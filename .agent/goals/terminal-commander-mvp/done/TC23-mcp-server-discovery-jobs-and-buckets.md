@@ -3,7 +3,7 @@ goal_id: TC23
 title: Mcp Server Discovery Jobs And Buckets
 chain_id: terminal-commander-mvp
 phase: Wave 7 - MCP interface
-status: "Pending"
+status: "In progress"
 depends_on: ["TC21", "TC22"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
