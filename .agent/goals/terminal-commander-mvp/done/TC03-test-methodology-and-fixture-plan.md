@@ -3,15 +3,15 @@ goal_id: TC03
 title: Test Methodology And Fixture Plan
 chain_id: terminal-commander-mvp
 phase: Wave 0 - Research and discipline
-status: "Pending"
+status: "Completed"
 depends_on: ["TC01", "TC02"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T16:10:00+02:00"
+completed_at: "2026-05-21T16:45:00+02:00"
+completion_commit: "09a3140"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -98,9 +98,9 @@ contracts_or_interfaces:
 - Raw terminal capture fixtures are forbidden when over 256 lines or 16 KB; trim or summarize.
 - Verification baseline (scripts/dev/verify-baseline.sh) runs on WSL2 with no systemd, no network egress, and no Windows-specific tooling.
 - python3 is a required dev prerequisite (TC05 verification uses `python3 -m json.tool`).
-- <<DECISION REQUIRED: ANSI test corpus crate (vte vs strip-ansi-escapes)>>
-- <<DECISION REQUIRED: snapshot framework (insta vs hand-rolled)>>
-- <<DECISION REQUIRED: JSON-Schema validator (jsonschema vs schemars vs typify)>>
+- ANSI test corpus crate: `vte` (locked 2026-05-21 by operator).
+- Snapshot framework: `insta` (locked 2026-05-21 by operator).
+- JSON-Schema validator: `jsonschema` (locked 2026-05-21 by operator).
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
