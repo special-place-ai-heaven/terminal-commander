@@ -172,7 +172,9 @@ impl ToolSurface {
         }
         let capped = max_bytes.min(MAX_FILE_WINDOW_BYTES);
         let bytes = std::fs::read(path).map_err(McpError::Io)?;
-        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(bytes.len());
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
         let end = start.saturating_add(capped).min(bytes.len());
         let slice = &bytes[start..end];
         Ok(FileReadWindowResponse {
@@ -400,10 +402,7 @@ mod tests {
     #[test]
     fn file_read_window_caps_response() {
         let s = surface();
-        let p = std::env::temp_dir().join(format!(
-            "tc-mcp-file-window-{}",
-            std::process::id()
-        ));
+        let p = std::env::temp_dir().join(format!("tc-mcp-file-window-{}", std::process::id()));
         std::fs::write(&p, vec![b'a'; 200_000]).unwrap();
         let resp = s.file_read_window(&p, 0, 1_000_000).unwrap();
         // Capped at MAX_FILE_WINDOW_BYTES.
