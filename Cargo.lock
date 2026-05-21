@@ -568,7 +568,14 @@ dependencies = [
 name = "terminal-commander-mcp"
 version = "0.0.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "terminal-commander-core",
+ "terminal-commander-sifters",
+ "terminal-commanderd",
+ "thiserror",
+ "time",
+ "tokio",
 ]
 
 [[package]]
