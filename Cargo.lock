@@ -613,6 +613,7 @@ name = "terminal-commanderd"
 version = "0.0.0"
 dependencies = [
  "parking_lot",
+ "serde",
  "terminal-commander-core",
  "terminal-commander-probes",
  "terminal-commander-sifters",

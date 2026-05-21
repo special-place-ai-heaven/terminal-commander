@@ -8,6 +8,11 @@
 //!
 //! Source-status: live (TC21).
 
+pub mod policy;
 pub mod router;
 
+pub use policy::{
+    COMMANDS_DENY, DEFAULT_DENY_PATH_SUFFIXES, PolicyAction, PolicyDecision, PolicyEngine,
+    PolicyProfile, PolicyVerdict,
+};
 pub use router::{AuditPlaceholder, AuditRecord, Router};

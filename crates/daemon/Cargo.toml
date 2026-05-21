@@ -25,6 +25,7 @@ terminal-commander-core.workspace = true
 terminal-commander-sifters.workspace = true
 terminal-commander-probes.workspace = true
 terminal-commander-store.workspace = true
+serde = { version = "1.0.228", features = ["derive"] }
 
 [lints]
 workspace = true
