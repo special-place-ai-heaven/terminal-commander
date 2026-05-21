@@ -3,13 +3,13 @@ goal_id: TC15
 title: Process Probe Streaming Stdout Stderr
 chain_id: terminal-commander-mvp
 phase: Wave 5 - Probes and jobs
-status: "Pending"
+status: "In progress"
 depends_on: ["TC10", "TC12"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
+started_at: "2026-05-22T01:30:00+02:00"
 completed_at: ""
 completion_commit: ""
 blocked_reason: ""
@@ -101,7 +101,8 @@ contracts_or_interfaces:
 - Pin: `process-wrap = "9.1"` (with the `tokio1` integration), launching every child in its own process GROUP. Termination ladder is SIGTERM-to-group then SIGKILL after a configurable grace window (shared default with TC16).
 - `crates/terminal-commander-probes/Cargo.toml` declares `license.workspace = true` (SPDX `Apache-2.0`); per-file Apache-2.0 headers per project convention.
 - cwd and environment are passed through to the child with an explicit advisory-policy placeholder seam: the placeholder denies nothing and is NOT security. Real policy (cap-std Dir handles, default-deny enumeration, audit log) lands in TC22; the placeholder names the hook so TC22 can swap in the live policy without API churn.
-- <<DECISION REQUIRED: grace-window default between SIGTERM and SIGKILL (5s vs 10s); shared with TC16 cancellation>>
+- Grace window (locked 2026-05-22 at TC15): 10s default between SIGTERM and SIGKILL. Shared with TC16. Configurable via `ProcessProbeConfig.grace`.
+- Implementation note (locked 2026-05-22): MVP uses `tokio::process::Command` directly rather than `process-wrap`. Reason: this orchestration session runs on Windows; `process-wrap`'s POSIX process-group integration would be conditionally compiled out anyway, and a direct `tokio::process` path keeps the code portable + readable. The TC15 spec lists `process-wrap = 9.1` as the canonical dep; a follow-up TC15a goal can swap in process-wrap once a POSIX-primary harness is available. This is a scoped substitution, not a doctrine relaxation.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
