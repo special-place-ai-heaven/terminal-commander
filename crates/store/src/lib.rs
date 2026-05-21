@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! Persistent event store for Terminal Commander.
+//! Persistent event store + registry for Terminal Commander.
+//!
+//! Two responsibilities live behind the same SQLite file: the event
+//! store (TC12) and the rule registry (TC13). They share the
+//! connection so a single transaction can touch both (e.g. when a
+//! sifter run records both the emitted events and the activation
+//! that produced them).
 //!
 //! Backed by SQLite (rusqlite 0.39 bundled) with FTS5 search and
 //! refinery migrations. Single-writer; readers open the DB read-only.
@@ -12,6 +18,9 @@
 //! eviction + VACUUM INTO backup. Registry persistence and audit log
 //! ride on the same database file but live behind their own modules
 //! (TC13 registry, TC22 audit).
+
+pub mod registry;
+pub use registry::{ActivationRecord, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, RuleSearchHit};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
