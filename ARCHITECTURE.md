@@ -455,3 +455,30 @@ the deciding goal.
 | Encryption at rest (sqlcipher) | post-MVP | Off. |
 | Kernel-enforced policy (Landlock / seccomp) | post-MVP | Advisory only. |
 | macOS / Windows-native port | post-MVP | Not built. PTY abstraction kept feature-flagged. |
+
+## 11. Runtime contract anchor (TC34)
+
+The `terminal-commander-runtime` chain (TC33-TC48) lands the live
+runtime on top of this architecture. The normative product contract
+and tool-surface lock for that chain are:
+
+- `docs/runtime/REALTIME_SIGNAL_CHANNEL.md` — product semantics.
+- `docs/mcp/TOOL_CONTROL_SURFACE.md` — locked MCP tool list.
+
+The TC33 reality audit (`docs/audits/runtime-gap-audit.md`,
+`runtime-source-map.md`, `runtime-tool-surface-gap.md`) records the
+gap between this architecture and `main` as of commit `a667010`.
+Notable scaffold-only or deferred surfaces:
+
+- `terminal-commanderd` binary entry point (`crates/daemon/src/main.rs`).
+- `terminal-commander-mcp` binary entry point (`crates/mcp/src/main.rs`).
+- rmcp 1.7.0 stdio adapter (deferred — lands in TC40).
+- Daemon UDS / named-pipe IPC (deferred — lands in TC37).
+- Persistent audit log (`AuditPlaceholder` in memory — replaced by
+  TC35 / V0003 migration).
+- POSIX PTY spawn (`crates/probes/src/pty.rs` is normalizer-only —
+  spawn lands in TC44).
+
+The runtime chain brings these to live status without changing the
+process topology, privilege boundary, or invariants set out in
+sections 1-10.

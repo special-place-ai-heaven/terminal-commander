@@ -380,6 +380,29 @@ tests/
 
 The exact layout should be confirmed by the initial bootstrap and architecture goals before implementation begins.
 
+## Runtime contract
+
+The runtime chain (`.agent/goals/terminal-commander-runtime/`,
+TC33-TC48) is the realtime-signal-channel lock-in for this codebase.
+Two documents are normative for that chain:
+
+- `docs/runtime/REALTIME_SIGNAL_CHANNEL.md` — product semantics:
+  Terminal Commander is a realtime signal channel and tool-control
+  abstraction layer for LLM agents, not a CLI command runner.
+- `docs/mcp/TOOL_CONTROL_SURFACE.md` — locked MCP tool list with
+  per-tool status, bounded-output limits, and policy gates.
+
+TC33 reality audit:
+
+- `docs/audits/runtime-gap-audit.md`
+- `docs/audits/runtime-source-map.md`
+- `docs/audits/runtime-tool-surface-gap.md`
+
+If a planned feature would create a raw-stream lane, bypass the
+policy engine, open a network listener, or hard-code an MCP tool list
+that diverges from the live dispatcher, it is a contract violation
+and the relevant goal must stop and amend the runtime contract.
+
 ## License
 
 Apache-2.0; see LICENSE.

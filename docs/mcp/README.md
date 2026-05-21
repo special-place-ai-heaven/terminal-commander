@@ -58,3 +58,17 @@ There is no raw-stream lane:
 | Policy gate on every call | live (TC23) |
 | rmcp 1.7.0 stdio adapter | reserved (post-MVP) |
 | Registry / probe / file / command tools | reserved (TC24+) |
+
+## 7. Runtime contract anchor (TC34)
+
+Authoritative tool list and per-tool status for the runtime chain
+(TC33-TC48) lives in `docs/mcp/TOOL_CONTROL_SURFACE.md`. This README
+records the TC23 baseline; the TC34 tool-surface lock supersedes the
+"reserved" rows above for any goal in the runtime chain.
+
+TC33 audit drift: this README advertises 5 tools, but on `main` the
+in-process `ToolSurface` actually implements 8 (it omits
+`file_read_window`, `registry_search`, `registry_get`,
+`registry_create`, `registry_activate` from the advertised list).
+TC40 fixes this by tying `system_discover.tools[]` to the live
+dispatcher's handler set.

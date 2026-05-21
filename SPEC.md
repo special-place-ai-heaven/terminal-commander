@@ -387,4 +387,21 @@ current state. The following statuses are defined for use across goals:
 The `system_discover` MCP tool must report the status of every probe
 type, every sifter type, the policy posture, and the audit log target.
 A `mock` or `unknown` status must never be reported as `live` to the
-MCP client.
+MCP client. The advertised tool list MUST equal the actually-
+dispatched tool list; a hard-coded mismatch is a defect (TC34 + TC40).
+
+## 13. Runtime contract anchor (TC34)
+
+The realtime signal channel contract and the locked MCP tool surface
+are normative for the `terminal-commander-runtime` chain (TC35-TC48).
+This SPEC remains the baseline; the runtime contract refines it.
+
+- Product semantics: `docs/runtime/REALTIME_SIGNAL_CHANNEL.md`.
+- Tool surface lock: `docs/mcp/TOOL_CONTROL_SURFACE.md`.
+- TC33 audit evidence: `docs/audits/runtime-gap-audit.md`,
+  `docs/audits/runtime-source-map.md`,
+  `docs/audits/runtime-tool-surface-gap.md`.
+
+When this SPEC and the runtime contract conflict, the runtime
+contract wins for TC35-TC48; the conflict is recorded as a SPEC
+amendment in the goal that observes it.
