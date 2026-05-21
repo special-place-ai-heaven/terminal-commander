@@ -7,5 +7,26 @@
 //! pointer models that every other crate references. It performs
 //! no I/O.
 //!
-//! Source-status: scaffold-only at TC04. Concrete types land in
-//! TC06 (identifiers, events, source pointers).
+//! Source-status (TC06): live for `Severity`, typed IDs,
+//! `EventSource`, `SourcePointer`, `RuleRef`, and `SignalEvent`.
+//! Serialization round-trips against the TC05 contract fixtures.
+//! Storage, MCP, and probe wiring land in later goals (TC07+).
+
+#![doc(html_no_source)]
+
+pub mod error;
+pub mod event;
+pub mod ids;
+pub mod pointer;
+pub mod severity;
+pub mod source;
+
+pub use error::{CoreError, Result};
+pub use event::{Captures, RuleRef, SignalEvent};
+pub use ids::{
+    ActivationId, AuditId, BucketId, EventId, FrameId, JobId, ProbeId, RuleId, SessionId, SourceId,
+    TypedId,
+};
+pub use pointer::SourcePointer;
+pub use severity::Severity;
+pub use source::{EventSource, SourceStream, SourceType};
