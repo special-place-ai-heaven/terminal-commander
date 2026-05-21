@@ -3,15 +3,15 @@ goal_id: TC07
 title: In Memory Bucket Manager
 chain_id: terminal-commander-mvp
 phase: Wave 2 - Core model
-status: "Pending"
+status: "Completed"
 depends_on: ["TC06"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T19:15:00+02:00"
+completed_at: "2026-05-21T20:00:00+02:00"
+completion_commit: "ba39140"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -96,8 +96,8 @@ contracts_or_interfaces:
 - BucketSummary MUST reserve fields `noise_suppressed_count: u64` and `dedupe_collapsed_count: u64` (zero-default until TC11 wires noise/dedupe).
 - Concurrency: BucketManager MUST be `Send + Sync`; use `parking_lot::RwLock` or `tokio::sync::RwLock` (no std `Mutex` for the public surface).
 - tokio 1 is the locked async runtime; if any read API becomes async it MUST use `tokio::sync::RwLock`.
-- <<DECISION REQUIRED: in-memory cap and eviction policy before TC12 persists (per-bucket max events? global memory budget? LRU vs FIFO?)>>
-- <<DECISION REQUIRED: backpressure strategy when probe append rate outpaces consumer drain>>
+- In-memory cap (locked 2026-05-21 by operator): per-bucket max events AND per-bucket TTL, both operator-tunable via `BucketConfig`. Defaults: `max_events = 10_000`, `ttl = Duration::from_secs(24 * 3600)` (24h). Eviction is FIFO when `max_events` is reached; events older than `ttl` are evicted on read or on a periodic sweep.
+- Backpressure (locked 2026-05-21 by operator): drop-oldest with `dropped_count` counter. On `append` when the bucket is full, the head event is evicted and `dropped_count` is incremented. The counter is surfaced in `BucketReadResponse` and `BucketSummary` so consumers can detect loss. Producers never block.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
