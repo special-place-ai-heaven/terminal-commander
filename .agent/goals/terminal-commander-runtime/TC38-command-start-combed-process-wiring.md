@@ -3,15 +3,15 @@ goal_id: TC38
 title: Command Start Combed Process Wiring
 chain_id: terminal-commander-runtime
 phase: Wave 3 - Runtime command/probe pipeline
-status: "Pending"
+status: "Completed"
 depends_on: ["TC37"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-21T18:55:35+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T08:00:00+00:00"
+completed_at: "2026-05-22T10:30:00+00:00"
+completion_commit: "328b2a5"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
