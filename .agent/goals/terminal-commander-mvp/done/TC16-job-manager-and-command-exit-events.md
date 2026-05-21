@@ -3,15 +3,15 @@ goal_id: TC16
 title: Job Manager And Command Exit Events
 chain_id: terminal-commander-mvp
 phase: Wave 5 - Probes and jobs
-status: "Pending"
+status: "Completed"
 depends_on: ["TC15"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T02:05:00+02:00"
+completed_at: "2026-05-22T02:20:00+02:00"
+completion_commit: "b9d53a1"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -98,8 +98,8 @@ contracts_or_interfaces:
 - Cancellation contract is SIGTERM to the process GROUP, then SIGKILL after a configurable grace window; shared default with TC15. Sleep-poll cancellation loops are forbidden.
 - Scope pin: the JobManager type and its in-memory state live in `terminal-commander-core` (NOT `terminal-commanderd`). Daemon wiring (lifecycle, IPC exposure, supervision) lands in TC21. TC16 restricts implementation to `crates/terminal-commander-core/src/**` and `crates/terminal-commander-probes/**`; the `crates/terminal-commanderd/**` paths in `allowed_files_or_area` exist only for integration tests that import the core JobManager API, not for daemon binary code.
 - MVP decision: JobManager is in-memory only. Persistent recovery of running jobs across daemon restarts is explicitly deferred (post-MVP backlog).
-- <<DECISION REQUIRED: grace-window default between SIGTERM and SIGKILL (5s vs 10s); shared decision with TC15>>
-- <<DECISION REQUIRED: how JobManager wraps `process-wrap` JobControl - direct re-export, thin wrapper struct, or trait abstraction for test doubles>>
+- Grace window (locked 2026-05-22 at TC15/TC16): 10s default.
+- JobManager design (locked 2026-05-22 at TC16): thin wrapper struct in `terminal-commander-core` (in-memory state, RwLock<HashMap<JobId, JobRecord>>). No process-wrap re-export. The struct holds the SignalEvent emission hook for command_failed/command_exited; the daemon (TC21) supplies the hook so events land in the bucket manager.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.

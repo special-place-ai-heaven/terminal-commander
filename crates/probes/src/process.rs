@@ -352,9 +352,7 @@ mod tests {
     fn argv_say(stdout: &str, stderr: &str) -> Vec<String> {
         let sout = stdout.replace('\'', "\\'");
         let serr = stderr.replace('\'', "\\'");
-        let script = format!(
-            "import sys; print('{sout}'); print('{serr}', file=sys.stderr)"
-        );
+        let script = format!("import sys; print('{sout}'); print('{serr}', file=sys.stderr)");
         vec!["python3".to_owned(), "-c".to_owned(), script]
     }
 
