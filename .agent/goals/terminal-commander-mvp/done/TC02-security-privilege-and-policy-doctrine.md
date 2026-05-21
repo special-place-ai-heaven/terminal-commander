@@ -3,15 +3,15 @@ goal_id: TC02
 title: Security Privilege And Policy Doctrine
 chain_id: terminal-commander-mvp
 phase: Wave 0 - Research and discipline
-status: "Pending"
+status: "Completed"
 depends_on: ["TC01"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T15:35:00+02:00"
+completed_at: "2026-05-21T16:05:00+02:00"
+completion_commit: "f186e4e"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
