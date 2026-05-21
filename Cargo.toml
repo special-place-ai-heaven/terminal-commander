@@ -44,7 +44,11 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt-mul
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-missing_docs = "warn"
+# `missing_docs` is intentionally NOT a workspace-level lint: it
+# produces a flood of errors against scaffold and in-progress code
+# during early goals. Documentation rigor lands as a separate
+# wave-3 goal (post-MVP polish). Individual crates may re-enable
+# it locally when they declare their public surface stable.
 unreachable_pub = "warn"
 unused_lifetimes = "warn"
 
@@ -58,6 +62,18 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# `doc_markdown` flags every identifier in a doc comment that lacks
+# backticks. Useful in mature docs; noisy during scaffold + early
+# goals where docs evolve quickly. Reconsider at TC32.
+doc_markdown = "allow"
+# `doc_overindented_list_items` (a.k.a. doc_quote_line_without_marker
+# in some Clippy versions) trips on indented ASCII diagrams used in
+# the architecture doc comments. Allow.
+doc_overindented_list_items = "allow"
+# `doc_lazy_continuation` errors on continued lines in doc comments
+# whose indent does not satisfy the CommonMark continuation rule.
+# Too noisy on multi-line doc paragraphs at MVP.
+doc_lazy_continuation = "allow"
 
 [profile.dev]
 opt-level = 0
