@@ -29,3 +29,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+regex = "1.12.3"
