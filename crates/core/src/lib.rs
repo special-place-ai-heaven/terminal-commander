@@ -14,6 +14,7 @@
 
 #![doc(html_no_source)]
 
+pub mod bucket;
 pub mod error;
 pub mod event;
 pub mod ids;
@@ -21,6 +22,10 @@ pub mod pointer;
 pub mod severity;
 pub mod source;
 
+pub use bucket::{
+    BucketConfig, BucketError, BucketManager, BucketReadRequest, BucketReadResponse, BucketState,
+    BucketSummary, BySeverity, DEFAULT_MAX_EVENTS, DEFAULT_READ_LIMIT, DEFAULT_TTL, MAX_READ_LIMIT,
+};
 pub use error::{CoreError, Result};
 pub use event::{Captures, RuleRef, SignalEvent};
 pub use ids::{
