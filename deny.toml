@@ -1,0 +1,43 @@
+# cargo-deny configuration for Terminal Commander.
+#
+# Authoritative scope reference: CONTRIBUTING.md sections 4 and 6.
+# Authoritative license posture: NOTICE (rmcp Apache-2.0 transition).
+
+[graph]
+all-features = true
+
+[licenses]
+# Allow the set of licenses present in our dependency closure and in
+# our own crates. CC0-1.0 is required because `notify` core ships
+# under CC0; `notify-debouncer-full` and `file-id` are MIT OR Apache-2.0.
+# rmcp is in transition from `MIT OR Apache-2.0` to `Apache-2.0`.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = []
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

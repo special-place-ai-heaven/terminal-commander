@@ -1,0 +1,71 @@
+# Workspace manifest for Terminal Commander.
+# See SPEC.md section 7 for the canonical 7-crate list and roles.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/sifters",
+    "crates/probes",
+    "crates/store",
+    "crates/daemon",
+    "crates/mcp",
+    "crates/cli",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0"
+authors = ["The Terminal Commander Authors"]
+repository = "https://github.com/special-place-administrator/terminal-commander"
+homepage = "https://github.com/special-place-administrator/terminal-commander"
+readme = "../../README.md"
+version = "0.0.0"
+publish = false
+
+[workspace.dependencies]
+# Inter-crate dependencies (paths). Versions are pinned at the
+# workspace level so member manifests stay terse.
+terminal-commander-core    = { path = "crates/core",    version = "0.0.0" }
+terminal-commander-sifters = { path = "crates/sifters", version = "0.0.0" }
+terminal-commander-probes  = { path = "crates/probes",  version = "0.0.0" }
+terminal-commander-store   = { path = "crates/store",   version = "0.0.0" }
+
+# Third-party crates referenced by SPEC / TC04 contract. Each is
+# declared here so member crates pick the same version. Concrete
+# usage lands in the goals listed in the comment after each line.
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "io-util", "fs", "time", "signal"] }  # TC15+
+# rmcp = { version = "=1.7.0", default-features = false }   # TC23 (commented: not yet a member dep at TC04)
+# rusqlite = { version = "0.39", features = ["bundled"] }    # TC12
+# refinery = { version = "0.9" }                              # TC12
+# notify = { version = "8.2" }                                # TC18
+# notify-debouncer-full = { version = "0.7" }                 # TC18
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+unused_lifetimes = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Allow a small set of pedantic lints that produce more noise than
+# signal in a workspace skeleton. Each is reconsidered at TC32.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+debug = "line-tables-only"
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

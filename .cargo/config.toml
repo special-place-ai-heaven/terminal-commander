@@ -1,0 +1,9 @@
+# Workspace-wide cargo configuration.
+
+[build]
+# Default to the workspace's pinned target triple is OS-detected. No
+# override here. Cross-compilation lands in TC26.
+
+[net]
+git-fetch-with-cli = true   # use system git for fetches; helps in
+                            # corporate-proxy and WSL environments

@@ -1,0 +1,21 @@
+[package]
+name = "terminal-commander-cli"
+description = "Operator CLI. Talks to the daemon. Subcommands per TC25."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "terminal-commander"
+path = "src/main.rs"
+
+[dependencies]
+terminal-commander-core.workspace = true
+
+[lints]
+workspace = true

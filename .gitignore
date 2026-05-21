@@ -1,1 +1,45 @@
+# Local indexer
 .symforge/
+
+# Rust build outputs
+target/
+**/target/
+Cargo.lock.bak
+
+# Editor and OS metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs (incl. terminal-commander runtime, never commit raw streams)
+*.log
+logs/
+**/audit.log
+**/context-spool/
+
+# Local environment secrets
+.env
+.env.*
+!.env.example
+
+# Temporary context spools and runtime artifacts
+.tc/
+.terminal-commander/
+*.tcspool
+
+# Coverage and profiler outputs
+*.profraw
+*.profdata
+coverage/
+tarpaulin-report.html
+
+# Backup files left by editors
+*.bak
+*.orig
+
+# CI-generated artifacts
+artifacts/

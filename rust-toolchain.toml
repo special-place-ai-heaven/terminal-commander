@@ -1,0 +1,13 @@
+# Pinned toolchain for Terminal Commander.
+#
+# Amendment 2026-05-21: SPEC.md / docs/research/_USER_DECISIONS.md
+# declare the MSRV floor as 1.92 (forced by rmcp =1.7.0). The
+# operator chose 1.95.0 for the active toolchain at TC04 start to
+# avoid a rustup download. CI's `cargo-hack --rust-version` continues
+# to gate the 1.92 MSRV claim, so this pin is the developer-time
+# floor, not a relaxation of the MSRV promise.
+
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

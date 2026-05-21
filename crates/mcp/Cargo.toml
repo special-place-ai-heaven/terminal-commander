@@ -1,0 +1,21 @@
+[package]
+name = "terminal-commander-mcp"
+description = "Thin MCP server adapter (rmcp 1.7.0 stdio). Forwards every tool call to the daemon over IPC."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "terminal-commander-mcp"
+path = "src/main.rs"
+
+[dependencies]
+terminal-commander-core.workspace = true
+
+[lints]
+workspace = true

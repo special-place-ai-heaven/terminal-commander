@@ -1,0 +1,24 @@
+[package]
+name = "terminal-commanderd"
+description = "Long-running Terminal Commander daemon. Owns bucket manager, context spool, policy engine, audit emitter, and local API."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "terminal-commanderd"
+path = "src/main.rs"
+
+[dependencies]
+terminal-commander-core.workspace = true
+terminal-commander-sifters.workspace = true
+terminal-commander-probes.workspace = true
+terminal-commander-store.workspace = true
+
+[lints]
+workspace = true
