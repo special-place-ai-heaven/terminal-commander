@@ -100,7 +100,8 @@ this file" is a contract violation, not a workaround.
 | Event store | Durable SQLite, manual migration runner, FTS5 search lane. | `crates/store` |
 | Registry | Versioned, tagged rule library. Search, get, create, test, activate, bind. | `crates/store::registry` |
 | Policy engine | Evaluates allow / deny / allow-with-audit for every gated action. Four locked profiles. | `crates/daemon::policy` |
-| Audit log | Durable record of policy-relevant runtime actions. (Currently a placeholder seam on `main`; replaced by TC35.) | `crates/daemon::router::AuditPlaceholder` (today) |
+| Audit log | Durable record of policy-relevant runtime actions. Persistent SQLite-backed since TC35. | `crates/daemon::audit::PersistentAudit` + `crates/store::audit` |
+| Daemon runtime bootstrap | Loads config, opens store, applies V0003, wires Router with PersistentAudit, idles in foreground. No IPC yet. | `crates/daemon::state::DaemonState`, `crates/daemon::runtime` |
 
 ## 5. Locked invariants
 

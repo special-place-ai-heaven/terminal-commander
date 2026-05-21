@@ -2,21 +2,34 @@
 // Copyright 2026 The Terminal Commander Authors
 
 //! `terminal-commanderd` library entry point. Exposes the local API
-//! router (TC21), the policy engine (TC22), and the persistent audit
-//! sink (TC35) so the daemon binary, MCP server (TC23), admin CLI
-//! (TC25), and tests can all build against the same in-process API
-//! before the UDS / JSON-RPC transport lands.
+//! router (TC21), the policy engine (TC22), the persistent audit
+//! sink (TC35), and the daemon runtime bootstrap (TC36) so the
+//! daemon binary, future MCP adapter, admin CLI, and tests can all
+//! build against the same in-process API before UDS / JSON-RPC
+//! transport (TC37) lands.
 //!
-//! Source-status: live for the in-process API and the audit sink
-//! (TC21 + TC22 + TC35). UDS transport is TC37.
+//! Source-status:
+//! - Router + Policy + Audit: live.
+//! - Daemon runtime bootstrap: live (TC36) for self-check and
+//!   foreground-idle modes. UDS / rmcp transport remains deferred
+//!   (TC37 / TC40).
 
 pub mod audit;
+pub mod config;
 pub mod policy;
 pub mod router;
+pub mod runtime;
+pub mod state;
 
 pub use audit::{AuditSink, InMemoryAudit, PersistentAudit};
+pub use config::{
+    ConfigError, DaemonConfig, DaemonSection, LimitsSection, PolicySection, RetentionSection,
+    RuntimeMode,
+};
 pub use policy::{
     COMMANDS_DENY, DEFAULT_DENY_PATH_SUFFIXES, PolicyAction, PolicyDecision, PolicyEngine,
     PolicyProfile, PolicyVerdict,
 };
 pub use router::Router;
+pub use runtime::{RuntimeError, SelfCheckReport, run_foreground_idle, run_self_check};
+pub use state::{BootstrapError, DaemonState};

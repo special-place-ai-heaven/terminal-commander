@@ -20,12 +20,15 @@ path = "src/main.rs"
 [dependencies]
 parking_lot = "0.12.5"
 time = "0.3"
-tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "signal", "macros"] }
 terminal-commander-core.workspace = true
 terminal-commander-sifters.workspace = true
 terminal-commander-probes.workspace = true
 terminal-commander-store.workspace = true
 serde = { version = "1.0.228", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
+toml = "0.9"
+thiserror = "2.0.18"
 
 [lints]
 workspace = true

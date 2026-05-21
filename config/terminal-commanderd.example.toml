@@ -1,14 +1,31 @@
-# Example configuration for terminal-commanderd (TC26).
+# Example configuration for terminal-commanderd.
 #
 # Copy to ~/.config/terminal-commanderd/terminal-commanderd.toml
 # and edit as needed. SAFE TO COMMIT (no secrets).
+#
+# Loaded by `terminal-commanderd --config <path> <subcommand>`. If
+# the daemon is invoked without `--config`, the platform default
+# `$HOME/.local/share/terminal-commanderd` is used.
 
 [daemon]
-# Data directory for the SQLite event store + audit log.
+# Data directory holding the SQLite event store + audit log.
 # MUST be on a native Linux filesystem (NOT /mnt/c on WSL2). See
 # docs/storage/EVENT_STORE.md section 3 and
 # docs/research/wsl-boundary.md.
 data_dir = "${HOME}/.local/share/terminal-commanderd"
+
+# Local socket path. RESERVED for TC37 (UDS IPC). Not opened by TC36
+# bootstrap. Operators may set this now so later upgrades work
+# without a config edit.
+# socket_path = "${XDG_RUNTIME_DIR}/terminal-commanderd.sock"
+
+# Runtime mode. One of:
+# - "self_check"       — bootstrap, run self-check, exit. Used by
+#                        `terminal-commanderd check`.
+# - "foreground_idle"  — bootstrap, idle in foreground until
+#                        SIGINT/SIGTERM. Used by `terminal-commanderd
+#                        start`. No IPC yet.
+runtime_mode = "self_check"
 
 [policy]
 # One of: developer_local, repo_only, read_only_observer, admin_debug
@@ -23,5 +40,14 @@ max_events  = 100_000
 ttl_seconds = 86_400  # 24h
 
 [audit]
-# Where the audit log lives. SQLite-backed via the event store.
+# Audit log retention (days). Advisory at MVP; the daemon does not
+# yet evict old audit rows.
 retention_days = 30
+
+[limits]
+# Per-call response caps. Both are CLAMPED at config load to the
+# codebase hard caps:
+# - file_window_bytes   ceiling = 65 536  (MAX_FILE_WINDOW_BYTES)
+# - bucket_read_limit   ceiling = 10 000  (MAX_READ_LIMIT)
+file_window_bytes = 65_536
+bucket_read_limit = 200

@@ -100,5 +100,54 @@ sections 5, 6, 9.
 | cargo install paths | live (TC26) |
 | systemd user-unit example | live (TC26) |
 | WSL2 startup snippet | live (TC26) |
+| Daemon runtime bootstrap (TC36) | live |
+| Daemon self-check (TC36) | live |
+| Daemon foreground-idle (TC36) | live |
+| Daemon UDS IPC | deferred (TC37) |
+| rmcp stdio adapter | deferred (TC40) |
 | Distribution packages (deb/rpm/aur) | deferred (post-MVP) |
 | Privileged helper installer | NEVER (PRIVILEGE_MODEL.md) |
+
+## 8. Subcommands (TC36)
+
+`terminal-commanderd` is no longer scaffold-only. The TC04 placeholder
+`refusing to start` exit is removed. Subcommands:
+
+```text
+terminal-commanderd check          # bootstrap + self-check report, exit
+terminal-commanderd start          # bootstrap + foreground idle until
+                                   # SIGINT/SIGTERM. No IPC yet.
+terminal-commanderd print-config   # render the active resolved config
+```
+
+Global flags:
+
+```text
+--config <path>     # operator config TOML. Optional.
+--data-dir <path>   # override daemon.data_dir. Useful for tests / CI.
+```
+
+What the daemon does on `start` today (TC36 scope):
+
+1. Resolves config from `--config`, `--data-dir`, or platform default
+   (`$HOME/.local/share/terminal-commanderd`).
+2. Validates the config; rejects empty `data_dir`, `/mnt/c/...` paths,
+   zero retention values; clamps over-cap per-call limits down to the
+   codebase hard caps.
+3. Creates the data directory if missing.
+4. Opens the SQLite store with WAL pragmas and applies migrations
+   V0001 / V0002 / V0003 lazily.
+5. Wires the daemon `Router` with a `PersistentAudit` sink so every
+   router action lands as a durable audit row (NEVER `InMemoryAudit`).
+6. Runs the self-check: store reachable, audit round trip, router →
+   persistent audit pipeline, structural sudo deny across profiles.
+7. Idles in foreground until SIGINT / SIGTERM, then exits cleanly.
+
+What `start` does NOT do (deferred by mini-spec):
+
+- No UDS / named-pipe IPC listener. (TC37.)
+- No rmcp stdio adapter. (TC40.)
+- No `command_start_combed` process execution. (TC38.)
+- No PTY spawn. (TC44.)
+- No network listener of any kind.
+- No setuid / polkit / privileged helper.
