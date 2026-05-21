@@ -3,15 +3,15 @@ goal_id: TC13
 title: Registry Store And Rule Crud
 chain_id: terminal-commander-mvp
 phase: Wave 4 - Storage
-status: "Pending"
+status: "Completed"
 depends_on: ["TC09", "TC12"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T00:15:00+02:00"
+completed_at: "2026-05-22T00:50:00+02:00"
+completion_commit: "d5fe07f"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -102,9 +102,9 @@ contracts_or_interfaces:
 - Advisory-policy framing: rule activation records are advisory in MVP. They reflect intent recorded by the registry but do not enforce kernel-level isolation; real enforcement (Landlock, seccomp-bpf) is roadmap and lives in TC22 / docs/security/HARDENING.md.
 - Minimum tables: `rules`, `rule_versions`, `rule_tags`, `rule_activations` (plus FTS5 virtual table mirroring rule_versions).
 - Schema must support import of the 6 user-locked rule-pack file names enumerated in `README.md:367-372` without further migration.
-- <<DECISION REQUIRED: rule version identifier (content-addressed hash of canonical RuleDefinition vs monotonically increasing int per rule_id)>>
-- <<DECISION REQUIRED: `latest` pointer (dedicated column on rules vs computed via window function over rule_versions)>>
-- <<DECISION REQUIRED: row-level JSON-Schema validation on insert (validate full RuleDefinition shape in-DB-trigger vs application layer only)>>
+- Rule version identifier (locked 2026-05-22 at TC13): monotonically increasing `u32` per `rule_id`, starting at 1. The `rules.id` table stores the `latest_version` pointer; editing creates a new (rule_id, version+1) row in `rule_versions`. Content hashes are out of MVP scope.
+- `latest` pointer (locked 2026-05-22): dedicated `rules.latest_version` column. Updated inside the same transaction as the version insert.
+- Row-level validation (locked 2026-05-22): application layer only. `RuleDefinition::validate()` (TC09) is called BEFORE every insert. DB triggers add complexity without buying us anything for an in-process daemon.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
