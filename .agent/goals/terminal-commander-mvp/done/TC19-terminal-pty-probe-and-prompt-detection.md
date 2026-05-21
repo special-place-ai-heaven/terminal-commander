@@ -3,7 +3,7 @@ goal_id: TC19
 title: Terminal Pty Probe And Prompt Detection
 chain_id: terminal-commander-mvp
 phase: Wave 5 - Probes and jobs
-status: "Pending"
+status: "In progress"
 depends_on: ["TC15", "TC16"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
