@@ -3,7 +3,7 @@ goal_id: TC20
 title: Directory And Artifact Probes
 chain_id: terminal-commander-mvp
 phase: Wave 5 - Probes and jobs
-status: "Pending"
+status: "In progress"
 depends_on: ["TC18"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
