@@ -3,15 +3,15 @@ goal_id: TC01a
 title: Readme License Contributing Reconcile
 chain_id: terminal-commander-mvp
 phase: Wave 0 - Research and discipline
-status: "Pending"
+status: "Completed"
 depends_on: ["TC01"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T15:00:00+02:00"
+completed_at: "2026-05-21T15:30:00+02:00"
+completion_commit: "e9a9858"
 blocked_reason: ""
 source_refs:
   - "TC01 research findings; user-locked Apache-2.0 license; rmcp =1.7.0 pin"
