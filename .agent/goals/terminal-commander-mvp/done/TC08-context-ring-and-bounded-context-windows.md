@@ -3,15 +3,15 @@ goal_id: TC08
 title: Context Ring And Bounded Context Windows
 chain_id: terminal-commander-mvp
 phase: Wave 2 - Core model
-status: "Pending"
+status: "Completed"
 depends_on: ["TC06"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T20:05:00+02:00"
+completed_at: "2026-05-21T20:40:00+02:00"
+completion_commit: "9cdbd14"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -95,8 +95,8 @@ contracts_or_interfaces:
 - ContextRing default capacity: 4096 frames OR 1 MB total payload, whichever limit is reached first; eviction policy is FIFO; eviction MUST emit a truncation marker so callers can detect dropped history.
 - Per-frame text cap: 8192 bytes; oversize frames are truncated at append time and carry `truncated_bytes: u32` (number of bytes dropped) so callers see explicit loss instead of silent corruption.
 - Frames stored in the ring are POST-ANSI-strip normalized text; raw ANSI escape handling and CR-collapse live in TC15 (process probe) and never reach the ring.
-- <<DECISION REQUIRED: ANSI-strip crate (vte vs strip-ansi-escapes); decision MUST be made at or before TC08 because TC11/TC15/TC19 all consume normalized frames>>
-- <<DECISION REQUIRED: per-source vs per-session ring sharing (one ring per probe? one per job? shared across sessions?)>>
+- ANSI-strip crate: `vte` (already locked at TC03 by operator). Note: vte is a full VT/ANSI parser; the "strip" path consumes its parser events and emits only printable text. TC08 itself does not invoke vte (frames arrive pre-stripped from TC15/TC19); the ring is agnostic to the upstream stripper.
+- Ring sharing scope: one `ContextRing` per probe (locked 2026-05-21 at TC08 start; correctness emphasis). Each probe's ring is keyed by `ProbeId`; deletion of the probe deletes the ring atomically. A job's multiple probes have independent rings; a session reuses a probe id while alive and discards the ring when the probe ends. This matches `EventSource.probe_id`, makes context lookups deterministic, and avoids cross-probe frame numbering ambiguity.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
