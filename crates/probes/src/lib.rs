@@ -17,8 +17,13 @@
 //! Source-status: live (TC15) for non-interactive process probing
 //! and event emission. Job lifecycle + exit events land in TC16.
 
+pub mod file;
 pub mod process;
 
+pub use file::{
+    spawn_with_sink as spawn_file_probe_with_sink, DEFAULT_POLL_INTERVAL, FileProbe,
+    FileProbeConfig, FileProbeError, FileProbeMetrics, FileProbeMode,
+};
 pub use process::{
     DEFAULT_GRACE, EventSink, InMemorySink, ProcessProbe, ProcessProbeConfig, ProcessProbeError,
     ProcessProbeMetrics,
