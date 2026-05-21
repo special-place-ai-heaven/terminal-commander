@@ -17,9 +17,16 @@
 //! Source-status: live (TC15) for non-interactive process probing
 //! and event emission. Job lifecycle + exit events land in TC16.
 
+pub mod directory;
 pub mod file;
 pub mod process;
 pub mod pty;
+
+pub use directory::{
+    DEFAULT_DIR_POLL_INTERVAL, DirectoryEvent, DirectoryEventKind, DirectoryProbe,
+    DirectoryProbeConfig, DirectoryProbeError, DirectorySink, InMemoryDirectorySink, JunitSummary,
+    spawn_with_in_memory_sink as spawn_directory_probe_with_sink,
+};
 
 pub use file::{
     DEFAULT_POLL_INTERVAL, FileProbe, FileProbeConfig, FileProbeError, FileProbeMetrics,
