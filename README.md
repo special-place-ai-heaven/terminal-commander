@@ -353,10 +353,11 @@ Planned layout:
 
 crates/
   terminal-commander-core/
+  terminal-commander-sifters/
+  terminal-commander-probes/
+  terminal-commander-store/
   terminal-commanderd/
   terminal-commander-mcp/
-  terminal-commander-probes/
-  terminal-commander-sifters/
   terminal-commander-cli/
 
 config/
@@ -381,6 +382,11 @@ The exact layout should be confirmed by the initial bootstrap and architecture g
 
 ## License
 
-License is not selected yet.
+Apache-2.0; see LICENSE.
 
-Choose and add a license through an explicit goal before publishing implementation code for wider reuse.
+SPDX identifier: `Apache-2.0`. The full Apache License 2.0 text is in the
+`LICENSE` file at the repository root, and `NOTICE` records the rmcp
+relicensing transition relevant to the supply-chain (`cargo-deny`)
+license allowlist. See `docs/research/license-decision.md` for the
+decision rationale, and `CONTRIBUTING.md` for the per-file SPDX header
+expectation.
