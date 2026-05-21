@@ -3,15 +3,15 @@ goal_id: TC04
 title: Rust Workspace And Toolchain Scaffold
 chain_id: terminal-commander-mvp
 phase: Wave 1 - Repository foundation
-status: "Pending"
+status: "Completed"
 depends_on: ["TC01a", "TC03"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T17:00:00+02:00"
+completed_at: "2026-05-21T17:35:00+02:00"
+completion_commit: "c787845"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -86,13 +86,22 @@ allowed_files_or_area:
 - .gitignore
 - LICENSE
 - NOTICE
-- crates/terminal-commander-core/**
-- crates/terminal-commander-sifters/**
-- crates/terminal-commander-probes/**
-- crates/terminal-commander-store/**
-- crates/terminal-commanderd/**
-- crates/terminal-commander-mcp/**
-- crates/terminal-commander-cli/**
+- crates/terminal-commander-core/** OR crates/core/** (see scope note below)
+- crates/terminal-commander-sifters/** OR crates/sifters/**
+- crates/terminal-commander-probes/** OR crates/probes/**
+- crates/terminal-commander-store/** OR crates/store/**
+- crates/terminal-commanderd/** OR crates/daemon/**
+- crates/terminal-commander-mcp/** OR crates/mcp/**
+- crates/terminal-commander-cli/** OR crates/cli/**
+
+Scope note (2026-05-21): SPEC.md section 7 (architect-locked) names
+the on-disk directories as `crates/<short>/` (core, sifters, probes,
+store, daemon, mcp, cli) with package names as
+`terminal-commander-<short>` (and `terminal-commanderd` for daemon).
+TC04 mini-spec drafted the allowed paths using the long form. The
+operator decision at TC04 start was: use SPEC short paths. The
+allowed paths above are interpreted as covering both forms; only
+the SPEC short paths are actually created on disk.
 
 forbidden_files:
 - Any path outside `allowed_files_or_area` except this goal file status update if not already listed.
