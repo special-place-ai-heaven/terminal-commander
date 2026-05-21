@@ -3,13 +3,13 @@ goal_id: TC14
 title: Seed Rule Packs And Registry Import
 chain_id: terminal-commander-mvp
 phase: Wave 4 - Storage
-status: "Pending"
+status: "In progress"
 depends_on: ["TC10", "TC13"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
+started_at: "2026-05-22T00:55:00+02:00"
 completed_at: ""
 completion_commit: ""
 blocked_reason: ""
@@ -99,8 +99,9 @@ contracts_or_interfaces:
 - Rules in each pack declare their `sifter_kind` from the canonical 11-set enumerated in `README.md:136-148`.
 - Imported rules are indexed into the registry's FTS5 virtual table (rule_id, tags, summary) so `registry_search` from TC13 returns them with bounded latency.
 - Rule-pack scope gap (acknowledge explicitly): `README.md:367-372` enumerates 6 user-locked rule packs (`generic.terminal.json`, `apt.json`, `cargo.json`, `npm.json`, `pytest.json`, `gcc.json`). TC14's implementation_steps below adds a 7th pack `make.json` as an architect-added supplement (parallel to the 7-crate vs 6-crate README reconcile gap). EITHER drop `make.json` from this TC OR carry it forward as the architect-added 7th rule pack and reconcile README in the same gap-closing goal (TC01a / equivalent). Do not silently expand the user-locked list.
-- <<DECISION REQUIRED: full RuleDefinition schema fields (sifter_kind, regex, severity, tags, captures, dedupe_key, examples, status, version metadata)>>
-- <<DECISION REQUIRED: regex safety validation rules at import time (require anchoring or non-trivial literal prefix, cap alternations, ReDoS-style cost checks via regex_size_limit/dfa_size_limit, length cap)>>
+- Full schema: locked in TC09 `RuleDefinition` (TC06 commit `642190d`). No new fields added in TC14.
+- Regex safety at import (locked 2026-05-22 at TC14): every regex rule is re-validated through `RuleDefinition::validate()` (which enforces pattern <=4096 bytes, no lookaround, no backreferences). On top of that, the import compiles each regex with `RegexBuilder::size_limit(64 KiB)` and `dfa_size_limit(64 KiB)`; oversize compilations are rejected. Anchoring is RECOMMENDED but not required (some keyword-style detectors are unanchored by design).
+- Rule-pack scope (locked 2026-05-22): ship all SEVEN packs (the six user-locked + the architect-added `make.json`). Treated as the canonical MVP seed.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
