@@ -3,15 +3,15 @@ goal_id: TC17
 title: Realtime Bucket Waiter
 chain_id: terminal-commander-mvp
 phase: Wave 5 - Probes and jobs
-status: "Pending"
+status: "Completed"
 depends_on: ["TC07", "TC12", "TC16"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T02:25:00+02:00"
+completed_at: "2026-05-22T02:40:00+02:00"
+completion_commit: "4fbdb07"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
