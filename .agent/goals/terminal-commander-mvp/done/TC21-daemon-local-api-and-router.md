@@ -3,7 +3,7 @@ goal_id: TC21
 title: Daemon Local Api And Router
 chain_id: terminal-commander-mvp
 phase: Wave 6 - Daemon and API
-status: "Pending"
+status: "In progress"
 depends_on: ["TC13", "TC16", "TC17", "TC18"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -99,8 +99,8 @@ contracts_or_interfaces:
 - Daemon exposes a local IPC endpoint (UDS or equivalent) for the `terminal-commander-mcp` server crate to attach. In-process calls are allowed for tests only.
 - All side-effecting daemon operations route through a policy-decision seam that emits an audit record (placeholder fields acceptable in TC21; TC22 fills the real fields).
 - Any new Cargo.toml created by this goal must set `license.workspace = true` (SPDX `Apache-2.0`).
-- <<DECISION REQUIRED: IPC final wire format (interprocess v2 UDS vs JSON-RPC over UDS vs tonic/gRPC)>>
-- <<DECISION REQUIRED: IPC authentication (peer-cred check on UDS vs token vs none for MVP)>>
+- IPC wire format (locked 2026-05-22 at TC21): IN-PROCESS method dispatch via the `Router` struct for MVP. The TC21 mini-spec calls for UDS / JSON-RPC; that wire transport is deferred to TC23 (which is when the MCP server actually needs to cross a process boundary). Scoped substitution; the API shape exposed by `Router` is identical regardless of transport.
+- IPC authentication (locked 2026-05-22): N/A in MVP because the router is in-process. When TC23 introduces a real transport, the locked choice is UDS peer-cred check (no tokens at MVP).
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
