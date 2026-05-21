@@ -1,0 +1,27 @@
+# User-level systemd unit example (TC26).
+# Copy to ~/.config/systemd/user/terminal-commanderd.service and
+#   systemctl --user enable --now terminal-commanderd
+#
+# This unit runs the daemon under the operator's UID. It does NOT
+# install at the system level and does NOT confer privilege.
+
+[Unit]
+Description=Terminal Commander daemon (user-level)
+Documentation=https://github.com/special-place-administrator/terminal-commander
+After=default.target
+
+[Service]
+Type=simple
+# Use $HOME/.cargo/bin/terminal-commanderd if that is where cargo
+# installed it.
+ExecStart=%h/.cargo/bin/terminal-commanderd
+Restart=on-failure
+RestartSec=5
+# Hardening (PRIVILEGE_MODEL.md section 11.3): bare-metal Linux only.
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,27 @@
+# Example configuration for terminal-commanderd (TC26).
+#
+# Copy to ~/.config/terminal-commanderd/terminal-commanderd.toml
+# and edit as needed. SAFE TO COMMIT (no secrets).
+
+[daemon]
+# Data directory for the SQLite event store + audit log.
+# MUST be on a native Linux filesystem (NOT /mnt/c on WSL2). See
+# docs/storage/EVENT_STORE.md section 3 and
+# docs/research/wsl-boundary.md.
+data_dir = "${HOME}/.local/share/terminal-commanderd"
+
+[policy]
+# One of: developer_local, repo_only, read_only_observer, admin_debug
+# (see POLICY.md section 2).
+profile = "developer_local"
+profile_version = "1"
+
+[retention]
+# Per-bucket retention; matches the TC07/TC12 in-memory and
+# persistent defaults.
+max_events  = 100_000
+ttl_seconds = 86_400  # 24h
+
+[audit]
+# Where the audit log lives. SQLite-backed via the event store.
+retention_days = 30
