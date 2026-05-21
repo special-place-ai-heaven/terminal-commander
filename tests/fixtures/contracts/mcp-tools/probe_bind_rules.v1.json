@@ -1,0 +1,18 @@
+{
+  "request_example": {
+    "<<DECISION_REQUIRED_AT>>": "TC24"
+  },
+  "tool": "probe_bind_rules",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/probe_bind_rules-v1",
+    "fixture_id": "contracts/mcp-tools/probe_bind_rules.v1.json",
+    "status": "reserved-not-implemented",
+    "consumed_by": [
+      "TC24"
+    ],
+    "note": "Reserved per README.md:243-266. Concrete request/response shape locked in TC24. Until then this fixture is a placeholder so the MCP tool surface coverage check (TC23) does not report 'missing tool name' (which would be a blocker, not an invention)."
+  },
+  "response_example_placeholder": {
+    "<<DECISION_REQUIRED_AT>>": "TC24"
+  }
+}

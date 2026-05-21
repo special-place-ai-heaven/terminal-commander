@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/event-context-request.v1.json",
+    "schema_anchor": "TC05/event-context-request-v1",
+    "status": "informative-until-TC08",
+    "required": ["event_id"],
+    "optional": ["before", "after", "max_bytes"]
+  },
+  "event_id": "evt_01HXTC0002",
+  "before": 3,
+  "after": 5,
+  "max_bytes": 4096
+}

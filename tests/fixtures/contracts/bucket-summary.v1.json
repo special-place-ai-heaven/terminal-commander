@@ -1,0 +1,42 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/bucket-summary.v1.json",
+    "schema_anchor": "TC05/bucket-summary-v1",
+    "status": "informative-until-TC07",
+    "required": ["bucket_id", "created_at", "head_cursor", "tail_cursor", "event_count", "by_severity", "by_kind"],
+    "optional": ["last_event_at", "linked_job_ids", "linked_probe_ids", "retention_until"]
+  },
+  "bucket_id": "build_42",
+  "created_at": "2026-05-20T20:00:00.000+02:00",
+  "head_cursor": 0,
+  "tail_cursor": 1843,
+  "event_count": 1843,
+  "last_event_at": "2026-05-20T20:11:34.250+02:00",
+  "linked_job_ids": ["job_install_1"],
+  "linked_probe_ids": ["probe_apt_7"],
+  "retention_until": "2026-05-21T20:11:34.250+02:00",
+  "by_severity": {
+    "trace": 0,
+    "low": 1700,
+    "medium": 120,
+    "high": 22,
+    "critical": 1
+  },
+  "by_kind": {
+    "command_started": 1,
+    "command_exited": 0,
+    "command_failed": 1,
+    "missing_package": 1,
+    "compile_error": 0,
+    "test_failed": 0,
+    "permission_denied": 0,
+    "password_prompt": 0,
+    "stalled": 0,
+    "file_changed": 0,
+    "artifact_generated": 0,
+    "repeated_collapsed": 18,
+    "threshold_crossed": 0,
+    "prompt_detected": 0,
+    "policy_denied": 0
+  }
+}
