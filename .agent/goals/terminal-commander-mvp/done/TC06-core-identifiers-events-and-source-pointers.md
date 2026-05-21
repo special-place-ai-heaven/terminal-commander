@@ -3,15 +3,15 @@ goal_id: TC06
 title: Core Identifiers Events And Source Pointers
 chain_id: terminal-commander-mvp
 phase: Wave 2 - Core model
-status: "Pending"
+status: "Completed"
 depends_on: ["TC05"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T18:25:00+02:00"
+completed_at: "2026-05-21T19:10:00+02:00"
+completion_commit: "642190d"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -96,9 +96,10 @@ contracts_or_interfaces:
 - crates/terminal-commander-core/Cargo.toml MUST set `license.workspace = true` (workspace root sets `license = "Apache-2.0"` per TC04).
 - Severity enum MUST serde as snake_case lowercase strings (debug, info, low, medium, high, critical).
 - Event/bucket sequence field pinned to `u64` (matches SQLite i64 storage in TC12; document the i64 conversion site).
-- <<DECISION REQUIRED: ID format (UUIDv7 vs ULID vs u64 monotonic)>>
-- <<DECISION REQUIRED: timestamp crate (time vs chrono)>>
-- <<DECISION REQUIRED: capture-map type (serde_json::Value vs typed struct vs IndexMap<String, String>)>>
+- ID format: UUIDv7 via the `uuid` crate (locked 2026-05-21 by operator). All typed IDs wrap `Uuid` and serialize as `prefix_<base32-encoded-uuid7>` for human readability; the wire-form string parses back round-trip.
+- Timestamp crate: `time` (locked 2026-05-21 by operator).
+- Capture-map type: `IndexMap<String, String>` (locked 2026-05-21 by operator). Insertion order preserved; values are strings even when the underlying capture is numeric (preserves regex named-group fidelity).
+- Severity values: TC05 doctrine amendment 2026-05-21 expanded the enum to seven values: `trace`, `debug`, `info`, `low`, `medium`, `high`, `critical`. The TC06 mini-spec line "debug, info, low, medium, high, critical" is consistent with the amendment (which adds `trace` at rank 0).
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
