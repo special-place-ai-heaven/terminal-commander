@@ -1,0 +1,70 @@
+{
+  "_meta": {
+    "fixture_id": "buckets/build_42.events.json",
+    "schema_anchor": "TC05/event-v1",
+    "status": "informative-until-TC05"
+  },
+  "bucket_id": "build_42",
+  "events": [
+    {
+      "event_id": "evt_TEST_0001",
+      "seq": 1840,
+      "timestamp": "<TS>",
+      "severity": "low",
+      "kind": "command_started",
+      "summary": "cargo build --release started",
+      "captures": {},
+      "source": {
+        "probe_id": "probe_proc_1",
+        "source_type": "process",
+        "stream": "meta",
+        "job_id": "job_build_1"
+      },
+      "pointer": {
+        "frame_id": 1,
+        "line": 1,
+        "context_available": true
+      }
+    },
+    {
+      "event_id": "evt_TEST_0002",
+      "seq": 1842,
+      "timestamp": "<TS>",
+      "severity": "high",
+      "kind": "missing_package",
+      "summary": "APT could not locate package libssl-dev",
+      "captures": { "package": "libssl-dev" },
+      "source": {
+        "probe_id": "probe_apt_7",
+        "source_type": "terminal",
+        "stream": "stderr",
+        "job_id": "job_build_1"
+      },
+      "pointer": {
+        "frame_id": 9821,
+        "line": 318,
+        "context_available": true
+      }
+    },
+    {
+      "event_id": "evt_TEST_0003",
+      "seq": 1843,
+      "timestamp": "<TS>",
+      "severity": "critical",
+      "kind": "command_failed",
+      "summary": "cargo build --release exited with code 101",
+      "captures": { "exit_code": 101 },
+      "source": {
+        "probe_id": "probe_proc_1",
+        "source_type": "process",
+        "stream": "meta",
+        "job_id": "job_build_1"
+      },
+      "pointer": {
+        "frame_id": 9822,
+        "line": 319,
+        "context_available": true
+      }
+    }
+  ]
+}

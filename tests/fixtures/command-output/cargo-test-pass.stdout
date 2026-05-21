@@ -1,0 +1,9 @@
+    Finished test [unoptimized + debuginfo] target(s) in 0.42s
+     Running unittests src/lib.rs (target/debug/deps/terminal_commander_core-<HASH>)
+
+running 3 tests
+test event::tests::roundtrip_basic ... ok
+test pointer::tests::context_available_default_true ... ok
+test severity::tests::ord_matches_doc ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

@@ -1,0 +1,17 @@
+   Compiling terminal-commander-core v0.0.0 (/home/dev/repo/crates/core)
+error[E0432]: unresolved import `crate::missing_module`
+ --> crates/core/src/lib.rs:8:5
+  |
+8 | use crate::missing_module;
+  |     ^^^^^^^^^^^^^^^^^^^^^ no `missing_module` in the root
+
+error[E0599]: no method named `does_not_exist` found for struct `Event` in the current scope
+  --> crates/core/src/event.rs:42:15
+   |
+42 |     event.does_not_exist();
+   |           ^^^^^^^^^^^^^^ method not found in `Event`
+
+error: aborting due to 2 previous errors
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `terminal-commander-core` (lib) due to 2 previous errors

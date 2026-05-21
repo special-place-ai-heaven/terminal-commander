@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "fixture_id": "policy/read_only_observer-deny.json",
+    "schema_anchor": "TC05/policy-decision-v1",
+    "status": "informative-until-TC22"
+  },
+  "request": {
+    "actor": "mcp:claude-code",
+    "action": "command_start",
+    "subject": { "argv": ["cargo", "build", "--release"], "cwd": "/home/dev/repo" }
+  },
+  "profile": { "name": "read_only_observer", "version": "1" },
+  "decision": "deny",
+  "reason": "profile=read_only_observer denies command_start (no process/terminal/pty probes allowed)",
+  "audit_id": "aud_TEST_0002",
+  "timestamp": "<TS>"
+}

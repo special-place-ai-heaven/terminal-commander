@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "fixture_id": "rules/cargo-compile-error.json",
+    "schema_anchor": "TC05/rule-v1",
+    "status": "informative-until-TC05"
+  },
+  "rule_id": "cargo-compile-error",
+  "version": 1,
+  "kind": "regex",
+  "severity": "high",
+  "stream": "stderr",
+  "pattern": "^error\\[(?P<code>E[0-9]{4})\\]: (?P<message>.+)$",
+  "captures": ["code", "message"],
+  "summary_template": "rustc {code}: {message}",
+  "rate_limit_per_min": 60,
+  "redact": []
+}
