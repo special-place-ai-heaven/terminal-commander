@@ -22,6 +22,7 @@ use terminal_commander_sifters::SifterRuntime;
 use terminal_commander_store::EventStore;
 
 use crate::audit::PersistentAudit;
+use crate::command::CommandRuntime;
 use crate::config::DaemonConfig;
 use crate::policy::PolicyEngine;
 use crate::router::Router;
@@ -68,6 +69,9 @@ pub struct DaemonState {
     pub audit: Arc<PersistentAudit>,
     /// Wired router. Always uses the persistent audit sink.
     pub router: Arc<Router>,
+    /// Command runtime (TC38). Wires command_start_combed into the
+    /// daemon. Uses the same persistent audit sink as the router.
+    pub command: Arc<CommandRuntime>,
 }
 
 impl std::fmt::Debug for DaemonState {
@@ -121,6 +125,14 @@ impl DaemonState {
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
         ));
 
+        let command = Arc::new(CommandRuntime::new(
+            Arc::clone(&router),
+            Arc::clone(&rings),
+            Arc::clone(&jobs),
+            Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
+            policy,
+        ));
+
         Ok(Self {
             config,
             store,
@@ -131,6 +143,7 @@ impl DaemonState {
             policy,
             audit,
             router,
+            command,
         })
     }
 

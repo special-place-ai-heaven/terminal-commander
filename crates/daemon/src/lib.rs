@@ -15,6 +15,7 @@
 //!   (use WSL2). rmcp transport adapter remains deferred to TC40.
 
 pub mod audit;
+pub mod command;
 pub mod config;
 pub mod ipc;
 pub mod policy;
@@ -23,6 +24,10 @@ pub mod runtime;
 pub mod state;
 
 pub use audit::{AuditSink, InMemoryAudit, PersistentAudit};
+pub use command::{
+    CommandError, CommandRuntime, CommandStartRequest, CommandStartResponse, CommandStatusResponse,
+    DEFAULT_COMMAND_SEVERITY_MIN, MAX_ARGV_ITEM_BYTES, MAX_ARGV_ITEMS, SHELL_INTERPRETERS_DENY,
+};
 pub use config::{
     ConfigError, DaemonConfig, DaemonSection, LimitsSection, PolicySection, RetentionSection,
     RuntimeMode,

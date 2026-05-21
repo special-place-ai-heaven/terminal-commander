@@ -103,6 +103,7 @@ this file" is a contract violation, not a workaround.
 | Audit log | Durable record of policy-relevant runtime actions. Persistent SQLite-backed since TC35. | `crates/daemon::audit::PersistentAudit` + `crates/store::audit` |
 | Daemon runtime bootstrap | Loads config, opens store, applies V0003, wires Router with PersistentAudit, idles in foreground. | `crates/daemon::state::DaemonState`, `crates/daemon::runtime` |
 | Daemon UDS IPC | Unix-domain socket transport with SO_PEERCRED / getpeereid peer identity, length-prefixed JSON frames, bounded `MAX_FRAME_BYTES`, closed-set error codes, audit on every accepted request. Method set today: `system_discover` / `health` / `policy_status` / `self_check`. | `crates/daemon::ipc::{server,client,protocol,peer}` |
+| Command runtime | argv-only `command_start_combed`. Policy gate -> ProcessProbe -> DaemonEventSink -> Router::bucket_append (PersistentAudit). Bounded response (job_id / bucket_id / probe_id / cursor). Lifecycle events written to bucket. No raw stdout/stderr returned. | `crates/daemon::command::CommandRuntime` |
 
 ## 5. Locked invariants
 
