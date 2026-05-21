@@ -3,15 +3,15 @@ goal_id: TC10
 title: Keyword And Regex Sifter Runtime
 chain_id: terminal-commander-mvp
 phase: Wave 3 - Sifters
-status: "Pending"
+status: "Completed"
 depends_on: ["TC09"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T21:25:00+02:00"
+completed_at: "2026-05-21T22:00:00+02:00"
+completion_commit: "1d13542"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -97,9 +97,10 @@ contracts_or_interfaces:
 - Pin: `regex` crate (linear-time, DoS-resistant), version compatible with MSRV 1.92; explicitly forbid `fancy-regex`, backreferences, and lookaround in MVP.
 - `crates/terminal-commander-sifters/Cargo.toml` declares `license.workspace = true` (SPDX `Apache-2.0`) and a per-file Apache-2.0 header per the project convention.
 - Fixture-driven tests use the TC03 fixture taxonomy and rule pack names locked by the user in `README.md:367-372`.
-- <<DECISION REQUIRED: adopt `aho-corasick` for multi-keyword scan vs naive scan>>
-- <<DECISION REQUIRED: use `RegexSet` to batch active regex rules vs evaluating each `Regex` independently>>
-- <<DECISION REQUIRED: per-frame byte limit for sifter pass (cap input frame size before evaluation)>>
+- Multi-keyword scan (locked 2026-05-21 at TC10): `aho-corasick` 1.x is the keyword scanner. Each `SifterRuntime` builds one `AhoCorasick` index per stream-group of active keyword rules; per-frame cost is O(frame_bytes). Falls back gracefully when no keyword rules exist.
+- Regex batching (locked 2026-05-21): `RegexSet` is used to filter "any pattern might match this frame" in O(frame_bytes); only patterns the `RegexSet` flags as candidate are evaluated with their individual `Regex` to extract captures. No per-rule full scan when nothing matches.
+- Per-frame byte limit for the sifter pass (locked 2026-05-21): `MAX_SIFT_BYTES = 8192` bytes (matches `terminal_commander_core::context::MAX_FRAME_BYTES`). Frames longer than the cap are truncated at the last UTF-8 char boundary BEFORE evaluation, and an `EventDraft` field `frame_truncated_bytes` records the drop (defense-in-depth: also makes ReDoS impossible past the cap).
+- `EventDraft` type: TC09 spec says "EventDraft (TC06)" but TC06 closed without one. TC10 adds it to `terminal-commander-core::event` (within TC10 `allowed_files_or_area`). `EventDraft` has all `SignalEvent` fields except `event_id` and `seq`, both of which the `BucketManager::append` assigns at TC07.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
