@@ -3,15 +3,15 @@ goal_id: TC11
 title: Noise Suppression Dedupe And Progress Basics
 chain_id: terminal-commander-mvp
 phase: Wave 3 - Sifters
-status: "Pending"
+status: "Completed"
 depends_on: ["TC10"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T22:05:00+02:00"
+completed_at: "2026-05-21T22:45:00+02:00"
+completion_commit: "44c4410"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -98,8 +98,8 @@ contracts_or_interfaces:
 - Dedupe window is in-memory only in MVP; default 5 seconds, configurable per rule. Persistent recurrence aggregation is deferred.
 - TC12 persistent event schema must reserve `count`, `first_seen`, and `last_seen` columns so collapsed events can later round-trip to storage without schema migration.
 - Fixtures MUST exercise both axes: progress-like noise (cargo build spinner, apt percentage updates) and repeated-warning collapse (e.g. gcc duplicate diagnostic).
-- <<DECISION REQUIRED: dedupe key hash strategy (rule_id+canonical_summary vs rule_id+captures vs full normalized line)>>
-- <<DECISION REQUIRED: where suppression metadata lives (extra fields on SignalEvent vs sidecar SuppressionRecord referenced by event)>>
+- Dedupe key (locked 2026-05-21 at TC11): `rule_id` + `captures` (the IndexMap rendered to a canonical key-sorted string). Repeated identical rule matches within the configured window collapse into one representative event with `count`, `first_seen`, `last_seen` set; `pointer` continues to reference the FIRST matching frame so context resolution is stable.
+- Suppression metadata location (locked 2026-05-21): inline fields on `EventDraft` (and therefore `SignalEvent` after promotion): `count: u32`, `first_seen: Option<OffsetDateTime>`, `last_seen: Option<OffsetDateTime>`, `suppressed: bool`. Sidecar records add complexity for no benefit at MVP; TC12 storage reserves the same columns.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
