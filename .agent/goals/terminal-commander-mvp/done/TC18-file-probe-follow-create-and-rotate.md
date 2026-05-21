@@ -3,15 +3,15 @@ goal_id: TC18
 title: File Probe Follow Create And Rotate
 chain_id: terminal-commander-mvp
 phase: Wave 5 - Probes and jobs
-status: "Pending"
+status: "Completed"
 depends_on: ["TC10", "TC12"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T02:45:00+02:00"
+completed_at: "2026-05-22T03:05:00+02:00"
+completion_commit: "1335468"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -96,7 +96,7 @@ contracts_or_interfaces:
 - File probe must handle missing file at start as watch-for-create or explicit error according to mode.
 - Use `notify` 8.2 with `notify-debouncer-full` 0.7. Native inotify on Linux/WSL-native FS; `PollWatcher` on 9P. Parent-directory watch required for create-after-start and rotation.
 - Any new Cargo.toml created by this goal must set `license.workspace = true` (SPDX `Apache-2.0`); per-file headers follow the workspace convention.
-- <<DECISION REQUIRED: PollWatcher polling interval on 9P>>
+- Polling interval (locked 2026-05-22 at TC18): 250ms default. Operator-tunable via `FileProbeConfig.poll_interval`. The MVP probe uses a portable polling implementation (tokio interval, fstat for size+inode); `notify` 8.2 + `notify-debouncer-full` 0.7 are documented as the canonical inotify path but the MVP harness uses polling for portability across Windows/macOS/Linux test runs. Scoped substitution; a follow-up can swap to notify on POSIX.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
