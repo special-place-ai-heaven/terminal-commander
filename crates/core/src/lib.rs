@@ -15,6 +15,7 @@
 #![doc(html_no_source)]
 
 pub mod bucket;
+pub mod context;
 pub mod error;
 pub mod event;
 pub mod ids;
@@ -25,6 +26,11 @@ pub mod source;
 pub use bucket::{
     BucketConfig, BucketError, BucketManager, BucketReadRequest, BucketReadResponse, BucketState,
     BucketSummary, BySeverity, DEFAULT_MAX_EVENTS, DEFAULT_READ_LIMIT, DEFAULT_TTL, MAX_READ_LIMIT,
+};
+pub use context::{
+    ContextError, ContextLine, ContextRingConfig, ContextRingManager, ContextWindowRequest,
+    ContextWindowResponse, DEFAULT_RING_BYTES, DEFAULT_RING_FRAMES, MAX_FRAME_BYTES,
+    MAX_WINDOW_BYTES, MAX_WINDOW_FRAMES, SourceFrame,
 };
 pub use error::{CoreError, Result};
 pub use event::{Captures, RuleRef, SignalEvent};
