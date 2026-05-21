@@ -1,0 +1,3 @@
+<TS> INFO  app restarting pid=<PID>
+<TS> INFO  config loaded path=/home/dev/repo/config.toml
+<TS> INFO  listening on 127.0.0.1:8080

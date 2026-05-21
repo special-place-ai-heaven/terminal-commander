@@ -1,0 +1,22 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/probe-descriptor.v1.json",
+    "schema_anchor": "TC05/probe-v1",
+    "status": "informative-until-TC15",
+    "required": ["probe_id", "kind", "created_at", "state"],
+    "optional": ["job_id", "path", "argv", "rules", "spec", "policy_profile"]
+  },
+  "probe_id": "probe_proc_42",
+  "kind": "process",
+  "created_at": "2026-05-20T20:11:34.000+02:00",
+  "state": "running",
+  "job_id": "job_install_1",
+  "argv": ["apt-get", "install", "-y", "libssl-dev"],
+  "spec": {
+    "cwd": "/home/dev/repo",
+    "env_allow": ["PATH", "HOME", "LANG"],
+    "stall_window_ms": 30000
+  },
+  "rules": ["apt-missing-package", "permission-denied", "command-failed"],
+  "policy_profile": "developer_local"
+}

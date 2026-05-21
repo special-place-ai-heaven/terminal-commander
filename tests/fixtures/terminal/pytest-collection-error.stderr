@@ -1,0 +1,17 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-8.3.0, pluggy-1.5.0
+rootdir: /home/dev/repo
+collected 0 items / 1 error
+
+==================================== ERRORS ====================================
+________________________ ERROR collecting tests/test_x.py ______________________
+ImportError while importing test module '/home/dev/repo/tests/test_x.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+tests/test_x.py:3: in <module>
+    import nonexistent_package
+E   ModuleNotFoundError: No module named 'nonexistent_package'
+=========================== short test summary info ============================
+ERROR tests/test_x.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+=============================== 1 error in 0.12s ===============================

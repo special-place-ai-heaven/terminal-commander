@@ -1,0 +1,10 @@
+22 28 0:21 / /sys rw,nosuid,nodev,noexec,relatime shared:7 - sysfs sysfs rw
+23 28 0:4 / /proc rw,nosuid,nodev,noexec,relatime shared:13 - proc proc rw
+24 28 0:6 / /dev rw,nosuid shared:2 - devtmpfs devtmpfs rw,size=8123456k,nr_inodes=2030864,mode=755
+25 22 0:22 / /sys/kernel/security rw,nosuid,nodev,noexec,relatime shared:8 - securityfs securityfs rw
+26 24 0:23 / /dev/shm rw,nosuid,nodev shared:3 - tmpfs tmpfs rw
+27 24 0:24 / /dev/pts rw,nosuid,noexec,relatime shared:4 - devpts devpts rw,gid=5,mode=620,ptmxmode=000
+28 1 259:1 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p1 rw
+29 22 0:25 / /sys/fs/cgroup ro,nosuid,nodev,noexec shared:9 - cgroup2 cgroup2 rw,nsdelegate
+30 28 259:1 /home/dev /home/dev rw,relatime shared:10 - ext4 /dev/nvme0n1p1 rw
+31 28 0:26 / /run rw,nosuid,nodev shared:11 - tmpfs tmpfs rw,size=1632692k,mode=755

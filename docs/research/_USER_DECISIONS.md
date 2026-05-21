@@ -12,6 +12,7 @@ Source: direct user input in goal session.
 | Language | Rust, edition 2024 | Confirmed. |
 | License | Apache-2.0 | SPDX `Apache-2.0`. Single license, not dual MIT/Apache. |
 | rmcp version | `=1.7.0` exact pin | crates.io. MSRV floor = Rust 1.92. Edition 2024. |
+| Rust toolchain pin (amended 2026-05-21) | `1.95.0` | Operator decision at TC04 start: use locally-available 1.95.0 instead of the 1.92.0 MSRV floor to avoid a `rustup` download. rmcp 1.7.0 still works (it floors AT 1.92, does not require =1.92). CI `cargo-hack --rust-version` continues to gate the MSRV claim. |
 | Async runtime | tokio | Forced by rmcp 1.7.0 dependency. |
 | Daemon process model | Two-process | thin `terminal-commander-mcp` (rmcp stdio) + `terminal-commanderd` daemon. IPC details deferred to TC21 (daemon local API and router). ARCH locks the split conceptually only. |
 | Workspace | Rust 2024 multi-crate workspace | Flat `crates/<name>/` layout. 7 crates per TC04. |

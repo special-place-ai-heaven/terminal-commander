@@ -1,0 +1,178 @@
+---
+goal_id: TC09
+title: Rule Model Validation And Templates
+chain_id: terminal-commander-mvp
+phase: Wave 2 - Core model
+status: "Completed"
+depends_on: ["TC06", "TC08"]
+target_branch: "feature/terminal-commander-mvp"
+prohibited_branches: ["main", "master"]
+worktree_hint: ""
+created_at: "2026-05-21T00:00:00+02:00"
+started_at: "2026-05-21T20:45:00+02:00"
+completed_at: "2026-05-21T21:20:00+02:00"
+completion_commit: "c832f00"
+blocked_reason: ""
+source_refs:
+  - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
+  - "Repository: https://github.com/special-place-administrator/terminal-commander.git"
+  - "User note: repository is initially empty except the generated README.md already added by user"
+  - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
+risk_level: "medium"
+---
+
+# TC09 - Rule Model Validation And Templates
+
+Use this file directly with `/goal`:
+
+    /goal .agent/goals/terminal-commander-mvp/TC09-rule-model-validation-and-templates.md
+
+## Goal File Workflow
+
+0. Use the Branch Guard below before editing this goal file, source code, migrations, docs, tests, or generated artifacts.
+1. After Branch Guard passes, update this file's frontmatter: set `status` to `In progress` and set `started_at` to an ISO-8601 timestamp.
+2. Execute only this goal's mini-spec. Keep changes inside `allowed_files_or_area` and stop if a stop condition is hit.
+3. If acceptance criteria pass, run the verification command(s), commit the verified work, then update this file: set `status` to `Completed`, set `completed_at`, and set `completion_commit` to the exact verified work commit hash.
+4. Commit the goal-status update as a separate commit unless the repository policy says otherwise.
+5. If blocked, set `status` to `Blocked`, set `blocked_reason`, leave `completion_commit` empty unless a verified partial commit exists, and record the blocker in the final report.
+
+## Branch Guard
+
+This goal belongs only to branch:
+
+```text
+feature/terminal-commander-mvp
+```
+
+Before changing anything, run:
+
+```bash
+git branch --show-current
+git status --short
+```
+
+The branch output must be exactly:
+
+```text
+feature/terminal-commander-mvp
+```
+
+If the current branch is one of the prohibited branches, or anything other than `feature/terminal-commander-mvp`, do not edit there. Switch to or create the correct worktree/branch, then rerun this Branch Guard. Stop if the correct branch/worktree is unavailable, dirty with unrelated work, or still does not print `feature/terminal-commander-mvp`.
+
+## Mission Context
+
+- Target project: `https://github.com/special-place-administrator/terminal-commander.git`
+- Goal chain: `terminal-commander-mvp`
+- Source material: user-provided Terminal Commander concept, confirmed branch policy, initial README already added by user, and the Terminal Commander product specification produced in the planning session.
+- Current known state: repository is new and user reports it contains the initial README.md; all code, tests, registry, daemon, MCP server, probes, and packaging are otherwise unverified or absent.
+- Desired end state: a provider-neutral MCP-operated local signal-combing layer that can run commands, observe terminal/file sources, dynamically manage rules, expose realtime signal buckets, and provide bounded context without raw noisy output.
+
+## Mini-Spec
+
+objective:
+- Implement the rule definition model, validation rules, capture mapping, summary template rendering, and rule test input/output types.
+
+non_goals:
+- Do not implement the streaming sifter runtime.
+- Do not persist the registry to SQLite.
+- Do not activate rules against live probes.
+
+allowed_files_or_area:
+- .agent/goals/terminal-commander-mvp/TC09-rule-model-validation-and-templates.md
+- crates/terminal-commander-core/src/**
+- crates/terminal-commander-core/tests/**
+- tests/fixtures/rules/**
+
+forbidden_files:
+- Any path outside `allowed_files_or_area` except this goal file status update if not already listed.
+- Secrets, credentials, private keys, token caches, or environment files containing secrets.
+- Generated binaries, build outputs, vendored dependencies, or large log artifacts.
+- Unrelated application behavior, unrelated documentation, or unrelated repository restructuring.
+
+contracts_or_interfaces:
+- RuleDefinition must support at least keyword and regex rule kinds, severity, event kind, summary template, context hints, tags, examples, and status.
+- Validation must reject empty rule IDs, empty match definitions, invalid context counts, and unsupported rule types.
+- Template rendering must never panic when captures are absent; it must report missing captures or leave a documented placeholder behavior.
+- Regex backend pinned: `regex` crate (linear-time, DoS-resistant via DFA caps). `fancy-regex`, backreferences, and lookaround are forbidden in MVP rule definitions; validation MUST reject them.
+- Regex pattern length cap: 4096 bytes; validation MUST reject longer patterns to bound regex_size_limit / dfa_size_limit exposure.
+- RuleType enum MUST reserve all 11 canonical sifter discriminators from README.md:136-148 (keyword, regex, prompt, exit_code, stream_marker, progress_collapse, dedupe, threshold, sequence, anchor, custom); unimplemented variants validate to `RuleStatus::Draft` or equivalent but are reserved in the enum.
+- Template syntax locked: `${name}` for named captures only; renderer returns `Result<String, MissingCapture>` and MUST NOT panic on absent captures.
+- crates/terminal-commander-core/Cargo.toml (already TC06-owned) MUST carry SPDX header `license.workspace = true`; TC09 does not re-declare it.
+- RuleStatus variants (locked 2026-05-21 at TC09 start by orchestrator under correctness mandate): five-value lifecycle `Draft`, `Active`, `Disabled`, `Deprecated`, `Tombstoned`. Tombstoned exists so deleted rules retain an audit handle (event records that reference the rule id can still resolve to the soft-deleted definition).
+- Tag taxonomy (locked 2026-05-21): free-form lowercase strings; validation caps each tag at 64 chars and the tag list at 16 entries. No controlled vocabulary in MVP; later registry goals (TC13/TC14) may layer recommendations on top.
+- ContextHint semantics (locked 2026-05-21): `{ before_lines: u32, after_lines: u32 }`. Matches the `event_context(before, after)` shape from README and `ContextWindowRequest` (TC08). Byte-range hints are out of MVP scope; sifter (TC10/TC11) does not need them.
+
+invariants:
+- No unbounded raw terminal or file output may be exposed as a success path.
+- Every signal event design or implementation must preserve a bounded source pointer or explain why no pointer can exist.
+- Every public contract must be documented or tested before it is treated as live.
+- No mock, stub, placeholder, TODO-only, disabled, degraded, or unknown behavior may be reported as completed functionality.
+- Security-sensitive operations must be policy-gated and auditable when they are introduced.
+
+implementation_steps:
+- Define RuleDefinition, RuleType, RuleStatus, ContextHint, RuleExample, RuleTestRequest, and RuleTestResult types.
+- Implement validation for keyword and regex rule definitions without compiling regex in this goal unless trivial.
+- Implement simple summary template rendering for named captures using a deterministic syntax documented in code or docs.
+- Add tests for valid keyword, valid regex, invalid rule ID, invalid context, missing summary capture, and JSON fixture compatibility.
+- Document any template limitations for later sifter implementation.
+
+acceptance_criteria:
+- Rule model supports keyword and regex definitions with validation tests.
+- Rule examples can be represented in serializable form.
+- Template renderer behavior is deterministic and tested for missing captures.
+- Invalid rules fail validation instead of being accepted silently.
+- No live rule activation or storage is implemented.
+
+evidence_required:
+- Branch evidence: `git branch --show-current` output exactly `feature/terminal-commander-mvp`.
+- File paths changed.
+- Verification command output summary.
+- Any new public type, API, route, migration, feature flag, environment variable, event, or status enum introduced.
+- Explicit source-status notes for live, partial, degraded, disabled, test-only, mock, blocked, unknown, or deleted behavior touched.
+
+stop_conditions:
+- Current branch is not exactly `feature/terminal-commander-mvp`.
+- The goal requires touching forbidden files.
+- The goal expands into another goal's scope.
+- A required interface, route, package, repository path, migration path, branch, or runtime dependency is missing or contradicts this mini-spec.
+- Verification cannot run for a reason that is not clearly pre-existing and documented.
+- A security, credential, data-retention, privacy, production-safety, or destructive-change question appears that is not answered by this goal file.
+
+verification_command:
+```bash
+git diff --check
+cargo fmt --check
+cargo clippy -p terminal-commander-core --all-targets -- -D warnings
+cargo nextest run -p terminal-commander-core -E 'test(rule)'
+```
+
+## Task Prompt
+
+Run TC09 only on branch `feature/terminal-commander-mvp`. Complete the objective above, stay inside the allowed files/areas, respect all forbidden files and invariants, verify the work, commit only verified changes, update this goal file's status fields, and report blockers instead of guessing.
+
+## Final Report Format
+
+Objective:
+- Implement the rule definition model, validation rules, capture mapping, summary template rendering, and rule test input/output types.
+
+Changes:
+- <focused list of implementation changes>
+
+Files changed:
+- <paths>
+
+Verification:
+- PASS/FAIL: `<command>` — <summary>
+
+Evidence:
+- <source-status notes, test output summaries, route/status evidence, screenshots only if rendered UI changed>
+
+Commit:
+- Verified work commit: `<hash or none>`
+- Goal status commit: `<hash or none>`
+
+Known gaps / blockers:
+- <none or explicit blocker>
+
+Next goal:
+- TC10 and TC10-keyword-and-regex-sifter-runtime.md

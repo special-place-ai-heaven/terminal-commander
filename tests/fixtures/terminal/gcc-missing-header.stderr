@@ -1,0 +1,6 @@
+gcc -c -O2 -Wall -o build/foo.o src/foo.c
+src/foo.c:1:10: fatal error: openssl/ssl.h: No such file or directory
+    1 | #include <openssl/ssl.h>
+      |          ^~~~~~~~~~~~~~~
+compilation terminated.
+make: *** [Makefile:14: build/foo.o] Error 1

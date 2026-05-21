@@ -1,0 +1,30 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/event.signal.v1.json",
+    "schema_anchor": "TC05/event-v1",
+    "status": "informative-until-TC06",
+    "required": ["event_id", "bucket_id", "seq", "timestamp", "severity", "kind", "summary", "source"],
+    "optional": ["captures", "rule", "pointer", "pointer_unavailable_reason", "tags"]
+  },
+  "event_id": "evt_01HXTC0001",
+  "bucket_id": "build_42",
+  "seq": 1842,
+  "timestamp": "2026-05-20T20:11:34.218+02:00",
+  "severity": "high",
+  "kind": "missing_package",
+  "summary": "APT could not locate package libssl-dev",
+  "captures": { "package": "libssl-dev" },
+  "rule": { "id": "apt-missing-package", "version": 1 },
+  "source": {
+    "probe_id": "probe_apt_7",
+    "source_type": "process",
+    "stream": "stderr",
+    "job_id": "job_install_1"
+  },
+  "pointer": {
+    "frame_id": 9821,
+    "line": 318,
+    "context_available": true
+  },
+  "tags": ["packaging", "apt"]
+}

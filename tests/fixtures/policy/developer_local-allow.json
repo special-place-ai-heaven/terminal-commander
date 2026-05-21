@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "fixture_id": "policy/developer_local-allow.json",
+    "schema_anchor": "TC05/policy-decision-v1",
+    "status": "informative-until-TC22"
+  },
+  "request": {
+    "actor": "mcp:claude-code",
+    "action": "command_start",
+    "subject": { "argv": ["cargo", "build", "--release"], "cwd": "/home/dev/repo" }
+  },
+  "profile": { "name": "developer_local", "version": "1" },
+  "decision": "allow",
+  "reason": "command argv[0]='cargo' is in commands.allow_roots and cwd is under paths.read_allow",
+  "audit_id": "aud_TEST_0001",
+  "timestamp": "<TS>"
+}

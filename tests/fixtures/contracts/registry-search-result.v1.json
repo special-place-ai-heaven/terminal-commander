@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/registry-search-result.v1.json",
+    "schema_anchor": "TC05/registry-search-result-v1",
+    "status": "informative-until-TC13",
+    "required": ["query", "matches", "total"],
+    "optional": ["next_offset", "facets"]
+  },
+  "query": "apt",
+  "total": 2,
+  "next_offset": null,
+  "facets": {
+    "tags": { "packaging": 2, "apt": 2 },
+    "severity": { "high": 2 }
+  },
+  "matches": [
+    {
+      "id": "apt-missing-package",
+      "version": 1,
+      "kind": "regex",
+      "severity": "high",
+      "summary_template": "APT could not locate package {package}",
+      "tags": ["packaging", "apt"],
+      "score": 0.91
+    },
+    {
+      "id": "apt-permission-denied",
+      "version": 1,
+      "kind": "keyword",
+      "severity": "high",
+      "summary_template": "APT operation requires root",
+      "tags": ["packaging", "apt", "permission"],
+      "score": 0.72
+    }
+  ]
+}

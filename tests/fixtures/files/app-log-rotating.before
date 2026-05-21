@@ -1,0 +1,6 @@
+<TS> INFO  app starting pid=<PID>
+<TS> INFO  config loaded path=/home/dev/repo/config.toml
+<TS> INFO  listening on 127.0.0.1:8080
+<TS> WARN  slow query duration_ms=512 query_id=q-001
+<TS> WARN  slow query duration_ms=783 query_id=q-002
+<TS> ERROR upstream timeout host=host-a after_ms=3000

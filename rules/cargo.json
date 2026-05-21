@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "pack": "cargo",
+    "version": 1,
+    "description": "Cargo / rustc compilation errors."
+  },
+  "rules": [
+    {
+      "id": "cargo.compile-error",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "compile_error",
+      "stream": "stderr",
+      "description": "rustc emitted an error[Ennnn] line.",
+      "pattern": "^error\\[(?P<code>E[0-9]{4})\\]: (?P<message>.+)$",
+      "captures": ["code", "message"],
+      "summary_template": "rustc ${code}: ${message}",
+      "tags": ["build", "rust", "cargo"],
+      "rate_limit_per_min": 60,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 4 }
+    },
+    {
+      "id": "cargo.could-not-compile",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "critical",
+      "event_kind": "command_failed",
+      "stream": "stderr",
+      "description": "cargo summary line for a failed build.",
+      "pattern": "^error: could not compile `(?P<crate>[A-Za-z0-9_-]+)`",
+      "captures": ["crate"],
+      "summary_template": "build failed for crate ${crate}",
+      "tags": ["build", "rust", "cargo"],
+      "rate_limit_per_min": 6,
+      "redact": [],
+      "context_hint": { "before_lines": 3, "after_lines": 1 }
+    }
+  ]
+}

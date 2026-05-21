@@ -1,0 +1,22 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/audit-record.v1.json",
+    "schema_anchor": "TC05/audit-record-v1",
+    "status": "informative-until-TC22",
+    "required": ["audit_id", "timestamp", "actor", "action", "subject", "policy_profile", "decision"],
+    "optional": ["reason", "rule_id", "result", "monotonic_clock_ns"]
+  },
+  "audit_id": "aud_01HXTC0001",
+  "timestamp": "2026-05-20T20:11:34.000+02:00",
+  "monotonic_clock_ns": 18374234500000000,
+  "actor": "mcp:claude-code",
+  "action": "command_start",
+  "subject": {
+    "argv": ["cargo", "build", "--release"],
+    "cwd": "/home/dev/repo"
+  },
+  "policy_profile": { "name": "developer_local", "version": "1" },
+  "decision": "allow",
+  "reason": "argv[0]='cargo' allowed; cwd under paths.read_allow",
+  "result": "success"
+}

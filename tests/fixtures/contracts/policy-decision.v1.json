@@ -1,0 +1,19 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/policy-decision.v1.json",
+    "schema_anchor": "TC05/policy-decision-v1",
+    "status": "informative-until-TC22",
+    "required": ["request", "profile", "decision", "reason", "timestamp"],
+    "optional": ["audit_id", "rule_id", "limit_exceeded"]
+  },
+  "request": {
+    "actor": "mcp:claude-code",
+    "action": "command_start",
+    "subject": { "argv": ["cargo", "build", "--release"], "cwd": "/home/dev/repo" }
+  },
+  "profile": { "name": "developer_local", "version": "1" },
+  "decision": "allow",
+  "reason": "argv[0]='cargo' is in commands.allow_roots; cwd is under paths.read_allow",
+  "timestamp": "2026-05-20T20:11:34.000+02:00",
+  "audit_id": "aud_01HXTC0001"
+}

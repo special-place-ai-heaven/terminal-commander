@@ -1,0 +1,23 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/event-context-response.v1.json",
+    "schema_anchor": "TC05/event-context-response-v1",
+    "status": "informative-until-TC08",
+    "required": ["event_id", "frames", "truncated"],
+    "optional": ["bucket_id", "context_window_id", "evicted"]
+  },
+  "event_id": "evt_01HXTC0002",
+  "bucket_id": "build_42",
+  "context_window_id": "ctx_probe_apt_7_318",
+  "truncated": false,
+  "evicted": false,
+  "frames": [
+    { "frame_id": 9818, "line": 315, "stream": "stdout", "text": "Reading package lists... Done" },
+    { "frame_id": 9819, "line": 316, "stream": "stdout", "text": "Building dependency tree... Done" },
+    { "frame_id": 9820, "line": 317, "stream": "stdout", "text": "Reading state information... Done" },
+    { "frame_id": 9821, "line": 318, "stream": "stderr", "text": "E: Unable to locate package libssl-dev" },
+    { "frame_id": 9822, "line": 319, "stream": "stderr", "text": "E: Couldn't find any package by glob 'libssl-dev'" },
+    { "frame_id": 9823, "line": 320, "stream": "stderr", "text": "E: Couldn't find any package by regex 'libssl-dev'" },
+    { "frame_id": 9824, "line": 321, "stream": "meta",   "text": "command exited with code 100" }
+  ]
+}

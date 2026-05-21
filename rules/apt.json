@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "pack": "apt",
+    "version": 1,
+    "description": "APT (Debian/Ubuntu) package-manager error rules."
+  },
+  "rules": [
+    {
+      "id": "apt.missing-package",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "missing_package",
+      "stream": "stderr",
+      "description": "APT could not locate a package.",
+      "pattern": "^E: Unable to locate package (?P<package>[A-Za-z0-9._+-]+)$",
+      "captures": ["package"],
+      "summary_template": "missing package: ${package}",
+      "tags": ["packaging", "apt"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 3, "after_lines": 1 }
+    },
+    {
+      "id": "apt.requires-root",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "permission_denied",
+      "stream": "stderr",
+      "description": "APT requires superuser privileges.",
+      "keywords": ["are you root?", "are you superuser?"],
+      "captures": [],
+      "summary_template": "apt requires root",
+      "tags": ["packaging", "apt", "permission"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 1, "after_lines": 0 }
+    }
+  ]
+}

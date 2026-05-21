@@ -1,0 +1,51 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/mcp-tools/bucket_wait.v1.json",
+    "schema_anchor": "TC05/mcp-tools/bucket_wait-v1",
+    "status": "informative-until-TC17",
+    "consumed_by": ["TC17", "TC23", "TC29"],
+    "note": "bucket_wait is the load-bearing tool for the prime directive. Response carries EITHER non-empty events OR heartbeat=true. Raw stdout/stderr text is NEVER a bucket_wait success shape."
+  },
+  "tool": "bucket_wait",
+  "request_example": {
+    "bucket": "build_42",
+    "cursor": 1842,
+    "severity_min": "medium",
+    "kind_filter": null,
+    "timeout_ms": 30000
+  },
+  "response_examples": {
+    "with_events": {
+      "bucket_id": "build_42",
+      "cursor_in": 1842,
+      "next_cursor": 1845,
+      "heartbeat": false,
+      "events": [
+        {
+          "event_id": "evt_01HXTC0004",
+          "bucket_id": "build_42",
+          "seq": 1844,
+          "timestamp": "2026-05-20T20:11:34.300+02:00",
+          "severity": "high",
+          "kind": "compile_error",
+          "summary": "rustc E0432: unresolved import `crate::missing_module`",
+          "captures": { "code": "E0432" },
+          "source": {
+            "probe_id": "probe_cargo_3",
+            "source_type": "process",
+            "stream": "stderr",
+            "job_id": "job_build_2"
+          },
+          "pointer": { "frame_id": 240, "line": 7, "context_available": true }
+        }
+      ]
+    },
+    "heartbeat": {
+      "bucket_id": "build_42",
+      "cursor_in": 1842,
+      "next_cursor": 1842,
+      "heartbeat": true,
+      "events": []
+    }
+  }
+}

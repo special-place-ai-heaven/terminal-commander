@@ -1,0 +1,19 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/job-status.v1.json",
+    "schema_anchor": "TC05/job-status-v1",
+    "status": "informative-until-TC16",
+    "required": ["job_id", "argv", "state", "started_at"],
+    "optional": ["exited_at", "exit_code", "signal", "duration_ms", "probe_ids", "bucket_ids"]
+  },
+  "job_id": "job_install_1",
+  "argv": ["apt-get", "install", "-y", "libssl-dev"],
+  "state": "exited",
+  "started_at": "2026-05-20T20:11:34.000+02:00",
+  "exited_at": "2026-05-20T20:11:34.250+02:00",
+  "exit_code": 100,
+  "signal": null,
+  "duration_ms": 250,
+  "probe_ids": ["probe_apt_7"],
+  "bucket_ids": ["build_42"]
+}

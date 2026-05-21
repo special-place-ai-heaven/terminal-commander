@@ -1,0 +1,23 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/forbidden/missing-pointer.v1.json",
+    "schema_anchor": "TC05/forbidden/missing-pointer",
+    "status": "negative-test-oracle",
+    "forbidden_reason": "TC02 invariant: every signal event preserves a bounded source pointer OR explains why no pointer can exist via `pointer_unavailable_reason`. Severity>=medium events MUST point back to source frames so context can be fetched on demand.",
+    "consumed_by": ["TC10", "TC23", "TC29"]
+  },
+  "FORBIDDEN_DO_NOT_PRODUCE": true,
+  "event_id": "evt_BAD_0002",
+  "bucket_id": "build_42",
+  "seq": 1842,
+  "timestamp": "2026-05-20T20:11:34.218+02:00",
+  "severity": "high",
+  "kind": "missing_package",
+  "summary": "APT could not locate package libssl-dev",
+  "source": {
+    "probe_id": "probe_apt_7",
+    "source_type": "process",
+    "stream": "stderr",
+    "job_id": "job_install_1"
+  }
+}

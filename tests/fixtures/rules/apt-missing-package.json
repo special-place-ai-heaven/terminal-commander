@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "fixture_id": "rules/apt-missing-package.json",
+    "schema_anchor": "TC05/rule-v1",
+    "status": "informative-until-TC05"
+  },
+  "rule_id": "apt-missing-package",
+  "version": 1,
+  "kind": "regex",
+  "severity": "high",
+  "stream": "stderr",
+  "pattern": "^E: Unable to locate package (?P<package>[A-Za-z0-9._+-]+)$",
+  "captures": ["package"],
+  "summary_template": "APT could not locate package {package}",
+  "rate_limit_per_min": 30,
+  "redact": []
+}

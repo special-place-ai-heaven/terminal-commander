@@ -1,0 +1,30 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/forbidden/raw-stream-as-events.v1.json",
+    "schema_anchor": "TC05/forbidden/raw-stream",
+    "status": "negative-test-oracle",
+    "forbidden_reason": "Bucket entries MUST be structured signal events with summary + pointer (SECURITY.md B5). Raw multi-line stream content in `events` is the prime directive violation: 'No unbounded raw terminal or file output may be exposed as a success path.'",
+    "consumed_by": ["TC23", "TC29"]
+  },
+  "FORBIDDEN_DO_NOT_PRODUCE": true,
+  "bucket_id": "build_42",
+  "cursor_in": 1840,
+  "next_cursor": 1843,
+  "events": [
+    {
+      "event_id": "evt_BAD_0001",
+      "bucket_id": "build_42",
+      "seq": 1842,
+      "timestamp": "2026-05-20T20:11:34.000+02:00",
+      "severity": "high",
+      "kind": "raw_chunk",
+      "summary": "Reading package lists... Done\nBuilding dependency tree... Done\nReading state information... Done\nE: Unable to locate package libssl-dev\nE: Couldn't find any package by glob 'libssl-dev'\nE: Couldn't find any package by regex 'libssl-dev'",
+      "source": {
+        "probe_id": "probe_apt_7",
+        "source_type": "process",
+        "stream": "stderr",
+        "job_id": "job_install_1"
+      }
+    }
+  ]
+}

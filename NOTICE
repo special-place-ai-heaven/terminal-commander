@@ -1,0 +1,31 @@
+Terminal Commander
+Copyright 2026 The Terminal Commander Authors
+
+This product includes software developed by The Terminal Commander Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+------------------------------------------------------------------------
+
+Upstream dependency notice (rmcp relicensing transition)
+
+The Rust MCP SDK crate `rmcp` is undergoing a relicensing transition.
+Legacy releases were published under `MIT OR Apache-2.0`; current and
+future releases are published under `Apache-2.0`. The repository
+`cargo-deny` license allowlist therefore covers BOTH expressions:
+
+  - `MIT OR Apache-2.0`  (legacy rmcp and ecosystem crates still on it)
+  - `Apache-2.0`         (current rmcp and the Terminal Commander crates)
+
+See `docs/research/license-decision.md` and
+`docs/research/tooling-baseline.md` for full rationale.

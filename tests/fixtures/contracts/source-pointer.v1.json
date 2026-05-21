@@ -1,0 +1,15 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/source-pointer.v1.json",
+    "schema_anchor": "TC05/source-pointer-v1",
+    "status": "informative-until-TC06",
+    "required": ["frame_id", "line", "context_available"],
+    "optional": ["byte_offset", "stream", "context_window_id"]
+  },
+  "frame_id": 9821,
+  "line": 318,
+  "context_available": true,
+  "byte_offset": 17452,
+  "stream": "stderr",
+  "context_window_id": "ctx_probe_apt_7_318"
+}

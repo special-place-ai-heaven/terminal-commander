@@ -40,9 +40,8 @@ The output of `git branch --show-current` MUST match the goal file's
 Terminal Commander is licensed under the Apache License, Version 2.0.
 
 - SPDX identifier: `Apache-2.0`
-- Repo root: `LICENSE` (full Apache-2.0 text) and optional `NOTICE`
-  file. Added in a dedicated license goal (see SOURCE_MAP open
-  decisions; LICENSE creation is NOT part of TC01).
+- Repo root: `LICENSE` (full Apache-2.0 text) and `NOTICE` file.
+  Added by TC01a (see `.agent/goals/terminal-commander-mvp/TC01a-readme-license-contributing-reconcile.md`).
 - Cargo manifest field on every member crate:
   `license.workspace = true` with the workspace setting being
   `license = "Apache-2.0"`.

@@ -1,0 +1,25 @@
+[package]
+name = "terminal-commander-store"
+description = "rusqlite + refinery persistence: event store, bucket cursors, rule registry, audit log. FTS5 search lane."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+regex = "1.12.3"
+# refinery 0.9 pins rusqlite <=0.38; we need 0.39 for FTS5 + recent
+# fixes. Migrations are run manually in lib.rs via execute_batch().
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+terminal-commander-core.workspace = true
+thiserror = "2.0.18"
+time = { version = "0.3.47", features = ["formatting", "parsing", "serde-well-known"] }
+
+[lints]
+workspace = true

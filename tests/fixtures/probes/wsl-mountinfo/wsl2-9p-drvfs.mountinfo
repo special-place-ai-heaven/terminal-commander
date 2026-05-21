@@ -1,0 +1,9 @@
+529 528 0:90 / / rw,relatime shared:1 - 9p none rw,aname=drvfs;path=/;uid=1000;gid=1000;symlinkroot=/mnt/,mmap,access=client,msize=65536,trans=virtio
+530 529 0:4 / /proc rw,nosuid,nodev,noexec,relatime shared:2 - proc proc rw
+531 529 0:23 / /dev rw,nosuid,relatime shared:3 - devtmpfs devtmpfs rw,size=8123456k,nr_inodes=2030864,mode=755
+532 529 0:24 / /sys rw,nosuid,nodev,noexec,relatime shared:4 - sysfs sysfs rw
+533 529 0:25 / /run rw,nosuid,nodev,relatime shared:5 - tmpfs tmpfs rw,mode=755
+534 529 0:91 / /mnt/c rw,relatime shared:6 - 9p drvfs rw,dirsync,aname=drvfs;path=C:\;uid=1000;gid=1000;symlinkroot=/mnt/,mmap,access=client,msize=65536,trans=virtio
+535 529 0:92 / /mnt/d rw,relatime shared:7 - 9p drvfs rw,dirsync,aname=drvfs;path=D:\;uid=1000;gid=1000;symlinkroot=/mnt/,mmap,access=client,msize=65536,trans=virtio
+536 529 0:93 / /mnt/wsl rw,relatime shared:8 - tmpfs none rw
+537 530 0:30 / /proc/sys/fs/binfmt_misc rw,relatime shared:9 - binfmt_misc binfmt_misc rw

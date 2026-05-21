@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "pack": "gcc",
+    "version": 1,
+    "description": "gcc / g++ compile error rules."
+  },
+  "rules": [
+    {
+      "id": "gcc.missing-header",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "missing_header",
+      "stream": "stderr",
+      "description": "gcc could not find a header file.",
+      "pattern": "fatal error: (?P<header>[^:]+): No such file or directory",
+      "captures": ["header"],
+      "summary_template": "missing header ${header}",
+      "tags": ["build", "c", "gcc"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 1, "after_lines": 0 }
+    },
+    {
+      "id": "gcc.undefined-reference",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "linker_error",
+      "stream": "stderr",
+      "description": "ld undefined-reference linker error.",
+      "pattern": "undefined reference to `(?P<symbol>[^`]+)'",
+      "captures": ["symbol"],
+      "summary_template": "undefined reference to ${symbol}",
+      "tags": ["build", "c", "linker"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+600 599 253:0 / / rw,relatime shared:1 - ext4 /dev/sdb rw,discard,errors=remount-ro,data=ordered
+601 600 0:4 / /proc rw,nosuid,nodev,noexec,relatime shared:2 - proc proc rw
+602 600 0:23 / /dev rw,nosuid,relatime shared:3 - devtmpfs devtmpfs rw,size=8123456k,nr_inodes=2030864,mode=755
+603 600 0:24 / /sys rw,nosuid,nodev,noexec,relatime shared:4 - sysfs sysfs rw
+604 600 0:25 / /run rw,nosuid,nodev,relatime shared:5 - tmpfs tmpfs rw,mode=755
+605 600 253:0 /home/dev /home/dev rw,relatime shared:6 - ext4 /dev/sdb rw,discard,errors=remount-ro,data=ordered
+606 600 253:0 /home/dev/projects /home/dev/projects rw,relatime shared:7 - ext4 /dev/sdb rw,discard,errors=remount-ro,data=ordered
+607 601 0:30 / /proc/sys/fs/binfmt_misc rw,relatime shared:8 - binfmt_misc binfmt_misc rw

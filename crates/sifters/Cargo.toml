@@ -1,0 +1,22 @@
+[package]
+name = "terminal-commander-sifters"
+description = "Sifter runtime: keyword, regex, condition, multiline, dedupe, suppression, stall, progress, prompt, correlation, artifact parsers."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aho-corasick = "1.1.4"
+indexmap = "2.14.0"
+regex = "1.12.3"
+terminal-commander-core.workspace = true
+thiserror = "2.0.18"
+time = "0.3.47"
+
+[lints]
+workspace = true
