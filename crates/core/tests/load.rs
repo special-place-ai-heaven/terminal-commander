@@ -156,4 +156,4 @@ fn concurrent_appenders_are_safe_with_send_sync() {
 }
 
 #[allow(dead_code)]
-fn _ensures_event_draft_imports(_d: &EventDraft) {}
+const fn _ensures_event_draft_imports(_d: &EventDraft) {}

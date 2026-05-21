@@ -112,12 +112,13 @@ fn pattern_redos_caught_by_validation_or_size_limit() {
     use regex::RegexBuilder;
     // Pattern that would blow up an unbounded DFA. The combined
     // 1024-alternation regex pushes past our 64 KiB size_limit.
+    use std::fmt::Write as _;
     let mut pat = String::from("^(");
     for i in 0..1024 {
         if i > 0 {
             pat.push('|');
         }
-        pat.push_str(&format!("a{i}b{i}c{i}d{i}e{i}"));
+        let _ = write!(pat, "a{i}b{i}c{i}d{i}e{i}");
     }
     pat.push_str(")$");
     let r = RegexBuilder::new(&pat).size_limit(65_536).build();
