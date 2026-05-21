@@ -22,9 +22,9 @@ cross-process boundary that:
 This is the transport layer for the realtime signal channel. It is
 not a shell bridge.
 
-## 2. What ships in TC37
+## 2. What ships in TC37 + TC39
 
-Method set (deliberately small):
+TC37 baseline method set:
 
 | Method | Purpose |
 |---|---|
@@ -33,11 +33,18 @@ Method set (deliberately small):
 | `policy_status` | Active profile + daemon-side per-call caps. |
 | `self_check` | Tiny synthesized report (data dir, profile, audit count). |
 
-What TC37 does NOT ship (intentional; later goals):
+TC39 added the realtime signal-retrieval methods:
 
-- `command_*` (TC38 wires `command_start_combed`).
-- `bucket_*` over IPC (TC39 daemon API + TC41 MCP tool surface).
-- `event_context` over IPC (TC39).
+| Method | Purpose | Bound |
+|---|---|---|
+| `bucket_events_since` | Cursor-based bucket read. | `MAX_BUCKET_READ_LIMIT = 10_000` events; default 200. |
+| `bucket_wait` | Realtime wait. Notify-backed (no busy poll). Heartbeat on timeout. | `MAX_BUCKET_WAIT_MS = 30_000`; default 5000. |
+| `bucket_summary` | Counters + severity histogram. | Small JSON; no event payloads. |
+| `event_context` | Bounded context window around an event's `SourcePointer`. Resolved by `(bucket_id, event_id)`. | `MAX_CONTEXT_FRAMES = 1024`; `MAX_CONTEXT_BYTES = 64 KiB`. |
+
+What still NOT ships (intentional; later goals):
+
+- `command_*` over IPC (TC41).
 - `file_*` (TC43).
 - `registry_*` (TC42 hot rebind + TC41 MCP surface).
 - rmcp stdio adapter (TC40).
@@ -199,6 +206,93 @@ terminal-commanderd check                       # self-check + exit (no IPC)
 terminal-commanderd print-config                # emit resolved config
 ```
 
+## 9a. Signal-retrieval method shapes (TC39)
+
+### `bucket_events_since`
+
+Request params:
+```text
+bucket_id      BucketId        required
+cursor         u64             required (0 to read from head)
+severity_min   Severity?       optional (omit = trace)
+kind_filter    String?         optional exact-match
+limit          usize?          optional; clamped to MAX_BUCKET_READ_LIMIT
+```
+
+Response:
+```text
+bucket_id, cursor_in, next_cursor, has_more, dropped_count, events: Vec<SignalEvent>
+```
+
+`SignalEvent` is the canonical wire shape from TC06. No raw stream
+lane.
+
+### `bucket_wait`
+
+Same params as `bucket_events_since` plus:
+```text
+timeout_ms     u64?            optional; clamped to MAX_BUCKET_WAIT_MS
+```
+
+Notify-backed (no busy polling). Returns immediately if events are
+already past `cursor`. Otherwise parks on the bucket's `tokio::sync::
+Notify` until either a matching event lands or the timeout fires.
+
+Response:
+```text
+bucket_id, cursor_in, next_cursor, heartbeat: bool, dropped_count, events
+```
+
+Contract: when `heartbeat = true`, `events` MUST be empty and
+`next_cursor == cursor_in`.
+
+### `bucket_summary`
+
+Request: `{ bucket_id }`.
+
+Response carries `head_seq`, `tail_seq`, `event_count`,
+`dropped_count`, and a wire-stable `by_severity` histogram with all
+seven severity fields. Counters only. Never raw stream content.
+
+### `event_context`
+
+Request:
+```text
+bucket_id    BucketId
+event_id     EventId
+before       u32?    (default 5; max MAX_CONTEXT_FRAMES)
+after        u32?    (default 5; max MAX_CONTEXT_FRAMES)
+max_bytes    usize?  (default + max = MAX_CONTEXT_BYTES = 64 KiB)
+```
+
+Resolution path:
+1. Walk the bucket from cursor 0 using `bucket_events_since` pages
+   (each capped at `MAX_BUCKET_READ_LIMIT`) until the matching
+   `event_id` is found.
+2. If the event carries no pointer (severity below Medium, or a
+   synthetic lifecycle event with `pointer_unavailable_reason`),
+   return `{ frames: [], unavailable_reason: <typed reason> }`.
+3. Otherwise resolve `(probe_id, pointer.frame_id)` against the
+   context ring. If the anchor was evicted, return
+   `{ anchor_missing: true, unavailable_reason: anchor_evicted, frames: [] }`.
+4. Otherwise return bounded frames.
+
+Closed-set unavailable reasons:
+- `no_pointer` (below Medium severity; no pointer by design).
+- `synthetic_event` (event carries `pointer_unavailable_reason`).
+- `anchor_evicted` (frame no longer in the ring).
+- `unknown_probe` (no ring for that probe).
+
+The response NEVER fabricates raw text when context is missing.
+
+### New `IpcErrorCode` variants (TC39)
+
+| Code | Meaning |
+|---|---|
+| `bucket_not_found` | `bucket_id` does not exist. |
+| `event_not_found` | `event_id` not found in the bucket. |
+| `invalid_cursor` | Reserved for future cursor validation. |
+
 ## 10. Security posture
 
 - No TCP listener. No UDP. No HTTP. No WebSocket. No network
@@ -249,6 +343,18 @@ Integration (`crates/daemon/tests/ipc_roundtrip.rs`, Unix only):
 - `oversized_frame_rejected`
 - `peer_credentials_recorded_in_audit_metadata` (Linux only)
 - `shutdown_removes_socket_file`
+
+Integration (`crates/daemon/tests/ipc_bucket.rs`, Unix only, TC39):
+- `bucket_events_since_returns_structured_events_no_raw_text`
+- `bucket_wait_returns_heartbeat_when_no_events_arrive`
+- `bucket_wait_wakes_on_command_event`
+- `bucket_summary_reports_counts_only`
+- `event_context_returns_bounded_window_around_event_pointer`
+- `event_context_returns_no_pointer_for_below_medium_event`
+- `bucket_events_since_unknown_bucket_returns_typed_error`
+- `event_context_unknown_event_returns_typed_error`
+- `bucket_events_since_clamps_oversized_limit`
+- `ipc_bucket_methods_emit_persistent_audit_rows`
 
 ## 13. Recorded gaps (NOT fixed in TC37)
 

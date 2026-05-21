@@ -22,7 +22,10 @@
 //!
 //! Source-status: live (TC37).
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
+use terminal_commander_core::{BucketId, EventId, SignalEvent};
 
 /// Hard cap on a complete frame (length prefix + payload). Anything
 /// above this is rejected without payload parse.
@@ -66,6 +69,26 @@ pub struct ResponseEnvelope {
     pub result: IpcResult,
 }
 
+/// Maximum wait timeout the daemon will accept for `bucket_wait`.
+/// Requests above this are clamped at the dispatcher.
+pub const MAX_BUCKET_WAIT_MS: u64 = 30_000;
+/// Default wait timeout when the client omits one.
+pub const DEFAULT_BUCKET_WAIT_MS: u64 = 5_000;
+/// Hard cap on events returned by `bucket_events_since` /
+/// `bucket_wait`. Mirrors the codebase `MAX_READ_LIMIT`.
+pub const MAX_BUCKET_READ_LIMIT: usize = 10_000;
+/// Default events-per-call when the client omits a limit.
+pub const DEFAULT_BUCKET_READ_LIMIT: usize = 200;
+/// Hard cap on context-window frames returned by `event_context`.
+pub const MAX_CONTEXT_FRAMES: u32 = 1024;
+/// Default `before` count when the client omits one.
+pub const DEFAULT_CONTEXT_BEFORE: u32 = 5;
+/// Default `after` count when the client omits one.
+pub const DEFAULT_CONTEXT_AFTER: u32 = 5;
+/// Hard cap on event_context payload bytes. Mirrors the per-ring
+/// `max_bytes` cap; the dispatcher clamps oversize values.
+pub const MAX_CONTEXT_BYTES: usize = 64 * 1024;
+
 /// Method-typed request union. Method names are namespaced
 /// `<domain>_<verb>` (matching the MCP tool naming so the eventual
 /// rmcp adapter at TC40 maps 1:1).
@@ -80,6 +103,17 @@ pub enum IpcRequest {
     PolicyStatus,
     /// Re-run the TC36 self-check; returns the report as text.
     SelfCheck,
+    /// Cursor-based bucket read. Bounded by `MAX_BUCKET_READ_LIMIT`.
+    BucketEventsSince(BucketEventsSinceParams),
+    /// Realtime wait. Returns heartbeat on timeout, never raw text.
+    BucketWait(BucketWaitParams),
+    /// Bounded summary (counters + severity histogram).
+    BucketSummary(BucketSummaryParams),
+    /// Bounded context window around the event's source pointer.
+    /// Resolved by `(bucket_id, event_id)`; the daemon walks the
+    /// bucket to find the matching event, then resolves
+    /// `(probe_id, pointer.frame_id)` against the context ring.
+    EventContext(EventContextParams),
 }
 
 /// Success / error union. Success carries a typed payload per method;
@@ -100,6 +134,10 @@ pub enum IpcResponse {
     Health { uptime_secs: u64 },
     PolicyStatus(PolicyStatusResponse),
     SelfCheck(SelfCheckResponse),
+    BucketEventsSince(BucketEventsSinceResponse),
+    BucketWait(BucketWaitResponse),
+    BucketSummary(BucketSummaryResponse),
+    EventContext(EventContextResponse),
 }
 
 /// `system_discover` payload. Mirrors the contract laid out in
@@ -154,6 +192,12 @@ pub enum IpcErrorCode {
     PeerCredentialFailure,
     /// Platform does not support UDS (Windows native).
     UnsupportedPlatform,
+    /// The requested bucket does not exist.
+    BucketNotFound,
+    /// The requested event id was not found in the bucket.
+    EventNotFound,
+    /// The cursor is invalid (e.g. far above the current tail).
+    InvalidCursor,
 }
 
 /// Structured error payload.
@@ -172,6 +216,180 @@ impl IpcError {
             message: message.into(),
         }
     }
+}
+
+/// Parameters for `bucket_events_since`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BucketEventsSinceParams {
+    pub bucket_id: BucketId,
+    pub cursor: u64,
+    /// Optional minimum severity. Omitted = `trace` (no filter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity_min: Option<terminal_commander_core::Severity>,
+    /// Optional exact-match kind filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind_filter: Option<String>,
+    /// Result count cap. Clamped to `MAX_BUCKET_READ_LIMIT` at the
+    /// dispatcher. Omitted = `DEFAULT_BUCKET_READ_LIMIT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// Response shape for `bucket_events_since` / `bucket_wait`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BucketEventsSinceResponse {
+    pub bucket_id: BucketId,
+    pub cursor_in: u64,
+    pub next_cursor: u64,
+    pub has_more: bool,
+    pub dropped_count: u64,
+    pub events: Vec<SignalEvent>,
+}
+
+/// Parameters for `bucket_wait`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BucketWaitParams {
+    pub bucket_id: BucketId,
+    pub cursor: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity_min: Option<terminal_commander_core::Severity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind_filter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Maximum wait in milliseconds. Clamped to `MAX_BUCKET_WAIT_MS`.
+    /// Omitted = `DEFAULT_BUCKET_WAIT_MS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+impl BucketWaitParams {
+    /// Resolve the effective `Duration`, clamping to the hard cap.
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        let raw = self.timeout_ms.unwrap_or(DEFAULT_BUCKET_WAIT_MS);
+        Duration::from_millis(raw.min(MAX_BUCKET_WAIT_MS))
+    }
+}
+
+/// Response shape for `bucket_wait`. Identical to
+/// `BucketEventsSinceResponse` plus a `heartbeat` flag.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BucketWaitResponse {
+    pub bucket_id: BucketId,
+    pub cursor_in: u64,
+    pub next_cursor: u64,
+    /// `true` when the wait timed out and no matching events
+    /// arrived. The `events` array MUST be empty in that case.
+    pub heartbeat: bool,
+    pub dropped_count: u64,
+    pub events: Vec<SignalEvent>,
+}
+
+/// Parameters for `bucket_summary`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BucketSummaryParams {
+    pub bucket_id: BucketId,
+}
+
+/// Response shape for `bucket_summary`. Counters only; never raw
+/// stream content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BucketSummaryResponse {
+    pub bucket_id: BucketId,
+    pub head_seq: u64,
+    pub tail_seq: u64,
+    pub event_count: u64,
+    pub dropped_count: u64,
+    /// Per-severity histogram (trace / debug / info / low / medium /
+    /// high / critical), in wire-stable order.
+    pub by_severity: SeverityHistogram,
+}
+
+/// Wire-stable severity histogram. Independent of the in-memory
+/// `BucketSummary` so the protocol locks the field order.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct SeverityHistogram {
+    pub trace: u64,
+    pub debug: u64,
+    pub info: u64,
+    pub low: u64,
+    pub medium: u64,
+    pub high: u64,
+    pub critical: u64,
+}
+
+/// Parameters for `event_context`. Resolves the event's source
+/// pointer and returns bounded context around that frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventContextParams {
+    pub bucket_id: BucketId,
+    pub event_id: EventId,
+    /// Frames to include BEFORE the anchor. Clamped to
+    /// `MAX_CONTEXT_FRAMES`. Omitted = `DEFAULT_CONTEXT_BEFORE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<u32>,
+    /// Frames to include AFTER the anchor. Clamped to
+    /// `MAX_CONTEXT_FRAMES`. Omitted = `DEFAULT_CONTEXT_AFTER`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<u32>,
+    /// Hard byte cap on the response. Clamped to
+    /// `MAX_CONTEXT_BYTES`. Omitted = `MAX_CONTEXT_BYTES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<usize>,
+}
+
+/// One context frame on the wire. Same shape as `core::ContextLine`
+/// but kept inside the IPC module so the protocol owns its serde
+/// surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcContextFrame {
+    pub probe_id: terminal_commander_core::ProbeId,
+    pub frame_id: terminal_commander_core::FrameId,
+    pub stream: terminal_commander_core::SourceStream,
+    pub line: Option<u64>,
+    pub text: String,
+}
+
+/// Reasons a context window may be empty or partial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextUnavailableReason {
+    /// Severity below Medium: event carries no pointer by design.
+    NoPointer,
+    /// Event carried a `pointer_unavailable_reason` instead of a
+    /// pointer (synthetic lifecycle events).
+    SyntheticEvent,
+    /// Anchor frame already evicted from the ring.
+    AnchorEvicted,
+    /// Probe id not found in the context-ring manager.
+    UnknownProbe,
+}
+
+/// Response shape for `event_context`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventContextResponse {
+    pub bucket_id: BucketId,
+    pub event_id: EventId,
+    /// `true` when the anchor frame was no longer in the ring at
+    /// resolution time.
+    pub anchor_missing: bool,
+    /// Set when the daemon could not produce a window for a
+    /// non-error reason (severity below threshold, synthetic event,
+    /// etc.). When set, `frames` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<ContextUnavailableReason>,
+    /// Echo of the event's `pointer_unavailable_reason` if the event
+    /// carried one. Never raw stream content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer_unavailable_reason: Option<String>,
+    /// Bounded window. Empty when `anchor_missing` or
+    /// `unavailable_reason` is set.
+    pub frames: Vec<IpcContextFrame>,
+    /// Reported by the underlying ring; helps clients reason about
+    /// truncation.
+    pub total_bytes: usize,
+    pub truncated: bool,
 }
 
 /// Serialize an envelope to a length-prefixed wire frame. Returns

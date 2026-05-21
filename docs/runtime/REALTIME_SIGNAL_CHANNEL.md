@@ -104,6 +104,7 @@ this file" is a contract violation, not a workaround.
 | Daemon runtime bootstrap | Loads config, opens store, applies V0003, wires Router with PersistentAudit, idles in foreground. | `crates/daemon::state::DaemonState`, `crates/daemon::runtime` |
 | Daemon UDS IPC | Unix-domain socket transport with SO_PEERCRED / getpeereid peer identity, length-prefixed JSON frames, bounded `MAX_FRAME_BYTES`, closed-set error codes, audit on every accepted request. Method set today: `system_discover` / `health` / `policy_status` / `self_check`. | `crates/daemon::ipc::{server,client,protocol,peer}` |
 | Command runtime | argv-only `command_start_combed`. Policy gate -> ProcessProbe -> DaemonEventSink -> Router::bucket_append (PersistentAudit). Bounded response (job_id / bucket_id / probe_id / cursor). Lifecycle events written to bucket. No raw stdout/stderr returned. | `crates/daemon::command::CommandRuntime` |
+| Daemon signal-retrieval API | `bucket_events_since` (cursor read), `bucket_wait` (Notify-backed, heartbeat-on-timeout), `bucket_summary`, `event_context` (bounded window resolved by `(bucket_id, event_id)`). All bounded, all audited through PersistentAudit. | `crates/daemon::ipc::server` + `protocol` |
 
 ## 5. Locked invariants
 

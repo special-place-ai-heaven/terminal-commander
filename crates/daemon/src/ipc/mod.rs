@@ -27,9 +27,13 @@ pub mod server;
 pub mod client;
 
 pub use protocol::{
-    DiscoverResponse, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, MAX_FRAME_BYTES,
-    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PolicyStatusResponse, RequestEnvelope, ResponseEnvelope,
-    SelfCheckResponse,
+    BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
+    BucketWaitParams, BucketWaitResponse, ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT,
+    DEFAULT_BUCKET_WAIT_MS, DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DiscoverResponse,
+    EventContextParams, EventContextResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest,
+    IpcResponse, IpcResult, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS, MAX_CONTEXT_BYTES,
+    MAX_CONTEXT_FRAMES, MAX_FRAME_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+    PolicyStatusResponse, RequestEnvelope, ResponseEnvelope, SelfCheckResponse, SeverityHistogram,
 };
 
 #[cfg(unix)]

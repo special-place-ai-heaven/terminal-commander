@@ -32,13 +32,17 @@ pub use config::{
     ConfigError, DaemonConfig, DaemonSection, LimitsSection, PolicySection, RetentionSection,
     RuntimeMode,
 };
+pub use ipc::{
+    BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
+    BucketWaitParams, BucketWaitResponse, ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT,
+    DEFAULT_BUCKET_WAIT_MS, DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DiscoverResponse,
+    EventContextParams, EventContextResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest,
+    IpcResponse, IpcResult, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS, MAX_CONTEXT_BYTES,
+    MAX_CONTEXT_FRAMES, MAX_FRAME_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+    PolicyStatusResponse, RequestEnvelope, ResponseEnvelope, SelfCheckResponse, SeverityHistogram,
+};
 #[cfg(unix)]
 pub use ipc::{DaemonClient, IpcServer, PeerCred, ServerHandle};
-pub use ipc::{
-    DiscoverResponse, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, MAX_FRAME_BYTES,
-    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PolicyStatusResponse, RequestEnvelope, ResponseEnvelope,
-    SelfCheckResponse,
-};
 pub use policy::{
     COMMANDS_DENY, DEFAULT_DENY_PATH_SUFFIXES, PolicyAction, PolicyDecision, PolicyEngine,
     PolicyProfile, PolicyVerdict,
