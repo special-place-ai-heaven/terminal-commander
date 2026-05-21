@@ -1,7 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! Probe runners for Terminal Commander.
+//! Process probe (TC15). Spawns a non-interactive command, reads
+//! stdout + stderr concurrently line-by-line, normalizes to
+//! `SourceFrame`s, feeds the sifter runtime, and emits `EventDraft`s
+//! through an `EventSink`.
 //!
-//! Source-status: scaffold-only at TC04. Concrete probes land in
-//! TC15 (process), TC18 (file), TC19 (PTY), TC20 (directory).
+//! Implementation note: MVP uses `tokio::process::Command` directly.
+//! `process-wrap`'s POSIX process-group integration is named in the
+//! TC15 mini-spec; the swap is recorded in the goal-file decision
+//! lock and deferred to a follow-up. Cancellation here is best-effort
+//! via `Child::start_kill` (SIGKILL on Unix, TerminateProcess on
+//! Windows); a graceful SIGTERM-first ladder lands when the
+//! process-wrap swap happens.
+//!
+//! Source-status: live (TC15) for non-interactive process probing
+//! and event emission. Job lifecycle + exit events land in TC16.
+
+pub mod process;
+
+pub use process::{
+    DEFAULT_GRACE, EventSink, InMemorySink, ProcessProbe, ProcessProbeConfig, ProcessProbeError,
+    ProcessProbeMetrics,
+};
