@@ -177,18 +177,64 @@ pub fn run_self_check(
 }
 
 /// Bootstrap + foreground idle until shutdown signal. No IPC, no
-/// command exec. TC37 replaces this with the UDS accept loop.
+/// command exec. Kept for `--mode foreground-idle` callers and as
+/// the safe pre-IPC mode; the `start` subcommand defaults to the
+/// IPC server.
 pub async fn run_foreground_idle(config: DaemonConfig) -> Result<(), RuntimeError> {
     let (_state, rep) = run_self_check(config)?;
     eprintln!("{}", rep.render());
     eprintln!(
         "terminal-commanderd: foreground idle. \
-         No IPC bound yet (UDS lands in TC37; rmcp stdio in TC40). \
+         No IPC bound (operator chose foreground_idle mode). \
          Send SIGINT (Ctrl-C) or SIGTERM to shut down."
     );
     wait_for_shutdown_signal().await?;
     eprintln!("terminal-commanderd: shutdown signal received, exiting cleanly.");
     Ok(())
+}
+
+/// Bootstrap + bind the UDS IPC listener + wait for shutdown signal.
+///
+/// On non-Unix targets this returns immediately with an unsupported-
+/// platform error so the daemon binary fails loud rather than
+/// silently degrading.
+#[cfg(unix)]
+pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
+    use std::sync::Arc;
+
+    use crate::ipc::IpcServer;
+
+    let (state, rep) = run_self_check(config)?;
+    eprintln!("{}", rep.render());
+
+    let socket_path = state.config.socket_path();
+    eprintln!(
+        "terminal-commanderd: binding UDS at {}",
+        socket_path.display()
+    );
+    let server = IpcServer::new(Arc::new(state), socket_path);
+    let handle = server
+        .spawn()
+        .map_err(|e| RuntimeError::Signal(format!("UDS bind: {e}")))?;
+    eprintln!(
+        "terminal-commanderd: IPC server bound. \
+         Method set: system_discover, health, policy_status, self_check. \
+         Send SIGINT (Ctrl-C) or SIGTERM to shut down."
+    );
+
+    wait_for_shutdown_signal().await?;
+    eprintln!("terminal-commanderd: shutdown signal received, draining...");
+    handle.shutdown().await;
+    eprintln!("terminal-commanderd: IPC server exited cleanly.");
+    Ok(())
+}
+
+/// Non-Unix stub. Returns an explicit unsupported-platform error.
+#[cfg(not(unix))]
+pub async fn run_ipc_server(_config: DaemonConfig) -> Result<(), RuntimeError> {
+    Err(RuntimeError::Signal(
+        "terminal-commanderd UDS IPC is Unix-only; use WSL2 on Windows".to_owned(),
+    ))
 }
 
 #[cfg(unix)]

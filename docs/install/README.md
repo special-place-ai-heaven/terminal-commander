@@ -103,7 +103,7 @@ sections 5, 6, 9.
 | Daemon runtime bootstrap (TC36) | live |
 | Daemon self-check (TC36) | live |
 | Daemon foreground-idle (TC36) | live |
-| Daemon UDS IPC | deferred (TC37) |
+| Daemon UDS IPC (TC37) | live (Linux/WSL/macOS/BSD); unsupported on Windows native |
 | rmcp stdio adapter | deferred (TC40) |
 | Distribution packages (deb/rpm/aur) | deferred (post-MVP) |
 | Privileged helper installer | NEVER (PRIVILEGE_MODEL.md) |
@@ -145,9 +145,15 @@ What the daemon does on `start` today (TC36 scope):
 
 What `start` does NOT do (deferred by mini-spec):
 
-- No UDS / named-pipe IPC listener. (TC37.)
 - No rmcp stdio adapter. (TC40.)
 - No `command_start_combed` process execution. (TC38.)
 - No PTY spawn. (TC44.)
 - No network listener of any kind.
 - No setuid / polkit / privileged helper.
+
+TC37 update: `start` now defaults to the `ipc-server` mode on Unix.
+The daemon binds a local UDS at `<data_dir>/terminal-commanderd.sock`
+(or `daemon.socket_path` if configured) and accepts the minimal TC37
+method set (`system_discover` / `health` / `policy_status` /
+`self_check`). See `docs/runtime/UDS_IPC.md`. To keep the pre-IPC
+behavior, run `terminal-commanderd start --mode foreground-idle`.

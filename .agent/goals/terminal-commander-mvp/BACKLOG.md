@@ -11,7 +11,7 @@ Language: ASCII only.
 |---|---|---|
 | rmcp 1.7.0 stdio adapter | TC23 | ToolSurface lands; transport glue is the next goal. Without this MCP clients cannot attach. (Owned by TC40.) |
 | pty-process spawn path | TC15 / TC19 | ANSI normalization + prompt detection are live; the actual PTY spawn is deferred to POSIX harness. (Owned by TC44.) |
-| daemon IPC transport (UDS) | TC21 | In-process Router runs now; UDS + peer-cred check is the next goal once MCP server crosses a process boundary. (Owned by TC37.) |
+| ~~daemon IPC transport (UDS)~~ | TC21 | RESOLVED at TC37. UDS server + client + SO_PEERCRED/getpeereid live on Unix; Windows uses WSL2. Minimal method set (system_discover/health/policy_status/self_check) audited via PersistentAudit. See docs/runtime/UDS_IPC.md. |
 | ~~Persistent audit log writes~~ | TC22 | RESOLVED at TC35. V0003 migration ships `audit_records`; `PersistentAudit` sink replaces `AuditPlaceholder`. Router now writes durable rows. See `docs/storage/AUDIT_LOG.md`. |
 
 ## P1 (correctness + ergonomics)

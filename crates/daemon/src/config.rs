@@ -66,9 +66,13 @@ pub enum RuntimeMode {
     SelfCheck,
     /// Initialize state and wait for shutdown signal. Foreground
     /// only. No UDS, no MCP transport, no command execution. This
-    /// is the bootstrap mode TC36 ships; TC37 adds UDS IPC, TC40
-    /// adds rmcp stdio.
+    /// is the TC36 bootstrap mode.
     ForegroundIdle,
+    /// Initialize state, bind the local UDS, accept connections,
+    /// wait for shutdown signal. No TCP. No command execution.
+    /// Method set is the TC37 minimum (system_discover / health /
+    /// policy_status / self_check). TC38+ extend it.
+    IpcServer,
 }
 
 /// Errors raised during config load / validate.
@@ -240,6 +244,16 @@ impl DaemonConfig {
     #[must_use]
     pub fn db_path(&self) -> PathBuf {
         self.daemon.data_dir.join("terminal-commander.db")
+    }
+
+    /// Resolve the UDS socket path. Uses `daemon.socket_path` if
+    /// configured, otherwise `<data_dir>/terminal-commanderd.sock`.
+    #[must_use]
+    pub fn socket_path(&self) -> PathBuf {
+        self.daemon
+            .socket_path
+            .clone()
+            .unwrap_or_else(|| self.daemon.data_dir.join("terminal-commanderd.sock"))
     }
 
     /// Validate the loaded config. Clamps soft per-call limits down

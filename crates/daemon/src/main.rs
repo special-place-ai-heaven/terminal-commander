@@ -3,22 +3,25 @@
 
 //! `terminal-commanderd`: the Terminal Commander daemon.
 //!
-//! Source-status: live runtime bootstrap (TC36). UDS IPC (TC37) and
-//! rmcp stdio (TC40) replace `start` / extend `start --foreground`.
-//! The TC04 scaffold-only `eprintln!` is gone.
+//! Source-status: live runtime bootstrap (TC36) + UDS IPC (TC37) on
+//! Unix. rmcp stdio (TC40) is the next transport.
 //!
 //! Subcommands:
 //!
-//! - `check`         — bootstrap + self-check report, exit. No IPC.
-//! - `start`         — bootstrap + foreground idle until shutdown
-//!                     signal. No IPC. (TC37 adds the UDS accept loop.)
-//! - `print-config`  — render the active resolved config back to TOML.
+//! - `check`              — bootstrap + self-check report, exit. No IPC.
+//! - `start`              — bootstrap + bind UDS + idle until shutdown.
+//!                          Unix only. Method set is the TC37 minimum.
+//!                          Use `--mode foreground-idle` to skip the
+//!                          UDS bind (pre-IPC fallback).
+//! - `print-config`       — render the active resolved config back to TOML.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
-use terminal_commanderd::{DaemonConfig, RuntimeError, run_foreground_idle, run_self_check};
+use clap::{Parser, Subcommand, ValueEnum};
+use terminal_commanderd::{
+    DaemonConfig, RuntimeError, run_foreground_idle, run_ipc_server, run_self_check,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -27,17 +30,14 @@ use terminal_commanderd::{DaemonConfig, RuntimeError, run_foreground_idle, run_s
     about = "Terminal Commander daemon",
     long_about = "Local daemon for the Terminal Commander realtime signal channel.\n\
                   Initializes the persistent event store, audit log, policy engine,\n\
-                  and in-memory subsystems. Does NOT open network listeners.\n\
-                  Does NOT spawn child commands by itself. Foreground-only at TC36."
+                  and in-memory subsystems. On Unix, binds a local UDS for the\n\
+                  TC37 minimal IPC method set. Does NOT open network listeners.\n\
+                  Does NOT spawn child commands by itself."
 )]
 struct Cli {
-    /// Path to a daemon config TOML. If omitted, defaults are used
-    /// rooted at the data-dir argument.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
-    /// Override `daemon.data_dir`. Useful for `check` / tests.
-    /// MUST NOT be under `/mnt/c/...` on WSL2.
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
 
@@ -47,14 +47,27 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Bootstrap runtime, run a self-check, print the report, and exit.
+    /// Bootstrap runtime, run a self-check, print the report, exit.
     Check,
-    /// Bootstrap runtime and idle in foreground until SIGINT/SIGTERM.
-    /// Does NOT open IPC. Does NOT spawn commands.
-    Start,
-    /// Resolve config and print it back as TOML. Useful for verifying
-    /// what the daemon would actually load.
+    /// Bootstrap runtime and run a non-exit daemon mode. Defaults to
+    /// `ipc-server` on Unix; falls back to `foreground-idle` on
+    /// non-Unix targets.
+    Start {
+        /// Override the daemon run mode for this invocation.
+        #[arg(long, value_enum)]
+        mode: Option<StartMode>,
+    },
+    /// Resolve config and print it back as TOML.
     PrintConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum StartMode {
+    /// Bind the UDS IPC listener and accept connections. Unix only.
+    IpcServer,
+    /// Idle in foreground without any IPC binding.
+    ForegroundIdle,
 }
 
 fn main() -> ExitCode {
@@ -75,7 +88,7 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Cmd::Start => {
+        Cmd::Start { mode } => {
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -86,7 +99,12 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            match rt.block_on(run_foreground_idle(cfg)) {
+            let mode = mode.unwrap_or(default_start_mode());
+            let result = match mode {
+                StartMode::IpcServer => rt.block_on(run_ipc_server(cfg)),
+                StartMode::ForegroundIdle => rt.block_on(run_foreground_idle(cfg)),
+            };
+            match result {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(RuntimeError::SelfCheck(msg)) => {
                     eprintln!("terminal-commanderd: bootstrap self-check failed: {msg}");
@@ -105,6 +123,16 @@ fn main() -> ExitCode {
     }
 }
 
+#[cfg(unix)]
+const fn default_start_mode() -> StartMode {
+    StartMode::IpcServer
+}
+
+#[cfg(not(unix))]
+const fn default_start_mode() -> StartMode {
+    StartMode::ForegroundIdle
+}
+
 fn resolve_config(cli: &Cli) -> Result<DaemonConfig, ExitCode> {
     if let Some(p) = cli.config.as_ref() {
         let mut cfg = DaemonConfig::load(p).map_err(|e| {
@@ -119,11 +147,6 @@ fn resolve_config(cli: &Cli) -> Result<DaemonConfig, ExitCode> {
     if let Some(dd) = cli.data_dir.as_ref() {
         return Ok(DaemonConfig::defaults_in(dd));
     }
-    // No --config, no --data-dir: try the platform default. If it
-    // does not exist, fall back to a defaults-in `~/.local/share/
-    // terminal-commanderd` (which is what the example config
-    // ships). Operators who want a different location must pass
-    // --config or --data-dir.
     let default_data = platform_default_data_dir();
     Ok(DaemonConfig::defaults_in(default_data))
 }
@@ -133,10 +156,6 @@ fn platform_default_data_dir() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
         PathBuf::from(home).join(".local/share/terminal-commanderd")
     } else if let Ok(up) = std::env::var("USERPROFILE") {
-        // Windows host (not WSL): provide a working default so the
-        // self-check / print-config path does not panic for CI on
-        // Windows runners. The store layer still enforces the 9P
-        // rejection where applicable.
         PathBuf::from(up).join(".terminal-commanderd")
     } else {
         PathBuf::from(".terminal-commanderd")

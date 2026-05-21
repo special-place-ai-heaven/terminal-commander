@@ -3,19 +3,20 @@
 
 //! `terminal-commanderd` library entry point. Exposes the local API
 //! router (TC21), the policy engine (TC22), the persistent audit
-//! sink (TC35), and the daemon runtime bootstrap (TC36) so the
-//! daemon binary, future MCP adapter, admin CLI, and tests can all
-//! build against the same in-process API before UDS / JSON-RPC
-//! transport (TC37) lands.
+//! sink (TC35), the daemon runtime bootstrap (TC36), and the local
+//! UDS IPC transport (TC37) so the daemon binary, future MCP
+//! adapter, admin CLI, and tests can build against the same
+//! in-process / cross-process API.
 //!
 //! Source-status:
 //! - Router + Policy + Audit: live.
-//! - Daemon runtime bootstrap: live (TC36) for self-check and
-//!   foreground-idle modes. UDS / rmcp transport remains deferred
-//!   (TC37 / TC40).
+//! - Daemon runtime bootstrap: live (TC36).
+//! - UDS IPC transport: live (TC37) on Unix; unsupported on Windows
+//!   (use WSL2). rmcp transport adapter remains deferred to TC40.
 
 pub mod audit;
 pub mod config;
+pub mod ipc;
 pub mod policy;
 pub mod router;
 pub mod runtime;
@@ -26,10 +27,19 @@ pub use config::{
     ConfigError, DaemonConfig, DaemonSection, LimitsSection, PolicySection, RetentionSection,
     RuntimeMode,
 };
+#[cfg(unix)]
+pub use ipc::{DaemonClient, IpcServer, PeerCred, ServerHandle};
+pub use ipc::{
+    DiscoverResponse, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, MAX_FRAME_BYTES,
+    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PolicyStatusResponse, RequestEnvelope, ResponseEnvelope,
+    SelfCheckResponse,
+};
 pub use policy::{
     COMMANDS_DENY, DEFAULT_DENY_PATH_SUFFIXES, PolicyAction, PolicyDecision, PolicyEngine,
     PolicyProfile, PolicyVerdict,
 };
 pub use router::Router;
-pub use runtime::{RuntimeError, SelfCheckReport, run_foreground_idle, run_self_check};
+pub use runtime::{
+    RuntimeError, SelfCheckReport, run_foreground_idle, run_ipc_server, run_self_check,
+};
 pub use state::{BootstrapError, DaemonState};

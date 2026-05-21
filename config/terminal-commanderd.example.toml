@@ -14,17 +14,20 @@
 # docs/research/wsl-boundary.md.
 data_dir = "${HOME}/.local/share/terminal-commanderd"
 
-# Local socket path. RESERVED for TC37 (UDS IPC). Not opened by TC36
-# bootstrap. Operators may set this now so later upgrades work
-# without a config edit.
+# Local UDS socket path. If omitted, defaults to
+# <data_dir>/terminal-commanderd.sock. The daemon binds this socket
+# when `start --mode ipc-server` (the TC37 default on Unix).
 # socket_path = "${XDG_RUNTIME_DIR}/terminal-commanderd.sock"
 
 # Runtime mode. One of:
 # - "self_check"       — bootstrap, run self-check, exit. Used by
 #                        `terminal-commanderd check`.
 # - "foreground_idle"  — bootstrap, idle in foreground until
-#                        SIGINT/SIGTERM. Used by `terminal-commanderd
-#                        start`. No IPC yet.
+#                        SIGINT/SIGTERM. No IPC.
+# - "ipc_server"       — bootstrap, bind UDS, accept TC37 minimal
+#                        method set, idle until shutdown. The
+#                        `start` subcommand uses this mode on Unix
+#                        by default.
 runtime_mode = "self_check"
 
 [policy]
