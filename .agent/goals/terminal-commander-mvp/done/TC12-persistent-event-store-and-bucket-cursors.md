@@ -3,15 +3,15 @@ goal_id: TC12
 title: Persistent Event Store And Bucket Cursors
 chain_id: terminal-commander-mvp
 phase: Wave 4 - Storage
-status: "Pending"
+status: "Completed"
 depends_on: ["TC07"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T22:50:00+02:00"
+completed_at: "2026-05-22T00:10:00+02:00"
+completion_commit: "619e2a3"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -99,9 +99,9 @@ contracts_or_interfaces:
 - Single-writer invariant: the event-store DB has exactly one writer (the daemon process). MCP server and other readers MUST open read-only connections (`OpenFlags::SQLITE_OPEN_READ_ONLY`). Pragmas: `journal_mode=WAL`, `busy_timeout=5000` (ms), `synchronous=NORMAL`.
 - Event row schema MUST NOT have BLOB columns (no `raw_bytes` / `payload_blob`). Only `summary TEXT`, `captures JSON`, `pointer JSON`. A schema test asserts no BLOB columns exist in the events table.
 - `crates/terminal-commander-store/Cargo.toml` declares `license.workspace = true` (SPDX `Apache-2.0`).
-- <<DECISION REQUIRED: FTS5 virtual-table column schema for summary+kind search (which columns are indexed, tokenizer choice)>>
-- <<DECISION REQUIRED: retention and compaction policy (time-based, count-based, per-bucket cap, VACUUM cadence)>>
-- <<DECISION REQUIRED: backup/snapshot strategy (`VACUUM INTO` vs file-level copy with WAL checkpoint)>>
+- FTS5 schema (locked 2026-05-21 at TC12): `events_fts(summary, kind, captures_text)` external-content table tied to the `events` row id. Tokenizer: `unicode61 remove_diacritics 2` (locale-agnostic, LLM-friendly).
+- Retention/compaction (locked 2026-05-21): per-bucket TIME-based (24h default, mirrors TC07 TTL) AND per-bucket COUNT cap (100_000 default). VACUUM cadence: operator-driven (not automatic at MVP); a `vacuum()` method exists for the admin CLI.
+- Backup strategy (locked 2026-05-21): `VACUUM INTO '<path>'` (atomic, consistent snapshot, no WAL gymnastics). Exposed via `EventStore::backup_to(path)`.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
