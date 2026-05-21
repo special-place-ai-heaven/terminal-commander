@@ -19,10 +19,13 @@ pub mod context;
 pub mod error;
 pub mod event;
 pub mod ids;
+pub mod job;
 pub mod pointer;
 pub mod rule;
 pub mod severity;
 pub mod source;
+
+pub use job::{DEFAULT_JOB_GRACE, JobConfig, JobExitInfo, JobManager, JobRecord, JobState};
 
 pub use bucket::{
     BucketConfig, BucketError, BucketManager, BucketReadRequest, BucketReadResponse, BucketState,
