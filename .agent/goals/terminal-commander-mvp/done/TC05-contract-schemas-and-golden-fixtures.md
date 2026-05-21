@@ -3,15 +3,15 @@ goal_id: TC05
 title: Contract Schemas And Golden Fixtures
 chain_id: terminal-commander-mvp
 phase: Wave 1 - Repository foundation
-status: "Pending"
+status: "Completed"
 depends_on: ["TC04"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T17:45:00+02:00"
+completed_at: "2026-05-21T18:15:00+02:00"
+completion_commit: "cc12d0c"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -99,8 +99,8 @@ contracts_or_interfaces:
 - Fixture stubs MUST reserve all 20 canonical MCP tool names from README.md:243-266 (one fixture file per tool name, even if body is `<<DECISION REQUIRED>>`-marked); missing tool names = blocked, not invented.
 - Required event-context contract fixtures: `event-context-request.v1.json` and `event-context-response.v1.json` per README.md:204-209.
 - `bucket_wait` response fixture MUST distinguish heartbeat shape (`heartbeat=true`, `events=[]`, `next_cursor=<current cursor>`) from raw stdout shape; raw stdout MUST NOT be a success path.
-- <<DECISION REQUIRED: JSON-Schema validator (jsonschema vs schemars vs typify)>>
-- <<DECISION REQUIRED: fixture vN bump semantics (when does v1.json become v2.json)>>
+- JSON-Schema validator: `jsonschema` (locked 2026-05-21 by operator at TC03).
+- Fixture vN bump semantics: SemVer-strict (locked 2026-05-21 by operator at TC05). v1 -> v2 on any breaking change to a required field, a type, an enum domain, or a removal. Additive optional fields stay in v1. Rule documented in `docs/contracts/README.md`.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
