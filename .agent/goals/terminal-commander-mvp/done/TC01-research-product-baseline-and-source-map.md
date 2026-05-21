@@ -3,15 +3,15 @@ goal_id: TC01
 title: Research Product Baseline And Source Map
 chain_id: terminal-commander-mvp
 phase: Wave 0 - Research and discipline
-status: "Pending"
+status: "Completed"
 depends_on: []
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T12:00:00+02:00"
+completed_at: "2026-05-21T14:23:48+02:00"
+completion_commit: "fdba121"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
