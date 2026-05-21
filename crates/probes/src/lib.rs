@@ -19,12 +19,14 @@
 
 pub mod file;
 pub mod process;
+pub mod pty;
 
 pub use file::{
-    spawn_with_sink as spawn_file_probe_with_sink, DEFAULT_POLL_INTERVAL, FileProbe,
-    FileProbeConfig, FileProbeError, FileProbeMetrics, FileProbeMode,
+    DEFAULT_POLL_INTERVAL, FileProbe, FileProbeConfig, FileProbeError, FileProbeMetrics,
+    FileProbeMode, spawn_with_sink as spawn_file_probe_with_sink,
 };
 pub use process::{
     DEFAULT_GRACE, EventSink, InMemorySink, ProcessProbe, ProcessProbeConfig, ProcessProbeError,
     ProcessProbeMetrics,
 };
+pub use pty::{AnsiNormalizer, PromptDetector, PromptKind};

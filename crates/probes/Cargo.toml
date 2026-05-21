@@ -16,6 +16,7 @@ terminal-commander-core.workspace = true
 terminal-commander-sifters = { version = "0.0.0", path = "../sifters" }
 thiserror = "2.0.18"
 tokio = { workspace = true, features = ["process", "macros", "rt-multi-thread", "io-util", "sync", "time", "fs"] }
+vte = "0.15.0"
 
 [lints]
 workspace = true

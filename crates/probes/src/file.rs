@@ -14,9 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use terminal_commander_core::{
-    BucketId, ContextRingManager, ProbeId, SourceFrame, SourceStream,
-};
+use terminal_commander_core::{BucketId, ContextRingManager, ProbeId, SourceFrame, SourceStream};
 use terminal_commander_sifters::SifterRuntime;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom};
@@ -221,13 +219,9 @@ async fn run(
                         line_no = line_no.saturating_add(1);
                         let bytes = line.len() as u64;
                         let normalized = line.trim_end_matches('\r').to_owned();
-                        let frame = SourceFrame::new(
-                            probe_id,
-                            SourceStream::File,
-                            normalized,
-                        )
-                        .with_line(line_no)
-                        .with_byte_offset(pos);
+                        let frame = SourceFrame::new(probe_id, SourceStream::File, normalized)
+                            .with_line(line_no)
+                            .with_byte_offset(pos);
                         pos = pos.saturating_add(bytes).saturating_add(1);
                         let _ = rings.append_frame(probe_id, frame.clone());
                         {
@@ -349,10 +343,7 @@ mod tests {
 
             tokio::time::sleep(Duration::from_millis(300)).await; // let probe seek to end
             {
-                let mut f = std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(&p)
-                    .unwrap();
+                let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
                 writeln!(f, "ERROR after-start").unwrap();
             }
             tokio::time::sleep(Duration::from_millis(800)).await;
@@ -384,7 +375,10 @@ mod tests {
             probe.cancel();
             let _ = probe.wait().await;
             let m = probe.metrics();
-            assert!(m.frames_total >= 1, "create-after-start should be picked up");
+            assert!(
+                m.frames_total >= 1,
+                "create-after-start should be picked up"
+            );
             let _ = std::fs::remove_file(&p);
         });
     }
@@ -409,7 +403,11 @@ mod tests {
             probe.cancel();
             let _ = probe.wait().await;
             let m = probe.metrics();
-            assert!(m.truncations_detected >= 1, "truncations: {}", m.truncations_detected);
+            assert!(
+                m.truncations_detected >= 1,
+                "truncations: {}",
+                m.truncations_detected
+            );
             let _ = std::fs::remove_file(&p);
         });
     }
