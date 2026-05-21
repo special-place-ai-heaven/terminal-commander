@@ -572,6 +572,7 @@ dependencies = [
  "serde_json",
  "terminal-commander-core",
  "terminal-commander-sifters",
+ "terminal-commander-store",
  "terminal-commanderd",
  "thiserror",
  "time",

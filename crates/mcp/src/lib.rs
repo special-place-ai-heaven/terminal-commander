@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use terminal_commander_core::{
     BucketId, BucketReadRequest, BucketReadResponse, BucketSummary, BucketWaitRequest,
     BucketWaitResponse, ContextWindowResponse, FrameId, ProbeId, Severity,
@@ -45,6 +46,10 @@ pub enum McpError {
     Bucket(#[from] terminal_commander_core::BucketError),
     #[error("context error: {0}")]
     Context(#[from] terminal_commander_core::ContextError),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("store error: {0}")]
+    Store(String),
 }
 
 /// MCP tool surface. Wraps the daemon `Router` + `PolicyEngine`.
@@ -150,6 +155,116 @@ impl ToolSurface {
             .router
             .event_context(probe_id, anchor, before, after, max_bytes)?)
     }
+
+    /// `file_read_window` tool. Returns bounded byte ranges from a
+    /// file. Policy default-deny path list is consulted FIRST.
+    ///
+    /// Bounded output: response is capped at `MAX_FILE_WINDOW_BYTES`.
+    pub fn file_read_window(
+        &self,
+        path: &std::path::Path,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<FileReadWindowResponse, McpError> {
+        let v = self.policy.evaluate(&PolicyAction::FileRead { path });
+        if v.decision == PolicyDecision::Deny {
+            return Err(McpError::PolicyDenied(v.reason));
+        }
+        let capped = max_bytes.min(MAX_FILE_WINDOW_BYTES);
+        let bytes = std::fs::read(path).map_err(McpError::Io)?;
+        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(bytes.len());
+        let end = start.saturating_add(capped).min(bytes.len());
+        let slice = &bytes[start..end];
+        Ok(FileReadWindowResponse {
+            path: path.to_path_buf(),
+            offset: u64::try_from(start).unwrap_or(u64::MAX),
+            next_offset: u64::try_from(end).unwrap_or(u64::MAX),
+            truncated: end < bytes.len(),
+            content_utf8_lossy: String::from_utf8_lossy(slice).into_owned(),
+            total_size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        })
+    }
+
+    /// `registry_search` tool.
+    pub fn registry_search(
+        &self,
+        store: &mut terminal_commander_store::EventStore,
+        query: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<terminal_commander_store::RuleSearchHit>, McpError> {
+        let v = self.policy.evaluate(&PolicyAction::BucketRead);
+        if v.decision == PolicyDecision::Deny {
+            return Err(McpError::PolicyDenied(v.reason));
+        }
+        store
+            .ensure_registry()
+            .map_err(|e| McpError::Store(e.to_string()))?;
+        store
+            .search_rules(query, limit)
+            .map_err(|e| McpError::Store(e.to_string()))
+    }
+
+    /// `registry_get` tool.
+    pub fn registry_get(
+        &self,
+        store: &terminal_commander_store::EventStore,
+        rule_id: &str,
+    ) -> Result<Option<terminal_commander_core::RuleDefinition>, McpError> {
+        let v = self.policy.evaluate(&PolicyAction::BucketRead);
+        if v.decision == PolicyDecision::Deny {
+            return Err(McpError::PolicyDenied(v.reason));
+        }
+        store
+            .get_latest_rule(rule_id)
+            .map_err(|e| McpError::Store(e.to_string()))
+    }
+
+    /// `registry_create` tool.
+    pub fn registry_create(
+        &self,
+        store: &mut terminal_commander_store::EventStore,
+        rule: &terminal_commander_core::RuleDefinition,
+    ) -> Result<u32, McpError> {
+        let v = self.policy.evaluate(&PolicyAction::RegistryCreate);
+        if v.decision == PolicyDecision::Deny {
+            return Err(McpError::PolicyDenied(v.reason));
+        }
+        store
+            .create_rule_version(rule)
+            .map_err(|e| McpError::Store(e.to_string()))
+    }
+
+    /// `registry_activate` tool. Always passes through AllowWithAudit
+    /// (TC22 contract). Caller's audit-log path emits the record.
+    pub fn registry_activate(
+        &self,
+        store: &mut terminal_commander_store::EventStore,
+        rule_id: &str,
+        version: u32,
+        profile: Option<&str>,
+    ) -> Result<(), McpError> {
+        let v = self.policy.evaluate(&PolicyAction::RegistryActivate);
+        if v.decision == PolicyDecision::Deny {
+            return Err(McpError::PolicyDenied(v.reason));
+        }
+        store
+            .record_activation(rule_id, version, profile, Some("mcp"))
+            .map_err(|e| McpError::Store(e.to_string()))
+    }
+}
+
+/// Hard cap on a single `file_read_window` response.
+pub const MAX_FILE_WINDOW_BYTES: usize = 64 * 1024;
+
+/// Response shape for `file_read_window`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileReadWindowResponse {
+    pub path: PathBuf,
+    pub offset: u64,
+    pub next_offset: u64,
+    pub truncated: bool,
+    pub content_utf8_lossy: String,
+    pub total_size: u64,
 }
 
 #[cfg(test)]
@@ -281,4 +396,61 @@ mod tests {
     // structured types from `terminal_commander_core`.
     #[allow(dead_code)]
     fn no_raw_stream_check(_e: &SignalEvent, _b: &BucketReadResponse) {}
+
+    #[test]
+    fn file_read_window_caps_response() {
+        let s = surface();
+        let p = std::env::temp_dir().join(format!(
+            "tc-mcp-file-window-{}",
+            std::process::id()
+        ));
+        std::fs::write(&p, vec![b'a'; 200_000]).unwrap();
+        let resp = s.file_read_window(&p, 0, 1_000_000).unwrap();
+        // Capped at MAX_FILE_WINDOW_BYTES.
+        assert!(resp.content_utf8_lossy.len() <= MAX_FILE_WINDOW_BYTES);
+        assert!(resp.truncated);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn file_read_window_denies_ssh_key_path() {
+        let s = surface();
+        let p = std::path::Path::new("/home/dev/.ssh/id_rsa");
+        let err = s.file_read_window(p, 0, 100).unwrap_err();
+        assert!(matches!(err, McpError::PolicyDenied(_)));
+    }
+
+    #[test]
+    fn registry_create_search_round_trip_via_mcp() {
+        let s = surface();
+        let mut store = terminal_commander_store::EventStore::in_memory().unwrap();
+        let mut rule = terminal_commander_core::RuleDefinition {
+            id: "mcp.test".to_owned(),
+            version: 1,
+            kind: terminal_commander_core::RuleType::Keyword,
+            status: terminal_commander_core::RuleStatus::Draft,
+            severity: Severity::Medium,
+            event_kind: "x".to_owned(),
+            stream: None,
+            description: None,
+            pattern: None,
+            keywords: Some(vec!["needle".to_owned()]),
+            captures: vec![],
+            summary_template: "ok".to_owned(),
+            tags: vec!["mcp".to_owned()],
+            rate_limit_per_min: None,
+            redact: vec![],
+            context_hint: terminal_commander_core::ContextHint::default(),
+            examples: vec![],
+        };
+        let v1 = s.registry_create(&mut store, &rule).unwrap();
+        assert_eq!(v1, 1);
+        rule.summary_template = "edited".to_owned();
+        let v2 = s.registry_create(&mut store, &rule).unwrap();
+        assert_eq!(v2, 2);
+        let got = s.registry_get(&store, "mcp.test").unwrap().unwrap();
+        assert_eq!(got.summary_template, "edited");
+        let hits = s.registry_search(&mut store, "mcp", None).unwrap();
+        assert!(!hits.is_empty());
+    }
 }
