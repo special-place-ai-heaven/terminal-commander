@@ -20,9 +20,11 @@
 //! `terminal_commander_core::context::MAX_FRAME_BYTES`) BEFORE
 //! evaluation; any drop is recorded in `EventDraft::frame_truncated_bytes`.
 //!
-//! Source-status: live (TC10). Dedupe, suppression, progress, and
-//! correlation rules land in TC11. Persistence in TC12; daemon
+//! Source-status: live (TC10/TC11). Persistence in TC12; daemon
 //! activation in TC13/TC21.
+
+pub mod noise;
+pub use noise::{DEFAULT_DEDUPE_WINDOW, Dedupe, NoisePolicy, ProgressDetector};
 
 use aho_corasick::AhoCorasick;
 use indexmap::IndexMap;
@@ -354,6 +356,10 @@ fn build_draft(
             Some(def.tags.clone())
         },
         frame_truncated_bytes,
+        count: 1,
+        first_seen: None,
+        last_seen: None,
+        suppressed: false,
     };
     // Drafts are always self-consistent here; validate as a sanity check.
     if draft.validate().is_err() {

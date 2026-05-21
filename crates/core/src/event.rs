@@ -81,6 +81,61 @@ pub struct SignalEvent {
     /// Optional free-form tags for downstream filtering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    /// Number of underlying matches collapsed into this event.
+    /// Defaults to `1` (single occurrence; omitted from the wire
+    /// form). Set by TC11 dedupe.
+    #[serde(default = "one_u32", skip_serializing_if = "is_one_u32")]
+    pub count: u32,
+    /// First time the underlying pattern was seen in the collapse
+    /// window. `None` when this event is the only occurrence.
+    #[serde(default, with = "rfc3339_opt", skip_serializing_if = "Option::is_none")]
+    pub first_seen: Option<OffsetDateTime>,
+    /// Last time the underlying pattern was seen in the collapse
+    /// window. `None` when this event is the only occurrence.
+    #[serde(default, with = "rfc3339_opt", skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<OffsetDateTime>,
+    /// True when this event was emitted in lieu of an emission
+    /// blocked by suppression (progress noise classification).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub suppressed: bool,
+}
+
+const fn one_u32() -> u32 {
+    1
+}
+
+// Serde requires these helpers to take `&T`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_one_u32(n: &u32) -> bool {
+    *n == 1
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+mod rfc3339_opt {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    // Serde-required signature.
+    #[allow(clippy::ref_option, unreachable_pub)]
+    pub fn serialize<S: Serializer>(t: &Option<OffsetDateTime>, s: S) -> Result<S::Ok, S::Error> {
+        match t {
+            None => s.serialize_none(),
+            Some(t) => s.serialize_str(&t.format(&Rfc3339).map_err(serde::ser::Error::custom)?),
+        }
+    }
+    #[allow(unreachable_pub)]
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<OffsetDateTime>, D::Error> {
+        let opt = Option::<String>::deserialize(d)?;
+        opt.map(|s| OffsetDateTime::parse(&s, &Rfc3339).map_err(serde::de::Error::custom))
+            .transpose()
+    }
 }
 
 impl SignalEvent {
@@ -132,6 +187,17 @@ pub struct EventDraft {
     /// sifter evaluation (defense-in-depth cap; TC10).
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub frame_truncated_bytes: u32,
+    /// See [`SignalEvent::count`]. Set by TC11 dedupe before
+    /// promotion.
+    #[serde(default = "one_u32", skip_serializing_if = "is_one_u32")]
+    pub count: u32,
+    #[serde(default, with = "rfc3339_opt", skip_serializing_if = "Option::is_none")]
+    pub first_seen: Option<OffsetDateTime>,
+    #[serde(default, with = "rfc3339_opt", skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<OffsetDateTime>,
+    /// True when emitted in place of a progress-noise burst.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub suppressed: bool,
 }
 
 // Signature is dictated by serde's `skip_serializing_if`, which
@@ -160,6 +226,10 @@ impl EventDraft {
             pointer: self.pointer,
             pointer_unavailable_reason: self.pointer_unavailable_reason,
             tags: self.tags,
+            count: self.count,
+            first_seen: self.first_seen,
+            last_seen: self.last_seen,
+            suppressed: self.suppressed,
         }
     }
 
@@ -209,6 +279,10 @@ mod tests {
             pointer: Some(SourcePointer::new(FrameId::new()).with_line(318)),
             pointer_unavailable_reason: None,
             tags: Some(vec!["packaging".to_owned(), "apt".to_owned()]),
+            count: 1,
+            first_seen: None,
+            last_seen: None,
+            suppressed: false,
         }
     }
 

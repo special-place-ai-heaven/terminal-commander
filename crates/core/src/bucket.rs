@@ -518,6 +518,10 @@ mod tests {
             pointer: Some(SourcePointer::new(FrameId::new()).with_line(1)),
             pointer_unavailable_reason: None,
             tags: None,
+            count: 1,
+            first_seen: None,
+            last_seen: None,
+            suppressed: false,
         }
     }
 
