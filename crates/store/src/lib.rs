@@ -9,18 +9,27 @@
 //! sifter run records both the emitted events and the activation
 //! that produced them).
 //!
-//! Backed by SQLite (rusqlite 0.39 bundled) with FTS5 search and
-//! refinery migrations. Single-writer; readers open the DB read-only.
+//! Backed by SQLite (rusqlite 0.39 bundled) with FTS5 search and a
+//! manual migration runner. Single-writer; readers open the DB
+//! read-only.
 //!
-//! See `docs/storage/EVENT_STORE.md` for the locked design.
+//! See `docs/storage/EVENT_STORE.md` for the locked event-store design
+//! and `docs/storage/AUDIT_LOG.md` for the persistent audit log
+//! introduced at TC35.
 //!
 //! Source-status: live (TC12) for append + cursor reads + retention
-//! eviction + VACUUM INTO backup. Registry persistence and audit log
-//! ride on the same database file but live behind their own modules
-//! (TC13 registry, TC22 audit).
+//! eviction + VACUUM INTO backup. Registry persistence (TC13) and
+//! the persistent audit log (TC35) ride on the same database file
+//! but live behind their own modules.
 
+pub mod audit;
 pub mod import;
 pub mod registry;
+pub use audit::{
+    ALLOWED_AUDIT_DECISIONS, AuditEntry, AuditReadRequest, AuditRow, DEFAULT_AUDIT_READ_LIMIT,
+    MAX_AUDIT_METADATA_BYTES, MAX_AUDIT_READ_LIMIT, MAX_AUDIT_REASON_BYTES,
+    MAX_AUDIT_SUBJECT_BYTES,
+};
 pub use import::{
     ImportResult, RULE_PACK_DFA_SIZE_LIMIT, RULE_PACK_REGEX_SIZE_LIMIT, RulePackFile, RulePackMeta,
 };

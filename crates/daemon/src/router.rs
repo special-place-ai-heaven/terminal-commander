@@ -4,17 +4,20 @@
 //! Daemon local API router (TC21).
 //!
 //! Wires the in-memory bucket manager, context rings, job manager,
-//! sifter runtime, and registry handle into a single `Router`
-//! exposing the typed operations that TC23 will surface over MCP.
+//! sifter runtime, and an [`AuditSink`] into a single `Router`
+//! exposing the typed operations that the MCP server (TC23) and admin
+//! CLI (TC25) call.
 //!
-//! Source-status: live (TC21) for in-process API. The TC21 mini-spec
-//! names UDS / JSON-RPC as the eventual transport; that's deferred
-//! to TC23. Audit emission is a placeholder seam — TC22 wires the
-//! real audit log.
+//! Source-status:
+//! - Router itself: live (TC21) for in-process API. UDS / JSON-RPC
+//!   transport remains deferred to TC37.
+//! - Audit emission: live (TC35). Backed by [`AuditSink`]. By default
+//!   `Router::new` uses an [`InMemoryAudit`] sink for library smoke
+//!   and unit tests; production callers use `Router::with_sink` with
+//!   a [`PersistentAudit`] backed by an `EventStore`.
 
 use std::sync::Arc;
 
-use parking_lot::Mutex;
 use terminal_commander_core::{
     BucketConfig, BucketId, BucketManager, BucketReadRequest, BucketReadResponse, BucketSummary,
     BucketWaitRequest, BucketWaitResponse, ContextRingManager, ContextWindowRequest,
@@ -22,53 +25,24 @@ use terminal_commander_core::{
     SignalEvent,
 };
 use terminal_commander_sifters::SifterRuntime;
+use terminal_commander_store::AuditEntry;
 
-/// Stateful audit-log placeholder. TC22 replaces this with a real
-/// persistent audit emitter; the seam stays put so callers do not
-/// re-thread plumbing.
-#[derive(Debug, Default)]
-pub struct AuditPlaceholder {
-    records: Mutex<Vec<AuditRecord>>,
-}
+use crate::audit::{AuditSink, InMemoryAudit};
 
-/// Minimal audit record (placeholder shape; TC22 expands).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuditRecord {
-    pub action: String,
-    pub subject: String,
-    pub decision: String,
-}
-
-impl AuditPlaceholder {
-    /// Emit an audit record. Always returns `allow` decision until
-    /// TC22 wires real policy.
-    pub fn emit(&self, action: &str, subject: &str) {
-        self.records.lock().push(AuditRecord {
-            action: action.to_owned(),
-            subject: subject.to_owned(),
-            decision: "allow_placeholder".to_owned(),
-        });
-    }
-
-    #[must_use]
-    pub fn snapshot(&self) -> Vec<AuditRecord> {
-        self.records.lock().clone()
-    }
-}
-
-/// Daemon router. Holds Arc-shared subsystems and exposes the
-/// typed API that the MCP server (TC23) and admin CLI (TC25) call.
+/// Daemon router. Holds Arc-shared subsystems and the audit sink.
 #[derive(Debug)]
 pub struct Router {
     pub buckets: Arc<BucketManager>,
     pub rings: Arc<ContextRingManager>,
     pub jobs: Arc<JobManager>,
     pub sifter: Arc<SifterRuntime>,
-    pub audit: Arc<AuditPlaceholder>,
+    pub audit: Arc<dyn AuditSink>,
 }
 
 impl Router {
-    /// Construct a router from individual subsystems.
+    /// Construct a router with the default in-memory audit sink.
+    /// Convenient for library smoke and unit tests; production code
+    /// should call [`Router::with_sink`] with a persistent sink.
     #[must_use]
     pub fn new(
         buckets: Arc<BucketManager>,
@@ -76,13 +50,38 @@ impl Router {
         jobs: Arc<JobManager>,
         sifter: Arc<SifterRuntime>,
     ) -> Self {
+        Self::with_sink(buckets, rings, jobs, sifter, Arc::new(InMemoryAudit::new()))
+    }
+
+    /// Construct a router with an explicit audit sink. Production
+    /// callers pass a `PersistentAudit` backed by an `EventStore`.
+    #[must_use]
+    pub fn with_sink(
+        buckets: Arc<BucketManager>,
+        rings: Arc<ContextRingManager>,
+        jobs: Arc<JobManager>,
+        sifter: Arc<SifterRuntime>,
+        audit: Arc<dyn AuditSink>,
+    ) -> Self {
         Self {
             buckets,
             rings,
             jobs,
             sifter,
-            audit: Arc::new(AuditPlaceholder::default()),
+            audit,
         }
+    }
+
+    /// Best-effort audit. Errors are not propagated to callers; the
+    /// router would otherwise have to refuse normal traffic on an
+    /// audit-store hiccup. Failures still surface in the audit row
+    /// count (it does not increment) and any persistent sink can
+    /// report the underlying error through its own diagnostics. The
+    /// router accepts the trade-off because the alternative (refuse
+    /// to serve when audit is unhealthy) is also a contract violation
+    /// for the realtime signal channel.
+    fn record(&self, entry: &AuditEntry) {
+        let _ = self.audit.emit(entry);
     }
 
     /// Errors produced by router operations.
@@ -92,8 +91,10 @@ impl Router {
         bucket_id: BucketId,
         config: BucketConfig,
     ) -> Result<(), terminal_commander_core::BucketError> {
-        self.audit
-            .emit("bucket_create", &bucket_id.to_wire_string());
+        self.record(
+            &AuditEntry::new("bucket_create", bucket_id.to_wire_string(), "info")
+                .with_actor("router"),
+        );
         self.buckets.create_bucket(bucket_id, config)
     }
 
@@ -105,8 +106,10 @@ impl Router {
         bucket_id: BucketId,
         draft: EventDraft,
     ) -> Result<SignalEvent, terminal_commander_core::BucketError> {
-        self.audit
-            .emit("bucket_append", &bucket_id.to_wire_string());
+        self.record(
+            &AuditEntry::new("bucket_append", bucket_id.to_wire_string(), "info")
+                .with_actor("router"),
+        );
         let mut ev = draft.into_signal_event(0);
         let seq = self.buckets.append(bucket_id, ev.clone())?;
         ev.seq = seq;
@@ -120,8 +123,10 @@ impl Router {
         bucket_id: BucketId,
         request: &BucketReadRequest,
     ) -> Result<BucketReadResponse, terminal_commander_core::BucketError> {
-        self.audit
-            .emit("bucket_events_since", &bucket_id.to_wire_string());
+        self.record(
+            &AuditEntry::new("bucket_events_since", bucket_id.to_wire_string(), "info")
+                .with_actor("router"),
+        );
         self.buckets.events_since(bucket_id, request)
     }
 
@@ -132,7 +137,10 @@ impl Router {
         bucket_id: BucketId,
         request: BucketWaitRequest,
     ) -> Result<BucketWaitResponse, terminal_commander_core::BucketError> {
-        self.audit.emit("bucket_wait", &bucket_id.to_wire_string());
+        self.record(
+            &AuditEntry::new("bucket_wait", bucket_id.to_wire_string(), "info")
+                .with_actor("router"),
+        );
         self.buckets.bucket_wait(bucket_id, request).await
     }
 
@@ -142,8 +150,10 @@ impl Router {
         &self,
         bucket_id: BucketId,
     ) -> Result<BucketSummary, terminal_commander_core::BucketError> {
-        self.audit
-            .emit("bucket_summary", &bucket_id.to_wire_string());
+        self.record(
+            &AuditEntry::new("bucket_summary", bucket_id.to_wire_string(), "info")
+                .with_actor("router"),
+        );
         self.buckets.summary(bucket_id)
     }
 
@@ -157,7 +167,10 @@ impl Router {
         after: u32,
         max_bytes: Option<usize>,
     ) -> Result<ContextWindowResponse, terminal_commander_core::ContextError> {
-        self.audit.emit("event_context", &probe_id.to_wire_string());
+        self.record(
+            &AuditEntry::new("event_context", probe_id.to_wire_string(), "info")
+                .with_actor("router"),
+        );
         self.rings.window(&ContextWindowRequest {
             probe_id,
             anchor,
@@ -170,8 +183,10 @@ impl Router {
     /// Start tracking a new job.
     #[must_use]
     pub fn job_start(&self, config: JobConfig) -> JobId {
-        self.audit
-            .emit("job_start", &config.job_id.to_wire_string());
+        self.record(
+            &AuditEntry::new("job_start", config.job_id.to_wire_string(), "info")
+                .with_actor("router"),
+        );
         self.jobs.start(config)
     }
 
@@ -182,13 +197,17 @@ impl Router {
         exit_code: Option<i32>,
         signal: Option<String>,
     ) -> Option<EventDraft> {
-        self.audit.emit("job_finish", &job_id.to_wire_string());
+        self.record(
+            &AuditEntry::new("job_finish", job_id.to_wire_string(), "info").with_actor("router"),
+        );
         self.jobs.finish(job_id, exit_code, signal)
     }
 
     /// Cancel a job.
     pub fn job_cancel(&self, job_id: JobId) -> Option<EventDraft> {
-        self.audit.emit("job_cancel", &job_id.to_wire_string());
+        self.record(
+            &AuditEntry::new("job_cancel", job_id.to_wire_string(), "info").with_actor("router"),
+        );
         self.jobs.cancel(job_id)
     }
 
@@ -198,10 +217,11 @@ impl Router {
         self.jobs.get(job_id)
     }
 
-    /// Helper for tests: number of audit records.
+    /// Helper for tests / operators: number of audit rows currently
+    /// recorded by the configured sink.
     #[must_use]
     pub fn audit_len(&self) -> usize {
-        self.audit.snapshot().len()
+        self.audit.len()
     }
 }
 
@@ -212,6 +232,7 @@ mod tests {
         BucketConfig, Captures, EventDraft, EventSource, FrameId, ProbeId, Severity, SourcePointer,
         SourceStream, SourceType,
     };
+    use terminal_commander_store::AuditReadRequest;
 
     fn build_router() -> Router {
         let buckets = Arc::new(BucketManager::new());
@@ -293,8 +314,8 @@ mod tests {
         let r = build_router();
         let bid = BucketId::new();
         r.bucket_create(bid, BucketConfig::default()).unwrap();
-        let snap = r.audit.snapshot();
-        assert!(snap.iter().any(|a| a.action == "bucket_create"));
+        let rows = r.audit.read_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(rows.iter().any(|a| a.action == "bucket_create"));
     }
 
     #[test]

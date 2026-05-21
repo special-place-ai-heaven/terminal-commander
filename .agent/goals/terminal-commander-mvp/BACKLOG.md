@@ -9,10 +9,10 @@ Language: ASCII only.
 
 | Item | Origin | Notes |
 |---|---|---|
-| rmcp 1.7.0 stdio adapter | TC23 | ToolSurface lands; transport glue is the next goal. Without this MCP clients cannot attach. |
-| pty-process spawn path | TC15 / TC19 | ANSI normalization + prompt detection are live; the actual PTY spawn is deferred to POSIX harness. |
-| daemon IPC transport (UDS) | TC21 | In-process Router runs now; UDS + peer-cred check is the next goal once MCP server crosses a process boundary. |
-| Persistent audit log writes | TC22 | PolicyEngine returns verdicts; AuditPlaceholder records actions in memory. SQLite-backed audit log (V0003 migration) is the next goal. |
+| rmcp 1.7.0 stdio adapter | TC23 | ToolSurface lands; transport glue is the next goal. Without this MCP clients cannot attach. (Owned by TC40.) |
+| pty-process spawn path | TC15 / TC19 | ANSI normalization + prompt detection are live; the actual PTY spawn is deferred to POSIX harness. (Owned by TC44.) |
+| daemon IPC transport (UDS) | TC21 | In-process Router runs now; UDS + peer-cred check is the next goal once MCP server crosses a process boundary. (Owned by TC37.) |
+| ~~Persistent audit log writes~~ | TC22 | RESOLVED at TC35. V0003 migration ships `audit_records`; `PersistentAudit` sink replaces `AuditPlaceholder`. Router now writes durable rows. See `docs/storage/AUDIT_LOG.md`. |
 
 ## P1 (correctness + ergonomics)
 
