@@ -10,11 +10,17 @@ homepage.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "terminal-commanderd"
 path = "src/main.rs"
 
 [dependencies]
+parking_lot = "0.12.5"
+time = "0.3"
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread"] }
 terminal-commander-core.workspace = true
 terminal-commander-sifters.workspace = true
 terminal-commander-probes.workspace = true

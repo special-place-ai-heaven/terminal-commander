@@ -29,7 +29,8 @@ pub use job::{DEFAULT_JOB_GRACE, JobConfig, JobExitInfo, JobManager, JobRecord, 
 
 pub use bucket::{
     BucketConfig, BucketError, BucketManager, BucketReadRequest, BucketReadResponse, BucketState,
-    BucketSummary, BySeverity, DEFAULT_MAX_EVENTS, DEFAULT_READ_LIMIT, DEFAULT_TTL, MAX_READ_LIMIT,
+    BucketSummary, BucketWaitRequest, BucketWaitResponse, BySeverity, DEFAULT_MAX_EVENTS,
+    DEFAULT_READ_LIMIT, DEFAULT_TTL, MAX_READ_LIMIT,
 };
 pub use context::{
     ContextError, ContextLine, ContextRingConfig, ContextRingManager, ContextWindowRequest,

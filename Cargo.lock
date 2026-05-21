@@ -612,10 +612,13 @@ dependencies = [
 name = "terminal-commanderd"
 version = "0.0.0"
 dependencies = [
+ "parking_lot",
  "terminal-commander-core",
  "terminal-commander-probes",
  "terminal-commander-sifters",
  "terminal-commander-store",
+ "time",
+ "tokio",
 ]
 
 [[package]]
