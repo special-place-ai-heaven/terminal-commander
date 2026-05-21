@@ -1,0 +1,27 @@
+{
+  "_meta": {
+    "pack": "make",
+    "version": 1,
+    "description": "GNU make error summary rules (architect-added 7th pack; see TC14 scope note).",
+    "scope_note": "README.md user-locked list is 6 packs; this 7th is the architect-extended supplement, in parallel with the SPEC 7-crate vs README 6-crate reconcile by TC01a."
+  },
+  "rules": [
+    {
+      "id": "make.recipe-error",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "critical",
+      "event_kind": "command_failed",
+      "stream": "stderr",
+      "description": "make rule failure line.",
+      "pattern": "^make(?:\\[[0-9]+\\])?: \\*\\*\\* \\[(?P<target>[^]]+)\\] Error (?P<code>[0-9]+)",
+      "captures": ["target", "code"],
+      "summary_template": "make target ${target} failed with code ${code}",
+      "tags": ["build", "make"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 3, "after_lines": 0 }
+    }
+  ]
+}

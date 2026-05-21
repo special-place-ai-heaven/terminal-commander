@@ -19,7 +19,11 @@
 //! ride on the same database file but live behind their own modules
 //! (TC13 registry, TC22 audit).
 
+pub mod import;
 pub mod registry;
+pub use import::{
+    ImportResult, RULE_PACK_DFA_SIZE_LIMIT, RULE_PACK_REGEX_SIZE_LIMIT, RulePackFile, RulePackMeta,
+};
 pub use registry::{ActivationRecord, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, RuleSearchHit};
 
 use std::path::{Path, PathBuf};

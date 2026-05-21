@@ -11,9 +11,11 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
+regex = "1.12.3"
 # refinery 0.9 pins rusqlite <=0.38; we need 0.39 for FTS5 + recent
 # fixes. Migrations are run manually in lib.rs via execute_batch().
 rusqlite = { version = "0.39.0", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 terminal-commander-core.workspace = true
 thiserror = "2.0.18"

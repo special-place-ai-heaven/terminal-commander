@@ -1,0 +1,47 @@
+{
+  "_meta": {
+    "pack": "generic.terminal",
+    "version": 1,
+    "description": "Generic terminal/error patterns that apply across many tools.",
+    "schema": "RuleDefinition v1 (TC09)"
+  },
+  "rules": [
+    {
+      "id": "generic.permission-denied",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "permission_denied",
+      "stream": "stderr",
+      "description": "A tool refused an action due to permissions.",
+      "keywords": ["Permission denied", "Operation not permitted"],
+      "captures": [],
+      "summary_template": "permission denied",
+      "tags": ["terminal", "permission"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 2, "after_lines": 1 },
+      "examples": [
+        { "input": "bash: ./script.sh: Permission denied", "expect": { "kind": "permission_denied" } }
+      ]
+    },
+    {
+      "id": "generic.command-not-found",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "command_not_found",
+      "stream": "stderr",
+      "description": "Shell could not locate a binary.",
+      "pattern": "command not found: (?P<command>[A-Za-z0-9._/+-]+)",
+      "captures": ["command"],
+      "summary_template": "command not found: ${command}",
+      "tags": ["terminal", "shell"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 1, "after_lines": 0 }
+    }
+  ]
+}

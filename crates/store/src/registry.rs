@@ -9,9 +9,9 @@
 //!
 //! Source-status: live (TC13). MCP `registry_*` tools land in TC24.
 
-use rusqlite::{OptionalExtension, params};
 #[cfg(test)]
 use rusqlite::Connection;
+use rusqlite::{OptionalExtension, params};
 use serde_json as sj;
 use terminal_commander_core::{RuleDefinition, RuleStatus, Severity};
 use time::OffsetDateTime;

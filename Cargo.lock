@@ -550,7 +550,9 @@ dependencies = [
 name = "terminal-commander-store"
 version = "0.0.0"
 dependencies = [
+ "regex",
  "rusqlite",
+ "serde",
  "serde_json",
  "terminal-commander-core",
  "thiserror",

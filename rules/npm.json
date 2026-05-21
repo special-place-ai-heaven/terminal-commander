@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "pack": "npm",
+    "version": 1,
+    "description": "npm install / build error rules."
+  },
+  "rules": [
+    {
+      "id": "npm.enoent",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "missing_path",
+      "stream": "stderr",
+      "description": "npm reports a missing path (often package.json).",
+      "pattern": "ENOENT: no such file or directory, open '(?P<path>[^']+)'",
+      "captures": ["path"],
+      "summary_template": "npm missing file: ${path}",
+      "tags": ["packaging", "node", "npm"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 1, "after_lines": 0 }
+    },
+    {
+      "id": "npm.err-generic",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "npm_error",
+      "stream": "stderr",
+      "description": "Generic npm error line.",
+      "keywords": ["npm error", "npm ERR!"],
+      "captures": [],
+      "summary_template": "npm reported an error",
+      "tags": ["packaging", "node", "npm"],
+      "rate_limit_per_min": 60,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 2 }
+    }
+  ]
+}

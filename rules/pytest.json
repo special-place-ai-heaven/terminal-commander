@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "pack": "pytest",
+    "version": 1,
+    "description": "pytest collection and assertion failure rules."
+  },
+  "rules": [
+    {
+      "id": "pytest.collection-error",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "test_collection_error",
+      "stream": "stderr",
+      "description": "pytest reported a collection error.",
+      "pattern": "ERROR collecting (?P<test>[^\\s]+)$",
+      "captures": ["test"],
+      "summary_template": "pytest collection error in ${test}",
+      "tags": ["test", "python", "pytest"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 2, "after_lines": 4 }
+    },
+    {
+      "id": "pytest.failed-summary",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "test_failed",
+      "stream": "stdout",
+      "description": "pytest end-of-run failed summary line.",
+      "pattern": "^=+ (?P<count>[0-9]+) failed",
+      "captures": ["count"],
+      "summary_template": "${count} pytest test(s) failed",
+      "tags": ["test", "python", "pytest"],
+      "rate_limit_per_min": 6,
+      "redact": [],
+      "context_hint": { "before_lines": 3, "after_lines": 1 }
+    }
+  ]
+}
