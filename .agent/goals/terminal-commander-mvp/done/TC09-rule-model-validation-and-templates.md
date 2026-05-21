@@ -3,15 +3,15 @@ goal_id: TC09
 title: Rule Model Validation And Templates
 chain_id: terminal-commander-mvp
 phase: Wave 2 - Core model
-status: "Pending"
+status: "Completed"
 depends_on: ["TC06", "TC08"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
 worktree_hint: ""
 created_at: "2026-05-21T00:00:00+02:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-21T20:45:00+02:00"
+completed_at: "2026-05-21T21:20:00+02:00"
+completion_commit: "c832f00"
 blocked_reason: ""
 source_refs:
   - "User request: Terminal Commander / live terminal-stream signal-combing abstraction for LLMs, 2026-05-21"
@@ -98,9 +98,9 @@ contracts_or_interfaces:
 - RuleType enum MUST reserve all 11 canonical sifter discriminators from README.md:136-148 (keyword, regex, prompt, exit_code, stream_marker, progress_collapse, dedupe, threshold, sequence, anchor, custom); unimplemented variants validate to `RuleStatus::Draft` or equivalent but are reserved in the enum.
 - Template syntax locked: `${name}` for named captures only; renderer returns `Result<String, MissingCapture>` and MUST NOT panic on absent captures.
 - crates/terminal-commander-core/Cargo.toml (already TC06-owned) MUST carry SPDX header `license.workspace = true`; TC09 does not re-declare it.
-- <<DECISION REQUIRED: RuleStatus enum variants (Draft, Active, Disabled, Deprecated? include Tombstoned?)>>
-- <<DECISION REQUIRED: tag taxonomy (free-form strings vs controlled vocabulary vs both)>>
-- <<DECISION REQUIRED: ContextHint semantics (before_lines/after_lines counts? byte ranges? rolling-window references?)>>
+- RuleStatus variants (locked 2026-05-21 at TC09 start by orchestrator under correctness mandate): five-value lifecycle `Draft`, `Active`, `Disabled`, `Deprecated`, `Tombstoned`. Tombstoned exists so deleted rules retain an audit handle (event records that reference the rule id can still resolve to the soft-deleted definition).
+- Tag taxonomy (locked 2026-05-21): free-form lowercase strings; validation caps each tag at 64 chars and the tag list at 16 entries. No controlled vocabulary in MVP; later registry goals (TC13/TC14) may layer recommendations on top.
+- ContextHint semantics (locked 2026-05-21): `{ before_lines: u32, after_lines: u32 }`. Matches the `event_context(before, after)` shape from README and `ContextWindowRequest` (TC08). Byte-range hints are out of MVP scope; sifter (TC10/TC11) does not need them.
 
 invariants:
 - No unbounded raw terminal or file output may be exposed as a success path.
