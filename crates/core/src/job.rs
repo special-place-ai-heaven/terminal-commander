@@ -177,7 +177,9 @@ impl JobManager {
         let config = rec.config.clone();
         let started_at = rec.started_at;
         drop(g);
-        Some(Self::build_exit_event(&config, &exit_info, nonzero, started_at))
+        Some(Self::build_exit_event(
+            &config, &exit_info, nonzero, started_at,
+        ))
     }
 
     /// Mark a job cancelled (operator-initiated kill before exit).
@@ -187,10 +189,8 @@ impl JobManager {
         rec.state = JobState::Cancelled;
         let now = OffsetDateTime::now_utc();
         rec.ended_at = Some(now);
-        let duration_ms = u64::try_from(
-            (now - rec.started_at).whole_milliseconds().max(0),
-        )
-        .unwrap_or(u64::MAX);
+        let duration_ms =
+            u64::try_from((now - rec.started_at).whole_milliseconds().max(0)).unwrap_or(u64::MAX);
         let exit_info = JobExitInfo {
             exit_code: None,
             signal: Some("CANCELLED".to_owned()),
@@ -200,7 +200,9 @@ impl JobManager {
         let config = rec.config.clone();
         let started_at = rec.started_at;
         drop(g);
-        Some(Self::build_exit_event(&config, &exit_info, true, started_at))
+        Some(Self::build_exit_event(
+            &config, &exit_info, true, started_at,
+        ))
     }
 
     fn build_exit_event(

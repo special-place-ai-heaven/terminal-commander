@@ -39,6 +39,7 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use tokio::sync::Notify;
 
 use crate::error::CoreError;
 use crate::event::SignalEvent;
@@ -202,6 +203,41 @@ pub struct BucketReadResponse {
     pub events: Vec<SignalEvent>,
 }
 
+/// Wait request shape.
+#[derive(Debug, Clone)]
+pub struct BucketWaitRequest {
+    pub cursor: u64,
+    pub severity_min: Option<Severity>,
+    pub kind_filter: Option<String>,
+    pub limit: Option<usize>,
+    pub timeout: Duration,
+}
+
+impl BucketWaitRequest {
+    /// Construct a wait request reading from `cursor`.
+    #[must_use]
+    pub const fn new(cursor: u64, timeout: Duration) -> Self {
+        Self {
+            cursor,
+            severity_min: None,
+            kind_filter: None,
+            limit: None,
+            timeout,
+        }
+    }
+}
+
+/// Wait response shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketWaitResponse {
+    pub bucket_id: BucketId,
+    pub cursor_in: u64,
+    pub next_cursor: u64,
+    pub heartbeat: bool,
+    pub events: Vec<SignalEvent>,
+    pub dropped_count: u64,
+}
+
 /// Errors emitted by [`BucketManager`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BucketError {
@@ -226,13 +262,13 @@ struct BucketInner {
     state: BucketState,
     by_severity: BySeverity,
     by_kind: BTreeMap<String, u64>,
-    /// Ordered ring of events. `VecDeque` would also work; we use
-    /// `Vec` and treat the front as the head so iteration order is
-    /// the natural read order.
+    /// Ordered ring of events.
     events: std::collections::VecDeque<SignalEvent>,
     /// Reserved counters; zero until TC11.
     noise_suppressed_count: u64,
     dedupe_collapsed_count: u64,
+    /// Wakeup signal for [`BucketManager::bucket_wait`] (TC17).
+    notify: Arc<Notify>,
 }
 
 impl BucketInner {
@@ -254,6 +290,7 @@ impl BucketInner {
             events: std::collections::VecDeque::new(),
             noise_suppressed_count: 0,
             dedupe_collapsed_count: 0,
+            notify: Arc::new(Notify::new()),
         }
     }
 
@@ -416,7 +453,81 @@ impl BucketManager {
         inner.events.push_back(event);
         inner.refresh_state();
         inner.evict_for_capacity();
+        // Wake any waiters.
+        inner.notify.notify_waiters();
         Ok(assigned_seq)
+    }
+
+    /// Wait for matching events to arrive in the bucket. Returns
+    /// promptly when events are present or appended; returns a
+    /// heartbeat response when the timeout elapses without
+    /// matching events.
+    ///
+    /// Backed by `tokio::sync::Notify` — no polling, no busy wait.
+    pub async fn bucket_wait(
+        &self,
+        bucket_id: BucketId,
+        request: BucketWaitRequest,
+    ) -> Result<BucketWaitResponse, BucketError> {
+        // Snapshot the notify handle once.
+        let notify = {
+            let cell = self.bucket(bucket_id)?;
+            let inner = cell.read();
+            Arc::clone(&inner.notify)
+        };
+
+        let read_req = BucketReadRequest {
+            cursor: request.cursor,
+            severity_min: request.severity_min,
+            kind_filter: request.kind_filter.clone(),
+            limit: request.limit,
+        };
+
+        // Fast path: if events already match, return immediately.
+        let now_resp = self.events_since(bucket_id, &read_req)?;
+        if !now_resp.events.is_empty() {
+            return Ok(BucketWaitResponse {
+                bucket_id,
+                cursor_in: request.cursor,
+                next_cursor: now_resp.next_cursor,
+                heartbeat: false,
+                events: now_resp.events,
+                dropped_count: now_resp.dropped_count,
+            });
+        }
+
+        // Slow path: wait on the notifier, racing the timeout.
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        let outcome = tokio::time::timeout(request.timeout, notified.as_mut()).await;
+        match outcome {
+            Ok(()) => {
+                // Wake-up: read again. Even if filters reject the new
+                // events, we return what we found (possibly empty).
+                let resp = self.events_since(bucket_id, &read_req)?;
+                let heartbeat = resp.events.is_empty();
+                Ok(BucketWaitResponse {
+                    bucket_id,
+                    cursor_in: request.cursor,
+                    next_cursor: resp.next_cursor,
+                    heartbeat,
+                    events: resp.events,
+                    dropped_count: resp.dropped_count,
+                })
+            }
+            Err(_elapsed) => {
+                // Timeout: heartbeat with the bucket's current tail seq.
+                let state = self.state(bucket_id)?;
+                Ok(BucketWaitResponse {
+                    bucket_id,
+                    cursor_in: request.cursor,
+                    next_cursor: state.tail_seq.max(request.cursor),
+                    heartbeat: true,
+                    events: Vec::new(),
+                    dropped_count: state.dropped_count,
+                })
+            }
+        }
     }
 
     /// Read events strictly after `cursor`. The response is bounded
@@ -748,5 +859,91 @@ mod tests {
     fn manager_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<BucketManager>();
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn wait_fast_path_returns_already_present_events() {
+        let runtime = rt();
+        runtime.block_on(async {
+            let mgr = BucketManager::new();
+            let bid = BucketId::new();
+            mgr.create_bucket_default(bid).unwrap();
+            mgr.append(bid, ev(bid, Severity::High, "k1")).unwrap();
+            let resp = mgr
+                .bucket_wait(bid, BucketWaitRequest::new(0, Duration::from_millis(50)))
+                .await
+                .unwrap();
+            assert!(!resp.heartbeat);
+            assert_eq!(resp.events.len(), 1);
+        });
+    }
+
+    #[test]
+    fn wait_times_out_with_heartbeat_when_nothing_arrives() {
+        let runtime = rt();
+        runtime.block_on(async {
+            let mgr = BucketManager::new();
+            let bid = BucketId::new();
+            mgr.create_bucket_default(bid).unwrap();
+            let resp = mgr
+                .bucket_wait(bid, BucketWaitRequest::new(0, Duration::from_millis(40)))
+                .await
+                .unwrap();
+            assert!(resp.heartbeat);
+            assert!(resp.events.is_empty());
+            assert_eq!(resp.next_cursor, 0);
+        });
+    }
+
+    #[test]
+    fn wait_wakes_on_append() {
+        let runtime = rt();
+        runtime.block_on(async {
+            let mgr = std::sync::Arc::new(BucketManager::new());
+            let bid = BucketId::new();
+            mgr.create_bucket_default(bid).unwrap();
+
+            let mgr2 = std::sync::Arc::clone(&mgr);
+            let waiter = tokio::spawn(async move {
+                mgr2.bucket_wait(bid, BucketWaitRequest::new(0, Duration::from_secs(2)))
+                    .await
+            });
+            // Give the waiter a moment to park.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            mgr.append(bid, ev(bid, Severity::High, "k1")).unwrap();
+            let resp = waiter.await.unwrap().unwrap();
+            assert!(!resp.heartbeat);
+            assert_eq!(resp.events.len(), 1);
+        });
+    }
+
+    #[test]
+    fn wait_severity_filter_excludes_low_events_on_wait() {
+        let runtime = rt();
+        runtime.block_on(async {
+            let mgr = std::sync::Arc::new(BucketManager::new());
+            let bid = BucketId::new();
+            mgr.create_bucket_default(bid).unwrap();
+            let mgr2 = std::sync::Arc::clone(&mgr);
+            let waiter = tokio::spawn(async move {
+                let mut req = BucketWaitRequest::new(0, Duration::from_millis(60));
+                req.severity_min = Some(Severity::High);
+                mgr2.bucket_wait(bid, req).await
+            });
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Append a low-severity event; the waiter wakes but
+            // returns heartbeat=true (no matching events).
+            mgr.append(bid, ev(bid, Severity::Low, "k1")).unwrap();
+            let resp = waiter.await.unwrap().unwrap();
+            // Wake-up rechecked filter; no matches -> heartbeat=true.
+            assert!(resp.heartbeat);
+        });
     }
 }
