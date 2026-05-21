@@ -426,7 +426,12 @@ dependencies = [
 name = "terminal-commander-sifters"
 version = "0.0.0"
 dependencies = [
+ "aho-corasick",
+ "indexmap",
+ "regex",
  "terminal-commander-core",
+ "thiserror",
+ "time",
 ]
 
 [[package]]

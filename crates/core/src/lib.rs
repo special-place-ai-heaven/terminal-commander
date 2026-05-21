@@ -34,7 +34,7 @@ pub use context::{
     MAX_WINDOW_BYTES, MAX_WINDOW_FRAMES, SourceFrame,
 };
 pub use error::{CoreError, Result};
-pub use event::{Captures, RuleRef, SignalEvent};
+pub use event::{Captures, EventDraft, RuleRef, SignalEvent};
 pub use ids::{
     ActivationId, AuditId, BucketId, EventId, FrameId, JobId, ProbeId, RuleId, SessionId, SourceId,
     TypedId,

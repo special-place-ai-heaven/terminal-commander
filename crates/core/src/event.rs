@@ -101,6 +101,84 @@ impl SignalEvent {
     }
 }
 
+/// A signal event without the `event_id` and `seq` fields that the
+/// [`crate::bucket::BucketManager`] assigns at `append` time.
+///
+/// Sifters produce `EventDraft`s; the daemon route that hands them
+/// to a bucket converts them into [`SignalEvent`] by minting the
+/// `event_id` and letting the manager assign the per-bucket `seq`.
+///
+/// Source-status: live (TC10). Used by `terminal-commander-sifters`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventDraft {
+    pub bucket_id: BucketId,
+    #[serde(with = "rfc3339")]
+    pub timestamp: OffsetDateTime,
+    pub severity: Severity,
+    pub kind: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<RuleRef>,
+    pub source: EventSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captures: Option<Captures>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer: Option<crate::pointer::SourcePointer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pointer_unavailable_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    /// Number of bytes truncated from the incoming frame BEFORE
+    /// sifter evaluation (defense-in-depth cap; TC10).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub frame_truncated_bytes: u32,
+}
+
+// Signature is dictated by serde's `skip_serializing_if`, which
+// requires `fn(&T) -> bool`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
+impl EventDraft {
+    /// Promote a draft into a full [`SignalEvent`] by minting an
+    /// [`EventId`]. The bucket manager assigns `seq` on `append`.
+    #[must_use]
+    pub fn into_signal_event(self, seq: u64) -> SignalEvent {
+        SignalEvent {
+            event_id: EventId::new(),
+            bucket_id: self.bucket_id,
+            seq,
+            timestamp: self.timestamp,
+            severity: self.severity,
+            kind: self.kind,
+            summary: self.summary,
+            rule: self.rule,
+            source: self.source,
+            captures: self.captures,
+            pointer: self.pointer,
+            pointer_unavailable_reason: self.pointer_unavailable_reason,
+            tags: self.tags,
+        }
+    }
+
+    /// Run the TC02 invariant check on a draft (mirrors
+    /// [`SignalEvent::validate`]).
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.severity >= Severity::Medium
+            && self.pointer.is_none()
+            && self.pointer_unavailable_reason.is_none()
+        {
+            return Err(CoreError::PointerInvariantViolation {
+                event_id: "<draft>".to_owned(),
+                severity: self.severity.as_str().to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
