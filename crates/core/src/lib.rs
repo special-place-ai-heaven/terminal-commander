@@ -20,6 +20,7 @@ pub mod error;
 pub mod event;
 pub mod ids;
 pub mod pointer;
+pub mod rule;
 pub mod severity;
 pub mod source;
 
@@ -39,5 +40,11 @@ pub use ids::{
     TypedId,
 };
 pub use pointer::SourcePointer;
+pub use rule::{
+    ContextHint, MAX_CONTEXT_LINES, MAX_EXAMPLES, MAX_PATTERN_BYTES, MAX_RULE_ID_BYTES,
+    MAX_TAG_BYTES, MAX_TAGS, MAX_TEMPLATE_BYTES, RenderError, RenderedSummary, RuleDefinition,
+    RuleError, RuleExample, RuleExampleExpect, RuleHandle, RuleStatus, RuleTestRequest,
+    RuleTestResult, RuleType,
+};
 pub use severity::Severity;
 pub use source::{EventSource, SourceStream, SourceType};
