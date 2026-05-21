@@ -74,6 +74,12 @@ doc_overindented_list_items = "allow"
 # whose indent does not satisfy the CommonMark continuation rule.
 # Too noisy on multi-line doc paragraphs at MVP.
 doc_lazy_continuation = "allow"
+# `significant_drop_tightening` flags any RwLock guard held across a
+# function body. That is correct for tight-fast paths, but Terminal
+# Commander's bucket / context-ring paths intentionally hold the
+# write lock across mutation-plus-eviction blocks to keep the
+# observable state consistent. Reconsider at TC32.
+significant_drop_tightening = "allow"
 
 [profile.dev]
 opt-level = 0
