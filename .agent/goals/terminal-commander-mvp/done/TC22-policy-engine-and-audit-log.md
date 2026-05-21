@@ -3,7 +3,7 @@ goal_id: TC22
 title: Policy Engine And Audit Log
 chain_id: terminal-commander-mvp
 phase: Wave 6 - Daemon and API
-status: "Pending"
+status: "In progress"
 depends_on: ["TC02", "TC21"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -101,7 +101,7 @@ contracts_or_interfaces:
 - Audit log persists in rusqlite (WAL, refinery-managed migration) with batched single-writer transactions per the event-store lane (cite TC12). Schema: timestamp, session_id, client_id, operation, args_hash, decision, related_job_id, related_probe_id, related_bucket_id.
 - Output limits live in probe/event-store enforcement; policy provides configured limits + emits audit record on hit.
 - Any new Cargo.toml created by this goal must set `license.workspace = true` (SPDX `Apache-2.0`).
-- <<DECISION REQUIRED: policy config format (TOML vs JSON vs YAML)>>
+- Policy config format (locked 2026-05-22 at TC22): TOML. Matches Cargo / rust-toolchain conventions; readable; serde_toml stable.
 - <<DECISION REQUIRED: seccompiler stub-now-or-defer>>
 - <<DECISION REQUIRED: audit-log retention/rotation>>
 
