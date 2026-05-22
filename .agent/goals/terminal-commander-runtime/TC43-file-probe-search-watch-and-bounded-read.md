@@ -3,15 +3,15 @@ goal_id: TC43
 title: File Probe Search Watch And Bounded Read
 chain_id: terminal-commander-runtime
 phase: Wave 5 - File/disk intelligence probes
-status: "Pending"
+status: "Completed"
 depends_on: ["TC42d"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-21T18:55:35+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T18:40:00+00:00"
+completed_at: "2026-05-22T19:30:00+00:00"
+completion_commit: "06ea2d5"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
@@ -230,29 +230,76 @@ Verification additions:
 
 Run TC43 only on branch `main`. Complete the objective above, stay inside the allowed files/areas, respect all forbidden files and invariants, verify the work, commit only verified changes, update this goal file's status fields, and report blockers instead of guessing.
 
-## Final Report Format
+## Final Report
 
 Objective:
-- Expose bounded file intelligence through probes/tools so the LLM can ask for file lists, targeted search, line windows, and watched file changes without reading whole files.
+- Expose bounded file intelligence through daemon-owned probes/tools so the LLM can request bounded line windows, run bounded search, and observe future file changes — without reading whole files, without MCP-side direct file access, and without raw stream output.
 
-Changes:
-- <focused list of implementation changes>
+Changes (verified work commit `06ea2d5`):
+- New `crates/daemon/src/file_watch.rs`: `WatchRuntime` owns live `FileProbe` handles attached to buckets. Mirrors the role `command.rs` plays for `ProcessProbe` but is a separate runtime path — `command.rs` is NOT touched. Tracks `(watch_id, bucket_id, probe_id)` per live watch, threads a per-watch `SifterRuntime`, audits every start/stop, and supports scope-aware rebind via `rebind_watches_in_scope`.
+- `crates/daemon/src/state.rs`: `DaemonState` gains `Arc<WatchRuntime>`; bootstrap wires it alongside `CommandRuntime`.
+- `crates/daemon/src/ipc/protocol.rs`: 5 new IPC methods (`FileReadWindow`, `FileSearch`, `FileWatchStart`, `FileWatchStop`, `FileWatchList`), 5 new typed error codes (`PathDenied`, `FileNotFound`, `FileBinary`, `OversizedRequest`, `UnknownWatch`), bounded caps (`MAX_FILE_READ_LINES`, `MAX_FILE_READ_BYTES`, `MAX_FILE_SEARCH_MATCHES`, `MAX_FILE_SEARCH_SNIPPET_BYTES`, `MAX_FILE_SEARCH_SCAN_BYTES`) + `DEFAULT_*` matches.
+- `crates/daemon/src/ipc/server.rs`: handlers for the 5 new methods. Path-policy gate via `PolicyEngine::evaluate(PolicyAction::FileRead | FileWatch)` BEFORE any I/O. `require_regular_file` enforces "is regular file" so directories surface `FileNotFound`. Read paths catch `InvalidData` and return `FileBinary` so non-UTF-8 never streams to the LLM. The scope validator now resolves `Bucket`/`Job`/`Probe` ids against the UNION of `state.command.live_jobs()` and `state.watch.live_watches()`, so scoped registry activation can target a watch. `handle_registry_activate` / `handle_registry_deactivate` rebind both command jobs AND watches in the requested scope; the returned `jobs_rebound` is the sum.
+- `crates/mcp/src/tools.rs`: 5 new MCP tools (`file_read_window`, `file_search`, `file_watch_start`, `file_watch_stop`, `file_watch_list`) forwarding through the daemon UDS only. New MCP-facing DTOs (`McpFileReadWindowParams`, `McpFileSearchParams`, `McpFileWatchStartParams`, `McpFileWatchStopParams`). The tool catalogue grew 17 -> 22 live tools, zero `not_implemented`.
+- `crates/mcp/src/lib.rs`: legacy in-process `ToolSurface::file_read_window` shim REMOVED along with `FileReadWindowResponse` and `MAX_FILE_WINDOW_BYTES`. The TC43 contract forbids `std::fs::read` / `tokio::fs` / `File::open` / `read_to_string` / `read_to_end` anywhere in `crates/mcp/src`. The verification grep returns no matches.
+- Existing TC41/TC42/TC42b/TC42d count tests (`crates/mcp/tests/mcp_stdio.rs`, `crates/mcp/tests/mcp_live_daemon.rs`, `crates/mcp/src/tools.rs::tests`) updated to the new 22-tool catalogue.
+- `crates/mcp/tests/e2e.rs`: dropped the in-process `file_read_window` test; the new daemon-backed + MCP UDS path is covered by `file_ipc` / `file_tools_live_e2e`.
 
 Files changed:
-- <paths>
+- `crates/daemon/src/file_watch.rs` (new)
+- `crates/daemon/src/state.rs`
+- `crates/daemon/src/lib.rs`
+- `crates/daemon/src/ipc/mod.rs`
+- `crates/daemon/src/ipc/protocol.rs`
+- `crates/daemon/src/ipc/server.rs`
+- `crates/daemon/tests/file_ipc.rs` (new, 9 tests)
+- `crates/mcp/src/lib.rs` (TC43 cleanup: removed direct-fs path)
+- `crates/mcp/src/tools.rs`
+- `crates/mcp/tests/file_tools_live_e2e.rs` (new, 2 tests)
+- `crates/mcp/tests/mcp_live_daemon.rs` (tool list grew 17 -> 22)
+- `crates/mcp/tests/mcp_stdio.rs` (tool list grew 17 -> 22)
+- `crates/mcp/tests/e2e.rs` (dropped removed-shim test)
+- `.agent/goals/terminal-commander-runtime/TC43-*.md` (this file)
 
-Verification:
-- PASS/FAIL: `<command>` — <summary>
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`, rustc 1.95.0, cargo-nextest 0.9.136):
+- PASS: `git branch --show-current` — `main`
+- PASS: `git status --short` — clean after work + status commits
+- PASS: `git diff --check`
+- PASS: `cargo metadata --no-deps`
+- PASS: `cargo fmt --all --check`
+- PASS: `cargo clippy --workspace --all-targets -- -D warnings` — no warnings
+- PASS: `cargo test --workspace` — every suite green
+- PASS: `cargo nextest run --workspace` — **325/325 passing, 0 skipped**
+- PASS: `cargo test -p terminal-commanderd --test file_ipc -- --nocapture` — 9 tests
+- PASS: `cargo test -p terminal-commander-mcp --test file_tools_live_e2e -- --nocapture` — 2 tests
+- PASS: `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` — only doc/negative-assertion matches (`main.rs` docstring, `lib.rs` docstring, e2e comment)
+- PASS: `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src` — **no matches** (MCP crate does not touch the filesystem directly)
 
-Evidence:
-- <source-status notes, test output summaries, route/status evidence, screenshots only if rendered UI changed>
+Evidence — explicit acceptance confirmations:
 
-Commit:
-- Verified work commit: `<hash or none>`
-- Goal status commit: `<hash or none>`
+- **No `crates/daemon/src/command.rs` edits.** `git diff --stat HEAD~2..HEAD -- crates/daemon/src/command.rs` returns nothing. File-watch lifecycle lives entirely in the new `file_watch.rs` module; the `merge_active_and_inline` helper is replicated rather than imported so command.rs stays untouched.
+- **MCP does not read files directly.** The legacy `ToolSurface::file_read_window` (the sole `std::fs::read` site) was removed in this commit. The verification grep over `crates/mcp/src` returns no `tokio::fs`/`std::fs`/`File::open`/`read_to_string`/`read_to_end` matches. New MCP file tools forward exclusively through `McpDaemonClient::call` (UDS).
+- **No raw file/log/tail stream endpoint.** Every new IPC response carries bounded, structured fields only: `FileLine{line, byte_offset, text}` for reads, `FileSearchMatch{line, byte_offset, snippet}` for search (snippet capped to `max_snippet_bytes` ≤ 512), `FileWatchStartResponse` carries only ids + initial cursor. There is no "tail" or "stream" lane; future file content reaches the LLM only as structured `SignalEvent`s produced by scoped sifter rules.
+- **File read/search/watch responses are bounded.** Caps enforced at the dispatcher: read at most `MAX_FILE_READ_LINES = 2_000` lines AND `MAX_FILE_READ_BYTES = 64 KiB`; search at most `MAX_FILE_SEARCH_MATCHES = 500` matches with each snippet capped at `MAX_FILE_SEARCH_SNIPPET_BYTES = 512` bytes, and the whole scan capped at `MAX_FILE_SEARCH_SCAN_BYTES = 16 MiB`. Watch responses are id/counter shapes only.
+- **File watch emits through daemon/probes/sifters/buckets.** `WatchRuntime::start` spawns a `FileProbe` (existing `crates/probes::file`) wired to a `WatchEventSink` that calls `Router::bucket_append`. The watch never returns frame text to the LLM; only the sifter-produced `EventDraft`s reach the bucket. `file_watch_start_then_append_emits_events_when_rule_active` asserts this end-to-end through the IPC layer.
+- **Denied paths are rejected and audited.** `PolicyEngine::evaluate(FileRead | FileWatch)` runs before any open. Denied paths return `IpcErrorCode::PathDenied`; the dispatcher emits the standard `ipc_<method>` audit row with decision=error, and `WatchRuntime::start` emits a `file_watch_start` audit row with decision=deny. Asserted by `file_read_window_denies_default_deny_path`, `file_watch_denies_default_deny_path`, and the MCP-level `file_read_window_denies_sensitive_path_through_mcp`.
+- **Missing/binary/unknown-watch cases return typed bounded errors.** `FileNotFound` for missing or non-regular files (`file_read_window_missing_file_returns_typed_error`); `FileBinary` for non-UTF-8 (`file_read_window_rejects_binary`); `OversizedRequest` for empty queries (`file_search_rejects_empty_query`); `UnknownWatch` for stale stop ids (`file_watch_stop_unknown_id_returns_typed_error`). No raw stream content surfaces in any error path.
+- **TC39 bucket/context behavior remains compatible.** The full TC39 / TC41 / TC42 / TC42b / TC42c / TC42d test suites pass unchanged — `bucket_wait`, `bucket_events_since`, `event_context`, `command_start_combed`, registry scoped activation. Nextest summary: 325/325 with 0 skipped.
+
+Source-status:
+- `file_read_window`, `file_search`, `file_watch_start`, `file_watch_stop`, `file_watch_list` (IPC + MCP): **live (TC43)**.
+- `WatchRuntime`, `WatchRebindReport`, `LiveWatchIdentity`: **live (TC43)**.
+- File watch backend: polling at 120ms via existing `crates/probes::file` (TC18). Native notify/inotify is explicitly deferred per the TC43 prep amendment; will be revisited as a separate goal if/when justified.
+- `ToolSurface::file_read_window`: **deleted** (TC43). The MCP UDS path is the only file_read_window surface now.
+- Bounded-output, pointer, and audit invariants: **unchanged**.
+
+Commits:
+- Goal file prep amendment: `b12a3c7`
+- Verified work commit: `06ea2d5`
+- Goal status commit: this commit
 
 Known gaps / blockers:
-- <none or explicit blocker>
+- None.
 
 Next goal:
-- TC44-posix-pty-spawn-and-stdin-control.md
+- TC44-posix-pty-spawn-and-stdin-control.md — do NOT start until this TC43 report is reviewed.
