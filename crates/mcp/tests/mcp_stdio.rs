@@ -5,7 +5,7 @@
 //! duplex transport (no real stdin/stdout, no real daemon). Verifies:
 //!
 //! - initialize handshake completes,
-//! - tool list contains the four TC40 live tools and nothing else,
+//! - tool list contains all live tools at the current TC level,
 //! - calling a tool against an unreachable daemon returns a typed
 //!   error rather than panicking or producing raw output.
 //!
@@ -58,7 +58,7 @@ async fn paired_service() -> (
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn initialize_and_list_tools_returns_live_tc40_set() {
+async fn initialize_and_list_tools_returns_full_live_set() {
     let (_server, client) = paired_service().await;
     let info = client.peer_info().expect("peer info").clone();
     assert_eq!(
@@ -72,12 +72,18 @@ async fn initialize_and_list_tools_returns_live_tc40_set() {
     assert_eq!(
         names,
         vec![
+            "bucket_events_since".to_owned(),
+            "bucket_summary".to_owned(),
+            "bucket_wait".to_owned(),
+            "command_start_combed".to_owned(),
+            "command_status".to_owned(),
+            "event_context".to_owned(),
             "health".to_owned(),
             "policy_status".to_owned(),
             "self_check".to_owned(),
             "system_discover".to_owned(),
         ],
-        "TC40 must advertise exactly the four live discovery/status tools"
+        "TC41 must advertise the full discovery+command+bucket live tool set"
     );
 
     let _ = client.cancel().await;

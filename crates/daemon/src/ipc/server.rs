@@ -26,15 +26,17 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 
 use crate::audit::AuditSink;
+use crate::command::{CommandError, CommandStartRequest};
 use crate::ipc::peer::{self, PeerCred};
 use crate::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
-    BucketWaitParams, BucketWaitResponse, ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT,
-    DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DiscoverResponse, EventContextParams,
-    EventContextResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse,
-    IpcResult, MAX_BUCKET_READ_LIMIT, MAX_CONTEXT_BYTES, MAX_CONTEXT_FRAMES, MAX_FRAME_BYTES,
-    PolicyStatusResponse, RequestEnvelope, ResponseEnvelope, SelfCheckResponse, SeverityHistogram,
-    decode_payload, encode_frame,
+    BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStatusParams,
+    ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT, DEFAULT_CONTEXT_AFTER,
+    DEFAULT_CONTEXT_BEFORE, DiscoverResponse, EventContextParams, EventContextResponse,
+    IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult,
+    MAX_BUCKET_READ_LIMIT, MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES,
+    MAX_CONTEXT_FRAMES, MAX_FRAME_BYTES, PolicyStatusResponse, RequestEnvelope, ResponseEnvelope,
+    SelfCheckResponse, SeverityHistogram, decode_payload, encode_frame,
 };
 use crate::state::DaemonState;
 
@@ -361,6 +363,14 @@ async fn dispatch(
             Ok(r) => ("event_context", IpcResult::Ok { response: r }),
             Err(e) => ("event_context", IpcResult::Err { error: e }),
         },
+        IpcRequest::CommandStartCombed(p) => match handle_command_start_combed(state, p) {
+            Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
+            Err(e) => ("command_start_combed", IpcResult::Err { error: e }),
+        },
+        IpcRequest::CommandStatus(p) => match handle_command_status(state, p) {
+            Ok(r) => ("command_status", IpcResult::Ok { response: r }),
+            Err(e) => ("command_status", IpcResult::Err { error: e }),
+        },
     };
     // Audit one row per accepted request. The decision label reflects
     // whether the dispatcher produced an `Ok` response or a typed
@@ -393,6 +403,8 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
             "bucket_wait".to_owned(),
             "bucket_summary".to_owned(),
             "event_context".to_owned(),
+            "command_start_combed".to_owned(),
+            "command_status".to_owned(),
         ],
     })
 }
@@ -661,6 +673,71 @@ fn handle_event_context(
         total_bytes,
         truncated,
     }))
+}
+
+fn map_command_error(e: CommandError) -> IpcError {
+    match e {
+        CommandError::PolicyDenied(msg) => IpcError::new(IpcErrorCode::PolicyDenied, msg),
+        CommandError::ShellInterpreterDenied(shell) => IpcError::new(
+            IpcErrorCode::ShellInterpreterDenied,
+            format!(
+                "shell interpreter '{shell}' denied; command_start_combed is not a shell bridge"
+            ),
+        ),
+        CommandError::EmptyArgv => {
+            IpcError::new(IpcErrorCode::ArgvInvalid, "argv must not be empty")
+        }
+        CommandError::ArgvTooLong(n) => {
+            IpcError::new(IpcErrorCode::ArgvInvalid, format!("argv too long: {n}"))
+        }
+        CommandError::ArgvItemTooLong { index, len } => IpcError::new(
+            IpcErrorCode::ArgvInvalid,
+            format!("argv[{index}] is {len} bytes; exceeds per-item cap"),
+        ),
+        CommandError::UnknownJob(id) => {
+            IpcError::new(IpcErrorCode::UnknownJob, format!("unknown job: {id}"))
+        }
+        other => IpcError::new(IpcErrorCode::Internal, other.to_string()),
+    }
+}
+
+fn handle_command_start_combed(
+    state: &Arc<DaemonState>,
+    params: &CommandStartParams,
+) -> Result<IpcResponse, IpcError> {
+    if params.env.len() > MAX_COMMAND_ENV_ITEMS {
+        return Err(IpcError::new(
+            IpcErrorCode::ArgvInvalid,
+            format!("env entries {} exceed cap", params.env.len()),
+        ));
+    }
+    if params.rules.len() > MAX_COMMAND_INLINE_RULES {
+        return Err(IpcError::new(
+            IpcErrorCode::ArgvInvalid,
+            format!("inline rules {} exceed cap", params.rules.len()),
+        ));
+    }
+    let req = CommandStartRequest {
+        argv: params.argv.clone(),
+        cwd: params.cwd.clone(),
+        env: params.env.clone(),
+        bucket_config: params.bucket_config.clone(),
+        rules: params.rules.clone(),
+        grace: params.grace(),
+    };
+    let resp = state.command.start_combed(req).map_err(map_command_error)?;
+    Ok(IpcResponse::CommandStartCombed(resp))
+}
+
+fn handle_command_status(
+    state: &Arc<DaemonState>,
+    params: &CommandStatusParams,
+) -> Result<IpcResponse, IpcError> {
+    let resp = state
+        .command
+        .status(params.job_id)
+        .map_err(map_command_error)?;
+    Ok(IpcResponse::CommandStatus(resp))
 }
 
 fn emit_audit(

@@ -96,12 +96,18 @@ async fn live_health_roundtrip_through_uds() {
         assert_eq!(
             names,
             vec![
+                "bucket_events_since".to_owned(),
+                "bucket_summary".to_owned(),
+                "bucket_wait".to_owned(),
+                "command_start_combed".to_owned(),
+                "command_status".to_owned(),
+                "event_context".to_owned(),
                 "health".to_owned(),
                 "policy_status".to_owned(),
                 "self_check".to_owned(),
                 "system_discover".to_owned(),
             ],
-            "live daemon must still expose only the four TC40 tools"
+            "live daemon must expose the full TC41 tool set"
         );
 
         let result = client
@@ -174,8 +180,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             .filter(|t| t["status"].as_str() == Some("live"))
             .count();
         assert_eq!(
-            live_count, 4,
-            "tool catalogue must list exactly 4 live tools at TC40"
+            live_count, 10,
+            "tool catalogue must list exactly 10 live tools at TC41"
         );
 
         let _ = client.cancel().await;

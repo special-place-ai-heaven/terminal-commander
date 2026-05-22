@@ -26,17 +26,22 @@ use std::borrow::Cow;
 
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
-    handler::server::router::tool::ToolRouter,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
     tool, tool_handler, tool_router,
 };
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use terminal_commander_core::{BucketConfig, RuleDefinition, Severity};
 use terminal_commanderd::ipc::protocol::{
-    DiscoverResponse, IpcError, IpcErrorCode, IpcRequest, IpcResponse, PolicyStatusResponse,
-    SelfCheckResponse,
+    BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
+    BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStartResponse,
+    CommandStatusParams, CommandStatusResponse, ContextUnavailableReason, DiscoverResponse,
+    EventContextParams, EventContextResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest,
+    IpcResponse, PolicyStatusResponse, SelfCheckResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -88,24 +93,34 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             description: "Re-run the daemon self-check; bounded text report.",
         },
         ToolCatalogueEntry {
+            name: "command_start_combed",
+            status: ToolStatus::Live,
+            description: "Start a non-PTY argv command; bounded metadata response. No raw stdout/stderr.",
+        },
+        ToolCatalogueEntry {
+            name: "command_status",
+            status: ToolStatus::Live,
+            description: "Lifecycle + counters lookup for a previously started job.",
+        },
+        ToolCatalogueEntry {
             name: "bucket_events_since",
-            status: ToolStatus::NotImplemented,
-            description: "Cursor read of a bucket. Reserved for TC41.",
+            status: ToolStatus::Live,
+            description: "Cursor read of a bucket. Bounded; severity / kind filters supported.",
         },
         ToolCatalogueEntry {
             name: "bucket_wait",
-            status: ToolStatus::NotImplemented,
-            description: "Realtime wait on a bucket. Reserved for TC41.",
+            status: ToolStatus::Live,
+            description: "Realtime wait on a bucket. Heartbeat returned on timeout.",
         },
         ToolCatalogueEntry {
             name: "bucket_summary",
-            status: ToolStatus::NotImplemented,
-            description: "Bucket counters + severity histogram. Reserved for TC41.",
+            status: ToolStatus::Live,
+            description: "Bucket counters + severity histogram. No raw stream content.",
         },
         ToolCatalogueEntry {
             name: "event_context",
-            status: ToolStatus::NotImplemented,
-            description: "Bounded context window around an event. Reserved for TC41.",
+            status: ToolStatus::Live,
+            description: "Bounded context window around an event. Pointer-based.",
         },
     ]
 }
@@ -230,6 +245,119 @@ impl TerminalCommanderMcpServer {
             Err(e) => Err(into_mcp_error(&e)),
         }
     }
+
+    /// `command_start_combed` — start a non-PTY argv command on the
+    /// daemon and return bounded metadata. Never returns raw output.
+    #[tool(
+        description = "Start a non-PTY argv command. Returns job_id, bucket_id, probe_id, initial cursor. No stdout/stderr text is returned. Shell interpreters are denied by default."
+    )]
+    async fn command_start_combed(
+        &self,
+        Parameters(params): Parameters<McpCommandStartParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ipc = params.into_ipc();
+        match self.daemon.call(IpcRequest::CommandStartCombed(ipc)).await {
+            Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
+                job_id,
+                bucket_id,
+                probe_id,
+                cursor,
+            })) => json_tool_result(&serde_json::json!({
+                "job_id": job_id,
+                "bucket_id": bucket_id,
+                "probe_id": probe_id,
+                "cursor": cursor,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `command_status` — lifecycle counters + exit info for a job.
+    #[tool(
+        description = "Lookup lifecycle counters and exit info for a previously started job. Bounded; never returns raw output."
+    )]
+    async fn command_status(
+        &self,
+        Parameters(params): Parameters<McpCommandStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let job_id = parse_id::<terminal_commander_core::ids::JobIdKind>("job_id", &params.job_id)
+            .map_err(invalid_params)?;
+        let ipc = CommandStatusParams { job_id };
+        match self.daemon.call(IpcRequest::CommandStatus(ipc)).await {
+            Ok(IpcResponse::CommandStatus(s)) => json_tool_result(&command_status_payload(&s)),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `bucket_events_since` — cursor read; bounded; severity / kind
+    /// filters supported.
+    #[tool(
+        description = "Cursor-based read of bucket events. Bounded by daemon caps. Filters: severity_min, kind_filter."
+    )]
+    async fn bucket_events_since(
+        &self,
+        Parameters(params): Parameters<McpBucketEventsSinceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ipc = params.into_ipc().map_err(invalid_params)?;
+        match self.daemon.call(IpcRequest::BucketEventsSince(ipc)).await {
+            Ok(IpcResponse::BucketEventsSince(r)) => json_tool_result(&bucket_events_payload(&r)),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `bucket_wait` — realtime wait; returns heartbeat on timeout.
+    #[tool(
+        description = "Realtime wait on a bucket. Returns a heartbeat when the timeout expires without matching events. Bounded by daemon caps."
+    )]
+    async fn bucket_wait(
+        &self,
+        Parameters(params): Parameters<McpBucketWaitParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ipc = params.into_ipc().map_err(invalid_params)?;
+        match self.daemon.call(IpcRequest::BucketWait(ipc)).await {
+            Ok(IpcResponse::BucketWait(r)) => json_tool_result(&bucket_wait_payload(&r)),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `bucket_summary` — counters + severity histogram.
+    #[tool(
+        description = "Bucket counters and severity histogram. No raw stream content is returned."
+    )]
+    async fn bucket_summary(
+        &self,
+        Parameters(params): Parameters<McpBucketSummaryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let bucket_id =
+            parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", &params.bucket_id)
+                .map_err(invalid_params)?;
+        let ipc = BucketSummaryParams { bucket_id };
+        match self.daemon.call(IpcRequest::BucketSummary(ipc)).await {
+            Ok(IpcResponse::BucketSummary(s)) => json_tool_result(&bucket_summary_payload(&s)),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `event_context` — pointer-bounded context around an event.
+    #[tool(
+        description = "Bounded context window around an event. Returns frames or a typed unavailable_reason when no pointer exists. Pointer-based; never streams."
+    )]
+    async fn event_context(
+        &self,
+        Parameters(params): Parameters<McpEventContextParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ipc = params.into_ipc().map_err(invalid_params)?;
+        match self.daemon.call(IpcRequest::EventContext(ipc)).await {
+            Ok(IpcResponse::EventContext(r)) => json_tool_result(&event_context_payload(&r)),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
 }
 
 #[tool_handler]
@@ -294,12 +422,280 @@ pub fn format_ipc_error(e: &IpcError) -> String {
     format!("daemon ipc error [{:?}]: {}", e.code, e.message)
 }
 
+/// Build an MCP `invalid_params` error from a free-form reason. Used
+/// when an MCP tool input fails wire-form validation before any
+/// daemon call.
+fn invalid_params(reason: String) -> McpError {
+    McpError::invalid_params(Cow::Owned(reason), None)
+}
+
+/// Parse a wire-form identifier from an MCP tool input field.
+fn parse_id<K: terminal_commander_core::ids::TypedIdKind>(
+    field: &str,
+    s: &str,
+) -> Result<terminal_commander_core::ids::TypedId<K>, String> {
+    terminal_commander_core::ids::TypedId::<K>::parse_wire(s).map_err(|e| format!("{field}: {e}"))
+}
+
+fn parse_severity_filter(s: &str) -> Result<Severity, String> {
+    match s {
+        "trace" => Ok(Severity::Trace),
+        "debug" => Ok(Severity::Debug),
+        "info" => Ok(Severity::Info),
+        "low" => Ok(Severity::Low),
+        "medium" => Ok(Severity::Medium),
+        "high" => Ok(Severity::High),
+        "critical" => Ok(Severity::Critical),
+        other => Err(format!(
+            "severity_min '{other}' is not one of trace|debug|info|low|medium|high|critical"
+        )),
+    }
+}
+
+/// Env entry pair for the MCP wire form. Avoids relying on
+/// `JsonSchema` for a tuple struct.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct EnvEntry {
+    pub key: String,
+    pub value: String,
+}
+
+/// MCP-facing parameters for `command_start_combed`. Strings + ints
+/// only so the JSON Schema stays consumer-friendly. Translated to the
+/// daemon-side `CommandStartParams` in `into_ipc`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpCommandStartParams {
+    /// Non-empty argv. argv[0] is the program; rest are args.
+    /// Shell interpreters are rejected by the daemon.
+    pub argv: Vec<String>,
+    /// Optional working directory.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Optional explicit environment. Empty = inherit.
+    #[serde(default)]
+    pub env: Vec<EnvEntry>,
+    /// Optional grace window between graceful and forced terminate,
+    /// in milliseconds. Clamped at the daemon.
+    #[serde(default)]
+    pub grace_ms: Option<u64>,
+}
+
+impl McpCommandStartParams {
+    fn into_ipc(self) -> CommandStartParams {
+        let cwd = self.cwd.map(std::path::PathBuf::from);
+        let env: Vec<(String, String)> = self.env.into_iter().map(|e| (e.key, e.value)).collect();
+        CommandStartParams {
+            argv: self.argv,
+            cwd,
+            env,
+            bucket_config: None::<BucketConfig>,
+            rules: Vec::<RuleDefinition>::new(),
+            grace_ms: self.grace_ms,
+        }
+    }
+}
+
+/// MCP-facing parameters for `command_status`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpCommandStatusParams {
+    /// Job id returned by `command_start_combed`.
+    pub job_id: String,
+}
+
+/// MCP-facing parameters for `bucket_events_since`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpBucketEventsSinceParams {
+    pub bucket_id: String,
+    pub cursor: u64,
+    /// Lowercase severity name: trace|debug|info|low|medium|high|critical.
+    #[serde(default)]
+    pub severity_min: Option<String>,
+    #[serde(default)]
+    pub kind_filter: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+impl McpBucketEventsSinceParams {
+    fn into_ipc(self) -> Result<BucketEventsSinceParams, String> {
+        let bucket_id =
+            parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", &self.bucket_id)?;
+        let severity_min = match self.severity_min {
+            Some(s) => Some(parse_severity_filter(&s)?),
+            None => None,
+        };
+        Ok(BucketEventsSinceParams {
+            bucket_id,
+            cursor: self.cursor,
+            severity_min,
+            kind_filter: self.kind_filter,
+            limit: self.limit,
+        })
+    }
+}
+
+/// MCP-facing parameters for `bucket_wait`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpBucketWaitParams {
+    pub bucket_id: String,
+    pub cursor: u64,
+    #[serde(default)]
+    pub severity_min: Option<String>,
+    #[serde(default)]
+    pub kind_filter: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Wait timeout in milliseconds. Clamped at the daemon.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+impl McpBucketWaitParams {
+    fn into_ipc(self) -> Result<BucketWaitParams, String> {
+        let bucket_id =
+            parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", &self.bucket_id)?;
+        let severity_min = match self.severity_min {
+            Some(s) => Some(parse_severity_filter(&s)?),
+            None => None,
+        };
+        Ok(BucketWaitParams {
+            bucket_id,
+            cursor: self.cursor,
+            severity_min,
+            kind_filter: self.kind_filter,
+            limit: self.limit,
+            timeout_ms: self.timeout_ms,
+        })
+    }
+}
+
+/// MCP-facing parameters for `bucket_summary`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpBucketSummaryParams {
+    pub bucket_id: String,
+}
+
+/// MCP-facing parameters for `event_context`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpEventContextParams {
+    pub bucket_id: String,
+    pub event_id: String,
+    #[serde(default)]
+    pub before: Option<u32>,
+    #[serde(default)]
+    pub after: Option<u32>,
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
+}
+
+impl McpEventContextParams {
+    fn into_ipc(self) -> Result<EventContextParams, String> {
+        let bucket_id =
+            parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", &self.bucket_id)?;
+        let event_id =
+            parse_id::<terminal_commander_core::ids::EventIdKind>("event_id", &self.event_id)?;
+        Ok(EventContextParams {
+            bucket_id,
+            event_id,
+            before: self.before,
+            after: self.after,
+            max_bytes: self.max_bytes,
+        })
+    }
+}
+
+fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
+    serde_json::json!({
+        "job_id": s.job_id,
+        "bucket_id": s.bucket_id,
+        "probe_id": s.probe_id,
+        "state": s.state,
+        "frames_total": s.frames_total,
+        "frames_stdout": s.frames_stdout,
+        "frames_stderr": s.frames_stderr,
+        "bytes_total": s.bytes_total,
+        "events_emitted": s.events_emitted,
+        "exit_code": s.exit_code,
+        "signal": s.signal,
+        "duration_ms": s.duration_ms,
+    })
+}
+
+fn bucket_events_payload(r: &BucketEventsSinceResponse) -> serde_json::Value {
+    serde_json::json!({
+        "bucket_id": r.bucket_id,
+        "cursor_in": r.cursor_in,
+        "next_cursor": r.next_cursor,
+        "has_more": r.has_more,
+        "dropped_count": r.dropped_count,
+        "events": r.events,
+    })
+}
+
+fn bucket_wait_payload(r: &BucketWaitResponse) -> serde_json::Value {
+    serde_json::json!({
+        "bucket_id": r.bucket_id,
+        "cursor_in": r.cursor_in,
+        "next_cursor": r.next_cursor,
+        "heartbeat": r.heartbeat,
+        "dropped_count": r.dropped_count,
+        "events": r.events,
+    })
+}
+
+fn bucket_summary_payload(s: &BucketSummaryResponse) -> serde_json::Value {
+    serde_json::json!({
+        "bucket_id": s.bucket_id,
+        "head_seq": s.head_seq,
+        "tail_seq": s.tail_seq,
+        "event_count": s.event_count,
+        "dropped_count": s.dropped_count,
+        "by_severity": s.by_severity,
+    })
+}
+
+fn event_context_payload(r: &EventContextResponse) -> serde_json::Value {
+    let frames: Vec<serde_json::Value> = r
+        .frames
+        .iter()
+        .map(|f: &IpcContextFrame| {
+            serde_json::json!({
+                "probe_id": f.probe_id,
+                "frame_id": f.frame_id,
+                "stream": f.stream,
+                "line": f.line,
+                "text": f.text,
+            })
+        })
+        .collect();
+    let unavail = r.unavailable_reason.map(unavailable_reason_str);
+    serde_json::json!({
+        "bucket_id": r.bucket_id,
+        "event_id": r.event_id,
+        "anchor_missing": r.anchor_missing,
+        "unavailable_reason": unavail,
+        "pointer_unavailable_reason": r.pointer_unavailable_reason,
+        "frames": frames,
+        "total_bytes": r.total_bytes,
+        "truncated": r.truncated,
+    })
+}
+
+const fn unavailable_reason_str(r: ContextUnavailableReason) -> &'static str {
+    match r {
+        ContextUnavailableReason::NoPointer => "no_pointer",
+        ContextUnavailableReason::SyntheticEvent => "synthetic_event",
+        ContextUnavailableReason::AnchorEvicted => "anchor_evicted",
+        ContextUnavailableReason::UnknownProbe => "unknown_probe",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn catalogue_lists_four_live_tools() {
+    fn catalogue_lists_ten_live_tools_at_tc41() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -307,12 +703,32 @@ mod tests {
             .collect();
         assert_eq!(
             live,
-            vec!["system_discover", "health", "policy_status", "self_check"]
+            vec![
+                "system_discover",
+                "health",
+                "policy_status",
+                "self_check",
+                "command_start_combed",
+                "command_status",
+                "bucket_events_since",
+                "bucket_wait",
+                "bucket_summary",
+                "event_context",
+            ]
+        );
+        let not_impl: Vec<_> = tool_catalogue()
+            .iter()
+            .filter(|t| matches!(t.status, ToolStatus::NotImplemented))
+            .map(|t| t.name)
+            .collect();
+        assert!(
+            not_impl.is_empty(),
+            "TC41 promotes every TC40-deferred entry to live; expected no not_implemented, got: {not_impl:?}"
         );
     }
 
     #[test]
-    fn tool_router_exposes_only_live_tools() {
+    fn tool_router_exposes_all_live_tools() {
         let router = TerminalCommanderMcpServer::tool_router();
         let mut names: Vec<String> = router
             .list_all()
@@ -323,6 +739,12 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "bucket_events_since".to_owned(),
+                "bucket_summary".to_owned(),
+                "bucket_wait".to_owned(),
+                "command_start_combed".to_owned(),
+                "command_status".to_owned(),
+                "event_context".to_owned(),
                 "health".to_owned(),
                 "policy_status".to_owned(),
                 "self_check".to_owned(),

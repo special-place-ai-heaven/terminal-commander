@@ -22,10 +22,15 @@
 //!
 //! Source-status: live (TC37).
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use terminal_commander_core::{BucketId, EventId, SignalEvent};
+use terminal_commander_core::{
+    BucketConfig, BucketId, EventId, JobId, RuleDefinition, SignalEvent,
+};
+
+pub use crate::command::{CommandStartResponse, CommandStatusResponse};
 
 /// Hard cap on a complete frame (length prefix + payload). Anything
 /// above this is rejected without payload parse.
@@ -114,6 +119,11 @@ pub enum IpcRequest {
     /// bucket to find the matching event, then resolves
     /// `(probe_id, pointer.frame_id)` against the context ring.
     EventContext(EventContextParams),
+    /// Start a non-PTY argv command. Bounded metadata response only;
+    /// never returns raw stdout/stderr. Shell-bridge guard applies.
+    CommandStartCombed(CommandStartParams),
+    /// Lifecycle + counters lookup for a previously started command.
+    CommandStatus(CommandStatusParams),
 }
 
 /// Success / error union. Success carries a typed payload per method;
@@ -138,6 +148,8 @@ pub enum IpcResponse {
     BucketWait(BucketWaitResponse),
     BucketSummary(BucketSummaryResponse),
     EventContext(EventContextResponse),
+    CommandStartCombed(CommandStartResponse),
+    CommandStatus(CommandStatusResponse),
 }
 
 /// `system_discover` payload. Mirrors the contract laid out in
@@ -198,6 +210,14 @@ pub enum IpcErrorCode {
     EventNotFound,
     /// The cursor is invalid (e.g. far above the current tail).
     InvalidCursor,
+    /// `argv[0]` basename matches the shell-bridge deny list.
+    /// `command_start_combed` is not a shell entry point.
+    ShellInterpreterDenied,
+    /// argv shape is invalid (empty, too long, or item too large).
+    ArgvInvalid,
+    /// `command_status` was called with a job id the daemon does not
+    /// know.
+    UnknownJob,
 }
 
 /// Structured error payload.
@@ -390,6 +410,63 @@ pub struct EventContextResponse {
     /// truncation.
     pub total_bytes: usize,
     pub truncated: bool,
+}
+
+/// Maximum number of explicit env entries on `command_start_combed`.
+/// Symmetric with `MAX_ARGV_ITEMS`; protects the wire path from
+/// accidental fan-out via env.
+pub const MAX_COMMAND_ENV_ITEMS: usize = 256;
+/// Maximum number of inline rules accepted on `command_start_combed`.
+/// Hot rule binding is TC42 territory; TC41 only accepts the empty
+/// default unless the operator passes a small per-call list.
+pub const MAX_COMMAND_INLINE_RULES: usize = 64;
+/// Maximum grace window before forced terminate. Clamped at the
+/// dispatcher.
+pub const MAX_COMMAND_GRACE_MS: u64 = 60_000;
+
+/// Wire shape for `command_start_combed`. Mirrors
+/// [`crate::command::CommandStartRequest`] but uses millis instead of
+/// `Duration` so the JSON form stays human-readable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandStartParams {
+    /// argv. `argv[0]` is the program; rest are passed verbatim.
+    /// Shell-string passthrough is forbidden; `argv[0]` matching the
+    /// shell-bridge deny list is rejected before the policy gate.
+    pub argv: Vec<String>,
+    /// Working directory. Optional; resolves against the daemon's
+    /// own cwd when None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    /// Explicit environment for the child. Empty means inherit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+    /// Bucket configuration override (max_events / TTL). Defaults
+    /// applied if None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_config: Option<BucketConfig>,
+    /// Optional inline rule set. Empty means use the daemon's empty
+    /// sifter (no events emitted). Hot rule binding lives in TC42.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<RuleDefinition>,
+    /// Grace window between graceful and forced terminate, in
+    /// milliseconds. Clamped to `MAX_COMMAND_GRACE_MS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grace_ms: Option<u64>,
+}
+
+impl CommandStartParams {
+    /// Resolve the effective grace `Duration`, clamping to the cap.
+    #[must_use]
+    pub fn grace(&self) -> Option<Duration> {
+        self.grace_ms
+            .map(|ms| Duration::from_millis(ms.min(MAX_COMMAND_GRACE_MS)))
+    }
+}
+
+/// Wire shape for `command_status`. Carries just the job id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandStatusParams {
+    pub job_id: JobId,
 }
 
 /// Serialize an envelope to a length-prefixed wire frame. Returns
