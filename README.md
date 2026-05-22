@@ -324,21 +324,42 @@ caps: 1024 frames, 64 KiB.
 
 ## MCP tool surface
 
-The provider-neutral interface used by an LLM harness:
+The provider-neutral interface used by an LLM harness. Current
+catalogue: 29 live tools (TC45 surface).
 
 ```text
-system_discover            policy_status
+system_discover            health                    policy_status
+self_check
 command_start_combed       command_status
-command_write_stdin        command_send_signal
-bucket_create              bucket_events_since
-bucket_wait                bucket_summary
+bucket_events_since        bucket_wait               bucket_summary
 event_context
-probe_create               probe_bind_rules
-registry_search            registry_get
-registry_create            registry_test
-registry_activate
-file_read_window           file_search           file_watch
+registry_search            registry_get              registry_upsert
+registry_test              registry_activate         registry_deactivate
+registry_list_active
+file_read_window           file_search
+file_watch_start           file_watch_stop           file_watch_list
+pty_command_start          pty_command_write_stdin   pty_command_stop
+pty_command_list
+runtime_state              probe_list                probe_status
 ```
+
+Beta source-status snapshot (full evidence in
+`EVIDENCE_REPORT_RUNTIME.md`):
+
+- Persistent audit (TC35), UDS IPC (TC37), command runtime (TC38),
+  bucket / context APIs (TC39), rmcp stdio adapter (TC40), MCP
+  command + bucket tools (TC41), dynamic registry (TC42 /
+  TC42b / TC42c / TC42d), file tools (TC43), PTY + secret-prompt
+  deny (TC44), aggregate runtime view (TC45): all **live**.
+- Local daemon + MCP stdio smoke (TC46): **live** (secondary
+  evidence; not provider-harness success on its own).
+- Codex CLI and Claude Code provider live smokes (TC46):
+  **Not Run** on the verification host. Exact blockers and
+  config-only examples in `docs/integrations/`.
+- Load / noise / backpressure gate (TC47): **live**, 8/8 stress
+  tests passing.
+- Beta recommendation (TC48): **Conditional Go**. See
+  `RELEASE_CHECKLIST.md`.
 
 The most important tool is `bucket_wait`. It lets the LLM wait for
 meaningful signal without polling raw output:

@@ -149,3 +149,43 @@ Explicitly deferred:
 
 Any of the above becoming in-scope requires a new goal in this chain
 or a successor chain.
+
+## Runtime chain (TC33 - TC48)
+
+Successor chain `terminal-commander-runtime` covering the runtime
+P0 items the MVP wave left open. All goals below have landed on
+`main`. Per-goal commit hashes and detailed evidence live in
+`EVIDENCE_REPORT_RUNTIME.md`.
+
+| Goal  | Wave                                | Outcome |
+|-------|-------------------------------------|---------|
+| TC33  | runtime-pivot research              | research, no code |
+| TC34  | runtime-pivot pivot                 | chain pivot, no code |
+| TC35  | persistent audit log V0003          | `PersistentAudit` is the production audit sink |
+| TC36  | daemon runtime bootstrap + config   | `DaemonState::bootstrap` wires every subsystem |
+| TC37  | UDS IPC + peer identity             | local UDS IPC, PeerCred per connection |
+| TC38  | command runtime + shell-bridge guard | argv-only, sudo/doas/su default-deny, shell-interpreter deny |
+| TC39  | signal-retrieval API over UDS       | bounded bucket / context APIs, notify-based wait |
+| TC40  | rmcp stdio MCP adapter              | `terminal-commander-mcp` forwards through UDS |
+| TC41  | MCP command + bucket tool surface   | command_start_combed + bucket_* tools live |
+| TC42  | registry hot activation             | rule binding through MCP / UDS |
+| TC42b | live rule rebind                    | running-stream rebind without draft loss |
+| TC42c | scoped registry rule bindings       | Global / Bucket / Job / Probe scope |
+| TC42d | explicit scope on activate / deactivate | `IpcErrorCode::ScopeInvalid`; nextest gate |
+| TC43  | file probe search / watch / bounded read | file_read_window, file_search, file_watch_* tools |
+| TC44  | POSIX PTY spawn + bounded stdin     | `pty-process = "=0.5.3"`, secret-prompt deny |
+| TC45  | aggregate runtime view              | runtime_state / probe_list / probe_status |
+| TC46  | provider-harness smoke              | local daemon + MCP stdio smoke + Codex / Claude Code configs |
+| TC47  | load / noise / backpressure gate    | 8 stress tests, no product-code changes |
+| TC48  | beta gate evidence review           | this report; recommendation: `Conditional Go` |
+
+Out-of-runtime-chain (still deferred):
+
+- Native notify / inotify file-watch backend (TC43 polling remains).
+- Windows-native ConPTY (TC44 is Unix-only).
+- Daemon-side `frames_suppressed` counter (BACKLOG P1.1).
+- Live provider-harness validation against Codex CLI and Claude Code
+  on a host where both binaries work (BACKLOG P1.2 / P1.3).
+
+Successor chain after TC48 is operator-driven beta exercise, not a
+new code chain.
