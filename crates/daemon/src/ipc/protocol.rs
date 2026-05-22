@@ -143,6 +143,20 @@ pub enum IpcRequest {
     RegistryDeactivate(RegistryDeactivateParams),
     /// Snapshot of every currently-active `(rule_id, version)`.
     RegistryListActive,
+    /// Bounded line/byte window read of a regular file. Never
+    /// returns the whole file; the daemon clamps the window.
+    FileReadWindow(FileReadWindowParams),
+    /// Bounded substring/regex search over one file. Returns
+    /// structured match pointers + short snippets only.
+    FileSearch(FileSearchParams),
+    /// Start a daemon-owned file probe that emits structured signal
+    /// events into a bucket as the file is appended to. Never
+    /// streams raw file content.
+    FileWatchStart(FileWatchStartParams),
+    /// Stop a previously-started file watch by `watch_id`.
+    FileWatchStop(FileWatchStopParams),
+    /// Snapshot of every currently-live file watch.
+    FileWatchList,
 }
 
 /// Success / error union. Success carries a typed payload per method;
@@ -182,6 +196,11 @@ pub enum IpcResponse {
     RegistryActivate(RegistryActivateResponse),
     RegistryDeactivate(RegistryDeactivateResponse),
     RegistryListActive(RegistryListActiveResponse),
+    FileReadWindow(FileReadWindowResponse),
+    FileSearch(FileSearchResponse),
+    FileWatchStart(FileWatchStartResponse),
+    FileWatchStop(FileWatchStopResponse),
+    FileWatchList(FileWatchListResponse),
 }
 
 /// `system_discover` payload. Mirrors the contract laid out in
@@ -263,6 +282,24 @@ pub enum IpcErrorCode {
     /// (unknown bucket / job / probe id) or with a malformed scope
     /// payload. The activation is NOT silently widened to Global.
     ScopeInvalid,
+    /// `file_*` request referenced a path the policy engine rejected
+    /// (default-deny suffix or future per-profile path policy).
+    PathDenied,
+    /// `file_*` request referenced a path that does not exist on
+    /// disk OR is not a regular file (directories rejected here so
+    /// TC43 does not balloon into directory probe expansion).
+    FileNotFound,
+    /// `file_read_window` / `file_search` detected non-UTF-8 bytes
+    /// in the requested window. Binary content is rejected with a
+    /// typed code instead of streaming bytes to the LLM.
+    FileBinary,
+    /// Request exceeds a bounded cap (line count, byte count, glob
+    /// breadth, search result count). The dispatcher clamps where
+    /// safe; payloads that cannot be clamped surface this code.
+    OversizedRequest,
+    /// `file_watch_stop` referenced a watch id the daemon does not
+    /// know.
+    UnknownWatch,
 }
 
 /// Structured error payload.
@@ -694,6 +731,184 @@ pub struct RegistryActiveEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryListActiveResponse {
     pub entries: Vec<RegistryActiveEntry>,
+}
+
+// =====================================================================
+// TC43: file probe surface.
+//
+// Three families:
+//   - `file_read_window` — bounded line/byte window read of one file.
+//   - `file_search`       — bounded substring/regex match over one file.
+//   - `file_watch_*`      — daemon-owned follow-mode FileProbe attached
+//                           to a bucket so scoped rules emit signal.
+// =====================================================================
+
+/// Hard cap on lines returned by `file_read_window` in a single call.
+pub const MAX_FILE_READ_LINES: u32 = 2_000;
+/// Default lines when the caller omits a limit.
+pub const DEFAULT_FILE_READ_LINES: u32 = 200;
+/// Hard cap on bytes returned by `file_read_window`. Same envelope cap
+/// shape as the bucket / event-context payloads.
+pub const MAX_FILE_READ_BYTES: usize = 64 * 1024;
+/// Default `file_read_window` byte cap.
+pub const DEFAULT_FILE_READ_BYTES: usize = MAX_FILE_READ_BYTES;
+/// Hard cap on matches returned by `file_search` in a single call.
+pub const MAX_FILE_SEARCH_MATCHES: u32 = 500;
+/// Default `file_search` match cap.
+pub const DEFAULT_FILE_SEARCH_MATCHES: u32 = 100;
+/// Hard cap on snippet bytes returned per `file_search` match.
+pub const MAX_FILE_SEARCH_SNIPPET_BYTES: usize = 512;
+/// Default snippet bytes per match.
+pub const DEFAULT_FILE_SEARCH_SNIPPET_BYTES: usize = 240;
+/// Hard cap on bytes scanned by a single `file_search` call. Protects
+/// the daemon from a request that asks to search a gigabyte file.
+pub const MAX_FILE_SEARCH_SCAN_BYTES: u64 = 16 * 1024 * 1024;
+
+/// `file_read_window` parameters.
+///
+/// Either `start_line` (1-based) drives a line-window read or
+/// `start_byte` drives a byte-window read. If both are omitted the
+/// daemon reads from line 1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileReadWindowParams {
+    pub path: std::path::PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lines: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<usize>,
+}
+
+/// One line returned by `file_read_window`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileLine {
+    /// 1-based line number within the file.
+    pub line: u64,
+    /// Byte offset where this line begins. Useful for follow-up
+    /// reads / context windows.
+    pub byte_offset: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileReadWindowResponse {
+    pub path: std::path::PathBuf,
+    pub lines: Vec<FileLine>,
+    /// File size in bytes at read time.
+    pub file_bytes: u64,
+    /// `true` when the response was clamped by line / byte cap.
+    pub truncated: bool,
+    /// First byte offset past the last line returned. Lets the
+    /// caller compute a follow-up window without rereading.
+    pub next_byte_offset: u64,
+}
+
+/// `file_search` parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSearchParams {
+    pub path: std::path::PathBuf,
+    /// Substring to find. Required.
+    pub query: String,
+    /// Case-insensitive match. Defaults to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_insensitive: Option<bool>,
+    /// Hard cap on returned matches. Clamped to
+    /// [`MAX_FILE_SEARCH_MATCHES`]. Omitted = [`DEFAULT_FILE_SEARCH_MATCHES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_matches: Option<u32>,
+    /// Hard cap on snippet bytes per match. Clamped to
+    /// [`MAX_FILE_SEARCH_SNIPPET_BYTES`]. Omitted =
+    /// [`DEFAULT_FILE_SEARCH_SNIPPET_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_snippet_bytes: Option<usize>,
+}
+
+/// One `file_search` match. Bounded shape: never the whole line, never
+/// arbitrary bytes — `snippet` is capped at `max_snippet_bytes`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSearchMatch {
+    /// 1-based line number.
+    pub line: u64,
+    /// Byte offset of the matching position within the file.
+    pub byte_offset: u64,
+    /// Bounded text snippet around the match. Replaced with the
+    /// owning line, truncated to `max_snippet_bytes`. Never raw
+    /// stream bytes; always UTF-8.
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSearchResponse {
+    pub path: std::path::PathBuf,
+    pub matches: Vec<FileSearchMatch>,
+    /// `true` when the search hit the per-call cap or the scan-bytes
+    /// budget before completing.
+    pub truncated: bool,
+    /// Bytes actually scanned (may be lower than file size when the
+    /// scan-bytes budget tripped first).
+    pub bytes_scanned: u64,
+}
+
+/// `file_watch_start` parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWatchStartParams {
+    pub path: std::path::PathBuf,
+    /// Optional bucket config (max_events / TTL). Defaults applied
+    /// if None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_config: Option<BucketConfig>,
+    /// Optional inline rule set bound to this watch only. Empty
+    /// means the per-job set is whatever scoped activations the
+    /// registry resolves for the watch's `(bucket_id, watch_id,
+    /// probe_id)` triple.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<RuleDefinition>,
+    /// Follow from end (skip existing content) or from beginning.
+    /// Defaults to follow-end (typical "tail -F" semantics).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_from_beginning: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWatchStartResponse {
+    /// Opaque watch identifier. The LLM uses this with
+    /// `file_watch_stop`. Wire form is a JobId so scoped activation
+    /// can target a single watch via `ActivationScope::Job { job_id }`.
+    pub watch_id: JobId,
+    pub bucket_id: BucketId,
+    pub probe_id: terminal_commander_core::ProbeId,
+    pub cursor: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWatchStopParams {
+    pub watch_id: JobId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWatchStopResponse {
+    pub watch_id: JobId,
+    pub bucket_id: BucketId,
+    pub frames_total: u64,
+    pub events_emitted: u64,
+    pub bytes_total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWatchListEntry {
+    pub watch_id: JobId,
+    pub bucket_id: BucketId,
+    pub probe_id: terminal_commander_core::ProbeId,
+    pub path: std::path::PathBuf,
+    pub frames_total: u64,
+    pub events_emitted: u64,
+    pub bytes_total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWatchListResponse {
+    pub entries: Vec<FileWatchListEntry>,
 }
 
 /// Serialize an envelope to a length-prefixed wire frame. Returns

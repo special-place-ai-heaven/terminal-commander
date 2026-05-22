@@ -40,12 +40,14 @@ use terminal_commanderd::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStartResponse,
     CommandStatusParams, CommandStatusResponse, ContextUnavailableReason, DiscoverResponse,
-    EventContextParams, EventContextResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest,
-    IpcResponse, PolicyStatusResponse, RegistryActivateParams, RegistryActivateResponse,
-    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
-    RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse, RegistryTestParams,
-    RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
-    SelfCheckResponse,
+    EventContextParams, EventContextResponse, FileReadWindowParams, FileReadWindowResponse,
+    FileSearchParams, FileSearchResponse, FileWatchListResponse, FileWatchStartParams,
+    FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, IpcContextFrame, IpcError,
+    IpcErrorCode, IpcRequest, IpcResponse, PolicyStatusResponse, RegistryActivateParams,
+    RegistryActivateResponse, RegistryDeactivateParams, RegistryDeactivateResponse,
+    RegistryGetParams, RegistryGetResponse, RegistryListActiveResponse, RegistrySearchParams,
+    RegistrySearchResponse, RegistryTestParams, RegistryTestResponse, RegistryTestSample,
+    RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -73,6 +75,7 @@ pub struct ToolCatalogueEntry {
 /// Static catalogue of every MCP tool the adapter knows about. Tools
 /// not marked `Live` are NOT registered with the tool router — they
 /// are only advertised here so clients can see what is reserved.
+#[allow(clippy::too_many_lines)] // flat catalogue
 #[must_use]
 pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
     &[
@@ -160,6 +163,31 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "registry_list_active",
             status: ToolStatus::Live,
             description: "Snapshot of every currently-active rule (id + version + severity).",
+        },
+        ToolCatalogueEntry {
+            name: "file_read_window",
+            status: ToolStatus::Live,
+            description: "Bounded line/byte window read of one file. Never returns the whole file.",
+        },
+        ToolCatalogueEntry {
+            name: "file_search",
+            status: ToolStatus::Live,
+            description: "Bounded substring search over one file. Returns structured match pointers + capped snippets.",
+        },
+        ToolCatalogueEntry {
+            name: "file_watch_start",
+            status: ToolStatus::Live,
+            description: "Start a daemon-owned file watch bound to a bucket; emits signal only when scoped rules match.",
+        },
+        ToolCatalogueEntry {
+            name: "file_watch_stop",
+            status: ToolStatus::Live,
+            description: "Stop a previously started file watch by watch_id.",
+        },
+        ToolCatalogueEntry {
+            name: "file_watch_list",
+            status: ToolStatus::Live,
+            description: "Snapshot of every currently-live file watch.",
         },
     ]
 }
@@ -581,6 +609,145 @@ impl TerminalCommanderMcpServer {
     async fn registry_list_active(&self) -> Result<CallToolResult, McpError> {
         match self.daemon.call(IpcRequest::RegistryListActive).await {
             Ok(IpcResponse::RegistryListActive(RegistryListActiveResponse { entries })) => {
+                json_tool_result(&serde_json::json!({ "entries": entries }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `file_read_window` — bounded line/byte window read of one file.
+    #[tool(
+        description = "Read a bounded line window from a file. Returns structured lines + pointers; never the whole file."
+    )]
+    async fn file_read_window(
+        &self,
+        Parameters(params): Parameters<McpFileReadWindowParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ipc = FileReadWindowParams {
+            path: std::path::PathBuf::from(params.path),
+            start_line: params.start_line,
+            max_lines: params.max_lines,
+            max_bytes: params.max_bytes,
+        };
+        match self.daemon.call(IpcRequest::FileReadWindow(ipc)).await {
+            Ok(IpcResponse::FileReadWindow(FileReadWindowResponse {
+                path,
+                lines,
+                file_bytes,
+                truncated,
+                next_byte_offset,
+            })) => json_tool_result(&serde_json::json!({
+                "path": path,
+                "lines": lines,
+                "file_bytes": file_bytes,
+                "truncated": truncated,
+                "next_byte_offset": next_byte_offset,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `file_search` — bounded substring search over one file.
+    #[tool(
+        description = "Search a file for a substring. Returns bounded match pointers + capped snippets only."
+    )]
+    async fn file_search(
+        &self,
+        Parameters(params): Parameters<McpFileSearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ipc = FileSearchParams {
+            path: std::path::PathBuf::from(params.path),
+            query: params.query,
+            case_insensitive: params.case_insensitive,
+            max_matches: params.max_matches,
+            max_snippet_bytes: params.max_snippet_bytes,
+        };
+        match self.daemon.call(IpcRequest::FileSearch(ipc)).await {
+            Ok(IpcResponse::FileSearch(FileSearchResponse {
+                path,
+                matches,
+                truncated,
+                bytes_scanned,
+            })) => json_tool_result(&serde_json::json!({
+                "path": path,
+                "matches": matches,
+                "truncated": truncated,
+                "bytes_scanned": bytes_scanned,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `file_watch_start` — daemon-owned file watch bound to a bucket.
+    #[tool(
+        description = "Start a daemon-owned file watch. Future appended content is sifted by scoped rules and emitted as structured bucket events."
+    )]
+    async fn file_watch_start(
+        &self,
+        Parameters(params): Parameters<McpFileWatchStartParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ipc = FileWatchStartParams {
+            path: std::path::PathBuf::from(params.path),
+            bucket_config: None,
+            rules: vec![],
+            follow_from_beginning: params.follow_from_beginning,
+        };
+        match self.daemon.call(IpcRequest::FileWatchStart(ipc)).await {
+            Ok(IpcResponse::FileWatchStart(FileWatchStartResponse {
+                watch_id,
+                bucket_id,
+                probe_id,
+                cursor,
+            })) => json_tool_result(&serde_json::json!({
+                "watch_id": watch_id,
+                "bucket_id": bucket_id,
+                "probe_id": probe_id,
+                "cursor": cursor,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `file_watch_stop` — stop a live watch by id.
+    #[tool(
+        description = "Stop a previously started file watch by watch_id. Returns final counters."
+    )]
+    async fn file_watch_stop(
+        &self,
+        Parameters(params): Parameters<McpFileWatchStopParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use terminal_commander_core::ids::JobIdKind;
+        let watch_id =
+            parse_id::<JobIdKind>("watch_id", &params.watch_id).map_err(invalid_params)?;
+        let ipc = FileWatchStopParams { watch_id };
+        match self.daemon.call(IpcRequest::FileWatchStop(ipc)).await {
+            Ok(IpcResponse::FileWatchStop(FileWatchStopResponse {
+                watch_id,
+                bucket_id,
+                frames_total,
+                events_emitted,
+                bytes_total,
+            })) => json_tool_result(&serde_json::json!({
+                "watch_id": watch_id,
+                "bucket_id": bucket_id,
+                "frames_total": frames_total,
+                "events_emitted": events_emitted,
+                "bytes_total": bytes_total,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `file_watch_list` — snapshot of live file watches.
+    #[tool(description = "Snapshot of every currently-live file watch.")]
+    async fn file_watch_list(&self) -> Result<CallToolResult, McpError> {
+        match self.daemon.call(IpcRequest::FileWatchList).await {
+            Ok(IpcResponse::FileWatchList(FileWatchListResponse { entries })) => {
                 json_tool_result(&serde_json::json!({ "entries": entries }))
             }
             Ok(other) => Err(unexpected_variant(&other)),
@@ -1062,12 +1229,63 @@ impl McpActivationScope {
     }
 }
 
+// =====================================================================
+// TC43: MCP-facing DTOs for file tools. Flat string fields so the
+// generated JSON Schema is consumer-friendly. The daemon performs
+// path-policy validation; the MCP layer must not touch the filesystem.
+// =====================================================================
+
+/// MCP-facing parameters for `file_read_window`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpFileReadWindowParams {
+    /// Absolute or repo-relative path to a regular file.
+    pub path: String,
+    /// 1-based start line. Omit to read from line 1.
+    #[serde(default)]
+    pub start_line: Option<u64>,
+    /// Max lines returned. Clamped by the daemon.
+    #[serde(default)]
+    pub max_lines: Option<u32>,
+    /// Max payload bytes returned. Clamped by the daemon.
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
+}
+
+/// MCP-facing parameters for `file_search`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpFileSearchParams {
+    pub path: String,
+    pub query: String,
+    #[serde(default)]
+    pub case_insensitive: Option<bool>,
+    #[serde(default)]
+    pub max_matches: Option<u32>,
+    #[serde(default)]
+    pub max_snippet_bytes: Option<usize>,
+}
+
+/// MCP-facing parameters for `file_watch_start`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpFileWatchStartParams {
+    pub path: String,
+    /// Follow from beginning (default false = follow-end / tail-like).
+    #[serde(default)]
+    pub follow_from_beginning: Option<bool>,
+}
+
+/// MCP-facing parameters for `file_watch_stop`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpFileWatchStopParams {
+    /// Wire-form JobId returned by `file_watch_start`.
+    pub watch_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn catalogue_lists_seventeen_live_tools_at_tc42() {
+    fn catalogue_lists_twenty_two_live_tools_at_tc43() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -1093,6 +1311,11 @@ mod tests {
                 "registry_activate",
                 "registry_deactivate",
                 "registry_list_active",
+                "file_read_window",
+                "file_search",
+                "file_watch_start",
+                "file_watch_stop",
+                "file_watch_list",
             ]
         );
         let not_impl: Vec<_> = tool_catalogue()
@@ -1102,7 +1325,7 @@ mod tests {
             .collect();
         assert!(
             not_impl.is_empty(),
-            "TC42 carries forward TC41's no-not_implemented invariant; got: {not_impl:?}"
+            "TC43 carries forward TC42's no-not_implemented invariant; got: {not_impl:?}"
         );
     }
 
@@ -1124,6 +1347,11 @@ mod tests {
                 "command_start_combed".to_owned(),
                 "command_status".to_owned(),
                 "event_context".to_owned(),
+                "file_read_window".to_owned(),
+                "file_search".to_owned(),
+                "file_watch_list".to_owned(),
+                "file_watch_start".to_owned(),
+                "file_watch_stop".to_owned(),
                 "health".to_owned(),
                 "policy_status".to_owned(),
                 "registry_activate".to_owned(),

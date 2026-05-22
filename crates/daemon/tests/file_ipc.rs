@@ -1,0 +1,472 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Terminal Commander Authors
+
+//! TC43 daemon IPC tests for the file probe surface.
+//!
+//! Covers `file_read_window`, `file_search`, `file_watch_start` +
+//! `file_watch_stop`, plus the typed error paths: PathDenied,
+//! FileNotFound, FileBinary, OversizedRequest, UnknownWatch.
+
+#![cfg(unix)]
+
+use std::io::Write as _;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use terminal_commander_core::{ContextHint, RuleDefinition, RuleStatus, RuleType, Severity};
+use terminal_commander_store::AuditReadRequest;
+use terminal_commanderd::{
+    DaemonClient, DaemonConfig, DaemonState, FileReadWindowParams, FileSearchParams,
+    FileWatchStartParams, FileWatchStopParams, IpcErrorCode, IpcRequest, IpcResponse, IpcServer,
+};
+
+fn tmp_data_dir(tag: &str) -> PathBuf {
+    let mut p = std::env::temp_dir();
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    p.push(format!("tc-file-ipc-{tag}-{pid}-{nanos}"));
+    p
+}
+
+fn cleanup(p: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(p);
+}
+
+fn rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+fn write_text(path: &std::path::Path, text: &str) {
+    let mut f = std::fs::File::create(path).unwrap();
+    f.write_all(text.as_bytes()).unwrap();
+}
+
+fn build_server() -> (PathBuf, Arc<DaemonState>, terminal_commanderd::ServerHandle) {
+    let data = tmp_data_dir("server");
+    let cfg = DaemonConfig::defaults_in(&data);
+    let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+    let socket = state.config.socket_path();
+    let handle = IpcServer::new(Arc::clone(&state), socket).spawn().unwrap();
+    (data, state, handle)
+}
+
+fn kw_rule(id: &str, keyword: &str, event_kind: &str) -> RuleDefinition {
+    RuleDefinition {
+        id: id.to_owned(),
+        version: 1,
+        kind: RuleType::Keyword,
+        status: RuleStatus::Active,
+        severity: Severity::Medium,
+        event_kind: event_kind.to_owned(),
+        stream: None,
+        description: None,
+        pattern: None,
+        keywords: Some(vec![keyword.to_owned()]),
+        captures: vec![],
+        summary_template: "matched".to_owned(),
+        tags: vec!["tc43".to_owned()],
+        rate_limit_per_min: None,
+        redact: vec![],
+        context_hint: ContextHint::default(),
+        examples: vec![],
+    }
+}
+
+#[test]
+fn file_read_window_returns_bounded_lines() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let tmp = data.join("read.txt");
+        write_text(&tmp, "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        // Full read.
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileReadWindow(FileReadWindowParams {
+                    path: tmp.clone(),
+                    start_line: None,
+                    max_lines: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .expect("read");
+        let r = match resp {
+            IpcResponse::FileReadWindow(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(r.lines.len(), 6);
+        assert_eq!(r.lines[0].text, "alpha");
+        assert_eq!(r.lines[0].line, 1);
+
+        // Bounded window: start_line=3, max_lines=2.
+        let resp = client
+            .call(
+                2,
+                IpcRequest::FileReadWindow(FileReadWindowParams {
+                    path: tmp.clone(),
+                    start_line: Some(3),
+                    max_lines: Some(2),
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .expect("read window");
+        let r = match resp {
+            IpcResponse::FileReadWindow(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(r.lines.len(), 2);
+        assert_eq!(r.lines[0].text, "gamma");
+        assert_eq!(r.lines[1].text, "delta");
+        assert!(r.truncated);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn file_read_window_denies_default_deny_path() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileReadWindow(FileReadWindowParams {
+                    path: PathBuf::from("/etc/shadow"),
+                    start_line: None,
+                    max_lines: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .expect_err("default-deny path must be rejected");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn file_read_window_missing_file_returns_typed_error() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileReadWindow(FileReadWindowParams {
+                    path: data.join("does-not-exist.txt"),
+                    start_line: None,
+                    max_lines: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .expect_err("missing file must be rejected");
+        assert_eq!(err.code, IpcErrorCode::FileNotFound);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn file_search_returns_bounded_matches() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let tmp = data.join("search.txt");
+        write_text(
+            &tmp,
+            "alpha\nneedle here\nbeta\nNEEDLE upper\nneedle again\n",
+        );
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        // Case-sensitive: 2 matches.
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileSearch(FileSearchParams {
+                    path: tmp.clone(),
+                    query: "needle".to_owned(),
+                    case_insensitive: None,
+                    max_matches: None,
+                    max_snippet_bytes: None,
+                }),
+            )
+            .await
+            .expect("search");
+        let r = match resp {
+            IpcResponse::FileSearch(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(r.matches.len(), 2);
+        assert_eq!(r.matches[0].line, 2);
+        assert_eq!(r.matches[1].line, 5);
+        assert!(r.matches[0].snippet.contains("needle"));
+
+        // Case-insensitive: 3 matches.
+        let resp = client
+            .call(
+                2,
+                IpcRequest::FileSearch(FileSearchParams {
+                    path: tmp.clone(),
+                    query: "needle".to_owned(),
+                    case_insensitive: Some(true),
+                    max_matches: None,
+                    max_snippet_bytes: None,
+                }),
+            )
+            .await
+            .expect("search ci");
+        let r = match resp {
+            IpcResponse::FileSearch(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(r.matches.len(), 3);
+
+        // Cap via max_matches.
+        let resp = client
+            .call(
+                3,
+                IpcRequest::FileSearch(FileSearchParams {
+                    path: tmp.clone(),
+                    query: "needle".to_owned(),
+                    case_insensitive: Some(true),
+                    max_matches: Some(1),
+                    max_snippet_bytes: None,
+                }),
+            )
+            .await
+            .expect("search cap");
+        let r = match resp {
+            IpcResponse::FileSearch(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(r.matches.len(), 1);
+        assert!(r.truncated);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn file_search_rejects_empty_query() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let tmp = data.join("q.txt");
+        write_text(&tmp, "anything\n");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileSearch(FileSearchParams {
+                    path: tmp.clone(),
+                    query: String::new(),
+                    case_insensitive: None,
+                    max_matches: None,
+                    max_snippet_bytes: None,
+                }),
+            )
+            .await
+            .expect_err("empty query rejected");
+        assert_eq!(err.code, IpcErrorCode::OversizedRequest);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn file_read_window_rejects_binary() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let tmp = data.join("bin.dat");
+        // Invalid UTF-8 bytes.
+        std::fs::write(&tmp, [0xff, 0xfe, 0xfa, 0x00, 0x01, 0x02]).unwrap();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileReadWindow(FileReadWindowParams {
+                    path: tmp.clone(),
+                    start_line: None,
+                    max_lines: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .expect_err("binary content rejected");
+        assert_eq!(err.code, IpcErrorCode::FileBinary);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn file_watch_start_then_append_emits_events_when_rule_active() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server();
+        let tmp = data.join("watch.log");
+        write_text(&tmp, "preexisting\n");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(3));
+
+        // Start watch with inline rule so we don't need to activate.
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileWatchStart(FileWatchStartParams {
+                    path: tmp.clone(),
+                    bucket_config: None,
+                    rules: vec![kw_rule("kw-watch", "needle", "needle_match")],
+                    follow_from_beginning: Some(false),
+                }),
+            )
+            .await
+            .expect("watch start");
+        let ws = match resp {
+            IpcResponse::FileWatchStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // Append matching content.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        {
+            let mut f = std::fs::OpenOptions::new().append(true).open(&tmp).unwrap();
+            writeln!(f, "needle appears here").unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        // bucket_events_since should see at least one needle_match.
+        let resp = client
+            .call(
+                2,
+                IpcRequest::BucketEventsSince(terminal_commanderd::BucketEventsSinceParams {
+                    bucket_id: ws.bucket_id,
+                    cursor: 0,
+                    severity_min: None,
+                    kind_filter: None,
+                    limit: None,
+                }),
+            )
+            .await
+            .expect("events");
+        let r = match resp {
+            IpcResponse::BucketEventsSince(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(
+            r.events.iter().any(|e| e.kind == "needle_match"),
+            "expected needle_match in bucket; got {:?}",
+            r.events
+        );
+
+        // Stop the watch.
+        let resp = client
+            .call(
+                3,
+                IpcRequest::FileWatchStop(FileWatchStopParams {
+                    watch_id: ws.watch_id,
+                }),
+            )
+            .await
+            .expect("stop");
+        let stopped = match resp {
+            IpcResponse::FileWatchStop(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(stopped.watch_id, ws.watch_id);
+        assert!(stopped.events_emitted >= 1);
+
+        // Audit row landed for the start.
+        let rows = {
+            let mut g = state.store.lock();
+            g.audit_since(&AuditReadRequest::new(0)).unwrap()
+        };
+        assert!(
+            rows.iter().any(|r| r.action == "file_watch_start"),
+            "expected file_watch_start audit row"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn file_watch_stop_unknown_id_returns_typed_error() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWatchStop(FileWatchStopParams {
+                    watch_id: terminal_commander_core::JobId::new(),
+                }),
+            )
+            .await
+            .expect_err("unknown watch must be rejected");
+        assert_eq!(err.code, IpcErrorCode::UnknownWatch);
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn file_watch_denies_default_deny_path() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWatchStart(FileWatchStartParams {
+                    path: PathBuf::from("/etc/shadow"),
+                    bucket_config: None,
+                    rules: vec![],
+                    follow_from_beginning: None,
+                }),
+            )
+            .await
+            .expect_err("sensitive path watch must be rejected");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}

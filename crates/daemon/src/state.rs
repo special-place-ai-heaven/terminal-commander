@@ -25,6 +25,7 @@ use crate::activation::ActivationRegistry;
 use crate::audit::PersistentAudit;
 use crate::command::CommandRuntime;
 use crate::config::DaemonConfig;
+use crate::file_watch::WatchRuntime;
 use crate::policy::PolicyEngine;
 use crate::router::Router;
 
@@ -77,6 +78,10 @@ pub struct DaemonState {
     /// persistent `rule_activations` table at bootstrap; mutated by
     /// the `registry_activate` / `registry_deactivate` IPC handlers.
     pub activation: Arc<ActivationRegistry>,
+    /// File-watch runtime (TC43). Owns live `FileProbe` handles
+    /// attached to buckets. Deliberately separate from
+    /// `CommandRuntime`.
+    pub watch: Arc<WatchRuntime>,
 }
 
 impl std::fmt::Debug for DaemonState {
@@ -169,6 +174,14 @@ impl DaemonState {
             policy,
             Arc::clone(&activation),
         ));
+        let watch = Arc::new(WatchRuntime::new(
+            Arc::clone(&router),
+            Arc::clone(&rings),
+            Arc::clone(&jobs),
+            Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
+            policy,
+            Arc::clone(&activation),
+        ));
 
         Ok(Self {
             config,
@@ -182,6 +195,7 @@ impl DaemonState {
             router,
             command,
             activation,
+            watch,
         })
     }
 

@@ -26,7 +26,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use terminal_commander_core::{
     BucketId, BucketReadRequest, BucketReadResponse, BucketSummary, BucketWaitRequest,
     BucketWaitResponse, ContextWindowResponse, FrameId, ProbeId, Severity,
@@ -163,36 +162,10 @@ impl ToolSurface {
             .event_context(probe_id, anchor, before, after, max_bytes)?)
     }
 
-    /// `file_read_window` tool. Returns bounded byte ranges from a
-    /// file. Policy default-deny path list is consulted FIRST.
-    ///
-    /// Bounded output: response is capped at `MAX_FILE_WINDOW_BYTES`.
-    pub fn file_read_window(
-        &self,
-        path: &std::path::Path,
-        offset: u64,
-        max_bytes: usize,
-    ) -> Result<FileReadWindowResponse, McpError> {
-        let v = self.policy.evaluate(&PolicyAction::FileRead { path });
-        if v.decision == PolicyDecision::Deny {
-            return Err(McpError::PolicyDenied(v.reason));
-        }
-        let capped = max_bytes.min(MAX_FILE_WINDOW_BYTES);
-        let bytes = std::fs::read(path).map_err(McpError::Io)?;
-        let start = usize::try_from(offset)
-            .unwrap_or(usize::MAX)
-            .min(bytes.len());
-        let end = start.saturating_add(capped).min(bytes.len());
-        let slice = &bytes[start..end];
-        Ok(FileReadWindowResponse {
-            path: path.to_path_buf(),
-            offset: u64::try_from(start).unwrap_or(u64::MAX),
-            next_offset: u64::try_from(end).unwrap_or(u64::MAX),
-            truncated: end < bytes.len(),
-            content_utf8_lossy: String::from_utf8_lossy(slice).into_owned(),
-            total_size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        })
-    }
+    // TC43: the in-process `ToolSurface::file_read_window` shim was
+    // removed. The MCP-facing file_read_window now lives in
+    // `tools.rs` and forwards through the daemon UDS. Per TC43, the
+    // MCP crate MUST NOT touch the filesystem directly.
 
     /// `registry_search` tool.
     pub fn registry_search(
@@ -260,20 +233,6 @@ impl ToolSurface {
             .record_activation(rule_id, version, profile, Some("mcp"))
             .map_err(|e| McpError::Store(e.to_string()))
     }
-}
-
-/// Hard cap on a single `file_read_window` response.
-pub const MAX_FILE_WINDOW_BYTES: usize = 64 * 1024;
-
-/// Response shape for `file_read_window`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileReadWindowResponse {
-    pub path: PathBuf,
-    pub offset: u64,
-    pub next_offset: u64,
-    pub truncated: bool,
-    pub content_utf8_lossy: String,
-    pub total_size: u64,
 }
 
 #[cfg(test)]
@@ -406,25 +365,11 @@ mod tests {
     #[allow(dead_code)]
     fn no_raw_stream_check(_e: &SignalEvent, _b: &BucketReadResponse) {}
 
-    #[test]
-    fn file_read_window_caps_response() {
-        let s = surface();
-        let p = std::env::temp_dir().join(format!("tc-mcp-file-window-{}", std::process::id()));
-        std::fs::write(&p, vec![b'a'; 200_000]).unwrap();
-        let resp = s.file_read_window(&p, 0, 1_000_000).unwrap();
-        // Capped at MAX_FILE_WINDOW_BYTES.
-        assert!(resp.content_utf8_lossy.len() <= MAX_FILE_WINDOW_BYTES);
-        assert!(resp.truncated);
-        let _ = std::fs::remove_file(&p);
-    }
-
-    #[test]
-    fn file_read_window_denies_ssh_key_path() {
-        let s = surface();
-        let p = std::path::Path::new("/home/dev/.ssh/id_rsa");
-        let err = s.file_read_window(p, 0, 100).unwrap_err();
-        assert!(matches!(err, McpError::PolicyDenied(_)));
-    }
+    // TC43: the in-process `ToolSurface::file_read_window` was
+    // removed (MCP must not read files directly). The daemon-backed
+    // file_read_window + bounded-cap + sensitive-path-denied paths
+    // are covered by `crates/daemon/tests/file_ipc.rs` and
+    // `crates/mcp/tests/file_tools_live_e2e.rs`.
 
     #[test]
     fn registry_create_search_round_trip_via_mcp() {

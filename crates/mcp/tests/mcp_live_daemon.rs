@@ -102,6 +102,11 @@ async fn live_health_roundtrip_through_uds() {
                 "command_start_combed".to_owned(),
                 "command_status".to_owned(),
                 "event_context".to_owned(),
+                "file_read_window".to_owned(),
+                "file_search".to_owned(),
+                "file_watch_list".to_owned(),
+                "file_watch_start".to_owned(),
+                "file_watch_stop".to_owned(),
                 "health".to_owned(),
                 "policy_status".to_owned(),
                 "registry_activate".to_owned(),
@@ -114,7 +119,7 @@ async fn live_health_roundtrip_through_uds() {
                 "self_check".to_owned(),
                 "system_discover".to_owned(),
             ],
-            "live daemon must expose the full TC42 tool set"
+            "live daemon must expose the full TC43 tool set"
         );
 
         let result = client
@@ -187,8 +192,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             .filter(|t| t["status"].as_str() == Some("live"))
             .count();
         assert_eq!(
-            live_count, 17,
-            "tool catalogue must list exactly 17 live tools at TC42"
+            live_count, 22,
+            "tool catalogue must list exactly 22 live tools at TC43"
         );
 
         let _ = client.cancel().await;

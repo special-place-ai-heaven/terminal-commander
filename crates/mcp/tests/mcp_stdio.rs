@@ -78,6 +78,11 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "command_start_combed".to_owned(),
             "command_status".to_owned(),
             "event_context".to_owned(),
+            "file_read_window".to_owned(),
+            "file_search".to_owned(),
+            "file_watch_list".to_owned(),
+            "file_watch_start".to_owned(),
+            "file_watch_stop".to_owned(),
             "health".to_owned(),
             "policy_status".to_owned(),
             "registry_activate".to_owned(),
@@ -90,7 +95,7 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "self_check".to_owned(),
             "system_discover".to_owned(),
         ],
-        "TC42 must advertise the full TC41 set plus registry surface"
+        "TC43 must advertise the full TC42 set plus file probe surface"
     );
 
     let _ = client.cancel().await;

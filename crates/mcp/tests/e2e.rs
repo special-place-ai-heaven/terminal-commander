@@ -181,13 +181,7 @@ fn e2e_event_context_around_emitted_event() {
     assert_eq!(resp.frames.len(), 3);
 }
 
-#[test]
-fn e2e_file_read_window_caps_payload_for_large_file() {
-    let (s, _) = surface();
-    let p = std::env::temp_dir().join(format!("tc-e2e-frw-{}", std::process::id()));
-    std::fs::write(&p, vec![b'a'; 200_000]).unwrap();
-    let resp = s.file_read_window(&p, 0, 1_000_000).unwrap();
-    assert!(resp.truncated);
-    assert!(resp.content_utf8_lossy.len() <= 64 * 1024);
-    let _ = std::fs::remove_file(&p);
-}
+// TC43: the in-process `ToolSurface::file_read_window` was removed.
+// Bounded read + sensitive-path denial are exercised through the
+// daemon UDS in `crates/daemon/tests/file_ipc.rs` and the MCP
+// surface in `crates/mcp/tests/file_tools_live_e2e.rs`.
