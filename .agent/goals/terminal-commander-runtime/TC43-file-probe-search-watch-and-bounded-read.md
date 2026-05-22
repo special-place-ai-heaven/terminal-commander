@@ -4,7 +4,7 @@ title: File Probe Search Watch And Bounded Read
 chain_id: terminal-commander-runtime
 phase: Wave 5 - File/disk intelligence probes
 status: "Pending"
-depends_on: ["TC42"]
+depends_on: ["TC42d"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
@@ -83,21 +83,49 @@ non_goals:
 
 allowed_files_or_area:
 - crates/probes/src/file.rs
-- crates/probes/src/directory.rs
+- crates/probes/src/lib.rs
+- crates/daemon/src/ipc/**
+- crates/daemon/src/file_watch.rs
+- crates/daemon/src/state.rs
+- crates/daemon/src/policy.rs
 - crates/daemon/src/runtime.rs
 - crates/daemon/src/router.rs
-- crates/daemon/src/ipc.rs
+- crates/daemon/src/config.rs only for bounded file/search limit wiring
+- crates/daemon/src/lib.rs
+- crates/daemon/tests/**
+- crates/core/src/** only for narrow DTO/schema additions required by file read/search/watch contracts
+- crates/store/** only if existing bucket/event/context APIs need narrow integration; no migration unless explicitly justified
 - crates/mcp/src/**
-- crates/core/src/** only for file result DTOs
+- crates/mcp/tests/**
+- crates/probes/tests/**
 - docs/mcp/**
 - docs/runtime/**
-- tests/**/file*
-- tests/**/directory*
-- examples/file-search/**
+- docs/security/**
+- docs/rules/** only for file-watch rule examples
+- examples/mcp/**
+- examples/file-search/** optional
+- Cargo.lock only if a genuinely required dependency is added and justified
+- relevant crate Cargo.toml only if a genuinely required dependency is added and justified
+- .agent/goals/terminal-commander-runtime/TC43-*.md
+- .agent/goals/terminal-commander-runtime/GOAL_CHAIN_INDEX.md
+- .agent/goals/terminal-commander-runtime/RUN_ORDER.md
+
+Note: `crates/daemon/src/command.rs` is intentionally NOT in the normal allowed edit set. File-watch lifecycle must be a separate runtime path. If implementation proves `command.rs` is required, stop and report the exact seam instead of editing it silently.
 
 forbidden_files:
-- PTY spawn implementation
-- network listeners
+- PTY spawn
+- stdin control
+- shell execution
+- command execution feature expansion
+- directory/artifact probe expansion
+- installer/service work
+- privileged helper
+- sudo behavior
+- TCP/HTTP/WebSocket/network listener
+- raw stdout/stderr/log/file stream endpoint
+- direct file reads from crates/mcp
+- direct command spawn from crates/mcp
+- native notify/inotify watcher dependency unless separately justified; TC43 must not balloon into the P1 notify backend rewrite
 - privileged path bypasses
 - unbounded recursive crawl without max depth/count/bytes
 
@@ -152,12 +180,51 @@ stop_conditions:
 
 verification_command:
 ```bash
+git branch --show-current
+git status --short
 git diff --check
 cargo metadata --no-deps
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo nextest run --workspace
+# targeted daemon file IPC tests
+cargo test -p terminal-commanderd --test file_ipc
+# targeted live-daemon MCP file e2e
+cargo test -p terminal-commander-mcp --test file_tools_live_e2e
+# privilege model guards on the MCP crate
+rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp
+# prove MCP does not read files directly
+rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src
 ```
+
+## Scope Amendment (TC43 prep)
+
+This amendment aligns the original TC43 mini-spec with the actual repo layout as of TC42d, and tightens the forbidden list per operator direction. Recorded here per the same precedent as TC41 / TC42.
+
+Drift corrected:
+
+- `crates/daemon/src/ipc.rs` does not exist on `main`. The daemon uses `crates/daemon/src/ipc/` as a module directory; the allowed area now points at `crates/daemon/src/ipc/**`.
+- `tests/**/file*` / `tests/**/directory*` are not real paths in this repo. Tests live in `crates/<crate>/tests/`; the allowed area now lists `crates/daemon/tests/**`, `crates/mcp/tests/**`, and `crates/probes/tests/**`.
+- The original `allowed_files_or_area` omitted `crates/daemon/src/state.rs`, `crates/daemon/src/policy.rs`, `crates/daemon/src/lib.rs`, and a dedicated `crates/daemon/src/file_watch.rs`, all of which are needed to wire a file-watch lifecycle into the daemon the same way `command.rs` wires a process-probe lifecycle. They are now explicit.
+- `crates/probes/src/directory.rs` is removed from the allowed area; TC43 is not the directory/artifact probe expansion goal.
+- `Cargo.lock` and per-crate `Cargo.toml` files are now explicitly allowed but only if a genuinely required dependency is added and justified.
+
+Dependency:
+
+- `depends_on` updated from `TC42` to `TC42d` so the chain reflects the TC42b / TC42c / TC42d refinements that landed before file work begins.
+
+Explicit non-allowance:
+
+- `crates/daemon/src/command.rs` is intentionally not in the normal allowed edit set. File-watch lifecycle must be a separate runtime path. If implementation proves `command.rs` is required, stop and report the exact seam instead of editing it silently.
+
+Forbidden list tightened:
+
+- PTY spawn, stdin control, shell execution, command execution feature expansion, directory/artifact probe expansion, installer/service work, privileged helper, sudo behavior, TCP/HTTP/WebSocket/network listener, raw stdout/stderr/log/file stream endpoint, direct file reads from `crates/mcp`, direct command spawn from `crates/mcp`, native notify/inotify watcher dependency unless separately justified (TC43 must not balloon into the P1 notify backend rewrite), privileged path bypasses, unbounded recursive crawl without max depth/count/bytes.
+
+Verification additions:
+
+- `git branch --show-current`, `git status --short`, `cargo test --workspace`, targeted `cargo test -p terminal-commanderd --test file_ipc`, targeted `cargo test -p terminal-commander-mcp --test file_tools_live_e2e`, `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp`, and `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src` are now part of the verification command set so the gates are explicit and reproducible.
 
 ## Task Prompt
 
