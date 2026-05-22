@@ -43,6 +43,14 @@ Run the goals linearly. Do not skip a blocked goal.
 ```
 
 ```bash
+/goal .agent/goals/terminal-commander-runtime/TC42b-live-rule-rebind-for-active-streams.md
+```
+
+```bash
+/goal .agent/goals/terminal-commander-runtime/TC42c-scoped-rule-bindings-for-buckets-jobs-probes.md
+```
+
+```bash
 /goal .agent/goals/terminal-commander-runtime/TC43-file-probe-search-watch-and-bounded-read.md
 ```
 
