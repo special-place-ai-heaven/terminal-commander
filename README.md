@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/TC_logo.png" alt="Terminal Commander" width="320" />
+</p>
+
 # Terminal Commander
 
 **Terminal Commander** is a local realtime signal-channel and
