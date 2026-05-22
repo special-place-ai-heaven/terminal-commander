@@ -157,6 +157,16 @@ pub enum IpcRequest {
     FileWatchStop(FileWatchStopParams),
     /// Snapshot of every currently-live file watch.
     FileWatchList,
+    /// Start an interactive PTY argv command. Bounded metadata
+    /// response only; never returns raw screen buffer.
+    PtyCommandStart(PtyCommandStartParams),
+    /// Write bounded stdin bytes to a running PTY job. Returns
+    /// `SecretInputDenied` while a secret prompt is active.
+    PtyCommandWriteStdin(PtyCommandWriteStdinParams),
+    /// Stop a previously started PTY job by `job_id`.
+    PtyCommandStop(PtyCommandStopParams),
+    /// Snapshot of every currently-live PTY job.
+    PtyCommandList,
 }
 
 /// Success / error union. Success carries a typed payload per method;
@@ -201,6 +211,10 @@ pub enum IpcResponse {
     FileWatchStart(FileWatchStartResponse),
     FileWatchStop(FileWatchStopResponse),
     FileWatchList(FileWatchListResponse),
+    PtyCommandStart(PtyCommandStartResponse),
+    PtyCommandWriteStdin(PtyCommandWriteStdinResponse),
+    PtyCommandStop(PtyCommandStopResponse),
+    PtyCommandList(PtyCommandListResponse),
 }
 
 /// `system_discover` payload. Mirrors the contract laid out in
@@ -300,6 +314,11 @@ pub enum IpcErrorCode {
     /// `file_watch_stop` referenced a watch id the daemon does not
     /// know.
     UnknownWatch,
+    /// `pty_command_write_stdin` was issued while the target PTY job
+    /// has an active secret prompt. The LLM input MUST NOT be
+    /// written. TC44 contract: no automatic password entry, no
+    /// LLM-supplied password forwarding.
+    SecretInputDenied,
 }
 
 /// Structured error payload.
@@ -909,6 +928,95 @@ pub struct FileWatchListEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileWatchListResponse {
     pub entries: Vec<FileWatchListEntry>,
+}
+
+// =====================================================================
+// TC44: PTY command surface.
+// =====================================================================
+
+/// Hard cap on argv items for a PTY command. Matches `MAX_ARGV_ITEMS`
+/// from `command.rs` so the two surfaces stay symmetric.
+pub const MAX_PTY_ARGV_ITEMS: usize = 256;
+/// Hard cap on bytes accepted in one `pty_command_write_stdin` call.
+/// Mirrors `MAX_PTY_STDIN_BYTES` from `crates/probes::pty`.
+pub const MAX_PTY_STDIN_BYTES: usize = 4096;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyCommandStartParams {
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_config: Option<BucketConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<RuleDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyCommandStartResponse {
+    pub job_id: JobId,
+    pub bucket_id: BucketId,
+    pub probe_id: terminal_commander_core::ProbeId,
+    pub cursor: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyCommandWriteStdinParams {
+    pub job_id: JobId,
+    /// Bytes to write. Capped at `MAX_PTY_STDIN_BYTES`. Sent as a
+    /// JSON string; non-UTF-8 input must be base64-pre-encoded by the
+    /// caller (TC44 surface accepts UTF-8 only).
+    pub bytes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyCommandWriteStdinResponse {
+    pub job_id: JobId,
+    pub bytes_written: u64,
+    /// Echoes the post-write secret-prompt-active flag so the LLM
+    /// can avoid a follow-up write that would also be rejected.
+    pub secret_prompt_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyCommandStopParams {
+    pub job_id: JobId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyCommandStopResponse {
+    pub job_id: JobId,
+    pub bucket_id: BucketId,
+    pub frames_total: u64,
+    pub events_emitted: u64,
+    pub bytes_total: u64,
+    pub stdin_bytes_written: u64,
+    pub secret_prompts_total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyCommandListEntry {
+    pub job_id: JobId,
+    pub bucket_id: BucketId,
+    pub probe_id: terminal_commander_core::ProbeId,
+    pub argv: Vec<String>,
+    pub frames_total: u64,
+    pub events_emitted: u64,
+    pub bytes_total: u64,
+    pub stdin_bytes_written: u64,
+    pub secret_prompts_total: u64,
+    pub secret_prompt_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyCommandListResponse {
+    pub entries: Vec<PtyCommandListEntry>,
 }
 
 /// Serialize an envelope to a length-prefixed wire frame. Returns

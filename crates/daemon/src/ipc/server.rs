@@ -41,14 +41,16 @@ use crate::ipc::protocol::{
     IpcRequest, IpcResponse, IpcResult, MAX_BUCKET_READ_LIMIT, MAX_COMMAND_ENV_ITEMS,
     MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES, MAX_CONTEXT_FRAMES, MAX_FILE_READ_BYTES,
     MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES, MAX_FILE_SEARCH_SCAN_BYTES,
-    MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_REGISTRY_TEST_SAMPLE_BYTES,
-    MAX_REGISTRY_TEST_SAMPLES, PolicyStatusResponse, RegistryActivateParams,
-    RegistryActivateResponse, RegistryActiveEntry, RegistryDeactivateParams,
-    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryListActiveResponse,
-    RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse, RegistryTestMatch,
-    RegistryTestParams, RegistryTestResponse, RegistryUpsertParams, RegistryUpsertResponse,
-    RequestEnvelope, ResponseEnvelope, SelfCheckResponse, SeverityHistogram, decode_payload,
-    encode_frame,
+    MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES,
+    MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES, PolicyStatusResponse,
+    PtyCommandListEntry, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
+    PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
+    PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
+    RegistryActiveEntry, RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams,
+    RegistryGetResponse, RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams,
+    RegistrySearchResponse, RegistryTestMatch, RegistryTestParams, RegistryTestResponse,
+    RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope,
+    SelfCheckResponse, SeverityHistogram, decode_payload, encode_frame,
 };
 use crate::state::DaemonState;
 
@@ -433,6 +435,23 @@ async fn dispatch(
             let r = handle_file_watch_list(state);
             ("file_watch_list", IpcResult::Ok { response: r })
         }
+        IpcRequest::PtyCommandStart(p) => match handle_pty_command_start(state, p) {
+            Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
+            Err(e) => ("pty_command_start", IpcResult::Err { error: e }),
+        },
+        IpcRequest::PtyCommandWriteStdin(p) => match handle_pty_command_write_stdin(state, p).await
+        {
+            Ok(r) => ("pty_command_write_stdin", IpcResult::Ok { response: r }),
+            Err(e) => ("pty_command_write_stdin", IpcResult::Err { error: e }),
+        },
+        IpcRequest::PtyCommandStop(p) => match handle_pty_command_stop(state, p) {
+            Ok(r) => ("pty_command_stop", IpcResult::Ok { response: r }),
+            Err(e) => ("pty_command_stop", IpcResult::Err { error: e }),
+        },
+        IpcRequest::PtyCommandList => {
+            let r = handle_pty_command_list(state);
+            ("pty_command_list", IpcResult::Ok { response: r })
+        }
     };
     // Audit one row per accepted request. The decision label reflects
     // whether the dispatcher produced an `Ok` response or a typed
@@ -479,6 +498,10 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
             "file_watch_start".to_owned(),
             "file_watch_stop".to_owned(),
             "file_watch_list".to_owned(),
+            "pty_command_start".to_owned(),
+            "pty_command_write_stdin".to_owned(),
+            "pty_command_stop".to_owned(),
+            "pty_command_list".to_owned(),
         ],
     })
 }
@@ -1004,10 +1027,10 @@ fn handle_registry_activate(
     // every live job (TC42b behavior preserved). Scoped activations
     // only touch matching jobs.
     let cmd_report = state.command.rebind_jobs_in_scope(Some(scope));
-    // TC43: file watches share the activation registry. Rebind any
-    // live watch the scope matches so future appended lines see the
-    // new rule set.
+    // TC43: file watches share the activation registry.
     let watch_report = state.watch.rebind_watches_in_scope(Some(scope));
+    // TC44: PTY jobs share the activation registry.
+    let pty_report = state.pty.rebind_jobs_in_scope(Some(scope));
     Ok(IpcResponse::RegistryActivate(RegistryActivateResponse {
         rule_id: def.id,
         version,
@@ -1015,7 +1038,8 @@ fn handle_registry_activate(
         scope,
         jobs_rebound: cmd_report
             .jobs_rebound
-            .saturating_add(watch_report.watches_rebound),
+            .saturating_add(watch_report.watches_rebound)
+            .saturating_add(pty_report.jobs_rebound),
     }))
 }
 
@@ -1046,6 +1070,7 @@ fn handle_registry_deactivate(
     // (no fake historical un-matches).
     let cmd_report = state.command.rebind_jobs_in_scope(Some(scope));
     let watch_report = state.watch.rebind_watches_in_scope(Some(scope));
+    let pty_report = state.pty.rebind_jobs_in_scope(Some(scope));
     Ok(IpcResponse::RegistryDeactivate(
         RegistryDeactivateResponse {
             rule_id: params.rule_id.clone(),
@@ -1054,7 +1079,8 @@ fn handle_registry_deactivate(
             scope,
             jobs_rebound: cmd_report
                 .jobs_rebound
-                .saturating_add(watch_report.watches_rebound),
+                .saturating_add(watch_report.watches_rebound)
+                .saturating_add(pty_report.jobs_rebound),
         },
     ))
 }
@@ -1107,13 +1133,18 @@ fn validate_scope_against_live_jobs(
                 .live_watches()
                 .iter()
                 .any(|w| w.bucket_id == bucket_id);
-            if in_command || in_watch {
+            let in_pty = state
+                .pty
+                .live_jobs()
+                .iter()
+                .any(|j| j.bucket_id == bucket_id);
+            if in_command || in_watch || in_pty {
                 Ok(())
             } else {
                 Err(IpcError::new(
                     IpcErrorCode::ScopeInvalid,
                     format!(
-                        "scope bucket_id={} does not resolve to a live job or watch",
+                        "scope bucket_id={} does not resolve to a live job, watch, or pty",
                         bucket_id.to_wire_string()
                     ),
                 ))
@@ -1126,13 +1157,14 @@ fn validate_scope_against_live_jobs(
                 .live_watches()
                 .iter()
                 .any(|w| w.watch_id == job_id);
-            if in_command || in_watch {
+            let in_pty = state.pty.live_jobs().iter().any(|j| j.job_id == job_id);
+            if in_command || in_watch || in_pty {
                 Ok(())
             } else {
                 Err(IpcError::new(
                     IpcErrorCode::ScopeInvalid,
                     format!(
-                        "scope job_id={} does not resolve to a live job or watch",
+                        "scope job_id={} does not resolve to a live job, watch, or pty",
                         job_id.to_wire_string()
                     ),
                 ))
@@ -1149,13 +1181,14 @@ fn validate_scope_against_live_jobs(
                 .live_watches()
                 .iter()
                 .any(|w| w.probe_id == probe_id);
-            if in_command || in_watch {
+            let in_pty = state.pty.live_jobs().iter().any(|j| j.probe_id == probe_id);
+            if in_command || in_watch || in_pty {
                 Ok(())
             } else {
                 Err(IpcError::new(
                     IpcErrorCode::ScopeInvalid,
                     format!(
-                        "scope probe_id={} does not resolve to a live job or watch",
+                        "scope probe_id={} does not resolve to a live job, watch, or pty",
                         probe_id.to_wire_string()
                     ),
                 ))
@@ -1491,6 +1524,172 @@ fn handle_file_watch_stop(
             format!("file_watch_stop: {other}"),
         )),
     }
+}
+
+// =====================================================================
+// TC44: pty_command_{start,write_stdin,stop,list} handlers.
+//
+// Reuses the existing `validate_scope_against_live_jobs` /
+// `live_jobs` machinery so scoped registry activations transparently
+// reach live PTY jobs via the standard rebind path.
+// =====================================================================
+
+fn handle_pty_command_start(
+    state: &Arc<DaemonState>,
+    params: &PtyCommandStartParams,
+) -> Result<IpcResponse, IpcError> {
+    if params.argv.is_empty() {
+        return Err(IpcError::new(
+            IpcErrorCode::ArgvInvalid,
+            "argv must not be empty",
+        ));
+    }
+    if params.argv.len() > MAX_PTY_ARGV_ITEMS {
+        return Err(IpcError::new(
+            IpcErrorCode::ArgvInvalid,
+            format!(
+                "argv has {} items; cap is {MAX_PTY_ARGV_ITEMS}",
+                params.argv.len()
+            ),
+        ));
+    }
+    if params.env.len() > MAX_COMMAND_ENV_ITEMS {
+        return Err(IpcError::new(
+            IpcErrorCode::ArgvInvalid,
+            "env exceeds bounded item cap",
+        ));
+    }
+    if params.rules.len() > MAX_COMMAND_INLINE_RULES {
+        return Err(IpcError::new(
+            IpcErrorCode::OversizedRequest,
+            "rules exceeds bounded item cap",
+        ));
+    }
+    let env_os: Vec<(std::ffi::OsString, std::ffi::OsString)> = params
+        .env
+        .iter()
+        .map(|(k, v)| (std::ffi::OsString::from(k), std::ffi::OsString::from(v)))
+        .collect();
+    let req = crate::pty_command::PtyStartRequest {
+        argv: params.argv.clone(),
+        cwd: params.cwd.clone(),
+        env: env_os,
+        bucket_config: params.bucket_config.clone(),
+        rules: params.rules.clone(),
+        rows: params.rows,
+        cols: params.cols,
+    };
+    match state.pty.start(req) {
+        Ok(r) => Ok(IpcResponse::PtyCommandStart(PtyCommandStartResponse {
+            job_id: r.job_id,
+            bucket_id: r.bucket_id,
+            probe_id: r.probe_id,
+            cursor: 0,
+        })),
+        Err(crate::pty_command::PtyRuntimeError::PolicyDenied(reason)) => {
+            Err(IpcError::new(IpcErrorCode::PolicyDenied, reason))
+        }
+        Err(crate::pty_command::PtyRuntimeError::ShellInterpreterDenied(shell)) => {
+            Err(IpcError::new(IpcErrorCode::ShellInterpreterDenied, shell))
+        }
+        Err(crate::pty_command::PtyRuntimeError::EmptyArgv) => Err(IpcError::new(
+            IpcErrorCode::ArgvInvalid,
+            "argv must not be empty",
+        )),
+        Err(crate::pty_command::PtyRuntimeError::Sifter(reason)) => {
+            Err(IpcError::new(IpcErrorCode::RuleInvalid, reason))
+        }
+        Err(other) => Err(IpcError::new(
+            IpcErrorCode::Internal,
+            format!("pty_command_start: {other}"),
+        )),
+    }
+}
+
+async fn handle_pty_command_write_stdin(
+    state: &Arc<DaemonState>,
+    params: &PtyCommandWriteStdinParams,
+) -> Result<IpcResponse, IpcError> {
+    let bytes = params.bytes.as_bytes();
+    if bytes.len() > MAX_PTY_STDIN_BYTES {
+        return Err(IpcError::new(
+            IpcErrorCode::OversizedRequest,
+            format!("stdin payload {} > cap {MAX_PTY_STDIN_BYTES}", bytes.len()),
+        ));
+    }
+    match state.pty.write_stdin(params.job_id, bytes).await {
+        Ok(r) => Ok(IpcResponse::PtyCommandWriteStdin(
+            PtyCommandWriteStdinResponse {
+                job_id: params.job_id,
+                bytes_written: r.bytes_written,
+                secret_prompt_active: r.secret_prompt_active,
+            },
+        )),
+        Err(crate::pty_command::PtyRuntimeError::SecretInputDenied) => Err(IpcError::new(
+            IpcErrorCode::SecretInputDenied,
+            "secret prompt active; LLM-supplied input denied",
+        )),
+        Err(crate::pty_command::PtyRuntimeError::OversizedStdin) => Err(IpcError::new(
+            IpcErrorCode::OversizedRequest,
+            "stdin exceeds bounded cap",
+        )),
+        Err(crate::pty_command::PtyRuntimeError::UnknownJob(id)) => Err(IpcError::new(
+            IpcErrorCode::UnknownJob,
+            format!("pty job '{}' is not live", id.to_wire_string()),
+        )),
+        Err(other) => Err(IpcError::new(
+            IpcErrorCode::Internal,
+            format!("pty_command_write_stdin: {other}"),
+        )),
+    }
+}
+
+fn handle_pty_command_stop(
+    state: &Arc<DaemonState>,
+    params: &PtyCommandStopParams,
+) -> Result<IpcResponse, IpcError> {
+    match state.pty.stop(params.job_id) {
+        Ok((bucket_id, m)) => Ok(IpcResponse::PtyCommandStop(PtyCommandStopResponse {
+            job_id: params.job_id,
+            bucket_id,
+            frames_total: m.frames_total,
+            events_emitted: m.events_emitted,
+            bytes_total: m.bytes_total,
+            stdin_bytes_written: m.stdin_bytes_written,
+            secret_prompts_total: m.secret_prompts_total,
+        })),
+        Err(crate::pty_command::PtyRuntimeError::UnknownJob(id)) => Err(IpcError::new(
+            IpcErrorCode::UnknownJob,
+            format!("pty job '{}' is not live", id.to_wire_string()),
+        )),
+        Err(other) => Err(IpcError::new(
+            IpcErrorCode::Internal,
+            format!("pty_command_stop: {other}"),
+        )),
+    }
+}
+
+fn handle_pty_command_list(state: &Arc<DaemonState>) -> IpcResponse {
+    let entries: Vec<PtyCommandListEntry> = state
+        .pty
+        .list()
+        .into_iter()
+        .map(
+            |(job_id, bucket_id, probe_id, argv, m, secret_prompt_active)| PtyCommandListEntry {
+                job_id,
+                bucket_id,
+                probe_id,
+                argv,
+                frames_total: m.frames_total,
+                events_emitted: m.events_emitted,
+                bytes_total: m.bytes_total,
+                stdin_bytes_written: m.stdin_bytes_written,
+                secret_prompts_total: m.secret_prompts_total,
+                secret_prompt_active,
+            },
+        )
+        .collect();
+    IpcResponse::PtyCommandList(PtyCommandListResponse { entries })
 }
 
 fn handle_file_watch_list(state: &Arc<DaemonState>) -> IpcResponse {

@@ -21,6 +21,8 @@ pub mod config;
 pub mod file_watch;
 pub mod ipc;
 pub mod policy;
+#[cfg(unix)]
+pub mod pty_command;
 pub mod router;
 pub mod runtime;
 pub mod state;
@@ -49,21 +51,28 @@ pub use ipc::{
     IpcErrorCode, IpcRequest, IpcResponse, IpcResult, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS,
     MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_GRACE_MS, MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES,
     MAX_CONTEXT_FRAMES, MAX_FILE_READ_BYTES, MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES,
-    MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES,
-    MAX_REGISTRY_SEARCH_LIMIT, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
-    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PolicyStatusResponse, RegistryActivateParams,
-    RegistryActivateResponse, RegistryActiveEntry, RegistryDeactivateParams,
-    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryListActiveResponse,
-    RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse, RegistryTestMatch,
-    RegistryTestParams, RegistryTestResponse, RegistryTestSample, RegistryUpsertParams,
-    RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope, SelfCheckResponse,
-    SeverityHistogram,
+    MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS,
+    MAX_PTY_STDIN_BYTES, MAX_REGISTRY_SEARCH_LIMIT, MAX_REGISTRY_TEST_SAMPLE_BYTES,
+    MAX_REGISTRY_TEST_SAMPLES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PolicyStatusResponse,
+    PtyCommandListEntry, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
+    PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
+    PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
+    RegistryActiveEntry, RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams,
+    RegistryGetResponse, RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams,
+    RegistrySearchResponse, RegistryTestMatch, RegistryTestParams, RegistryTestResponse,
+    RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope,
+    ResponseEnvelope, SelfCheckResponse, SeverityHistogram,
 };
 #[cfg(unix)]
 pub use ipc::{DaemonClient, IpcServer, PeerCred, ServerHandle};
 pub use policy::{
     COMMANDS_DENY, DEFAULT_DENY_PATH_SUFFIXES, PolicyAction, PolicyDecision, PolicyEngine,
     PolicyProfile, PolicyVerdict,
+};
+#[cfg(unix)]
+pub use pty_command::{
+    LivePtyIdentity, PtyRebindReport, PtyRuntime, PtyRuntimeError, PtyStartRequest,
+    PtyStartResponse, PtyWriteResponse,
 };
 pub use router::Router;
 pub use runtime::{

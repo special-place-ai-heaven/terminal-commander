@@ -18,5 +18,10 @@ thiserror = "2.0.18"
 tokio = { workspace = true, features = ["process", "macros", "rt-multi-thread", "io-util", "sync", "time", "fs"] }
 vte = "0.15.0"
 
+# TC44: POSIX PTY spawn. Linux/WSL only; the crate's tokio-async API
+# is used. License: MIT. Pinned to 0.5.3 per the TC44 prep amendment.
+[target.'cfg(unix)'.dependencies]
+pty-process = { version = "=0.5.3", features = ["async"] }
+
 [lints]
 workspace = true

@@ -37,3 +37,8 @@ pub use process::{
     ProcessProbeMetrics,
 };
 pub use pty::{AnsiNormalizer, PromptDetector, PromptKind};
+#[cfg(unix)]
+pub use pty::{
+    DEFAULT_PTY_GRACE, MAX_PTY_STDIN_BYTES, PtyProbe, PtyProbeConfig, PtyProbeError,
+    PtyProbeMetrics, WriteStdinError,
+};

@@ -43,7 +43,9 @@ use terminal_commanderd::ipc::protocol::{
     EventContextParams, EventContextResponse, FileReadWindowParams, FileReadWindowResponse,
     FileSearchParams, FileSearchResponse, FileWatchListResponse, FileWatchStartParams,
     FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, IpcContextFrame, IpcError,
-    IpcErrorCode, IpcRequest, IpcResponse, PolicyStatusResponse, RegistryActivateParams,
+    IpcErrorCode, IpcRequest, IpcResponse, PolicyStatusResponse, PtyCommandListResponse,
+    PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
+    PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RegistryActivateParams,
     RegistryActivateResponse, RegistryDeactivateParams, RegistryDeactivateResponse,
     RegistryGetParams, RegistryGetResponse, RegistryListActiveResponse, RegistrySearchParams,
     RegistrySearchResponse, RegistryTestParams, RegistryTestResponse, RegistryTestSample,
@@ -188,6 +190,26 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "file_watch_list",
             status: ToolStatus::Live,
             description: "Snapshot of every currently-live file watch.",
+        },
+        ToolCatalogueEntry {
+            name: "pty_command_start",
+            status: ToolStatus::Live,
+            description: "Start an interactive non-shell argv command attached to a PTY. Bounded metadata only.",
+        },
+        ToolCatalogueEntry {
+            name: "pty_command_write_stdin",
+            status: ToolStatus::Live,
+            description: "Write bounded stdin bytes to a running PTY job. Denied while a secret prompt is active.",
+        },
+        ToolCatalogueEntry {
+            name: "pty_command_stop",
+            status: ToolStatus::Live,
+            description: "Stop a previously started PTY job by job_id. Returns final counters.",
+        },
+        ToolCatalogueEntry {
+            name: "pty_command_list",
+            status: ToolStatus::Live,
+            description: "Snapshot of every currently-live PTY job (including secret_prompt_active).",
         },
     ]
 }
@@ -754,6 +776,118 @@ impl TerminalCommanderMcpServer {
             Err(e) => Err(into_mcp_error(&e)),
         }
     }
+
+    /// `pty_command_start` — interactive PTY argv command.
+    #[tool(
+        description = "Start an interactive argv command attached to a PTY. Bounded metadata response only; never returns raw screen buffer. Shell interpreters denied."
+    )]
+    async fn pty_command_start(
+        &self,
+        Parameters(params): Parameters<McpPtyCommandStartParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let env: Vec<(String, String)> = params.env.into_iter().map(|e| (e.key, e.value)).collect();
+        let ipc = PtyCommandStartParams {
+            argv: params.argv,
+            cwd: params.cwd.map(std::path::PathBuf::from),
+            env,
+            bucket_config: None,
+            rules: vec![],
+            rows: params.rows,
+            cols: params.cols,
+        };
+        match self.daemon.call(IpcRequest::PtyCommandStart(ipc)).await {
+            Ok(IpcResponse::PtyCommandStart(PtyCommandStartResponse {
+                job_id,
+                bucket_id,
+                probe_id,
+                cursor,
+            })) => json_tool_result(&serde_json::json!({
+                "job_id": job_id,
+                "bucket_id": bucket_id,
+                "probe_id": probe_id,
+                "cursor": cursor,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `pty_command_write_stdin` — bounded stdin write.
+    #[tool(
+        description = "Write bounded UTF-8 stdin bytes to a running PTY job. Returns SecretInputDenied while a secret prompt is active; no automatic password entry."
+    )]
+    async fn pty_command_write_stdin(
+        &self,
+        Parameters(params): Parameters<McpPtyCommandWriteStdinParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use terminal_commander_core::ids::JobIdKind;
+        let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
+        let ipc = PtyCommandWriteStdinParams {
+            job_id,
+            bytes: params.bytes,
+        };
+        match self
+            .daemon
+            .call(IpcRequest::PtyCommandWriteStdin(ipc))
+            .await
+        {
+            Ok(IpcResponse::PtyCommandWriteStdin(PtyCommandWriteStdinResponse {
+                job_id,
+                bytes_written,
+                secret_prompt_active,
+            })) => json_tool_result(&serde_json::json!({
+                "job_id": job_id,
+                "bytes_written": bytes_written,
+                "secret_prompt_active": secret_prompt_active,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `pty_command_stop` — stop a live PTY job by id.
+    #[tool(description = "Stop a previously started PTY job by job_id. Returns final counters.")]
+    async fn pty_command_stop(
+        &self,
+        Parameters(params): Parameters<McpPtyCommandStopParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use terminal_commander_core::ids::JobIdKind;
+        let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
+        let ipc = PtyCommandStopParams { job_id };
+        match self.daemon.call(IpcRequest::PtyCommandStop(ipc)).await {
+            Ok(IpcResponse::PtyCommandStop(PtyCommandStopResponse {
+                job_id,
+                bucket_id,
+                frames_total,
+                events_emitted,
+                bytes_total,
+                stdin_bytes_written,
+                secret_prompts_total,
+            })) => json_tool_result(&serde_json::json!({
+                "job_id": job_id,
+                "bucket_id": bucket_id,
+                "frames_total": frames_total,
+                "events_emitted": events_emitted,
+                "bytes_total": bytes_total,
+                "stdin_bytes_written": stdin_bytes_written,
+                "secret_prompts_total": secret_prompts_total,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `pty_command_list` — snapshot of live PTY jobs.
+    #[tool(description = "Snapshot of every currently-live PTY job.")]
+    async fn pty_command_list(&self) -> Result<CallToolResult, McpError> {
+        match self.daemon.call(IpcRequest::PtyCommandList).await {
+            Ok(IpcResponse::PtyCommandList(PtyCommandListResponse { entries })) => {
+                json_tool_result(&serde_json::json!({ "entries": entries }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
 }
 
 #[tool_handler]
@@ -1280,12 +1414,44 @@ pub struct McpFileWatchStopParams {
     pub watch_id: String,
 }
 
+// =====================================================================
+// TC44: PTY command MCP DTOs.
+// =====================================================================
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpPtyCommandStartParams {
+    /// Non-empty argv. argv[0] is the program; rest are args. Shell
+    /// interpreters denied.
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: Vec<EnvEntry>,
+    #[serde(default)]
+    pub rows: Option<u16>,
+    #[serde(default)]
+    pub cols: Option<u16>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpPtyCommandWriteStdinParams {
+    /// Wire-form JobId returned by `pty_command_start`.
+    pub job_id: String,
+    /// UTF-8 stdin payload. Capped at 4096 bytes by the daemon.
+    pub bytes: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpPtyCommandStopParams {
+    pub job_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn catalogue_lists_twenty_two_live_tools_at_tc43() {
+    fn catalogue_lists_twenty_six_live_tools_at_tc44() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -1316,6 +1482,10 @@ mod tests {
                 "file_watch_start",
                 "file_watch_stop",
                 "file_watch_list",
+                "pty_command_start",
+                "pty_command_write_stdin",
+                "pty_command_stop",
+                "pty_command_list",
             ]
         );
         let not_impl: Vec<_> = tool_catalogue()
@@ -1325,7 +1495,7 @@ mod tests {
             .collect();
         assert!(
             not_impl.is_empty(),
-            "TC43 carries forward TC42's no-not_implemented invariant; got: {not_impl:?}"
+            "TC44 carries forward TC43's no-not_implemented invariant; got: {not_impl:?}"
         );
     }
 
@@ -1354,6 +1524,10 @@ mod tests {
                 "file_watch_stop".to_owned(),
                 "health".to_owned(),
                 "policy_status".to_owned(),
+                "pty_command_list".to_owned(),
+                "pty_command_start".to_owned(),
+                "pty_command_stop".to_owned(),
+                "pty_command_write_stdin".to_owned(),
                 "registry_activate".to_owned(),
                 "registry_deactivate".to_owned(),
                 "registry_get".to_owned(),

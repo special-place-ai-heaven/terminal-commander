@@ -27,6 +27,8 @@ use crate::command::CommandRuntime;
 use crate::config::DaemonConfig;
 use crate::file_watch::WatchRuntime;
 use crate::policy::PolicyEngine;
+#[cfg(unix)]
+use crate::pty_command::PtyRuntime;
 use crate::router::Router;
 
 /// Errors raised during daemon bootstrap.
@@ -82,6 +84,12 @@ pub struct DaemonState {
     /// attached to buckets. Deliberately separate from
     /// `CommandRuntime`.
     pub watch: Arc<WatchRuntime>,
+    /// PTY command runtime (TC44). Owns live `PtyProbe` handles for
+    /// interactive jobs. Linux/WSL only; on non-Unix targets the
+    /// field is absent and the IPC layer returns
+    /// `UnsupportedPlatform`.
+    #[cfg(unix)]
+    pub pty: Arc<PtyRuntime>,
 }
 
 impl std::fmt::Debug for DaemonState {
@@ -182,6 +190,15 @@ impl DaemonState {
             policy,
             Arc::clone(&activation),
         ));
+        #[cfg(unix)]
+        let pty = Arc::new(PtyRuntime::new(
+            Arc::clone(&router),
+            Arc::clone(&rings),
+            Arc::clone(&jobs),
+            Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
+            policy,
+            Arc::clone(&activation),
+        ));
 
         Ok(Self {
             config,
@@ -196,6 +213,8 @@ impl DaemonState {
             command,
             activation,
             watch,
+            #[cfg(unix)]
+            pty,
         })
     }
 
