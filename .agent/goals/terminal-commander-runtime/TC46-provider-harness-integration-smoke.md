@@ -3,15 +3,15 @@ goal_id: TC46
 title: Provider Harness Integration Smoke
 chain_id: terminal-commander-runtime
 phase: Wave 8 - Provider-facing validation
-status: "Pending"
+status: "Completed"
 depends_on: ["TC45"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-21T18:55:35+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T22:15:00+00:00"
+completed_at: "2026-05-22T22:45:00+00:00"
+completion_commit: "a7e1544"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
@@ -247,29 +247,80 @@ Verification additions:
 
 Run TC46 only on branch `main`. Complete the objective above, stay inside the allowed files/areas, respect all forbidden files and invariants, verify the work, commit only verified changes, update this goal file's status fields, and report blockers instead of guessing.
 
-## Final Report Format
+## Final Report
 
-Objective:
-- Prove a provider-neutral MCP harness can use Terminal Commander as the abstraction layer for command execution, file probing, bucket_wait, and bounded context.
+Objective (narrow / smoke-proof per Scope Amendment):
+- Prove a provider-neutral MCP harness can attach to Terminal Commander's local MCP stdio surface and call the TC45 29-tool catalogue without raw stream noise, without MCP-side spawning, without MCP-side filesystem access, and without network listeners. Ship Codex CLI + Claude Code config examples that are safe to commit.
 
-Changes:
-- <focused list of implementation changes>
+Changes (verified work commit `a7e1544`):
+- `docs/integrations/codex-cli.md` (new): Codex CLI MCP stdio walk-through. `~/.codex/config.toml` stanza targets `terminal-commander-mcp` and sets `TC_SOCKET` from `TC_DATA/terminal-commanderd.sock`. No hardcoded user paths. No credentials.
+- `docs/integrations/claude-code.md` (new): Claude Code walk-through with both the `--mcp-config <path>` form and the persistent `settings.json` form. Same env-var socket resolution. No credentials, no machine-specific absolute paths.
+- `docs/integrations/README.md`: rewrote the lead paragraph + status table to point at the new per-provider docs and the smoke script. TC27 baseline (5 MVP tools) content retained below as historical reference.
+- `scripts/smoke/verify-runtime-smoke.sh` (new, executable): bounded local smoke. Builds debug binaries, spawns `terminal-commanderd --data-dir <tmp> start --mode ipc-server`, spawns `terminal-commander-mcp` over stdio with `TC_SOCKET` pointed at the daemon's UDS, pumps a fixed JSON-RPC sequence (`initialize` → `tools/list` → `tools/call system_discover` → `tools/call health` → `tools/call command_start_combed` → `tools/call bucket_wait` → `tools/call command_status`), and asserts every response is bounded JSON. Includes a raw-stream leak check that fails if the literal echo argv string appears outside the audit-bearing fields (`argv`, `argv0`, `subject`, `summary`, `summary_template`, `reason`). Uses only cargo + python3 — no `jq`, no provider CLIs.
+
+No source code changes in `crates/`.
 
 Files changed:
-- <paths>
+- `docs/integrations/codex-cli.md` (new)
+- `docs/integrations/claude-code.md` (new)
+- `docs/integrations/README.md` (rewrote lead; TC27 baseline retained below)
+- `scripts/smoke/verify-runtime-smoke.sh` (new)
+- `.agent/goals/terminal-commander-runtime/TC46-*.md` (this file)
 
-Verification:
-- PASS/FAIL: `<command>` — <summary>
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`):
+- PASS: `git branch --show-current` — `main`
+- PASS: `git status --short` — clean after work + status commits
+- PASS: `git diff --check`
+- PASS: `cargo metadata --no-deps`
+- PASS: `cargo fmt --all --check`
+- PASS: `cargo clippy --workspace --all-targets -- -D warnings` — no warnings
+- PASS: `cargo test --workspace` — every suite green
+- PASS: `cargo nextest run --workspace` — **339/339 passing, 0 skipped** (TC45 surface unchanged)
+- PASS: `cargo test -p terminal-commander-mcp -- --nocapture` — green
+- PASS: `bash scripts/smoke/verify-runtime-smoke.sh` — **8/8 PASS assertions, SUCCESS**:
+  1. initialize protocol version
+  2. tools/list reports 29 tools
+  3. command_start_combed advertised
+  4. system_discover payload bounded
+  5. health reports ok
+  6. command_start_combed returned bucket_id + job_id
+  7. bucket_wait returned events array
+  8. no raw stream text in bounded MCP responses
+- PASS: `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` — only doc / negative-assertion matches
+- PASS: `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src` — no matches
 
-Evidence:
-- <source-status notes, test output summaries, route/status evidence, screenshots only if rendered UI changed>
+Provider smoke evidence:
 
-Commit:
-- Verified work commit: `<hash or none>`
-- Goal status commit: `<hash or none>`
+- **Codex CLI: Not Run.** `codex --help` on this verification host fails with `Error: Missing optional dependency @openai/codex-linux-x64. Reinstall Codex: npm install -g @openai/codex@latest`. The `codex` shim under Windows nvm (`/mnt/c/Program Files/nodejs/codex`) does not include the Linux x64 native binary required to run under WSL2. The Codex config-only example still ships in `docs/integrations/codex-cli.md` and is correct against the documented Codex MCP server schema. To run the provider smoke, an operator with a working Codex CLI install must follow the doc and observe the tool calls in the session transcript.
+- **Claude Code: Not Run.** `which claude` returns no result on this verification host; no `claude` binary in `$PATH` or in the user's npm-global. The Claude Code config-only example still ships in `docs/integrations/claude-code.md` and is correct against the public Claude Code MCP configuration docs. To run the provider smoke, an operator with a working Claude Code install must launch `claude --mcp-config <path>` (or use the persistent settings form) and observe `/mcp` + a tool call.
+- **Secondary evidence (not provider-harness success):** the local daemon + MCP stdio smoke run via `scripts/smoke/verify-runtime-smoke.sh` proves the transport surface end-to-end. 8/8 assertions PASS, no raw stream text in any response, the TC45 29-tool catalogue is advertised.
+
+Evidence — explicit acceptance confirmations:
+
+- **Codex MCP config example exists and is bounded/safe.** `docs/integrations/codex-cli.md` ships the `~/.codex/config.toml` stanza using `TC_SOCKET = "${TC_DATA}/terminal-commanderd.sock"` — no hardcoded user paths, no secrets.
+- **Claude Code MCP config example exists and is bounded/safe.** `docs/integrations/claude-code.md` ships both the `--mcp-config` and persistent settings forms; same env-var socket resolution.
+- **At least one real provider-harness smoke is executed if the host has the provider CLI available.** Neither provider CLI is usable on this verification host; both blockers are named with exact text above.
+- **If a provider cannot be run, the report says exactly why.** Codex: missing `@openai/codex-linux-x64`. Claude Code: no `claude` binary on PATH.
+- **No raw stream appears in any MCP response.** The smoke script's leak check passes; no MCP DTO field carries raw stdout/stderr.
+- **MCP crate still has no direct spawn or direct file-read path.** Both verification greps clean.
+- **Existing TC41-TC45 tests still pass.** Nextest 339/339, zero skipped.
+- **Full WSL/Linux verification passes.** All gates green.
+
+Source-status:
+- `scripts/smoke/verify-runtime-smoke.sh`: **live (TC46)** as the local daemon + MCP stdio smoke. Secondary evidence; not provider-harness success.
+- `docs/integrations/codex-cli.md`: **config-only (TC46)**. Provider smoke = `Not Run` on this host (exact blocker named above).
+- `docs/integrations/claude-code.md`: **config-only (TC46)**. Provider smoke = `Not Run` on this host (exact blocker named above).
+- `docs/integrations/README.md`: **updated (TC46)** — lead paragraph + status table now point at the TC45 surface and the per-provider walk-throughs; TC27 baseline retained below.
+- Every `crates/` source file: **unchanged** in this commit.
+
+Commits:
+- Goal file prep amendment: `89a573e`
+- Verified work commit: `a7e1544`
+- Goal status commit: this commit
 
 Known gaps / blockers:
-- <none or explicit blocker>
+- Provider-harness live smoke (Codex + Claude Code) is **Not Run** on this verification host. Both blockers are mechanical CLI-install issues, not Terminal Commander defects. The config-only examples ship; operators with a working provider CLI can execute the provider smoke by following the doc.
+- No Terminal Commander runtime defect surfaced during TC46.
 
 Next goal:
-- TC47-load-noise-and-backpressure-gate.md
+- TC47-load-noise-and-backpressure-gate.md — do NOT start until this TC46 report is reviewed.
