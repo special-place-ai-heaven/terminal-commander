@@ -81,27 +81,66 @@ non_goals:
 - Do not tune for unrealistic benchmark numbers at the expense of correctness.
 
 allowed_files_or_area:
-- tests/load/**
-- tests/e2e/**
-- scripts/dev/**
-- crates/core/src/** only for metrics/backpressure DTOs
-- crates/daemon/src/** only for metrics/backpressure plumbing
-- crates/probes/src/** only for bounded streaming fixes
+- crates/daemon/tests/**
+- crates/mcp/tests/**
+- crates/probes/tests/**
+- crates/sifters/tests/**
+- scripts/smoke/**
+- docs/runtime/**
+- docs/mcp/**
+- docs/security/**
 - docs/testing/**
 - TESTING.md
 - BACKLOG.md
+- .agent/goals/terminal-commander-runtime/TC47-*.md
+- .agent/goals/terminal-commander-runtime/GOAL_CHAIN_INDEX.md
+- .agent/goals/terminal-commander-runtime/RUN_ORDER.md
+
+Note: TC47 is a stress / quality gate, NOT a feature-building goal. Product-code paths are deliberately OUT of normal scope:
+- `crates/core/src/**`
+- `crates/daemon/src/**`
+- `crates/probes/src/**`
+- `crates/sifters/src/**`
+- `crates/mcp/src/**`
+
+Any of those files may be touched ONLY for a narrow real bug fix discovered by the load gate. If a fix is needed: record the exact bug, evidence, and changed file in the final report. If the fix is larger than narrow, STOP and report instead of expanding TC47.
 
 forbidden_files:
 - MCP tool surface redesign
-- network listener additions
-- privileged install behavior
+- new MCP tools
+- new runtime capabilities
+- routing / fanout rewrite
+- network listener
+- direct command spawn from `crates/mcp`
+- direct file reads from `crates/mcp`
+- shell execution feature expansion
+- raw stdout / stderr / file / PTY stream endpoint
+- privileged helper
+- installer / service work
 - unbounded raw output fixtures committed to repo
+- pretending degraded or missing stress evidence is success
 
 contracts_or_interfaces:
 - Load tests must generate noisy data at runtime or use small compressed/fixture seeds; do not commit huge raw logs.
-- Metrics must include frames_seen, frames_suppressed, events_emitted, bytes_seen, dropped_count/backpressure where applicable.
+- Metrics surfaced: `frames_total` (probe), `events_emitted` (probe + sink), `bytes_total` (probe), `BucketSummary.dropped_count` (TC07), `secret_prompts_total` (PTY, TC44), and the aggregate counters in `RuntimeStateResponse` (TC45).
+- Do NOT claim a `frames_suppressed` counter. The daemon does not surface a dedicated suppression counter today. Tests may derive a noise-reduction ratio from `frames_total / events_emitted` where the test owns both the input volume and the matching rule. The missing explicit `frames_suppressed` counter is a backlog item; record it accordingly.
 - Signal latency should be measured or bounded enough for beta; if not, record as P0/P1 with evidence.
 - A failure must be explicit, not hidden by lower assertion thresholds.
+
+Stress targets (each must be covered or marked Not Run with exact reason):
+- At least one megabyte-scale noisy process-output test (REQUIRED — `process` probe via `command_start_combed`).
+- File-watch load if feasible without rewriting the polling backend (`crates/probes::file` is poll-based; document the polling boundary if push-rate is bounded by it).
+- PTY ANSI/CR/progress-noise load if feasible and stable on WSL.
+- `bucket_wait` under concurrent events.
+- `bucket_events_since` with capped limits (the existing `MAX_BUCKET_READ_LIMIT = 10_000` cap is the hard ceiling).
+- `event_context` bounded windows (`MAX_CONTEXT_FRAMES` / `MAX_CONTEXT_BYTES`).
+- `runtime_state` / `probe_list` / `probe_status` under live load.
+- Registry activation during active streams (TC42b rebind path) if feasible.
+
+Script decision:
+- TC47 implementation MAY create `scripts/smoke/verify-load-gate.sh` only if useful.
+- If pure Rust tests are enough, no script is required; the goal is satisfied by `cargo test` evidence.
+- The existing `scripts/smoke/verify-runtime-smoke.sh` (TC46) remains a regression gate and MUST still pass.
 
 invariants:
 - The product is a realtime signal channel and abstraction layer for LLM agents, not a raw terminal/log dumping tool.
@@ -148,13 +187,86 @@ stop_conditions:
 
 verification_command:
 ```bash
+git branch --show-current
+git status --short
 git diff --check
 cargo metadata --no-deps
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo nextest run --workspace
-bash scripts/dev/verify-load-gate.sh
+# targeted load/noise/backpressure tests (names finalized in implementation; one per stress target)
+cargo test -p terminal-commanderd --test load_noise_backpressure -- --nocapture
+# regression gate from TC46
+bash scripts/smoke/verify-runtime-smoke.sh
+# optional gate created only if useful
+test -x scripts/smoke/verify-load-gate.sh && bash scripts/smoke/verify-load-gate.sh
+# privilege model guards on the MCP crate
+rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp
+# prove MCP does not read files directly
+rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src
 ```
+
+## Scope Amendment (TC47 prep)
+
+This amendment aligns the original TC47 mini-spec with the actual repo layout as of TC46 and locks the stress / quality gate boundary. Same precedent as TC41 / TC42 / TC43 / TC44 / TC45 / TC46.
+
+Drift corrected:
+
+- `tests/load/**` and `tests/e2e/**` are not real paths in this repo. Tests live in `crates/<crate>/tests/`. Replaced with `crates/daemon/tests/**`, `crates/mcp/tests/**`, `crates/probes/tests/**`, `crates/sifters/tests/**`.
+- `scripts/dev/**` is not a real directory. Replaced with `scripts/smoke/**` (the directory TC46 established).
+- `scripts/dev/verify-load-gate.sh` does not exist. Replaced with `scripts/smoke/verify-load-gate.sh` AND it is OPTIONAL — TC47 implementation creates it only if useful.
+- Allowed creation under `docs/runtime/**`, `docs/mcp/**`, `docs/security/**`, `docs/testing/**` for the stress report and any new metric backlog notes.
+- `GOAL_CHAIN_INDEX.md` / `RUN_ORDER.md` allowed only if TC47 wording needs alignment.
+
+Scope rule (locked):
+
+- TC47 is a stress / quality gate, NOT a feature-building goal.
+- Product-code paths (`crates/core/src/**`, `crates/daemon/src/**`, `crates/probes/src/**`, `crates/sifters/src/**`, `crates/mcp/src/**`) are OUT of normal TC47 scope.
+- Any product-code change must be a narrow real-bug fix discovered by the load gate. Record exact bug + evidence + changed file in the final report. If the fix is larger than narrow, STOP and report.
+
+Forbidden list locked:
+
+- new MCP tools
+- new runtime capabilities
+- routing / fanout rewrite
+- network listener
+- direct command spawn from `crates/mcp`
+- direct file reads from `crates/mcp`
+- shell execution feature expansion
+- raw stdout / stderr / file / PTY stream endpoint
+- privileged helper
+- installer / service work
+- unbounded raw output fixtures committed to repo
+- pretending degraded or missing stress evidence is success
+
+Stress targets (locked):
+
+- At least one megabyte-scale noisy process-output test (REQUIRED).
+- File-watch load if feasible without rewriting the polling backend. Document the polling boundary if push-rate is bounded by it.
+- PTY ANSI/CR/progress-noise load if feasible and stable on WSL.
+- `bucket_wait` under concurrent events.
+- `bucket_events_since` with capped limits (existing `MAX_BUCKET_READ_LIMIT = 10_000` is the ceiling).
+- `event_context` bounded windows (`MAX_CONTEXT_FRAMES` / `MAX_CONTEXT_BYTES`).
+- `runtime_state` / `probe_list` / `probe_status` under live load.
+- Registry activation during active streams (TC42b rebind path) if feasible.
+
+Metric wording:
+
+- Do NOT claim a `frames_suppressed` counter — the daemon does not surface one today. Tests may derive noise reduction from `frames_total / events_emitted` where the test owns both input volume and the matching rule. Record the missing explicit `frames_suppressed` counter as a backlog item.
+
+Acceptance clarification:
+
+- Large noisy output MUST NOT appear raw in MCP responses.
+- Matching signal MUST still be emitted.
+- Bucket reads / context windows remain bounded by the existing caps.
+- Backpressure / drop / loss state MUST be visible where loss occurs.
+- If a specific stress area is `Not Run`, record the exact reason; do NOT treat it as pass.
+- Full WSL / Linux verification required.
+
+Verification additions:
+
+- `git branch --show-current`, `git status --short`, `cargo test --workspace`, targeted `cargo test -p terminal-commanderd --test load_noise_backpressure -- --nocapture` (name placeholder; finalized in implementation), `bash scripts/smoke/verify-runtime-smoke.sh`, conditional `bash scripts/smoke/verify-load-gate.sh` (only if created), `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp`, `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src` are now part of the verification command set so the gates are explicit and reproducible.
 
 ## Task Prompt
 
