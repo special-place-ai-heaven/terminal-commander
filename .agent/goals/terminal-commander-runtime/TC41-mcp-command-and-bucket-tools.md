@@ -3,15 +3,15 @@ goal_id: TC41
 title: Mcp Command And Bucket Tools
 chain_id: terminal-commander-runtime
 phase: Wave 4 - MCP control surface
-status: "Pending"
+status: "Completed"
 depends_on: ["TC40"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-21T18:55:35+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T12:30:00+00:00"
+completed_at: "2026-05-22T13:30:00+00:00"
+completion_commit: "31f6aec"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
@@ -170,29 +170,67 @@ cargo nextest run --workspace
 
 Run TC41 only on branch `main`. Complete the objective above, stay inside the allowed files/areas, respect all forbidden files and invariants, verify the work, commit only verified changes, update this goal file's status fields, and report blockers instead of guessing.
 
-## Final Report Format
+## Final Report
 
 Objective:
 - Expose the command and bucket realtime control surface through MCP so an LLM can start work and wait for signal without terminal toil.
 
-Changes:
-- <focused list of implementation changes>
+Changes (verified work commit `31f6aec`):
+- Daemon IPC protocol: added `IpcRequest::CommandStartCombed`, `IpcRequest::CommandStatus`, the matching `IpcResponse` variants, `CommandStartParams` / `CommandStatusParams`, and `IpcErrorCode::{ShellInterpreterDenied, ArgvInvalid, UnknownJob}`. Introduced bounded caps `MAX_COMMAND_ENV_ITEMS`, `MAX_COMMAND_INLINE_RULES`, `MAX_COMMAND_GRACE_MS`.
+- Daemon IPC server: two new handlers (`handle_command_start_combed`, `handle_command_status`) forward to `state.command.start_combed` / `state.command.status`, map every `CommandError` to a typed `IpcError`, audit `ipc_command_start_combed` / `ipc_command_status` through the persistent audit sink, and re-advertise the full method list via `system_discover`.
+- MCP tool surface: six new live tools wired through `McpDaemonClient` — `command_start_combed`, `command_status`, `bucket_events_since`, `bucket_wait`, `bucket_summary`, `event_context`. Each accepts a `JsonSchema`-deriving parameters DTO; IDs cross the wire as wire-form strings and are parsed before the daemon call; severities cross as lowercase strings. All responses are bounded JSON blobs; no `stdout` / `stderr` field exists on any of them.
+- `tool_catalogue` promoted every TC40 `not_implemented` entry to `live` and added the two new command entries. The unit tests in `tools.rs` now enforce a 10-tool live set and zero `not_implemented` entries at TC41.
+- TC40 integration smoke tests (`mcp_stdio.rs`, `mcp_live_daemon.rs`) updated to the 10-tool TC41 set.
 
 Files changed:
-- <paths>
+- `crates/daemon/src/ipc/protocol.rs`
+- `crates/daemon/src/ipc/server.rs`
+- `crates/daemon/src/ipc/mod.rs`
+- `crates/daemon/src/lib.rs`
+- `crates/daemon/tests/ipc_command.rs` (new)
+- `crates/mcp/src/tools.rs`
+- `crates/mcp/tests/mcp_stdio.rs`
+- `crates/mcp/tests/mcp_live_daemon.rs`
+- `crates/mcp/tests/mcp_live_command_e2e.rs` (new)
+- `.agent/goals/terminal-commander-runtime/TC41-mcp-command-and-bucket-tools.md` (status amendment + this report)
 
-Verification:
-- PASS/FAIL: `<command>` — <summary>
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`, rustc 1.95.0, cargo-nextest 0.9.136):
+- PASS: `git branch --show-current` — `main`
+- PASS: `git status --short` — clean after the work + status commits
+- PASS: `git diff --check`
+- PASS: `cargo metadata --no-deps`
+- PASS: `cargo fmt --all --check`
+- PASS: `cargo clippy --workspace --all-targets -- -D warnings` — no warnings
+- PASS: `cargo test --workspace` — 274 tests, 0 failures
+- PASS: `cargo nextest run --workspace` — 274/274, 0 skipped
+- PASS: `cargo test -p terminal-commanderd --test ipc_command -- --nocapture` — 5 tests
+- PASS: `cargo test -p terminal-commander-mcp -- --nocapture` — all MCP tests including the live-daemon e2e
+- PASS: `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` — only doc-comment matches
 
-Evidence:
-- <source-status notes, test output summaries, route/status evidence, screenshots only if rendered UI changed>
+Evidence (acceptance items, all asserted in tests):
+1. `mcp_live_command_e2e::full_command_lifecycle_through_mcp_yields_only_structured_signal` starts a non-shell argv command via MCP, waits on its bucket through `bucket_wait`, reads `event_context` (typed `unavailable_reason` because lifecycle events carry no pointer), then queries `command_status`. The full chain runs across the rmcp stdio transport into the real daemon UDS server.
+2. `mcp_live_command_e2e::mcp_shell_attempt_is_denied_and_audited` proves the MCP shell attempt `argv = ["sh", "-c", "..."]` is rejected with the typed shell-bridge error and no spawn happens.
+3. The same e2e test re-calls `bucket_wait` against an advanced cursor with a 250 ms timeout and asserts `heartbeat = true` with an empty events array.
+4. The lifecycle event in the e2e is checked to carry `kind` starting with `command_` and `source.stream` equal to `meta`, never `stdout`/`stderr`. No raw output ever appears in MCP responses.
+5. Every MCP payload length is asserted against `MAX_RESPONSE_BYTES` in both `mcp_live_daemon.rs` and `mcp_live_command_e2e.rs`, exercising the bounded-output invariant on the real path.
+6. `mcp_crate_contains_no_command_spawn` and `mcp_crate_contains_no_tcp_listener` security tests still pass; the manual `rg` against `crates/mcp` shows only doc-comment matches.
 
-Commit:
-- Verified work commit: `<hash or none>`
-- Goal status commit: `<hash or none>`
+Source-status:
+- `system_discover`, `health`, `policy_status`, `self_check`: **live** (carried from TC40).
+- `command_start_combed`, `command_status`: **live** (TC41).
+- `bucket_events_since`, `bucket_wait`, `bucket_summary`, `event_context`: promoted **TC40 not_implemented -> live** at TC41. The MCP tools forward to the existing TC39 daemon UDS methods.
+- `command_send_signal`, `command_write_stdin`: **not implemented at TC41** and deliberately not advertised. Stdin / signal control land in TC44 (PTY) and later; they would require new daemon IPC variants and a stdin lane this goal forbids.
+- Inline `rules` parameter: **not exposed via MCP at TC41**. The wire shape supports it on the daemon side and the IPC tests use empty rules. Hot rule binding is TC42 scope; exposing it through MCP without TC42 would advertise a partial surface.
+
+Commits (local, then pushed to origin/main):
+- Verified work commit: `31f6aec`
+- Goal status commit: this commit
+- Prep amendment (scope alignment of allowed_files_or_area, no implementation): `df5c4f7`
 
 Known gaps / blockers:
-- <none or explicit blocker>
+- The prep amendment `df5c4f7` was required because the original goal file listed `crates/daemon/src/ipc.rs` while the repo uses `crates/daemon/src/ipc/` as a module directory. Recorded here for traceability; future goal-file template updates should reflect the module-directory layout.
+- `started_at` and `completed_at` in this frontmatter are operator-set timestamps; the verified-commit author dates (`2026-05-22 +0200`) are the audit-grade truth.
+- TC41 does not expose `command_send_signal`, `command_write_stdin`, or inline rule binding from MCP. These remain explicit non-goals here and are tracked for TC42 / TC44.
 
 Next goal:
-- TC42-registry-hot-activation-and-rule-binding.md
+- TC42-registry-hot-activation-and-rule-binding.md — do not start until this TC41 report is reviewed.
