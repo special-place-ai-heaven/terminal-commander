@@ -26,8 +26,11 @@
 pub mod noise;
 pub use noise::{DEFAULT_DEDUPE_WINDOW, Dedupe, NoisePolicy, ProgressDetector};
 
+use std::sync::Arc;
+
 use aho_corasick::AhoCorasick;
 use indexmap::IndexMap;
+use parking_lot::RwLock;
 use regex::{Regex, RegexSet};
 use terminal_commander_core::{
     BucketId, Captures, EventDraft, EventSource, RuleDefinition, RuleRef, RuleType, Severity,
@@ -73,9 +76,12 @@ struct KeywordRule {
     keywords: Vec<String>,
 }
 
-/// A built, ready-to-evaluate set of keyword + regex rules.
+/// Immutable, evaluatable snapshot of a built rule set. Owned and
+/// hot-swapped by [`SifterRuntime`] so callers holding an
+/// `Arc<SifterRuntime>` can keep evaluating while the rule set is
+/// rebuilt under the hood (TC42b).
 #[derive(Debug)]
-pub struct SifterRuntime {
+struct SifterRuntimeInner {
     keyword_rules: Vec<KeywordRule>,
     /// AhoCorasick over the union of all keyword tokens. For each
     /// match we look up the owning rule via `kw_pattern_to_rule`.
@@ -86,109 +92,66 @@ pub struct SifterRuntime {
     regex_set: Option<RegexSet>,
 }
 
+/// A built, ready-to-evaluate set of keyword + regex rules.
+///
+/// The outer type holds an atomic-swap container; readers
+/// (`evaluate`, `rule_count`) take a brief read lock and clone the
+/// inner `Arc` so the lock is held only long enough to grab a
+/// snapshot. Writers (`rebuild`) build the new inner outside the
+/// lock then swap it in. This is how TC42b makes
+/// `registry_activate` / `registry_deactivate` affect already-
+/// running command streams without restarting the probe.
+pub struct SifterRuntime {
+    inner: RwLock<Arc<SifterRuntimeInner>>,
+}
+
+impl std::fmt::Debug for SifterRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let snap = self.inner.read().clone();
+        f.debug_struct("SifterRuntime")
+            .field(
+                "rule_count",
+                &(snap.keyword_rules.len() + snap.regex_rules.len()),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl SifterRuntime {
     /// Build a runtime from a list of [`RuleDefinition`]s.
     ///
     /// Rules MUST be Active and of one of the MVP-live kinds
     /// (Keyword, Regex). Otherwise [`SifterError`] is returned.
     pub fn build(rules: &[RuleDefinition]) -> Result<Self, SifterError> {
-        let mut keyword_rules: Vec<KeywordRule> = Vec::new();
-        let mut kw_patterns: Vec<String> = Vec::new();
-        let mut kw_pattern_to_rule: Vec<usize> = Vec::new();
-        let mut regex_rules: Vec<RegexRule> = Vec::new();
-
-        for def in rules {
-            // Validation already covers most things, but call it
-            // here too so the runtime is a safe entry point.
-            def.validate()
-                .map_err(|e| SifterError::Invalid(def.id.clone(), e.to_string()))?;
-            if !def.status.is_runtime_eligible() {
-                return Err(SifterError::NotActive(def.id.clone()));
-            }
-            match def.kind {
-                RuleType::Keyword => {
-                    let kws = def
-                        .keywords
-                        .as_deref()
-                        .ok_or_else(|| SifterError::EmptyKeywords { id: def.id.clone() })?;
-                    if kws.is_empty() {
-                        return Err(SifterError::EmptyKeywords { id: def.id.clone() });
-                    }
-                    let rule_idx = keyword_rules.len();
-                    let kws_sorted = {
-                        let mut v: Vec<String> = kws.to_vec();
-                        v.sort();
-                        v
-                    };
-                    for kw in &kws_sorted {
-                        kw_patterns.push(kw.clone());
-                        kw_pattern_to_rule.push(rule_idx);
-                    }
-                    keyword_rules.push(KeywordRule {
-                        def: def.clone(),
-                        keywords: kws_sorted,
-                    });
-                }
-                RuleType::Regex => {
-                    let pat = def
-                        .pattern
-                        .as_deref()
-                        .ok_or_else(|| SifterError::MissingPattern { id: def.id.clone() })?;
-                    let compiled = Regex::new(pat).map_err(|e| SifterError::RegexCompile {
-                        id: def.id.clone(),
-                        reason: e.to_string(),
-                    })?;
-                    regex_rules.push(RegexRule {
-                        def: def.clone(),
-                        compiled,
-                    });
-                }
-                other => {
-                    return Err(SifterError::KindNotImplemented(format!(
-                        "{}/{other:?}",
-                        def.id
-                    )));
-                }
-            }
-        }
-
-        let keyword_ac = if kw_patterns.is_empty() {
-            None
-        } else {
-            Some(
-                AhoCorasick::new(&kw_patterns).map_err(|e| SifterError::RegexCompile {
-                    id: "<aho>".to_owned(),
-                    reason: e.to_string(),
-                })?,
-            )
-        };
-
-        let regex_set = if regex_rules.is_empty() {
-            None
-        } else {
-            let pats: Vec<&str> = regex_rules
-                .iter()
-                .map(|r| r.def.pattern.as_deref().unwrap_or(""))
-                .collect();
-            Some(RegexSet::new(pats).map_err(|e| SifterError::RegexCompile {
-                id: "<set>".to_owned(),
-                reason: e.to_string(),
-            })?)
-        };
-
+        let inner = build_inner(rules)?;
         Ok(Self {
-            keyword_rules,
-            keyword_ac,
-            kw_pattern_to_rule,
-            regex_rules,
-            regex_set,
+            inner: RwLock::new(Arc::new(inner)),
         })
     }
 
-    /// Number of active rules (kw + regex).
+    /// Atomically replace the active rule set. Builds the new
+    /// compiled state outside the lock then swaps it in. Returns the
+    /// previous rule count + the new rule count so the caller can
+    /// audit the effect.
+    ///
+    /// On error the runtime is left unchanged.
+    pub fn rebuild(&self, rules: &[RuleDefinition]) -> Result<RebindReport, SifterError> {
+        let new_inner = build_inner(rules)?;
+        let new_count = new_inner.keyword_rules.len() + new_inner.regex_rules.len();
+        let mut g = self.inner.write();
+        let old_count = g.keyword_rules.len() + g.regex_rules.len();
+        *g = Arc::new(new_inner);
+        Ok(RebindReport {
+            old_rule_count: old_count,
+            new_rule_count: new_count,
+        })
+    }
+
+    /// Number of active rules (kw + regex) in the current snapshot.
     #[must_use]
-    pub const fn rule_count(&self) -> usize {
-        self.keyword_rules.len() + self.regex_rules.len()
+    pub fn rule_count(&self) -> usize {
+        let snap = self.inner.read();
+        snap.keyword_rules.len() + snap.regex_rules.len()
     }
 
     /// Evaluate the runtime against one frame. Returns a vector of
@@ -196,6 +159,121 @@ impl SifterRuntime {
     /// by the bucket manager. Order: keyword matches first (in rule
     /// order), then regex matches.
     pub fn evaluate(&self, frame: &SourceFrame, bucket_id: BucketId) -> Vec<EventDraft> {
+        // Clone the Arc out so the lock is released before the
+        // (potentially expensive) evaluation runs. A rebuild that
+        // races with us simply means the next frame sees the new
+        // rule set; frames in flight finish against the snapshot
+        // they captured. This is the TC42b invariant: no fake
+        // historical matches, no missed future matches.
+        let snap = self.inner.read().clone();
+        snap.evaluate(frame, bucket_id)
+    }
+}
+
+/// Outcome of a [`SifterRuntime::rebuild`] call. Bounded counters
+/// only — never raw stream content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RebindReport {
+    pub old_rule_count: usize,
+    pub new_rule_count: usize,
+}
+
+fn build_inner(rules: &[RuleDefinition]) -> Result<SifterRuntimeInner, SifterError> {
+    let mut keyword_rules: Vec<KeywordRule> = Vec::new();
+    let mut kw_patterns: Vec<String> = Vec::new();
+    let mut kw_pattern_to_rule: Vec<usize> = Vec::new();
+    let mut regex_rules: Vec<RegexRule> = Vec::new();
+
+    for def in rules {
+        // Validation already covers most things, but call it
+        // here too so the runtime is a safe entry point.
+        def.validate()
+            .map_err(|e| SifterError::Invalid(def.id.clone(), e.to_string()))?;
+        if !def.status.is_runtime_eligible() {
+            return Err(SifterError::NotActive(def.id.clone()));
+        }
+        match def.kind {
+            RuleType::Keyword => {
+                let kws = def
+                    .keywords
+                    .as_deref()
+                    .ok_or_else(|| SifterError::EmptyKeywords { id: def.id.clone() })?;
+                if kws.is_empty() {
+                    return Err(SifterError::EmptyKeywords { id: def.id.clone() });
+                }
+                let rule_idx = keyword_rules.len();
+                let kws_sorted = {
+                    let mut v: Vec<String> = kws.to_vec();
+                    v.sort();
+                    v
+                };
+                for kw in &kws_sorted {
+                    kw_patterns.push(kw.clone());
+                    kw_pattern_to_rule.push(rule_idx);
+                }
+                keyword_rules.push(KeywordRule {
+                    def: def.clone(),
+                    keywords: kws_sorted,
+                });
+            }
+            RuleType::Regex => {
+                let pat = def
+                    .pattern
+                    .as_deref()
+                    .ok_or_else(|| SifterError::MissingPattern { id: def.id.clone() })?;
+                let compiled = Regex::new(pat).map_err(|e| SifterError::RegexCompile {
+                    id: def.id.clone(),
+                    reason: e.to_string(),
+                })?;
+                regex_rules.push(RegexRule {
+                    def: def.clone(),
+                    compiled,
+                });
+            }
+            other => {
+                return Err(SifterError::KindNotImplemented(format!(
+                    "{}/{other:?}",
+                    def.id
+                )));
+            }
+        }
+    }
+
+    let keyword_ac = if kw_patterns.is_empty() {
+        None
+    } else {
+        Some(
+            AhoCorasick::new(&kw_patterns).map_err(|e| SifterError::RegexCompile {
+                id: "<aho>".to_owned(),
+                reason: e.to_string(),
+            })?,
+        )
+    };
+
+    let regex_set = if regex_rules.is_empty() {
+        None
+    } else {
+        let pats: Vec<&str> = regex_rules
+            .iter()
+            .map(|r| r.def.pattern.as_deref().unwrap_or(""))
+            .collect();
+        Some(RegexSet::new(pats).map_err(|e| SifterError::RegexCompile {
+            id: "<set>".to_owned(),
+            reason: e.to_string(),
+        })?)
+    };
+
+    Ok(SifterRuntimeInner {
+        keyword_rules,
+        keyword_ac,
+        kw_pattern_to_rule,
+        regex_rules,
+        regex_set,
+    })
+}
+
+impl SifterRuntimeInner {
+    fn evaluate(&self, frame: &SourceFrame, bucket_id: BucketId) -> Vec<EventDraft> {
         let (text, truncated_bytes) = cap_text(&frame.text);
         let mut out = Vec::new();
 

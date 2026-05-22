@@ -1026,6 +1026,7 @@ version = "0.0.0"
 dependencies = [
  "aho-corasick",
  "indexmap",
+ "parking_lot",
  "regex",
  "terminal-commander-core",
  "thiserror",

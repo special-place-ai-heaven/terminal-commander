@@ -203,6 +203,29 @@ impl EventSink for DaemonEventSink {
     }
 }
 
+/// Per-job state tracked by [`CommandRuntime`]. Carries the live
+/// counters, the rebind-able sifter handle, and the per-call inline
+/// rules so a global activation change can recompute the merged
+/// rule set without losing the inline rules the operator passed at
+/// `start_combed` time (TC42b).
+#[derive(Debug, Clone)]
+struct JobBinding {
+    metrics: ProcessProbeMetrics,
+    sifter: Arc<terminal_commander_sifters::SifterRuntime>,
+    inline_rules: Vec<terminal_commander_core::RuleDefinition>,
+}
+
+/// Bounded report returned by [`CommandRuntime::rebind_all_jobs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RebindAllReport {
+    /// Jobs that were live at the moment the rebind began.
+    pub jobs_considered: u32,
+    /// Jobs whose sifter was successfully rebuilt.
+    pub jobs_rebound: u32,
+    /// Jobs whose rebuild failed; the prior sifter is unchanged.
+    pub rebuild_failures: u32,
+}
+
 /// The command runtime owned by `DaemonState`. Single instance per
 /// daemon process.
 pub struct CommandRuntime {
@@ -212,10 +235,11 @@ pub struct CommandRuntime {
     audit: Arc<dyn AuditSink>,
     policy: PolicyEngine,
     profile_label: String,
-    live: Arc<RwLock<std::collections::HashMap<JobId, ProcessProbeMetrics>>>,
-    /// Activation registry consulted at `start_combed`. The active
-    /// rule snapshot is merged with the per-call inline rules before
-    /// the per-job `SifterRuntime` is built (TC42).
+    live: Arc<RwLock<std::collections::HashMap<JobId, JobBinding>>>,
+    /// Activation registry consulted at `start_combed` AND at every
+    /// `rebind_all_jobs` call. The active rule snapshot is merged
+    /// with the per-call inline rules before the per-job
+    /// `SifterRuntime` is built (TC42) or rebuilt (TC42b).
     activation: Arc<ActivationRegistry>,
 }
 
@@ -392,32 +416,17 @@ impl CommandRuntime {
         self.router.bucket_create(bucket_id, bucket_cfg)?;
 
         // Merge globally-active rules (TC42 activation registry) with
-        // the per-call inline rules. Inline rules win on `(rule_id,
-        // version)` collisions so an operator can always shadow an
-        // active rule for one command without deactivating it
-        // globally. Deterministic ordering: active rules first (sorted
-        // by id+version), then inline rules in caller order.
-        let merged_rules: Vec<RuleDefinition> = {
-            let active = self.activation.snapshot();
-            let mut seen: std::collections::HashSet<(String, u32)> =
-                std::collections::HashSet::new();
-            // Inline rules first into the seen set so we know which
-            // active rules to skip.
-            for r in &req.rules {
-                seen.insert((r.id.clone(), r.version));
-            }
-            let mut out = Vec::with_capacity(active.len() + req.rules.len());
-            for r in active {
-                if !seen.contains(&(r.id.clone(), r.version)) {
-                    out.push(r);
-                }
-            }
-            out.extend(req.rules.iter().cloned());
-            out
-        };
+        // the per-call inline rules. Same helper TC42b uses on every
+        // rebind so semantics stay identical.
+        let merged_rules: Vec<RuleDefinition> =
+            merge_active_and_inline(&self.activation.snapshot(), &req.rules);
         let sifter = Arc::new(
             SifterRuntime::build(&merged_rules).map_err(|e| CommandError::Sifter(e.to_string()))?,
         );
+        // Keep a handle for the live binding so TC42b's
+        // `rebind_all_jobs` can swap this job's rule set without
+        // restarting the probe.
+        let sifter_for_binding = Arc::clone(&sifter);
 
         // Build the event sink BEFORE start so the spawn closure
         // captures the right router/job pair.
@@ -466,6 +475,10 @@ impl CommandRuntime {
         // job_cfg.argv (already moved into the JobManager record)
         // or a stored argv_for_meta clone.
         let argv_for_meta = req.argv.clone();
+        // Snapshot the inline rules into the binding so a future
+        // `rebind_all_jobs` can recompute `(active ∪ inline)` for
+        // this job without losing the operator's per-call rules.
+        let inline_rules_for_binding = req.rules.clone();
         let job_cfg = JobConfig {
             job_id,
             argv: req.argv,
@@ -478,9 +491,14 @@ impl CommandRuntime {
         };
         let _ = self.jobs.start(job_cfg);
         self.jobs.mark_running(job_id);
-        self.live
-            .write()
-            .insert(job_id, ProcessProbeMetrics::default());
+        self.live.write().insert(
+            job_id,
+            JobBinding {
+                metrics: ProcessProbeMetrics::default(),
+                sifter: sifter_for_binding,
+                inline_rules: inline_rules_for_binding,
+            },
+        );
         self.audit(
             "command_start",
             &job_id.to_wire_string(),
@@ -500,7 +518,13 @@ impl CommandRuntime {
         tokio::spawn(async move {
             let (final_metrics, outcome) = drive_to_exit(probe).await;
             // Update the stored metrics for command_status callers.
-            waiter_live.write().insert(job_id, final_metrics);
+            // The binding's `sifter` and `inline_rules` are
+            // preserved so a deactivation racing with the exit
+            // still has a sifter handle to swap (the no-op rebuild
+            // is harmless on a finished probe).
+            if let Some(b) = waiter_live.write().get_mut(&job_id) {
+                b.metrics = final_metrics;
+            }
 
             // Lifecycle draft.
             let draft = match outcome {
@@ -542,6 +566,80 @@ impl CommandRuntime {
         })
     }
 
+    /// Recompute every live job's sifter from the current
+    /// activation registry snapshot + that job's stored inline
+    /// rules. The probe API is unchanged; the swap happens inside
+    /// the `Arc<SifterRuntime>` each job already holds.
+    ///
+    /// This is the TC42b entry point: an LLM-issued
+    /// `registry_activate` / `registry_deactivate` calls this after
+    /// updating the activation registry so already-running commands
+    /// see the new rule set on future frames. In-flight frames
+    /// finish against the snapshot they captured (no fake historical
+    /// matches).
+    ///
+    /// Per-job rebuild failures (e.g. the active set now contains a
+    /// rule the sifter cannot compile) leave that job's prior sifter
+    /// in place and are counted in the returned report. They are
+    /// audited individually via the daemon's persistent audit sink
+    /// using the standard `command_runtime` actor.
+    pub fn rebind_all_jobs(&self) -> RebindAllReport {
+        let active_snapshot = self.activation.snapshot();
+        // Take a snapshot of (job_id, sifter_handle, inline_rules)
+        // under the read lock so the rebuild loop does not hold the
+        // map lock across a regex compile.
+        let work: Vec<(
+            JobId,
+            Arc<terminal_commander_sifters::SifterRuntime>,
+            Vec<terminal_commander_core::RuleDefinition>,
+        )> = {
+            let g = self.live.read();
+            g.iter()
+                .map(|(jid, binding)| {
+                    (
+                        *jid,
+                        Arc::clone(&binding.sifter),
+                        binding.inline_rules.clone(),
+                    )
+                })
+                .collect()
+        };
+        let mut report = RebindAllReport {
+            jobs_considered: u32::try_from(work.len()).unwrap_or(u32::MAX),
+            jobs_rebound: 0,
+            rebuild_failures: 0,
+        };
+        for (job_id, sifter, inline_rules) in work {
+            let merged = merge_active_and_inline(&active_snapshot, &inline_rules);
+            match sifter.rebuild(&merged) {
+                Ok(rb) => {
+                    report.jobs_rebound = report.jobs_rebound.saturating_add(1);
+                    self.audit(
+                        "command_sifter_rebind",
+                        &job_id.to_wire_string(),
+                        "info",
+                        None,
+                        Some(format!(
+                            "{{\"old_rule_count\":{},\"new_rule_count\":{}}}",
+                            rb.old_rule_count, rb.new_rule_count
+                        )),
+                    );
+                }
+                Err(e) => {
+                    report.rebuild_failures = report.rebuild_failures.saturating_add(1);
+                    self.audit(
+                        "command_sifter_rebind",
+                        &job_id.to_wire_string(),
+                        "error",
+                        Some(e.to_string()),
+                        None,
+                    );
+                }
+            }
+        }
+        report
+    }
+
     /// `command_status` entry point. Returns bounded counters + the
     /// final exit state for the given job. Never returns raw text.
     pub fn status(&self, job_id: JobId) -> Result<CommandStatusResponse, CommandError> {
@@ -549,7 +647,12 @@ impl CommandRuntime {
             .jobs
             .get(job_id)
             .ok_or(CommandError::UnknownJob(job_id))?;
-        let metrics = self.live.read().get(&job_id).cloned().unwrap_or_default();
+        let metrics = self
+            .live
+            .read()
+            .get(&job_id)
+            .map(|b| b.metrics.clone())
+            .unwrap_or_default();
         Ok(CommandStatusResponse {
             job_id,
             bucket_id: rec.config.bucket_id,
@@ -605,6 +708,30 @@ fn extract_signal(status: std::process::ExitStatus) -> Option<String> {
 #[cfg(not(unix))]
 const fn extract_signal(_status: std::process::ExitStatus) -> Option<String> {
     None
+}
+
+/// Compute the per-job rule set: `(active ∪ inline)`. Inline rules
+/// win on `(rule_id, version)` collisions so an operator can shadow
+/// an active rule for one job without deactivating it globally.
+/// Deterministic ordering: active rules first (already sorted by the
+/// `ActivationRegistry::snapshot` contract), then inline rules in
+/// caller order.
+fn merge_active_and_inline(
+    active: &[terminal_commander_core::RuleDefinition],
+    inline: &[terminal_commander_core::RuleDefinition],
+) -> Vec<terminal_commander_core::RuleDefinition> {
+    let mut seen: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
+    for r in inline {
+        seen.insert((r.id.clone(), r.version));
+    }
+    let mut out = Vec::with_capacity(active.len() + inline.len());
+    for r in active {
+        if !seen.contains(&(r.id.clone(), r.version)) {
+            out.push(r.clone());
+        }
+    }
+    out.extend(inline.iter().cloned());
+    out
 }
 
 fn subject_for_argv(argv: &[String]) -> String {

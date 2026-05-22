@@ -13,6 +13,7 @@ publish.workspace = true
 [dependencies]
 aho-corasick = "1.1.4"
 indexmap = "2.14.0"
+parking_lot = "0.12.5"
 regex = "1.12.3"
 terminal-commander-core.workspace = true
 thiserror = "2.0.18"

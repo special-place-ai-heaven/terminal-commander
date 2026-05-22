@@ -955,6 +955,12 @@ fn handle_registry_activate(
     g.record_activation(&def.id, version, Some(&profile), Some("ipc"))
         .map_err(map_store_error)?;
     drop(g);
+    // TC42b: push the new rule set into every already-running
+    // command's sifter. Already-running probes do not get a
+    // restart; their captured `Arc<SifterRuntime>` is rebuilt in
+    // place. Each per-job rebuild emits a `command_sifter_rebind`
+    // audit row.
+    let _ = state.command.rebind_all_jobs();
     Ok(IpcResponse::RegistryActivate(RegistryActivateResponse {
         rule_id: def.id,
         version,
@@ -972,6 +978,11 @@ fn handle_registry_deactivate(
         .deactivate_rule(&params.rule_id, params.version)
         .map_err(map_store_error)?;
     drop(g);
+    // TC42b: rebind every running command so future frames stop
+    // matching against the deactivated rule. In-flight frames
+    // finish against the snapshot they captured (no fake
+    // historical un-matches).
+    let _ = state.command.rebind_all_jobs();
     Ok(IpcResponse::RegistryDeactivate(
         RegistryDeactivateResponse {
             rule_id: params.rule_id.clone(),
