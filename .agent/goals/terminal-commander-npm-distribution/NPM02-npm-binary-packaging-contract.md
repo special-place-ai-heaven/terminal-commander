@@ -3,15 +3,15 @@ goal_id: NPM02
 title: Npm Binary Packaging Contract
 chain_id: terminal-commander-npm-distribution
 phase: Wave 1 - Distribution audit
-status: "Pending"
+status: "Completed"
 depends_on: ["NPM01"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T00:00:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T11:00:00+00:00"
+completed_at: "2026-05-23T11:40:00+00:00"
+completion_commit: "81f4ea1"
 blocked_reason: ""
 source_refs:
   - "NPM01 audit output: docs/release/npm-distribution-audit.md"
