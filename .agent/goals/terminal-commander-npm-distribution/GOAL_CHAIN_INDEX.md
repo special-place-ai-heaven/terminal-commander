@@ -1,0 +1,116 @@
+# Goal Chain Index — terminal-commander-npm-distribution
+
+Status: skeleton (NPM00 init).
+Branch: `main`.
+Successor of: `terminal-commander-runtime` (TC48 = Conditional Go on `main` at `e42e7e4`).
+
+This chain stands up npm distribution + Cursor MCP install path for
+Terminal Commander. It is a release / distribution lifecycle chain,
+NOT a runtime feature chain. The TC33–TC48 runtime surface is the
+input contract; this chain does not change runtime behavior.
+
+Language: ASCII only.
+
+## Chain summary
+
+| Goal  | Title                                                          | Status   |
+|-------|----------------------------------------------------------------|----------|
+| NPM01 | Memory and Symforge release audit                              | Pending  |
+| NPM02 | npm binary packaging contract                                  | Pending  |
+| NPM03 | Wrapper package and platform package layout                    | Pending  |
+| NPM04 | Local `npm pack` and global install smoke                      | Pending  |
+| NPM05 | GitHub Actions build matrix                                    | Pending  |
+| NPM06 | release-please manifest config                                 | Pending  |
+| NPM07 | npm trusted publishing workflow                                | Pending  |
+| NPM08 | Cursor MCP install config smoke                                | Pending  |
+| NPM09 | Release dry-run and beta publish review                        | Pending  |
+
+## Target user experience (assumption — locked at NPM02)
+
+```bash
+# Inside the supported platform (Linux x64 / Linux arm64, or WSL2)
+npm install -g terminal-commander
+```
+
+Then on PATH:
+
+- `terminal-commanderd`
+- `terminal-commander-mcp`
+- `terminal-commander`
+
+Cursor MCP config (project `.cursor/mcp.json` or global
+`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "terminal-commander": {
+      "type": "stdio",
+      "command": "terminal-commander-mcp"
+    }
+  }
+}
+```
+
+Windows operators run Cursor on Windows and invoke through WSL:
+
+```json
+{
+  "mcpServers": {
+    "terminal-commander": {
+      "type": "stdio",
+      "command": "wsl",
+      "args": ["-d", "Ubuntu-24.04", "bash", "-lc", "terminal-commander-mcp"]
+    }
+  }
+}
+```
+
+## Locked assumptions (must be honored or amended in a prep PR)
+
+- Root npm wrapper package: `terminal-commander`.
+- Platform binary packages:
+  - `@terminal-commander/linux-x64`
+  - `@terminal-commander/linux-arm64`
+- Root `bin` field exposes the three commands as Node shims that
+  resolve the platform binary via `optionalDependencies`.
+- Initial platforms: Linux x64 + Linux arm64 only. No macOS, no
+  Windows-native package until the runtime supports them
+  (`crates/probes/src/pty.rs` is `cfg(unix)`; the daemon UDS is
+  Unix-only; TC44 explicitly defers Windows ConPTY).
+- WSL is supported by installing inside WSL OR by Cursor invoking
+  `wsl ... terminal-commander-mcp`.
+- No `postinstall` binary download. Platform packages ship their
+  binaries directly and are pulled via `optionalDependencies`.
+- Prefer npm trusted publishing / OIDC via GitHub Actions. No
+  long-lived `NPM_TOKEN` unless trusted publishing is impossible
+  AND explicitly approved in a goal final report.
+- Provenance enabled.
+- Cursor MCP config is the primary provider smoke target for this
+  chain.
+
+## Out of chain (deferred)
+
+- macOS arm64 / x64 packages — pending runtime macOS validation.
+- Windows-native binary package — pending Windows runtime support
+  (currently out of scope per TC44 `non_goals`).
+- crates.io publishing — out of TC31 + TC48 scope.
+- Static linking / musl variants — opportunistic.
+- Cursor-extension automatic install — opportunistic.
+- Continue, Cline, Codex, Claude Code config templates — covered by
+  the runtime chain (TC46) and the operator beta phase, not this
+  chain.
+
+## Cross-chain invariants (inherited from terminal-commander-runtime)
+
+- MCP must not spawn commands directly. (`rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` clean.)
+- MCP must not read files directly. (`rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src` clean.)
+- No network listener.
+- No raw stream endpoint.
+- No shell-execution expansion.
+- No privileged helper or system service install.
+- No secrets, tokens, private usernames, private absolute paths, or
+  machine-specific paths in committed artifacts.
+- `Not Run` evidence MUST NOT be promoted to PASS.
+- Beta posture ceiling remains `Conditional Go` until at least one
+  provider live smoke transcript exists.
