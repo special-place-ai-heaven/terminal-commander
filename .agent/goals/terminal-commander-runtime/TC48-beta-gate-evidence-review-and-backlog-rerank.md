@@ -3,15 +3,15 @@ goal_id: TC48
 title: Beta Gate Evidence Review And Backlog Rerank
 chain_id: terminal-commander-runtime
 phase: Wave 9 - Beta readiness
-status: "Pending"
+status: "Completed"
 depends_on: ["TC47"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-21T18:55:35+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T08:30:00+00:00"
+completed_at: "2026-05-23T09:15:00+00:00"
+completion_commit: "179ebf2"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
@@ -297,29 +297,85 @@ Verification additions:
 
 Run TC48 only on branch `main`. Complete the objective above, stay inside the allowed files/areas, respect all forbidden files and invariants, verify the work, commit only verified changes, update this goal file's status fields, and report blockers instead of guessing.
 
-## Final Report Format
+## Final Report
 
-Objective:
-- Review the runtime chain evidence, correct source-status drift, rerank the backlog, and decide whether Terminal Commander is beta-ready as a realtime MCP signal abstraction layer.
+Objective (beta gate / evidence review):
+- Review the TC33-TC47 runtime chain evidence, correct source-status drift, rerank the backlog, and decide whether Terminal Commander is beta-ready.
 
-Changes:
-- <focused list of implementation changes>
+**Beta recommendation: Conditional Go.**
+
+Changes (verified work commit `179ebf2`):
+- `BACKLOG.md` (new): four historical P0s listed under "Resolved P0" with TC references. Active P0 empty. New P1 items: `frames_suppressed` counter (P1.1), Codex CLI live smoke (P1.2), Claude Code live smoke (P1.3).
+- `EVIDENCE_REPORT_RUNTIME.md` (new): per-goal verified-work + goal-status commit hashes for TC35-TC47, source-status, invariants, verification snapshot at TC47 status commit.
+- `RISK_REGISTER.md` (new): 6 active risks (R-01..R-06), 9 resolved risks (H-01..H-09). R-01 (provider live smokes) and R-02 (no `frames_suppressed`) touch beta posture; others operator-accepted or external.
+- `RELEASE_CHECKLIST.md`: rewritten from TC31 baseline. Beta = `Conditional Go`. Pre-flight mirrors TC47 gate set. Provider-harness gate is operator-driven.
+- `ROADMAP.md`: appended `Runtime chain (TC33 - TC48)` wave table.
+- `README.md`: corrected `MCP tool surface` to actual 29-tool TC45 catalogue; added beta source-status snapshot.
+
+No product-code changes. `git diff HEAD~2..HEAD -- crates/ Cargo.toml Cargo.lock rules/ config/ scripts/` returns empty.
 
 Files changed:
-- <paths>
+- `BACKLOG.md` (new)
+- `EVIDENCE_REPORT_RUNTIME.md` (new)
+- `RISK_REGISTER.md` (new)
+- `RELEASE_CHECKLIST.md`
+- `ROADMAP.md`
+- `README.md`
+- `.agent/goals/terminal-commander-runtime/TC48-*.md` (this file)
 
-Verification:
-- PASS/FAIL: `<command>` — <summary>
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`):
+- PASS: `git branch --show-current` — `main`
+- PASS: `git status --short` — clean after work + status commits
+- PASS: `git diff --check`
+- PASS: `cargo metadata --no-deps`
+- PASS: `cargo fmt --all --check`
+- PASS: `cargo clippy --workspace --all-targets -- -D warnings`
+- PASS: `cargo test --workspace` — every suite green
+- PASS: `cargo nextest run --workspace` — **347/347, 0 skipped**
+- PASS: `cargo test -p terminal-commanderd --test load_noise_backpressure -- --nocapture` — TC47 regression 8/8
+- PASS: `bash scripts/smoke/verify-runtime-smoke.sh` — TC46 regression SUCCESS (8/8 PASS)
+- PASS: `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` — doc-only matches
+- PASS: `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src` — no matches
 
-Evidence:
-- <source-status notes, test output summaries, route/status evidence, screenshots only if rendered UI changed>
+Evidence — review confirmations (each live or honestly reported):
+- TC35 persistent audit: live.
+- TC37 UDS IPC: live, bounded, local-only, no network listener.
+- TC38 command runtime: live, argv-only, shell-guarded.
+- TC39 bucket/context APIs: live, bounded, heartbeat-aware, non-streaming.
+- TC40 MCP stdio adapter: live.
+- TC41 MCP command + bucket tools: live.
+- TC42 / TC42b / TC42c / TC42d registry: live (activation + scoped binding + live rebind + explicit-scope-required).
+- TC43 file tools: live + bounded.
+- TC44 PTY: live with secret-prompt deny.
+- TC45 aggregate runtime view: live.
+- TC46 provider harness: Codex `Not Run` (`Missing optional dependency @openai/codex-linux-x64`); Claude Code `Not Run` (no `claude` binary on PATH). Local smoke = secondary evidence only.
+- TC47 load / noise / backpressure: 8/8 stress tests pass; dedicated file-watch + PTY load tests `Not Run` with exact reasons; `frames_suppressed` counter absent (BACKLOG P1.1).
 
-Commit:
-- Verified work commit: `<hash or none>`
-- Goal status commit: `<hash or none>`
+Acceptance confirmations:
+- `EVIDENCE_REPORT_RUNTIME.md` has per-goal commit hashes and verification summaries.
+- Backlog active P0 is empty; historical P0s preserved as `Resolved P0` with TC refs.
+- `RELEASE_CHECKLIST.md` says `Conditional Go` with locked rationale.
+- No code changed in this review goal (git diff confirms).
+- No secrets / tokens / private usernames / private paths / machine-specific paths in committed artifacts.
+- `Not Run` evidence preserved verbatim across all four artifacts.
+- `frames_suppressed` landed in `BACKLOG.md` as P1.1.
+- Unresolved risks remain traceable in `RISK_REGISTER.md`.
+
+Beta recommendation rationale:
+- All local gates pass on `main` at `179ebf2`.
+- TC33-TC47 runtime chain delivers every live capability the MVP wave deferred.
+- 29-tool MCP surface in `system_discover` matches the live tools.
+- Provider live smoke against Codex CLI and Claude Code is `Not Run` on the verification host (mechanical CLI install issues, not Terminal Commander defects). Until at least one provider live smoke transcript exists, beta stays `Conditional Go`. Promotion to `Go` requires only operator transcripts; no code work.
+
+Commits:
+- Goal file prep amendment: `a3eeaf3`
+- Verified work commit: `179ebf2`
+- Goal status commit: this commit
 
 Known gaps / blockers:
-- <none or explicit blocker>
+- Codex CLI and Claude Code provider live smokes `Not Run` (BACKLOG P1.2 / P1.3; RISK R-01).
+- Daemon-side `frames_suppressed` counter not implemented (BACKLOG P1.1; RISK R-02).
+- Dedicated file-watch and PTY megabyte-scale load tests `Not Run` per TC47.
 
 Next goal:
-- none
+- none — TC48 is the terminal goal of the `terminal-commander-runtime` chain. Operator-driven beta exercise (the two provider live smokes) is the next step; it is not a new code chain.
