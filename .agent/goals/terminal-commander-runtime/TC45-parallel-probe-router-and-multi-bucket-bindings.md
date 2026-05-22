@@ -82,28 +82,64 @@ non_goals:
 - Do not implement every possible probe type; focus on process, PTY, file, and directory surfaces already present.
 
 allowed_files_or_area:
-- crates/daemon/src/runtime.rs
+- crates/daemon/src/ipc/**
 - crates/daemon/src/router.rs
-- crates/daemon/src/ipc.rs
-- crates/probes/src/**
-- crates/core/src/**
+- crates/daemon/src/runtime.rs
+- crates/daemon/src/state.rs
+- crates/daemon/src/lib.rs
+- crates/daemon/tests/**
 - crates/mcp/src/**
+- crates/mcp/tests/**
+- crates/core/src/** only for narrow DTO/schema additions required by aggregate runtime state
 - docs/runtime/**
 - docs/mcp/**
-- tests/**/parallel*
-- tests/**/routing*
+- docs/security/**
+- .agent/goals/terminal-commander-runtime/TC45-*.md
+- .agent/goals/terminal-commander-runtime/GOAL_CHAIN_INDEX.md
+- .agent/goals/terminal-commander-runtime/RUN_ORDER.md
+
+Note: TC45 is deliberately the narrow / read-only aggregate runtime interpretation. The following files are intentionally NOT in the normal allowed edit set:
+- `crates/daemon/src/command.rs`
+- `crates/daemon/src/pty_command.rs`
+- `crates/daemon/src/file_watch.rs`
+- `crates/store/**`
+
+If implementation proves any of those is required, stop and report the exact seam instead of editing silently. The same precedent TC43/TC44 used.
 
 forbidden_files:
 - journal/systemd probe unless explicitly scoped
 - cloud/network transport
 - privileged helper install
 - unbounded queues
+- raw stream endpoint
+- network listener
+- direct command spawn from crates/mcp
+- direct file reads from crates/mcp
+- shell execution feature expansion
+- directory/artifact probe expansion
+- TCP/HTTP/WebSocket listener
+- new generic `probe_create` spawn API (would duplicate TC38/TC43/TC44 surfaces)
+- true fan-out (one probe -> many buckets) bucket-model rewrite — out of scope per Scope Amendment
+- session/client association identifiers — out of scope per Scope Amendment
+- distributed/cloud routing
 
 contracts_or_interfaces:
-- One bucket may receive from many probes; one probe may emit to one or more buckets where rule bindings allow it.
-- Routing must support probe_id, job_id, bucket_id, rule_id, and session/client association.
-- Runtime state summary must show probes, jobs, buckets, active rule bindings, last_seen_at, frames_seen, events_emitted, and suppressed/noise metrics.
-- Backpressure and dropped-event reporting must be explicit.
+- One bucket may receive from many probes — this is already supported via parallel command / file-watch / PTY jobs that scoped registry activation can route into the same bucket. TC45 surfaces a unified view; it does NOT change the underlying bucket model.
+- Routing dimensions exposed in the aggregate view: probe_id, job_id, bucket_id, rule_id. Session/client association is OUT of scope per the Scope Amendment.
+- Runtime state summary must show: per-runtime live probes (command / pty / file-watch), live buckets, currently-active scoped rules, plus per-probe `frames_seen`, `events_emitted`, `last_seen_at`, `suppressed_count`, and bucket-level `dropped_count` / `head_seq` / `tail_seq` counters.
+- Backpressure and dropped-event reporting must be explicit — the existing `BucketSummary.dropped_count` (TC07) and per-probe metrics already expose these; the aggregate view surfaces them in one bounded payload.
+- The aggregate view is read-only. It must NOT spawn, cancel, or modify any probe / job / bucket / rule activation.
+
+New methods (read-only, bounded):
+- `runtime_state` — single bounded snapshot: counts + per-runtime live lists + active rule scopes + bucket counters.
+- `probe_list` — flat list of every live probe across all runtimes; per-probe identity + counters.
+- `probe_status` — bounded per-probe lookup.
+
+Explicit deferrals (recorded per Scope Amendment):
+- `probe_bind_rules` as a separate tool — DEFERRED. TC42c / TC42d scoped `registry_activate` already covers rule binding semantics (`Global` / `Bucket` / `Job` / `Probe`). Calling it a new tool would just be an alias.
+- True fan-out where one probe emits into multiple buckets — DEFERRED to a later architecture goal that touches the router + bucket manager + EventDraft shape.
+- Session / client association — DEFERRED. TC37 PeerCred records uid/gid/pid on connection; threading a session id end-to-end requires its own goal.
+- Distributed / cloud routing — DEFERRED per `non_goals`.
 
 invariants:
 - The product is a realtime signal channel and abstraction layer for LLM agents, not a raw terminal/log dumping tool.
@@ -151,12 +187,62 @@ stop_conditions:
 
 verification_command:
 ```bash
+git branch --show-current
+git status --short
 git diff --check
 cargo metadata --no-deps
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo nextest run --workspace
+# targeted daemon runtime_state / probe_list / probe_status tests
+cargo test -p terminal-commanderd --test runtime_state -- --nocapture
+# targeted live-daemon MCP runtime_state / probe_list / probe_status e2e
+cargo test -p terminal-commander-mcp --test runtime_state_live_e2e -- --nocapture
+# privilege model guards on the MCP crate
+rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp
+# prove MCP does not read files directly
+rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src
 ```
+
+## Scope Amendment (TC45 prep)
+
+This amendment aligns the original TC45 mini-spec with the actual repo layout as of TC44 and narrows the scope to the read-only aggregate runtime view. Same precedent as TC41 / TC42 / TC43 / TC44.
+
+Interpretation chosen: **Narrow / read-only aggregate**.
+
+- "Probe registry" = read-only aggregate view across existing runtimes (`CommandRuntime`, `WatchRuntime`, `PtyRuntime`). No new generic `probe_create` spawn API. No new `probe_stop`. No one-probe-to-many-buckets fanout. No session/client association.
+- New surface: `runtime_state`, `probe_list`, `probe_status`. All bounded, all read-only.
+
+Drift corrected:
+
+- `crates/daemon/src/ipc.rs` does not exist on `main`; the daemon uses `crates/daemon/src/ipc/` as a module directory. Allowed area now points at `crates/daemon/src/ipc/**`.
+- `tests/**/parallel*` / `tests/**/routing*` are not real paths; tests live in `crates/<crate>/tests/`. Allowed area now lists `crates/daemon/tests/**` and `crates/mcp/tests/**`.
+- The original `allowed_files_or_area` omitted `crates/daemon/src/state.rs` and `crates/daemon/src/lib.rs`, both of which the new aggregate view needs (re-export the unified DTOs, wire any new IPC handlers into the dispatcher). They are now explicit.
+- `crates/probes/src/**` is removed from the allowed area: TC45 does not change probe internals.
+- `crates/core/src/**` retained only for narrow DTO/schema additions required by the aggregate runtime state response.
+
+Explicit non-allowance:
+
+- `crates/daemon/src/command.rs` — TC45 must not edit this file. Already locked since TC43.
+- `crates/daemon/src/pty_command.rs` — TC45 must not edit this file. Already locked since TC44.
+- `crates/daemon/src/file_watch.rs` — TC45 must not edit this file. Already locked since TC43.
+- `crates/store/**` — unless a narrow, justified status-store need appears. TC45 is read-only over the in-memory runtimes; it does not persist any new state.
+
+Explicit deferrals:
+
+- `probe_bind_rules` as a separate tool — DEFERRED. TC42c / TC42d scoped `registry_activate` already covers rule binding semantics. A new tool would be an alias and would tempt operators to think the two paths can diverge.
+- True fan-out where one probe emits into multiple buckets — DEFERRED to a later architecture goal that touches the router + bucket manager + EventDraft shape.
+- Session / client association — DEFERRED.
+- Distributed / cloud routing — DEFERRED per `non_goals`.
+
+Forbidden list tightened:
+
+- Raw stream endpoint, network listener, direct command spawn from `crates/mcp`, direct file reads from `crates/mcp`, shell execution feature expansion, directory/artifact probe expansion, TCP/HTTP/WebSocket listener, new generic `probe_create` spawn API, true fan-out bucket-model rewrite, session/client association identifiers, distributed/cloud routing.
+
+Verification additions:
+
+- `git branch --show-current`, `git status --short`, `cargo test --workspace`, targeted `cargo test -p terminal-commanderd --test runtime_state -- --nocapture`, targeted `cargo test -p terminal-commander-mcp --test runtime_state_live_e2e -- --nocapture`, `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp`, `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src` are now part of the verification command set so the gates are explicit and reproducible.
 
 ## Task Prompt
 
