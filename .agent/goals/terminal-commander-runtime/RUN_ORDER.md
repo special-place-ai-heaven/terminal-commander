@@ -51,6 +51,10 @@ Run the goals linearly. Do not skip a blocked goal.
 ```
 
 ```bash
+/goal .agent/goals/terminal-commander-runtime/TC42d-explicit-scope-and-nextest-gate.md
+```
+
+```bash
 /goal .agent/goals/terminal-commander-runtime/TC43-file-probe-search-watch-and-bounded-read.md
 ```
 
