@@ -1,19 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! Thin MCP tool surface (TC23).
+//! Terminal Commander MCP crate (TC23 + TC40).
 //!
 //! Per PRIVILEGE_MODEL.md the MCP server contains NO Command::spawn,
 //! NO file open outside its own config, and NO network listener.
-//! Every tool call is forwarded to the daemon Router.
 //!
-//! rmcp stdio adapter is deferred to a follow-up. This crate exposes
-//! a `ToolSurface` struct that the rmcp adapter will wrap; the
-//! adapter is the only thing that changes between in-process tests
-//! and a real stdio harness.
+//! Layout:
+//! - `ToolSurface` (this file) — original TC23 in-process tool
+//!   facade. Used by integration tests that drive a `Router`
+//!   directly without involving stdio or rmcp.
+//! - [`daemon_client`] — UDS client wrapper for the stdio adapter.
+//! - [`tools`] — rmcp `ServerHandler` exposed by the binary. Every
+//!   tool call here forwards through the daemon UDS client.
 //!
-//! Source-status: live (TC23) for the tool surface dispatch. The
-//! rmcp stdio glue lands in a follow-up.
+//! Source-status: live (TC23 in-process surface + TC40 rmcp stdio
+//! adapter for discovery/status tools).
+
+#[cfg(unix)]
+pub mod daemon_client;
+#[cfg(unix)]
+pub mod tools;
 
 use std::sync::Arc;
 use std::time::Duration;

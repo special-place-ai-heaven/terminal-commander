@@ -4,6 +4,8 @@
 # Rust build outputs
 target/
 **/target/
+target-wsl/
+**/target-wsl/
 Cargo.lock.bak
 
 # Editor and OS metadata

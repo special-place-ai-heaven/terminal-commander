@@ -36,7 +36,7 @@ terminal-commander-store   = { path = "crates/store",   version = "0.0.0" }
 # declared here so member crates pick the same version. Concrete
 # usage lands in the goals listed in the comment after each line.
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "io-util", "fs", "time", "signal"] }  # TC15+
-# rmcp = { version = "=1.7.0", default-features = false }   # TC23 (commented: not yet a member dep at TC04)
+rmcp = { version = "=1.7.0", features = ["server", "macros", "transport-io"] }   # TC40
 # rusqlite = { version = "0.39", features = ["bundled"] }    # TC12
 # refinery = { version = "0.9" }                              # TC12
 # notify = { version = "8.2" }                                # TC18

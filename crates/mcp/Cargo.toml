@@ -18,6 +18,8 @@ name = "terminal-commander-mcp"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
+schemars = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 terminal-commander-core.workspace = true
@@ -26,7 +28,16 @@ terminal-commander-store = { version = "0.0.0", path = "../store" }
 terminal-commanderd = { version = "0.0.0", path = "../daemon" }
 thiserror = "2.0.18"
 time = "0.3.47"
-tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "io-std", "io-util", "net"] }
+
+[target.'cfg(unix)'.dependencies]
+rmcp = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "io-util"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+rmcp = { version = "=1.7.0", features = ["server", "client", "macros", "transport-io"] }
