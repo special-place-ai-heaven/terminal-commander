@@ -594,6 +594,14 @@ impl BucketManager {
         let inner = cell.read();
         Ok(inner.state.clone())
     }
+
+    /// List every live bucket id. Used by the TC45 aggregate
+    /// `runtime_state` view. Read-only; bounded by the bucket-count
+    /// cap the daemon already enforces at create time.
+    #[must_use]
+    pub fn list_bucket_ids(&self) -> Vec<BucketId> {
+        self.inner.read().keys().copied().collect()
+    }
 }
 
 #[cfg(test)]

@@ -42,15 +42,17 @@ use crate::ipc::protocol::{
     MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES, MAX_CONTEXT_FRAMES, MAX_FILE_READ_BYTES,
     MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES, MAX_FILE_SEARCH_SCAN_BYTES,
     MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES,
-    MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES, PolicyStatusResponse,
-    PtyCommandListEntry, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
-    PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
-    PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
-    RegistryActiveEntry, RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams,
-    RegistryGetResponse, RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams,
-    RegistrySearchResponse, RegistryTestMatch, RegistryTestParams, RegistryTestResponse,
-    RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope,
-    SelfCheckResponse, SeverityHistogram, decode_payload, encode_frame,
+    MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES, PolicyStatusResponse, ProbeKind,
+    ProbeListEntry, ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListEntry,
+    PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams,
+    PtyCommandStopResponse, PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse,
+    RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
+    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
+    RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
+    RegistryTestMatch, RegistryTestParams, RegistryTestResponse, RegistryUpsertParams,
+    RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope, RuntimeActiveRule,
+    RuntimeBucketSummary, RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
+    decode_payload, encode_frame,
 };
 use crate::state::DaemonState;
 
@@ -452,6 +454,18 @@ async fn dispatch(
             let r = handle_pty_command_list(state);
             ("pty_command_list", IpcResult::Ok { response: r })
         }
+        IpcRequest::RuntimeState => {
+            let r = handle_runtime_state(state);
+            ("runtime_state", IpcResult::Ok { response: r })
+        }
+        IpcRequest::ProbeList => {
+            let r = handle_probe_list(state);
+            ("probe_list", IpcResult::Ok { response: r })
+        }
+        IpcRequest::ProbeStatus(p) => match handle_probe_status(state, p) {
+            Ok(r) => ("probe_status", IpcResult::Ok { response: r }),
+            Err(e) => ("probe_status", IpcResult::Err { error: e }),
+        },
     };
     // Audit one row per accepted request. The decision label reflects
     // whether the dispatcher produced an `Ok` response or a typed
@@ -502,6 +516,9 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
             "pty_command_write_stdin".to_owned(),
             "pty_command_stop".to_owned(),
             "pty_command_list".to_owned(),
+            "runtime_state".to_owned(),
+            "probe_list".to_owned(),
+            "probe_status".to_owned(),
         ],
     })
 }
@@ -1665,6 +1682,161 @@ fn handle_pty_command_stop(
         Err(other) => Err(IpcError::new(
             IpcErrorCode::Internal,
             format!("pty_command_stop: {other}"),
+        )),
+    }
+}
+
+// =====================================================================
+// TC45: runtime_state / probe_list / probe_status.
+//
+// Read-only aggregate view across the three runtimes
+// (CommandRuntime / WatchRuntime / PtyRuntime). Touches no probe
+// internals; uses only the public read-only seams those runtimes
+// already expose (`live_jobs`, `list`, `status`).
+// =====================================================================
+
+fn collect_probes(state: &Arc<DaemonState>) -> Vec<ProbeListEntry> {
+    let mut out: Vec<ProbeListEntry> = Vec::new();
+
+    // CommandRuntime: live_jobs + per-job status for counters.
+    for j in state.command.live_jobs() {
+        let (frames_total, events_emitted) = state
+            .command
+            .status(j.job_id)
+            .map_or((0u64, 0u64), |s| (s.frames_total, s.events_emitted));
+        out.push(ProbeListEntry {
+            kind: ProbeKind::Command,
+            job_id: j.job_id,
+            bucket_id: j.bucket_id,
+            probe_id: j.probe_id,
+            frames_total,
+            events_emitted,
+            secret_prompts_total: 0,
+            secret_prompt_active: false,
+            path: None,
+        });
+    }
+
+    // WatchRuntime: list returns (job_id, bucket_id, probe_id, path, metrics).
+    for (wid, bid, pid, path, m) in state.watch.list() {
+        out.push(ProbeListEntry {
+            kind: ProbeKind::FileWatch,
+            job_id: wid,
+            bucket_id: bid,
+            probe_id: pid,
+            frames_total: m.frames_total,
+            events_emitted: m.events_emitted,
+            secret_prompts_total: 0,
+            secret_prompt_active: false,
+            path: Some(path),
+        });
+    }
+
+    // PtyRuntime: list returns (job_id, bucket_id, probe_id, argv, metrics, secret_active).
+    #[cfg(unix)]
+    for (jid, bid, pid, _argv, m, secret) in state.pty.list() {
+        out.push(ProbeListEntry {
+            kind: ProbeKind::Pty,
+            job_id: jid,
+            bucket_id: bid,
+            probe_id: pid,
+            frames_total: m.frames_total,
+            events_emitted: m.events_emitted,
+            secret_prompts_total: m.secret_prompts_total,
+            secret_prompt_active: secret,
+            path: None,
+        });
+    }
+
+    out
+}
+
+fn handle_runtime_state(state: &Arc<DaemonState>) -> IpcResponse {
+    let probes = collect_probes(state);
+    let command_jobs = u32::try_from(
+        probes
+            .iter()
+            .filter(|p| matches!(p.kind, ProbeKind::Command))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let pty_jobs = u32::try_from(
+        probes
+            .iter()
+            .filter(|p| matches!(p.kind, ProbeKind::Pty))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let file_watches = u32::try_from(
+        probes
+            .iter()
+            .filter(|p| matches!(p.kind, ProbeKind::FileWatch))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+
+    // Bucket counters: walk every live bucket via the new
+    // `BucketManager::list_bucket_ids`. `summary` runs TTL eviction
+    // and returns the bounded counters we surface.
+    let mut buckets: Vec<RuntimeBucketSummary> = Vec::new();
+    for bid in state.buckets.list_bucket_ids() {
+        if let Ok(s) = state.buckets.summary(bid) {
+            buckets.push(RuntimeBucketSummary {
+                bucket_id: bid,
+                head_seq: s.head_seq,
+                tail_seq: s.tail_seq,
+                event_count: s.event_count,
+                dropped_count: s.dropped_count,
+            });
+        }
+    }
+    let bucket_count = u32::try_from(buckets.len()).unwrap_or(u32::MAX);
+
+    // Scoped activation snapshot.
+    let active_entries = state.activation.snapshot_entries();
+    let active_rules: Vec<RuntimeActiveRule> = active_entries
+        .into_iter()
+        .map(|e| RuntimeActiveRule {
+            rule_id: e.definition.id,
+            version: e.definition.version,
+            event_kind: e.definition.event_kind,
+            scope: e.scope,
+        })
+        .collect();
+    let active_rules_count = u32::try_from(active_rules.len()).unwrap_or(u32::MAX);
+
+    IpcResponse::RuntimeState(RuntimeStateResponse {
+        command_jobs,
+        pty_jobs,
+        file_watches,
+        bucket_count,
+        active_rules_count,
+        probes,
+        buckets,
+        active_rules,
+    })
+}
+
+fn handle_probe_list(state: &Arc<DaemonState>) -> IpcResponse {
+    IpcResponse::ProbeList(ProbeListResponse {
+        probes: collect_probes(state),
+    })
+}
+
+#[allow(clippy::option_if_let_else)]
+fn handle_probe_status(
+    state: &Arc<DaemonState>,
+    params: &ProbeStatusParams,
+) -> Result<IpcResponse, IpcError> {
+    let probes = collect_probes(state);
+    match probes.into_iter().find(|p| p.probe_id == params.probe_id) {
+        Some(p) => Ok(IpcResponse::ProbeStatus(ProbeStatusResponse { probe: p })),
+        None => Err(IpcError::new(
+            IpcErrorCode::UnknownProbe,
+            format!(
+                "probe '{}' is not live in any runtime",
+                params.probe_id.to_wire_string()
+            ),
         )),
     }
 }

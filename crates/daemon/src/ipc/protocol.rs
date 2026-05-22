@@ -167,6 +167,16 @@ pub enum IpcRequest {
     PtyCommandStop(PtyCommandStopParams),
     /// Snapshot of every currently-live PTY job.
     PtyCommandList,
+    /// TC45: bounded aggregate snapshot across every daemon runtime
+    /// (command, file watch, PTY) plus active rule scopes and
+    /// bucket counters. Read-only.
+    RuntimeState,
+    /// TC45: flat list of every live probe across all runtimes.
+    /// Read-only.
+    ProbeList,
+    /// TC45: bounded lookup for one probe by id. Returns
+    /// `UnknownProbe` if no runtime knows the id.
+    ProbeStatus(ProbeStatusParams),
 }
 
 /// Success / error union. Success carries a typed payload per method;
@@ -215,6 +225,9 @@ pub enum IpcResponse {
     PtyCommandWriteStdin(PtyCommandWriteStdinResponse),
     PtyCommandStop(PtyCommandStopResponse),
     PtyCommandList(PtyCommandListResponse),
+    RuntimeState(RuntimeStateResponse),
+    ProbeList(ProbeListResponse),
+    ProbeStatus(ProbeStatusResponse),
 }
 
 /// `system_discover` payload. Mirrors the contract laid out in
@@ -319,6 +332,9 @@ pub enum IpcErrorCode {
     /// written. TC44 contract: no automatic password entry, no
     /// LLM-supplied password forwarding.
     SecretInputDenied,
+    /// `probe_status` referenced a probe id the daemon does not
+    /// know across any of its runtimes.
+    UnknownProbe,
 }
 
 /// Structured error payload.
@@ -1017,6 +1033,100 @@ pub struct PtyCommandListEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtyCommandListResponse {
     pub entries: Vec<PtyCommandListEntry>,
+}
+
+// =====================================================================
+// TC45: aggregate runtime view (read-only).
+//
+// `runtime_state`, `probe_list`, and `probe_status` surface the union
+// of `CommandRuntime::live_jobs`, `WatchRuntime::list`, and
+// `PtyRuntime::list` (when cfg(unix)) plus bucket counters and the
+// scoped activation snapshot. No new spawn / cancel / mutation
+// capability. No raw stream content.
+// =====================================================================
+
+/// Closed set of probe kinds surfaced by `probe_list` / `probe_status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeKind {
+    Command,
+    FileWatch,
+    Pty,
+}
+
+/// One row in `probe_list` / `runtime_state.probes`.
+///
+/// Bounded; never carries raw stream content. `argv` is the
+/// bounded argv passed at spawn time (for FileWatch this is
+/// `["file_watch:<path>"]`, matching how `WatchRuntime` registers
+/// the JobConfig today; for PTY this is the original argv).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeListEntry {
+    pub kind: ProbeKind,
+    pub job_id: JobId,
+    pub bucket_id: BucketId,
+    pub probe_id: terminal_commander_core::ProbeId,
+    pub frames_total: u64,
+    pub events_emitted: u64,
+    /// PTY only — surfaces `PtyProbeMetrics::secret_prompts_total`.
+    /// Other kinds return 0.
+    pub secret_prompts_total: u64,
+    /// PTY only — current secret-prompt flag from the probe.
+    /// Other kinds return `false`.
+    pub secret_prompt_active: bool,
+    /// File-watch only — surfaces the watched path. Other kinds
+    /// return None.
+    pub path: Option<std::path::PathBuf>,
+}
+
+/// Bucket-level counters surfaced by `runtime_state.buckets`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeBucketSummary {
+    pub bucket_id: BucketId,
+    pub head_seq: u64,
+    pub tail_seq: u64,
+    pub event_count: u64,
+    /// Backpressure indicator: events dropped by the bucket's
+    /// retention policy. Already tracked by `BucketSummary`
+    /// (TC07); surfaced here in the aggregate view.
+    pub dropped_count: u64,
+}
+
+/// One active scoped registry binding surfaced by
+/// `runtime_state.active_rules`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeActiveRule {
+    pub rule_id: String,
+    pub version: u32,
+    pub event_kind: String,
+    pub scope: terminal_commander_core::ActivationScope,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeStateResponse {
+    pub command_jobs: u32,
+    pub pty_jobs: u32,
+    pub file_watches: u32,
+    pub bucket_count: u32,
+    pub active_rules_count: u32,
+    pub probes: Vec<ProbeListEntry>,
+    pub buckets: Vec<RuntimeBucketSummary>,
+    pub active_rules: Vec<RuntimeActiveRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeListResponse {
+    pub probes: Vec<ProbeListEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeStatusParams {
+    pub probe_id: terminal_commander_core::ProbeId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeStatusResponse {
+    pub probe: ProbeListEntry,
 }
 
 /// Serialize an envelope to a length-prefixed wire frame. Returns

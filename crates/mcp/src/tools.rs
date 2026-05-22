@@ -43,13 +43,14 @@ use terminal_commanderd::ipc::protocol::{
     EventContextParams, EventContextResponse, FileReadWindowParams, FileReadWindowResponse,
     FileSearchParams, FileSearchResponse, FileWatchListResponse, FileWatchStartParams,
     FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, IpcContextFrame, IpcError,
-    IpcErrorCode, IpcRequest, IpcResponse, PolicyStatusResponse, PtyCommandListResponse,
-    PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
+    IpcErrorCode, IpcRequest, IpcResponse, PolicyStatusResponse, ProbeListResponse,
+    ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams,
+    PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
     PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RegistryActivateParams,
     RegistryActivateResponse, RegistryDeactivateParams, RegistryDeactivateResponse,
     RegistryGetParams, RegistryGetResponse, RegistryListActiveResponse, RegistrySearchParams,
     RegistrySearchResponse, RegistryTestParams, RegistryTestResponse, RegistryTestSample,
-    RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
+    RegistryUpsertParams, RegistryUpsertResponse, RuntimeStateResponse, SelfCheckResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -210,6 +211,21 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "pty_command_list",
             status: ToolStatus::Live,
             description: "Snapshot of every currently-live PTY job (including secret_prompt_active).",
+        },
+        ToolCatalogueEntry {
+            name: "runtime_state",
+            status: ToolStatus::Live,
+            description: "Bounded aggregate runtime snapshot: probes, buckets, active rule scopes.",
+        },
+        ToolCatalogueEntry {
+            name: "probe_list",
+            status: ToolStatus::Live,
+            description: "Flat list of every live probe across all runtimes (command / pty / file watch).",
+        },
+        ToolCatalogueEntry {
+            name: "probe_status",
+            status: ToolStatus::Live,
+            description: "Bounded per-probe lookup by probe_id. Returns UnknownProbe if not live.",
         },
     ]
 }
@@ -888,6 +904,56 @@ impl TerminalCommanderMcpServer {
             Err(e) => Err(into_mcp_error(&e)),
         }
     }
+
+    /// `runtime_state` — bounded aggregate runtime snapshot.
+    #[tool(
+        description = "Bounded aggregate runtime snapshot across all runtimes. Read-only; never returns raw stream content."
+    )]
+    async fn runtime_state(&self) -> Result<CallToolResult, McpError> {
+        match self.daemon.call(IpcRequest::RuntimeState).await {
+            Ok(IpcResponse::RuntimeState(r)) => {
+                let _ = std::any::type_name::<RuntimeStateResponse>();
+                json_tool_result(&r)
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `probe_list` — flat list of every live probe.
+    #[tool(
+        description = "Flat list of every live probe across command / pty / file-watch runtimes."
+    )]
+    async fn probe_list(&self) -> Result<CallToolResult, McpError> {
+        match self.daemon.call(IpcRequest::ProbeList).await {
+            Ok(IpcResponse::ProbeList(ProbeListResponse { probes })) => {
+                json_tool_result(&serde_json::json!({ "probes": probes }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `probe_status` — bounded lookup for one probe by id.
+    #[tool(
+        description = "Bounded per-probe lookup by probe_id. Returns UnknownProbe if no runtime knows the id."
+    )]
+    async fn probe_status(
+        &self,
+        Parameters(params): Parameters<McpProbeStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use terminal_commander_core::ids::ProbeIdKind;
+        let probe_id =
+            parse_id::<ProbeIdKind>("probe_id", &params.probe_id).map_err(invalid_params)?;
+        let ipc = ProbeStatusParams { probe_id };
+        match self.daemon.call(IpcRequest::ProbeStatus(ipc)).await {
+            Ok(IpcResponse::ProbeStatus(ProbeStatusResponse { probe })) => {
+                json_tool_result(&serde_json::json!({ "probe": probe }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
 }
 
 #[tool_handler]
@@ -1446,12 +1512,22 @@ pub struct McpPtyCommandStopParams {
     pub job_id: String,
 }
 
+// =====================================================================
+// TC45: aggregate runtime view MCP DTOs.
+// =====================================================================
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpProbeStatusParams {
+    /// Wire-form ProbeId.
+    pub probe_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn catalogue_lists_twenty_six_live_tools_at_tc44() {
+    fn catalogue_lists_twenty_nine_live_tools_at_tc45() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -1486,6 +1562,9 @@ mod tests {
                 "pty_command_write_stdin",
                 "pty_command_stop",
                 "pty_command_list",
+                "runtime_state",
+                "probe_list",
+                "probe_status",
             ]
         );
         let not_impl: Vec<_> = tool_catalogue()
@@ -1495,7 +1574,7 @@ mod tests {
             .collect();
         assert!(
             not_impl.is_empty(),
-            "TC44 carries forward TC43's no-not_implemented invariant; got: {not_impl:?}"
+            "TC45 carries forward TC44's no-not_implemented invariant; got: {not_impl:?}"
         );
     }
 
@@ -1524,6 +1603,8 @@ mod tests {
                 "file_watch_stop".to_owned(),
                 "health".to_owned(),
                 "policy_status".to_owned(),
+                "probe_list".to_owned(),
+                "probe_status".to_owned(),
                 "pty_command_list".to_owned(),
                 "pty_command_start".to_owned(),
                 "pty_command_stop".to_owned(),
@@ -1535,6 +1616,7 @@ mod tests {
                 "registry_search".to_owned(),
                 "registry_test".to_owned(),
                 "registry_upsert".to_owned(),
+                "runtime_state".to_owned(),
                 "self_check".to_owned(),
                 "system_discover".to_owned(),
             ]

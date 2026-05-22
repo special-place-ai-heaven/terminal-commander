@@ -54,6 +54,7 @@ pub use ipc::{
     MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS,
     MAX_PTY_STDIN_BYTES, MAX_REGISTRY_SEARCH_LIMIT, MAX_REGISTRY_TEST_SAMPLE_BYTES,
     MAX_REGISTRY_TEST_SAMPLES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PolicyStatusResponse,
+    ProbeKind, ProbeListEntry, ProbeListResponse, ProbeStatusParams, ProbeStatusResponse,
     PtyCommandListEntry, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
     PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
     PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
@@ -61,7 +62,8 @@ pub use ipc::{
     RegistryGetResponse, RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams,
     RegistrySearchResponse, RegistryTestMatch, RegistryTestParams, RegistryTestResponse,
     RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope,
-    ResponseEnvelope, SelfCheckResponse, SeverityHistogram,
+    ResponseEnvelope, RuntimeActiveRule, RuntimeBucketSummary, RuntimeStateResponse,
+    SelfCheckResponse, SeverityHistogram,
 };
 #[cfg(unix)]
 pub use ipc::{DaemonClient, IpcServer, PeerCred, ServerHandle};
