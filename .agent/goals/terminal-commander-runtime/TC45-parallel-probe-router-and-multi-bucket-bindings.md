@@ -3,15 +3,15 @@ goal_id: TC45
 title: Parallel Probe Router And Multi Bucket Bindings
 chain_id: terminal-commander-runtime
 phase: Wave 7 - Parallelism and routing
-status: "Pending"
+status: "Completed"
 depends_on: ["TC44"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-21T18:55:35+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T21:00:00+00:00"
+completed_at: "2026-05-22T22:10:00+00:00"
+completion_commit: "96ddc62"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
@@ -248,29 +248,82 @@ Verification additions:
 
 Run TC45 only on branch `main`. Complete the objective above, stay inside the allowed files/areas, respect all forbidden files and invariants, verify the work, commit only verified changes, update this goal file's status fields, and report blockers instead of guessing.
 
-## Final Report Format
+## Final Report
 
-Objective:
-- Turn the runtime into a real filter/proxy/router by supporting multiple concurrent probes, multiple buckets, and dynamic routing/binding of rules to sources.
+Objective (narrow interpretation per Scope Amendment):
+- Surface a bounded, read-only aggregate view across every daemon runtime so an LLM can see the union of live probes, buckets, and active rule scopes in one snapshot — without changing the underlying bucket model, without a new spawn API, and without touching `command.rs` / `pty_command.rs` / `file_watch.rs`.
 
-Changes:
-- <focused list of implementation changes>
+Changes (verified work commit `96ddc62`):
+- `crates/core/src/bucket.rs`: narrow read-only addition `BucketManager::list_bucket_ids()` so the aggregate view can iterate every live bucket without poking the internal `RwLock<HashMap<...>>`. No new behavior; bounded by the existing bucket-count cap.
+- `crates/daemon/src/ipc/protocol.rs`: 3 new IPC methods (`RuntimeState`, `ProbeList`, `ProbeStatus`), new typed error code `IpcErrorCode::UnknownProbe`, and the DTOs that back them: `ProbeKind { Command, FileWatch, Pty }`, `ProbeListEntry`, `RuntimeBucketSummary`, `RuntimeActiveRule`, `RuntimeStateResponse`, `ProbeListResponse`, `ProbeStatusParams`, `ProbeStatusResponse`. Every shape is counters + ids + bounded fields; no raw stream lane.
+- `crates/daemon/src/ipc/server.rs`: 4 new handler fns plus a shared `collect_probes` helper. `collect_probes` consumes only the public read-only seams `state.command.live_jobs() + state.command.status()`, `state.watch.list()`, and `state.pty.list()` (cfg(unix)). `runtime_state` adds per-bucket counters via `BucketManager::summary` and a flat copy of `ActivationRegistry::snapshot_entries`. `probe_status` does an O(N) lookup over the same collected list and returns `UnknownProbe` for misses. Dispatcher gains 3 arms; `system_discover` advertises the 3 new method names.
+- `crates/mcp/src/tools.rs`: 3 new MCP tools (`runtime_state`, `probe_list`, `probe_status`) forwarding through the daemon UDS. New flat MCP DTO `McpProbeStatusParams` (wire-form ProbeId string). Tool catalogue grew 26 -> 29 live; `not_implemented` count stays zero.
+- Existing tool-list assertions in `crates/mcp/src/tools.rs::tests`, `crates/mcp/tests/mcp_live_daemon.rs`, `crates/mcp/tests/mcp_stdio.rs` updated to the new 29-tool catalogue with the three TC45 names slotted alphabetically.
 
 Files changed:
-- <paths>
+- `crates/core/src/bucket.rs`
+- `crates/daemon/src/ipc/mod.rs`
+- `crates/daemon/src/ipc/protocol.rs`
+- `crates/daemon/src/ipc/server.rs`
+- `crates/daemon/src/lib.rs`
+- `crates/daemon/tests/runtime_state.rs` (new, 3 tests)
+- `crates/mcp/src/tools.rs`
+- `crates/mcp/tests/mcp_live_daemon.rs`
+- `crates/mcp/tests/mcp_stdio.rs`
+- `crates/mcp/tests/runtime_state_live_e2e.rs` (new, 2 tests)
+- `.agent/goals/terminal-commander-runtime/TC45-*.md` (this file)
 
-Verification:
-- PASS/FAIL: `<command>` — <summary>
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`, rustc 1.95.0, cargo-nextest 0.9.136):
+- PASS: `git branch --show-current` — `main`
+- PASS: `git status --short` — clean after work + status commits
+- PASS: `git diff --check`
+- PASS: `cargo metadata --no-deps`
+- PASS: `cargo fmt --all --check`
+- PASS: `cargo clippy --workspace --all-targets -- -D warnings` — no warnings
+- PASS: `cargo test --workspace` — every suite green
+- PASS: `cargo nextest run --workspace` — **339/339 passing, 0 skipped**
+- PASS: `cargo test -p terminal-commanderd --test runtime_state -- --nocapture` — 3 tests
+- PASS: `cargo test -p terminal-commander-mcp --test runtime_state_live_e2e -- --nocapture` — 2 tests
+- PASS: `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` — only doc/negative-assertion matches
+- PASS: `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src` — no matches
 
-Evidence:
-- <source-status notes, test output summaries, route/status evidence, screenshots only if rendered UI changed>
+Evidence — explicit acceptance confirmations:
 
-Commit:
-- Verified work commit: `<hash or none>`
-- Goal status commit: `<hash or none>`
+- **`runtime_state` returns a bounded snapshot across available runtimes.** `runtime_state_aggregates_command_pty_and_filewatch` spawns a `sleep` command, a file watch, and a `python3` PTY job and asserts `command_jobs == 1`, `file_watches == 1`, `pty_jobs == 1`, `probes.len() == 3`, `bucket_count >= 3`. Each probe entry carries `kind`, `job_id`, `bucket_id`, `probe_id`, `frames_total`, `events_emitted`, `secret_prompts_total` (PTY only), `secret_prompt_active` (PTY only), and `path` (file-watch only).
+- **`probe_list` returns a flat bounded list.** Same test asserts `probe_list` returns the same three entries.
+- **`probe_status` returns a bounded record or typed not-found.** Same test resolves the PTY probe id and asserts `kind == Pty`; `probe_status_unknown_probe_returns_typed_error` (daemon) and `probe_status_unknown_probe_returns_error_through_mcp` (MCP) assert `IpcErrorCode::UnknownProbe` for an unseen id.
+- **Live-daemon MCP e2e proves these tools work after starting at least two live runtime sources.** `runtime_state_aggregates_two_sources_through_mcp` spawns a `command_start_combed` sleeper + a `file_watch_start`, then asserts the MCP `runtime_state` / `probe_list` / `probe_status` tools return the aggregate view.
+- **Responses contain metadata/counters only, no raw output.** Every DTO field is a typed id, counter, kind tag, bounded path, or scope value. There is no field carrying frame text. The probe entries lift only `frames_total` / `events_emitted` / `secret_prompts_total` etc., never line content.
+- **Existing TC41-TC44 behavior remains green.** Full nextest run: 339/339. The 26-tool TC44 catalogue test became the 29-tool TC45 catalogue test; the underlying tools are unchanged.
+- **No `command.rs` / `pty_command.rs` / `file_watch.rs` edits.** `git diff HEAD~2..HEAD -- crates/daemon/src/command.rs crates/daemon/src/pty_command.rs crates/daemon/src/file_watch.rs` returns empty.
+- **No direct MCP command spawn or file read.** Both verification greps clean; only doc strings.
+- **No network listener.** No new transport added; the daemon UDS remains the only IPC surface.
+- **Bucket cursor isolation preserved.** `runtime_state` calls `BucketManager::summary` which is the same TTL-eviction path the existing bucket tools use; it does not advance any cursor or touch event data.
+- **PersistentAudit preserved as production audit path.** The dispatcher continues to land an `ipc_<method>` row per request via the existing audit hook; the three new methods follow the same audit pattern as every other read-only method (e.g. `file_watch_list`, `pty_command_list`).
+- **Typed bounded errors.** `IpcErrorCode::UnknownProbe` is a closed-set variant; the protocol enum did not grow any open-ended error path.
+
+Explicit deferrals (locked by Scope Amendment, NOT implemented here):
+
+- `probe_bind_rules` as a separate tool — TC42c/TC42d scoped `registry_activate` already covers rule binding semantics. Calling it would be an alias and would invite operator drift.
+- True fan-out (one probe -> many buckets) — out of scope.
+- Session / client association — out of scope.
+- Distributed / cloud routing — out of scope per the original `non_goals`.
+
+Source-status:
+- `runtime_state`, `probe_list`, `probe_status` (IPC + MCP): **live (TC45)**.
+- `ProbeKind`, `ProbeListEntry`, `RuntimeBucketSummary`, `RuntimeActiveRule`, `RuntimeStateResponse`, `ProbeListResponse`, `ProbeStatusParams`, `ProbeStatusResponse`: **live (TC45)**.
+- `IpcErrorCode::UnknownProbe`: **live (TC45)**.
+- `BucketManager::list_bucket_ids`: **live (TC45)** — narrow read-only addition, returns the existing live bucket id set.
+- Existing `command.live_jobs()` / `watch.list()` / `pty.list()` seams: **unchanged**.
+- `command.rs`, `pty_command.rs`, `file_watch.rs`: **unchanged**.
+
+Commits:
+- Goal file prep amendment: `02cb2af`
+- Verified work commit: `96ddc62`
+- Goal status commit: this commit
 
 Known gaps / blockers:
-- <none or explicit blocker>
+- None.
 
 Next goal:
-- TC46-provider-harness-integration-smoke.md
+- TC46-provider-harness-integration-smoke.md — do NOT start until this TC45 report is reviewed.
