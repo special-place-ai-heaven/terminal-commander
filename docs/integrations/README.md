@@ -1,11 +1,27 @@
 # Provider Integration Examples - Terminal Commander
 
-Status: TC27 baseline.
+Status: TC46 — updated for the TC45 29-tool surface.
 
 Provider-neutral MCP integration recipes. NO secrets, NO machine-
 specific paths. The MCP server is launched by the LLM harness as a
 child process over rmcp stdio (per `docs/security/PRIVILEGE_MODEL.md`
-section 4).
+section 4) and forwards every tool call through the daemon UDS.
+
+Per-provider walk-throughs:
+- [`codex-cli.md`](codex-cli.md) — Codex CLI MCP stdio config.
+- [`claude-code.md`](claude-code.md) — Claude Code MCP stdio config
+  (`--mcp-config` flag + persistent settings).
+
+A local daemon + MCP stdio smoke (no provider in the loop) lives at
+[`scripts/smoke/verify-runtime-smoke.sh`](../../scripts/smoke/verify-runtime-smoke.sh).
+It is secondary evidence: it proves Terminal Commander's local
+transport surface works without a provider. Provider-harness success
+requires actually running the provider against one of the configs
+above and observing tool calls in the session transcript.
+
+The rest of this page is the TC27 baseline kept for historical
+context; the modern TC45 surface advertises 29 tools and the
+per-provider walk-throughs above are the authoritative source.
 
 Language: ASCII only.
 
