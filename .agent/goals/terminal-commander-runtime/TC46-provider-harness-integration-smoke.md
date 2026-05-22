@@ -81,24 +81,47 @@ non_goals:
 
 allowed_files_or_area:
 - docs/integrations/**
-- examples/**
-- scripts/dev/**
-- tests/e2e/**
-- crates/mcp/src/** only for test harness fixes
-- crates/daemon/src/** only for test harness fixes
-- .agent/goals/terminal-commander-runtime/**
+- docs/mcp/**
+- examples/mcp/**
+- examples/provider-harness/**
+- scripts/smoke/**
+- crates/mcp/tests/**
+- crates/daemon/tests/**
+- crates/mcp/src/** only for tiny compatibility fixes required by smoke execution
+- crates/daemon/src/** only for tiny compatibility fixes required by smoke execution
+- .agent/goals/terminal-commander-runtime/TC46-*.md
+- .agent/goals/terminal-commander-runtime/GOAL_CHAIN_INDEX.md
+- .agent/goals/terminal-commander-runtime/RUN_ORDER.md
+
+Note: TC46 is a smoke / integration proof goal, not a feature-building goal. Any product-code change under `crates/mcp/src/**` or `crates/daemon/src/**` must be a tiny compatibility fix required by smoke execution AND explicitly recorded in the final report. If a product-code change exceeds a tiny compatibility fix, STOP and report instead of widening scope.
 
 forbidden_files:
 - privileged install files
 - network listener additions
 - provider credential files
 - destructive filesystem commands
+- new MCP tools
+- command / runtime feature expansion
+- registry / file / PTY / router feature work
+- direct command spawn from `crates/mcp`
+- direct file reads from `crates/mcp`
+- shell execution feature expansion
+- raw stdout / stderr / file / PTY stream endpoint
+- privileged helper
+- installer / service work
+- secrets, tokens, private usernames, private paths, or machine-specific absolute paths in committed docs
+- pretending provider smoke passed when the provider CLI / auth / config is unavailable
 
 contracts_or_interfaces:
 - Smoke tests must use MCP stdio and the local daemon/UDS path, not in-process mocks.
 - The demo command must produce lots of noise and one or more matching signal lines.
-- The harness must prove command_start_combed -> bucket_wait -> event_context -> file_read/search where applicable.
-- If a provider cannot run in CI/local environment, document the exact blocker and keep the generic MCP harness as evidence.
+- The harness must prove `command_start_combed` -> `bucket_wait` / `bucket_events_since` -> `command_status`. Where applicable, also `event_context` and / or `file_read_window` / `file_search`.
+- Codex MCP config example and Claude Code MCP config example MUST both ship in `docs/integrations/` (or `examples/provider-harness/`). Examples MUST use machine-local paths and environment variables, NOT hardcoded user paths.
+- Examples MUST include instructions to start `terminal-commanderd` in UDS mode and to run `terminal-commander-mcp` over stdio.
+- If Codex CLI cannot be run on the verification host, the report MUST mark the Codex provider smoke as `Not Run` or `Blocked` with the exact reason (missing CLI, missing auth, etc.); the config-only example still ships.
+- If Claude Code CLI cannot be run on the verification host, the report MUST mark the Claude provider smoke as `Not Run` or `Blocked` with the exact reason; the config-only example still ships.
+- Direct daemon UDS + MCP stdio smoke is useful secondary evidence but MUST NOT be called provider-harness success.
+- The smoke script `scripts/smoke/verify-runtime-smoke.sh` (created by TC46 implementation) MUST NOT require secrets, MUST NOT spawn raw shell bridges through MCP, MUST cover the daemon + MCP stdio path using bounded tool calls, and MUST clearly state which provider harnesses (if any) it can drive directly.
 
 invariants:
 - The product is a realtime signal channel and abstraction layer for LLM agents, not a raw terminal/log dumping tool.
@@ -145,13 +168,80 @@ stop_conditions:
 
 verification_command:
 ```bash
+git branch --show-current
+git status --short
 git diff --check
 cargo metadata --no-deps
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo nextest run --workspace
-bash scripts/dev/verify-runtime-smoke.sh
+cargo test -p terminal-commander-mcp -- --nocapture
+# privilege model guards on the MCP crate
+rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp
+# prove MCP does not read files directly
+rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src
+# local daemon + MCP stdio smoke (created by TC46 implementation)
+bash scripts/smoke/verify-runtime-smoke.sh
 ```
+
+Provider smoke evidence (per acceptance):
+- Codex: config path used, command run, observed `list_tools` / call result, or exact blocker. No secrets, tokens, or private paths in committed artifacts.
+- Claude Code: config path or `--mcp-config` used, `/mcp` or tool discovery evidence, observed call result, or exact blocker. No secrets, tokens, or private paths in committed artifacts.
+
+## Scope Amendment (TC46 prep)
+
+This amendment aligns the original TC46 mini-spec with the actual repo layout as of TC45 and locks the provider-harness smoke boundary. Same precedent as TC41 / TC42 / TC43 / TC44 / TC45.
+
+Drift corrected:
+
+- `tests/e2e/**` is not a real path in this repo. Tests live in `crates/<crate>/tests/`. Replaced with `crates/mcp/tests/**` and `crates/daemon/tests/**` (the latter only if harness-adjacent smoke helpers are needed).
+- `scripts/dev/**` is not a real directory and `scripts/dev/verify-runtime-smoke.sh` does not exist. Replaced with `scripts/smoke/**` and `scripts/smoke/verify-runtime-smoke.sh`; TC46 implementation creates the script.
+- Allowed creation of missing directories: `docs/integrations/**`, `docs/mcp/**`, `examples/mcp/**`, `examples/provider-harness/**`, `scripts/smoke/**`. None exist on disk today; TC46 implementation may create them.
+- Allowed area now lists `GOAL_CHAIN_INDEX.md` / `RUN_ORDER.md` only if TC46 wording needs alignment.
+
+Scope rules:
+
+- TC46 is a smoke / integration proof goal, not a feature-building goal.
+- `crates/mcp/src/**` and `crates/daemon/src/**` are allowed ONLY for tiny compatibility fixes required by smoke execution.
+- Any product-code change must be explicitly recorded in the final report.
+- If a product-code change exceeds a tiny compatibility fix, STOP and report instead of widening scope.
+
+Forbidden list locked:
+
+- new MCP tools
+- command / runtime feature expansion
+- registry / file / PTY / router feature work
+- network listener
+- direct command spawn from `crates/mcp`
+- direct file reads from `crates/mcp`
+- shell execution feature expansion
+- raw stdout / stderr / file / PTY stream endpoint
+- privileged helper
+- installer / service work
+- secrets, tokens, private usernames, private paths, or machine-specific absolute paths in committed docs
+- pretending provider smoke passed when the provider CLI / auth / config is unavailable
+
+Provider boundary locked:
+
+- Codex MCP config example required.
+- Claude Code MCP config example required.
+- Examples use environment variables and machine-local paths only.
+- If Codex CLI / auth is unavailable on the verification host: Codex provider smoke = `Not Run` or `Blocked`; the config-only example still ships; the exact blocker is named.
+- If Claude Code CLI / auth is unavailable on the verification host: same — `Not Run` / `Blocked` with exact reason; config still ships.
+- Direct daemon UDS + MCP stdio smoke is secondary evidence; it is NOT provider-harness success on its own.
+
+Script decision (locked):
+
+- TC46 implementation MAY create `scripts/smoke/verify-runtime-smoke.sh`.
+- The script MUST NOT require secrets.
+- The script MUST NOT spawn raw shell bridges through MCP.
+- The script MUST verify the daemon + MCP stdio smoke using bounded tool calls (`system_discover`, `health`, plus the `command_start_combed -> bucket_wait -> command_status` flow at minimum).
+- If the script cannot directly drive a provider harness (no Codex CLI, no Claude Code CLI), it MUST say so explicitly and remain a local MCP / daemon smoke only.
+
+Verification additions:
+
+- `git branch --show-current`, `git status --short`, `cargo test --workspace`, `cargo test -p terminal-commander-mcp -- --nocapture`, `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp`, `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src`, `bash scripts/smoke/verify-runtime-smoke.sh`, plus provider smoke evidence (Codex + Claude Code) OR exact blocker for each, are now part of the verification command set so the gates are explicit and reproducible.
 
 ## Task Prompt
 
