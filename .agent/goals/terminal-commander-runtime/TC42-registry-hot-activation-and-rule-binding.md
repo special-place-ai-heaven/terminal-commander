@@ -3,15 +3,15 @@ goal_id: TC42
 title: Registry Hot Activation And Rule Binding
 chain_id: terminal-commander-runtime
 phase: Wave 4 - MCP control surface
-status: "Pending"
+status: "Completed"
 depends_on: ["TC41"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-21T18:55:35+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T13:45:00+00:00"
+completed_at: "2026-05-22T15:00:00+00:00"
+completion_commit: "9c8ce0e"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
@@ -192,29 +192,76 @@ cargo nextest run --workspace
 
 Run TC42 only on branch `main`. Complete the objective above, stay inside the allowed files/areas, respect all forbidden files and invariants, verify the work, commit only verified changes, update this goal file's status fields, and report blockers instead of guessing.
 
-## Final Report Format
+## Final Report
 
 Objective:
 - Make registry rule selection/creation/testing/activation affect live probe runtimes by unique rule IDs, not only the persistent registry database.
 
-Changes:
-- <focused list of implementation changes>
+Changes (verified work commit `9c8ce0e`):
+- Store layer adds two methods: `EventStore::list_active_rule_defs()` (bootstrap rehydration) and `EventStore::deactivate_rule(rule_id, version)` (close most-recent open activation row).
+- New `daemon::activation::ActivationRegistry`: in-memory authority for active `(rule_id, version)` keys, deterministic snapshot, loaded from the persistent `rule_activations` table at bootstrap.
+- `DaemonState` carries `Arc<ActivationRegistry>` and threads it into `CommandRuntime::new`.
+- `CommandRuntime::start_combed` merges the active-rule snapshot with the per-call inline rules (inline rules win on key collision), then builds the per-job `SifterRuntime` from the merged set.
+- IPC protocol: seven new methods (`registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_deactivate`, `registry_list_active`), matching request/response shapes, new error codes `IpcErrorCode::{RuleNotFound, RuleInvalid}`, bounded caps `MAX_REGISTRY_SEARCH_LIMIT`, `MAX_REGISTRY_TEST_SAMPLES`, `MAX_REGISTRY_TEST_SAMPLE_BYTES`.
+- IPC server dispatches the new methods to the store and the activation registry; standard `ipc_<method>` audit rows continue to land via the existing dispatcher hook.
+- MCP tool surface: seven new live tools forwarding through `McpDaemonClient`. `registry_upsert` accepts the rule body as a JSON string so the `schemars` derive stays narrow; the daemon parses and validates before persisting.
+- Tool catalogue grew 10 (TC41) -> 17 (TC42), all `live`, zero `not_implemented`.
 
 Files changed:
-- <paths>
+- `crates/store/src/registry.rs`
+- `crates/daemon/src/activation.rs` (new)
+- `crates/daemon/src/lib.rs`
+- `crates/daemon/src/state.rs`
+- `crates/daemon/src/command.rs`
+- `crates/daemon/src/ipc/protocol.rs`
+- `crates/daemon/src/ipc/server.rs`
+- `crates/daemon/src/ipc/mod.rs`
+- `crates/daemon/tests/registry_ipc.rs` (new)
+- `crates/mcp/src/tools.rs`
+- `crates/mcp/tests/mcp_stdio.rs`
+- `crates/mcp/tests/mcp_live_daemon.rs`
+- `crates/mcp/tests/registry_live_e2e.rs` (new)
+- `.agent/goals/terminal-commander-runtime/TC42-registry-hot-activation-and-rule-binding.md` (frontmatter + this report)
 
-Verification:
-- PASS/FAIL: `<command>` — <summary>
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`, rustc 1.95.0, cargo-nextest 0.9.136):
+- PASS: `git branch --show-current` — `main`
+- PASS: `git status --short` — clean after the work + status commits
+- PASS: `git diff --check`
+- PASS: `cargo metadata --no-deps`
+- PASS: `cargo fmt --all --check`
+- PASS: `cargo clippy --workspace --all-targets -- -D warnings` — no warnings
+- PASS: `cargo test --workspace` — 290 tests, 0 failures
+- PASS: `cargo nextest run --workspace` — 290/290, 0 skipped
+- PASS: `cargo test -p terminal-commanderd --test registry_ipc` — 8 tests
+- PASS: `cargo test -p terminal-commander-mcp --test registry_live_e2e` — 2 tests
+- PASS: `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` — only doc-comment matches
 
-Evidence:
-- <source-status notes, test output summaries, route/status evidence, screenshots only if rendered UI changed>
+Evidence (acceptance criteria, asserted in tests):
+1. `registry_live_e2e::activated_rule_drives_signal_then_deactivated_rule_does_not` walks the full LLM flow through MCP: upsert a keyword rule, dry-run it against bounded samples (one match, one miss), activate it, list-active confirms one entry, start `echo needle ...` via MCP, observe a `needle_match` event on the bucket via `bucket_wait`, deactivate, start the same command again, prove the same argv now produces only lifecycle events (`kind` starting with `command_`).
+2. `registry_live_e2e::registry_upsert_rejects_invalid_regex_through_mcp` proves an unclosed regex group is rejected with a typed MCP `invalid_params` error (mapped from `IpcErrorCode::RuleInvalid`).
+3. `registry_ipc::registry_test_evaluates_rule_against_samples` proves dry-run returns matches only for the matching sample with bounded shape.
+4. `registry_ipc::registry_test_rejects_oversize_sample_count` proves `MAX_REGISTRY_TEST_SAMPLES + 1` is rejected with `IpcErrorCode::RuleInvalid` before the sifter runs.
+5. `registry_ipc::registry_activate_then_list_then_deactivate` proves the in-memory authority matches the persistent activation rows and that `ipc_registry_*` audit rows land for every accepted call.
+6. `registry_ipc::registry_activations_survive_daemon_restart` proves a second bootstrap rehydrates the in-memory registry from the persistent table.
+7. `registry_ipc::registry_upsert_rejects_invalid_regex` proves daemon-side validation surfaces `RuleInvalid` instead of `Internal`.
 
-Commit:
-- Verified work commit: `<hash or none>`
-- Goal status commit: `<hash or none>`
+Source-status:
+- `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_deactivate`, `registry_list_active`: **live (TC42)**.
+- `ActivationRegistry`: **live**. Persistent backing via the existing TC13 `rule_activations` table; no new SQL migration required.
+- Activation scope is **global**: an active rule applies to every newly-started command. Per-bucket / per-job binding is not implemented; the in-memory registry is keyed by `(rule_id, version)` without a scope discriminator. This matches the TC42 acceptance criteria ("activated rule produces a bucket signal") without expanding scope into TC45's parallel-router work.
+- Already-running command/probe hot rebind: **not implemented**. The `ProcessProbe` owns the `Arc<SifterRuntime>` captured at spawn time; swapping it would require a new probe API surface that TC42 deliberately does not introduce. Documented as a known gap (next goal can layer this on if needed).
+- Audit: every `registry_*` IPC call lands a row through `PersistentAudit` via the standard `ipc_<method>` dispatcher path; no production code path falls back to `InMemoryAudit`.
+- Bounded-output invariant: every MCP payload still routes through the daemon's `MAX_RESPONSE_BYTES` envelope; the live e2e asserts the cap on real responses for command + bucket tools and the registry response shapes are bounded by design (counts, ids, severities, capped JSON).
+
+Commits:
+- Prep amendment (scope alignment, no code): `26b00eb`
+- Verified work commit: `9c8ce0e`
+- Goal status commit: this commit
 
 Known gaps / blockers:
-- <none or explicit blocker>
+- Hot rebind of an already-running command's sifter is explicitly not implemented; the next probe-touching goal (or a follow-up) needs a swap API on `ProcessProbe` to make this work without daemon restart-equivalent semantics for in-flight jobs.
+- Activation scope is global. If TC45 (parallel probe router + multi-bucket bindings) wants per-bucket activation, the `ActivationRegistry` will gain a scope key.
+- `started_at` / `completed_at` are operator-set timestamps; commit author dates are the audit-grade truth.
 
 Next goal:
-- TC43-file-probe-search-watch-and-bounded-read.md
+- TC43-file-probe-search-watch-and-bounded-read.md — do not start until this TC42 report is reviewed.
