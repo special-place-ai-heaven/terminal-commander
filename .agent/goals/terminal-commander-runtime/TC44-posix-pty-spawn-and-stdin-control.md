@@ -3,15 +3,15 @@ goal_id: TC44
 title: Posix Pty Spawn And Stdin Control
 chain_id: terminal-commander-runtime
 phase: Wave 6 - Interactive terminal capability
-status: "Pending"
+status: "Completed"
 depends_on: ["TC43"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-21T18:55:35+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T19:35:00+00:00"
+completed_at: "2026-05-22T20:55:00+00:00"
+completion_commit: "4cc8dcc"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
@@ -253,29 +253,82 @@ Verification additions:
 
 Run TC44 only on branch `main`. Complete the objective above, stay inside the allowed files/areas, respect all forbidden files and invariants, verify the work, commit only verified changes, update this goal file's status fields, and report blockers instead of guessing.
 
-## Final Report Format
+## Final Report
 
 Objective:
-- Add POSIX/WSL PTY spawn and controlled stdin so interactive commands can be observed and steered while still emitting only filtered signal to the LLM.
+- Add POSIX/WSL PTY spawn and controlled stdin so interactive commands can be observed and steered while emitting only filtered signal to the LLM, without touching `command.rs`, without exposing raw screen buffers, and without ever forwarding an LLM-supplied secret.
 
-Changes:
-- <focused list of implementation changes>
+Changes (verified work commit `4cc8dcc`):
+- `crates/probes/Cargo.toml`: `pty-process = "=0.5.3"` (MIT) added under `[target.'cfg(unix)'.dependencies]`, async feature on. Pinned per the TC44 prep amendment; no fallback to `portable-pty` was needed.
+- `crates/probes/src/pty.rs`: new `PtyProbe` runtime (mod `runtime`, cfg(unix) only). Owns the pty exclusively in its streaming task; the borrow-checker headache from sharing `pty_process::Pty` is resolved by a tokio mpsc channel for stdin writes. Reads run with a 50ms timeout per loop iteration so the loop also services cancellation and queued writes. PTY output flows through the existing `AnsiNormalizer` (ANSI/CR normalization) and `PromptDetector`. The detector now also inspects the pending partial-line buffer via the new `AnsiNormalizer::peek_pending`, so `[sudo] password for dev: ` style prompts (no trailing newline) flip the secret flag before the LLM can write. New types: `PtyProbeConfig`, `PtyProbeMetrics`, `PtyProbeError`, `WriteStdinError`, `PtyProbe`, plus `DEFAULT_PTY_GRACE` and `MAX_PTY_STDIN_BYTES = 4096`.
+- `crates/daemon/src/pty_command.rs` (new): `PtyRuntime` lifecycle. Mirrors `CommandRuntime` / `WatchRuntime` shape but lives entirely in this module so `command.rs` stays untouched. Audit rows are `pty_command_start` / `pty_command_write_stdin` / `pty_command_stop` / `pty_sifter_rebind`. The pre-spawn shell-interpreter deny list (`SHELL_INTERPRETERS_DENY` from `command.rs`) is reused; the existing `PolicyAction::CommandStart` gate (sudo/doas/su/... default-deny) applies before spawn. `write_stdin` returns `PtyRuntimeError::SecretInputDenied` when the probe has flagged a secret prompt; the audit metadata is exactly `{byte_count, prompt_kind: "secret"}` — never the bytes.
+- `crates/daemon/src/state.rs`: `DaemonState.pty: Arc<PtyRuntime>` wired alongside `CommandRuntime` and `WatchRuntime` at bootstrap (cfg(unix)).
+- `crates/daemon/src/ipc/protocol.rs`: 4 new IPC methods (`PtyCommandStart`, `PtyCommandWriteStdin`, `PtyCommandStop`, `PtyCommandList`), new error code `IpcErrorCode::SecretInputDenied`, caps `MAX_PTY_ARGV_ITEMS` and `MAX_PTY_STDIN_BYTES`. Param/response DTOs carry only bounded metadata; no raw screen buffer field exists.
+- `crates/daemon/src/ipc/server.rs`: 4 handler fns. `validate_scope_against_live_jobs` now resolves `Bucket`/`Job`/`Probe` scope ids against the union of `command.live_jobs()`, `watch.live_watches()`, and `pty.live_jobs()`. `handle_registry_activate` / `handle_registry_deactivate` rebind all three runtimes; the returned `jobs_rebound` is the sum.
+- `crates/mcp/src/tools.rs`: 4 new MCP tools forwarding through the daemon UDS (`pty_command_start` / `pty_command_write_stdin` / `pty_command_stop` / `pty_command_list`). Flat MCP DTOs. The MCP crate still does not touch the filesystem and still does not spawn commands. Tool catalogue grew 22 -> 26 live; `not_implemented` count remains zero.
+- `crates/mcp/tests/mcp_live_daemon.rs` + `crates/mcp/tests/mcp_stdio.rs`: tool-set assertions updated to the 26-tool catalogue.
 
 Files changed:
-- <paths>
+- `crates/probes/Cargo.toml`
+- `crates/probes/src/lib.rs`
+- `crates/probes/src/pty.rs`
+- `crates/daemon/src/pty_command.rs` (new)
+- `crates/daemon/src/lib.rs`
+- `crates/daemon/src/state.rs`
+- `crates/daemon/src/ipc/mod.rs`
+- `crates/daemon/src/ipc/protocol.rs`
+- `crates/daemon/src/ipc/server.rs`
+- `crates/daemon/tests/pty_ipc.rs` (new, 6 tests)
+- `crates/mcp/src/tools.rs`
+- `crates/mcp/tests/mcp_live_daemon.rs`
+- `crates/mcp/tests/mcp_stdio.rs`
+- `crates/mcp/tests/pty_tools_live_e2e.rs` (new, 3 tests)
+- `Cargo.lock`
+- `.agent/goals/terminal-commander-runtime/TC44-*.md` (this file)
 
-Verification:
-- PASS/FAIL: `<command>` — <summary>
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`, rustc 1.95.0, cargo-nextest 0.9.136, pty-process 0.5.3):
+- PASS: `git branch --show-current` — `main`
+- PASS: `git status --short` — clean after work + status commits
+- PASS: `git diff --check`
+- PASS: `cargo metadata --no-deps`
+- PASS: `cargo fmt --all --check`
+- PASS: `cargo clippy --workspace --all-targets -- -D warnings` — no warnings
+- PASS: `cargo test --workspace` — every suite green
+- PASS: `cargo nextest run --workspace` — **334/334 passing, 0 skipped**
+- PASS: `cargo test -p terminal-commanderd --test pty_ipc -- --nocapture` — 6 tests
+- PASS: `cargo test -p terminal-commander-mcp --test pty_tools_live_e2e -- --nocapture` — 3 tests
+- PASS: `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` — only doc/negative-assertion matches
+- PASS: `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src` — no matches
+- PASS: `rg "stdin_text|secret_text|stdin_bytes_value|raw_prompt" crates/daemon/src crates/daemon/tests crates/mcp/src crates/mcp/tests` — NO STDIN-LEAK PATHS (audit evidence)
 
-Evidence:
-- <source-status notes, test output summaries, route/status evidence, screenshots only if rendered UI changed>
+Evidence — explicit acceptance confirmations:
 
-Commit:
-- Verified work commit: `<hash or none>`
-- Goal status commit: `<hash or none>`
+- **PTY command starts through daemon/MCP.** Both `crates/daemon/tests/pty_ipc.rs::pty_command_start_then_stop_returns_metrics` and `crates/mcp/tests/pty_tools_live_e2e.rs::pty_command_full_lifecycle_through_mcp` spawn a `python3` PTY child end-to-end and verify the bounded response shape (job_id + bucket_id + probe_id + cursor) plus the post-stop counters.
+- **PTY output creates bucket signal events.** The probe feeds normalized lines through `SifterRuntime::evaluate`; matching drafts land via `WatchEventSink → Router::bucket_append`. `pty_command_start_then_stop_returns_metrics` asserts `frames_total >= 2`.
+- **Non-secret stdin works.** `pty_command_full_lifecycle_through_mcp` writes `"hello\n"` over `pty_command_write_stdin` and asserts `stdin_bytes_written > 0` on stop.
+- **Secret-prompt stdin is denied and audited safely.** `pty_write_stdin_denied_during_secret_prompt` asserts `IpcErrorCode::SecretInputDenied` and inspects the persisted audit row: decision = `deny`, metadata contains `"prompt_kind":"secret"`, metadata does NOT contain the test password string `"should-not-be-sent"`. `pty_secret_prompt_denies_stdin_through_mcp` proves the same path surfaces through the MCP tool layer.
+- **Shell PTY attempt is denied and audited.** `pty_command_rejects_shell_interpreter` (daemon) and `pty_shell_interpreter_denied_through_mcp` (MCP) prove the `SHELL_INTERPRETERS_DENY` list rejects `bash` before any spawn happens; the audit row is `pty_command_start` with decision = `deny` and reason naming the interpreter.
+- **No raw PTY output appears in MCP responses.** Every PTY response DTO carries only ids + bounded counters + boolean flags. The PTY probe never exposes its byte buffer to the IPC layer; events reach the LLM only through the existing structured `EventDraft` lane, after the sifter has matched.
+- **Existing command, bucket, registry, file-watch tests still pass.** Full nextest run is 334/334; TC41 / TC42 / TC42b / TC42c / TC42d / TC43 suites are untouched.
+- **No `crates/daemon/src/command.rs` edits.** `git diff HEAD~2..HEAD -- crates/daemon/src/command.rs` returns nothing in this work commit. PTY lifecycle is the new `pty_command.rs` module; the `SHELL_INTERPRETERS_DENY` constant is imported, not re-declared.
+- **No raw file/log/tail stream endpoint.** Confirmed by both grep guards above.
+
+Source-status:
+- `pty-process 0.5.3` dependency: **live (TC44)** under cfg(unix). Pinned via `=0.5.3`; license MIT.
+- `PtyProbe` + `AnsiNormalizer::peek_pending` + `WriteStdinError::SecretInputActive`: **live (TC44)**.
+- `PtyRuntime` + `pty_command_*` IPC methods + MCP tools: **live (TC44)**.
+- `IpcErrorCode::SecretInputDenied`: **live (TC44)**.
+- Existing `SHELL_INTERPRETERS_DENY` reuse, `PolicyAction::CommandStart` gate: **unchanged**.
+- `command.rs` (TC38 process probe runtime): **unchanged**.
+- Windows-native ConPTY: **deferred** per `non_goals`. The PTY runtime is cfg(unix) only; on non-Unix builds the `state.pty` field is absent and the daemon would surface `IpcErrorCode::UnsupportedPlatform` (already a closed-set variant). WSL2 is the supported Windows story.
+
+Commits:
+- Goal file prep amendment: `f097d51`
+- Verified work commit: `4cc8dcc`
+- Goal status commit: this commit
 
 Known gaps / blockers:
-- <none or explicit blocker>
+- None.
 
 Next goal:
-- TC45-parallel-probe-router-and-multi-bucket-bindings.md
+- TC45-parallel-probe-router-and-multi-bucket-bindings.md — do NOT start until this TC44 report is reviewed.
