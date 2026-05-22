@@ -80,12 +80,27 @@ non_goals:
 
 allowed_files_or_area:
 - crates/mcp/src/**
-- crates/daemon/src/ipc.rs
-- crates/daemon/src/runtime.rs
+- crates/mcp/tests/**
+- crates/daemon/src/ipc/**
+- crates/daemon/src/command.rs
+- crates/daemon/src/state.rs
+- crates/daemon/src/lib.rs
+- crates/daemon/tests/**
+- crates/core/src/** only for narrow DTO/schema additions required by command/bucket MCP contracts
 - docs/mcp/**
+- docs/runtime/**
+- docs/security/**
 - examples/mcp/**
 - tests/**/mcp*
 - tests/**/command*
+- .agent/goals/terminal-commander-runtime/TC41-*.md
+
+Note: scope amended from the original `crates/daemon/src/ipc.rs` /
+`crates/daemon/src/runtime.rs` listing because the repo uses
+`crates/daemon/src/ipc/` as a module directory (not a single file)
+and `command_start_combed` / `command_status` IPC wiring requires
+touching `command.rs` and `state.rs` as well. Recorded in the final
+report.
 
 forbidden_files:
 - crates/probes/src/pty.rs
