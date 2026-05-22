@@ -312,6 +312,57 @@ impl EventStore {
         Ok(out)
     }
 
+    /// Close the most recent open activation for (rule_id, version).
+    /// "Open" means `deactivated_at IS NULL`. Returns whether a row
+    /// was actually closed (so the caller can distinguish "wasn't
+    /// active" from a real deactivation).
+    pub fn deactivate_rule(&mut self, rule_id: &str, version: u32) -> Result<bool> {
+        self.ensure_registry()?;
+        let now_s = OffsetDateTime::now_utc().format(&Rfc3339)?;
+        // We deactivate the most recent open row by `activated_at`
+        // descending. Using rowid as the secondary key keeps it
+        // deterministic when two rows share a timestamp.
+        let changed = self.conn.execute(
+            "UPDATE rule_activations
+                SET deactivated_at = ?1
+              WHERE rowid IN (
+                  SELECT rowid FROM rule_activations
+                   WHERE rule_id = ?2
+                     AND version = ?3
+                     AND deactivated_at IS NULL
+                   ORDER BY activated_at DESC, rowid DESC
+                   LIMIT 1
+              )",
+            params![now_s, rule_id, i64::from(version)],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Load every currently-active rule (one definition per
+    /// `(rule_id, version)` that has an open activation row).
+    /// Definitions are read from `rule_versions.definition`. Used by
+    /// the daemon at bootstrap to rebuild the in-memory activation
+    /// registry without trusting the in-memory state alone.
+    pub fn list_active_rule_defs(&self) -> Result<Vec<RuleDefinition>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT rv.definition
+               FROM rule_activations ra
+               JOIN rule_versions rv
+                 ON rv.rule_id = ra.rule_id
+                AND rv.version = ra.version
+              WHERE ra.deactivated_at IS NULL
+              ORDER BY ra.activated_at ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let def_s: String = row.get(0)?;
+            let def: RuleDefinition = sj::from_str(&def_s)?;
+            out.push(def);
+        }
+        Ok(out)
+    }
+
     /// Tombstone a rule. Existing versions remain queryable; new
     /// versions cannot be inserted while tombstoned.
     pub fn tombstone_rule(&mut self, rule_id: &str) -> Result<()> {

@@ -35,8 +35,13 @@ use crate::ipc::protocol::{
     DEFAULT_CONTEXT_BEFORE, DiscoverResponse, EventContextParams, EventContextResponse,
     IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult,
     MAX_BUCKET_READ_LIMIT, MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES,
-    MAX_CONTEXT_FRAMES, MAX_FRAME_BYTES, PolicyStatusResponse, RequestEnvelope, ResponseEnvelope,
-    SelfCheckResponse, SeverityHistogram, decode_payload, encode_frame,
+    MAX_CONTEXT_FRAMES, MAX_FRAME_BYTES, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
+    PolicyStatusResponse, RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
+    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
+    RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
+    RegistryTestMatch, RegistryTestParams, RegistryTestResponse, RegistryUpsertParams,
+    RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope, SelfCheckResponse,
+    SeverityHistogram, decode_payload, encode_frame,
 };
 use crate::state::DaemonState;
 
@@ -259,6 +264,7 @@ async fn handle_connection(
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum ReadOutcome {
     Ok(RequestEnvelope),
     Err(IpcError),
@@ -371,6 +377,34 @@ async fn dispatch(
             Ok(r) => ("command_status", IpcResult::Ok { response: r }),
             Err(e) => ("command_status", IpcResult::Err { error: e }),
         },
+        IpcRequest::RegistrySearch(p) => match handle_registry_search(state, p) {
+            Ok(r) => ("registry_search", IpcResult::Ok { response: r }),
+            Err(e) => ("registry_search", IpcResult::Err { error: e }),
+        },
+        IpcRequest::RegistryGet(p) => match handle_registry_get(state, p) {
+            Ok(r) => ("registry_get", IpcResult::Ok { response: r }),
+            Err(e) => ("registry_get", IpcResult::Err { error: e }),
+        },
+        IpcRequest::RegistryUpsert(p) => match handle_registry_upsert(state, p) {
+            Ok(r) => ("registry_upsert", IpcResult::Ok { response: r }),
+            Err(e) => ("registry_upsert", IpcResult::Err { error: e }),
+        },
+        IpcRequest::RegistryTest(p) => match handle_registry_test(state, p) {
+            Ok(r) => ("registry_test", IpcResult::Ok { response: r }),
+            Err(e) => ("registry_test", IpcResult::Err { error: e }),
+        },
+        IpcRequest::RegistryActivate(p) => match handle_registry_activate(state, p) {
+            Ok(r) => ("registry_activate", IpcResult::Ok { response: r }),
+            Err(e) => ("registry_activate", IpcResult::Err { error: e }),
+        },
+        IpcRequest::RegistryDeactivate(p) => match handle_registry_deactivate(state, p) {
+            Ok(r) => ("registry_deactivate", IpcResult::Ok { response: r }),
+            Err(e) => ("registry_deactivate", IpcResult::Err { error: e }),
+        },
+        IpcRequest::RegistryListActive => {
+            let r = handle_registry_list_active(state);
+            ("registry_list_active", IpcResult::Ok { response: r })
+        }
     };
     // Audit one row per accepted request. The decision label reflects
     // whether the dispatcher produced an `Ok` response or a typed
@@ -405,6 +439,13 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
             "event_context".to_owned(),
             "command_start_combed".to_owned(),
             "command_status".to_owned(),
+            "registry_search".to_owned(),
+            "registry_get".to_owned(),
+            "registry_upsert".to_owned(),
+            "registry_test".to_owned(),
+            "registry_activate".to_owned(),
+            "registry_deactivate".to_owned(),
+            "registry_list_active".to_owned(),
         ],
     })
 }
@@ -738,6 +779,221 @@ fn handle_command_status(
         .status(params.job_id)
         .map_err(map_command_error)?;
     Ok(IpcResponse::CommandStatus(resp))
+}
+
+fn map_store_error(e: terminal_commander_store::EventStoreError) -> IpcError {
+    use terminal_commander_store::EventStoreError;
+    match e {
+        EventStoreError::InvalidPayload(msg) => IpcError::new(IpcErrorCode::RuleInvalid, msg),
+        other => IpcError::new(IpcErrorCode::Internal, other.to_string()),
+    }
+}
+
+fn handle_registry_search(
+    state: &Arc<DaemonState>,
+    params: &RegistrySearchParams,
+) -> Result<IpcResponse, IpcError> {
+    let limit = params
+        .limit
+        .map(|n| n.min(crate::ipc::protocol::MAX_REGISTRY_SEARCH_LIMIT));
+    let g = state.store.lock();
+    let hits = g
+        .search_rules(&params.query, limit)
+        .map_err(map_store_error)?;
+    drop(g);
+    let projected: Vec<RegistrySearchHit> = hits
+        .into_iter()
+        .map(|h| RegistrySearchHit {
+            rule_id: h.rule_id,
+            version: h.version,
+            event_kind: h.event_kind,
+            summary_template: h.summary_template,
+            tags: h.tags,
+            severity: h.severity,
+            status: h.status,
+        })
+        .collect();
+    Ok(IpcResponse::RegistrySearch(RegistrySearchResponse {
+        hits: projected,
+    }))
+}
+
+fn lookup_rule_def(
+    state: &Arc<DaemonState>,
+    rule_id: &str,
+    version: Option<u32>,
+) -> Result<terminal_commander_core::RuleDefinition, IpcError> {
+    let g = state.store.lock();
+    let opt = match version {
+        Some(v) => g.get_rule_version(rule_id, v).map_err(map_store_error)?,
+        None => g.get_latest_rule(rule_id).map_err(map_store_error)?,
+    };
+    drop(g);
+    opt.ok_or_else(|| {
+        let message = version.map_or_else(
+            || format!("rule '{rule_id}' not found"),
+            |v| format!("rule '{rule_id}' version {v} not found"),
+        );
+        IpcError::new(IpcErrorCode::RuleNotFound, message)
+    })
+}
+
+fn handle_registry_get(
+    state: &Arc<DaemonState>,
+    params: &RegistryGetParams,
+) -> Result<IpcResponse, IpcError> {
+    let def = lookup_rule_def(state, &params.rule_id, params.version)?;
+    Ok(IpcResponse::RegistryGet(RegistryGetResponse {
+        definition: def,
+    }))
+}
+
+fn handle_registry_upsert(
+    state: &Arc<DaemonState>,
+    params: &RegistryUpsertParams,
+) -> Result<IpcResponse, IpcError> {
+    // Validate up front so the operator gets a typed RuleInvalid
+    // instead of a generic Internal error.
+    params
+        .definition
+        .validate()
+        .map_err(|e| IpcError::new(IpcErrorCode::RuleInvalid, e.to_string()))?;
+    let mut g = state.store.lock();
+    let version = g
+        .create_rule_version(&params.definition)
+        .map_err(map_store_error)?;
+    drop(g);
+    Ok(IpcResponse::RegistryUpsert(RegistryUpsertResponse {
+        rule_id: params.definition.id.clone(),
+        version,
+    }))
+}
+
+fn handle_registry_test(
+    state: &Arc<DaemonState>,
+    params: &RegistryTestParams,
+) -> Result<IpcResponse, IpcError> {
+    use terminal_commander_core::{RuleStatus, SourceFrame, SourceStream};
+    use terminal_commander_sifters::SifterRuntime;
+
+    if params.samples.len() > MAX_REGISTRY_TEST_SAMPLES {
+        return Err(IpcError::new(
+            IpcErrorCode::RuleInvalid,
+            format!(
+                "samples count {} exceeds cap {MAX_REGISTRY_TEST_SAMPLES}",
+                params.samples.len()
+            ),
+        ));
+    }
+
+    let mut def = lookup_rule_def(state, &params.rule_id, params.version)?;
+    // Force-active so a Draft rule can still be evaluated against
+    // samples without persisting an activation. Read-only.
+    def.status = RuleStatus::Active;
+    let sifter = SifterRuntime::build(std::slice::from_ref(&def))
+        .map_err(|e| IpcError::new(IpcErrorCode::RuleInvalid, e.to_string()))?;
+
+    let probe = terminal_commander_core::ProbeId::new();
+    let bucket = terminal_commander_core::BucketId::new();
+    let mut matches: Vec<RegistryTestMatch> = Vec::new();
+    let mut truncated_total: u32 = 0;
+
+    for (i, sample) in params.samples.iter().enumerate() {
+        // Per-sample cap; bytes beyond it are dropped before the
+        // sifter even sees them.
+        let mut text = sample.text.clone();
+        if text.len() > MAX_REGISTRY_TEST_SAMPLE_BYTES {
+            let mut end = MAX_REGISTRY_TEST_SAMPLE_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let dropped = u32::try_from(text.len() - end).unwrap_or(u32::MAX);
+            text.truncate(end);
+            truncated_total = truncated_total.saturating_add(dropped);
+        }
+        let stream = sample.stream.clone().unwrap_or(SourceStream::Stdout);
+        let frame = SourceFrame::new(probe, stream, text);
+        let drafts = sifter.evaluate(&frame, bucket);
+        for draft in drafts {
+            let mut captures: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
+            if let Some(c) = draft.captures.as_ref() {
+                for (k, v) in c {
+                    captures.insert(k.clone(), v.clone());
+                }
+            }
+            matches.push(RegistryTestMatch {
+                sample_index: i,
+                severity: draft.severity,
+                kind: draft.kind,
+                summary: draft.summary,
+                captures,
+            });
+        }
+    }
+
+    Ok(IpcResponse::RegistryTest(RegistryTestResponse {
+        matches,
+        truncated_bytes: truncated_total,
+    }))
+}
+
+fn handle_registry_activate(
+    state: &Arc<DaemonState>,
+    params: &RegistryActivateParams,
+) -> Result<IpcResponse, IpcError> {
+    let def = lookup_rule_def(state, &params.rule_id, params.version)?;
+    let version = def.version;
+    let was_already_active = state.activation.is_active(&def.id, version);
+    // In-memory authority first so a concurrent command_start picks
+    // up the rule even if the persistent insert is slow.
+    state.activation.activate(def.clone());
+    // Persistent activation row for the audit trail and restart
+    // recovery.
+    let profile = format!("{:?}", state.policy.profile);
+    let mut g = state.store.lock();
+    g.record_activation(&def.id, version, Some(&profile), Some("ipc"))
+        .map_err(map_store_error)?;
+    drop(g);
+    Ok(IpcResponse::RegistryActivate(RegistryActivateResponse {
+        rule_id: def.id,
+        version,
+        was_already_active,
+    }))
+}
+
+fn handle_registry_deactivate(
+    state: &Arc<DaemonState>,
+    params: &RegistryDeactivateParams,
+) -> Result<IpcResponse, IpcError> {
+    let was_in_memory = state.activation.deactivate(&params.rule_id, params.version);
+    let mut g = state.store.lock();
+    let was_persisted = g
+        .deactivate_rule(&params.rule_id, params.version)
+        .map_err(map_store_error)?;
+    drop(g);
+    Ok(IpcResponse::RegistryDeactivate(
+        RegistryDeactivateResponse {
+            rule_id: params.rule_id.clone(),
+            version: params.version,
+            was_deactivated: was_in_memory || was_persisted,
+        },
+    ))
+}
+
+fn handle_registry_list_active(state: &Arc<DaemonState>) -> IpcResponse {
+    let snap = state.activation.snapshot();
+    let entries: Vec<RegistryActiveEntry> = snap
+        .into_iter()
+        .map(|def| RegistryActiveEntry {
+            rule_id: def.id,
+            version: def.version,
+            severity: def.severity,
+            event_kind: def.event_kind,
+            tags: def.tags,
+        })
+        .collect();
+    IpcResponse::RegistryListActive(RegistryListActiveResponse { entries })
 }
 
 fn emit_audit(

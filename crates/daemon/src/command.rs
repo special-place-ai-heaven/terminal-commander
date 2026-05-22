@@ -42,6 +42,7 @@ use terminal_commander_probes::{EventSink, ProcessProbe, ProcessProbeConfig, Pro
 use terminal_commander_sifters::SifterRuntime;
 use terminal_commander_store::AuditEntry;
 
+use crate::activation::ActivationRegistry;
 use crate::audit::AuditSink;
 use crate::policy::{PolicyAction, PolicyDecision, PolicyEngine, PolicyProfile};
 use crate::router::Router;
@@ -212,6 +213,10 @@ pub struct CommandRuntime {
     policy: PolicyEngine,
     profile_label: String,
     live: Arc<RwLock<std::collections::HashMap<JobId, ProcessProbeMetrics>>>,
+    /// Activation registry consulted at `start_combed`. The active
+    /// rule snapshot is merged with the per-call inline rules before
+    /// the per-job `SifterRuntime` is built (TC42).
+    activation: Arc<ActivationRegistry>,
 }
 
 impl std::fmt::Debug for CommandRuntime {
@@ -224,7 +229,10 @@ impl std::fmt::Debug for CommandRuntime {
 
 impl CommandRuntime {
     /// Construct. The audit sink is the same persistent sink wired
-    /// at daemon bootstrap (TC36), NOT an in-memory fallback.
+    /// at daemon bootstrap (TC36), NOT an in-memory fallback. The
+    /// `activation` registry is the TC42 source of truth for which
+    /// rules are currently active; the runtime consults it at every
+    /// `start_combed` call.
     #[must_use]
     pub fn new(
         router: Arc<Router>,
@@ -232,6 +240,7 @@ impl CommandRuntime {
         jobs: Arc<JobManager>,
         audit: Arc<dyn AuditSink>,
         policy: PolicyEngine,
+        activation: Arc<ActivationRegistry>,
     ) -> Self {
         let profile_label = match policy.profile {
             PolicyProfile::DeveloperLocal => "developer_local".to_owned(),
@@ -247,6 +256,7 @@ impl CommandRuntime {
             policy,
             profile_label,
             live: Arc::new(RwLock::new(std::collections::HashMap::default())),
+            activation,
         }
     }
 
@@ -381,10 +391,32 @@ impl CommandRuntime {
         let bucket_cfg = req.bucket_config.unwrap_or_default();
         self.router.bucket_create(bucket_id, bucket_cfg)?;
 
-        // Build a per-job sifter runtime so the bound rule set
-        // affects ONLY this command's stream.
+        // Merge globally-active rules (TC42 activation registry) with
+        // the per-call inline rules. Inline rules win on `(rule_id,
+        // version)` collisions so an operator can always shadow an
+        // active rule for one command without deactivating it
+        // globally. Deterministic ordering: active rules first (sorted
+        // by id+version), then inline rules in caller order.
+        let merged_rules: Vec<RuleDefinition> = {
+            let active = self.activation.snapshot();
+            let mut seen: std::collections::HashSet<(String, u32)> =
+                std::collections::HashSet::new();
+            // Inline rules first into the seen set so we know which
+            // active rules to skip.
+            for r in &req.rules {
+                seen.insert((r.id.clone(), r.version));
+            }
+            let mut out = Vec::with_capacity(active.len() + req.rules.len());
+            for r in active {
+                if !seen.contains(&(r.id.clone(), r.version)) {
+                    out.push(r);
+                }
+            }
+            out.extend(req.rules.iter().cloned());
+            out
+        };
         let sifter = Arc::new(
-            SifterRuntime::build(&req.rules).map_err(|e| CommandError::Sifter(e.to_string()))?,
+            SifterRuntime::build(&merged_rules).map_err(|e| CommandError::Sifter(e.to_string()))?,
         );
 
         // Build the event sink BEFORE start so the spawn closure

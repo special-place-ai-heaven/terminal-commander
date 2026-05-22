@@ -41,7 +41,11 @@ use terminal_commanderd::ipc::protocol::{
     BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStartResponse,
     CommandStatusParams, CommandStatusResponse, ContextUnavailableReason, DiscoverResponse,
     EventContextParams, EventContextResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest,
-    IpcResponse, PolicyStatusResponse, SelfCheckResponse,
+    IpcResponse, PolicyStatusResponse, RegistryActivateParams, RegistryActivateResponse,
+    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
+    RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse, RegistryTestParams,
+    RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
+    SelfCheckResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -121,6 +125,41 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "event_context",
             status: ToolStatus::Live,
             description: "Bounded context window around an event. Pointer-based.",
+        },
+        ToolCatalogueEntry {
+            name: "registry_search",
+            status: ToolStatus::Live,
+            description: "FTS search over persisted rule definitions. Bounded.",
+        },
+        ToolCatalogueEntry {
+            name: "registry_get",
+            status: ToolStatus::Live,
+            description: "Fetch a rule definition by id and optional version.",
+        },
+        ToolCatalogueEntry {
+            name: "registry_upsert",
+            status: ToolStatus::Live,
+            description: "Insert a new immutable (rule_id, version+1) row from a JSON definition.",
+        },
+        ToolCatalogueEntry {
+            name: "registry_test",
+            status: ToolStatus::Live,
+            description: "Dry-run a rule against bounded samples; never persists, no raw stream lane.",
+        },
+        ToolCatalogueEntry {
+            name: "registry_activate",
+            status: ToolStatus::Live,
+            description: "Activate (rule_id, version?) for every newly-started command.",
+        },
+        ToolCatalogueEntry {
+            name: "registry_deactivate",
+            status: ToolStatus::Live,
+            description: "Deactivate (rule_id, version); future commands skip the rule.",
+        },
+        ToolCatalogueEntry {
+            name: "registry_list_active",
+            status: ToolStatus::Live,
+            description: "Snapshot of every currently-active rule (id + version + severity).",
         },
     ]
 }
@@ -354,6 +393,178 @@ impl TerminalCommanderMcpServer {
         let ipc = params.into_ipc().map_err(invalid_params)?;
         match self.daemon.call(IpcRequest::EventContext(ipc)).await {
             Ok(IpcResponse::EventContext(r)) => json_tool_result(&event_context_payload(&r)),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `registry_search` — FTS over persisted rules.
+    #[tool(
+        description = "Search persisted rule definitions by free-text query. Returns id, version, event_kind, severity, status, tags, and summary template. Bounded."
+    )]
+    async fn registry_search(
+        &self,
+        Parameters(params): Parameters<McpRegistrySearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ipc = RegistrySearchParams {
+            query: params.query,
+            limit: params.limit,
+        };
+        match self.daemon.call(IpcRequest::RegistrySearch(ipc)).await {
+            Ok(IpcResponse::RegistrySearch(RegistrySearchResponse { hits })) => {
+                json_tool_result(&serde_json::json!({ "hits": hits }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `registry_get` — fetch a rule by id (and optional version).
+    #[tool(
+        description = "Fetch the full rule definition by id. If version is omitted, returns the latest stored version."
+    )]
+    async fn registry_get(
+        &self,
+        Parameters(params): Parameters<McpRegistryGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ipc = RegistryGetParams {
+            rule_id: params.rule_id,
+            version: params.version,
+        };
+        match self.daemon.call(IpcRequest::RegistryGet(ipc)).await {
+            Ok(IpcResponse::RegistryGet(RegistryGetResponse { definition })) => {
+                json_tool_result(&serde_json::json!({ "definition": definition }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `registry_upsert` — create a new immutable version from a JSON
+    /// rule definition.
+    #[tool(
+        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string. Validates regex/keywords; existing versions are never mutated."
+    )]
+    async fn registry_upsert(
+        &self,
+        Parameters(params): Parameters<McpRegistryUpsertParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let definition: RuleDefinition = serde_json::from_str(&params.definition_json)
+            .map_err(|e| invalid_params(format!("definition_json: {e}")))?;
+        let ipc = RegistryUpsertParams { definition };
+        match self.daemon.call(IpcRequest::RegistryUpsert(ipc)).await {
+            Ok(IpcResponse::RegistryUpsert(RegistryUpsertResponse { rule_id, version })) => {
+                json_tool_result(&serde_json::json!({
+                    "rule_id": rule_id,
+                    "version": version,
+                }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `registry_test` — dry-run a rule against bounded sample texts.
+    #[tool(
+        description = "Evaluate a rule against bounded sample texts. Returns matches with severity/kind/summary/captures; never persists; never echoes the input back as raw stream output."
+    )]
+    async fn registry_test(
+        &self,
+        Parameters(params): Parameters<McpRegistryTestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut samples: Vec<RegistryTestSample> = Vec::with_capacity(params.samples.len());
+        for s in params.samples {
+            let stream = match s.stream.as_deref() {
+                None => None,
+                Some(name) => Some(parse_source_stream(name).map_err(invalid_params)?),
+            };
+            samples.push(RegistryTestSample {
+                text: s.text,
+                stream,
+            });
+        }
+        let ipc = RegistryTestParams {
+            rule_id: params.rule_id,
+            version: params.version,
+            samples,
+        };
+        match self.daemon.call(IpcRequest::RegistryTest(ipc)).await {
+            Ok(IpcResponse::RegistryTest(RegistryTestResponse {
+                matches,
+                truncated_bytes,
+            })) => json_tool_result(&serde_json::json!({
+                "matches": matches,
+                "truncated_bytes": truncated_bytes,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `registry_activate` — activate a rule for every newly-started
+    /// command.
+    #[tool(
+        description = "Activate (rule_id, version?) so every newly-started command uses the rule. Already-running commands are not hot-rebound."
+    )]
+    async fn registry_activate(
+        &self,
+        Parameters(params): Parameters<McpRegistryActivateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ipc = RegistryActivateParams {
+            rule_id: params.rule_id,
+            version: params.version,
+        };
+        match self.daemon.call(IpcRequest::RegistryActivate(ipc)).await {
+            Ok(IpcResponse::RegistryActivate(RegistryActivateResponse {
+                rule_id,
+                version,
+                was_already_active,
+            })) => json_tool_result(&serde_json::json!({
+                "rule_id": rule_id,
+                "version": version,
+                "was_already_active": was_already_active,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `registry_deactivate` — remove a rule from the active set.
+    #[tool(
+        description = "Deactivate (rule_id, version). Future commands skip the rule; already-running commands keep the rules they were started with."
+    )]
+    async fn registry_deactivate(
+        &self,
+        Parameters(params): Parameters<McpRegistryDeactivateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ipc = RegistryDeactivateParams {
+            rule_id: params.rule_id,
+            version: params.version,
+        };
+        match self.daemon.call(IpcRequest::RegistryDeactivate(ipc)).await {
+            Ok(IpcResponse::RegistryDeactivate(RegistryDeactivateResponse {
+                rule_id,
+                version,
+                was_deactivated,
+            })) => json_tool_result(&serde_json::json!({
+                "rule_id": rule_id,
+                "version": version,
+                "was_deactivated": was_deactivated,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `registry_list_active` — snapshot of active rules.
+    #[tool(
+        description = "Snapshot of every currently-active rule. Returns id + version + severity + event_kind + tags."
+    )]
+    async fn registry_list_active(&self) -> Result<CallToolResult, McpError> {
+        match self.daemon.call(IpcRequest::RegistryListActive).await {
+            Ok(IpcResponse::RegistryListActive(RegistryListActiveResponse { entries })) => {
+                json_tool_result(&serde_json::json!({ "entries": entries }))
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
@@ -690,12 +901,86 @@ const fn unavailable_reason_str(r: ContextUnavailableReason) -> &'static str {
     }
 }
 
+fn parse_source_stream(name: &str) -> Result<terminal_commander_core::SourceStream, String> {
+    match name {
+        "stdout" => Ok(terminal_commander_core::SourceStream::Stdout),
+        "stderr" => Ok(terminal_commander_core::SourceStream::Stderr),
+        "meta" => Ok(terminal_commander_core::SourceStream::Meta),
+        other => Err(format!(
+            "stream '{other}' must be one of stdout|stderr|meta"
+        )),
+    }
+}
+
+/// MCP-facing parameters for `registry_search`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRegistrySearchParams {
+    /// FTS5 query (e.g. `"apt"`, `"missing_package"`).
+    pub query: String,
+    /// Result cap. Clamped at the daemon.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// MCP-facing parameters for `registry_get`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRegistryGetParams {
+    pub rule_id: String,
+    /// Omit for the latest stored version.
+    #[serde(default)]
+    pub version: Option<u32>,
+}
+
+/// MCP-facing parameters for `registry_upsert`. The full
+/// `RuleDefinition` is passed as a JSON string so the MCP layer does
+/// not need to mirror every field of the core schema.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRegistryUpsertParams {
+    /// JSON-encoded `RuleDefinition`. Daemon validates regex /
+    /// keywords / kind before persisting.
+    pub definition_json: String,
+}
+
+/// MCP-facing single sample for `registry_test`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRegistryTestSample {
+    pub text: String,
+    /// Optional stream tag for `rule.stream` filtering. One of
+    /// `stdout`, `stderr`, `meta`. Defaults to `stdout` when omitted.
+    #[serde(default)]
+    pub stream: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRegistryTestParams {
+    pub rule_id: String,
+    #[serde(default)]
+    pub version: Option<u32>,
+    pub samples: Vec<McpRegistryTestSample>,
+}
+
+/// MCP-facing parameters for `registry_activate`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRegistryActivateParams {
+    pub rule_id: String,
+    /// Omit to activate the latest stored version.
+    #[serde(default)]
+    pub version: Option<u32>,
+}
+
+/// MCP-facing parameters for `registry_deactivate`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRegistryDeactivateParams {
+    pub rule_id: String,
+    pub version: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn catalogue_lists_ten_live_tools_at_tc41() {
+    fn catalogue_lists_seventeen_live_tools_at_tc42() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -714,6 +999,13 @@ mod tests {
                 "bucket_wait",
                 "bucket_summary",
                 "event_context",
+                "registry_search",
+                "registry_get",
+                "registry_upsert",
+                "registry_test",
+                "registry_activate",
+                "registry_deactivate",
+                "registry_list_active",
             ]
         );
         let not_impl: Vec<_> = tool_catalogue()
@@ -723,7 +1015,7 @@ mod tests {
             .collect();
         assert!(
             not_impl.is_empty(),
-            "TC41 promotes every TC40-deferred entry to live; expected no not_implemented, got: {not_impl:?}"
+            "TC42 carries forward TC41's no-not_implemented invariant; got: {not_impl:?}"
         );
     }
 
@@ -747,6 +1039,13 @@ mod tests {
                 "event_context".to_owned(),
                 "health".to_owned(),
                 "policy_status".to_owned(),
+                "registry_activate".to_owned(),
+                "registry_deactivate".to_owned(),
+                "registry_get".to_owned(),
+                "registry_list_active".to_owned(),
+                "registry_search".to_owned(),
+                "registry_test".to_owned(),
+                "registry_upsert".to_owned(),
                 "self_check".to_owned(),
                 "system_discover".to_owned(),
             ]

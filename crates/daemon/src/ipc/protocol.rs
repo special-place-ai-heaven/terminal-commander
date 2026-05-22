@@ -27,7 +27,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use terminal_commander_core::{
-    BucketConfig, BucketId, EventId, JobId, RuleDefinition, SignalEvent,
+    BucketConfig, BucketId, EventId, JobId, RuleDefinition, RuleStatus, Severity, SignalEvent,
+    SourceStream,
 };
 
 pub use crate::command::{CommandStartResponse, CommandStatusResponse};
@@ -124,12 +125,36 @@ pub enum IpcRequest {
     CommandStartCombed(CommandStartParams),
     /// Lifecycle + counters lookup for a previously started command.
     CommandStatus(CommandStatusParams),
+    /// FTS-backed search over persisted rule definitions.
+    RegistrySearch(RegistrySearchParams),
+    /// Fetch a specific rule definition by id and optional version.
+    RegistryGet(RegistryGetParams),
+    /// Insert a new (rule_id, version+1) row from a validated
+    /// definition. Existing versions are immutable.
+    RegistryUpsert(RegistryUpsertParams),
+    /// Evaluate a rule against bounded sample texts and return the
+    /// emitted draft shapes. Read-only; never persisted.
+    RegistryTest(RegistryTestParams),
+    /// Mark `(rule_id, version)` as active in the in-memory
+    /// activation registry AND record the persistent activation row.
+    RegistryActivate(RegistryActivateParams),
+    /// Remove `(rule_id, version)` from the active set and close
+    /// the persistent activation row.
+    RegistryDeactivate(RegistryDeactivateParams),
+    /// Snapshot of every currently-active `(rule_id, version)`.
+    RegistryListActive,
 }
 
 /// Success / error union. Success carries a typed payload per method;
 /// error carries a structured code + message.
+///
+/// Boxing the `Ok` payload would change neither the JSON wire form
+/// nor the public Rust API (serde renders `Box<T>` as `T`), so the
+/// large-variant lint is suppressed in favor of keeping the
+/// pattern-matched shape that every dispatcher and test uses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
+#[allow(clippy::large_enum_variant)]
 pub enum IpcResult {
     Ok { response: IpcResponse },
     Err { error: IpcError },
@@ -150,6 +175,13 @@ pub enum IpcResponse {
     EventContext(EventContextResponse),
     CommandStartCombed(CommandStartResponse),
     CommandStatus(CommandStatusResponse),
+    RegistrySearch(RegistrySearchResponse),
+    RegistryGet(RegistryGetResponse),
+    RegistryUpsert(RegistryUpsertResponse),
+    RegistryTest(RegistryTestResponse),
+    RegistryActivate(RegistryActivateResponse),
+    RegistryDeactivate(RegistryDeactivateResponse),
+    RegistryListActive(RegistryListActiveResponse),
 }
 
 /// `system_discover` payload. Mirrors the contract laid out in
@@ -218,6 +250,14 @@ pub enum IpcErrorCode {
     /// `command_status` was called with a job id the daemon does not
     /// know.
     UnknownJob,
+    /// `registry_get` / `registry_test` / `registry_activate` /
+    /// `registry_deactivate` referenced a `(rule_id, version?)` the
+    /// daemon does not know.
+    RuleNotFound,
+    /// `registry_upsert` or `registry_test` payload failed rule
+    /// validation (empty id, bad regex, kind/keywords mismatch,
+    /// etc.).
+    RuleInvalid,
 }
 
 /// Structured error payload.
@@ -467,6 +507,163 @@ impl CommandStartParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandStatusParams {
     pub job_id: JobId,
+}
+
+/// Maximum hits returned by `registry_search` in a single call.
+pub const MAX_REGISTRY_SEARCH_LIMIT: usize = 200;
+/// Default hits returned when the caller omits a limit.
+pub const DEFAULT_REGISTRY_SEARCH_LIMIT: usize = 50;
+/// Maximum number of samples accepted by `registry_test`.
+pub const MAX_REGISTRY_TEST_SAMPLES: usize = 32;
+/// Maximum size of a single sample text. Mirrors the sifter's
+/// per-frame cap; bytes above this are truncated before evaluation.
+pub const MAX_REGISTRY_TEST_SAMPLE_BYTES: usize = 8192;
+
+/// `registry_search` parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistrySearchParams {
+    /// FTS5 query string. Operator-supplied; the daemon performs no
+    /// rewriting beyond what SQLite's FTS5 layer enforces.
+    pub query: String,
+    /// Result cap. Clamped to `MAX_REGISTRY_SEARCH_LIMIT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// One hit returned by `registry_search`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistrySearchHit {
+    pub rule_id: String,
+    pub version: u32,
+    pub event_kind: String,
+    pub summary_template: String,
+    pub tags: Vec<String>,
+    pub severity: Severity,
+    pub status: RuleStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistrySearchResponse {
+    pub hits: Vec<RegistrySearchHit>,
+}
+
+/// `registry_get` parameters. If `version` is `None`, the daemon
+/// returns the latest stored version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryGetParams {
+    pub rule_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryGetResponse {
+    pub definition: RuleDefinition,
+}
+
+/// `registry_upsert` parameters. The daemon validates the definition,
+/// assigns the next version, and persists an immutable row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryUpsertParams {
+    pub definition: RuleDefinition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryUpsertResponse {
+    pub rule_id: String,
+    pub version: u32,
+}
+
+/// A single bounded sample for `registry_test`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryTestSample {
+    /// Sample text. Bytes above `MAX_REGISTRY_TEST_SAMPLE_BYTES` are
+    /// truncated by the daemon before evaluation; the dropped byte
+    /// count surfaces in the response.
+    pub text: String,
+    /// Stream tag used to drive `rule.stream` filtering. Defaults to
+    /// `stdout` so an operator does not have to set it for simple
+    /// keyword tests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<SourceStream>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryTestParams {
+    pub rule_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    pub samples: Vec<RegistryTestSample>,
+}
+
+/// One match produced by `registry_test`. Bounded by design:
+/// captures are projected to a flat `BTreeMap<String, String>` so
+/// the response never carries arbitrary deeply-nested JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryTestMatch {
+    pub sample_index: usize,
+    pub severity: Severity,
+    pub kind: String,
+    pub summary: String,
+    pub captures: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryTestResponse {
+    pub matches: Vec<RegistryTestMatch>,
+    /// Bytes dropped by per-sample truncation. Helps the operator
+    /// reason about why a tail-anchored regex did not fire.
+    pub truncated_bytes: u32,
+}
+
+/// `registry_activate` parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryActivateParams {
+    pub rule_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryActivateResponse {
+    pub rule_id: String,
+    pub version: u32,
+    /// `true` when the rule was already active before this call. The
+    /// activation row is still persisted in either case so the audit
+    /// trail records the operator intent.
+    pub was_already_active: bool,
+}
+
+/// `registry_deactivate` parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryDeactivateParams {
+    pub rule_id: String,
+    pub version: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryDeactivateResponse {
+    pub rule_id: String,
+    pub version: u32,
+    /// `false` when the rule was not in the in-memory active set
+    /// (e.g. operator deactivated something already inactive). The
+    /// daemon still attempts to close the persistent row.
+    pub was_deactivated: bool,
+}
+
+/// One entry in `registry_list_active`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryActiveEntry {
+    pub rule_id: String,
+    pub version: u32,
+    pub severity: Severity,
+    pub event_kind: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryListActiveResponse {
+    pub entries: Vec<RegistryActiveEntry>,
 }
 
 /// Serialize an envelope to a length-prefixed wire frame. Returns

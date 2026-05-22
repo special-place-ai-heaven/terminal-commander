@@ -80,10 +80,17 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "event_context".to_owned(),
             "health".to_owned(),
             "policy_status".to_owned(),
+            "registry_activate".to_owned(),
+            "registry_deactivate".to_owned(),
+            "registry_get".to_owned(),
+            "registry_list_active".to_owned(),
+            "registry_search".to_owned(),
+            "registry_test".to_owned(),
+            "registry_upsert".to_owned(),
             "self_check".to_owned(),
             "system_discover".to_owned(),
         ],
-        "TC41 must advertise the full discovery+command+bucket live tool set"
+        "TC42 must advertise the full TC41 set plus registry surface"
     );
 
     let _ = client.cancel().await;

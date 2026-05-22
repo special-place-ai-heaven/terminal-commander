@@ -14,6 +14,7 @@
 //! - UDS IPC transport: live (TC37) on Unix; unsupported on Windows
 //!   (use WSL2). rmcp transport adapter remains deferred to TC40.
 
+pub mod activation;
 pub mod audit;
 pub mod command;
 pub mod config;
@@ -23,6 +24,7 @@ pub mod router;
 pub mod runtime;
 pub mod state;
 
+pub use activation::{ActivationRegistry, ActivationRegistryHandle};
 pub use audit::{AuditSink, InMemoryAudit, PersistentAudit};
 pub use command::{
     CommandError, CommandRuntime, CommandStartRequest, CommandStartResponse, CommandStatusResponse,
@@ -36,12 +38,18 @@ pub use ipc::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStatusParams,
     ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT, DEFAULT_BUCKET_WAIT_MS,
-    DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DiscoverResponse, EventContextParams,
-    EventContextResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse,
-    IpcResult, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS, MAX_COMMAND_ENV_ITEMS,
+    DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DEFAULT_REGISTRY_SEARCH_LIMIT, DiscoverResponse,
+    EventContextParams, EventContextResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest,
+    IpcResponse, IpcResult, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS, MAX_COMMAND_ENV_ITEMS,
     MAX_COMMAND_GRACE_MS, MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES, MAX_CONTEXT_FRAMES,
-    MAX_FRAME_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PolicyStatusResponse, RequestEnvelope,
-    ResponseEnvelope, SelfCheckResponse, SeverityHistogram,
+    MAX_FRAME_BYTES, MAX_REGISTRY_SEARCH_LIMIT, MAX_REGISTRY_TEST_SAMPLE_BYTES,
+    MAX_REGISTRY_TEST_SAMPLES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PolicyStatusResponse,
+    RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
+    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
+    RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
+    RegistryTestMatch, RegistryTestParams, RegistryTestResponse, RegistryTestSample,
+    RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope,
+    SelfCheckResponse, SeverityHistogram,
 };
 #[cfg(unix)]
 pub use ipc::{DaemonClient, IpcServer, PeerCred, ServerHandle};

@@ -21,6 +21,7 @@ use terminal_commander_core::{BucketManager, ContextRingManager, JobManager};
 use terminal_commander_sifters::SifterRuntime;
 use terminal_commander_store::EventStore;
 
+use crate::activation::ActivationRegistry;
 use crate::audit::PersistentAudit;
 use crate::command::CommandRuntime;
 use crate::config::DaemonConfig;
@@ -72,6 +73,10 @@ pub struct DaemonState {
     /// Command runtime (TC38). Wires command_start_combed into the
     /// daemon. Uses the same persistent audit sink as the router.
     pub command: Arc<CommandRuntime>,
+    /// In-memory activation registry (TC42). Restored from the
+    /// persistent `rule_activations` table at bootstrap; mutated by
+    /// the `registry_activate` / `registry_deactivate` IPC handlers.
+    pub activation: Arc<ActivationRegistry>,
 }
 
 impl std::fmt::Debug for DaemonState {
@@ -108,6 +113,15 @@ impl DaemonState {
         let audit = Arc::new(PersistentAudit::new(Arc::clone(&store)));
         audit.ensure_migration().map_err(BootstrapError::Store)?;
 
+        // Apply the TC13 registry migration eagerly so bootstrap can
+        // safely call `list_active_rule_defs` and the IPC layer can
+        // accept `registry_*` calls without a first-call latency
+        // spike. The migration is idempotent.
+        {
+            let mut g = store.lock();
+            g.ensure_registry().map_err(BootstrapError::Store)?;
+        }
+
         let buckets = Arc::new(BucketManager::new());
         let rings = Arc::new(ContextRingManager::new());
         let jobs = Arc::new(JobManager::new());
@@ -115,6 +129,16 @@ impl DaemonState {
             Arc::new(SifterRuntime::build(&[]).map_err(|e| BootstrapError::Sifter(e.to_string()))?);
 
         let policy = PolicyEngine::new(config.policy.profile);
+
+        // Restore active rule definitions from the persistent
+        // registry. The in-memory ActivationRegistry is the runtime
+        // authority for `command_start_combed`; the DB row is the
+        // durability backstop for restarts.
+        let active_defs = {
+            let g = store.lock();
+            g.list_active_rule_defs().map_err(BootstrapError::Store)?
+        };
+        let activation = Arc::new(ActivationRegistry::from_defs(active_defs));
 
         let router = Arc::new(Router::with_sink(
             Arc::clone(&buckets),
@@ -131,6 +155,7 @@ impl DaemonState {
             Arc::clone(&jobs),
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
             policy,
+            Arc::clone(&activation),
         ));
 
         Ok(Self {
@@ -144,6 +169,7 @@ impl DaemonState {
             audit,
             router,
             command,
+            activation,
         })
     }
 

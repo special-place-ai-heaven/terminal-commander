@@ -104,10 +104,17 @@ async fn live_health_roundtrip_through_uds() {
                 "event_context".to_owned(),
                 "health".to_owned(),
                 "policy_status".to_owned(),
+                "registry_activate".to_owned(),
+                "registry_deactivate".to_owned(),
+                "registry_get".to_owned(),
+                "registry_list_active".to_owned(),
+                "registry_search".to_owned(),
+                "registry_test".to_owned(),
+                "registry_upsert".to_owned(),
                 "self_check".to_owned(),
                 "system_discover".to_owned(),
             ],
-            "live daemon must expose the full TC41 tool set"
+            "live daemon must expose the full TC42 tool set"
         );
 
         let result = client
@@ -180,8 +187,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             .filter(|t| t["status"].as_str() == Some("live"))
             .count();
         assert_eq!(
-            live_count, 10,
-            "tool catalogue must list exactly 10 live tools at TC41"
+            live_count, 17,
+            "tool catalogue must list exactly 17 live tools at TC42"
         );
 
         let _ = client.cancel().await;
