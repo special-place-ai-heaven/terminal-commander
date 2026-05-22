@@ -3,15 +3,15 @@ goal_id: TC40
 title: Rmcp Stdio Adapter And Tool Discovery
 chain_id: terminal-commander-runtime
 phase: Wave 4 - MCP control surface
-status: "Pending"
+status: "Completed"
 depends_on: ["TC39"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-21T18:55:35+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T10:00:00+00:00"
+completed_at: "2026-05-22T11:30:00+00:00"
+completion_commit: "a61f5ac11df01230833d6ae7ccdf1d35646b3f8c"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
