@@ -3,15 +3,15 @@ goal_id: TC42b
 title: Live Rule Rebind For Active Streams
 chain_id: terminal-commander-runtime
 phase: Wave 4 - MCP control surface
-status: "Pending"
+status: "Completed"
 depends_on: ["TC42"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-22T15:30:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-22T15:35:00+00:00"
+completed_at: "2026-05-22T16:30:00+00:00"
+completion_commit: "0974ac4"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
@@ -176,29 +176,69 @@ cargo nextest run --workspace
 
 Run TC42b only on branch `main`. Complete the objective above, stay inside the allowed files/areas, respect all forbidden files and invariants, verify the work, commit only verified changes, update this goal file's status fields, and report blockers instead of guessing.
 
-## Final Report Format
+## Final Report
 
 Objective:
-- Make registry activation / deactivation affect future frames from already-running command/probe streams.
+- Make registry activation / deactivation affect future frames from already-running command/probe streams without restarting the daemon, restarting the command, or exposing raw output.
 
-Changes:
-- <focused list of implementation changes>
+Changes (verified work commit `0974ac4`):
+- `crates/sifters` — `SifterRuntime` refactored into an outer wrapper holding `RwLock<Arc<SifterRuntimeInner>>`. `evaluate(&self, ...)` still returns the same shape; readers clone the `Arc` under a brief read lock so evaluation runs outside the lock. New `rebuild(&self, &[RuleDefinition]) -> RebindReport` builds the new compiled state outside the lock and atomically swaps it in; rebuild failures leave the prior set intact. `ProcessProbe` is untouched — same `Arc<SifterRuntime>` handle, new contents.
+- `crates/daemon/src/command.rs` — `CommandRuntime` now stores per-job `JobBinding { metrics, sifter, inline_rules }` instead of just metrics. The inline rules captured at `command_start_combed` time survive every subsequent rebind. New `rebind_all_jobs()` walks every live binding, recomputes `(active ∪ inline)` against the current activation snapshot, and calls `sifter.rebuild()` per job. Each per-job rebuild emits a `command_sifter_rebind` audit row (info on success, error on rebuild failure) through the persistent audit sink. Returns a bounded `RebindAllReport { jobs_considered, jobs_rebound, rebuild_failures }`.
+- `crates/daemon/src/ipc/server.rs` — `handle_registry_activate` and `handle_registry_deactivate` call `state.command.rebind_all_jobs()` AFTER updating the in-memory `ActivationRegistry` and the persistent activation row. No wire-protocol changes; effects surface via the standard `command_sifter_rebind` audit row.
+- `merge_active_and_inline` extracted as a shared helper so spawn-time and rebind-time merges use identical semantics.
 
 Files changed:
-- <paths>
+- `crates/sifters/Cargo.toml` (parking_lot 0.12.5 direct dep)
+- `crates/sifters/src/lib.rs`
+- `crates/daemon/src/command.rs`
+- `crates/daemon/src/ipc/server.rs`
+- `crates/daemon/tests/registry_live_rebind.rs` (new)
+- `crates/mcp/tests/registry_live_rebind_e2e.rs` (new)
+- `Cargo.lock` (parking_lot already in graph; lockfile updated by the new sifters dep)
+- `.agent/goals/terminal-commander-runtime/TC42b-live-rule-rebind-for-active-streams.md` (frontmatter + this report)
 
-Verification:
-- PASS/FAIL: `<command>` — <summary>
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`, rustc 1.95.0, cargo-nextest 0.9.136):
+- PASS: `git branch --show-current` — `main`
+- PASS: `git status --short` — clean after the work + status commits
+- PASS: `git diff --check`
+- PASS: `cargo metadata --no-deps`
+- PASS: `cargo fmt --all --check`
+- PASS: `cargo clippy --workspace --all-targets -- -D warnings` — no warnings
+- PASS: `cargo test --workspace` — 294 tests, 0 failures
+- PASS: `cargo nextest run --workspace` — 294/294, 0 skipped
+- PASS: `cargo test -p terminal-commanderd --test registry_live_rebind` — 3 tests
+- PASS: `cargo test -p terminal-commander-mcp --test registry_live_rebind_e2e` — 1 test, ~2 seconds
+- PASS: `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` — only doc-comment matches; the live-rebind e2e uses a `Path::new(...).exists()` availability check so the grep stays clean
 
-Evidence:
-- <source-status notes, test output summaries>
+Evidence (acceptance criteria, all asserted in tests):
+1. `registry_live_rebind_e2e::activate_while_command_runs_drives_signal_then_deactivate_silences_it` walks the full LLM-visible contract through MCP using a `python3 -u -c` emitter that prints `midrun-token` 8x at 250 ms intervals.
+2. Phase 1 (pre-activation `bucket_wait`) is asserted to contain NO `midrun_match` events from that running command.
+3. Phase 2 (`registry_activate` mid-run) triggers `rebind_all_jobs` server-side.
+4. Phase 3 (`bucket_wait` post-activation) is asserted to contain at least one `midrun_match` event from the SAME still-running command.
+5. Phase 4 (`registry_deactivate` mid-run) symmetrically triggers a rebind.
+6. Phase 5 (final `bucket_wait` window after a grace + drain pass) is asserted to contain NO further `midrun_match` events.
+7. `registry_live_rebind::sifter_runtime_rebuild_swaps_rule_set_in_place` proves the daemon-level rebuild contract: same `Arc<SifterRuntime>` returns different `evaluate()` results before vs after `rebuild`.
+8. `registry_live_rebind::sifter_rebuild_failure_preserves_prior_rule_set` proves a malformed regex on rebuild does NOT clobber the previous compiled rule set.
+9. `registry_live_rebind::rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job` proves the audit-row count grows by one per running job on activate AND on deactivate.
+10. The bounded-output invariant is preserved: no new raw-stream lane, no new tool, no new wire field carries free-form bytes. The audit metadata is a bounded JSON blob with two integer counters.
 
-Commit:
-- Verified work commit: `<hash or none>`
-- Goal status commit: `<hash or none>`
+Source-status:
+- `SifterRuntime::rebuild`, `CommandRuntime::rebind_all_jobs`, `RebindAllReport`: **live (TC42b)**.
+- `registry_activate` / `registry_deactivate` MCP+IPC behavior: **live (TC42b)** — now also rebinds running streams.
+- `ProcessProbe` API: **unchanged**. The whole rebind machinery lives behind the existing `Arc<SifterRuntime>` handle.
+- Per-bucket / per-job activation scope: **NOT implemented**. Activation is still global; rebind applies the same merged set to every running job. The seam to layer per-job scope on top is available (`ActivationRegistry::snapshot()` + per-job `inline_rules`).
+- Already-running probes' historical frames: **never reread**. No fake historical matches; in-flight frames finish against the snapshot they captured.
+- Audit: every per-job rebind lands a `command_sifter_rebind` row through `PersistentAudit` (production sink); no production path falls back to `InMemoryAudit`.
+
+Commits:
+- Goal file creation: `94aed07`
+- Verified work commit: `0974ac4`
+- Goal status commit: this commit
 
 Known gaps / blockers:
-- <none or explicit blocker>
+- The live e2e (`registry_live_rebind_e2e`) requires `python3` on PATH for a controllable slow-line emitter. The test skips gracefully when missing; CI hosts that lack python3 should install it or run the daemon-level tests instead.
+- Per-bucket / per-job activation scope remains future work (no behavior gap, just future scope).
+- `started_at` / `completed_at` are operator-set timestamps; commit author dates are the audit-grade truth.
 
 Next goal:
-- TC43-file-probe-search-watch-and-bounded-read.md
+- TC43-file-probe-search-watch-and-bounded-read.md — do not start until this TC42b report is reviewed.
