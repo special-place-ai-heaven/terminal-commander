@@ -11,7 +11,7 @@ worktree_hint: ""
 created_at: "2026-05-21T18:55:35+00:00"
 started_at: "2026-05-22T13:45:00+00:00"
 completed_at: "2026-05-22T15:00:00+00:00"
-completion_commit: "9c8ce0e"
+completion_commit: "fc3f337"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
@@ -197,7 +197,7 @@ Run TC42 only on branch `main`. Complete the objective above, stay inside the al
 Objective:
 - Make registry rule selection/creation/testing/activation affect live probe runtimes by unique rule IDs, not only the persistent registry database.
 
-Changes (verified work commit `9c8ce0e`):
+Changes (verified work commit `fc3f337`):
 - Store layer adds two methods: `EventStore::list_active_rule_defs()` (bootstrap rehydration) and `EventStore::deactivate_rule(rule_id, version)` (close most-recent open activation row).
 - New `daemon::activation::ActivationRegistry`: in-memory authority for active `(rule_id, version)` keys, deterministic snapshot, loaded from the persistent `rule_activations` table at bootstrap.
 - `DaemonState` carries `Arc<ActivationRegistry>` and threads it into `CommandRuntime::new`.
@@ -255,7 +255,7 @@ Source-status:
 
 Commits:
 - Prep amendment (scope alignment, no code): `26b00eb`
-- Verified work commit: `9c8ce0e`
+- Verified work commit: `fc3f337`
 - Goal status commit: this commit
 
 Known gaps / blockers:
