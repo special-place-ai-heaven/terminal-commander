@@ -305,7 +305,7 @@ fn registry_activate_then_list_then_deactivate() {
                 IpcRequest::RegistryActivate(RegistryActivateParams {
                     rule_id: "kw-act".to_owned(),
                     version: None,
-                    scope: None,
+                    scope: Some(terminal_commander_core::ActivationScope::Global),
                 }),
             )
             .await
@@ -332,7 +332,7 @@ fn registry_activate_then_list_then_deactivate() {
                 IpcRequest::RegistryActivate(RegistryActivateParams {
                     rule_id: "kw-act".to_owned(),
                     version: Some(1),
-                    scope: None,
+                    scope: Some(terminal_commander_core::ActivationScope::Global),
                 }),
             )
             .await
@@ -362,7 +362,7 @@ fn registry_activate_then_list_then_deactivate() {
                 IpcRequest::RegistryDeactivate(RegistryDeactivateParams {
                     rule_id: "kw-act".to_owned(),
                     version: 1,
-                    scope: None,
+                    scope: Some(terminal_commander_core::ActivationScope::Global),
                 }),
             )
             .await
@@ -472,7 +472,7 @@ fn registry_activations_survive_daemon_restart() {
                     IpcRequest::RegistryActivate(RegistryActivateParams {
                         rule_id: "kw-restart".to_owned(),
                         version: None,
-                        scope: None,
+                        scope: Some(terminal_commander_core::ActivationScope::Global),
                     }),
                 )
                 .await

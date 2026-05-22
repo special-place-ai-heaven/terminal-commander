@@ -210,7 +210,7 @@ for i in range(8):
         let _ = call_tool(
             &client,
             "registry_activate",
-            serde_json::json!({"rule_id": "tc42b-kw"}),
+            serde_json::json!({"rule_id": "tc42b-kw", "scope": {"kind": "global"}}),
         )
         .await;
 
@@ -243,7 +243,7 @@ for i in range(8):
         let _ = call_tool(
             &client,
             "registry_deactivate",
-            serde_json::json!({"rule_id": "tc42b-kw", "version": 1}),
+            serde_json::json!({"rule_id": "tc42b-kw", "version": 1, "scope": {"kind": "global"}}),
         )
         .await;
 

@@ -942,13 +942,18 @@ fn handle_registry_activate(
     state: &Arc<DaemonState>,
     params: &RegistryActivateParams,
 ) -> Result<IpcResponse, IpcError> {
-    use terminal_commander_core::ActivationScope;
+    // TC42d: scope is REQUIRED. A missing scope is rejected with a
+    // typed error rather than silently widened to Global. The
+    // dispatcher emits the `ipc_registry_activate` audit row with
+    // decision=error so the rejection is durably recorded.
+    let scope = params.scope.ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::ScopeInvalid,
+            "scope is required; pass {kind:'global'} for explicit global activation",
+        )
+    })?;
     let def = lookup_rule_def(state, &params.rule_id, params.version)?;
     let version = def.version;
-    // TC42c: omitted scope defaults to `Global` for wire compat with
-    // TC42 / TC42b clients. The audit row records the resolved scope
-    // either way.
-    let scope = params.scope.unwrap_or(ActivationScope::Global);
     validate_scope_against_live_jobs(state, scope)?;
     let was_already_active = state.activation.is_active(&def.id, version, scope);
     // In-memory authority first so a concurrent command_start picks
@@ -979,8 +984,14 @@ fn handle_registry_deactivate(
     state: &Arc<DaemonState>,
     params: &RegistryDeactivateParams,
 ) -> Result<IpcResponse, IpcError> {
-    use terminal_commander_core::ActivationScope;
-    let scope = params.scope.unwrap_or(ActivationScope::Global);
+    // TC42d: scope is REQUIRED. See `handle_registry_activate` for
+    // rationale.
+    let scope = params.scope.ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::ScopeInvalid,
+            "scope is required; pass {kind:'global'} for explicit global deactivation",
+        )
+    })?;
     validate_scope_against_live_jobs(state, scope)?;
     let was_in_memory = state
         .activation

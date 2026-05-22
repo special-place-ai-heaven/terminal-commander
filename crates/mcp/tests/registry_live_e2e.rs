@@ -185,7 +185,7 @@ async fn activated_rule_drives_signal_then_deactivated_rule_does_not() {
             &call_tool(
                 &client,
                 "registry_activate",
-                serde_json::json!({"rule_id": "tc42-kw"}),
+                serde_json::json!({"rule_id": "tc42-kw", "scope": {"kind": "global"}}),
             )
             .await,
         );
@@ -245,7 +245,7 @@ async fn activated_rule_drives_signal_then_deactivated_rule_does_not() {
             &call_tool(
                 &client,
                 "registry_deactivate",
-                serde_json::json!({"rule_id": "tc42-kw", "version": 1}),
+                serde_json::json!({"rule_id": "tc42-kw", "version": 1, "scope": {"kind": "global"}}),
             )
             .await,
         );
