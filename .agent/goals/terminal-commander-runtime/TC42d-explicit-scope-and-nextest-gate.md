@@ -3,15 +3,15 @@ goal_id: TC42d
 title: Explicit Scope And Nextest Gate
 chain_id: terminal-commander-runtime
 phase: Wave 4 - MCP control surface
-status: "In progress"
+status: "Completed"
 depends_on: ["TC42c"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-22T18:00:00+00:00"
 started_at: "2026-05-22T18:05:00+00:00"
-completed_at: ""
-completion_commit: ""
+completed_at: "2026-05-22T18:35:00+00:00"
+completion_commit: "a636697"
 blocked_reason: ""
 source_refs:
   - "GitHub main repository: https://github.com/special-place-administrator/terminal-commander"
@@ -87,4 +87,57 @@ rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp
 
 ## Final Report
 
-(to be filled in after verified work commit lands)
+Objective:
+- Require explicit `scope` on `registry_activate` / `registry_deactivate`. Omitted scope rejected with typed error + durable audit row. Install + run `cargo nextest` as first-class verification.
+
+Changes (verified work commit `a636697`):
+- `crates/daemon/src/ipc/server.rs` — `handle_registry_activate` / `handle_registry_deactivate` now `ok_or_else` on `params.scope` with `IpcErrorCode::ScopeInvalid` and message `"scope is required; pass {kind:'global'} for explicit global activation"` (deactivation message symmetric). The dispatcher's existing audit hook lands the rejection as `ipc_registry_activate` / `ipc_registry_deactivate` with `decision = "error"`.
+- `crates/daemon/tests/registry_ipc.rs`, `crates/daemon/tests/registry_live_rebind.rs`, `crates/mcp/tests/registry_live_e2e.rs`, `crates/mcp/tests/registry_live_rebind_e2e.rs` — every `scope: None` callsite migrated to explicit `Some(ActivationScope::Global)` / `{"kind":"global"}`. Existing TC41/TC42/TC42b/TC42c semantics unchanged; the wire shape just stopped being implicit.
+- `crates/daemon/tests/registry_scope_required.rs` (new) — three daemon-level tests: activate-missing-scope rejection + audit row, deactivate-missing-scope rejection + audit row, explicit-global activate+deactivate happy path.
+- `crates/mcp/tests/registry_scope_required_e2e.rs` (new) — two MCP-level rejection tests proving the LLM-visible surface surfaces a scope-required error instead of silently widening to Global.
+
+Files changed:
+- `crates/daemon/src/ipc/server.rs`
+- `crates/daemon/tests/registry_ipc.rs`
+- `crates/daemon/tests/registry_live_rebind.rs`
+- `crates/daemon/tests/registry_scope_required.rs` (new)
+- `crates/mcp/tests/registry_live_e2e.rs`
+- `crates/mcp/tests/registry_live_rebind_e2e.rs`
+- `crates/mcp/tests/registry_scope_required_e2e.rs` (new)
+
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`):
+- PASS: `git branch --show-current` — `main`
+- PASS: `git status --short` clean after work + status commits
+- PASS: `git diff --check`
+- PASS: `cargo fmt --all --check`
+- PASS: `cargo clippy --workspace --all-targets -- -D warnings` — no warnings
+- PASS: `cargo nextest run --workspace` — **317/317 passing, 0 skipped** (cargo-nextest 0.9.136 installed via `cargo install cargo-nextest --locked`)
+- PASS: `cargo test -p terminal-commanderd --test registry_scope_required` — 3 tests
+- PASS: `cargo test -p terminal-commander-mcp --test registry_scope_required_e2e` — 2 tests
+- PASS: `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` — only doc/negative-assertion matches
+
+Evidence (acceptance criteria):
+1. `registry_scope_required::activate_without_scope_is_rejected_and_audited` asserts `IpcErrorCode::ScopeInvalid`, helpful reason, in-memory registry untouched, and the `ipc_registry_activate` audit row with `decision=error`.
+2. `registry_scope_required::deactivate_without_scope_is_rejected_and_audited` mirrors the assertion for deactivate.
+3. `registry_scope_required::explicit_global_scope_activates_normally` proves `Some(Global)` continues to activate + deactivate cleanly.
+4. `registry_scope_required_e2e::mcp_activate_without_scope_returns_error` + `mcp_deactivate_without_scope_returns_error` prove the MCP surface forwards the rejection.
+5. TC42c scoped isolation (`registry_scoped_rebind`, `registry_scoped_rebind_e2e`) and TC42b live rebind (`registry_live_rebind`, `registry_live_rebind_e2e`) still pass under the new contract.
+6. TC41 command + bucket MCP tests still pass.
+7. Bounded-output invariant preserved: no new raw-stream lane, no new tool, no new wire field carrying free-form bytes.
+
+Source-status:
+- `registry_activate` / `registry_deactivate` IPC + MCP handlers: **live (TC42d)**, now scope-required.
+- `IpcErrorCode::ScopeInvalid`: **live (TC42c + TC42d)** — same variant, additional emission path.
+- Persistent rows pre-TC42c: still rehydrate as `Global` via the column default; no migration changes.
+- `cargo nextest` verification gate: **live (TC42d)** on this WSL host.
+
+Commits:
+- Goal file creation: `f3e68ce`
+- Verified work commit: `a636697`
+- Goal status commit: this commit
+
+Known gaps / blockers:
+- None.
+
+Next goal:
+- TC43-file-probe-search-watch-and-bounded-read.md — do NOT start until this TC42d report is reviewed.
