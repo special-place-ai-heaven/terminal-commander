@@ -1,0 +1,3 @@
+NPM03 placeholder for the terminal-commander admin CLI on linux-x64.
+Replaced by NPM05 GitHub Actions with the real
+`cargo build --release --target x86_64-unknown-linux-gnu` artifact.

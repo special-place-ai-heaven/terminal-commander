@@ -1,0 +1,25 @@
+# NPM03: keep platform-package bin/ directories tracked (the placeholder
+# files live there) but never commit a real Rust binary or a generated
+# tarball. NPM05 GitHub Actions drops real binaries into these dirs at
+# build time, NOT into the repo.
+
+# Built tarballs.
+*.tgz
+
+# Real binaries (any file under bin/ that is not the placeholder).
+# Note: placeholder files use the `.placeholder` suffix so they survive
+# this filter.
+terminal-commander-linux-x64/bin/terminal-commanderd
+terminal-commander-linux-x64/bin/terminal-commander-mcp
+terminal-commander-linux-x64/bin/terminal-commander
+terminal-commander-linux-arm64/bin/terminal-commanderd
+terminal-commander-linux-arm64/bin/terminal-commander-mcp
+terminal-commander-linux-arm64/bin/terminal-commander
+
+# node_modules — never committed.
+**/node_modules/
+
+# npm-debug logs and package-lock files belong outside the published
+# tarballs; the root layout does not vendor a lockfile here.
+**/npm-debug.log
+**/.npm/
