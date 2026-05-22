@@ -133,12 +133,24 @@ impl DaemonState {
         // Restore active rule definitions from the persistent
         // registry. The in-memory ActivationRegistry is the runtime
         // authority for `command_start_combed`; the DB row is the
-        // durability backstop for restarts.
-        let active_defs = {
+        // durability backstop for restarts. TC42c rehydrates each
+        // row with its scope so a bucket/job/probe-scoped activation
+        // survives a daemon restart and reattaches to the matching
+        // identity when that bucket/job/probe is re-encountered.
+        let active_rows = {
             let g = store.lock();
-            g.list_active_rule_defs().map_err(BootstrapError::Store)?
+            g.list_active_rule_defs_scoped()
+                .map_err(BootstrapError::Store)?
         };
-        let activation = Arc::new(ActivationRegistry::from_defs(active_defs));
+        let entries: Vec<crate::activation::ActivationEntry> = active_rows
+            .into_iter()
+            .map(
+                |terminal_commander_store::ActiveRuleDef { definition, scope }| {
+                    crate::activation::ActivationEntry { definition, scope }
+                },
+            )
+            .collect();
+        let activation = Arc::new(ActivationRegistry::from_entries(entries));
 
         let router = Arc::new(Router::with_sink(
             Arc::clone(&buckets),

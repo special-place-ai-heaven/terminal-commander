@@ -101,11 +101,7 @@ fn python3_available() -> bool {
     // contain a `Command::new(...)` (the daemon-level grep that
     // proves the MCP crate never spawns directly should not flag
     // a test fixture).
-    for candidate in [
-        "/usr/bin/python3",
-        "/usr/local/bin/python3",
-        "/bin/python3",
-    ] {
+    for candidate in ["/usr/bin/python3", "/usr/local/bin/python3", "/bin/python3"] {
         if std::path::Path::new(candidate).exists() {
             return true;
         }

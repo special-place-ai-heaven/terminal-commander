@@ -281,6 +281,7 @@ fn registry_test_rejects_oversize_sample_count() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn registry_activate_then_list_then_deactivate() {
     let runtime = rt();
     runtime.block_on(async {
@@ -304,6 +305,7 @@ fn registry_activate_then_list_then_deactivate() {
                 IpcRequest::RegistryActivate(RegistryActivateParams {
                     rule_id: "kw-act".to_owned(),
                     version: None,
+                    scope: None,
                 }),
             )
             .await
@@ -317,7 +319,11 @@ fn registry_activate_then_list_then_deactivate() {
         assert!(!act.was_already_active);
 
         // In-memory state should reflect activation.
-        assert!(state.activation.is_active("kw-act", 1));
+        assert!(state.activation.is_active(
+            "kw-act",
+            1,
+            terminal_commander_core::ActivationScope::Global
+        ));
 
         // Idempotent re-activate.
         let resp = client
@@ -326,6 +332,7 @@ fn registry_activate_then_list_then_deactivate() {
                 IpcRequest::RegistryActivate(RegistryActivateParams {
                     rule_id: "kw-act".to_owned(),
                     version: Some(1),
+                    scope: None,
                 }),
             )
             .await
@@ -355,6 +362,7 @@ fn registry_activate_then_list_then_deactivate() {
                 IpcRequest::RegistryDeactivate(RegistryDeactivateParams {
                     rule_id: "kw-act".to_owned(),
                     version: 1,
+                    scope: None,
                 }),
             )
             .await
@@ -364,7 +372,11 @@ fn registry_activate_then_list_then_deactivate() {
             other => panic!("unexpected response: {other:?}"),
         };
         assert!(d.was_deactivated);
-        assert!(!state.activation.is_active("kw-act", 1));
+        assert!(!state.activation.is_active(
+            "kw-act",
+            1,
+            terminal_commander_core::ActivationScope::Global
+        ));
 
         // Audit rows must exist for each accepted call.
         let rows = {
@@ -460,6 +472,7 @@ fn registry_activations_survive_daemon_restart() {
                     IpcRequest::RegistryActivate(RegistryActivateParams {
                         rule_id: "kw-restart".to_owned(),
                         version: None,
+                        scope: None,
                     }),
                 )
                 .await
@@ -472,7 +485,11 @@ fn registry_activations_survive_daemon_restart() {
         {
             let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
             assert!(
-                state.activation.is_active("kw-restart", 1),
+                state.activation.is_active(
+                    "kw-restart",
+                    1,
+                    terminal_commander_core::ActivationScope::Global
+                ),
                 "activation must survive restart"
             );
         }

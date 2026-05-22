@@ -510,19 +510,28 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryActivateParams>,
     ) -> Result<CallToolResult, McpError> {
+        let scope = match params.scope {
+            Some(s) => Some(s.into_ipc_scope()?),
+            None => None,
+        };
         let ipc = RegistryActivateParams {
             rule_id: params.rule_id,
             version: params.version,
+            scope,
         };
         match self.daemon.call(IpcRequest::RegistryActivate(ipc)).await {
             Ok(IpcResponse::RegistryActivate(RegistryActivateResponse {
                 rule_id,
                 version,
                 was_already_active,
+                scope,
+                jobs_rebound,
             })) => json_tool_result(&serde_json::json!({
                 "rule_id": rule_id,
                 "version": version,
                 "was_already_active": was_already_active,
+                "scope": scope,
+                "jobs_rebound": jobs_rebound,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -537,19 +546,28 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryDeactivateParams>,
     ) -> Result<CallToolResult, McpError> {
+        let scope = match params.scope {
+            Some(s) => Some(s.into_ipc_scope()?),
+            None => None,
+        };
         let ipc = RegistryDeactivateParams {
             rule_id: params.rule_id,
             version: params.version,
+            scope,
         };
         match self.daemon.call(IpcRequest::RegistryDeactivate(ipc)).await {
             Ok(IpcResponse::RegistryDeactivate(RegistryDeactivateResponse {
                 rule_id,
                 version,
                 was_deactivated,
+                scope,
+                jobs_rebound,
             })) => json_tool_result(&serde_json::json!({
                 "rule_id": rule_id,
                 "version": version,
                 "was_deactivated": was_deactivated,
+                "scope": scope,
+                "jobs_rebound": jobs_rebound,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -613,10 +631,10 @@ pub fn into_mcp_error(e: &IpcError) -> McpError {
         "ipc_code": format!("{:?}", e.code),
     });
     match e.code {
-        IpcErrorCode::PolicyDenied => McpError::invalid_params(message, Some(data)),
-        IpcErrorCode::UnknownMethod | IpcErrorCode::SchemaMismatch => {
-            McpError::invalid_params(message, Some(data))
-        }
+        IpcErrorCode::PolicyDenied
+        | IpcErrorCode::UnknownMethod
+        | IpcErrorCode::SchemaMismatch
+        | IpcErrorCode::ScopeInvalid => McpError::invalid_params(message, Some(data)),
         _ => McpError::internal_error(message, Some(data)),
     }
 }
@@ -966,6 +984,9 @@ pub struct McpRegistryActivateParams {
     /// Omit to activate the latest stored version.
     #[serde(default)]
     pub version: Option<u32>,
+    /// Optional scope (TC42c). Omitted = `global`.
+    #[serde(default)]
+    pub scope: Option<McpActivationScope>,
 }
 
 /// MCP-facing parameters for `registry_deactivate`.
@@ -973,6 +994,72 @@ pub struct McpRegistryActivateParams {
 pub struct McpRegistryDeactivateParams {
     pub rule_id: String,
     pub version: u32,
+    /// Optional scope (TC42c). Omitted = `global`. MUST match the
+    /// scope used at activation; deactivating with a different scope
+    /// will not close the previously-opened activation row.
+    #[serde(default)]
+    pub scope: Option<McpActivationScope>,
+}
+
+/// MCP-facing scope DTO. Flat string fields so the generated JSON
+/// schema is consumer-friendly. Translated to the daemon-side
+/// `ActivationScope` in `into_ipc_scope`.
+///
+/// Exactly one of the four shapes is accepted:
+/// - `{ "kind": "global" }`
+/// - `{ "kind": "bucket", "bucket_id": "bkt_..." }`
+/// - `{ "kind": "job", "job_id": "job_..." }`
+/// - `{ "kind": "probe", "probe_id": "prb_..." }`
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpActivationScope {
+    /// One of: `global`, `bucket`, `job`, `probe`.
+    pub kind: String,
+    #[serde(default)]
+    pub bucket_id: Option<String>,
+    #[serde(default)]
+    pub job_id: Option<String>,
+    #[serde(default)]
+    pub probe_id: Option<String>,
+}
+
+impl McpActivationScope {
+    /// Translate to the wire `ActivationScope` understood by the
+    /// daemon. Returns an MCP `invalid_params` error on shape
+    /// mismatch (wrong typed-id prefix, missing id for non-global,
+    /// unknown kind).
+    pub fn into_ipc_scope(self) -> Result<terminal_commander_core::ActivationScope, McpError> {
+        use terminal_commander_core::ActivationScope;
+        use terminal_commander_core::ids::{BucketIdKind, JobIdKind, ProbeIdKind};
+        match self.kind.as_str() {
+            "global" => Ok(ActivationScope::Global),
+            "bucket" => {
+                let s = self.bucket_id.ok_or_else(|| {
+                    invalid_params("scope.kind=bucket requires scope.bucket_id".to_owned())
+                })?;
+                let bucket_id =
+                    parse_id::<BucketIdKind>("scope.bucket_id", &s).map_err(invalid_params)?;
+                Ok(ActivationScope::Bucket { bucket_id })
+            }
+            "job" => {
+                let s = self.job_id.ok_or_else(|| {
+                    invalid_params("scope.kind=job requires scope.job_id".to_owned())
+                })?;
+                let job_id = parse_id::<JobIdKind>("scope.job_id", &s).map_err(invalid_params)?;
+                Ok(ActivationScope::Job { job_id })
+            }
+            "probe" => {
+                let s = self.probe_id.ok_or_else(|| {
+                    invalid_params("scope.kind=probe requires scope.probe_id".to_owned())
+                })?;
+                let probe_id =
+                    parse_id::<ProbeIdKind>("scope.probe_id", &s).map_err(invalid_params)?;
+                Ok(ActivationScope::Probe { probe_id })
+            }
+            other => Err(invalid_params(format!(
+                "scope.kind '{other}' is not one of global|bucket|job|probe"
+            ))),
+        }
+    }
 }
 
 #[cfg(test)]

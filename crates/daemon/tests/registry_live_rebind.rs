@@ -201,6 +201,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
                 IpcRequest::RegistryActivate(RegistryActivateParams {
                     rule_id: "kw-rebind".to_owned(),
                     version: None,
+                    scope: None,
                 }),
             )
             .await
@@ -229,6 +230,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
                 IpcRequest::RegistryDeactivate(RegistryDeactivateParams {
                     rule_id: "kw-rebind".to_owned(),
                     version: 1,
+                    scope: None,
                 }),
             )
             .await
@@ -252,4 +254,3 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
         cleanup(&data);
     });
 }
-

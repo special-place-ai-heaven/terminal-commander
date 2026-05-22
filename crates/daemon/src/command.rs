@@ -35,8 +35,8 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use terminal_commander_core::{
-    BucketConfig, BucketId, ContextRingManager, EventDraft, JobConfig, JobId, JobManager,
-    JobRecord, ProbeId, RuleDefinition,
+    ActivationScope, BucketConfig, BucketId, ContextRingManager, EventDraft, JobConfig, JobId,
+    JobManager, JobRecord, ProbeId, RuleDefinition,
 };
 use terminal_commander_probes::{EventSink, ProcessProbe, ProcessProbeConfig, ProcessProbeMetrics};
 use terminal_commander_sifters::SifterRuntime;
@@ -213,6 +213,23 @@ struct JobBinding {
     metrics: ProcessProbeMetrics,
     sifter: Arc<terminal_commander_sifters::SifterRuntime>,
     inline_rules: Vec<terminal_commander_core::RuleDefinition>,
+    /// Identity triple used to resolve scoped activations on rebind
+    /// (TC42c). `(bucket_id, job_id, probe_id)` is the per-job key
+    /// the `ActivationRegistry::snapshot_for_job` lookup needs.
+    bucket_id: BucketId,
+    probe_id: ProbeId,
+}
+
+/// Identity triple for a single live job.
+///
+/// Exposed via [`CommandRuntime::live_jobs`] so the IPC layer can
+/// validate a caller-supplied [`ActivationScope`] against the set of
+/// known live entities before persisting an activation row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveJobIdentity {
+    pub job_id: JobId,
+    pub bucket_id: BucketId,
+    pub probe_id: ProbeId,
 }
 
 /// Bounded report returned by [`CommandRuntime::rebind_all_jobs`].
@@ -225,6 +242,17 @@ pub struct RebindAllReport {
     /// Jobs whose rebuild failed; the prior sifter is unchanged.
     pub rebuild_failures: u32,
 }
+
+/// Internal work tuple captured under the live-map read lock so the
+/// rebuild loop can run without holding the lock. Refactored out so
+/// the closure type stays under clippy's `type_complexity` threshold.
+type RebindWork = (
+    JobId,
+    BucketId,
+    ProbeId,
+    Arc<terminal_commander_sifters::SifterRuntime>,
+    Vec<terminal_commander_core::RuleDefinition>,
+);
 
 /// The command runtime owned by `DaemonState`. Single instance per
 /// daemon process.
@@ -415,11 +443,16 @@ impl CommandRuntime {
         let bucket_cfg = req.bucket_config.unwrap_or_default();
         self.router.bucket_create(bucket_id, bucket_cfg)?;
 
-        // Merge globally-active rules (TC42 activation registry) with
-        // the per-call inline rules. Same helper TC42b uses on every
-        // rebind so semantics stay identical.
+        // Merge scope-resolved active rules (TC42c) with the per-call
+        // inline rules. Same helper TC42b uses on every rebind so
+        // semantics stay identical. The scoped snapshot returns only
+        // entries whose scope matches `(global ∪ matching-bucket ∪
+        // matching-job ∪ matching-probe)`.
+        let active_for_job = self
+            .activation
+            .snapshot_for_job(bucket_id, job_id, probe_id);
         let merged_rules: Vec<RuleDefinition> =
-            merge_active_and_inline(&self.activation.snapshot(), &req.rules);
+            merge_active_and_inline(&active_for_job, &req.rules);
         let sifter = Arc::new(
             SifterRuntime::build(&merged_rules).map_err(|e| CommandError::Sifter(e.to_string()))?,
         );
@@ -497,6 +530,8 @@ impl CommandRuntime {
                 metrics: ProcessProbeMetrics::default(),
                 sifter: sifter_for_binding,
                 inline_rules: inline_rules_for_binding,
+                bucket_id,
+                probe_id,
             },
         );
         self.audit(
@@ -568,39 +603,57 @@ impl CommandRuntime {
 
     /// Recompute every live job's sifter from the current
     /// activation registry snapshot + that job's stored inline
-    /// rules. The probe API is unchanged; the swap happens inside
-    /// the `Arc<SifterRuntime>` each job already holds.
+    /// rules. TC42c: pass an optional scope filter to restrict the
+    /// rebind to jobs the scope would touch (matching `bucket_id` /
+    /// `job_id` / `probe_id`, or every job for [`ActivationScope::Global`]).
+    /// Pass `None` to rebind every live job (used at bootstrap or
+    /// when the caller does not have a specific scope in hand).
     ///
-    /// This is the TC42b entry point: an LLM-issued
-    /// `registry_activate` / `registry_deactivate` calls this after
-    /// updating the activation registry so already-running commands
-    /// see the new rule set on future frames. In-flight frames
-    /// finish against the snapshot they captured (no fake historical
-    /// matches).
+    /// The probe API is unchanged; the swap happens inside the
+    /// `Arc<SifterRuntime>` each job already holds.
+    ///
+    /// This is the entry point: an LLM-issued `registry_activate` /
+    /// `registry_deactivate` calls this after updating the
+    /// activation registry so already-running commands see the new
+    /// rule set on future frames. In-flight frames finish against
+    /// the snapshot they captured (no fake historical matches).
     ///
     /// Per-job rebuild failures (e.g. the active set now contains a
     /// rule the sifter cannot compile) leave that job's prior sifter
     /// in place and are counted in the returned report. They are
     /// audited individually via the daemon's persistent audit sink
-    /// using the standard `command_runtime` actor.
+    /// using the standard `command_runtime` actor. The audit
+    /// metadata includes the resolved scope so an auditor can prove
+    /// only the matching jobs were touched.
     pub fn rebind_all_jobs(&self) -> RebindAllReport {
-        let active_snapshot = self.activation.snapshot();
-        // Take a snapshot of (job_id, sifter_handle, inline_rules)
-        // under the read lock so the rebuild loop does not hold the
-        // map lock across a regex compile.
-        let work: Vec<(
-            JobId,
-            Arc<terminal_commander_sifters::SifterRuntime>,
-            Vec<terminal_commander_core::RuleDefinition>,
-        )> = {
+        self.rebind_jobs_in_scope(None)
+    }
+
+    /// TC42c entry point. Rebinds only the live jobs the supplied
+    /// scope matches. `None` is equivalent to [`ActivationScope::Global`]
+    /// (every job).
+    pub fn rebind_jobs_in_scope(&self, scope: Option<ActivationScope>) -> RebindAllReport {
+        // Take a snapshot of `(job_id, sifter_handle, inline_rules,
+        // identity)` under the read lock so the rebuild loop does
+        // not hold the map lock across a regex compile.
+        let work: Vec<RebindWork> = {
             let g = self.live.read();
             g.iter()
-                .map(|(jid, binding)| {
-                    (
+                .filter_map(|(jid, binding)| {
+                    let matches = match scope {
+                        None | Some(ActivationScope::Global) => true,
+                        Some(s) => s.matches(binding.bucket_id, *jid, binding.probe_id),
+                    };
+                    if !matches {
+                        return None;
+                    }
+                    Some((
                         *jid,
+                        binding.bucket_id,
+                        binding.probe_id,
                         Arc::clone(&binding.sifter),
                         binding.inline_rules.clone(),
-                    )
+                    ))
                 })
                 .collect()
         };
@@ -609,8 +662,12 @@ impl CommandRuntime {
             jobs_rebound: 0,
             rebuild_failures: 0,
         };
-        for (job_id, sifter, inline_rules) in work {
-            let merged = merge_active_and_inline(&active_snapshot, &inline_rules);
+        let scope_label = scope.map_or("any", |s| s.kind_label());
+        for (job_id, bucket_id, probe_id, sifter, inline_rules) in work {
+            let active_for_job = self
+                .activation
+                .snapshot_for_job(bucket_id, job_id, probe_id);
+            let merged = merge_active_and_inline(&active_for_job, &inline_rules);
             match sifter.rebuild(&merged) {
                 Ok(rb) => {
                     report.jobs_rebound = report.jobs_rebound.saturating_add(1);
@@ -620,8 +677,8 @@ impl CommandRuntime {
                         "info",
                         None,
                         Some(format!(
-                            "{{\"old_rule_count\":{},\"new_rule_count\":{}}}",
-                            rb.old_rule_count, rb.new_rule_count
+                            "{{\"old_rule_count\":{},\"new_rule_count\":{},\"scope\":\"{}\"}}",
+                            rb.old_rule_count, rb.new_rule_count, scope_label
                         )),
                     );
                 }
@@ -638,6 +695,23 @@ impl CommandRuntime {
             }
         }
         report
+    }
+
+    /// Snapshot of every live job's identity triple. The IPC layer
+    /// uses this to validate a caller-supplied [`ActivationScope`]
+    /// before persisting a scoped activation row. Returned cloned so
+    /// callers can hold the values across an async boundary without
+    /// keeping the live-map lock.
+    #[must_use]
+    pub fn live_jobs(&self) -> Vec<LiveJobIdentity> {
+        let g = self.live.read();
+        g.iter()
+            .map(|(jid, binding)| LiveJobIdentity {
+                job_id: *jid,
+                bucket_id: binding.bucket_id,
+                probe_id: binding.probe_id,
+            })
+            .collect()
     }
 
     /// `command_status` entry point. Returns bounded counters + the

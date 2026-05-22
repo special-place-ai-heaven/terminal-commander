@@ -1,38 +1,51 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! Runtime activation registry (TC42).
+//! Runtime activation registry (TC42 + TC42c).
 //!
 //! `ActivationRegistry` is the daemon's in-memory authority for "which
-//! rule versions are currently active". The persistent
-//! `rule_activations` table (TC13, V0002 migration) is the durable
-//! backing store; this registry is rebuilt from that table at
-//! daemon bootstrap and is kept in sync on every activate/deactivate
-//! IPC call.
+//! rule versions are currently active, and against which scope". The
+//! persistent `rule_activations` table (TC13 schema, V0004 columns)
+//! is the durable backing store; this registry is rebuilt from that
+//! table at daemon bootstrap and is kept in sync on every
+//! activate/deactivate IPC call.
 //!
-//! Activation scope at TC42 is **global**: a rule that is active
-//! applies to every newly-started command. Per-bucket / per-job
-//! binding can layer on top later. Already-running probes are NOT
-//! hot-rebound; the SifterRuntime captured by `ProcessProbe::spawn`
-//! is owned by that probe and cannot be swapped without a new probe
-//! API (documented gap in the TC42 report).
+//! Scope:
 //!
-//! Source-status: live (TC42) for global pre-spawn activation.
+//! - TC42 introduced this registry keyed by `(rule_id, version)` with
+//!   an implicit `Global` scope.
+//! - TC42b layered live rebind on top: an activation change reaches
+//!   every running command's sifter without restarting the probe.
+//! - TC42c (this module) layers a scope discriminator on top of the
+//!   key: `(rule_id, version, ActivationScope)`. The same rule may be
+//!   active under several disjoint scopes simultaneously; the rebind
+//!   path consults the scope when computing the per-job rule set.
+//!
+//! Source-status: live (TC42c).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use terminal_commander_core::RuleDefinition;
+use terminal_commander_core::{ActivationScope, BucketId, JobId, ProbeId, RuleDefinition};
+
+/// One in-memory activation entry. Carries the active rule
+/// definition AND the scope it was activated under.
+#[derive(Debug, Clone)]
+pub struct ActivationEntry {
+    pub definition: RuleDefinition,
+    pub scope: ActivationScope,
+}
 
 /// In-memory authority for active rules.
 ///
-/// Keyed by `(rule_id, version)` so the same `rule_id` can be
-/// active at multiple historical versions, though in practice a
-/// deactivate-then-activate cycle is how operators upgrade.
+/// Keyed by `(rule_id, version, scope)` so the same `(rule_id, version)`
+/// pair can be active under several disjoint scopes (e.g. global +
+/// one specific bucket). The same `(rule_id, version, scope)` tuple
+/// is idempotent: re-activating replaces the stored definition.
 #[derive(Debug, Default)]
 pub struct ActivationRegistry {
-    by_key: RwLock<HashMap<(String, u32), RuleDefinition>>,
+    by_key: RwLock<HashMap<(String, u32, ActivationScope), RuleDefinition>>,
 }
 
 impl ActivationRegistry {
@@ -43,63 +56,119 @@ impl ActivationRegistry {
     }
 
     /// Build a registry pre-populated from an arbitrary set of
-    /// active rule definitions. Used by `DaemonState::bootstrap`
-    /// after `list_active_rule_defs()` returns the persistent set.
+    /// `(definition, scope)` entries. Used by `DaemonState::bootstrap`
+    /// after `list_active_rule_defs_scoped()` returns the persistent
+    /// set.
     #[must_use]
-    pub fn from_defs(defs: Vec<RuleDefinition>) -> Self {
+    pub fn from_entries(entries: Vec<ActivationEntry>) -> Self {
         let me = Self::new();
-        for def in defs {
-            me.activate(def);
+        for e in entries {
+            me.activate(e.definition, e.scope);
         }
         me
     }
 
-    /// Number of currently-active `(rule_id, version)` entries.
+    /// Number of currently-active `(rule_id, version, scope)` entries.
     #[must_use]
     pub fn len(&self) -> usize {
         self.by_key.read().len()
     }
 
-    /// Whether the registry holds zero active rules.
+    /// Whether the registry holds zero active entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.by_key.read().is_empty()
     }
 
-    /// Insert or replace the active rule for `(rule_id, version)`.
+    /// Insert or replace the active entry for `(rule_id, version, scope)`.
     /// Idempotent: re-activating the same key replaces the stored
     /// definition.
-    pub fn activate(&self, def: RuleDefinition) {
-        let key = (def.id.clone(), def.version);
+    pub fn activate(&self, def: RuleDefinition, scope: ActivationScope) {
+        let key = (def.id.clone(), def.version, scope);
         self.by_key.write().insert(key, def);
     }
 
-    /// Remove `(rule_id, version)` from the active set. Returns
+    /// Remove `(rule_id, version, scope)` from the active set. Returns
     /// whether something was removed so the caller can distinguish
     /// "wasn't active" from a real deactivation.
-    pub fn deactivate(&self, rule_id: &str, version: u32) -> bool {
+    pub fn deactivate(&self, rule_id: &str, version: u32, scope: ActivationScope) -> bool {
         self.by_key
             .write()
-            .remove(&(rule_id.to_owned(), version))
+            .remove(&(rule_id.to_owned(), version, scope))
             .is_some()
     }
 
-    /// Whether `(rule_id, version)` is currently active.
+    /// Whether `(rule_id, version, scope)` is currently active.
     #[must_use]
-    pub fn is_active(&self, rule_id: &str, version: u32) -> bool {
+    pub fn is_active(&self, rule_id: &str, version: u32, scope: ActivationScope) -> bool {
         self.by_key
             .read()
-            .contains_key(&(rule_id.to_owned(), version))
+            .contains_key(&(rule_id.to_owned(), version, scope))
     }
 
-    /// Snapshot of every active rule definition. Returned cloned so
-    /// callers can hold the values across an async boundary without
-    /// keeping the registry lock.
+    /// Snapshot of every active entry, including its scope. Used by
+    /// `registry_list_active` so the caller can see exactly which
+    /// scopes a rule is bound to.
+    #[must_use]
+    pub fn snapshot_entries(&self) -> Vec<ActivationEntry> {
+        let g = self.by_key.read();
+        let mut out: Vec<ActivationEntry> = g
+            .iter()
+            .map(|((_id, _ver, scope), def)| ActivationEntry {
+                definition: def.clone(),
+                scope: *scope,
+            })
+            .collect();
+        // Deterministic order: rule_id, version, scope label, scope value.
+        out.sort_by(|a, b| {
+            a.definition
+                .id
+                .cmp(&b.definition.id)
+                .then(a.definition.version.cmp(&b.definition.version))
+                .then(a.scope.kind_label().cmp(b.scope.kind_label()))
+                .then(a.scope.value_wire().cmp(&b.scope.value_wire()))
+        });
+        out
+    }
+
+    /// Snapshot of every active rule definition, dropping the scope.
+    /// Deduplicates by `(rule_id, version)` so a rule that is active
+    /// under both `Global` and a bucket scope appears once. Useful
+    /// for backwards-compatible callers that still want a flat list.
     #[must_use]
     pub fn snapshot(&self) -> Vec<RuleDefinition> {
         let g = self.by_key.read();
-        let mut out: Vec<RuleDefinition> = g.values().cloned().collect();
-        // Deterministic order: by rule_id then version.
+        let mut seen = std::collections::HashSet::<(String, u32)>::new();
+        let mut out: Vec<RuleDefinition> = Vec::with_capacity(g.len());
+        for ((id, ver, _scope), def) in g.iter() {
+            if seen.insert((id.clone(), *ver)) {
+                out.push(def.clone());
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id).then(a.version.cmp(&b.version)));
+        out
+    }
+
+    /// Resolve every rule definition whose scope matches the given
+    /// live job triple. Deduplicates by `(rule_id, version)` so a
+    /// rule active under both `Global` and a matching `Bucket` scope
+    /// merges to one entry. Order is deterministic by rule id +
+    /// version.
+    #[must_use]
+    pub fn snapshot_for_job(
+        &self,
+        bucket_id: BucketId,
+        job_id: JobId,
+        probe_id: ProbeId,
+    ) -> Vec<RuleDefinition> {
+        let g = self.by_key.read();
+        let mut seen = std::collections::HashSet::<(String, u32)>::new();
+        let mut out: Vec<RuleDefinition> = Vec::with_capacity(g.len());
+        for ((id, ver, scope), def) in g.iter() {
+            if scope.matches(bucket_id, job_id, probe_id) && seen.insert((id.clone(), *ver)) {
+                out.push(def.clone());
+            }
+        }
         out.sort_by(|a, b| a.id.cmp(&b.id).then(a.version.cmp(&b.version)));
         out
     }
@@ -143,14 +212,15 @@ mod tests {
         assert!(r.is_empty());
         assert_eq!(r.len(), 0);
         assert!(r.snapshot().is_empty());
+        assert!(r.snapshot_entries().is_empty());
     }
 
     #[test]
-    fn activate_then_snapshot_returns_rule() {
+    fn activate_global_then_snapshot_returns_rule() {
         let r = ActivationRegistry::new();
-        r.activate(rule("a", 1));
-        assert!(r.is_active("a", 1));
-        assert!(!r.is_active("a", 2));
+        r.activate(rule("a", 1), ActivationScope::Global);
+        assert!(r.is_active("a", 1, ActivationScope::Global));
+        assert!(!r.is_active("a", 2, ActivationScope::Global));
         let snap = r.snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].id, "a");
@@ -160,26 +230,35 @@ mod tests {
     #[test]
     fn deactivate_returns_true_only_when_present() {
         let r = ActivationRegistry::new();
-        r.activate(rule("a", 1));
-        assert!(r.deactivate("a", 1));
-        assert!(!r.deactivate("a", 1));
+        r.activate(rule("a", 1), ActivationScope::Global);
+        assert!(r.deactivate("a", 1, ActivationScope::Global));
+        assert!(!r.deactivate("a", 1, ActivationScope::Global));
         assert!(r.is_empty());
     }
 
     #[test]
-    fn from_defs_loads_persistent_state() {
-        let r = ActivationRegistry::from_defs(vec![rule("a", 1), rule("b", 1)]);
+    fn from_entries_loads_persistent_state() {
+        let r = ActivationRegistry::from_entries(vec![
+            ActivationEntry {
+                definition: rule("a", 1),
+                scope: ActivationScope::Global,
+            },
+            ActivationEntry {
+                definition: rule("b", 1),
+                scope: ActivationScope::Global,
+            },
+        ]);
         assert_eq!(r.len(), 2);
-        assert!(r.is_active("a", 1));
-        assert!(r.is_active("b", 1));
+        assert!(r.is_active("a", 1, ActivationScope::Global));
+        assert!(r.is_active("b", 1, ActivationScope::Global));
     }
 
     #[test]
     fn snapshot_order_is_deterministic() {
         let r = ActivationRegistry::new();
-        r.activate(rule("b", 1));
-        r.activate(rule("a", 2));
-        r.activate(rule("a", 1));
+        r.activate(rule("b", 1), ActivationScope::Global);
+        r.activate(rule("a", 2), ActivationScope::Global);
+        r.activate(rule("a", 1), ActivationScope::Global);
         let names: Vec<(String, u32)> = r
             .snapshot()
             .into_iter()
@@ -202,9 +281,75 @@ mod tests {
         def_v1.summary_template = "first".to_owned();
         let mut def_v1_replaced = rule("a", 1);
         def_v1_replaced.summary_template = "second".to_owned();
-        r.activate(def_v1);
-        r.activate(def_v1_replaced);
+        r.activate(def_v1, ActivationScope::Global);
+        r.activate(def_v1_replaced, ActivationScope::Global);
         assert_eq!(r.len(), 1);
         assert_eq!(r.snapshot()[0].summary_template, "second");
+    }
+
+    #[test]
+    fn same_rule_can_be_active_under_multiple_scopes() {
+        let r = ActivationRegistry::new();
+        let bid = BucketId::new();
+        r.activate(rule("a", 1), ActivationScope::Global);
+        r.activate(rule("a", 1), ActivationScope::Bucket { bucket_id: bid });
+        assert_eq!(r.len(), 2);
+        assert!(r.is_active("a", 1, ActivationScope::Global));
+        assert!(r.is_active("a", 1, ActivationScope::Bucket { bucket_id: bid }));
+    }
+
+    #[test]
+    fn snapshot_for_job_returns_only_matching_scopes() {
+        let r = ActivationRegistry::new();
+        let bid_a = BucketId::new();
+        let bid_b = BucketId::new();
+        let jid = JobId::new();
+        let pid = ProbeId::new();
+        // Global rule applies to both.
+        r.activate(rule("global", 1), ActivationScope::Global);
+        // Bucket A only.
+        r.activate(
+            rule("a_only", 1),
+            ActivationScope::Bucket { bucket_id: bid_a },
+        );
+        // Bucket B only.
+        r.activate(
+            rule("b_only", 1),
+            ActivationScope::Bucket { bucket_id: bid_b },
+        );
+        let snap_a = r.snapshot_for_job(bid_a, jid, pid);
+        let ids_a: Vec<&str> = snap_a.iter().map(|d| d.id.as_str()).collect();
+        assert!(ids_a.contains(&"global"));
+        assert!(ids_a.contains(&"a_only"));
+        assert!(!ids_a.contains(&"b_only"));
+    }
+
+    #[test]
+    fn snapshot_dedupes_same_rule_across_scopes() {
+        let r = ActivationRegistry::new();
+        let bid = BucketId::new();
+        let jid = JobId::new();
+        let pid = ProbeId::new();
+        r.activate(rule("dup", 1), ActivationScope::Global);
+        r.activate(rule("dup", 1), ActivationScope::Bucket { bucket_id: bid });
+        // snapshot() dedupes by (rule_id, version).
+        assert_eq!(r.snapshot().len(), 1);
+        // snapshot_for_job dedupes too even if both scopes match.
+        let merged = r.snapshot_for_job(bid, jid, pid);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, "dup");
+    }
+
+    #[test]
+    fn snapshot_entries_keeps_all_scopes() {
+        let r = ActivationRegistry::new();
+        let bid = BucketId::new();
+        r.activate(rule("a", 1), ActivationScope::Global);
+        r.activate(rule("a", 1), ActivationScope::Bucket { bucket_id: bid });
+        let entries = r.snapshot_entries();
+        assert_eq!(entries.len(), 2);
+        let kinds: Vec<&str> = entries.iter().map(|e| e.scope.kind_label()).collect();
+        assert!(kinds.contains(&"global"));
+        assert!(kinds.contains(&"bucket"));
     }
 }

@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use terminal_commander_core::{
-    BucketConfig, BucketId, EventId, JobId, RuleDefinition, RuleStatus, Severity, SignalEvent,
-    SourceStream,
+    ActivationScope, BucketConfig, BucketId, EventId, JobId, RuleDefinition, RuleStatus, Severity,
+    SignalEvent, SourceStream,
 };
 
 pub use crate::command::{CommandStartResponse, CommandStatusResponse};
@@ -258,6 +258,11 @@ pub enum IpcErrorCode {
     /// validation (empty id, bad regex, kind/keywords mismatch,
     /// etc.).
     RuleInvalid,
+    /// `registry_activate` / `registry_deactivate` was issued with
+    /// a scope value the daemon cannot resolve to a live entity
+    /// (unknown bucket / job / probe id) or with a malformed scope
+    /// payload. The activation is NOT silently widened to Global.
+    ScopeInvalid,
 }
 
 /// Structured error payload.
@@ -617,28 +622,45 @@ pub struct RegistryTestResponse {
 }
 
 /// `registry_activate` parameters.
+///
+/// The optional `scope` field (TC42c) selects which live stream(s) the
+/// activation reaches. Omitted scope deserializes to
+/// [`ActivationScope::Global`], preserving TC42/TC42b wire compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryActivateParams {
     pub rule_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ActivationScope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryActivateResponse {
     pub rule_id: String,
     pub version: u32,
-    /// `true` when the rule was already active before this call. The
-    /// activation row is still persisted in either case so the audit
-    /// trail records the operator intent.
+    /// `true` when the rule was already active under this scope
+    /// before this call. The activation row is still persisted in
+    /// either case so the audit trail records the operator intent.
     pub was_already_active: bool,
+    /// Echo of the scope that was applied. Always populated so
+    /// pre-TC42c clients can ignore the field and post-TC42c clients
+    /// can verify their request.
+    pub scope: ActivationScope,
+    /// Number of live jobs whose sifter was rebound by this call.
+    /// Zero is valid (e.g. no commands running, or no live job
+    /// matched the scope).
+    pub jobs_rebound: u32,
 }
 
-/// `registry_deactivate` parameters.
+/// `registry_deactivate` parameters. Scope follows the same default
+/// rule as `registry_activate`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryDeactivateParams {
     pub rule_id: String,
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ActivationScope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -646,12 +668,19 @@ pub struct RegistryDeactivateResponse {
     pub rule_id: String,
     pub version: u32,
     /// `false` when the rule was not in the in-memory active set
-    /// (e.g. operator deactivated something already inactive). The
-    /// daemon still attempts to close the persistent row.
+    /// for this scope (e.g. operator deactivated something already
+    /// inactive). The daemon still attempts to close the persistent
+    /// row.
     pub was_deactivated: bool,
+    /// Echo of the scope that was applied.
+    pub scope: ActivationScope,
+    /// Number of live jobs whose sifter was rebound by this call.
+    pub jobs_rebound: u32,
 }
 
-/// One entry in `registry_list_active`.
+/// One entry in `registry_list_active`. Carries the scope the rule
+/// is bound to so a rule active under several scopes appears once
+/// per scope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryActiveEntry {
     pub rule_id: String,
@@ -659,6 +688,7 @@ pub struct RegistryActiveEntry {
     pub severity: Severity,
     pub event_kind: String,
     pub tags: Vec<String>,
+    pub scope: ActivationScope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

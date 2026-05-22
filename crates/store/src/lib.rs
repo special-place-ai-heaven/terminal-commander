@@ -33,7 +33,9 @@ pub use audit::{
 pub use import::{
     ImportResult, RULE_PACK_DFA_SIZE_LIMIT, RULE_PACK_REGEX_SIZE_LIMIT, RulePackFile, RulePackMeta,
 };
-pub use registry::{ActivationRecord, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, RuleSearchHit};
+pub use registry::{
+    ActivationRecord, ActiveRuleDef, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, RuleSearchHit,
+};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

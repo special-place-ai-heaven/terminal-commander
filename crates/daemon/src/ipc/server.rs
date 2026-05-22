@@ -942,29 +942,36 @@ fn handle_registry_activate(
     state: &Arc<DaemonState>,
     params: &RegistryActivateParams,
 ) -> Result<IpcResponse, IpcError> {
+    use terminal_commander_core::ActivationScope;
     let def = lookup_rule_def(state, &params.rule_id, params.version)?;
     let version = def.version;
-    let was_already_active = state.activation.is_active(&def.id, version);
+    // TC42c: omitted scope defaults to `Global` for wire compat with
+    // TC42 / TC42b clients. The audit row records the resolved scope
+    // either way.
+    let scope = params.scope.unwrap_or(ActivationScope::Global);
+    validate_scope_against_live_jobs(state, scope)?;
+    let was_already_active = state.activation.is_active(&def.id, version, scope);
     // In-memory authority first so a concurrent command_start picks
     // up the rule even if the persistent insert is slow.
-    state.activation.activate(def.clone());
+    state.activation.activate(def.clone(), scope);
     // Persistent activation row for the audit trail and restart
     // recovery.
     let profile = format!("{:?}", state.policy.profile);
     let mut g = state.store.lock();
-    g.record_activation(&def.id, version, Some(&profile), Some("ipc"))
+    g.record_activation_scoped(&def.id, version, scope, Some(&profile), Some("ipc"))
         .map_err(map_store_error)?;
     drop(g);
-    // TC42b: push the new rule set into every already-running
-    // command's sifter. Already-running probes do not get a
-    // restart; their captured `Arc<SifterRuntime>` is rebuilt in
-    // place. Each per-job rebuild emits a `command_sifter_rebind`
-    // audit row.
-    let _ = state.command.rebind_all_jobs();
+    // TC42c: push the new rule set into every already-running
+    // command's sifter that the scope matches. Global scope rebinds
+    // every live job (TC42b behavior preserved). Scoped activations
+    // only touch matching jobs.
+    let report = state.command.rebind_jobs_in_scope(Some(scope));
     Ok(IpcResponse::RegistryActivate(RegistryActivateResponse {
         rule_id: def.id,
         version,
         was_already_active,
+        scope,
+        jobs_rebound: report.jobs_rebound,
     }))
 }
 
@@ -972,39 +979,120 @@ fn handle_registry_deactivate(
     state: &Arc<DaemonState>,
     params: &RegistryDeactivateParams,
 ) -> Result<IpcResponse, IpcError> {
-    let was_in_memory = state.activation.deactivate(&params.rule_id, params.version);
+    use terminal_commander_core::ActivationScope;
+    let scope = params.scope.unwrap_or(ActivationScope::Global);
+    validate_scope_against_live_jobs(state, scope)?;
+    let was_in_memory = state
+        .activation
+        .deactivate(&params.rule_id, params.version, scope);
     let mut g = state.store.lock();
     let was_persisted = g
-        .deactivate_rule(&params.rule_id, params.version)
+        .deactivate_rule_scoped(&params.rule_id, params.version, scope)
         .map_err(map_store_error)?;
     drop(g);
-    // TC42b: rebind every running command so future frames stop
-    // matching against the deactivated rule. In-flight frames
-    // finish against the snapshot they captured (no fake
-    // historical un-matches).
-    let _ = state.command.rebind_all_jobs();
+    // TC42c: rebind every running command the scope matches so
+    // future frames stop matching against the deactivated rule.
+    // In-flight frames finish against the snapshot they captured
+    // (no fake historical un-matches).
+    let report = state.command.rebind_jobs_in_scope(Some(scope));
     Ok(IpcResponse::RegistryDeactivate(
         RegistryDeactivateResponse {
             rule_id: params.rule_id.clone(),
             version: params.version,
             was_deactivated: was_in_memory || was_persisted,
+            scope,
+            jobs_rebound: report.jobs_rebound,
         },
     ))
 }
 
 fn handle_registry_list_active(state: &Arc<DaemonState>) -> IpcResponse {
-    let snap = state.activation.snapshot();
-    let entries: Vec<RegistryActiveEntry> = snap
+    let entries: Vec<RegistryActiveEntry> = state
+        .activation
+        .snapshot_entries()
         .into_iter()
-        .map(|def| RegistryActiveEntry {
-            rule_id: def.id,
-            version: def.version,
-            severity: def.severity,
-            event_kind: def.event_kind,
-            tags: def.tags,
+        .map(|e| RegistryActiveEntry {
+            rule_id: e.definition.id,
+            version: e.definition.version,
+            severity: e.definition.severity,
+            event_kind: e.definition.event_kind,
+            tags: e.definition.tags,
+            scope: e.scope,
         })
         .collect();
     IpcResponse::RegistryListActive(RegistryListActiveResponse { entries })
+}
+
+/// Validate that a caller-supplied [`ActivationScope`] resolves to a
+/// known live entity (where applicable). `Global` is always valid.
+/// A `Bucket` / `Job` / `Probe` scope referring to an id the daemon
+/// does not currently have a live job for is rejected with
+/// [`IpcErrorCode::ScopeInvalid`] instead of silently widening to
+/// `Global`.
+///
+/// Note on liveness: we deliberately only check against the
+/// command-runtime's live-job map. A scope referring to a future
+/// bucket/job/probe id that has not been started yet is not
+/// legitimately scopeable; the operator can create the command
+/// first, then activate. A scope referring to a recently-exited job
+/// is treated as invalid for the same reason.
+fn validate_scope_against_live_jobs(
+    state: &Arc<DaemonState>,
+    scope: terminal_commander_core::ActivationScope,
+) -> Result<(), IpcError> {
+    use terminal_commander_core::ActivationScope;
+    match scope {
+        ActivationScope::Global => Ok(()),
+        ActivationScope::Bucket { bucket_id } => {
+            if state
+                .command
+                .live_jobs()
+                .iter()
+                .any(|j| j.bucket_id == bucket_id)
+            {
+                Ok(())
+            } else {
+                Err(IpcError::new(
+                    IpcErrorCode::ScopeInvalid,
+                    format!(
+                        "scope bucket_id={} does not resolve to a live job",
+                        bucket_id.to_wire_string()
+                    ),
+                ))
+            }
+        }
+        ActivationScope::Job { job_id } => {
+            if state.command.live_jobs().iter().any(|j| j.job_id == job_id) {
+                Ok(())
+            } else {
+                Err(IpcError::new(
+                    IpcErrorCode::ScopeInvalid,
+                    format!(
+                        "scope job_id={} does not resolve to a live job",
+                        job_id.to_wire_string()
+                    ),
+                ))
+            }
+        }
+        ActivationScope::Probe { probe_id } => {
+            if state
+                .command
+                .live_jobs()
+                .iter()
+                .any(|j| j.probe_id == probe_id)
+            {
+                Ok(())
+            } else {
+                Err(IpcError::new(
+                    IpcErrorCode::ScopeInvalid,
+                    format!(
+                        "scope probe_id={} does not resolve to a live job",
+                        probe_id.to_wire_string()
+                    ),
+                ))
+            }
+        }
+    }
 }
 
 fn emit_audit(
