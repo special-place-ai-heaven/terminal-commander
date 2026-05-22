@@ -81,22 +81,53 @@ non_goals:
 allowed_files_or_area:
 - crates/store/src/registry.rs
 - crates/store/src/import.rs
+- crates/store/src/lib.rs
+- crates/store/migrations/**
+- crates/store/tests/**
 - crates/sifters/src/**
-- crates/daemon/src/runtime.rs
+- crates/sifters/tests/**
+- crates/daemon/src/ipc/**
 - crates/daemon/src/router.rs
-- crates/daemon/src/ipc.rs
+- crates/daemon/src/runtime.rs
+- crates/daemon/src/state.rs
+- crates/daemon/src/command.rs
+- crates/daemon/src/lib.rs
+- crates/daemon/tests/**
+- crates/core/src/** only for narrow DTO/schema additions required by activation/binding contracts
 - crates/mcp/src/**
+- crates/mcp/tests/**
+- crates/mcp/Cargo.toml only if TC42 genuinely requires MCP-local dependency changes
+- Cargo.lock only if dependency changes are required
 - rules/**
-- docs/rules/**
 - docs/mcp/**
+- docs/rules/**
+- docs/runtime/**
+- docs/security/**
 - tests/**/registry*
 - tests/**/sifter*
+- tests/**/mcp*
+- .agent/goals/terminal-commander-runtime/TC42-*.md
 
 forbidden_files:
 - PTY spawn implementation
-- file search/index implementation
-- network listeners
-- unsafe regex engines without bounded execution guards
+- stdin control
+- shell execution
+- file/directory/artifact probes
+- installer/service work
+- privileged helper
+- sudo behavior
+- TCP/HTTP/WebSocket/network listener
+- raw stdout/stderr/log/tail stream endpoint
+- direct command spawn from crates/mcp
+- unsafe or unbounded regex execution
+
+Note: scope amended from the original listing because (a) the repo
+uses `crates/daemon/src/ipc/` as a module directory, not a single
+`ipc.rs` file (same drift TC41 needed to correct), and (b) live
+registry activation may need to touch daemon state/command/runtime
+plus the store migration and test surfaces so an activated rule
+actually affects in-flight probe traffic instead of only persisting
+a registry row. Recorded in the final report.
 
 contracts_or_interfaces:
 - Rules have stable unique IDs and versions.
