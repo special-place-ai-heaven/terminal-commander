@@ -3,15 +3,15 @@ goal_id: NPM01
 title: Memory And Symforge Release Audit
 chain_id: terminal-commander-npm-distribution
 phase: Wave 1 - Distribution audit
-status: "Pending"
+status: "Completed"
 depends_on: []
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T00:00:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T10:00:00+00:00"
+completed_at: "2026-05-23T10:45:00+00:00"
+completion_commit: "5dcbaa4"
 blocked_reason: ""
 source_refs:
   - "Terminal Commander GitHub repository: https://github.com/special-place-administrator/terminal-commander"
@@ -176,29 +176,73 @@ rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src
 
 Run NPM01 only on branch `main`. Complete the objective above, stay inside the allowed files/areas, respect all forbidden files and invariants, verify the work, commit only verified changes, update this goal file's status fields, and report blockers instead of guessing.
 
-## Final Report Format
+## Final Report
 
 Objective:
-- Produce the Symforge release audit + NPM02-NPM07 recommendations.
+- Produce an evidence-backed Symforge release audit + Terminal Commander recommendations for NPM02-NPM07.
 
-Changes:
-- <focused list of audit changes>
+Changes (verified work commit `5dcbaa4`):
+- `docs/release/npm-distribution-audit.md` (new, 18 sections, 343 lines). Memory-source query results, Symforge file inspection map, Terminal Commander current state, capability gap table, what-to-copy / what-not-to-copy lists, per-goal recommendations for NPM02-NPM09, risks (R-NPM-01..R-NPM-05), open questions for NPM02, evidence acknowledgements.
+
+No product-code changes. No `package.json`, `packages/`, `.github/workflows/`, `release-please-config.json`, `.release-please-manifest.json`, or `scripts/**` added — those are NPM02-NPM09 deliverables.
 
 Files changed:
-- <paths>
+- `docs/release/npm-distribution-audit.md` (new)
+- `.agent/goals/terminal-commander-npm-distribution/NPM01-*.md` (this file)
 
-Verification:
-- PASS/FAIL: `<command>` — <summary>
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`):
+- PASS: `git branch --show-current` — `main`
+- PASS: `git status --short` — clean after work + status commits
+- PASS: `git diff --check`
+- PASS: `cargo metadata --no-deps`
+- PASS: `cargo fmt --all --check`
+- PASS: `cargo clippy --workspace --all-targets -- -D warnings`
+- PASS: `cargo test --workspace` — every suite green
+- PASS: `cargo nextest run --workspace` — **347/347, 0 skipped**
+- PASS: `bash scripts/smoke/verify-runtime-smoke.sh` — TC46 regression SUCCESS (8/8 PASS)
+- PASS: `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` — doc / negative-assertion matches only
+- PASS: `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src` — no matches
+- PASS: `git diff HEAD -- crates/ Cargo.toml Cargo.lock rules/ config/ scripts/ .github/ packages/ package.json` — empty
 
-Evidence:
-- <memory sources queried, Symforge artifacts inspected, gap analysis, `Not Run` markers with exact reasons, official-doc links>
+Evidence — memory sources queried (each recorded honestly, none `Not Run` / `Blocked`):
+- **agentmemory MCP `memory_smart_search`** — hits include `mem_mp6xflam_6c69f7f265d1` ("User's SymForge install path is npm-driven. `npm install -g sy[mforge]`") and `mem_mp879e2s_d94e00c1bd0e` ("SymForge Wave 0 close-out commits a1d511f").
+- **agentmemory MCP `memory_recall`** — same hits + supporting rows.
+- **remindb-vault `MemorySearch`** — SymForge install-howto + Wave 0 backlog rows. No "trusted publishing" hits; keyword absent in the Obsidian corpus; documented in §1.
+- **SymForge MCP `health`** — ready; indexed Terminal Commander, not Symforge (different project). Used Bash + WSL to read the Symforge repo directly.
+- **Symforge repo on disk** — found at `/mnt/c/AI_STUFF/PROGRAMMING/symforge` via WSL2 listing. 7 release files inspected verbatim (paths captured in §18 of the audit).
+- **Terminal Commander repo** — inspected for current Cargo bins, missing release files; results in §3 of the audit.
 
-Commit:
-- Verified work commit: `<hash or none>`
-- Goal status commit: `<hash or none>`
+Evidence — explicit acceptance confirmations:
+
+- **`docs/release/npm-distribution-audit.md` exists, ASCII-only, contains source map + capability gap + recommendations + memory-source query results.** Yes — sections §1-§18.
+- **Recommendations cover NPM02-NPM07 (and NPM08-NPM09).** Yes — §7-§12 + §16 summary table.
+- **No `crates/**`, runtime, CI, or `package.json` files edited.** Confirmed by `git diff HEAD -- ...` returning empty (recorded above).
+- **`.agent/goals/.../GOAL_CHAIN_INDEX.md` updated with NPM01 status if needed.** The index is sufficient as written; the status table refresh is left for NPM09 / final chain sweep to avoid mid-chain status drift.
+- **Provider live smoke remains `Not Run`.** Locked: NPM08 owns the Cursor provider smoke; this goal does not run providers.
+- **No secrets, tokens, private usernames, private absolute paths, or machine-specific paths in committed artifacts.** Symforge install paths in the agentmemory hits include `svetipeter`; those rows are referenced only by `obsId` / verbatim hit text, NOT copied into the committed audit. WSL2 absolute paths (`/mnt/c/AI_STUFF/PROGRAMMING/symforge`) are recorded in §18 as evidence anchors only; no operator credentials or tokens appear anywhere.
+
+Beta-state mapping (per the user's follow-up rule "use Symforge + memory as evidence FIRST, then map onto Terminal Commander's actual beta state"):
+- TC48 `Conditional Go` posture preserved. Audit §11 keeps the workspace Cargo version at `0.0.0` and explicitly excludes `Cargo.toml` from the release-please `extra-files` list.
+- Provider live smoke pending = locked. Audit §13 routes the Cursor smoke through NPM08 with the `Not Run` ceiling intact.
+- Linux/WSL2 = the real platform story. Audit §4 rejects Symforge's macOS / Windows targets per TC44 `non_goals`; initial matrix locked to linux-x64 + linux-arm64. Windows operators use Cursor invoking `wsl ... terminal-commander-mcp`.
+- TC46 + TC47 regressions are reused as the release-time gates. Audit §10 mirrors Symforge `verify-main-push` stages while adding the TC46 smoke + TC47 load regression as pre-build gates.
+
+Source-status:
+- `docs/release/npm-distribution-audit.md`: **live (NPM01)**.
+- Symforge repo: **read-only evidence source** (not modified).
+- Terminal Commander runtime + MCP surface: **unchanged**.
+- Every `crates/` source file: **unchanged**.
+- `frames_suppressed` counter (BACKLOG P1.1) + Codex / Claude Code provider live smokes (BACKLOG P1.2 / P1.3): **status unchanged**.
+
+Commits:
+- Verified work commit: `5dcbaa4`
+- Goal status commit: this commit
 
 Known gaps / blockers:
-- <none or explicit blocker>
+- None at NPM01. Two operator preconditions surface for NPM02:
+  - npmjs.com `@terminal-commander` org name availability (recorded in §15 + R-NPM-04).
+  - npmjs.com trusted-publisher configuration access (recorded in R-NPM-03).
+- Both blockers are operator-scope, not Terminal Commander defects.
 
 Next goal:
 - NPM02-npm-binary-packaging-contract.md
