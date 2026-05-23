@@ -1,6 +1,6 @@
 # Goal Chain Index — terminal-commander-windows-wsl-bridge
 
-Status: WWS01 + WWS02 + WWS03 Completed; WWS04..WWS09 Pending.
+Status: WWS01 + WWS02 + WWS03 + WWS04 Completed; WWS05..WWS09 Pending.
 Branch: `main`.
 Successor of: `terminal-commander-npm-distribution` (NPM10 = Completed, bootstrap workflow committed but NOT dispatched; all three packages remain E404 / unpublished).
 
@@ -15,7 +15,7 @@ Language: ASCII only.
 | WWS01  | Windows / WSL install UX contract                                   | Completed (commit `6220eb2`; contract at `docs/release/windows-wsl-bridge-contract.md`) |
 | WWS02  | Root npm package win32 bridge contract                              | Completed (commit `1da40f3`; resolver bridge_required branch + bounded shim refusals + NPM02 §13b amendment) |
 | WWS03  | WSL distro discovery and runtime doctor                             | Completed (commit `ec8441e`; lib/wsl/distro-name.js + detect.js + doctor.js + 50 new Node tests; live Windows doctor PASS) |
-| WWS04  | Windows bridge MCP shim                                             | Pending  |
+| WWS04  | Windows bridge MCP shim                                             | Completed (commit `d86e73f`; lib/wsl/spawn.js spawnWslBridge wired into bin/terminal-commander-mcp.js Windows branch; live Windows bridge smoke PASS) |
 | WWS05  | Cursor config writer                                                | Pending  |
 | WWS06  | WSL runtime install or pairing flow                                 | Pending  |
 | WWS07  | End-to-end Windows + Cursor + WSL smoke                             | Pending  |

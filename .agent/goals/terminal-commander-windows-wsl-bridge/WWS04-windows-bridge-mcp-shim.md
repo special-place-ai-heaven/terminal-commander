@@ -3,15 +3,15 @@ goal_id: WWS04
 title: Windows Bridge Mcp Shim
 chain_id: terminal-commander-windows-wsl-bridge
 phase: Wave 2 - Bridge shim
-status: "Pending"
+status: "Completed"
 depends_on: ["WWS03"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T12:00:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T13:30:00+00:00"
+completed_at: "2026-05-23T14:45:00+00:00"
+completion_commit: "d86e73f"
 blocked_reason: ""
 source_refs:
   - "WWS01 contract (docs/release/windows-wsl-bridge-contract.md) — §4.4 shim safety contract; §10.2 lib/wsl/spawn.js (WWS04); §15 D-04 / D-12; §12 failure-mode table"
