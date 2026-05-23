@@ -1,6 +1,6 @@
 # Goal Chain Index — terminal-commander-windows-wsl-bridge
 
-Status: WWS01 + WWS02 + WWS03 + WWS04 + WWS05 Completed; WWS06..WWS09 Pending.
+Status: WWS01 + WWS02 + WWS03 + WWS04 + WWS05 + WWS06 Completed; WWS07..WWS09 Pending.
 Branch: `main`.
 Successor of: `terminal-commander-npm-distribution` (NPM10 = Completed, bootstrap workflow committed but NOT dispatched; all three packages remain E404 / unpublished).
 
@@ -17,7 +17,7 @@ Language: ASCII only.
 | WWS03  | WSL distro discovery and runtime doctor                             | Completed (commit `ec8441e`; lib/wsl/distro-name.js + detect.js + doctor.js + 50 new Node tests; live Windows doctor PASS) |
 | WWS04  | Windows bridge MCP shim                                             | Completed (commit `d86e73f`; lib/wsl/spawn.js spawnWslBridge wired into bin/terminal-commander-mcp.js Windows branch; live Windows bridge smoke PASS) |
 | WWS05  | Cursor config writer                                                | Completed (commit `ae37878`; lib/cursor/{config,write,index}.js library-only; 62 new Node tests; live temp-dir config write PASS across 6 cases) |
-| WWS06  | WSL runtime install or pairing flow                                 | Pending  |
+| WWS06  | WSL runtime install or pairing flow                                 | Completed (commit `4936904`; lib/cli/* CLI surface — doctor + setup cursor-wsl + pair create/accept + setup_state.json + 78 new Node tests; live Windows doctor/setup/pair PASS; --install-wsl-runtime expected to return npm_package_unpublished until NPM07 publish) |
 | WWS07  | End-to-end Windows + Cursor + WSL smoke                             | Pending  |
 | WWS08  | README and release contract update                                  | Pending  |
 | WWS09  | Pre-publish readiness review                                        | Pending  |

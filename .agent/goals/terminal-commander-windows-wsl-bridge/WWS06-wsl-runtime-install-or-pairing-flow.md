@@ -3,15 +3,15 @@ goal_id: WWS06
 title: Wsl Runtime Install Or Pairing Flow
 chain_id: terminal-commander-windows-wsl-bridge
 phase: Wave 3 - CLI assembly
-status: "Pending"
+status: "Completed"
 depends_on: ["WWS05"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T12:00:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T16:30:00+00:00"
+completed_at: "2026-05-23T17:45:00+00:00"
+completion_commit: "4936904"
 blocked_reason: ""
 source_refs:
   - "WWS01 contract (docs/release/windows-wsl-bridge-contract.md) — §7 distro selection, §8 install policy, §9 pairing posture, §11 setup-state file layout, §15 D-07 / D-08 / D-09 / D-10 / D-12 / D-13 / D-14"
