@@ -102,6 +102,24 @@ to overwrite an existing `terminal-commander` entry). See
 `docs/integrations/cursor.md` §11a for the WWS05 writer API
 contract and §11c for the WWS06 CLI surface.
 
+## WWS07 bridge smoke
+
+A PowerShell smoke script at
+[`scripts/smoke/verify-windows-bridge-smoke.ps1`](../../../scripts/smoke/verify-windows-bridge-smoke.ps1)
+exercises the WWS06 CLI surface end-to-end:
+
+```powershell
+powershell -ExecutionPolicy Bypass `
+  -File scripts/smoke/verify-windows-bridge-smoke.ps1 -DryRun
+powershell -ExecutionPolicy Bypass `
+  -File scripts/smoke/verify-windows-bridge-smoke.ps1
+```
+
+The script does NOT touch the operator's real Cursor config by
+default. See `docs/integrations/cursor.md` §11d for the safety
+boundary + flag reference + the operator-driven Cursor GUI
+provider smoke checklist.
+
 ## Source status
 
 - Files created at NPM08 (2026-05-23).

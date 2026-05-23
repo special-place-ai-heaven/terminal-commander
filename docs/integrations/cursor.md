@@ -300,6 +300,80 @@ Safety guarantees:
 - Stdout-silent — all status text returns via the typed result
   record.
 
+## 11d. Windows bridge smoke (WWS07)
+
+WWS07 ships `scripts/smoke/verify-windows-bridge-smoke.ps1`, a
+PowerShell smoke script that exercises the entire Windows -> WSL
+bridge path:
+
+```powershell
+# Dry-run (no live CLI invocations; print planned actions only):
+powershell -ExecutionPolicy Bypass `
+  -File scripts/smoke/verify-windows-bridge-smoke.ps1 -DryRun
+
+# Live (drives the WWS06 CLI; reports runtime_missing honestly
+# until the WSL-side terminal-commander-mcp is installed):
+powershell -ExecutionPolicy Bypass `
+  -File scripts/smoke/verify-windows-bridge-smoke.ps1
+
+# Optional flags:
+#   -Distro <name>            override the default WSL distro
+#   -InstallWslRuntime        opt into 'setup cursor-wsl
+#                             --install-wsl-runtime' (NPM07-gated)
+#   -WriteCursorConfig        opt into a Cursor config write;
+#                             -TempCursorScope defaults on so the
+#                             write lands in a temp directory, not
+#                             the operator's real mcp.json.
+```
+
+Smoke output is bounded: `PASS  <step>` / `FAIL  <step>` /
+`NOTE  <text>` / `INFO  <text>` lines, one per check.
+
+Safety boundary:
+
+- NO direct `wsl.exe` or `child_process` call from PowerShell.
+  The only spawn surface is `node`; all `wsl.exe` calls flow
+  through the WWS04 `lib/wsl/spawn.js` helper.
+- NO sudo. NO password prompt. NO env credential.
+- The operator's real `%USERPROFILE%\.cursor\mcp.json` is NEVER
+  touched by default. `-WriteCursorConfig` is required to opt
+  into a real write; `-TempCursorScope` defaults on whenever
+  `-WriteCursorConfig` is supplied so the write lands in a temp
+  directory.
+- NO npm publish. NO workflow dispatch. NO tag / release / PR.
+- `runtime_missing` is RECORDED, not promoted to FAIL. The
+  script exits 0 on overall honest evidence.
+
+### Cursor GUI provider smoke (operator-driven)
+
+Cursor has no documented headless / scripted MCP discovery entry
+point at the time of WWS07 close (no `cursor --list-mcp-tools`
+subcommand). To promote the Cursor provider smoke from `Not Run`
+to PASS, an operator must perform these steps and attach the
+chat transcript:
+
+1. Run `terminal-commander setup cursor-wsl` (or
+   `terminal-commander setup cursor-wsl --project <repo>` for a
+   workspace-scoped config) — once the WSL-side runtime is
+   installed (`runtime_missing` blocks this until NPM07
+   publishes).
+2. Open Cursor on Windows.
+3. Open `Settings -> Features -> MCP`. The `terminal-commander`
+   server entry should be present and report "Connected".
+4. In the Cursor chat panel, ask: "Call the `health` MCP tool."
+5. Verify the response is a bounded JSON envelope (no raw
+   stdout/stderr text in the chat transcript).
+6. Optionally run the minimal flow from §8.
+7. Capture the chat transcript (text + timestamps) and attach
+   to the WWS07 evidence record. Until that attachment lands,
+   the Cursor provider smoke remains `Not Run` honestly.
+
+The direct bridge MCP round-trip (initialize + tools/list +
+health) executed by the PowerShell smoke when the WSL runtime is
+present is NOT the same as the Cursor provider smoke. WWS09
+gates the beta-posture promotion (`Conditional Go` -> `Go`) on
+at least one provider live smoke PASS.
+
 ## 11b. Windows bridge roadmap (WWS chain)
 
 The Windows config block in §6 is the **current manual path**:

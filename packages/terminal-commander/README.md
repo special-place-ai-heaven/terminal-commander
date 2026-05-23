@@ -59,7 +59,9 @@ WWS02 is the package-contract slice of the chain. The actual
 Windows -> WSL bridge invocation (`wsl.exe -d <distro> -- bash -lc
 'exec terminal-commander-mcp'`) lands in WWS04 (already landed).
 The Cursor MCP config writer is shipped at WWS05 (already landed
-as `lib/cursor/`). The setup CLI lands in WWS06. The contract
+as `lib/cursor/`). The setup CLI shipped at WWS06 (`lib/cli/`).
+The Windows bridge smoke ships at WWS07
+(`scripts/smoke/verify-windows-bridge-smoke.ps1`). The contract
 locking all of this is
 [`docs/release/windows-wsl-bridge-contract.md`](https://github.com/special-place-administrator/terminal-commander/blob/main/docs/release/windows-wsl-bridge-contract.md).
 

@@ -708,10 +708,27 @@ WWS01 contract by document path AND date.
   no secrets / tokens / env values / command history. `pair create`
   + `pair accept` deferred handshake (`pair_deferred` until the
   WSL-side daemon session protocol lands).
-- **WWS07**: PowerShell smoke script (`scripts/smoke/verify-windows-bridge-smoke.ps1`).
-  Non-interactive bridge smoke + Cursor GUI smoke checklist in
-  `docs/integrations/cursor.md`. `Not Run` recorded honestly if
-  unattainable; no promotion to PASS.
+- **WWS07** (**landed**): PowerShell smoke script
+  (`scripts/smoke/verify-windows-bridge-smoke.ps1`). PS 5.1+;
+  `Set-StrictMode -Version Latest`; `ErrorActionPreference =
+  Stop`. Flags: `-DryRun`, `-Distro <name>`, `-InstallWslRuntime`,
+  `-WriteCursorConfig`, `-TempCursorScope` (default-on when
+  `-WriteCursorConfig` supplied). Output: bounded `PASS  <step>`
+  / `FAIL  <step>` / `NOTE  <text>` / `INFO  <text>` lines.
+  Drives the WWS06 CLI (doctor, doctor wsl, setup --print-config,
+  setup --dry-run, --probe-runtime) and, when the WSL-side
+  runtime is present, drives an MCP initialize + tools/list +
+  health round-trip through the WWS04 bridge. The script never
+  calls `child_process` or `wsl.exe` directly; the only spawn
+  surface is `node` (the JS CLI shim). NO sudo. NO password. NO
+  publish. Real Cursor config NOT touched unless
+  `-WriteCursorConfig` AND `-TempCursorScope` (default-on); the
+  operator's `%USERPROFILE%\.cursor\mcp.json` is never written
+  without explicit opt-out. `runtime_missing` is RECORDED, not
+  promoted to FAIL — the script exits 0 on overall honest
+  evidence even when the WSL-side runtime is absent. Cursor GUI
+  provider smoke is operator-driven and `Not Run` until a
+  transcript is attached.
 - **WWS08**: docs-only — README + `docs/release/npm-binary-packaging-contract.md`
   WWS amendment section + `docs/integrations/cursor.md` Windows
   walk-through + `docs/release/release-please-contract.md`
