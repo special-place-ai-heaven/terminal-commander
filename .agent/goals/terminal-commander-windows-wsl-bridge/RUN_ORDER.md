@@ -1,6 +1,6 @@
 # Run order — terminal-commander-windows-wsl-bridge
 
-Status: WWS01 Completed (commit `6220eb2`); WWS02 Completed (commit `1da40f3`); WWS03 Completed (commit `ec8441e`); WWS04 Completed (commit `d86e73f`); WWS05..WWS09 Pending.
+Status: WWS01 Completed (commit `6220eb2`); WWS02 Completed (commit `1da40f3`); WWS03 Completed (commit `ec8441e`); WWS04 Completed (commit `d86e73f`); WWS05 Completed (commit `ae37878`); WWS06..WWS09 Pending.
 Branch: `main`.
 
 Execute goals strictly in this order. Each goal MUST pass its

@@ -3,15 +3,15 @@ goal_id: WWS05
 title: Cursor Config Writer
 chain_id: terminal-commander-windows-wsl-bridge
 phase: Wave 2 - Setup helpers
-status: "Pending"
+status: "Completed"
 depends_on: ["WWS04"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T12:00:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T15:00:00+00:00"
+completed_at: "2026-05-23T16:10:00+00:00"
+completion_commit: "ae37878"
 blocked_reason: ""
 source_refs:
   - "WWS01 contract (docs/release/windows-wsl-bridge-contract.md) — §11 Cursor scope + write/refuse-if-present policy; D-13 Cursor config default --global + refuse-existing + .bak backup"
