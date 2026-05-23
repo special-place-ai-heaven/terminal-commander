@@ -30,12 +30,12 @@
       "extra-files": [
         {
           "type": "json",
-          "path": "packages/terminal-commander/package.json",
+          "path": "package.json",
           "jsonpath": "$.optionalDependencies['@terminal-commander/linux-x64']"
         },
         {
           "type": "json",
-          "path": "packages/terminal-commander/package.json",
+          "path": "package.json",
           "jsonpath": "$.optionalDependencies['@terminal-commander/linux-arm64']"
         }
       ]
