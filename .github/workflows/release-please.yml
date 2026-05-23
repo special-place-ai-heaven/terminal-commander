@@ -253,7 +253,19 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
-          npm publish --access public
+          set -e
+          if npm publish --access public; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(node -p "require('./package.json').version")
+            name=$(node -p "require('./package.json').name")
+            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+              echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
+              exit 0
+            fi
+          fi
+          exit 1
 
   # ----------------------------------------------------------------
   # JOB 3 — publish-linux-arm64 (NPM07).
@@ -357,7 +369,19 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
-          npm publish --access public
+          set -e
+          if npm publish --access public; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(node -p "require('./package.json').version")
+            name=$(node -p "require('./package.json').name")
+            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+              echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
+              exit 0
+            fi
+          fi
+          exit 1
 
   # ----------------------------------------------------------------
   # JOB 4 — publish-root (NPM07).
