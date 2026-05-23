@@ -1,8 +1,9 @@
 # Goal Chain Index — terminal-commander-npm-distribution
 
-Status: skeleton (NPM00 init).
+Status: closed (NPM09 terminal goal).
 Branch: `main`.
 Successor of: `terminal-commander-runtime` (TC48 = Conditional Go on `main` at `e42e7e4`).
+Chain outcome (NPM09): **Conditional Go** preserved. Local runtime + npm layout + CI matrix + release-please + trusted-publishing workflow + Cursor docs + README all `live`. First live npm publish + Cursor provider live smoke remain Pending operator-driven steps.
 
 This chain stands up npm distribution + Cursor MCP install path for
 Terminal Commander. It is a release / distribution lifecycle chain,
@@ -15,16 +16,16 @@ Language: ASCII only.
 
 | Goal  | Title                                                          | Status   |
 |-------|----------------------------------------------------------------|----------|
-| NPM01 | Memory and Symforge release audit                              | Pending  |
-| NPM02 | npm binary packaging contract                                  | Pending  |
-| NPM03 | Wrapper package and platform package layout                    | Pending  |
-| NPM04 | Local `npm pack` and global install smoke                      | Pending  |
-| NPM05 | GitHub Actions build matrix                                    | Pending  |
-| NPM06 | release-please manifest config                                 | Pending  |
-| NPM07 | npm trusted publishing workflow                                | Pending  |
-| NPM08 | Cursor MCP install config smoke                                | Pending  |
-| NPM08b| README project normative overhaul                              | Pending  |
-| NPM09 | Release dry-run and beta publish review                        | Pending  |
+| NPM01 | Memory and Symforge release audit                              | Completed (5dcbaa4) |
+| NPM02 | npm binary packaging contract                                  | Completed (81f4ea1) |
+| NPM03 | Wrapper package and platform package layout                    | Completed (00f3ddb) |
+| NPM04 | Local `npm pack` and global install smoke                      | Completed (970db2c) |
+| NPM05 | GitHub Actions build matrix                                    | Completed (2bbf2fd) |
+| NPM06 | release-please manifest config                                 | Completed (e81eb3f) |
+| NPM07 | npm trusted publishing workflow                                | Completed (1b4267e) |
+| NPM08 | Cursor MCP install config smoke                                | Completed (6ab2343) |
+| NPM08b| README project normative overhaul                              | Completed (cacfef5) |
+| NPM09 | Release dry-run and beta publish review                        | In progress         |
 
 ## Target user experience (assumption — locked at NPM02)
 

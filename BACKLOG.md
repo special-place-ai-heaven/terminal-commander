@@ -63,6 +63,51 @@ settings form) ship in `docs/integrations/claude-code.md`.
 runs `claude --mcp-config <path>` or uses persistent settings,
 issues `/mcp` and a tool call, captures the transcript.
 
+### P1.4 — Cursor provider-harness live smoke
+
+**Source:** NPM08 final report.
+**Evidence:** Cursor 3.5.30 is installed on the verification host,
+but Cursor has no documented non-interactive MCP discovery / tool-call
+entry point — no `cursor --list-mcp-tools` subcommand, no
+`cursor-agent` headless CLI on this host. Docs +
+copy-pasteable configs ship at `docs/integrations/cursor.md` and
+`examples/provider-harness/cursor/`.
+**Impact:** Beta cannot be called fully provider-validated against
+Cursor until an operator opens Cursor with one of the example
+configs, confirms the 29-tool catalogue in `Settings -> MCP`, and
+captures a real tool-call transcript or screenshot.
+**Proposed work:** Operator copies one of
+`examples/provider-harness/cursor/mcp.global.native-linux.json`,
+`mcp.project.linux-wsl.json`, or `mcp.global.linux-wsl.json` into
+their Cursor MCP config path; starts the daemon; asks Cursor chat
+to call `health` and `command_start_combed` -> `bucket_wait` ->
+`command_status`; captures evidence.
+
+### P1.5 — First live npm publish (operator preconditions)
+
+**Source:** NPM07 + NPM09 final reports.
+**Evidence:** `.github/workflows/release-please.yml` carries an
+output-gated, OIDC-only publish path. All three package names
+return `E404` from `npm view` on 2026-05-23 — unpublished /
+available. Live publish jobs were correctly `skipped` on the
+NPM06 / NPM07 / NPM08 / NPM08b live runs because
+`releases_created='false'` (no Conventional-Commits-eligible
+commits since the manifest seed).
+**Impact:** Until the operator preconditions complete, the npm
+`install -g terminal-commander` path advertised in the README
+remains a future path; the current operator install path is the
+local-tarball NPM04 smoke. Beta stays `Conditional Go`.
+**Proposed work:**
+1. Claim `@terminal-commander` org on npmjs.com.
+2. Reserve all three package names.
+3. Configure trusted publisher for each of the three packages
+   with workflow filename `release-please.yml`.
+4. Land a Conventional-Commits `feat:` / `fix:` commit, review the
+   release PR release-please opens, and merge it. The publish
+   jobs fire on the merge push.
+
+No token fallback. No `NPM_TOKEN_TC` use.
+
 ## P2 — Medium priority
 
 ### P2.1 — Dedicated file-watch load test

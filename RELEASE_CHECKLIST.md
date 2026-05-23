@@ -1,13 +1,12 @@
 # Beta Release Checklist - Terminal Commander
 
-Status: TC48 beta gate. NEVER auto-publishes; this is a manual
-operator gate.
+Status: TC48 beta gate, **refreshed at NPM09** (terminal-commander-npm-distribution chain close, 2026-05-23). NEVER auto-publishes; this is a manual operator gate.
 
 Language: ASCII only.
 
 ## Beta recommendation
 
-**Conditional Go.**
+**Conditional Go.** (TC48 baseline, preserved through NPM01-NPM09.)
 
 Rationale:
 - The TC33-TC47 runtime chain is complete. Every TC35-TC45 source-
@@ -15,14 +14,24 @@ Rationale:
 - The TC47 load / noise / backpressure gate passes 8/8 stress tests
   with the bounded-output / no-raw-stream / drop-counter invariants
   asserted.
-- Provider-harness LIVE smokes for Codex CLI and Claude Code are
-  `Not Run` on the verification host (TC46). Config-only examples
-  ship in `docs/integrations/`. Operators must run their provider
-  CLI against the shipped configs before calling the beta fully
-  provider-validated.
-- The Conditional Go ceiling reflects the provider gap, not a
-  Terminal Commander defect. The local daemon + MCP stdio smoke
-  passes end-to-end.
+- The NPM01-NPM08b distribution chain landed: npm wrapper + platform
+  packages (NPM02-NPM03), local install smoke (NPM04), CI build
+  matrix linux-x64 + linux-arm64 (NPM05), release-please manifest
+  mode (NPM06), npm trusted-publishing workflow OIDC-gated (NPM07),
+  Cursor MCP docs + examples (NPM08), canonical public README
+  (NPM08b). See `docs/release/npm-distribution-final-report.md`
+  for the chain close evidence and the per-goal completion commits.
+- Provider-harness LIVE smokes for Codex CLI, Claude Code, AND
+  Cursor are `Not Run` on the verification host. Config-only
+  examples ship in `docs/integrations/` + `examples/provider-harness/cursor/`.
+- First live npm publish is **Pending** two operator-driven steps:
+  npmjs.com `@terminal-commander` org claim + trusted-publisher
+  config (workflow filename `release-please.yml`), AND a Conventional-
+  Commits `feat:` / `fix:` commit followed by a merged release PR.
+- The Conditional Go ceiling reflects the provider gap + the
+  operator-preconditioned first publish, not a Terminal Commander
+  defect. The local daemon + MCP stdio + npm-install smokes pass
+  end-to-end.
 
 ## Pre-flight (must pass on `main`)
 
@@ -55,10 +64,60 @@ Rationale:
       `docs/integrations/claude-code.md` (either `--mcp-config` or
       persistent settings form). Transcript MUST show `/mcp`
       discovery + a tool call.
+- [ ] Cursor: real smoke run against `docs/integrations/cursor.md`
+      using one of the `examples/provider-harness/cursor/*.json`
+      configs (native Linux / inside-WSL OR Windows-to-WSL bridge).
+      Transcript / screenshot MUST show Cursor `Settings -> MCP`
+      reporting `terminal-commander` connected with the 29-tool
+      catalogue + a tool call (e.g. `health` or `command_start_combed`
+      -> `bucket_wait` -> `command_status`).
 
-Until BOTH provider boxes are checked AND the transcripts are
+Until ALL THREE provider boxes are checked AND the transcripts are
 attached to a follow-up artifact, the beta posture stays
 `Conditional Go`.
+
+## npm distribution gate (added at NPM09 close)
+
+- [ ] `npm view terminal-commander version` returns the published
+      beta version (currently E404 / unpublished).
+- [ ] `npm view @terminal-commander/linux-x64 version` returns the
+      same version.
+- [ ] `npm view @terminal-commander/linux-arm64 version` returns the
+      same version.
+- [ ] `npm pack --dry-run` clean for all three packages (root +
+      both platform packages). Last NPM09 local verification:
+      7 / 5 / 5 files at `0.1.0-beta.1`.
+- [ ] Root `optionalDependencies` exact-pin both platform packages
+      to the shared version (no `^` / `~` ranges).
+- [ ] `.github/.release-please-manifest.json` agrees with all three
+      `package.json` version fields.
+- [ ] `npm-binary-build` workflow latest run on `main` is `success`
+      on both `ubuntu-24.04` (full smoke) and `ubuntu-24.04-arm`
+      (build + pack).
+- [ ] `release-please` workflow latest run on `main` is `success`
+      and the three publish jobs were correctly `skipped` if no
+      release PR was merged on that push (gate
+      `releases_created='true'`).
+- [ ] No `NPM_TOKEN`, `NPM_TOKEN_TC`, `CARGO_REGISTRY_TOKEN_TC`, or
+      `RELEASE_PLEASE_TOKEN_TC` reference exists in any active
+      workflow path.
+- [ ] No `cargo publish` / `crates.io` step in any workflow.
+- [ ] No `postinstall` script in any `package.json`.
+
+## Operator preconditions for first live npm publish (NPM07/NPM09)
+
+- [ ] `@terminal-commander` organization claimed on npmjs.com.
+- [ ] All three names reserved on npmjs.com.
+- [ ] Trusted publisher configured for each of the three packages
+      with Publisher=`GitHub Actions`, Owner=`special-place-administrator`,
+      Repository=`terminal-commander`, Workflow filename=
+      `release-please.yml`, Environment=blank.
+- [ ] A Conventional-Commits `feat:` or `fix:` commit lands on
+      `main`, release-please opens a release PR, operator reviews
+      and merges it. Only then do the publish jobs fire.
+
+Until ALL operator preconditions complete, the first live npm
+publish remains `Pending`. No token fallback is permitted.
 
 ## Versioning
 
