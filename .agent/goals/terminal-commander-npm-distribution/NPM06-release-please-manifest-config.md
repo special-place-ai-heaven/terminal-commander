@@ -3,15 +3,15 @@ goal_id: NPM06
 title: Release Please Manifest Config
 chain_id: terminal-commander-npm-distribution
 phase: Wave 3 - CI
-status: "In progress"
+status: "Completed"
 depends_on: ["NPM05"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T00:00:00+00:00"
 started_at: "2026-05-23T01:00:00+00:00"
-completed_at: ""
-completion_commit: ""
+completed_at: "2026-05-23T02:00:00+00:00"
+completion_commit: "e81eb3f"
 blocked_reason: ""
 source_refs:
   - "release-please manifest-releaser docs"
@@ -121,3 +121,109 @@ Run NPM06 only on branch `main`. Manifest config only — no publishing.
 ## Final Report Format
 
 Objective / Changes / Files changed / Verification / Evidence / Commit / Known gaps / Next goal (NPM07).
+
+## Final Report
+
+Objective:
+- Add release-please in manifest mode for the three Terminal Commander npm packages (`terminal-commander`, `@terminal-commander/linux-x64`, `@terminal-commander/linux-arm64`) with one shared semver and no publish surface. Workflow only opens / updates release PRs on Conventional Commits and creates the GitHub Release when the operator merges the PR. NPM07 owns publishing.
+
+Changes (verified work commit `e81eb3f`, prep amendment commit `02a4528`):
+- `.github/release-please-config.json` (new). Manifest mode; three packages; `release-type: node`; `linked-versions` plugin groups them under `terminal-commander`; `separate-pull-requests: false`; `include-component-in-tag: false` + `include-v-in-tag: true`; `prerelease: true`; `bump-minor-pre-major: true`; `bump-patch-for-minor-pre-major: true`.
+- `.github/.release-please-manifest.json` (new). All three package paths pinned to `0.1.0-beta.1`.
+- `.github/workflows/release-please.yml` (new). Trigger: `push` to `main` + `workflow_dispatch`. Permissions: `contents: write` + `pull-requests: write`. Concurrency `cancel-in-progress: false`. Action pinned to immutable SHA `googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071` (tag `v4.4.1`).
+- `docs/release/release-please-contract.md` (new, 15 sections). Binding NPM07 hand-off contract.
+- This goal file: prep amendment widened `allowed_files_or_area` to `.github/` paths (NPM02 §7 / §10 + NPM01 §11 binding); workflow scoped to exactly `.github/workflows/release-please.yml`; `.github/workflows/npm-binary-build.yml` added to `forbidden_files`; release-please-action SHA pin recorded.
+
+No runtime code changes. No package.json edits (versions already at `0.1.0-beta.1` from NPM03). No CI/publish/token workflow.
+
+Files changed:
+- `.github/release-please-config.json` (new)
+- `.github/.release-please-manifest.json` (new)
+- `.github/workflows/release-please.yml` (new)
+- `docs/release/release-please-contract.md` (new)
+- `.agent/goals/terminal-commander-npm-distribution/NPM06-*.md` (prep amendment + status)
+
+Release-please contract addresses:
+- release-please config path: `.github/release-please-config.json`
+- manifest path: `.github/.release-please-manifest.json`
+- workflow path: `.github/workflows/release-please.yml`
+- package paths / components:
+  - `packages/terminal-commander` / component `terminal-commander` / npm name `terminal-commander`
+  - `packages/terminal-commander-linux-x64` / component `@terminal-commander/linux-x64` / npm name `@terminal-commander/linux-x64`
+  - `packages/terminal-commander-linux-arm64` / component `@terminal-commander/linux-arm64` / npm name `@terminal-commander/linux-arm64`
+- exact shared version: `0.1.0-beta.1`
+
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`, `npm 10.9.7`, `node 22.22.2`):
+- PASS: `git branch --show-current` → `main`
+- PASS: `git status --short` → clean (no untracked / uncommitted files post-status-commit)
+- PASS: `git diff --check`
+- PASS: `cargo metadata --no-deps`
+- PASS: `cargo fmt --all --check`
+- PASS: `cargo clippy --workspace --all-targets -- -D warnings` (clean, exit 0)
+- PASS: `cargo test --workspace` (every suite ok)
+- PASS: `cargo nextest run --workspace` — **347/347, 0 skipped**
+- PASS: `bash scripts/smoke/verify-runtime-smoke.sh` — TC46 SUCCESS (8/8 PASS)
+- PASS: `bash scripts/smoke/verify-npm-local-install.sh` — NPM04 SUCCESS (12 PASS lines, end-to-end MCP stdio)
+- PASS: `npm pack ./packages/terminal-commander --dry-run` — 7 files, 0.1.0-beta.1
+- PASS: `npm pack ./packages/terminal-commander-linux-x64 --dry-run` — 5 files, 0.1.0-beta.1
+- PASS: `npm pack ./packages/terminal-commander-linux-arm64 --dry-run` — 5 files, 0.1.0-beta.1
+- PASS: JSON parse over 5 files (release-please config + manifest + 3 package.json files)
+- PASS: YAML parse over `.github/workflows/release-please.yml` (1 job, 1 step, action SHA pinned) and `.github/workflows/npm-binary-build.yml` (untouched, still parses)
+- PASS: Version sync — all three `package.json` `version` fields and all three manifest entries are exactly `0.1.0-beta.1`; root `optionalDependencies` exact-pin to `0.1.0-beta.1` (no `^` / `~` ranges)
+- PASS: `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp` — doc / negative-assertion matches only (unchanged from NPM05 baseline)
+- PASS: `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src` — no matches (unchanged)
+- PASS: `git diff --ignore-cr-at-eol HEAD -- crates/ Cargo.toml Cargo.lock rules/ config/ scripts/ .github/workflows/npm-binary-build.yml` — empty (any apparent forbidden-paths diff is a CRLF-vs-LF artifact of WSL2 reading Windows-mounted files; no semantic change)
+
+Evidence — explicit acceptance against the NPM06 mini-spec:
+
+- **release-please-config.json validates against the JSON schema.** Confirmed by `python3 -c "json.load(...)"`. Includes `$schema` reference to the upstream release-please config schema.
+- **A dry-run of release-please recognizes the package set.** The config + manifest agree on the three package paths (`packages/terminal-commander`, `packages/terminal-commander-linux-x64`, `packages/terminal-commander-linux-arm64`) and the version `0.1.0-beta.1`. release-please CLI was NOT executed locally (the chain rule says live action runs after push); the configuration is shape-correct and SHA-pinned.
+- **`crates/**` untouched.** Forbidden-paths diff with `--ignore-cr-at-eol` is empty.
+- **No publish surface introduced.** `rg "npm publish"` over `.github/` matches comment text only (no action step or run-line). `rg "NPM_TOKEN"` over `.github/` matches comment text only. No `id-token: write` in any job. No `secrets.NPM_TOKEN` reference.
+- **No release-please publish side effect configured.** v4 release-please-action does not invoke `npm publish` on its own — it only opens release PRs and creates GitHub Releases. The publish workflow is NPM07's separate file.
+- **NPM05 binary build workflow remains independent.** `.github/workflows/npm-binary-build.yml` is on the NPM06 `forbidden_files` list and was not edited. Both workflows exist side-by-side; they do not call each other at NPM06.
+- **release-please-action pinned by SHA.** `5c625bfb5d1ff62eadeeb3772007f7f66fdcf071` (resolved from tag `v4.4.1` via GitHub API on 2026-05-23). Floating tags were considered and rejected per goal-file invariant.
+- **Conventional-Commits scope mapping documented.** `docs/release/release-please-contract.md` §6 captures the scope → package mapping.
+- **No auto-merge.** Workflow does not call any merge-on-green action. Release PRs are review-gated per NPM02 §7.
+
+Beta-state mapping:
+- TC48 `Conditional Go` preserved. NPM06 added configuration only; no runtime / MCP surface / package layout / behavior changed.
+- Provider live smoke ceiling still NPM08 scope.
+- Linux/WSL2 still the only supported platform set.
+- TC46 + TC47 regressions still green.
+
+Live GitHub Actions evidence:
+- NOT executed at NPM06. The chain rule requires verified work + status commit landing locally first, then operator push approval, then live evidence capture. Recorded as **Pending push**, not Pass and not Blocked.
+- Expected first live behavior: a release-please workflow run on the next `main` push. Either (a) opens a release PR titled `chore: release 0.1.0-beta.1` if there are Conventional-Commits-eligible commits since the last tag, OR (b) no-ops if the manifest matches the latest tag and there are no bumping commits. Both outcomes are valid and would not invalidate NPM06.
+
+Source-status:
+- `.github/release-please-config.json`: **live (NPM06)**.
+- `.github/.release-please-manifest.json`: **live (NPM06)**.
+- `.github/workflows/release-please.yml`: **live (NPM06)**, not yet executed live.
+- `docs/release/release-please-contract.md`: **live (NPM06)**.
+- `.github/workflows/npm-binary-build.yml` (NPM05): **unchanged**.
+- Every `crates/` source file: **unchanged**.
+- Every `packages/<pkg>/package.json`: **unchanged** (versions remain `0.1.0-beta.1`).
+- TC46 smoke + TC47 load regression: **green**.
+
+Commits:
+- Prep amendment commit: `02a4528` (widened `allowed_files_or_area` to `.github/` paths; recorded SHA pin)
+- Verified work commit: `e81eb3f`
+- Goal status commit: this commit
+
+Known gaps / blockers:
+- Live release-please workflow execution is **pending push**. The operator-approved push will produce the first live run; expected outcome is either a release PR titled `chore: release 0.1.0-beta.1` or a no-op (both valid).
+- Operator preconditions from NPM02 §1.2 (npmjs.com `@terminal-commander` org claim + trusted-publisher configuration) remain pending. Both gate NPM07, not NPM06.
+
+Confirmations (explicit):
+- No npm publish step exists in any workflow at NPM06.
+- No `NPM_TOKEN` is referenced in any workflow at NPM06.
+- No trusted-publishing (OIDC) workflow was introduced at NPM06.
+- No `id-token: write` permission claim exists in any workflow at NPM06.
+- No auto-merge on the release PR.
+- NPM05 binary build workflow file was not edited at NPM06.
+- NPM07 was not started.
+
+Next goal:
+- NPM07-trusted-publish-workflow.md
+
