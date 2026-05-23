@@ -27,7 +27,18 @@
       "component": "terminal-commander",
       "package-name": "terminal-commander",
       "changelog-path": "CHANGELOG.md",
-      "extra-files": []
+      "extra-files": [
+        {
+          "type": "json",
+          "path": "packages/terminal-commander/package.json",
+          "jsonpath": "$.optionalDependencies['@terminal-commander/linux-x64']"
+        },
+        {
+          "type": "json",
+          "path": "packages/terminal-commander/package.json",
+          "jsonpath": "$.optionalDependencies['@terminal-commander/linux-arm64']"
+        }
+      ]
     },
     "packages/terminal-commander-linux-x64": {
       "release-type": "node",
