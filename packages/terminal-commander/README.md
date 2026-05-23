@@ -53,7 +53,7 @@ at this WWS02 milestone:
 |---------|--------------------------|
 | `terminal-commanderd` | **Refuses** with a single bounded stderr line + exit `64`. Daemon is Unix-only; run it inside a WSL distro. |
 | `terminal-commander-mcp` | **Bridges** to the WSL distro via `wsl.exe`. Resolves the distro from `TC_WSL_DISTRO` (operator override) then `detectWsl().default_distro`; refuses with `no_default_distro` if neither yields a safe + whitelisted name. Optionally probes WSL-side runtime presence via WWS03 `wslDoctor` (default ON; opt-out via `TC_WSL_SKIP_DOCTOR=1`). Spawns `wsl.exe -d <distro> -- bash -lc 'exec terminal-commander-mcp'` with `shell: false`, `windowsHide: true`, `stdio: 'inherit'`. The shim writes nothing to stdout — Cursor's rmcp framing passes through the WSL pipe transparently. Token-shaped env vars are stripped from the child's env. |
-| `terminal-commander` | **Refuses** with a single bounded stderr line + exit `64`. WWS06 adds the `setup cursor-wsl` / `doctor` / `pair` subcommands. |
+| `terminal-commander` | **CLI surface** for the WWS chain. WWS06 added `doctor`, `doctor wsl`, `setup cursor-wsl`, `pair create`, `pair accept <code>`. Run `terminal-commander --help` for the full panel. Every `wsl.exe` invocation flows through the WWS04 bridge helper (NO sudo, NO password handling, NO credential broker). The `--install-wsl-runtime` flag attempts ONE constant `npm install -g terminal-commander` invocation inside the chosen distro; it returns `npm_package_unpublished` honestly until NPM07's first publish lands. |
 
 WWS02 is the package-contract slice of the chain. The actual
 Windows -> WSL bridge invocation (`wsl.exe -d <distro> -- bash -lc

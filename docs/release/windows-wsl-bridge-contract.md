@@ -434,8 +434,28 @@ the pair commands ever being run.
   No `child_process` import. Stdout-silent; status returns via a
   typed `{ status, path, backup_path, server, was_present, hint }`
   record. 12-status closed enum.
-- `lib/cli/setup_cursor_wsl.js` + friends (WWS06): orchestrate
-  the above helpers. No new spawn surface beyond `lib/wsl/spawn.js`.
+- `lib/cli/setup_cursor_wsl.js` + friends (WWS06, **landed**):
+  orchestrate the above helpers. The CLI shipped at WWS06 is:
+  `terminal-commander doctor`, `terminal-commander doctor wsl
+  [--distro <name>] [--probe-runtime]`, `terminal-commander setup
+  cursor-wsl [--distro] [--global|--project <path>] [--force]
+  [--clobber-backup] [--print-config] [--dry-run]
+  [--install-wsl-runtime]`, `terminal-commander pair create
+  [--distro]`, `terminal-commander pair accept <code>`. Every
+  `wsl.exe` invocation flows through the WWS04 spawn argv shape;
+  the `--install-wsl-runtime` flag issues exactly one constant
+  `wsl.exe -d <distro> -- bash -lc 'npm install -g
+  terminal-commander'` command. NO sudo. NO password prompt. NO
+  credential broker (deferred). Permission failures return
+  `install_permission_required`; npm E404 returns
+  `npm_package_unpublished` honestly. `pair create` persists a
+  bounded `pair.json` (uuid v7 + 6-digit code + timestamps; no
+  secrets, no tokens, no env values). `pair accept` validates the
+  6-digit shape AND the persisted-code match; the full WSL-side
+  handshake is deferred to a future enhancement (`pair_deferred`
+  on no match). Windows-side `setup.json` written under
+  `%LOCALAPPDATA%\terminal-commander\` (bounded schema; no
+  secrets).
 
 ### 10.3 What the WWS chain DOES NOT add
 
@@ -668,10 +688,26 @@ WWS01 contract by document path AND date.
   NO `child_process`. NO spawn. NO network. NO env key written
   beyond `TC_WSL_DISTRO`. Stdout-silent. Library-only; CLI surface
   remains with WWS06.
-- **WWS06**: `lib/cli/setup_cursor_wsl.js` + `lib/cli/doctor.js`
-  + `lib/cli/pair_create.js` + `lib/cli/pair_accept.js`.
-  `--install-wsl-runtime` flag gating automatic install. Distro
-  default per §7.1.5. State files per §11.
+- **WWS06** (**landed**): `lib/cli/parser.js` +
+  `lib/cli/setup_cursor_wsl.js` + `lib/cli/doctor.js` +
+  `lib/cli/pair_create.js` + `lib/cli/pair_accept.js` +
+  `lib/cli/setup_state.js` + `lib/cli/run.js`.
+  `terminal-commander.js` Windows branch delegates to
+  `lib/cli/run.js` (Linux branch byte-identical). 21-status closed
+  setup enum; locked subcommand surface (`doctor`, `doctor wsl`,
+  `setup cursor-wsl`, `pair create`, `pair accept <code>`).
+  `--install-wsl-runtime` triggers ONE constant `npm install -g
+  terminal-commander` invocation via the WWS04 spawn argv shape.
+  NO sudo. NO password prompt. NO credential broker (deferred).
+  Permission failures -> `install_permission_required`. NPM E404
+  -> `npm_package_unpublished`. Distro priority chain
+  `--distro` -> `TC_WSL_DISTRO` -> `detectWsl().default_distro` ->
+  `no_default_distro_ambiguous` refusal. State files
+  (`setup.json` + `pair.json`) under
+  `%LOCALAPPDATA%\terminal-commander\` per §11 — bounded schemas;
+  no secrets / tokens / env values / command history. `pair create`
+  + `pair accept` deferred handshake (`pair_deferred` until the
+  WSL-side daemon session protocol lands).
 - **WWS07**: PowerShell smoke script (`scripts/smoke/verify-windows-bridge-smoke.ps1`).
   Non-interactive bridge smoke + Cursor GUI smoke checklist in
   `docs/integrations/cursor.md`. `Not Run` recorded honestly if

@@ -321,19 +321,75 @@ probe), WWS04 (the `terminal-commander-mcp` bridge shim
 bash -lc 'exec terminal-commander-mcp'` with double-validated
 distro, `stdio: 'inherit'`, and token-shaped env vars stripped),
 WWS05 (the Cursor config writer — `lib/cursor/config.js` +
-`lib/cursor/write.js` — now landed as library-only; auto-generates
-the bridge stanza, refuses to clobber existing `terminal-commander`
-entries without `force`, always creates `.bak` before overwrite,
+`lib/cursor/write.js` — library-only; auto-generates the bridge
+stanza, refuses to clobber existing `terminal-commander` entries
+without `force`, always creates `.bak` before overwrite,
 atomic-writes via a same-directory tmp file + rename), and WWS06
-(the setup / doctor / pair CLI). With WWS04 + WWS05 landed, Cursor
-on Windows that invokes `terminal-commander-mcp` will now
-transparently bridge into the WSL distro chosen by
-`TC_WSL_DISTRO` or the WSL default — provided the WSL-side
-`terminal-commander-mcp` is installed (the bridge short-circuits
-with `runtime_missing` until WWS06 lands the optional
-`--install-wsl-runtime` flag). The manual `wsl.exe` config in §6
-remains a valid alternative for operators who prefer to invoke
-`wsl.exe` directly from `mcp.json`.
+(the setup / doctor / pair CLI — now landed; see §11c). With
+WWS04 + WWS05 + WWS06 landed, Cursor on Windows that invokes
+`terminal-commander-mcp` will now transparently bridge into the
+WSL distro chosen by `TC_WSL_DISTRO` or the WSL default —
+provided the WSL-side `terminal-commander-mcp` is installed (the
+bridge short-circuits with `runtime_missing` until the operator
+runs `terminal-commander setup cursor-wsl --install-wsl-runtime`
+after NPM07 first-publish, or installs manually inside the
+distro). The manual `wsl.exe` config in §6 remains a valid
+alternative for operators who prefer to invoke `wsl.exe`
+directly from `mcp.json`.
+
+## 11c. WWS06 setup / doctor / pair CLI
+
+The Windows admin CLI has landed. Operator entry points:
+
+```powershell
+# Print Windows host overview.
+terminal-commander doctor
+
+# Read-only WSL discovery + optional runtime presence probe.
+terminal-commander doctor wsl
+terminal-commander doctor wsl --distro Ubuntu-24.04 --probe-runtime
+
+# Write the Cursor MCP config that points at the WWS04 bridge.
+# Default --global; --project <path> opts into workspace scope.
+terminal-commander setup cursor-wsl --print-config
+terminal-commander setup cursor-wsl --dry-run
+terminal-commander setup cursor-wsl
+terminal-commander setup cursor-wsl --force
+terminal-commander setup cursor-wsl --distro Ubuntu-24.04
+terminal-commander setup cursor-wsl --install-wsl-runtime
+
+# Optional pairing (deferred handshake; operator confirmation only).
+terminal-commander pair create
+terminal-commander pair accept 123456
+```
+
+Distro selection priority (locked): `--distro <name>` ->
+`TC_WSL_DISTRO` env -> `detectWsl().default_distro` -> bounded
+`no_default_distro_ambiguous` refusal with the candidate list.
+
+Hard safety boundary (locked at WWS06):
+
+- NO sudo. NO `sudo -S`. NO password prompt. NO env credential.
+- NO LLM-supplied secret is forwarded through MCP / chat /
+  bucket / log / audit / env / Cursor config / setup.json /
+  pair.json.
+- `--install-wsl-runtime` issues exactly ONE constant
+  `wsl.exe -d <distro> -- bash -lc 'npm install -g
+  terminal-commander'` command via the WWS04 bridge argv shape.
+  Permission failures return `install_permission_required` (no
+  retry under sudo); npm E404 returns `npm_package_unpublished`.
+- Setup state under `%LOCALAPPDATA%\terminal-commander\setup.json`
+  contains only `{ schema_version, distro, cursor_scope,
+  created_at, updated_at }`. Pair state under `pair.json`
+  contains only `{ schema_version, pair_id (uuid v7), code,
+  created_at, accepted_at, distro }`. Neither file holds tokens,
+  passwords, env values, or command history.
+
+Until NPM07 publishes the npm package, `setup cursor-wsl
+--install-wsl-runtime` is expected to return
+`npm_package_unpublished`. Operators can install manually
+inside the WSL distro via `npm install -g terminal-commander`
+once the package is published.
 
 ## 12. Source status
 

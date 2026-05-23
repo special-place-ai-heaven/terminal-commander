@@ -122,14 +122,21 @@ test("terminal-commander-mcp.js on win32 enters WWS04 bridge path; refuses with 
   );
 });
 
-test("terminal-commander.js on win32 prints bounded WWS06 hint with exit 64", () => {
+test("terminal-commander.js on win32 prints CLI usage (WWS06 setup/doctor/pair surface)", () => {
+  // No argv -> CLI runs the help path. exit 0; output goes to stderr
+  // (shim writes the result.output to stderr) and includes the WWS06
+  // command surface.
   const r = runShim("terminal-commander.js", "win32", "arm64");
-  assert.equal(r.status, 64, `unexpected exit code; stderr=${r.stderr} stdout=${r.stdout}`);
+  assert.equal(r.status, 0, `unexpected exit code; stderr=${r.stderr} stdout=${r.stdout}`);
   assert.equal(r.signal, null);
-  assert.equal(r.stdout, "");
-  assert.equal(r.stderr.endsWith("\n"), true);
-  assert.equal(r.stderr.split("\n").filter(Boolean).length, 1);
-  assert.match(r.stderr, /setup \/ doctor \/ pair subcommands are pending WWS06/);
+  // The shim writes the help text to stderr. Cursor never invokes
+  // `terminal-commander` itself (Cursor calls `terminal-commander-mcp`),
+  // so stdout cleanliness is not strictly required here — but the help
+  // panel SHOULD include the locked subcommand names.
+  assert.match(r.stderr, /terminal-commander\b/);
+  assert.match(r.stderr, /doctor/);
+  assert.match(r.stderr, /setup cursor-wsl/);
+  assert.match(r.stderr, /pair create/);
 });
 
 test("shim bin/* files contain no wsl.exe literal invocation; bridge spawn is owned by lib/wsl/spawn.js (executable code only)", () => {
