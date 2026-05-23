@@ -23,6 +23,7 @@ Language: ASCII only.
 | NPM06 | release-please manifest config                                 | Pending  |
 | NPM07 | npm trusted publishing workflow                                | Pending  |
 | NPM08 | Cursor MCP install config smoke                                | Pending  |
+| NPM08b| README project normative overhaul                              | Pending  |
 | NPM09 | Release dry-run and beta publish review                        | Pending  |
 
 ## Target user experience (assumption — locked at NPM02)

@@ -17,7 +17,8 @@ the next goal starts. Same precedent as the TC43–TC48 runtime chain.
 | 6     | NPM06 | NPM05      | YES — release-please needs the matrix |
 | 7     | NPM07 | NPM06      | YES — publishing needs release-please |
 | 8     | NPM08 | NPM07      | NO — Cursor smoke is operator-driven, may run after a candidate ships |
-| 9     | NPM09 | NPM07–NPM08 | YES — dry-run is the final gate |
+| 9     | NPM08b| NPM08      | NO — README overhaul is documentation-only; chain ships if NPM08b slips |
+| 10    | NPM09 | NPM08b     | YES — dry-run is the final gate |
 
 ## Chain rules
 

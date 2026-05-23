@@ -4,7 +4,7 @@ title: Release Dry Run And Beta Publish Review
 chain_id: terminal-commander-npm-distribution
 phase: Wave 5 - Release review
 status: "Pending"
-depends_on: ["NPM07", "NPM08"]
+depends_on: ["NPM08b"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
