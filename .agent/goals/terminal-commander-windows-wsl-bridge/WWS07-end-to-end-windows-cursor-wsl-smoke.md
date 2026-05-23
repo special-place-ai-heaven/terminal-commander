@@ -3,15 +3,15 @@ goal_id: WWS07
 title: End To End Windows Cursor Wsl Smoke
 chain_id: terminal-commander-windows-wsl-bridge
 phase: Wave 3 - Verification
-status: "Pending"
+status: "Completed"
 depends_on: ["WWS06"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T12:00:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T18:00:00+00:00"
+completed_at: "2026-05-23T19:10:00+00:00"
+completion_commit: "785d410"
 blocked_reason: ""
 source_refs:
   - "WWS04 bridge shim (commit d86e73f)"
