@@ -4,14 +4,18 @@ Local MCP control plane with environment runners. Raw terminal /
 file / PTY output goes in; only vetted, bounded signal comes out;
 context remains available by pointer.
 
-**Harness-first:** Terminal Commander is built for **coding agents**
-(Cursor, Codex, Claude Code, etc.), not for human terminal use. When
-the model needs shell, PTY, or file work, it should call **MCP tools**
-(`command_start_combed`, `bucket_wait`, `pty_*`, …) instead of parsing
-raw terminal scrollback. Humans typically run install / doctor / setup
-once; the product surface is **MCP → `terminal-commander-mcp` →
-`terminal-commanderd` → real sessions** (bash, zsh, PowerShell in WSL,
-etc.).
+**Harness-first / zero-touch:** Terminal Commander is built for **coding
+agents** (Cursor, Codex, Claude Code, etc.). The operator path is a
+single command:
+
+```powershell
+npm install -g terminal-commander
+```
+
+That installs the WSL runtime, configures every **detected** harness MCP
+entry, installs daemon autostart, and starts the daemon. No separate
+`setup` step. First MCP use runs lazy bootstrap if install was skipped.
+Humans may use `doctor` for diagnostics only.
 
 This npm package is the **root wrapper**. It runs on:
 

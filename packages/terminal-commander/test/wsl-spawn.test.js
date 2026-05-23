@@ -237,7 +237,7 @@ test("happy path spawns wsl.exe with exact argv + options shape", async () => {
   const rec = makeRecorder();
   const r = await spawnWslBridge({
     platform: "win32",
-    env: { PATH: "C:\\Windows;C:\\Windows\\System32" },
+    env: { PATH: "C:\\Windows;C:\\Windows\\System32", TC_SKIP_BOOTSTRAP: "1" },
     detect: makeMockDetect(okDetect(["Ubuntu-24.04"], "Ubuntu-24.04")),
     doctor: makeMockDoctor(DOCTOR_STATUSES.RUNTIME_PRESENT),
     exec: rec.exec,
@@ -351,7 +351,7 @@ test("exec thrown error during synchronous spawn yields bridge_spawn_failed", as
   };
   const r = await spawnWslBridge({
     platform: "win32",
-    env: {},
+    env: { TC_SKIP_BOOTSTRAP: "1" },
     detect: makeMockDetect(okDetect(["Ubuntu"], "Ubuntu")),
     doctor: makeMockDoctor(DOCTOR_STATUSES.RUNTIME_PRESENT),
     exec,

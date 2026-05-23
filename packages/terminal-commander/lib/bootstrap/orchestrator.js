@@ -22,7 +22,14 @@ const {
   AUTOSTART_STATUSES,
 } = require("../daemon/autostart.js");
 const { tryAcquireBootstrapLock, releaseBootstrapLock } = require("./lock.js");
-const { shouldSkipBootstrap, isGlobalNpmInstall } = require("./skip.js");
+const {
+  shouldSkipBootstrap,
+  isGlobalNpmInstall,
+  isPackageInstallLifecycle,
+} = require("./skip.js");
+const { harnessNeedsConfiguration } = require("../harness/needs.js");
+const { runWslBashLc } = require("./ensure_wsl_runtime.js");
+const { LINUX_PATH_PREFIX } = require("./constants.js");
 
 const BOOTSTRAP_STATUSES = Object.freeze({
   BOOTSTRAP_READY: "bootstrap_ready",
@@ -51,7 +58,8 @@ async function runBootstrap(opts) {
   const env = o.env || process.env;
   const mode = o.mode || "cli";
   const lines = [];
-  const failSoft = mode === "install";
+  const failSoft = mode === "install" || mode === "lazy";
+  const autoConfigure = mode === "install" || mode === "lazy" || o.auto_configure === true;
 
   if (shouldSkipBootstrap(env)) {
     return {
@@ -62,11 +70,11 @@ async function runBootstrap(opts) {
     };
   }
 
-  if (mode === "install" && platform === "win32" && !isGlobalNpmInstall(env)) {
+  if (mode === "install" && !isPackageInstallLifecycle(env) && o.require_install_lifecycle !== false) {
     return {
       status: BOOTSTRAP_STATUSES.BOOTSTRAP_SKIPPED,
       exit_code: 0,
-      output: "bootstrap skipped (not a global npm install).",
+      output: "bootstrap skipped (not an npm install lifecycle run).",
       lines: [],
     };
   }
@@ -98,7 +106,7 @@ async function runBootstrap(opts) {
 
       if (detectResult.reason === DETECT_REASONS.WSL_NOT_FOUND) {
         const msg =
-          "terminal-commander: WSL not found; install WSL then re-run setup harness.";
+          "terminal-commander: WSL not found; install WSL (wsl --install), then run npm install -g terminal-commander again.";
         lines.push(msg);
         logStderr(lines);
         return {
@@ -205,9 +213,26 @@ async function runBootstrap(opts) {
           );
         } else {
           lines.push(
-            `terminal-commander: WSL daemon autostart not installed (${daemonEnsure.status}); start manually in WSL.`,
+            `terminal-commander: WSL daemon autostart not installed (${daemonEnsure.status}); will retry on MCP connect.`,
           );
         }
+      }
+
+      if (
+        distro &&
+        o.dry_run !== true &&
+        (mode === "install" || mode === "lazy") &&
+        shouldInstallDaemonAutostart(env)
+      ) {
+        const startCmd = `${LINUX_PATH_PREFIX}. "$HOME/.config/terminal-commander/autostart.sh" 2>/dev/null || true`;
+        await runWslBashLc({
+          distro,
+          cmd: startCmd,
+          env,
+          exec: o.exec,
+          wslPath: o.wslPath,
+          timeoutMs: o.startDaemonTimeoutMs || 45_000,
+        });
       }
     }
 
@@ -231,13 +256,18 @@ async function runBootstrap(opts) {
       }
     }
 
-    harnessResults = (o.writeAllHarnesses || writeAllHarnesses)({
+    const needsHarness =
+      autoConfigure || o.force === true || harnessNeedsConfiguration({ platform, env });
+
+    harnessResults =
+      autoConfigure || needsHarness || o.dry_run === true
+        ? (o.writeAllHarnesses || writeAllHarnesses)({
       platform,
       env,
       distro,
       knownDistros,
       requireKnownDistro: platform === "win32" && distro != null,
-      force: o.force === true,
+      force: o.force === true || autoConfigure,
       clobber_backup: o.clobber_backup === true,
       dry_run: o.dry_run === true,
       cursor_scope: o.cursor_scope || "global",
@@ -245,7 +275,8 @@ async function runBootstrap(opts) {
       providerFilter: o.providerFilter,
       cursorOnly: o.cursorOnly === true,
       randomSuffix: o.randomSuffix,
-    });
+    })
+        : [];
 
     configured = [];
     for (const r of harnessResults) {
@@ -298,6 +329,6 @@ module.exports = {
   runBootstrap,
   shouldSkipBootstrap,
   isGlobalNpmInstall,
+  isPackageInstallLifecycle,
   BOOTSTRAP_STATUSES,
 };
-// shouldSkipBootstrap / isGlobalNpmInstall live in ./skip.js (re-exported above).

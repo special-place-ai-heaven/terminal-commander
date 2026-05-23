@@ -20,11 +20,37 @@ test("isGlobalNpmInstall detects npm_config_global", () => {
   assert.equal(isGlobalNpmInstall({}), false);
 });
 
+test("runBootstrap install mode auto-configures harnesses (force)", async () => {
+  const wrote = [];
+  const r = await runBootstrap({
+    mode: "install",
+    platform: "linux",
+    env: {
+      npm_lifecycle_event: "install",
+      npm_lifecycle_script: "node scripts/install.js",
+      HOME: process.env.HOME || process.env.USERPROFILE || "/tmp",
+    },
+    acquireLock: false,
+    require_install_lifecycle: false,
+    writeAllHarnesses: (opts) => {
+      wrote.push(opts.force);
+      return [];
+    },
+    skipDaemonAutostart: true,
+  });
+  assert.equal(r.exit_code, 0);
+  assert.equal(wrote.length, 1);
+  assert.equal(wrote[0], true);
+});
+
 test("runBootstrap skips on TC_SKIP_BOOTSTRAP", async () => {
   const r = await runBootstrap({
     mode: "install",
     platform: "win32",
-    env: { TC_SKIP_BOOTSTRAP: "1" },
+    env: {
+      TC_SKIP_BOOTSTRAP: "1",
+      npm_lifecycle_event: "install",
+    },
     acquireLock: false,
   });
   assert.equal(r.status, "bootstrap_skipped");

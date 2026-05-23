@@ -5,28 +5,7 @@
 
 const { detectAllHarnesses } = require("../harness/detect.js");
 const { listProviders } = require("../harness/registry.js");
-const fs = require("node:fs");
-
-function entryConfigured(id, opts) {
-  const o = opts || {};
-  try {
-    const d = require("../harness/detect.js").detectProvider(id, o);
-    if (!d.detected || !d.config_path) return false;
-    if (!fs.existsSync(d.config_path)) return false;
-    const text = fs.readFileSync(d.config_path, "utf8");
-    if (id === "cursor") return text.includes("terminal-commander-mcp");
-    if (id === "codex-cli") return text.includes("[mcp_servers.terminal_commander]");
-    if (id === "claude-code") {
-      return (
-        text.includes("terminal-commander-mcp") &&
-        text.includes('"terminal_commander"')
-      );
-    }
-    return text.includes("terminal-commander-mcp");
-  } catch (_e) {
-    return false;
-  }
-}
+const { entryConfigured } = require("../harness/needs.js");
 
 function runDoctorHarness(opts) {
   const o = opts || {};

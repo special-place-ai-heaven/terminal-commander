@@ -16,18 +16,22 @@ After this chain lands, the primary Windows operator path is:
 npm install -g terminal-commander
 ```
 
-That single command MUST:
+That single command MUST (zero-touch — no `setup` subcommands required):
 
 1. Run the package `install` lifecycle script (local-only; see §3).
 2. Detect WSL, resolve a distro, and run `npm install -g terminal-commander` **inside** the distro with a Linux-first `PATH` (see §5).
-3. For each **detected** harness in the provider registry, merge the Terminal Commander MCP stanza into the harness config file.
-4. Persist bootstrap metadata in `%LOCALAPPDATA%\terminal-commander\setup.json`.
-5. Exit **0** from npm even when WSL is missing (fail-soft with one stderr line).
+3. Install **daemon autostart** (systemd user unit or profile hook) and **start the daemon** if not already running.
+4. For each **detected** harness, **merge or update** the Terminal Commander MCP stanza (`--force` semantics on install; always creates `.bak` before overwrite).
+5. Persist bootstrap metadata in `%LOCALAPPDATA%\terminal-commander\setup.json`.
+6. Exit **0** from npm even when WSL is missing (fail-soft with one stderr line).
+
+**First MCP connect** (lazy bootstrap): if anything above was skipped (e.g. lock contention), the Windows→WSL bridge runs the same bootstrap once before spawning `terminal-commander-mcp`.
 
 Opt-out:
 
 - `TC_SKIP_BOOTSTRAP=1` before install.
-- `npm install -g terminal-commander --ignore-scripts` then `terminal-commander setup` or `terminal-commander setup harness`.
+- `TC_SKIP_DAEMON_AUTOSTART=1` to skip daemon service/profile install only.
+- `npm install -g terminal-commander --ignore-scripts` (manual recovery only).
 
 ## 2. Operator contract (Linux / WSL)
 
