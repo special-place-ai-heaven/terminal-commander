@@ -68,6 +68,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      recovery_release_as:
+        description: "Recovery only — create GitHub release for this version (skips opening a release PR)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -111,6 +116,8 @@ jobs:
           config-file: .github/release-please-config.json
           manifest-file: .github/.release-please-manifest.json
           token: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+          release-as: ${{ inputs.recovery_release_as }}
+          skip-github-pull-request: ${{ inputs.recovery_release_as != '' }}
 
   # ----------------------------------------------------------------
   # JOB 2 — publish-linux-x64 (NPM07).
