@@ -729,11 +729,21 @@ WWS01 contract by document path AND date.
   evidence even when the WSL-side runtime is absent. Cursor GUI
   provider smoke is operator-driven and `Not Run` until a
   transcript is attached.
-- **WWS08**: docs-only — README + `docs/release/npm-binary-packaging-contract.md`
-  WWS amendment section + `docs/integrations/cursor.md` Windows
-  walk-through + `docs/release/release-please-contract.md`
-  acknowledgment + `RELEASE_CHECKLIST.md` + `BACKLOG.md`. No
-  `package.json` edit. No workflow edit.
+- **WWS08** (**landed**): docs-only — `README.md` (feature
+  matrix WWS rows + Windows host install subsection + Cursor
+  bridge note + WWS01..WWS09 state table + Not Run items
+  preserved), `docs/release/npm-binary-packaging-contract.md`
+  §13b cross-link to the WWS chain (no field change to NPM02
+  baseline), `docs/release/npm-distribution-final-report.md` §11
+  WWS chain follow-up section, `docs/integrations/cursor.md`
+  cross-links to §11a/§11c/§11d, `examples/provider-harness/cursor/README.md`
+  operator note, `RELEASE_CHECKLIST.md` Windows + WSL bridge
+  chain section, `BACKLOG.md` P2 WWS-B1..WWS-B9 follow-ups,
+  `RISK_REGISTER.md` R-WWS-01..R-WWS-10 entries, `ROADMAP.md`
+  WWS chain table. No `package.json` edit. No workflow edit. No
+  `crates/**` edit. No `scripts/**` edit. No `packages/*/lib/**`
+  / `bin/**` / `test/**` edit. No version bump. No publish. No
+  workflow dispatch.
 - **WWS09**: review + final report. Recommendation either
   preserves `Conditional Go` or, if WWS07 Cursor live smoke
   transcript landed AND every other gate green, promotes to `Go`.

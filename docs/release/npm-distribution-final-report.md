@@ -357,3 +357,39 @@ No new chain is opened at NPM09 close.
 - [x] No manual tag / release created.
 - [x] No runtime / package version / release workflow change at
       NPM09 outside scope.
+
+## 11. WWS chain follow-up (added at WWS08)
+
+Added by WWS08 to acknowledge the successor chain
+`terminal-commander-windows-wsl-bridge` (WWS01–WWS09). The WWS
+chain shipped JS-only Windows control-plane surfaces that wrap
+the existing Linux/WSL2 runtime. None of the NPM06–NPM10
+publish gates or workflow contracts changed.
+
+- WWS01 contract: `docs/release/windows-wsl-bridge-contract.md`
+  (commit `6220eb2`); 15 binding decisions D-01..D-15.
+- WWS02 root npm package `os: ["linux", "win32"]` widening
+  (commit `1da40f3`); recorded as §13b amendment in
+  `docs/release/npm-binary-packaging-contract.md`. Platform
+  packages remain `os: ["linux"]`; `optionalDependencies`
+  exact-pin unchanged.
+- WWS03–WWS06 JS-only Windows control-plane modules under
+  `packages/terminal-commander/lib/{wsl,cursor,cli}/`;
+  `packages/terminal-commander/bin/terminal-commander*.js` shims
+  extended for the Windows branch. Linux behaviour byte-identical.
+- WWS07 Windows bridge smoke
+  (`scripts/smoke/verify-windows-bridge-smoke.ps1`, commit
+  `785d410`); records `runtime_missing` honestly when the WSL
+  distro lacks `terminal-commander-mcp`. The Cursor provider GUI
+  smoke remains `Not Run`.
+- WWS08 (this commit) ships public README + RELEASE_CHECKLIST +
+  BACKLOG + RISK_REGISTER + ROADMAP updates only; NO code, NO
+  workflow, NO version bump, NO publish.
+
+Publish posture: unchanged from NPM10. `npm-bootstrap-publish.yml`
+remains committed-but-undispatched. The first live publish still
+requires (i) operator npmjs.com trusted-publisher setup per
+`docs/release/npm-trusted-publishing-contract.md` §8, AND (ii) a
+Conventional-Commits `feat:`/`fix:` commit merging through a
+release-please PR. WWS09 is the final pre-publish readiness
+review.

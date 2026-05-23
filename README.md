@@ -104,16 +104,28 @@ Authoritative deeper docs:
 | release-please manifest mode | manifest-mode config at `.github/`, single shared `0.1.0-beta.1` version, linked-versions plugin | live (NPM06) |
 | npm trusted publishing (OIDC + provenance) | output-gated publish jobs inside `release-please.yml`; no `NPM_TOKEN`, no PAT | live workflow (NPM07); **first live publish pending** operator npmjs.com trusted-publisher setup + a release PR merge |
 | Cursor MCP config examples | native Linux / inside-WSL + Windows → WSL bridge | live (NPM08) |
+| Windows + WSL bridge UX contract | 15 binding decisions D-01..D-15; bridge architecture; safety boundary | live (WWS01) |
+| Root npm package `os` widened to `["linux", "win32"]` | bridge-required resolver branch; bounded Windows shim refusals | live (WWS02) |
+| WSL discovery + read-only doctor helpers | `lib/wsl/distro-name.js` safety whitelist; `lib/wsl/detect.js` `wsl -l -v` parser; `lib/wsl/doctor.js` runtime probe | live (WWS03) |
+| Windows → WSL `terminal-commander-mcp` bridge shim | `lib/wsl/spawn.js` argv-only spawn; `shell: false`, `windowsHide: true`, `stdio: 'inherit'`; token-shaped env stripped | live (WWS04) |
+| Cursor MCP config writer | `lib/cursor/config.js` + `lib/cursor/write.js`; refuse-existing without `--force`; `.bak` backup; atomic write; 256 KiB cap; 12-status enum | live (WWS05) |
+| Windows setup / doctor / pair CLI | `terminal-commander doctor`, `doctor wsl`, `setup cursor-wsl`, `pair create`, `pair accept <code>`; `--install-wsl-runtime` opt-in (no sudo, no password); 21-status enum | live (WWS06) |
+| Windows → WSL bridge smoke script | `scripts/smoke/verify-windows-bridge-smoke.ps1`; PASS for CLI/config/bridge readiness; **MCP round-trip Not Run** (WSL runtime missing until first npm publish) | live (WWS07); MCP round-trip **Not Run** |
 | Cursor provider live smoke transcript | requires operator GUI steps (no headless Cursor MCP entry point on host) | **Not Run** |
 | Codex CLI + Claude Code provider live smokes | operator-driven | **Not Run** (TC46 / TC48 baseline) |
 
 ## Install
 
-Terminal Commander runs on **Linux** and **WSL2**. Initial npm
-platforms are **linux-x64** and **linux-arm64**. There is **no
-macOS-native, no Windows-native, and no musl / Alpine package**
-claim at this time — the daemon UDS is Unix-only and the runtime
-chain (TC44 `non_goals`) explicitly defers those targets.
+Terminal Commander runs on **Linux** and **WSL2** as the real
+runtime host (daemon, MCP stdio adapter, admin CLI). On
+**Windows**, the same npm package installs as a **bridge / setup
+surface only**: a JS-only shim that drives `wsl.exe` into the
+chosen WSL distro where the real `terminal-commander-mcp`
+answers Cursor's MCP requests. Initial npm platforms are
+**linux-x64** and **linux-arm64**. There is **no macOS-native,
+no Windows-native daemon, and no musl / Alpine package** claim
+at this time — the daemon UDS is Unix-only and the runtime chain
+(TC44 `non_goals`) explicitly defers those targets.
 
 ### Future published path (pending first live publish)
 
@@ -162,6 +174,66 @@ cargo build --release \
 The CLI's Cargo package name is `terminal-commander-cli`; the binary
 name is `terminal-commander` (per the `[[bin]]` section in
 `crates/cli/Cargo.toml`).
+
+### Windows host (bridge / setup surface; pending first publish)
+
+The Windows-bridge UX landed in WWS01..WWS07. Once the first npm
+publish occurs (see [§ Current beta status](#current-beta-status)),
+Windows operators will install the same root package and drive
+setup with the new CLI:
+
+```powershell
+# 1. Install root package (Windows; pending first npm publish).
+npm install -g terminal-commander
+
+# 2. Inspect Windows host + WSL discovery (read-only).
+terminal-commander doctor
+terminal-commander doctor wsl
+
+# 3. Preview / apply the Cursor MCP config that points at the bridge.
+terminal-commander setup cursor-wsl --print-config
+terminal-commander setup cursor-wsl --dry-run
+terminal-commander setup cursor-wsl
+
+# 4. Optional inside-WSL runtime install (must be explicit; no sudo).
+terminal-commander setup cursor-wsl --install-wsl-runtime
+```
+
+Inside the chosen WSL distro, install the same root package once
+the publish lands:
+
+```sh
+npm install -g terminal-commander
+terminal-commander doctor
+```
+
+Current limitation: the npm package is **not yet published**; all
+three names (`terminal-commander`, `@terminal-commander/linux-x64`,
+`@terminal-commander/linux-arm64`) return `E404` on the registry.
+Until then, the Windows commands above resolve correctly through
+the local-tarball install path (`scripts/smoke/verify-npm-local-install.sh`
+on Linux/WSL; `scripts/smoke/verify-windows-bridge-smoke.ps1` on
+Windows) but the inside-WSL `--install-wsl-runtime` returns
+`npm_package_unpublished` honestly.
+
+Safety boundary (locked at WWS01 + WWS06):
+
+- The Windows shim never invokes `wsl.exe` directly; all bridge
+  spawns flow through `lib/wsl/spawn.js` with `shell: false`,
+  `windowsHide: true`, and a single-element `-d <distro>` argv.
+- Distro names are double-validated (`assertSafeDistroName` +
+  live `wsl -l -v` whitelist) before any spawn.
+- No sudo. No `sudo -S`. No password prompt. No environment
+  credential. No LLM-supplied secret forwarded through any
+  channel.
+- The Cursor config writer refuses to overwrite an existing
+  `terminal-commander` entry without `--force`; always creates
+  `<mcp.json>.bak` before overwrite; atomic write via a
+  same-directory tmp file + rename.
+- Pairing codes (`pair create` / `pair accept`) are operator
+  confirmation, NOT a security secret. The full WSL-side
+  handshake is deferred to a future enhancement; `pair accept`
+  returns `pair_deferred` until that lands.
 
 ## Quickstart
 
@@ -246,6 +318,17 @@ Full walk-through: [`docs/integrations/cursor.md`](docs/integrations/cursor.md).
 [`examples/provider-harness/cursor/mcp.global.linux-wsl.json`](examples/provider-harness/cursor/mcp.global.linux-wsl.json)
 
 Substitute your WSL distribution name from `wsl --list --verbose`.
+
+The manual `wsl.exe` config above remains the operator-driven
+fallback. Once the first npm publish lands, the WWS06 CLI
+auto-generates the bridge-form stanza (`command:
+terminal-commander-mcp`, optional `env.TC_WSL_DISTRO`) via
+`terminal-commander setup cursor-wsl`. The Windows bridge smoke
+script (`scripts/smoke/verify-windows-bridge-smoke.ps1`) exercises
+the full WWS06 surface end-to-end. See
+[`docs/integrations/cursor.md`](docs/integrations/cursor.md) §11a,
+§11c, and §11d for the auto-generated config, CLI surface, and
+smoke checklist.
 
 ### Cursor live smoke status
 
@@ -377,7 +460,22 @@ Threat model + structural enforcement: [`SECURITY.md`](SECURITY.md).
 
 ## Current beta status
 
-**Conditional Go** (TC48 baseline, preserved through NPM01–NPM08).
+**Conditional Go** (TC48 baseline, preserved through NPM01–NPM08
+and the WWS01–WWS07 Windows + WSL bridge chain).
+
+### Windows + WSL bridge chain state (WWS01–WWS09)
+
+| Goal   | Surface | Status |
+|--------|---------|--------|
+| WWS01  | Windows + WSL install UX contract; 15 binding decisions D-01..D-15 | live (commit `6220eb2`) |
+| WWS02  | Root npm package `os: ["linux", "win32"]`; bridge-required resolver branch; bounded shim refusals | live (commit `1da40f3`) |
+| WWS03  | `lib/wsl/distro-name.js` + `lib/wsl/detect.js` + `lib/wsl/doctor.js` discovery / doctor helpers | live (commit `ec8441e`) |
+| WWS04  | `lib/wsl/spawn.js` Windows → WSL bridge shim (`shell: false`, `windowsHide: true`, `stdio: 'inherit'`, token-shaped env stripped) | live (commit `d86e73f`) |
+| WWS05  | `lib/cursor/config.js` + `lib/cursor/write.js` Cursor MCP config writer (refuse-existing, `.bak`, atomic write, 256 KiB cap) | live (commit `ae37878`) |
+| WWS06  | `lib/cli/**` setup / doctor / pair CLI (5 subcommands; 21-status enum; `--install-wsl-runtime` opt-in; no sudo, no password) | live (commit `4936904`) |
+| WWS07  | `scripts/smoke/verify-windows-bridge-smoke.ps1` Windows bridge smoke (CLI/config readiness PASS; MCP round-trip **Not Run** = runtime_missing until publish) | live (commit `785d410`) |
+| WWS08  | README + release contract + RELEASE_CHECKLIST + BACKLOG + ROADMAP + RISK_REGISTER update | (current commit) |
+| WWS09  | Pre-publish readiness review | Pending |
 
 What is green:
 
@@ -405,6 +503,17 @@ not `Go`):
   operator GUI steps.
 - **Codex CLI + Claude Code provider live smokes**: Not Run on the
   verification host (TC46 / TC48 baseline).
+- **Windows → WSL MCP bridge round-trip** (WWS07 smoke step 9):
+  Not Run. The WSL distro on the verification host lacks
+  `terminal-commander-mcp` because the npm package is still
+  `E404`. The WWS07 PowerShell smoke records this honestly as
+  `runtime_missing` and does NOT promote it to PASS. Once the
+  first npm publish lands, an operator can install the runtime
+  inside WSL (`npm install -g terminal-commander` from within
+  the distro, or `terminal-commander setup cursor-wsl
+  --install-wsl-runtime` on Windows) and re-run the smoke; the
+  round-trip will then drive an MCP `initialize` + `tools/list`
+  + `tools/call(health)` through the WWS04 bridge.
 - **First live npm publish**: pending two operator-driven steps:
   1. Claim `@terminal-commander` org on npmjs.com and configure the
      trusted publisher for all three package names
@@ -446,7 +555,8 @@ exercise the full surface. Testing doctrine: [`TESTING.md`](TESTING.md).
   goals/
     terminal-commander-mvp/             # library + scaffold goals
     terminal-commander-runtime/         # daemon runtime + IPC goals (TC33–TC48)
-    terminal-commander-npm-distribution/# npm packaging + Cursor (NPM01–NPM09)
+    terminal-commander-npm-distribution/# npm packaging + Cursor (NPM01–NPM10)
+    terminal-commander-windows-wsl-bridge/ # Windows host bridge chain (WWS01–WWS09)
 
 crates/
   core/      sifters/   probes/   store/   daemon/   mcp/   cli/

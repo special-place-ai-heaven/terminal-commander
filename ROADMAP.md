@@ -189,3 +189,49 @@ Out-of-runtime-chain (still deferred):
 
 Successor chain after TC48 is operator-driven beta exercise, not a
 new code chain.
+
+## Windows + WSL bridge chain (WWS01–WWS09)
+
+Added by WWS08 (docs-only). The WWS chain landed JS-only
+Windows control-plane surfaces wrapping the existing Linux/WSL2
+runtime. No `crates/**` change. No package version change. No
+new MCP tool. No workflow change. The publish floor recommended
+by WWS01 §14.1 was WWS02 + WWS04 + WWS05 + WWS06 + WWS08 — all
+landed at this commit.
+
+| Goal  | Surface | Commit |
+|-------|---------|--------|
+| WWS01 | Windows + WSL install UX contract; D-01..D-15 binding decisions | `6220eb2` |
+| WWS02 | Root npm package `os: ["linux", "win32"]`; bridge-required resolver branch | `1da40f3` |
+| WWS03 | WSL discovery + read-only doctor helpers (`lib/wsl/{distro-name,detect,doctor}.js`) | `ec8441e` |
+| WWS04 | Windows → WSL bridge shim (`lib/wsl/spawn.js`) | `d86e73f` |
+| WWS05 | Cursor MCP config writer (`lib/cursor/{config,write,index}.js`) | `ae37878` |
+| WWS06 | Setup / doctor / pair CLI (`lib/cli/**`) | `4936904` |
+| WWS07 | Windows bridge smoke script (`scripts/smoke/verify-windows-bridge-smoke.ps1`) | `785d410` |
+| WWS08 | Public README + release contract + checklist + backlog + risk + roadmap updates | (this commit) |
+| WWS09 | Pre-publish readiness review | Pending |
+
+Out-of-WWS-chain (deferred):
+
+- First live npm publish (operator-driven; BACKLOG WWS-B1).
+- Windows → WSL MCP bridge round-trip live evidence (BACKLOG
+  WWS-B2; blocked on WWS-B1 + inside-WSL install).
+- Cursor provider GUI live smoke transcript (BACKLOG WWS-B3;
+  required for `Conditional Go` → `Go` promotion).
+- `setup cursor-wsl --uninstall` rollback (BACKLOG WWS-B4).
+- Multi-distro interactive ask-once prompt (BACKLOG WWS-B5).
+- Full WSL-side `pair accept` handshake (BACKLOG WWS-B6).
+- Safe credential broker for `--install-wsl-runtime`
+  permission failures (BACKLOG WWS-B7; explicitly does NOT
+  forward LLM-supplied credentials).
+- CAP01 capability-registry contract — future doctrine
+  carry-forward (BACKLOG WWS-B9). The chain consistently
+  describes "tentacles = programmable probes = policy-gated
+  capability executors" as future doctrine; the formal
+  registry contract is unscheduled.
+
+After WWS09 closes, the next operator-driven milestone is the
+first live npm publish via the existing NPM07 trusted-publishing
+workflow (no token, no PAT). `npm-bootstrap-publish.yml`
+remains the one-time bootstrap fallback per NPM10 and stays
+committed-but-undispatched.

@@ -471,6 +471,24 @@ Behavioral evidence (WWS02 verification commit):
   (`packages/terminal-commander-linux-x64/package.json` and
   `-linux-arm64/package.json` unchanged).
 
+WWS chain landing follow-up (recorded at WWS08, docs-only): WWS03
+(`lib/wsl/{distro-name,detect,doctor}.js`, commit `ec8441e`),
+WWS04 (`lib/wsl/spawn.js`, commit `d86e73f`), WWS05
+(`lib/cursor/{config,write,index}.js`, commit `ae37878`), WWS06
+(`lib/cli/**`, commit `4936904`), WWS07 (`scripts/smoke/verify-windows-bridge-smoke.ps1`,
+commit `785d410`), WWS08 (this commit) ALL landed AFTER the WWS02
+package contract change above. NONE of them modified any other
+field in this contract: root `os` stayed at `["linux", "win32"]`;
+platform packages stayed at `os: ["linux"]`; `optionalDependencies`
+exact-pin preserved; `0.1.0-beta.1` preserved across all three
+packages; root `optionalDependencies` shape unchanged. The pack
+file counts grew at WWS03/WWS04/WWS05/WWS06 only because the
+chain added JS-only modules to the root package's `lib/` (root
+tarball: 7 files at NPM03 → 23 at WWS06; both platform packages
+remain 5 files unchanged). WWS07 added one file under
+`scripts/` (NOT in any npm pack). WWS08 is docs-only (NOT in any
+npm pack).
+
 ## 14. Evidence
 
 - NPM01 audit: `docs/release/npm-distribution-audit.md` (commit

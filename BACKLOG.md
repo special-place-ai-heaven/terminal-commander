@@ -216,3 +216,22 @@ Resolved items remain listed so reviewers can map current code to
 the P0 backlog that drove the chain. Move new items into P1/P2/P3
 only after the work is shown live in the daemon + MCP surface and
 matched by tests.
+
+## P2 — Windows + WSL bridge follow-ups (WWS08 docs-only)
+
+Added by WWS08 to record known gaps from the WWS01–WWS07 chain.
+None of these are publish-blockers (the publish floor recommended
+by WWS01 §14.1 was WWS02 + WWS04 + WWS05 + WWS06 + WWS08, all
+landed); they are post-publish enhancements.
+
+| ID    | Item | Reason |
+|-------|------|--------|
+| WWS-B1 | First live npm publish | Pending operator npmjs.com trusted-publisher setup + release PR merge (`docs/release/npm-trusted-publishing-contract.md` §8). Until then `terminal-commander setup cursor-wsl --install-wsl-runtime` returns `npm_package_unpublished` honestly. |
+| WWS-B2 | Windows → WSL MCP bridge round-trip live evidence | WWS07 PowerShell smoke records `runtime_missing` honestly. Re-run after WWS-B1 to capture an MCP `initialize` + `tools/list` + `tools/call(health)` transcript through the WWS04 bridge. |
+| WWS-B3 | Cursor provider GUI live smoke transcript | No headless Cursor MCP discovery entry point. Operator opens Cursor → confirms `terminal-commander` in Settings → asks for `health` from chat → attaches transcript. Required before beta posture can promote `Conditional Go` → `Go`. |
+| WWS-B4 | `terminal-commander setup cursor-wsl --uninstall` | D-14 rollback (partial at WWS06). The WWS05 writer already produces `<mcp.json>.bak`; the uninstall flow restores it. NOT implemented at WWS06. |
+| WWS-B5 | Multi-distro interactive ask-once prompt | D-07 future enhancement. At WWS06 operators must pass `--distro <name>` or set `TC_WSL_DISTRO` when no default distro is available; the CLI emits `no_default_distro_ambiguous` with the candidate list. A future `--interactive` flag may add a prompt. |
+| WWS-B6 | Full WSL-side `pair accept` handshake | At WWS06 `pair create` persists `pair.json`; `pair accept` validates the 6-digit shape + persisted-code match → `pair_accepted` or `pair_deferred`. The WSL-side daemon session token exchange is deferred. |
+| WWS-B7 | Credential broker for `--install-wsl-runtime` permission failures | At WWS06 the install probe returns `install_permission_required` honestly when the inside-WSL npm install hits EACCES; Terminal Commander does NOT prompt for passwords or run sudo. Future work may add a safe broker that does NOT forward LLM-supplied credentials through MCP / chat / bucket / log / audit / env / Cursor config. |
+| WWS-B8 | `npm-bootstrap-publish.yml` disable / rotate after first publish | Inherited from NPM10 (BACKLOG P1.5b). The workflow exists but stays committed-but-undispatched. |
+| WWS-B9 | CAP01 capability-registry contract (future doctrine) | Recorded as doctrine carry-forward through the WWS chain. The registry would formalize the "tentacle = programmable probe = policy-gated capability executor" model. NOT started; NOT scheduled. |

@@ -244,3 +244,71 @@ of TC47:
   attached).
 - This file is the authoritative checklist. Out-of-band release
   steps are not permitted.
+
+## Windows + WSL bridge chain (WWS01–WWS07, WWS08 current)
+
+Status added by WWS08 (docs-only); does NOT modify any publish
+gate locked at NPM09. The WWS chain shipped JS-only Windows
+control-plane surfaces that wrap the existing Linux/WSL2 runtime;
+no version bump and no workflow change at WWS08.
+
+- [x] WWS01 Windows + WSL install UX contract live
+      (`docs/release/windows-wsl-bridge-contract.md`, commit
+      `6220eb2`; 15 binding decisions D-01..D-15).
+- [x] WWS02 root npm package `os: ["linux", "win32"]` widened;
+      `bridge_required` resolver branch; bounded shim refusals
+      on Windows (commit `1da40f3`).
+- [x] WWS03 WSL discovery + read-only doctor helpers shipped
+      (`lib/wsl/{distro-name,detect,doctor}.js`, commit
+      `ec8441e`).
+- [x] WWS04 Windows → WSL `terminal-commander-mcp` bridge shim
+      shipped (`lib/wsl/spawn.js`, commit `d86e73f`).
+- [x] WWS05 Cursor MCP config writer shipped
+      (`lib/cursor/{config,write,index}.js`, commit `ae37878`).
+- [x] WWS06 setup / doctor / pair CLI shipped (`lib/cli/**`,
+      commit `4936904`). Five subcommands locked; 21-status
+      enum; `--install-wsl-runtime` opt-in; no sudo; no
+      password.
+- [x] WWS07 Windows bridge smoke script shipped
+      (`scripts/smoke/verify-windows-bridge-smoke.ps1`, commit
+      `785d410`). Windows CLI / config-writer / doctor PASS on
+      the verification host.
+- [ ] WWS07 Windows → WSL MCP bridge round-trip (`initialize` +
+      `tools/list` + `tools/call(health)` through the WWS04
+      bridge): **Not Run** = `runtime_missing` because the WSL
+      distro lacks `terminal-commander-mcp` until the first npm
+      publish lands.
+- [ ] Cursor provider live smoke transcript: **Not Run** (no
+      headless Cursor MCP discovery entry point; operator GUI
+      steps required).
+- [ ] WWS09 pre-publish readiness review: Pending.
+
+Inherited / preserved from earlier chains (NOT modified by WWS08):
+
+- [ ] First live npm publish: pending operator npmjs.com
+      trusted-publisher setup + release PR merge (see
+      `docs/release/npm-trusted-publishing-contract.md` §8).
+- [ ] `npm-bootstrap-publish.yml` disable / rotate after first
+      publish (BACKLOG P1.5b, inherited from NPM10).
+
+The WWS chain did NOT modify any of:
+
+- `crates/**` (Rust workspace untouched; 347/347 nextest PASS
+  preserved).
+- `Cargo.toml` / `Cargo.lock`.
+- `.github/**` (no workflow change; `release-please.yml`,
+  `npm-binary-build.yml`, `npm-bootstrap-publish.yml`,
+  trusted-publishing surfaces all untouched).
+- `packages/*/package.json` (root + both platform packages
+  byte-identical; `0.1.0-beta.1` preserved).
+- `packages/terminal-commander-linux-x64/**` /
+  `packages/terminal-commander-linux-arm64/**` (platform
+  packages byte-identical).
+- `scripts/` other than the new WWS07 PowerShell smoke
+  (existing `verify-runtime-smoke.sh`,
+  `verify-npm-local-install.sh` byte-identical).
+- `rules/**` / `config/**` (rule packs + daemon config example
+  byte-identical).
+- No new MCP tool added; 29-tool TC45 catalogue unchanged.
+- No daemon change. No IPC change. No raw stream endpoint
+  added. No network listener added. No postinstall downloader.

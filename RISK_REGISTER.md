@@ -121,3 +121,22 @@ Risk policy:
   acceptance is informed.
 - Removing a risk row is forbidden. Demote to `Resolved` and keep
   the TC reference instead.
+
+## Active risks — Windows + WSL bridge chain (WWS01–WWS07)
+
+Added by WWS08 to mirror the WWS01 contract §15 R-WWS-01..R-WWS-10
+public risk table. None of these block the publish floor; they
+guide post-publish hardening.
+
+| ID   | Risk | Mitigation (where landed) | Status |
+|------|------|---------------------------|--------|
+| R-WWS-01 | English-locale only `wsl.exe -l -v` parser; non-English Windows hosts may not parse | `lib/wsl/detect.js` documented as English-locale only; parser tolerates UTF-16 LE BOM + NUL-padded ASCII + CRLF; future work to support localized headers | **accepted** at WWS03 |
+| R-WWS-02 | Cursor MCP config schema may evolve | `lib/cursor/write.js` writes only the documented stanza shape (`type: stdio`, `command`, optional `env.TC_WSL_DISTRO`); refuses unknown top-level keys without `--force`; preserves unrelated entries | **mitigated** at WWS05 |
+| R-WWS-03 | `wsl.exe` argv injection via unsafe distro names | Two-step double-validation: `assertSafeDistroName` (whitelist `^[A-Za-z0-9._-]{1,64}$`) + live `detectWsl().distros` membership BEFORE any spawn | **mitigated** at WWS03 / WWS04 |
+| R-WWS-04 | Operator supplies a crafted distro name via `--distro` / `TC_WSL_DISTRO` to attempt injection | Whitelist + membership check; argv array passed to spawn (no shell); `shell: false`, `windowsHide: true`, `stdio: 'inherit'` | **mitigated** at WWS04 / WWS06 |
+| R-WWS-05 | Cursor `mcp.json` overwrite clobbers operator's unrelated MCP servers | Refuse-existing-`terminal-commander`-entry without `--force`; always `.bak` before overwrite; refuse pre-existing `.bak` without `--clobber-backup`; atomic write via same-directory tmp file + rename | **mitigated** at WWS05 |
+| R-WWS-06 | Token-shaped env var leaks across bridge | `buildFilteredEnv` strips explicit keys (NPM_TOKEN, GITHUB_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY, SLACK_TOKEN, CARGO_REGISTRY_TOKEN, RELEASE_PLEASE_TOKEN, plus the `_TC` suffixed variants) AND pattern-shaped keys (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_PASS`, `*_API_KEY`, `*_APIKEY`, AWS_SESSION_TOKEN, AWS_SECRET_ACCESS_KEY) before the child env is constructed | **mitigated** at WWS04 |
+| R-WWS-07 | `--install-wsl-runtime` becomes a privilege-escalation hole | Locked to ONE constant `npm install -g terminal-commander` invocation; no sudo, no `sudo -S`, no password prompt, no env credential, no LLM-supplied secret; EACCES → `install_permission_required` honestly (no retry under sudo); E404 → `npm_package_unpublished` honestly | **mitigated** at WWS06 |
+| R-WWS-08 | Pair code mistaken for a security secret | Documented as operator confirmation only; `pair.json` stores `{ schema_version, pair_id, code, created_at, accepted_at, distro }` — no token, no env, no credentials; the code is never used in any cryptographic decision | **accepted** at WWS06 |
+| R-WWS-09 | Cursor live smoke from a Windows host still requires GUI steps (no headless MCP entry point) | WWS07 PowerShell smoke records the GUI smoke status honestly; `Not Run` if unattainable; no promotion to PASS without operator transcript | **accepted** at WWS07 |
+| R-WWS-10 | `npm-bootstrap-publish.yml` accidental dispatch | Workflow committed but NOT dispatched; remains the one-time bootstrap fallback per NPM10; BACKLOG WWS-B8 records the disable/rotate follow-up after first publish | **mitigated** by operator discipline |
