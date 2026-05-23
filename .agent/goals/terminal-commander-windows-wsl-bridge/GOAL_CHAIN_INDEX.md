@@ -1,6 +1,6 @@
 # Goal Chain Index — terminal-commander-windows-wsl-bridge
 
-Status: WWS01 + WWS02 + WWS03 + WWS04 + WWS05 + WWS06 + WWS07 + WWS08 Completed; WWS09 Pending.
+Status: **CHAIN CLOSED** — WWS01..WWS09 all Completed (final report at `docs/release/windows-wsl-bridge-final-report.md`, commit `b750f8b`).
 Branch: `main`.
 Successor of: `terminal-commander-npm-distribution` (NPM10 = Completed, bootstrap workflow committed but NOT dispatched; all three packages remain E404 / unpublished).
 
@@ -20,7 +20,7 @@ Language: ASCII only.
 | WWS06  | WSL runtime install or pairing flow                                 | Completed (commit `4936904`; lib/cli/* CLI surface — doctor + setup cursor-wsl + pair create/accept + setup_state.json + 78 new Node tests; live Windows doctor/setup/pair PASS; --install-wsl-runtime expected to return npm_package_unpublished until NPM07 publish) |
 | WWS07  | End-to-end Windows + Cursor + WSL smoke                             | Completed (commit `785d410`; scripts/smoke/verify-windows-bridge-smoke.ps1; live Windows smoke PASS for CLI surface; bridge MCP round-trip Not Run honestly = runtime_missing until NPM07 publishes; Cursor GUI provider smoke Not Run with explicit reason) |
 | WWS08  | README and release contract update                                  | Completed (commit `12b47ce`; docs-only; README feature matrix + Windows install subsection + WWS01..WWS09 state table; RELEASE_CHECKLIST/BACKLOG/RISK_REGISTER/ROADMAP updated; npm pack file counts unchanged 23/5/5) |
-| WWS09  | Pre-publish readiness review                                        | Pending  |
+| WWS09  | Pre-publish readiness review                                        | Completed (commit `b750f8b`; final report at `docs/release/windows-wsl-bridge-final-report.md`; recommendation: Conditional Go preserved, ready for `npm-bootstrap-publish` workflow_dispatch dry-run only; real publish gated on separate operator approval) |
 
 ## Target user experience (assumption — must be locked at WWS01)
 
