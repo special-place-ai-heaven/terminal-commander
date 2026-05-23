@@ -117,7 +117,43 @@ attached to a follow-up artifact, the beta posture stays
       and merges it. Only then do the publish jobs fire.
 
 Until ALL operator preconditions complete, the first live npm
-publish remains `Pending`. No token fallback is permitted.
+publish via NPM07's OIDC path remains `Pending`. **NPM10 adds a
+one-time bootstrap exception** (see below) for the case where
+npmjs.com requires the package page to exist before the
+trusted-publisher UI can be configured.
+
+## NPM10 bootstrap exception (one-time NPM_TOKEN_TC path)
+
+Use this path **only if** the operator determines that
+npmjs.com's trusted-publisher UI requires the package page to
+exist before configuration. Full policy:
+[`docs/release/npm-bootstrap-first-publish.md`](docs/release/npm-bootstrap-first-publish.md).
+
+Workflow: `.github/workflows/npm-bootstrap-publish.yml`. Trigger:
+`workflow_dispatch` only. Two-gate confirm:
+
+- `dry_run` (boolean, default `true`)
+- `confirm_publish` (string, must equal
+  `publish-terminal-commander-beta` for real publish)
+
+Default execution is `npm publish --dry-run`. Real publish
+requires both gates flipped. Auth: `secrets.NPM_TOKEN_TC` via
+`NODE_AUTH_TOKEN`. **No provenance** on token publish (intentional).
+
+Post-NPM10-success operator steps (required before any further
+publish):
+
+- [ ] Configure trusted publisher on every package page on
+      npmjs.com (workflow filename `release-please.yml`).
+- [ ] Disable or remove `.github/workflows/npm-bootstrap-publish.yml`.
+- [ ] Rotate / invalidate `NPM_TOKEN_TC`.
+- [ ] Confirm next release flows entirely through `release-please.yml`
+      (OIDC + provenance).
+
+Until ALL post-success steps complete, the chain is NOT considered
+to have closed the bootstrap exception cleanly. The OIDC contract
+remains the standing capability; `NPM_TOKEN_TC` is a single-use
+key.
 
 ## Versioning
 

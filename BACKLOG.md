@@ -85,28 +85,55 @@ to call `health` and `command_start_combed` -> `bucket_wait` ->
 
 ### P1.5 — First live npm publish (operator preconditions)
 
-**Source:** NPM07 + NPM09 final reports.
+**Source:** NPM07 + NPM09 final reports + NPM10 policy exception.
 **Evidence:** `.github/workflows/release-please.yml` carries an
 output-gated, OIDC-only publish path. All three package names
 return `E404` from `npm view` on 2026-05-23 — unpublished /
 available. Live publish jobs were correctly `skipped` on the
-NPM06 / NPM07 / NPM08 / NPM08b live runs because
+NPM06 / NPM07 / NPM08 / NPM08b / NPM09 live runs because
 `releases_created='false'` (no Conventional-Commits-eligible
 commits since the manifest seed).
-**Impact:** Until the operator preconditions complete, the npm
-`install -g terminal-commander` path advertised in the README
-remains a future path; the current operator install path is the
-local-tarball NPM04 smoke. Beta stays `Conditional Go`.
-**Proposed work:**
-1. Claim `@terminal-commander` org on npmjs.com.
-2. Reserve all three package names.
-3. Configure trusted publisher for each of the three packages
-   with workflow filename `release-please.yml`.
-4. Land a Conventional-Commits `feat:` / `fix:` commit, review the
-   release PR release-please opens, and merge it. The publish
-   jobs fire on the merge push.
+**Impact:** Until the FIRST publish lands, npmjs.com cannot offer
+the trusted-publisher configuration UI on a package page that does
+not yet exist. NPM10 added a one-time bootstrap workflow
+(`.github/workflows/npm-bootstrap-publish.yml`,
+`workflow_dispatch` only, two-gate confirm, NPM_TOKEN_TC) so the
+first publish can land via token; every subsequent publish goes
+through NPM07's OIDC path.
+**Proposed work (post-NPM10):**
+1. Operator dispatches `npm-bootstrap-publish` in dry-run mode and
+   verifies the three platform / root publish jobs succeed.
+2. Operator dispatches `npm-bootstrap-publish` with
+   `dry_run = false` AND
+   `confirm_publish = "publish-terminal-commander-beta"`.
+3. After the real publish, operator configures trusted publisher
+   for each of the three package pages on npmjs.com with workflow
+   filename `release-please.yml`.
+4. Operator lands a Conventional-Commits `feat:` / `fix:` commit;
+   release-please opens a release PR; operator reviews + merges
+   it. The OIDC publish jobs fire on the merge push.
 
-No token fallback. No `NPM_TOKEN_TC` use.
+After step 3 + step 4 succeed, P1.5b (below) fires.
+
+### P1.5b — Disable the NPM10 bootstrap workflow + rotate NPM_TOKEN_TC
+
+**Source:** NPM10 goal file +
+`docs/release/npm-bootstrap-first-publish.md` §5.3.
+**Evidence:** `.github/workflows/npm-bootstrap-publish.yml` is the
+ONE-TIME `NPM_TOKEN_TC` path; standing capability is OIDC trusted
+publishing via `release-please.yml`. The bootstrap workflow must
+not remain dispatchable after the first publish succeeds, otherwise
+an accidental dispatch could publish a token-authorized version
+that bypasses the OIDC + provenance contract.
+**Proposed work (post-first-publish, post-trusted-publisher-config):**
+1. Delete `.github/workflows/npm-bootstrap-publish.yml` OR rename
+   it to `.disabled` so GitHub Actions stops indexing it.
+2. Rotate / invalidate `NPM_TOKEN_TC` on npmjs.com.
+3. Update `docs/release/` to record that `NPM_TOKEN_TC` is
+   decommissioned and OIDC trusted publishing is the only
+   publish path.
+4. Open a follow-up goal (NPM11) to make the change auditable in
+   one commit pair.
 
 ## P2 — Medium priority
 

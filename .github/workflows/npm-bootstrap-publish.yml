@@ -1,0 +1,510 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Terminal Commander Authors
+#
+# NPM10 — one-time bootstrap publish workflow.
+#
+# ============================================================================
+#  WARNING — ONE-TIME BOOTSTRAP. DISABLE OR REMOVE AFTER FIRST PUBLISH.
+# ============================================================================
+#
+# Purpose:
+#   The first publish of `terminal-commander`,
+#   `@terminal-commander/linux-x64`, and `@terminal-commander/linux-arm64`
+#   uses `secrets.NPM_TOKEN_TC` because npmjs.com may not allow
+#   trusted-publisher configuration on a package page that does not
+#   exist yet. After this workflow successfully publishes the first
+#   `0.1.0-beta.N` for all three names, the operator MUST:
+#
+#     1. Open https://www.npmjs.com/package/<name> for each of the
+#        three names and configure the trusted publisher in
+#        "Publishing access" → "Add trusted publisher":
+#          - Publisher: GitHub Actions
+#          - Repository owner: special-place-administrator
+#          - Repository name: terminal-commander
+#          - Workflow filename: release-please.yml
+#          - Environment: (blank)
+#
+#     2. Disable (or remove) THIS workflow file. The OIDC-only
+#        publish path lives in `.github/workflows/release-please.yml`
+#        (NPM07); every subsequent publish goes through that workflow
+#        gated by `releases_created == 'true'`. The token workflow
+#        is a single-use bootstrap, not a standing capability.
+#
+#     3. Recommended: also rotate / invalidate `NPM_TOKEN_TC` on
+#        npmjs.com so leaving it configured cannot allow a future
+#        accidental dispatch.
+#
+# This workflow is intentionally restricted:
+#   - `on: workflow_dispatch` only. No `push`, no `release`, no
+#     `pull_request`, no `schedule`, no `workflow_run` triggers. It
+#     cannot fire accidentally.
+#   - Two-gate confirmation: `dry_run` defaults to `true`, and
+#     `confirm_publish` must equal the exact literal
+#     `publish-terminal-commander-beta` for any real publish to
+#     proceed. Either gate alone keeps the workflow in dry-run mode.
+#   - Pre-publish E404 check: every package name MUST return
+#     `E404` from `npm view <name> version` before the workflow
+#     publishes it. If any name already exists on the registry,
+#     the workflow fails LOUDLY and refuses to publish. This guards
+#     against accidental re-publish + supply-chain takeover.
+#   - Provenance is NOT enabled. Token-based publishes do not satisfy
+#     npm provenance requirements, and faking the `--provenance`
+#     flag with a token would produce a misleading attestation.
+#     Provenance returns with NPM07's OIDC path after trusted
+#     publisher is configured.
+#   - Permissions: `contents: read` only. No `id-token: write`,
+#     no `packages: write`, no other claim.
+#   - Auth surface: only `secrets.NPM_TOKEN_TC` via the standard
+#     `NODE_AUTH_TOKEN` env binding that `actions/setup-node` reads.
+#     The token is NEVER echoed, NEVER printed, NEVER written to a
+#     log line, and NEVER persisted in workspace files.
+
+name: npm-bootstrap-publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "If true, run npm publish --dry-run only. Set to false ONLY for the real first publish."
+        type: boolean
+        required: true
+        default: true
+      confirm_publish:
+        description: "Type EXACTLY 'publish-terminal-commander-beta' to enable real publish. Any other value forces dry-run."
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-bootstrap-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: "1.95.0"
+  NODE_VERSION: "20"
+  EXPECTED_VERSION: "0.1.0-beta.1"
+  CONFIRM_STRING: "publish-terminal-commander-beta"
+
+jobs:
+  # --------------------------------------------------------------
+  # Print the resolved gates and abort early if the inputs do not
+  # authorize a real publish. Every downstream job consults this
+  # job's outputs through `needs`.
+  # --------------------------------------------------------------
+  resolve-gates:
+    name: resolve-gates
+    runs-on: ubuntu-24.04
+    outputs:
+      real_publish: ${{ steps.gates.outputs.real_publish }}
+    steps:
+      - name: Resolve gates
+        id: gates
+        shell: bash
+        env:
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_CONFIRM: ${{ inputs.confirm_publish }}
+        run: |
+          set -e
+          echo "::group::Bootstrap publish gate state"
+          echo "dry_run input        : ${INPUT_DRY_RUN}"
+          # The confirm string is intentionally PRINTED in plain text
+          # so the operator can see that they typed the right value;
+          # it is not a secret.
+          echo "confirm_publish input: ${INPUT_CONFIRM}"
+          echo "expected confirm     : ${CONFIRM_STRING}"
+          echo "expected version     : ${EXPECTED_VERSION}"
+          echo "::endgroup::"
+          real_publish="false"
+          if [ "${INPUT_DRY_RUN}" = "false" ] && [ "${INPUT_CONFIRM}" = "${CONFIRM_STRING}" ]; then
+            real_publish="true"
+          fi
+          echo "real_publish=${real_publish}" >> "$GITHUB_OUTPUT"
+          echo "Resolved real_publish=${real_publish}"
+          if [ "${real_publish}" = "false" ]; then
+            echo "::notice::Gates closed — running in dry-run mode. To publish for real,"
+            echo "::notice::dispatch again with dry_run=false AND confirm_publish='${CONFIRM_STRING}'."
+          else
+            echo "::warning::Gates open — REAL publish will proceed against npmjs.com."
+          fi
+
+  # --------------------------------------------------------------
+  # PLATFORM PUBLISH — linux-x64.
+  #
+  # Build + stage + dry-run-or-real-publish for
+  # @terminal-commander/linux-x64.
+  # --------------------------------------------------------------
+  publish-linux-x64:
+    name: publish-linux-x64
+    needs: resolve-gates
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (${{ env.RUST_TOOLCHAIN }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: npm-bootstrap-publish-linux-x64
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+          # `scope` left unset; we publish a mix of unscoped (root) +
+          # scoped (platform) packages, and we set `--access public`
+          # explicitly on the scoped publishes.
+
+      - name: cargo build --release (x86_64-unknown-linux-gnu)
+        run: |
+          cargo build --release \
+            --target x86_64-unknown-linux-gnu \
+            -p terminal-commanderd \
+            -p terminal-commander-mcp \
+            -p terminal-commander-cli
+
+      - name: Stage real binaries into platform package
+        shell: bash
+        run: |
+          set -e
+          bin_dir="packages/terminal-commander-linux-x64/bin"
+          src_dir="target/x86_64-unknown-linux-gnu/release"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            if [ ! -x "$src_dir/$bin" ]; then
+              echo "::error::expected release binary not found: $src_dir/$bin"
+              exit 1
+            fi
+            cp "$src_dir/$bin" "$bin_dir/$bin"
+            chmod +x "$bin_dir/$bin"
+          done
+          rm -f "$bin_dir"/*.placeholder
+          ls -la "$bin_dir"
+
+      - name: Smoke — staged binaries answer --help
+        shell: bash
+        run: |
+          set -e
+          bin_dir="packages/terminal-commander-linux-x64/bin"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            "./$bin_dir/$bin" --help > /tmp/help-$bin.log 2>&1 || {
+              echo "::error::$bin --help failed";
+              head -50 /tmp/help-$bin.log;
+              exit 1;
+            }
+          done
+
+      - name: Confirm package version matches expected
+        shell: bash
+        run: |
+          set -e
+          actual=$(node -p "require('./packages/terminal-commander-linux-x64/package.json').version")
+          if [ "$actual" != "${EXPECTED_VERSION}" ]; then
+            echo "::error::version mismatch: package.json=$actual expected=${EXPECTED_VERSION}"
+            exit 1
+          fi
+          echo "version-match: $actual"
+
+      - name: Pre-publish E404 check (registry MUST NOT already host this name)
+        shell: bash
+        env:
+          REAL_PUBLISH: ${{ needs.resolve-gates.outputs.real_publish }}
+        run: |
+          set -e
+          name="@terminal-commander/linux-x64"
+          if out=$(npm view "$name" version 2>&1); then
+            # Note: npm view exits 0 only when the package exists.
+            echo "::error::package $name already exists on registry with version: $out"
+            echo "::error::bootstrap workflow refuses to re-publish; configure trusted publisher and use NPM07 path."
+            exit 1
+          fi
+          echo "$out" | head -3
+          echo "preflight-ok: $name returned E404 (unpublished)"
+
+      - name: Print package banner before publish
+        shell: bash
+        env:
+          REAL_PUBLISH: ${{ needs.resolve-gates.outputs.real_publish }}
+        run: |
+          echo "===================================================="
+          echo "  package : @terminal-commander/linux-x64"
+          echo "  version : ${EXPECTED_VERSION}"
+          echo "  tag     : beta"
+          echo "  access  : public"
+          echo "  mode    : $( [ \"$REAL_PUBLISH\" = \"true\" ] && echo REAL-PUBLISH || echo DRY-RUN )"
+          echo "===================================================="
+
+      - name: npm publish --dry-run (gates closed)
+        if: needs.resolve-gates.outputs.real_publish != 'true'
+        shell: bash
+        working-directory: packages/terminal-commander-linux-x64
+        run: |
+          npm publish --dry-run --tag beta --access public
+
+      - name: npm publish (gates open; REAL publish)
+        if: needs.resolve-gates.outputs.real_publish == 'true'
+        shell: bash
+        working-directory: packages/terminal-commander-linux-x64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+        run: |
+          npm publish --tag beta --access public
+
+  # --------------------------------------------------------------
+  # PLATFORM PUBLISH — linux-arm64.
+  # --------------------------------------------------------------
+  publish-linux-arm64:
+    name: publish-linux-arm64
+    needs: resolve-gates
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (${{ env.RUST_TOOLCHAIN }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: npm-bootstrap-publish-linux-arm64
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: cargo build --release (aarch64-unknown-linux-gnu)
+        run: |
+          cargo build --release \
+            --target aarch64-unknown-linux-gnu \
+            -p terminal-commanderd \
+            -p terminal-commander-mcp \
+            -p terminal-commander-cli
+
+      - name: Stage real binaries into platform package
+        shell: bash
+        run: |
+          set -e
+          bin_dir="packages/terminal-commander-linux-arm64/bin"
+          src_dir="target/aarch64-unknown-linux-gnu/release"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            if [ ! -x "$src_dir/$bin" ]; then
+              echo "::error::expected release binary not found: $src_dir/$bin"
+              exit 1
+            fi
+            cp "$src_dir/$bin" "$bin_dir/$bin"
+            chmod +x "$bin_dir/$bin"
+          done
+          rm -f "$bin_dir"/*.placeholder
+          ls -la "$bin_dir"
+
+      - name: Smoke — staged binaries answer --help (native arm64)
+        shell: bash
+        run: |
+          set -e
+          bin_dir="packages/terminal-commander-linux-arm64/bin"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            "./$bin_dir/$bin" --help > /tmp/help-$bin.log 2>&1 || {
+              echo "::error::$bin --help failed";
+              head -50 /tmp/help-$bin.log;
+              exit 1;
+            }
+          done
+
+      - name: Confirm package version matches expected
+        shell: bash
+        run: |
+          set -e
+          actual=$(node -p "require('./packages/terminal-commander-linux-arm64/package.json').version")
+          if [ "$actual" != "${EXPECTED_VERSION}" ]; then
+            echo "::error::version mismatch: package.json=$actual expected=${EXPECTED_VERSION}"
+            exit 1
+          fi
+          echo "version-match: $actual"
+
+      - name: Pre-publish E404 check (registry MUST NOT already host this name)
+        shell: bash
+        run: |
+          set -e
+          name="@terminal-commander/linux-arm64"
+          if out=$(npm view "$name" version 2>&1); then
+            echo "::error::package $name already exists on registry with version: $out"
+            echo "::error::bootstrap workflow refuses to re-publish; configure trusted publisher and use NPM07 path."
+            exit 1
+          fi
+          echo "$out" | head -3
+          echo "preflight-ok: $name returned E404 (unpublished)"
+
+      - name: Print package banner before publish
+        shell: bash
+        env:
+          REAL_PUBLISH: ${{ needs.resolve-gates.outputs.real_publish }}
+        run: |
+          echo "===================================================="
+          echo "  package : @terminal-commander/linux-arm64"
+          echo "  version : ${EXPECTED_VERSION}"
+          echo "  tag     : beta"
+          echo "  access  : public"
+          echo "  mode    : $( [ \"$REAL_PUBLISH\" = \"true\" ] && echo REAL-PUBLISH || echo DRY-RUN )"
+          echo "===================================================="
+
+      - name: npm publish --dry-run (gates closed)
+        if: needs.resolve-gates.outputs.real_publish != 'true'
+        shell: bash
+        working-directory: packages/terminal-commander-linux-arm64
+        run: |
+          npm publish --dry-run --tag beta --access public
+
+      - name: npm publish (gates open; REAL publish)
+        if: needs.resolve-gates.outputs.real_publish == 'true'
+        shell: bash
+        working-directory: packages/terminal-commander-linux-arm64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+        run: |
+          npm publish --tag beta --access public
+
+  # --------------------------------------------------------------
+  # ROOT WRAPPER PUBLISH — runs only after BOTH platform jobs
+  # succeed, regardless of whether they ran in dry-run or real
+  # mode. The same gate flips the root job between dry-run and
+  # real publish.
+  # --------------------------------------------------------------
+  publish-root:
+    name: publish-root
+    needs:
+      - resolve-gates
+      - publish-linux-x64
+      - publish-linux-arm64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Run resolver unit tests (root wrapper)
+        shell: bash
+        working-directory: packages/terminal-commander
+        run: |
+          npm test
+
+      - name: Confirm package version + optionalDependencies sync
+        shell: bash
+        working-directory: packages/terminal-commander
+        run: |
+          set -e
+          node <<'NODE'
+          const pkg = require('./package.json');
+          const expected = process.env.EXPECTED_VERSION;
+          if (pkg.version !== expected) {
+            console.error(`version mismatch: ${pkg.version} != ${expected}`);
+            process.exit(1);
+          }
+          const deps = pkg.optionalDependencies || {};
+          for (const name of [
+            '@terminal-commander/linux-x64',
+            '@terminal-commander/linux-arm64',
+          ]) {
+            if (deps[name] !== expected) {
+              console.error(`${name} optionalDependency = ${deps[name]} != ${expected}`);
+              process.exit(1);
+            }
+          }
+          console.log(`version-match: ${pkg.version}`);
+          console.log(`deps-exact-pin: ok`);
+          NODE
+
+      - name: Pre-publish E404 check (registry MUST NOT already host this name)
+        shell: bash
+        run: |
+          set -e
+          name="terminal-commander"
+          if out=$(npm view "$name" version 2>&1); then
+            echo "::error::package $name already exists on registry with version: $out"
+            echo "::error::bootstrap workflow refuses to re-publish; configure trusted publisher and use NPM07 path."
+            exit 1
+          fi
+          echo "$out" | head -3
+          echo "preflight-ok: $name returned E404 (unpublished)"
+
+      - name: Print package banner before publish
+        shell: bash
+        env:
+          REAL_PUBLISH: ${{ needs.resolve-gates.outputs.real_publish }}
+        run: |
+          echo "===================================================="
+          echo "  package : terminal-commander"
+          echo "  version : ${EXPECTED_VERSION}"
+          echo "  tag     : beta"
+          echo "  access  : (root unscoped; npm default)"
+          echo "  mode    : $( [ \"$REAL_PUBLISH\" = \"true\" ] && echo REAL-PUBLISH || echo DRY-RUN )"
+          echo "===================================================="
+
+      - name: npm publish --dry-run (gates closed)
+        if: needs.resolve-gates.outputs.real_publish != 'true'
+        shell: bash
+        working-directory: packages/terminal-commander
+        run: |
+          npm publish --dry-run --tag beta
+
+      - name: npm publish (gates open; REAL publish)
+        if: needs.resolve-gates.outputs.real_publish == 'true'
+        shell: bash
+        working-directory: packages/terminal-commander
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+        run: |
+          npm publish --tag beta
+
+  # --------------------------------------------------------------
+  # POST-PUBLISH REMINDER — only fires when a real publish ran.
+  # Pure stdout reminder for the operator; no side effects.
+  # --------------------------------------------------------------
+  post-publish-reminder:
+    name: post-publish-reminder
+    needs:
+      - resolve-gates
+      - publish-linux-x64
+      - publish-linux-arm64
+      - publish-root
+    if: needs.resolve-gates.outputs.real_publish == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Reminder — configure trusted publisher + disable this workflow
+        shell: bash
+        run: |
+          cat <<'EOF'
+          ============================================================
+          NPM10 BOOTSTRAP PUBLISH SUCCEEDED.
+          ============================================================
+          REQUIRED OPERATOR FOLLOW-UPS:
+            1. Configure trusted publisher on npmjs.com for each of:
+                 - terminal-commander
+                 - @terminal-commander/linux-x64
+                 - @terminal-commander/linux-arm64
+               with workflow filename: release-please.yml
+            2. DISABLE or REMOVE this workflow file
+               (.github/workflows/npm-bootstrap-publish.yml).
+            3. Rotate / invalidate the NPM_TOKEN_TC secret.
+            4. Every subsequent publish goes through release-please.yml
+               (NPM07: OIDC + provenance, no token).
+          ============================================================
+          EOF

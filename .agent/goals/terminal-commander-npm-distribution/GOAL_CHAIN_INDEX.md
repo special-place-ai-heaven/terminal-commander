@@ -1,9 +1,10 @@
 # Goal Chain Index — terminal-commander-npm-distribution
 
-Status: closed (NPM09 terminal goal).
+Status: reopened for NPM10 bootstrap exception (2026-05-23).
 Branch: `main`.
 Successor of: `terminal-commander-runtime` (TC48 = Conditional Go on `main` at `e42e7e4`).
 Chain outcome (NPM09): **Conditional Go** preserved. Local runtime + npm layout + CI matrix + release-please + trusted-publishing workflow + Cursor docs + README all `live`. First live npm publish + Cursor provider live smoke remain Pending operator-driven steps.
+NPM10 (added 2026-05-23): one-time `NPM_TOKEN_TC` bootstrap publish workflow, `workflow_dispatch` only, two-gate confirm. Explicit policy exception to NPM07's OIDC-only contract because npmjs.com may require a package page to exist before trusted publisher can be configured. After the first publish succeeds, NPM11 (TBD) disables the bootstrap workflow and rotates `NPM_TOKEN_TC`.
 
 This chain stands up npm distribution + Cursor MCP install path for
 Terminal Commander. It is a release / distribution lifecycle chain,
@@ -26,6 +27,7 @@ Language: ASCII only.
 | NPM08 | Cursor MCP install config smoke                                | Completed (6ab2343) |
 | NPM08b| README project normative overhaul                              | Completed (cacfef5) |
 | NPM09 | Release dry-run and beta publish review                        | Completed (b2770e1) |
+| NPM10 | Bootstrap first npm publish with NPM_TOKEN_TC (exception)      | In progress         |
 
 ## Target user experience (assumption — locked at NPM02)
 

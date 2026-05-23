@@ -19,6 +19,7 @@ the next goal starts. Same precedent as the TC43–TC48 runtime chain.
 | 8     | NPM08 | NPM07      | NO — Cursor smoke is operator-driven, may run after a candidate ships |
 | 9     | NPM08b| NPM08      | NO — README overhaul is documentation-only; chain ships if NPM08b slips |
 | 10    | NPM09 | NPM08b     | YES — dry-run is the final gate |
+| 11    | NPM10 | NPM09      | NO — one-time bootstrap exception; only fires if operator dispatches manually after NPM09 close |
 
 ## Chain rules
 
