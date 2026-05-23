@@ -73,6 +73,11 @@ on:
         description: "Recovery only — create GitHub release for this version (skips opening a release PR)"
         required: false
         type: string
+      force_publish:
+        description: "Recovery only — run npm publish jobs for the manifest version (after release PR merge/tag stall)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -119,6 +124,29 @@ jobs:
           release-as: ${{ inputs.recovery_release_as }}
           skip-github-pull-request: ${{ inputs.recovery_release_as != '' }}
 
+  # Recovery gate: when release-please cannot tag a merged release PR,
+  # workflow_dispatch force_publish runs the same npm publish jobs
+  # against the manifest version on main.
+  publish-version:
+    name: publish-version
+    if: github.event_name == 'workflow_dispatch' && inputs.force_publish == true
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.manifest.outputs.version }}
+      publish: "true"
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+
+      - name: Read manifest version
+        id: manifest
+        shell: bash
+        run: |
+          set -e
+          version=$(node -p "require('./.github/.release-please-manifest.json')['packages/terminal-commander']")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish-version: $version"
+
   # ----------------------------------------------------------------
   # JOB 2 — publish-linux-x64 (NPM07).
   #
@@ -132,8 +160,14 @@ jobs:
   # ----------------------------------------------------------------
   publish-linux-x64:
     name: publish-linux-x64
-    needs: release-please
-    if: needs.release-please.outputs.releases_created == 'true'
+    needs:
+      - release-please
+      - publish-version
+    if: >-
+      always() &&
+      !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      needs.publish-version.outputs.publish == 'true')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -203,7 +237,7 @@ jobs:
       - name: Confirm package version matches release-please output
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
           actual=$(node -p "require('./packages/terminal-commander-linux-x64/package.json').version")
@@ -234,8 +268,14 @@ jobs:
   # ----------------------------------------------------------------
   publish-linux-arm64:
     name: publish-linux-arm64
-    needs: release-please
-    if: needs.release-please.outputs.releases_created == 'true'
+    needs:
+      - release-please
+      - publish-version
+    if: >-
+      always() &&
+      !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      needs.publish-version.outputs.publish == 'true')
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -301,7 +341,7 @@ jobs:
       - name: Confirm package version matches release-please output
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
           actual=$(node -p "require('./packages/terminal-commander-linux-arm64/package.json').version")
@@ -334,9 +374,16 @@ jobs:
     name: publish-root
     needs:
       - release-please
+      - publish-version
       - publish-linux-x64
       - publish-linux-arm64
-    if: needs.release-please.outputs.releases_created == 'true'
+    if: >-
+      always() &&
+      !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      needs.publish-version.outputs.publish == 'true') &&
+      needs.publish-linux-x64.result == 'success' &&
+      needs.publish-linux-arm64.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -360,7 +407,7 @@ jobs:
         shell: bash
         working-directory: packages/terminal-commander
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
           node <<'NODE'
