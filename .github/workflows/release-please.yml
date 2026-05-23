@@ -30,7 +30,8 @@
 #   First npm publish uses `secrets.NPM_TOKEN_TC` via
 #   `NODE_AUTH_TOKEN` (trusted-publisher OIDC not yet configured on
 #   npmjs.com for all three package names). No `CARGO_REGISTRY_TOKEN`,
-#   no PAT, no `RELEASE_PLEASE_TOKEN_TC`.
+#   release-please job uses `RELEASE_PLEASE_TOKEN_TC` when
+#   `GITHUB_TOKEN` cannot open/update the release PR (Bad credentials).
 #
 # This workflow does NOT:
 #   - reference any long-lived secret (NPM_TOKEN, NPM_TOKEN_TC,
@@ -109,7 +110,7 @@ jobs:
           # `GITHUB_WORKSPACE` after checking out the repo internally.
           config-file: .github/release-please-config.json
           manifest-file: .github/.release-please-manifest.json
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
 
   # ----------------------------------------------------------------
   # JOB 2 — publish-linux-x64 (NPM07).
