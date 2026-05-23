@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "node",
+  "include-component-in-tag": false,
+  "include-v-in-tag": true,
+  "separate-pull-requests": false,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
+  "group-pull-request-title-pattern": "chore: release ${version}",
+  "pull-request-title-pattern": "chore: release ${version}",
+  "draft": false,
+  "prerelease": true,
+  "plugins": [
+    {
+      "type": "linked-versions",
+      "groupName": "terminal-commander",
+      "components": [
+        "terminal-commander",
+        "@terminal-commander/linux-x64",
+        "@terminal-commander/linux-arm64"
+      ]
+    }
+  ],
+  "packages": {
+    "packages/terminal-commander": {
+      "release-type": "node",
+      "component": "terminal-commander",
+      "package-name": "terminal-commander",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": []
+    },
+    "packages/terminal-commander-linux-x64": {
+      "release-type": "node",
+      "component": "@terminal-commander/linux-x64",
+      "package-name": "@terminal-commander/linux-x64",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": []
+    },
+    "packages/terminal-commander-linux-arm64": {
+      "release-type": "node",
+      "component": "@terminal-commander/linux-arm64",
+      "package-name": "@terminal-commander/linux-arm64",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": []
+    }
+  }
+}

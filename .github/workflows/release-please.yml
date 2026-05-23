@@ -1,0 +1,68 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Terminal Commander Authors
+#
+# NPM06 — release-please manifest-mode workflow.
+#
+# Purpose:
+#   On every push to `main`, run release-please in manifest mode so
+#   Conventional Commits drive a single shared-version release PR
+#   across the three npm packages:
+#     - packages/terminal-commander           (root wrapper)
+#     - packages/terminal-commander-linux-x64 (@terminal-commander/linux-x64)
+#     - packages/terminal-commander-linux-arm64 (@terminal-commander/linux-arm64)
+#
+#   The release PR carries the version bump on each `package.json`
+#   plus a CHANGELOG entry. When (and only when) the operator merges
+#   the release PR, release-please creates the GitHub Release and
+#   the matching `v<version>` tag.
+#
+# This workflow does NOT:
+#   - publish to the npm registry (NPM07 owns publishing),
+#   - reference or read any `NPM_TOKEN` or other long-lived secret,
+#   - request `id-token: write` (no OIDC at NPM06; NPM07 owns that),
+#   - call the NPM05 `npm-binary-build` workflow,
+#   - auto-merge the release PR,
+#   - touch `crates/**`, `Cargo.toml`, `Cargo.lock`, or `scripts/**`,
+#   - install a Node toolchain, run npm, or execute the package code.
+#
+# Action pin doctrine (NPM06):
+#   `googleapis/release-please-action` is pinned to immutable commit
+#   SHA `5c625bfb5d1ff62eadeeb3772007f7f66fdcf071`, which resolves to
+#   tag `v4.4.1` (the most recent v4 patch on 2026-05-23). v4 is
+#   chosen over v5 because the manifest-mode shape used in this
+#   chain matches the v4 README and the Symforge precedent.
+
+name: release-please
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Release-please needs to commit version bumps + the CHANGELOG into a
+# release PR (`contents: write`) and to open / update that PR
+# (`pull-requests: write`). No publish surface. No id-token.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-24.04
+    steps:
+      - name: release-please (manifest mode)
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
+        with:
+          # Manifest mode: both files live under .github/ per the
+          # NPM02 contract §7 + §10. Paths are relative to the repo
+          # root because release-please-action resolves them from
+          # `GITHUB_WORKSPACE` after checking out the repo internally.
+          config-file: .github/release-please-config.json
+          manifest-file: .github/.release-please-manifest.json
+          token: ${{ secrets.GITHUB_TOKEN }}
