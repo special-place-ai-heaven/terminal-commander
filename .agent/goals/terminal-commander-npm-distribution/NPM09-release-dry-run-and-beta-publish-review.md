@@ -3,15 +3,15 @@ goal_id: NPM09
 title: Release Dry Run And Beta Publish Review
 chain_id: terminal-commander-npm-distribution
 phase: Wave 5 - Release review
-status: "Pending"
+status: "Completed"
 depends_on: ["NPM08b"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T00:00:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T09:00:00+00:00"
+completed_at: "2026-05-23T10:00:00+00:00"
+completion_commit: "b2770e1"
 blocked_reason: ""
 source_refs:
   - "NPM07 publish workflow"

@@ -25,7 +25,7 @@ Language: ASCII only.
 | NPM07 | npm trusted publishing workflow                                | Completed (1b4267e) |
 | NPM08 | Cursor MCP install config smoke                                | Completed (6ab2343) |
 | NPM08b| README project normative overhaul                              | Completed (cacfef5) |
-| NPM09 | Release dry-run and beta publish review                        | In progress         |
+| NPM09 | Release dry-run and beta publish review                        | Completed (b2770e1) |
 
 ## Target user experience (assumption — locked at NPM02)
 
