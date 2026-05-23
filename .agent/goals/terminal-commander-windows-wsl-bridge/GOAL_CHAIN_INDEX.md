@@ -1,6 +1,6 @@
 # Goal Chain Index — terminal-commander-windows-wsl-bridge
 
-Status: WWS01 Completed; WWS02..WWS09 Pending.
+Status: WWS01 + WWS02 Completed; WWS03..WWS09 Pending.
 Branch: `main`.
 Successor of: `terminal-commander-npm-distribution` (NPM10 = Completed, bootstrap workflow committed but NOT dispatched; all three packages remain E404 / unpublished).
 
@@ -13,7 +13,7 @@ Language: ASCII only.
 | Goal   | Title                                                               | Status   |
 |--------|---------------------------------------------------------------------|----------|
 | WWS01  | Windows / WSL install UX contract                                   | Completed (commit `6220eb2`; contract at `docs/release/windows-wsl-bridge-contract.md`) |
-| WWS02  | Root npm package win32 bridge contract                              | Pending  |
+| WWS02  | Root npm package win32 bridge contract                              | Completed (commit `1da40f3`; resolver bridge_required branch + bounded shim refusals + NPM02 §13b amendment) |
 | WWS03  | WSL distro discovery and runtime doctor                             | Pending  |
 | WWS04  | Windows bridge MCP shim                                             | Pending  |
 | WWS05  | Cursor config writer                                                | Pending  |

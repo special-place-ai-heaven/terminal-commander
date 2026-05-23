@@ -3,15 +3,15 @@ goal_id: WWS02
 title: Root Npm Package Win32 Bridge Contract
 chain_id: terminal-commander-windows-wsl-bridge
 phase: Wave 1 - Package contract
-status: "Pending"
+status: "Completed"
 depends_on: ["WWS01"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T12:00:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T14:30:00+00:00"
+completed_at: "2026-05-23T15:30:00+00:00"
+completion_commit: "1da40f3"
 blocked_reason: ""
 source_refs:
   - "WWS01 windows-wsl bridge contract (commit 6220eb2; docs/release/windows-wsl-bridge-contract.md)"
