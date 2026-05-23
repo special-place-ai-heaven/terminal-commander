@@ -2,622 +2,396 @@
 
 # Terminal Commander
 
-**Terminal Commander** is a local realtime signal channel and MCP
-tool-control surface for LLM coding agents. It runs entirely on
-your machine — daemon, MCP stdio adapter, and admin CLI — and
-turns noisy terminal, file, and PTY streams into bounded, structured
-signal that an LLM can read by cursor without ever seeing the raw
-output.
-
-It is NOT a CLI command runner.
-It is NOT a shell bridge.
-It is NOT a log shipper.
-It is NOT a remote service.
+**Local MCP control plane for coding agents** — Cursor, Codex CLI, Claude Code, and other harnesses. Terminal Commander runs on your machine, turns terminal / file / PTY noise into **bounded structured signal**, and exposes it through MCP tools so the model never has to parse raw scrollback.
 
 ```text
-Raw terminal/file/PTY output goes in.
+Raw terminal / file / PTY output goes in.
 Only vetted, structured signal comes out.
-Context remains available by pointer.
+Context stays available by pointer.
 ```
 
-## Value: all signal, no raw noise
+| It is | It is not |
+|-------|-----------|
+| An MCP tool surface for LLMs | A human-facing terminal UI |
+| A local daemon + probes + sifters | A remote service or log shipper |
+| argv-only command control (policy-gated) | A generic shell bridge |
 
-- **Probes** observe commands, files, PTY streams, and runtime state.
-- **Sifters** + **registry rules** extract useful events (errors,
-  package-missing, stalls, prompts, artifacts, regressions).
-- **Buckets** expose bounded, cursor-based structured signal streams.
-- **Context pointers** provide bounded surrounding context ONLY when
-  the LLM asks — never as a raw firehose.
-- The LLM speaks intent (`run this`, `watch that`, `notify me when
-  X`); the daemon, probes, and sifters do the parsing toil.
+**Latest release:** [`v0.1.4`](https://github.com/special-place-administrator/terminal-commander/releases/latest) on [npm `latest`](https://www.npmjs.com/package/terminal-commander).
+
+---
+
+## Who this is for
+
+Terminal Commander is **harness-first**. The primary user is the **coding agent** inside your editor or CLI harness. Humans typically run **one install command** and use `doctor` only when something fails.
+
+```mermaid
+flowchart LR
+  subgraph agents["Coding agents"]
+    Cursor["Cursor"]
+    Codex["Codex CLI"]
+    Claude["Claude Code"]
+  end
+
+  subgraph tc["Terminal Commander"]
+    MCP["terminal-commander-mcp\n(MCP stdio)"]
+    Daemon["terminal-commanderd\n(UDS IPC server)"]
+    Probes["Probes + sifters +\nbuckets"]
+  end
+
+  Cursor --> MCP
+  Codex --> MCP
+  Claude --> MCP
+  MCP -->|"local UDS\nJSON frames"| Daemon
+  Daemon --> Probes
+```
+
+---
+
+## Install (zero-touch)
+
+### Windows (recommended path)
+
+One command on the host. Bootstrap runs automatically via the npm `install` script:
+
+```powershell
+npm install -g terminal-commander@latest
+```
+
+That **automatically**:
+
+1. Detects WSL and installs `terminal-commander` **inside** the distro (Linux-first `PATH`, not `/mnt/c` npm shims).
+2. Merges MCP config for every **detected** harness (Cursor, Codex, Claude Code, Claude Desktop, …).
+3. Installs **daemon autostart** (systemd user unit when available, else profile hook).
+4. Starts the daemon if the UDS socket is not already present.
+
+Then **restart your harness** (e.g. reload Cursor MCP). No `setup harness` step required.
+
+```mermaid
+sequenceDiagram
+  participant You as Operator
+  participant npm as npm install -g
+  participant Win as Windows shim
+  participant WSL as WSL distro
+  participant Harness as Cursor / Codex / Claude
+
+  You->>npm: terminal-commander@latest
+  npm->>Win: install lifecycle bootstrap
+  Win->>WSL: npm install -g (linux PATH)
+  Win->>Win: write harness MCP configs
+  Win->>WSL: daemon autostart + start
+  You->>Harness: restart MCP / reload window
+  Harness->>Win: terminal-commander-mcp
+  Win->>WSL: bridge + native MCP
+  WSL->>WSL: terminal-commanderd (UDS)
+```
+
+**Opt-out:** `set TC_SKIP_BOOTSTRAP=1` before install, or `npm install -g terminal-commander --ignore-scripts`.
+
+### Linux / WSL shell
+
+```sh
+npm install -g terminal-commander@latest
+```
+
+Installs the matching `@terminal-commander/linux-*` platform package, configures detected harnesses, and sets up daemon autostart on the host.
+
+### Commands on `PATH`
+
+| Command | Role |
+|---------|------|
+| `terminal-commander-mcp` | MCP stdio adapter (Windows: bridges into WSL) |
+| `terminal-commanderd` | Daemon — probes, policy, buckets, audit (Linux/WSL only) |
+| `terminal-commander` | Doctor / diagnostics CLI |
+
+---
 
 ## Architecture
 
-```text
-   +-----------------------------------------------+
-   |   LLM / MCP client                            |
-   |   (Cursor, Claude Code, Codex CLI, generic)   |
-   +-----------------------------------------------+
-                       |
-                       |  MCP stdio (rmcp 1.7.0)
-                       v
-   +-----------------------------------------------+
-   |  terminal-commander-mcp        (crates/mcp)   |
-   |  thin adapter; NO Command::spawn;             |
-   |  NO file open; NO network listener            |
-   +-----------------------------------------------+
-                       |
-                       |  Local UDS, peer-cred checked,
-                       |  length-prefixed JSON, 256 KiB cap
-                       v
-   +-----------------------------------------------+
-   |  terminal-commanderd         (crates/daemon)  |
-   |  IPC server, policy engine, job manager,      |
-   |  router, persistent audit (SQLite)            |
-   +-----------------------------------------------+
-                       |
-        +--------------+---------------+
-        v              v               v
-   +-----------+  +-----------+  +------------------+
-   | process / |  | sifters / |  | in-memory bucket |
-   | file /    |->|  registry |->| manager + ring   |
-   | directory |  | runtime   |  | context + audit  |
-   | / PTY     |  +-----------+  +------------------+
-   | probes    |
-   +-----------+
+```mermaid
+flowchart TB
+  subgraph client["MCP client (harness)"]
+    LLM["LLM"]
+  end
+
+  subgraph adapter["terminal-commander-mcp"]
+    RMCP["rmcp stdio\nno Command::spawn\nno network"]
+  end
+
+  subgraph daemon["terminal-commanderd"]
+    IPC["UDS server\npeer-cred + 256 KiB cap"]
+    Policy["Policy engine"]
+    Router["Router + buckets"]
+    Audit["SQLite audit"]
+  end
+
+  subgraph work["Runtime"]
+    Cmd["Command probes"]
+    File["File / watch probes"]
+    PTY["PTY probes"]
+    Sift["Sifter registry"]
+  end
+
+  LLM <-->|"MCP JSON"| RMCP
+  RMCP <-->|"length-prefixed JSON"| IPC
+  IPC --> Policy
+  Policy --> Router
+  Router --> Cmd
+  Router --> File
+  Router --> PTY
+  Cmd --> Sift
+  File --> Sift
+  PTY --> Sift
+  Router --> Audit
 ```
 
-Data flows DOWN the stack. Signal flows UP. Only bounded JSON
-envelopes cross the IPC boundary — no raw stream lane reaches the
-LLM. The MCP server is a thin adapter; the daemon owns every probe,
-every spawn, and every audit write.
+**Windows note:** Cursor/Codex/Claude on Windows invoke `terminal-commander-mcp` on the host. The shim runs `wsl.exe -d <distro> -- bash -lc '<linux-first PATH> … exec terminal-commander-mcp'`, sources `~/.config/terminal-commander/autostart.sh` so the daemon is up, and avoids the Windows `/mnt/c/.../nodejs` shim that breaks Linux optionalDependencies.
 
-Authoritative deeper docs:
-- [`docs/runtime/REALTIME_SIGNAL_CHANNEL.md`](docs/runtime/REALTIME_SIGNAL_CHANNEL.md) — product semantics.
-- [`docs/runtime/UDS_IPC.md`](docs/runtime/UDS_IPC.md) — local UDS IPC.
-- [`docs/runtime/COMMAND_RUNTIME.md`](docs/runtime/COMMAND_RUNTIME.md) — command lifecycle + policy gate.
-- [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md) — locked MCP tool list with bounds and policy gates.
-- [`docs/security/PRIVILEGE_MODEL.md`](docs/security/PRIVILEGE_MODEL.md) — security envelope.
+**Platforms:**
 
-## Feature matrix
+| Surface | Linux / WSL2 | Windows host |
+|---------|----------------|--------------|
+| Daemon + UDS | Yes | No (runs in WSL) |
+| MCP stdio | Native | Bridge to WSL |
+| npm install bootstrap | Harness + autostart | WSL runtime + harness + autostart |
 
-| Area | Surface | Status |
-|------|---------|--------|
-| `terminal-commanderd` daemon | bootstrap / IPC server / persistent audit / sub-commands `check` / `start` / `print-config` | live (TC33–TC48) |
-| Bounded UDS IPC | length-prefixed JSON over a local Unix domain socket, peer-cred checked, 256 KiB frame cap | live (TC37) |
-| `terminal-commander-mcp` stdio server | rmcp 1.7.0 stdio adapter, no `Command::spawn`, no file open, no network listener | live (TC40 + ongoing) |
-| Persistent audit | SQLite `audit_records` with closed-set decision labels | live (TC35) |
-| `command_start_combed` | argv-only spawn with policy-gated start + shell-interpreter deny | live (TC38 / TC41) |
-| `command_status` | bounded lifecycle/status JSON envelope | live (TC41 / TC45) |
-| `bucket_events_since` | cursor-bounded read with severity / kind / limit filters | live (TC39 / TC41) |
-| `bucket_wait` | `Notify`-backed park with heartbeat-on-timeout, never raw text | live (TC39 / TC41) |
-| `bucket_summary` | per-bucket counters | live (TC39 / TC41) |
-| `event_context` | pointer-anchored window, 1024 frames / 64 KiB cap, typed `unavailable_reason` on miss | live (TC39 / TC41) |
-| Registry upsert / test / activate / deactivate | dynamic rule registry with scoped live rebind | live (TC42 / TC42b / TC42c / TC42d) |
-| `file_read_window` / `file_search` | bounded path-policy-gated file tools | live (TC43) |
-| `file_watch_start` / `_stop` / `_list` | bounded file/directory watch with sifters | live (TC43) |
-| `pty_command_start` / `_write_stdin` / `_stop` / `_list` | PTY surface with **secret-prompt-deny on stdin** | live (TC44) |
-| `runtime_state` / `probe_list` / `probe_status` | aggregate runtime view | live (TC45) |
-| TC47 load / noise / backpressure gate | 8 stress tests | live (TC47) |
-| npm wrapper + platform package layout | `terminal-commander` root + `@terminal-commander/linux-x64` + `@terminal-commander/linux-arm64` with `optionalDependencies`, no postinstall | live (NPM02 / NPM03 / NPM04) |
-| GitHub Actions npm-binary-build matrix | linux-x64 (full smoke) + linux-arm64 (build + pack); both pass on `ubuntu-24.04` and `ubuntu-24.04-arm` | live (NPM05) |
-| release-please manifest mode | manifest-mode config at `.github/`, single shared `0.1.0-beta.1` version, linked-versions plugin | live (NPM06) |
-| npm publish (beta) | `terminal-commander@0.1.1-beta.1` + platform packages on npmjs.com; CI publish via `release-please.yml` | **live** (2026-05-23) |
-| Cursor MCP config examples | native Linux / inside-WSL + Windows → WSL bridge | live (NPM08) |
-| Windows + WSL bridge UX contract | 15 binding decisions D-01..D-15; bridge architecture; safety boundary | live (WWS01) |
-| Root npm package `os` widened to `["linux", "win32"]` | bridge-required resolver branch; bounded Windows shim refusals | live (WWS02) |
-| WSL discovery + read-only doctor helpers | `lib/wsl/distro-name.js` safety whitelist; `lib/wsl/detect.js` `wsl -l -v` parser; `lib/wsl/doctor.js` runtime probe | live (WWS03) |
-| Windows → WSL `terminal-commander-mcp` bridge shim | `lib/wsl/spawn.js` argv-only spawn; `shell: false`, `windowsHide: true`, `stdio: 'inherit'`; token-shaped env stripped | live (WWS04) |
-| Cursor MCP config writer | `lib/cursor/config.js` + `lib/cursor/write.js`; refuse-existing without `--force`; `.bak` backup; atomic write; 256 KiB cap; 12-status enum | live (WWS05) |
-| Windows setup / doctor / pair CLI | `terminal-commander doctor`, `doctor wsl`, `setup cursor-wsl`, `pair create`, `pair accept <code>`; `--install-wsl-runtime` opt-in (no sudo, no password); 21-status enum | live (WWS06) |
-| Windows → WSL bridge smoke script | `scripts/smoke/verify-windows-bridge-smoke.ps1`; PASS for CLI/config/bridge readiness; **MCP round-trip Not Run** (WSL runtime missing until first npm publish) | live (WWS07); MCP round-trip **Not Run** |
-| Cursor provider live smoke transcript | requires operator GUI steps (no headless Cursor MCP entry point on host) | **Not Run** |
-| Codex CLI + Claude Code provider live smokes | operator-driven | **Not Run** (TC46 / TC48 baseline) |
+No macOS-native package. No Windows-native PTY/UDS daemon (deferred).
 
-## Install from npm
+Deeper docs: [`docs/runtime/REALTIME_SIGNAL_CHANNEL.md`](docs/runtime/REALTIME_SIGNAL_CHANNEL.md), [`docs/runtime/UDS_IPC.md`](docs/runtime/UDS_IPC.md), [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
 
-**Published:** `0.1.1-beta.1` on [npmjs.com](https://www.npmjs.com/package/terminal-commander) today uses the **`beta` dist-tag** from the first publish. **New releases** use normal semver (`0.2.0`, `1.0.0`, …) and publish to **`latest`** (see `.github/release-please-config.json` `prerelease: false`).
+---
 
-**GitHub release:** [v0.1.1-beta.1](https://github.com/special-place-administrator/terminal-commander/releases/tag/v0.1.1-beta.1) (legacy tag from the first cut). The next tag will be `v0.2.0` (or similar) as a normal release.
+## Signal model
 
-```powershell
-# Windows (PowerShell or CMD) — one step; bootstrap configures detected harnesses:
-npm install -g terminal-commander
-```
+- **Probes** observe commands, files, PTY streams, and runtime state.
+- **Sifters** + **registry rules** turn raw lines into typed events (errors, stalls, prompts, artifacts, …).
+- **Buckets** expose cursor-based, bounded event streams to the LLM.
+- **`bucket_wait`** parks until matching signal or a heartbeat timeout — never raw stdout text in the transcript.
+- **`event_context`** returns a bounded window around a pointer when the model asks for more context.
 
-```sh
-# Linux / inside WSL:
-npm install -g terminal-commander
-```
+---
 
-Legacy beta install: `npm install -g terminal-commander@beta` (first publish only).
+## Harness configuration
 
-Commands on `PATH`:
+After install, MCP configs should already contain a `terminal-commander` (or `terminal_commander`) entry. If not, first MCP connect runs **lazy bootstrap** (same steps as install).
 
-- `terminal-commanderd` — daemon (Linux / WSL only)
-- `terminal-commander-mcp` — MCP stdio adapter
-- `terminal-commander` — admin / setup CLI
+| Harness | Config location | Auto-configured |
+|---------|-----------------|-----------------|
+| Cursor | `~/.cursor/mcp.json` (or project `.cursor/mcp.json`) | Yes |
+| Codex CLI | `~/.codex/config.toml` → `[mcp_servers.terminal_commander]` | Yes |
+| Claude Code | `~/.claude.json` → `mcpServers` | Yes |
+| Claude Desktop | `%AppData%\Claude\claude_desktop_config.json` (Windows) | Yes |
 
-**Where it runs:** the real runtime is **Linux or WSL2** (Unix domain socket). On **Windows**, the same npm package is a **bridge + setup surface**; daemon and probes still run inside a WSL distro. No macOS-native or Windows-native daemon.
-
-## Connect MCP providers (Cursor, Codex, Claude Code)
-
-Every provider uses the same MCP stdio command: `terminal-commander-mcp`. That process talks to `terminal-commanderd`, which **must already be running**.
-
-Detailed guides:
-
-- Cursor — [`docs/integrations/cursor.md`](docs/integrations/cursor.md)
-- Codex CLI — [`docs/integrations/codex-cli.md`](docs/integrations/codex-cli.md)
-- Claude Code — [`docs/integrations/claude-code.md`](docs/integrations/claude-code.md)
-
-### 1. Start the daemon (Linux or WSL)
-
-Run in the environment that hosts the runtime (inside WSL on Windows, not in PowerShell):
-
-```sh
-export TC_DATA="${XDG_STATE_HOME:-$HOME/.local/state}/terminal-commander"
-mkdir -p "$TC_DATA"
-terminal-commanderd --data-dir "$TC_DATA" start --mode ipc-server
-```
-
-Leave this running in a separate terminal (or a supervisor).
-
-### 2. Windows bootstrap (INSTALL01)
-
-`npm install -g terminal-commander` on Windows runs the **install bootstrap**:
-detects WSL, installs the runtime inside your distro (Linux-first `PATH`), and merges MCP
-config for Cursor, Codex CLI, Claude, and other detected harnesses. Opt-out:
-`TC_SKIP_BOOTSTRAP=1` or `npm install -g terminal-commander --ignore-scripts` then
-`terminal-commander setup harness`.
-
-Manual WSL-only install (if bootstrap was skipped):
-
-```powershell
-wsl -d Ubuntu-24.04 -- bash -lc "npm install -g terminal-commander@beta"
-terminal-commander doctor wsl --probe-runtime
-```
-
-Replace `Ubuntu-24.04` with your default distro (`terminal-commander doctor wsl` shows it).
-
-### 3. Cursor
-
-**Windows (Cursor on host → runtime in WSL)** — use the built-in config writer:
-
-```powershell
-terminal-commander setup cursor-wsl --print-config   # preview
-terminal-commander setup cursor-wsl --dry-run        # no write
-terminal-commander setup cursor-wsl                  # writes ~/.cursor/mcp.json
-```
-
-Restart Cursor. Open **Settings → Features → MCP** and confirm `terminal-commander` is listed. In chat, ask the model to call `health` or list MCP tools.
-
-**Linux or Cursor running inside WSL** — add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
+**Generated Cursor stanza (Windows bridge):**
 
 ```json
 {
   "mcpServers": {
     "terminal-commander": {
       "type": "stdio",
-      "command": "terminal-commander-mcp"
-    }
-  }
-}
-```
-
-Copy-paste examples: [`examples/provider-harness/cursor/`](examples/provider-harness/cursor/).
-
-### 4. Codex CLI
-
-Linux or WSL only. With the daemon running, add to `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.terminal_commander]
-command = "terminal-commander-mcp"
-args = []
-
-[mcp_servers.terminal_commander.env]
-TC_SOCKET = "${TC_DATA}/terminal-commanderd.sock"
-```
-
-Set `TC_DATA` to the same directory you passed to `terminal-commanderd --data-dir` (or export it in the shell that launches Codex).
-
-### 5. Claude Code
-
-Linux or WSL only. Save as `terminal-commander.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "terminal_commander": {
       "command": "terminal-commander-mcp",
-      "args": [],
       "env": {
-        "TC_SOCKET": "${TC_DATA}/terminal-commanderd.sock"
+        "TC_WSL_DISTRO": "Ubuntu-24.04"
       }
     }
   }
 }
 ```
 
+Pin a distro with `TC_WSL_DISTRO` or let the bridge pick the `wsl -l -v` default.
+
+Guides: [`docs/integrations/cursor.md`](docs/integrations/cursor.md), [`docs/integrations/codex-cli.md`](docs/integrations/codex-cli.md), [`docs/integrations/claude-code.md`](docs/integrations/claude-code.md).
+
+Copy-paste examples: [`examples/provider-harness/cursor/`](examples/provider-harness/cursor/).
+
+---
+
+## Daemon lifecycle
+
+On Linux/WSL, install/bootstrap configures autostart. You should **not** need a manual `terminal-commanderd start` for normal harness use.
+
+| Mechanism | When |
+|-----------|------|
+| systemd user service | WSL/Linux with systemd (common on Ubuntu 24.04 WSL) |
+| `~/.config/terminal-commander/autostart.sh` | Profile hook + first MCP bridge connect |
+| MCP bridge | Sources autostart before spawning MCP |
+
+**Manual start** (debugging only):
+
 ```sh
-claude --mcp-config terminal-commander.mcp.json
-```
-
-Or merge the `mcpServers` block into `~/.claude/settings.json` for a permanent install.
-
-### 6. Verify tools are visible
-
-In any connected client you should see **29 MCP tools**, including `health`, `system_discover`, `command_start_combed`, and `bucket_wait`. See [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
-
-### Develop from source (optional)
-
-```sh
-bash scripts/smoke/verify-npm-local-install.sh   # local pack + install smoke
-cargo build --release -p terminal-commanderd -p terminal-commander-mcp -p terminal-commander-cli
-```
-
-## Quickstart
-
-```sh
-# 1. Start the daemon (replace TC_DATA with any writable directory)
-export TC_DATA="${XDG_STATE_HOME:-$HOME/.local/state}/terminal-commander"
+export TC_DATA="${HOME}/.local/share/terminal-commanderd"
 mkdir -p "$TC_DATA"
 terminal-commanderd --data-dir "$TC_DATA" start --mode ipc-server
 ```
 
-Leave the daemon running in a separate terminal or under a process
-supervisor.
+Default socket: `$TC_DATA/terminal-commanderd.sock` (override with `TC_SOCKET` in harness env if needed).
 
-```sh
-# 2. Configure Cursor MCP. Copy ONE of these into ~/.cursor/mcp.json
-#    (or your workspace's .cursor/mcp.json):
-#
-#    examples/provider-harness/cursor/mcp.global.native-linux.json
-#    examples/provider-harness/cursor/mcp.project.linux-wsl.json
-#    examples/provider-harness/cursor/mcp.global.linux-wsl.json   (Windows → WSL bridge)
-#
-# See: docs/integrations/cursor.md
+---
+
+## Diagnostics
+
+```powershell
+# Windows
+terminal-commander doctor harness          # detected vs configured MCP
+terminal-commander doctor wsl --probe-runtime
+terminal-commander doctor daemon         # socket + autostart (0.1.4+)
 ```
 
 ```sh
-# 3. Inside Cursor (or any MCP client), ask for the tool list and
-#    verify the 29 TC45 tools are visible, then call:
-#
-#      health
-#      system_discover
+# Linux / inside WSL
+terminal-commander doctor harness
+terminal-commander doctor daemon
 ```
 
-```sh
-# 4. Run a real flow (works against any MCP client):
-#
-#    command_start_combed argv=["echo","hello"]
-#    bucket_wait        bucket_id=<from_combed>  cursor=0  timeout_ms=2000
-#    command_status     job_id=<from_combed>
+Repair helpers (rare):
+
+```powershell
+terminal-commander setup harness --force   # rewrite harness MCP stanzas
+terminal-commander setup daemon-autostart   # reinstall autostart unit/hook
 ```
 
-Every response is a bounded JSON envelope. No raw stdout or stderr
-appears in the LLM transcript.
+---
 
-## Cursor MCP integration
+## MCP tools (29)
 
-Cursor reads MCP server configs from `~/.cursor/mcp.json` (global)
-or `<workspace>/.cursor/mcp.json` (project). This repo does NOT
-ship an active `.cursor/mcp.json` — operators copy intentionally
-from `examples/provider-harness/cursor/` into their own scope.
-
-Full walk-through: [`docs/integrations/cursor.md`](docs/integrations/cursor.md).
-
-### Native Linux / inside-WSL Cursor
-
-```json
-{
-  "mcpServers": {
-    "terminal-commander": {
-      "command": "terminal-commander-mcp",
-      "type": "stdio"
-    }
-  }
-}
-```
-
-[`examples/provider-harness/cursor/mcp.global.native-linux.json`](examples/provider-harness/cursor/mcp.global.native-linux.json)
-
-### Windows Cursor → WSL bridge
-
-```json
-{
-  "mcpServers": {
-    "terminal-commander": {
-      "command": "wsl",
-      "type": "stdio",
-      "args": ["-d", "Ubuntu-24.04", "bash", "-lc", "terminal-commander-mcp"]
-    }
-  }
-}
-```
-
-[`examples/provider-harness/cursor/mcp.global.linux-wsl.json`](examples/provider-harness/cursor/mcp.global.linux-wsl.json)
-
-Substitute your WSL distribution name from `wsl --list --verbose`.
-
-The manual `wsl.exe` config above remains the operator-driven
-fallback. Once the first npm publish lands, the WWS06 CLI
-auto-generates the bridge-form stanza (`command:
-terminal-commander-mcp`, optional `env.TC_WSL_DISTRO`) via
-`terminal-commander setup cursor-wsl`. The Windows bridge smoke
-script (`scripts/smoke/verify-windows-bridge-smoke.ps1`) exercises
-the full WWS06 surface end-to-end. See
-[`docs/integrations/cursor.md`](docs/integrations/cursor.md) §11a,
-§11c, and §11d for the auto-generated config, CLI surface, and
-smoke checklist.
-
-### Cursor live smoke status
-
-**Not Run.** Cursor 3.5.30 is installed on the verification host,
-but Cursor today has no documented non-interactive MCP discovery /
-tool-call entry point — there is no `cursor --list-mcp-tools`
-subcommand, and the `cursor-agent` headless CLI is not installed.
-Live smoke requires operator-driven GUI steps (open Cursor → place
-config → start daemon → ask Cursor chat to list MCP tools and call
-`health` → capture transcript). Not scriptable in this session;
-not promoted to PASS.
-
-The local daemon + MCP stdio smoke
-([`scripts/smoke/verify-runtime-smoke.sh`](scripts/smoke/verify-runtime-smoke.sh))
-is secondary evidence only — it proves the local transport surface
-without a provider in the loop.
-
-## MCP tool catalogue (29 tools)
+Representative tools:
 
 ```text
-system_discover            health                    policy_status
-self_check
-command_start_combed       command_status
-bucket_events_since        bucket_wait               bucket_summary
-event_context
-registry_search            registry_get              registry_upsert
-registry_test              registry_activate         registry_deactivate
-registry_list_active
-file_read_window           file_search
-file_watch_start           file_watch_stop           file_watch_list
-pty_command_start          pty_command_write_stdin   pty_command_stop
-pty_command_list
-runtime_state              probe_list                probe_status
+health                      system_discover           policy_status
+command_start_combed        command_status            bucket_wait
+bucket_events_since         bucket_summary            event_context
+file_read_window            file_search               file_watch_*
+pty_command_*               registry_*                runtime_state / probe_*
 ```
 
-The most important tool is `bucket_wait`: the LLM parks on a
-`Notify`-backed channel and receives a bounded JSON envelope when
-matching signal arrives — or `heartbeat = true` on timeout, never
-raw text:
+Full catalogue with bounds and policy gates: [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
 
-```json
-{
-  "method": "bucket_wait",
-  "params": {
-    "bucket_id": "bkt_01HX...",
-    "cursor": 1842,
-    "severity_min": "medium",
-    "timeout_ms": 30000
-  }
-}
+**Example agent flow:**
+
+```text
+command_start_combed  argv=["echo","hello"]
+bucket_wait           bucket_id=<from_combed>  cursor=0  timeout_ms=5000
+command_status        job_id=<from_combed>
 ```
 
-Full per-tool bounds, policy gates, and shapes:
-[`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
+Every response is bounded JSON — no raw stream dump in the model context.
 
-## Settings and configuration
+---
 
-Operator-tunable settings live in `terminal-commanderd.toml`. A
-safe-to-commit example ships at
-[`config/terminal-commanderd.example.toml`](config/terminal-commanderd.example.toml).
+## Releases (fully automated)
 
-Selected knobs:
+Pushing **Conventional Commits** to `main` drives shipping — no manual release PR merge:
 
-| Key | Purpose | Default / constraint |
-|---|---|---|
-| `daemon.data_dir` | SQLite DB + audit log location | MUST be a native Linux filesystem; WSL `/mnt/c` is rejected at writer open |
-| `daemon.socket_path` | local UDS path | `<data_dir>/terminal-commanderd.sock` |
-| `daemon.runtime_mode` | how `start` runs | `self_check` / `foreground_idle` / `ipc_server` |
-| `policy.profile` | policy profile | `developer_local` / `repo_only` / `read_only_observer` / `admin_debug` |
-| `retention.max_events` | per-bucket cap | clamped to 100 000 |
-| `retention.ttl_seconds` | per-bucket TTL | 24 h default |
-| `audit.retention_days` | audit log retention | operator-controlled |
-| `limits.file_window_bytes` | file-read window cap | clamped at config load to 64 KiB |
-| `limits.bucket_read_limit` | bucket-read cap | clamped at config load to 10 000 |
+```mermaid
+flowchart LR
+  A["feat: / fix: on main"] --> B["release-please opens PR"]
+  B --> C["release-pr-sync\nsync deps + auto-merge"]
+  C --> D["tag + GitHub Release"]
+  D --> E["npm publish\nlinux-x64, arm64, root"]
+```
 
-Environment variables used by the MCP adapter:
+| Commit type | Version bump |
+|-------------|--------------|
+| `feat:` | minor (pre-1.0 patch semantics via release-please config) |
+| `fix:` | patch |
+| `chore:`, `docs:`, `ci:` | no release |
 
-| Var | Purpose |
-|---|---|
-| `TC_SOCKET` | optional override for the daemon UDS path the adapter connects to; defaults to `<data_dir>/terminal-commanderd.sock`. Used in the `mcp.project.linux-wsl.json` Cursor example via `${TC_DATA}/terminal-commanderd.sock`. |
+The `ensure-release` job backstops tag/GitHub Release/npm if release-please skips a step — operators should **not** hand-tag or run `force_publish` for normal releases.
 
-No other config keys are advertised here. Path-policy / bounded-output
-caveats: every command spawn passes through the policy engine BEFORE
-it runs; every file read passes through the path-suffix deny list;
-every audit record lands in SQLite with a closed-set decision label.
+Details: [`docs/release/release-please-contract.md`](docs/release/release-please-contract.md).
+
+---
+
+## Configuration
+
+Example daemon config: [`config/terminal-commanderd.example.toml`](config/terminal-commanderd.example.toml).
+
+| Setting | Notes |
+|---------|--------|
+| `daemon.data_dir` | SQLite + socket; must be native Linux fs (not WSL `/mnt/c`) |
+| `daemon.socket_path` | Default `<data_dir>/terminal-commanderd.sock` |
+| `policy.profile` | `developer_local`, `repo_only`, `read_only_observer`, `admin_debug` |
+
+| Environment | Purpose |
+|-------------|---------|
+| `TC_SOCKET` | MCP adapter UDS path override |
+| `TC_WSL_DISTRO` | Pin WSL distro for Windows bridge |
+| `TC_SKIP_BOOTSTRAP` | Skip install/bootstrap |
+| `TC_SKIP_DAEMON_AUTOSTART` | Skip daemon service/profile install |
+
+---
 
 ## Safety posture
 
-Terminal Commander runs locally with a deliberately narrow security
-envelope:
+- **No MCP command spawn** — `terminal-commander-mcp` only speaks MCP + UDS.
+- **No network listeners** — local Unix socket only, peer credentials checked.
+- **No raw stream tools** — bounded JSON envelopes only.
+- **Policy before spawn** — argv-only starts; shell interpreters denied by default.
+- **PTY stdin guard** — secret-prompt patterns rejected on `pty_command_write_stdin`.
+- **Persistent audit** — SQLite `audit_records` with closed decision labels.
 
-- **No MCP root shell.** `terminal-commander-mcp` is a thin adapter
-  with no `Command::spawn` of its own.
-- **No network listener.** Neither the daemon nor the MCP crate
-  opens a TCP / UDP / HTTP / SSE socket. Reachability is local UDS
-  only, peer-cred checked.
-- **No raw stream endpoint.** No tool returns raw stdout / stderr.
-  Every response is a bounded JSON envelope (`bucket_wait` returns
-  events or a heartbeat; `event_context` returns a bounded pointer-
-  anchored window with `unavailable_reason` on miss).
-- **No MCP-side command spawn.** Structural grep guard:
-  `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp`
-  yields only doc / negative-assertion matches.
-- **No MCP-side file reads.** Structural grep guard:
-  `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src`
-  yields no matches.
-- **No shell bridge.** `command_start_combed` is argv-only and runs
-  a shell-interpreter deny list (`sh`, `bash`, `dash`, `zsh`,
-  `fish`, `ksh`, `csh`, `tcsh`, `ash`, `busybox`, `powershell`,
-  `pwsh`, `cmd`, plus `.exe` variants) BEFORE the policy engine.
-- **No automatic password entry.** `pty_command_write_stdin`
-  rejects writes that look like secret-prompt responses
-  (sudo/SSH/GPG prompt patterns) per TC44.
-- **Persistent audit.** Every policy-relevant action lands in
-  SQLite's `audit_records` table with a closed-set decision label.
-  No in-memory audit on a production path.
-- **Bounded outputs.** Bucket reads cap at 10 000 events. File
-  reads cap at 64 KiB. Context windows cap at 1024 frames / 64 KiB.
-- **Pointer-or-reason invariant.** Every `severity >= medium` event
-  carries either a `SourcePointer` or a typed `pointer_unavailable_reason`.
-  Context-by-pointer is always bounded.
-- **Policy gate before every spawn.** Four closed-set profiles
-  (`developer_local`, `repo_only`, `read_only_observer`,
-  `admin_debug`). Default-deny suffix list covers private keys,
-  credential stores, sudoers, and token caches.
+[`docs/security/PRIVILEGE_MODEL.md`](docs/security/PRIVILEGE_MODEL.md) · [`SECURITY.md`](SECURITY.md)
 
-Full security boundary: [`docs/security/PRIVILEGE_MODEL.md`](docs/security/PRIVILEGE_MODEL.md).
-Threat model + structural enforcement: [`SECURITY.md`](SECURITY.md).
+---
 
-## Current beta status
-
-**Conditional Go** (TC48 baseline, preserved through NPM01–NPM08
-and the WWS01–WWS07 Windows + WSL bridge chain).
-
-### Windows + WSL bridge chain state (WWS01–WWS09)
-
-| Goal   | Surface | Status |
-|--------|---------|--------|
-| WWS01  | Windows + WSL install UX contract; 15 binding decisions D-01..D-15 | live (commit `6220eb2`) |
-| WWS02  | Root npm package `os: ["linux", "win32"]`; bridge-required resolver branch; bounded shim refusals | live (commit `1da40f3`) |
-| WWS03  | `lib/wsl/distro-name.js` + `lib/wsl/detect.js` + `lib/wsl/doctor.js` discovery / doctor helpers | live (commit `ec8441e`) |
-| WWS04  | `lib/wsl/spawn.js` Windows → WSL bridge shim (`shell: false`, `windowsHide: true`, `stdio: 'inherit'`, token-shaped env stripped) | live (commit `d86e73f`) |
-| WWS05  | `lib/cursor/config.js` + `lib/cursor/write.js` Cursor MCP config writer (refuse-existing, `.bak`, atomic write, 256 KiB cap) | live (commit `ae37878`) |
-| WWS06  | `lib/cli/**` setup / doctor / pair CLI (5 subcommands; 21-status enum; `--install-wsl-runtime` opt-in; no sudo, no password) | live (commit `4936904`) |
-| WWS07  | `scripts/smoke/verify-windows-bridge-smoke.ps1` Windows bridge smoke (CLI/config readiness PASS; MCP round-trip **Not Run** = runtime_missing until publish) | live (commit `785d410`) |
-| WWS08  | README + release contract + RELEASE_CHECKLIST + BACKLOG + ROADMAP + RISK_REGISTER update | (current commit) |
-| WWS09  | Pre-publish readiness review | Pending |
-
-What is green:
-
-- Local daemon + MCP stdio + npm-install smoke all pass.
-  - TC46 runtime smoke (`scripts/smoke/verify-runtime-smoke.sh`): 8/8 PASS.
-  - NPM04 npm-install smoke (`scripts/smoke/verify-npm-local-install.sh`): 12 PASS (end-to-end MCP stdio against npm-installed binaries).
-  - `cargo nextest run --workspace`: 347/347 PASS, 0 skipped.
-- TC47 load / noise / backpressure gate: 8/8 stress tests passing.
-- NPM05 GitHub Actions npm-binary-build matrix: PASS on both
-  `ubuntu-24.04` (full smoke) and `ubuntu-24.04-arm` (build + pack).
-- NPM06 release-please live workflow runs cleanly on every push;
-  no-ops when no `feat:` / `fix:` commits since the last release.
-- NPM07 trusted-publishing workflow runs cleanly: on a normal push
-  the three publish jobs are correctly **skipped** because
-  `releases_created` evaluates to `false`. No `NPM_TOKEN`, no
-  `CARGO_REGISTRY_TOKEN_TC`, no `RELEASE_PLEASE_TOKEN_TC`
-  referenced. `npm-binary-build.yml` remains a separate
-  non-publishing CI gate.
-
-What is **Not Run / pending** (and why beta is `Conditional Go`,
-not `Go`):
-
-- **Cursor provider live smoke**: Not Run. No documented
-  non-interactive entry point on the verification host. Requires
-  operator GUI steps.
-- **Codex CLI + Claude Code provider live smokes**: Not Run on the
-  verification host (TC46 / TC48 baseline).
-- **First npm beta publish**: **done** — `0.1.1-beta.1` on npm; GitHub
-  [pre-release](https://github.com/special-place-administrator/terminal-commander/releases/tag/v0.1.1-beta.1).
-  Windows operators must still install inside WSL for MCP (see
-  [Connect MCP providers](#connect-mcp-providers-cursor-codex-claude-code)).
-- **Windows → WSL MCP bridge round-trip** (WWS07): re-run after WSL-side
-  `npm install -g terminal-commander@beta` and daemon start in WSL.
-
-Beta cannot promote to `Go` until at least one provider live smoke
-transcript is attached. `Not Run` is **not** PASS.
-
-Authoritative beta artifacts:
-[`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
-[`EVIDENCE_REPORT_RUNTIME.md`](EVIDENCE_REPORT_RUNTIME.md),
-[`RISK_REGISTER.md`](RISK_REGISTER.md),
-[`BACKLOG.md`](BACKLOG.md).
-
-## Build and verify locally
+## Develop from source
 
 ```sh
+git clone https://github.com/special-place-administrator/terminal-commander.git
+cd terminal-commander
+
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
 cargo nextest run --workspace
+
 bash scripts/smoke/verify-runtime-smoke.sh
 bash scripts/smoke/verify-npm-local-install.sh
+
+# Windows bridge smoke (on Windows host)
+pwsh -File scripts/smoke/verify-windows-bridge-smoke.ps1
 ```
 
-UDS IPC and command-runtime integration tests are Unix-only. Native
-Windows compiles the workspace but skips those tests; use WSL2 to
-exercise the full surface. Testing doctrine: [`TESTING.md`](TESTING.md).
+Link local package for testing bootstrap changes:
+
+```powershell
+cd packages/terminal-commander
+npm link
+npm install -g terminal-commander@latest   # when testing published bits
+```
+
+Testing doctrine: [`TESTING.md`](TESTING.md).
+
+---
 
 ## Repository layout
 
 ```text
-.agent/
-  goals/
-    terminal-commander-mvp/             # library + scaffold goals
-    terminal-commander-runtime/         # daemon runtime + IPC goals (TC33–TC48)
-    terminal-commander-npm-distribution/# npm packaging + Cursor (NPM01–NPM10)
-    terminal-commander-windows-wsl-bridge/ # Windows host bridge chain (WWS01–WWS09)
-
-crates/
-  core/      sifters/   probes/   store/   daemon/   mcp/   cli/
-
-packages/
-  terminal-commander/                   # npm root wrapper (JS shims)
-  terminal-commander-linux-x64/         # platform binary package (linux/x64)
-  terminal-commander-linux-arm64/       # platform binary package (linux/arm64)
-
-examples/
-  provider-harness/cursor/              # copy-pasteable Cursor MCP configs
-  bucket_wait_demo.md
-  dynamic_rule_demo.md
-
-config/
-  terminal-commanderd.example.toml
-  terminal-commanderd.service.example
-
-rules/
-  apt.json   cargo.json   gcc.json   generic.terminal.json
-  make.json  npm.json     pytest.json
-
-docs/
-  runtime/   mcp/        install/   integrations/
-  release/   security/   audits/    contracts/
-  storage/   research/   rules/
+crates/          Rust workspace (daemon, mcp, core, probes, store, …)
+packages/        npm: terminal-commander + linux-x64 + linux-arm64
+packages/terminal-commander/lib/
+  bootstrap/     install + lazy MCP bootstrap
+  wsl/           Windows → WSL bridge
+  harness/       multi-provider MCP config writers
+  daemon/        autostart install
+docs/            runtime, MCP, integrations, release contracts
+examples/        provider-harness copy-paste configs
+scripts/smoke/   runtime, npm, Windows bridge verification
 ```
 
-## Development approach
+---
 
-The project advances through small, sequential `/goal` files. Each
-goal is:
+## Status
 
-- branch-safe,
-- evidence-driven,
-- narrowly scoped,
-- independently verifiable,
-- small enough for one autonomous agent run,
-- explicit about allowed and forbidden files,
-- clear about stop conditions and acceptance criteria.
+| Area | State |
+|------|--------|
+| Daemon + UDS IPC + 29 MCP tools | Live |
+| npm `terminal-commander@0.1.4` on `latest` | Live |
+| Windows install bootstrap + bridge | Live |
+| Harness auto-config + daemon autostart | Live |
+| Automated release + npm publish | Live |
+| macOS / native Windows daemon | Not planned (WSL path on Windows) |
 
-The two-commit landing pattern (verified work commit + status
-commit) and the prep-amendment-first rule for any scope drift come
-from the TC43+ runtime chain and are preserved across the NPM
-chain.
+---
 
 ## License
 
-Apache-2.0; see [`LICENSE`](LICENSE).
-
-SPDX identifier: `Apache-2.0`. The full Apache License 2.0 text is
-in the `LICENSE` file at the repository root, and `NOTICE` records
-the rmcp relicensing transition relevant to the supply-chain
-(`cargo-deny`) license allowlist. See
-[`docs/research/license-decision.md`](docs/research/license-decision.md)
-for the decision rationale and [`CONTRIBUTING.md`](CONTRIBUTING.md)
-for the per-file SPDX header expectation.
+Apache-2.0 — see [`LICENSE`](LICENSE).
