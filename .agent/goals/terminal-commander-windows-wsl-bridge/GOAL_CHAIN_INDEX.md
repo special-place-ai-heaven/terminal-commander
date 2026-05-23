@@ -1,6 +1,6 @@
 # Goal Chain Index — terminal-commander-windows-wsl-bridge
 
-Status: skeleton (WWS00 init).
+Status: WWS01 Completed; WWS02..WWS09 Pending.
 Branch: `main`.
 Successor of: `terminal-commander-npm-distribution` (NPM10 = Completed, bootstrap workflow committed but NOT dispatched; all three packages remain E404 / unpublished).
 
@@ -12,7 +12,7 @@ Language: ASCII only.
 
 | Goal   | Title                                                               | Status   |
 |--------|---------------------------------------------------------------------|----------|
-| WWS01  | Windows / WSL install UX contract                                   | Pending  |
+| WWS01  | Windows / WSL install UX contract                                   | Completed (commit `6220eb2`; contract at `docs/release/windows-wsl-bridge-contract.md`) |
 | WWS02  | Root npm package win32 bridge contract                              | Pending  |
 | WWS03  | WSL distro discovery and runtime doctor                             | Pending  |
 | WWS04  | Windows bridge MCP shim                                             | Pending  |
@@ -121,21 +121,43 @@ sees one MCP server; the setup complexity is hidden.
 
 ## Open decisions to lock at WWS01
 
-- Whether Windows setup may install Terminal Commander inside WSL
-  automatically, or only print copy-pasteable commands.
-- Whether the setup command must ask before running `npm install`
-  inside WSL.
-- Whether a pairing manifest is needed (both sides), or whether
-  `wsl.exe` invocation is enough on its own.
-- Where to store the Windows-side pairing / setup state file
-  (e.g. `%LOCALAPPDATA%\terminal-commander\` or `%APPDATA%\`).
-- Where to store the WSL-side runtime config (existing
-  `$XDG_STATE_HOME/terminal-commander/` placeholder).
-- Whether the root `package.json` `os` field must be widened to
-  include `"win32"`, and whether `optionalDependencies` remain
-  Linux-only.
-- How to handle hosts with multiple WSL distros (pick default,
-  ask once, persist choice).
-- Whether Cursor config should be written to the global path
-  (`%USERPROFILE%\.cursor\mcp.json`) or to a workspace-scoped
-  `.cursor/mcp.json`, and what to do if a file already exists.
+LOCKED at WWS01 in
+[`docs/release/windows-wsl-bridge-contract.md`](../../docs/release/windows-wsl-bridge-contract.md)
+(commit `6220eb2`). The 15 binding answers are recorded in §15 of
+that contract and reproduced here in summary form:
+
+- D-01 Root npm package `os` widened to `["linux", "win32"]`. Owner: WWS02.
+- D-02 Linux platform packages remain `os: ["linux"]` (NPM02 §4.1 unchanged). Owner: WWS02.
+- D-03 Windows install ships JS only (no Rust binary). Owner: WWS02.
+- D-04 `terminal-commander-mcp` on Windows is a bridge shim
+  (`wsl.exe -d <distro> bash -lc terminal-commander-mcp`,
+  `shell: false`, argv array, whitelist-validated distro).
+  Owner: WWS04.
+- D-05 `terminal-commanderd` on Windows refuses with exit 64 +
+  one-line "use WSL" message. Owner: WWS02 / WWS04.
+- D-06 `setup cursor-wsl` auto-detects WSL distros via `wsl.exe
+  -l -v` only. Owner: WWS03.
+- D-07 Default-distro pick (the asterisk in `wsl -l -v`); ask
+  once on multi-distro hosts; refuse on `--no-interactive`.
+  Owner: WWS06.
+- D-08 Automatic install inside WSL requires explicit
+  `--install-wsl-runtime`. Default prints the exact one-line
+  install command and exits non-zero. Owner: WWS06.
+- D-09 Pairing is OPTIONAL; pair codes are operator confirmation,
+  never security secrets. Owner: WWS06.
+- D-10 Windows-side state at `%LOCALAPPDATA%\terminal-commander\setup.json`
+  (+ optional `pair.json`). Schema in contract §11. Owner: WWS06.
+- D-11 WSL-side runtime config unchanged
+  (`$XDG_STATE_HOME/terminal-commander/`). Owner: (unchanged).
+- D-12 Multi-distro handling via persisted choice +
+  `--distro` override. Owner: WWS03 / WWS06.
+- D-13 Cursor config default `--global`; `--project` opts into
+  workspace scope; refuse-existing-terminal-commander-entry
+  without `--force`; always `.bak` backup. Owner: WWS05 / WWS06.
+- D-14 Rollback / uninstall via `setup cursor-wsl --uninstall`
+  (restores `mcp.json.bak`) BEFORE `npm uninstall`. Owner: WWS06
+  + WWS08.
+- D-15 Publish-readiness floor: WWS02 + WWS04 + WWS05 + WWS06 +
+  WWS08 must land before the first npm publish. WWS01
+  RECOMMENDS keeping `npm-bootstrap-publish.yml` PAUSED until
+  WWS08 (at minimum). WWS09 reconfirms. Owner: WWS09.

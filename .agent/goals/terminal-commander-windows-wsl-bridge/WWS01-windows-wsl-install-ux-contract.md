@@ -3,15 +3,15 @@ goal_id: WWS01
 title: Windows Wsl Install Ux Contract
 chain_id: terminal-commander-windows-wsl-bridge
 phase: Wave 0 - Contract
-status: "Pending"
+status: "Completed"
 depends_on: []
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T12:00:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T13:00:00+00:00"
+completed_at: "2026-05-23T14:00:00+00:00"
+completion_commit: "6220eb2"
 blocked_reason: ""
 source_refs:
   - "docs/release/npm-binary-packaging-contract.md (NPM02 Linux-only assumption that WWS01 must amend)"

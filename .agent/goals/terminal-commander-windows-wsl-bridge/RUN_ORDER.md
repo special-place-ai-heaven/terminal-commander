@@ -1,6 +1,6 @@
 # Run order — terminal-commander-windows-wsl-bridge
 
-Status: skeleton (WWS00 init).
+Status: WWS01 Completed (commit `6220eb2`); WWS02..WWS09 Pending.
 Branch: `main`.
 
 Execute goals strictly in this order. Each goal MUST pass its
