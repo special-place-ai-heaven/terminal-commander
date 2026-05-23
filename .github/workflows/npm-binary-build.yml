@@ -50,6 +50,7 @@ on:
       - "Cargo.lock"
       - "crates/**"
       - "packages/**"
+      - "scripts/release/**"
       - "scripts/smoke/**"
       - ".github/workflows/npm-binary-build.yml"
   pull_request:
@@ -60,6 +61,7 @@ on:
       - "Cargo.lock"
       - "crates/**"
       - "packages/**"
+      - "scripts/release/**"
       - "scripts/smoke/**"
       - ".github/workflows/npm-binary-build.yml"
   workflow_dispatch:
@@ -107,6 +109,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify root optionalDependencies pin
+        if: matrix.name == 'linux-x64'
+        shell: bash
+        run: node scripts/release/verify-optional-dependencies.js
 
       - name: Install Rust toolchain (${{ env.RUST_TOOLCHAIN }})
         uses: dtolnay/rust-toolchain@master

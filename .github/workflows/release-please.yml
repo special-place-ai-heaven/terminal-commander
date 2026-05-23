@@ -105,10 +105,10 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
-      releases_created: ${{ steps.release.outputs.releases_created }}
-      paths_released: ${{ steps.release.outputs.paths_released }}
-      tag_name: ${{ steps.release.outputs['packages/terminal-commander--tag_name'] }}
-      version: ${{ steps.release.outputs['packages/terminal-commander--version'] }}
+      releases_created: ${{ steps.final.outputs.releases_created }}
+      paths_released: ${{ steps.release.outputs.paths_released || steps.release_retry.outputs.paths_released }}
+      tag_name: ${{ steps.final.outputs.tag_name }}
+      version: ${{ steps.final.outputs.version }}
     steps:
       - name: release-please (manifest mode)
         id: release
@@ -123,6 +123,61 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
           release-as: ${{ inputs.recovery_release_as }}
           skip-github-pull-request: ${{ inputs.recovery_release_as != '' }}
+
+      # Merged release PRs often keep autorelease:pending when the custom
+      # title pattern omitted ${version}; that blocks all future releases.
+      - name: Clear stale autorelease labels on merged release PRs
+        if: >-
+          steps.release.outputs.releases_created != 'true' &&
+          github.event_name == 'push' &&
+          inputs.recovery_release_as == ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+        run: |
+          set -euo pipefail
+          mapfile -t prs < <(gh pr list --state merged --label "autorelease: pending" --json number --jq '.[].number')
+          for n in "${prs[@]}"; do
+            gh pr edit "$n" --remove-label "autorelease: pending"
+            echo "cleared autorelease:pending on PR #${n}"
+          done
+
+      # Second pass: after merge, release-please often needs another run to
+      # create the tag/GitHub Release (googleapis/release-please#2028).
+      - name: release-please tag retry (post-merge)
+        id: release_retry
+        if: >-
+          steps.release.outputs.releases_created != 'true' &&
+          github.event_name == 'push' &&
+          inputs.recovery_release_as == ''
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
+        with:
+          config-file: .github/release-please-config.json
+          manifest-file: .github/.release-please-manifest.json
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+          skip-github-pull-request: true
+
+      - name: Aggregate release-please outputs
+        id: final
+        shell: bash
+        run: |
+          set -euo pipefail
+          created="${{ steps.release.outputs.releases_created }}"
+          retry="${{ steps.release_retry.outputs.releases_created }}"
+          if [ "$created" = "true" ] || [ "$retry" = "true" ]; then
+            echo "releases_created=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "releases_created=false" >> "$GITHUB_OUTPUT"
+          fi
+          ver="${{ steps.release.outputs['packages/terminal-commander--version'] }}"
+          if [ -z "$ver" ]; then
+            ver="${{ steps.release_retry.outputs['packages/terminal-commander--version'] }}"
+          fi
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          tag="${{ steps.release.outputs['packages/terminal-commander--tag_name'] }}"
+          if [ -z "$tag" ]; then
+            tag="${{ steps.release_retry.outputs['packages/terminal-commander--tag_name'] }}"
+          fi
+          echo "tag_name=${tag}" >> "$GITHUB_OUTPUT"
 
   # Recovery gate: when release-please cannot tag a merged release PR,
   # workflow_dispatch force_publish runs the same npm publish jobs
@@ -426,6 +481,12 @@ jobs:
         working-directory: packages/terminal-commander
         run: |
           npm test
+
+      - name: Sync optionalDependencies to package version
+        shell: bash
+        run: |
+          node scripts/release/sync-optional-dependencies.js
+          node scripts/release/verify-optional-dependencies.js
 
       - name: Confirm package version + optionalDependencies sync
         shell: bash
