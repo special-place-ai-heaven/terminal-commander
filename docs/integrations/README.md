@@ -8,13 +8,19 @@ child process over rmcp stdio (per `docs/security/PRIVILEGE_MODEL.md`
 section 4) and forwards every tool call through the daemon UDS.
 
 Per-provider walk-throughs:
-- [`codex-cli.md`](codex-cli.md) — Codex CLI MCP stdio config.
+- [`codex-cli.md`](codex-cli.md) — Codex CLI MCP stdio config (`~/.codex/config.toml`).
 - [`claude-code.md`](claude-code.md) — Claude Code MCP stdio config
   (`--mcp-config` flag + persistent settings).
 - [`cursor.md`](cursor.md) — Cursor MCP stdio config (native Linux,
   inside-WSL, and Windows-Cursor-to-WSL bridge). Copy-pasteable
   configs in
   [`examples/provider-harness/cursor/`](../../examples/provider-harness/cursor/).
+- [`gemini.md`](gemini.md) — Gemini stub (INSTALL01; path unverified).
+- [`kimi.md`](kimi.md) — Kimi stub (INSTALL01; path unverified).
+
+**Windows one-step install:** `npm install -g terminal-commander` runs
+bootstrap (see [`../release/install-bootstrap-contract.md`](../release/install-bootstrap-contract.md))
+and merges MCP config for every detected harness.
 
 A local daemon + MCP stdio smoke (no provider in the loop) lives at
 [`scripts/smoke/verify-runtime-smoke.sh`](../../scripts/smoke/verify-runtime-smoke.sh).
@@ -31,13 +37,13 @@ Language: ASCII only.
 
 ## 1. Claude Code
 
-Add a stanza to your `~/.config/claude-code/config.json` (or the
-project-local `.claude/config.json`):
+See [`claude-code.md`](claude-code.md). Prefer `~/.claude/settings.json`
+with server key `terminal_commander`:
 
 ```json
 {
   "mcpServers": {
-    "terminal-commander": {
+    "terminal_commander": {
       "command": "terminal-commander-mcp",
       "args": []
     }
@@ -63,18 +69,14 @@ compile_error, retrieve event_context around it.
 
 ## 2. Codex CLI
 
-Codex CLI reads MCP servers from `~/.codex/mcp_servers.json`:
+Codex CLI reads MCP servers from `~/.codex/config.toml` (authoritative
+shape in [`codex-cli.md`](codex-cli.md)):
 
-```json
-{
-  "terminal-commander": {
-    "command": "terminal-commander-mcp",
-    "args": []
-  }
-}
+```toml
+[mcp_servers.terminal_commander]
+command = "terminal-commander-mcp"
+args = []
 ```
-
-Codex's tool discovery surfaces the five MVP tools the same way.
 
 ## 3. Generic MCP client
 

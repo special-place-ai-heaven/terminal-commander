@@ -1,0 +1,4 @@
+# Copy relevant lines into ~/.codex/config.toml
+[mcp_servers.terminal_commander]
+command = "terminal-commander-mcp"
+args = []

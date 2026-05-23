@@ -26,11 +26,7 @@ const {
   assertSafeDistroName,
   UNSAFE_DISTRO_NAME,
 } = require("../wsl/distro-name.js");
-const {
-  spawnWslBridge,
-  buildFilteredEnv,
-  BRIDGE_STATUSES,
-} = require("../wsl/spawn.js");
+const { buildFilteredEnv } = require("../wsl/filtered_env.js");
 const {
   buildTerminalCommanderServerConfig,
   serializeCursorMcpConfig,
@@ -41,6 +37,7 @@ const {
 } = require("../cursor/write.js");
 const { writeSetupJson } = require("./setup_state.js");
 const { spawn } = require("node:child_process");
+const { INSTALL_PROBE_CMD } = require("../bootstrap/constants.js");
 
 const SETUP_STATUSES = Object.freeze({
   SETUP_READY: "setup_ready",
@@ -66,9 +63,7 @@ const SETUP_STATUSES = Object.freeze({
   CREDENTIAL_REQUIRED: "credential_required",
 });
 
-// The single constant install command. Locked at WWS06 prep
-// amendment. NO operator value is interpolated.
-const INSTALL_PROBE_CMD = "npm install -g terminal-commander";
+// Re-export for tests (defined in lib/bootstrap/constants.js).
 
 function buildResult(partial) {
   return {

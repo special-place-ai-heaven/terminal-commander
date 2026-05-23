@@ -86,17 +86,27 @@ Language: ASCII only.
 
 ### 2.1 Windows-host happy path
 
-```powershell
-# Step 1 — install the root npm package on Windows.
-npm install -g terminal-commander
+**Amended by INSTALL01** ([`install-bootstrap-contract.md`](install-bootstrap-contract.md)):
 
-# Step 2 — one setup command. Detects WSL, picks a distro, ensures
-# the WSL-side runtime is installed, writes the Cursor MCP config,
-# verifies the bridge shim end-to-end, prints a ready banner.
-terminal-commander setup cursor-wsl
+```powershell
+# Single operator step — bootstrap runs from the npm `install` script.
+npm install -g terminal-commander
 ```
 
-After step 2, the operator can launch Cursor and ask the chat
+Bootstrap detects WSL, ensures the in-distro runtime (`npm install -g`
+inside the distro with Linux-first PATH), merges MCP config for every
+detected harness (Cursor, Codex CLI, Claude, …), and persists setup
+state. Opt-out: `TC_SKIP_BOOTSTRAP=1` or `--ignore-scripts` then
+`terminal-commander setup harness`.
+
+Legacy two-step path (deprecated; `setup cursor-wsl` delegates to bootstrap):
+
+```powershell
+npm install -g terminal-commander
+terminal-commander setup cursor-wsl   # prints migration notice
+```
+
+After install, the operator can launch Cursor and ask the chat
 panel to list MCP tools — the 29-tool TC45 catalogue is visible
 through the Windows shim into WSL.
 
@@ -304,39 +314,34 @@ operator the file lives next to their workspace.
 
 ## 8. WSL-side runtime install / update model (locked)
 
-### 8.1 Default behavior
+### 8.1 Default behavior (amended INSTALL01)
 
-`setup cursor-wsl` MUST NOT install anything inside the WSL distro
-by default. It probes the distro for the runtime and either:
+On **Windows global `npm install -g`**, the `install` lifecycle script
+and `lib/bootstrap/ensure_wsl_runtime.js` **default to installing**
+the runtime inside the resolved WSL distro. The same path runs when
+`spawnWslBridge` sees `runtime_missing` (lazy bootstrap) unless
+`TC_SKIP_BOOTSTRAP=1`.
 
-- (probe found `terminal-commanderd` AND `terminal-commander-mcp`
-  on `$PATH` inside WSL) — prints a green status line + proceeds
-  to write Cursor config; OR
-- (probe did NOT find the runtime) — prints the EXACT one-line
-  install command the operator can paste into a WSL shell:
-  ```
-  wsl -d <distro> -- bash -lc 'npm install -g terminal-commander'
-  ```
-  AND exits non-zero so the operator notices.
+`setup cursor-wsl` and `setup harness` call the shared ensure module.
+`--install-wsl-runtime` remains accepted as an explicit alias.
 
-### 8.2 Opt-in automatic install
+If WSL is missing or install fails, bootstrap **fail-soft** for npm
+(exit 0 from the install script with stderr guidance) unless the
+operator invoked `setup` directly (non-zero).
 
-Operator who passes `--install-wsl-runtime` opts into running the
-install themselves through the setup orchestrator. The orchestrator
-runs the EXACT same `wsl -d <distro> -- bash -lc 'npm install -g
-terminal-commander'` invocation with `shell: false`. It does NOT
-run `sudo`. It does NOT pass operator credentials. It does NOT
-auto-confirm npm prompts beyond standard non-TTY behavior.
+### 8.2 Install command (locked)
 
-### 8.3 Why opt-in, not default
+Inside WSL, the orchestrator runs ONE constant `bash -lc` string (see
+`lib/bootstrap/constants.js`). NO operator value is interpolated.
+`PATH` is prefixed with Linux system paths before `npm` to avoid
+Windows `nodejs` shims shadowing the in-distro install.
 
-- Installing system-wide inside a distro changes operator
-  environment without consent.
-- The npm install inside WSL may need `sudo` on certain distros;
-  the orchestrator refuses to elevate.
-- The operator may want to use a per-user nvm / fnm install
-  instead of system npm; auto-install would clobber that choice.
-- TC48 + NPM09 token / posture posture remains conservative.
+### 8.3 Opt-out
+
+- `TC_SKIP_BOOTSTRAP=1`
+- `npm install -g terminal-commander --ignore-scripts`
+- Manual per-user npm prefix inside WSL (operator may pre-install;
+  doctor still verifies `command -v terminal-commander-mcp`)
 
 ## 9. Optional pairing model (locked, not the primary path)
 
@@ -603,7 +608,7 @@ to a binding answer. WWS02–WWS09 implement these.
 | D-05 | Should `terminal-commanderd` on Windows refuse with a clear "use WSL" message? | YES. Exit 64. Single bounded stderr line per §12. | WWS02 / WWS04 |
 | D-06 | Should `setup cursor-wsl` auto-detect WSL distros? | YES. Via `wsl.exe -l -v` only. | WWS03 |
 | D-07 | Should setup pick the default distro or ask once? | Pick the WSL default distro (asterisk in `wsl -l -v`). Ask once via interactive Y/n if multiple distros AND no `--distro` flag AND no persisted choice. Refuse on `--no-interactive`. | WWS06 |
-| D-08 | Should setup auto-install the WSL runtime package, or require `--install-wsl-runtime`? | Require explicit `--install-wsl-runtime`. Default behavior prints the one-line install command and exits non-zero. | WWS06 |
+| D-08 | Should setup auto-install the WSL runtime package, or require `--install-wsl-runtime`? | **Superseded by INSTALL01:** default ON for Windows global bootstrap + lazy MCP bridge; opt-out via `TC_SKIP_BOOTSTRAP` / `--ignore-scripts`. `--install-wsl-runtime` is an alias. | INSTALL01 |
 | D-09 | Should pairing codes exist, and if yes, optional or mandatory? | Optional. Pair codes are operator-confirmation only, never security secrets. Default install works without ever running `pair create`. | WWS06 |
 | D-10 | Where to store Windows-side bridge / setup state? | `%LOCALAPPDATA%\terminal-commander\setup.json` (chosen distro, Cursor scope) + `%LOCALAPPDATA%\terminal-commander\pair.json` (optional). Schema in §11. | WWS06 |
 | D-11 | Where to store WSL-side runtime config? | Unchanged. `$XDG_STATE_HOME/terminal-commander/` (TC36 baseline). | none (unchanged) |

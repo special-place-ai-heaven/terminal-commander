@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "terminal_commander": {
+      "command": "terminal-commander-mcp",
+      "args": []
+    }
+  }
+}

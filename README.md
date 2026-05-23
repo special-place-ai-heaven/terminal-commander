@@ -102,7 +102,7 @@ Authoritative deeper docs:
 | npm wrapper + platform package layout | `terminal-commander` root + `@terminal-commander/linux-x64` + `@terminal-commander/linux-arm64` with `optionalDependencies`, no postinstall | live (NPM02 / NPM03 / NPM04) |
 | GitHub Actions npm-binary-build matrix | linux-x64 (full smoke) + linux-arm64 (build + pack); both pass on `ubuntu-24.04` and `ubuntu-24.04-arm` | live (NPM05) |
 | release-please manifest mode | manifest-mode config at `.github/`, single shared `0.1.0-beta.1` version, linked-versions plugin | live (NPM06) |
-| npm trusted publishing (OIDC + provenance) | output-gated publish jobs inside `release-please.yml`; no `NPM_TOKEN`, no PAT | live workflow (NPM07); **first live publish pending** operator npmjs.com trusted-publisher setup + a release PR merge |
+| npm publish (beta) | `terminal-commander@0.1.1-beta.1` + platform packages on npmjs.com; CI publish via `release-please.yml` | **live** (2026-05-23) |
 | Cursor MCP config examples | native Linux / inside-WSL + Windows → WSL bridge | live (NPM08) |
 | Windows + WSL bridge UX contract | 15 binding decisions D-01..D-15; bridge architecture; safety boundary | live (WWS01) |
 | Root npm package `os` widened to `["linux", "win32"]` | bridge-required resolver branch; bounded Windows shim refusals | live (WWS02) |
@@ -114,126 +114,147 @@ Authoritative deeper docs:
 | Cursor provider live smoke transcript | requires operator GUI steps (no headless Cursor MCP entry point on host) | **Not Run** |
 | Codex CLI + Claude Code provider live smokes | operator-driven | **Not Run** (TC46 / TC48 baseline) |
 
-## Install
+## Install from npm
 
-Terminal Commander runs on **Linux** and **WSL2** as the real
-runtime host (daemon, MCP stdio adapter, admin CLI). On
-**Windows**, the same npm package installs as a **bridge / setup
-surface only**: a JS-only shim that drives `wsl.exe` into the
-chosen WSL distro where the real `terminal-commander-mcp`
-answers Cursor's MCP requests. Initial npm platforms are
-**linux-x64** and **linux-arm64**. There is **no macOS-native,
-no Windows-native daemon, and no musl / Alpine package** claim
-at this time — the daemon UDS is Unix-only and the runtime chain
-(TC44 `non_goals`) explicitly defers those targets.
+**Published:** `0.1.1-beta.1` on [npmjs.com](https://www.npmjs.com/package/terminal-commander) today uses the **`beta` dist-tag** from the first publish. **New releases** use normal semver (`0.2.0`, `1.0.0`, …) and publish to **`latest`** (see `.github/release-please-config.json` `prerelease: false`).
 
-### Future published path (pending first live publish)
-
-Once the operator completes the npmjs.com trusted-publisher
-preconditions in [`docs/release/npm-trusted-publishing-contract.md`](docs/release/npm-trusted-publishing-contract.md) §8
-and the first release PR merges, the install command will be:
-
-```sh
-npm install -g terminal-commander
-```
-
-After install, the following commands land on `$PATH`:
-
-- `terminal-commanderd`        — daemon
-- `terminal-commander-mcp`     — MCP stdio adapter
-- `terminal-commander`         — admin CLI
-
-This path is **not active yet**; no npm publish has executed against
-the registry. See [§ Current beta status](#current-beta-status).
-
-### Current pre-publish path
-
-Build + pack + install the same packages locally without touching
-npmjs.com:
-
-```sh
-bash scripts/smoke/verify-npm-local-install.sh
-```
-
-The smoke script produces real release binaries via `cargo build
---release`, stages them into the matching platform package's `bin/`,
-runs `npm pack`, installs the resulting tarballs into a sandboxed
-`--prefix`, and exercises the three commands end-to-end (daemon
-self-check + MCP stdio handshake + `tools/list` returning 29 tools).
-Documented in [`docs/release/npm-binary-packaging-contract.md`](docs/release/npm-binary-packaging-contract.md).
-
-### Cargo-built path (always available)
-
-```sh
-cargo build --release \
-  -p terminal-commanderd \
-  -p terminal-commander-mcp \
-  -p terminal-commander-cli
-```
-
-The CLI's Cargo package name is `terminal-commander-cli`; the binary
-name is `terminal-commander` (per the `[[bin]]` section in
-`crates/cli/Cargo.toml`).
-
-### Windows host (bridge / setup surface; pending first publish)
-
-The Windows-bridge UX landed in WWS01..WWS07. Once the first npm
-publish occurs (see [§ Current beta status](#current-beta-status)),
-Windows operators will install the same root package and drive
-setup with the new CLI:
+**GitHub release:** [v0.1.1-beta.1](https://github.com/special-place-administrator/terminal-commander/releases/tag/v0.1.1-beta.1) (legacy tag from the first cut). The next tag will be `v0.2.0` (or similar) as a normal release.
 
 ```powershell
-# 1. Install root package (Windows; pending first npm publish).
+# Windows (PowerShell or CMD) — one step; bootstrap configures detected harnesses:
 npm install -g terminal-commander
-
-# 2. Inspect Windows host + WSL discovery (read-only).
-terminal-commander doctor
-terminal-commander doctor wsl
-
-# 3. Preview / apply the Cursor MCP config that points at the bridge.
-terminal-commander setup cursor-wsl --print-config
-terminal-commander setup cursor-wsl --dry-run
-terminal-commander setup cursor-wsl
-
-# 4. Optional inside-WSL runtime install (must be explicit; no sudo).
-terminal-commander setup cursor-wsl --install-wsl-runtime
 ```
-
-Inside the chosen WSL distro, install the same root package once
-the publish lands:
 
 ```sh
+# Linux / inside WSL:
 npm install -g terminal-commander
-terminal-commander doctor
 ```
 
-Current limitation: the npm package is **not yet published**; all
-three names (`terminal-commander`, `@terminal-commander/linux-x64`,
-`@terminal-commander/linux-arm64`) return `E404` on the registry.
-Until then, the Windows commands above resolve correctly through
-the local-tarball install path (`scripts/smoke/verify-npm-local-install.sh`
-on Linux/WSL; `scripts/smoke/verify-windows-bridge-smoke.ps1` on
-Windows) but the inside-WSL `--install-wsl-runtime` returns
-`npm_package_unpublished` honestly.
+Legacy beta install: `npm install -g terminal-commander@beta` (first publish only).
 
-Safety boundary (locked at WWS01 + WWS06):
+Commands on `PATH`:
 
-- The Windows shim never invokes `wsl.exe` directly; all bridge
-  spawns flow through `lib/wsl/spawn.js` with `shell: false`,
-  `windowsHide: true`, and a single-element `-d <distro>` argv.
-- Distro names are double-validated (`assertSafeDistroName` +
-  live `wsl -l -v` whitelist) before any spawn.
-- No sudo. No `sudo -S`. No password prompt. No environment
-  credential. No LLM-supplied secret forwarded through any
-  channel.
-- The Cursor config writer refuses to overwrite an existing
-  `terminal-commander` entry without `--force`; always creates
-  `<mcp.json>.bak` before overwrite; atomic write via a
-  same-directory tmp file + rename.
-- Pairing codes (`pair create` / `pair accept`) are operator
-  confirmation, NOT a security secret. The full WSL-side
-  handshake is deferred to a future enhancement; `pair accept`
-  returns `pair_deferred` until that lands.
+- `terminal-commanderd` — daemon (Linux / WSL only)
+- `terminal-commander-mcp` — MCP stdio adapter
+- `terminal-commander` — admin / setup CLI
+
+**Where it runs:** the real runtime is **Linux or WSL2** (Unix domain socket). On **Windows**, the same npm package is a **bridge + setup surface**; daemon and probes still run inside a WSL distro. No macOS-native or Windows-native daemon.
+
+## Connect MCP providers (Cursor, Codex, Claude Code)
+
+Every provider uses the same MCP stdio command: `terminal-commander-mcp`. That process talks to `terminal-commanderd`, which **must already be running**.
+
+Detailed guides:
+
+- Cursor — [`docs/integrations/cursor.md`](docs/integrations/cursor.md)
+- Codex CLI — [`docs/integrations/codex-cli.md`](docs/integrations/codex-cli.md)
+- Claude Code — [`docs/integrations/claude-code.md`](docs/integrations/claude-code.md)
+
+### 1. Start the daemon (Linux or WSL)
+
+Run in the environment that hosts the runtime (inside WSL on Windows, not in PowerShell):
+
+```sh
+export TC_DATA="${XDG_STATE_HOME:-$HOME/.local/state}/terminal-commander"
+mkdir -p "$TC_DATA"
+terminal-commanderd --data-dir "$TC_DATA" start --mode ipc-server
+```
+
+Leave this running in a separate terminal (or a supervisor).
+
+### 2. Windows bootstrap (INSTALL01)
+
+`npm install -g terminal-commander` on Windows runs the **install bootstrap**:
+detects WSL, installs the runtime inside your distro (Linux-first `PATH`), and merges MCP
+config for Cursor, Codex CLI, Claude, and other detected harnesses. Opt-out:
+`TC_SKIP_BOOTSTRAP=1` or `npm install -g terminal-commander --ignore-scripts` then
+`terminal-commander setup harness`.
+
+Manual WSL-only install (if bootstrap was skipped):
+
+```powershell
+wsl -d Ubuntu-24.04 -- bash -lc "npm install -g terminal-commander@beta"
+terminal-commander doctor wsl --probe-runtime
+```
+
+Replace `Ubuntu-24.04` with your default distro (`terminal-commander doctor wsl` shows it).
+
+### 3. Cursor
+
+**Windows (Cursor on host → runtime in WSL)** — use the built-in config writer:
+
+```powershell
+terminal-commander setup cursor-wsl --print-config   # preview
+terminal-commander setup cursor-wsl --dry-run        # no write
+terminal-commander setup cursor-wsl                  # writes ~/.cursor/mcp.json
+```
+
+Restart Cursor. Open **Settings → Features → MCP** and confirm `terminal-commander` is listed. In chat, ask the model to call `health` or list MCP tools.
+
+**Linux or Cursor running inside WSL** — add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
+
+```json
+{
+  "mcpServers": {
+    "terminal-commander": {
+      "type": "stdio",
+      "command": "terminal-commander-mcp"
+    }
+  }
+}
+```
+
+Copy-paste examples: [`examples/provider-harness/cursor/`](examples/provider-harness/cursor/).
+
+### 4. Codex CLI
+
+Linux or WSL only. With the daemon running, add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.terminal_commander]
+command = "terminal-commander-mcp"
+args = []
+
+[mcp_servers.terminal_commander.env]
+TC_SOCKET = "${TC_DATA}/terminal-commanderd.sock"
+```
+
+Set `TC_DATA` to the same directory you passed to `terminal-commanderd --data-dir` (or export it in the shell that launches Codex).
+
+### 5. Claude Code
+
+Linux or WSL only. Save as `terminal-commander.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "terminal_commander": {
+      "command": "terminal-commander-mcp",
+      "args": [],
+      "env": {
+        "TC_SOCKET": "${TC_DATA}/terminal-commanderd.sock"
+      }
+    }
+  }
+}
+```
+
+```sh
+claude --mcp-config terminal-commander.mcp.json
+```
+
+Or merge the `mcpServers` block into `~/.claude/settings.json` for a permanent install.
+
+### 6. Verify tools are visible
+
+In any connected client you should see **29 MCP tools**, including `health`, `system_discover`, `command_start_combed`, and `bucket_wait`. See [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
+
+### Develop from source (optional)
+
+```sh
+bash scripts/smoke/verify-npm-local-install.sh   # local pack + install smoke
+cargo build --release -p terminal-commanderd -p terminal-commander-mcp -p terminal-commander-cli
+```
 
 ## Quickstart
 
@@ -503,26 +524,12 @@ not `Go`):
   operator GUI steps.
 - **Codex CLI + Claude Code provider live smokes**: Not Run on the
   verification host (TC46 / TC48 baseline).
-- **Windows → WSL MCP bridge round-trip** (WWS07 smoke step 9):
-  Not Run. The WSL distro on the verification host lacks
-  `terminal-commander-mcp` because the npm package is still
-  `E404`. The WWS07 PowerShell smoke records this honestly as
-  `runtime_missing` and does NOT promote it to PASS. Once the
-  first npm publish lands, an operator can install the runtime
-  inside WSL (`npm install -g terminal-commander` from within
-  the distro, or `terminal-commander setup cursor-wsl
-  --install-wsl-runtime` on Windows) and re-run the smoke; the
-  round-trip will then drive an MCP `initialize` + `tools/list`
-  + `tools/call(health)` through the WWS04 bridge.
-- **First live npm publish**: pending two operator-driven steps:
-  1. Claim `@terminal-commander` org on npmjs.com and configure the
-     trusted publisher for all three package names
-     (`terminal-commander`, `@terminal-commander/linux-x64`,
-     `@terminal-commander/linux-arm64`) with workflow filename
-     `release-please.yml`. See
-     [`docs/release/npm-trusted-publishing-contract.md`](docs/release/npm-trusted-publishing-contract.md) §8.
-  2. A Conventional-Commits `feat:` / `fix:` commit lands on `main`,
-     release-please opens a release PR, and the operator merges it.
+- **First npm beta publish**: **done** — `0.1.1-beta.1` on npm; GitHub
+  [pre-release](https://github.com/special-place-administrator/terminal-commander/releases/tag/v0.1.1-beta.1).
+  Windows operators must still install inside WSL for MCP (see
+  [Connect MCP providers](#connect-mcp-providers-cursor-codex-claude-code)).
+- **Windows → WSL MCP bridge round-trip** (WWS07): re-run after WSL-side
+  `npm install -g terminal-commander@beta` and daemon start in WSL.
 
 Beta cannot promote to `Go` until at least one provider live smoke
 transcript is attached. `Not Run` is **not** PASS.

@@ -39,6 +39,9 @@ with `shell: false` and `stdio: 'inherit'`.
 
 ### Windows (bridge / setup surface)
 
+`npm install -g terminal-commander` runs INSTALL01 bootstrap: WSL runtime ensure +
+harness MCP auto-config. See [`docs/release/install-bootstrap-contract.md`](../../docs/release/install-bootstrap-contract.md).
+
 ```powershell
 npm install -g terminal-commander
 ```

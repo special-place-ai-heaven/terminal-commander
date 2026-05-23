@@ -233,7 +233,7 @@ if (-not $wslAvailable) {
         Write-Note "MCP bridge round-trip: Not Run (runtime_missing); will not fake PASS"
         if ($InstallWslRuntime) {
             Write-Note "InstallWslRuntime requested: deferring to CLI 'setup cursor-wsl --install-wsl-runtime'"
-            $installArgs = @("setup", "cursor-wsl", "--install-wsl-runtime")
+            $installArgs = @("setup", "harness")
             if ($Distro) { $installArgs += @("--distro", $Distro) }
             # The setup orchestrator will refuse with npm_package_unpublished while the
             # registry returns E404 for terminal-commander, since NPM07 has not published.

@@ -229,6 +229,19 @@ function writeSetupJson(opts) {
     created_at,
     updated_at: now,
   };
+  if (Array.isArray(o.providers_configured)) {
+    payload.providers_configured = o.providers_configured.slice();
+  } else if (prior.ok && prior.value && Array.isArray(prior.value.providers_configured)) {
+    payload.providers_configured = prior.value.providers_configured.slice();
+  }
+  if (typeof o.bootstrap_at === "string" && o.bootstrap_at.length > 0) {
+    payload.bootstrap_at = o.bootstrap_at;
+  } else if (prior.ok && prior.value && typeof prior.value.bootstrap_at === "string") {
+    payload.bootstrap_at = prior.value.bootstrap_at;
+  }
+  if (typeof o.bootstrap_mode === "string" && o.bootstrap_mode.length > 0) {
+    payload.bootstrap_mode = o.bootstrap_mode;
+  }
   const w = atomicWriteJson(target, payload, {
     scopeDir: stateDir,
     randomSuffix: o.randomSuffix,

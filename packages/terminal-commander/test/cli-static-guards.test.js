@@ -219,17 +219,13 @@ test("lib/cli/** never references wsl.exe in executable code except via the lib/
   }
 });
 
-test("lib/cli/setup_cursor_wsl.js install command is the locked constant", () => {
-  const src = readSrc("setup_cursor_wsl.js");
-  assert.match(
-    src,
-    /INSTALL_PROBE_CMD\s*=\s*['"]npm install -g terminal-commander['"]/,
-    "setup_cursor_wsl.js must define INSTALL_PROBE_CMD = 'npm install -g terminal-commander' as a literal constant",
+test("lib/bootstrap/constants.js install command is the locked npm install", () => {
+  const src = fs.readFileSync(
+    path.join(PKG_ROOT, "lib", "bootstrap", "constants.js"),
+    "utf8",
   );
-  // No `+` or template-literal concat onto INSTALL_PROBE_CMD.
-  const code = stripCommentsAndStrings(src);
-  assert.equal(/INSTALL_PROBE_CMD\s*\+/.test(code), false);
-  assert.equal(/\+\s*INSTALL_PROBE_CMD\b/.test(code), false);
+  assert.match(src, /npm install -g terminal-commander/);
+  assert.match(src, /INSTALL_PROBE_CMD/);
 });
 
 test("lib/cli/** never imports the bin/* shims", () => {

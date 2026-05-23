@@ -184,7 +184,7 @@ test("doctor.runtime_missing short-circuits to runtime_missing without spawning"
   const rec = makeRecorder();
   const r = await spawnWslBridge({
     platform: "win32",
-    env: {},
+    env: { TC_SKIP_BOOTSTRAP: "1" },
     detect: makeMockDetect(okDetect(["Ubuntu-24.04"], "Ubuntu-24.04")),
     doctor: makeMockDoctor(DOCTOR_STATUSES.RUNTIME_MISSING),
     exec: rec.exec,

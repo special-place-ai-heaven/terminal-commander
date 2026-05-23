@@ -9,8 +9,10 @@
 //   terminal-commander --help
 //   terminal-commander doctor
 //   terminal-commander doctor wsl [--distro <name>] [--probe-runtime] [--help]
-//   terminal-commander setup --help
-//   terminal-commander setup cursor-wsl [flags] [--help]
+//   terminal-commander setup [harness] [flags] [--help]
+//   terminal-commander setup harness [flags] [--help]
+//   terminal-commander setup cursor-wsl [flags] [--help]  (deprecated)
+//   terminal-commander doctor harness
 //   terminal-commander pair --help
 //   terminal-commander pair create [--distro <name>] [--help]
 //   terminal-commander pair accept <code> [--help]
@@ -42,7 +44,19 @@ const BOOLEAN_FLAGS = new Set([
   "--probe-runtime",
 ]);
 
-const STRING_FLAGS = new Set(["--distro", "--project"]);
+const STRING_FLAGS = new Set(["--distro", "--project", "--provider"]);
+
+const HARNESS_SETUP_FLAGS = new Set([
+  "distro",
+  "global",
+  "project",
+  "force",
+  "clobber-backup",
+  "print-config",
+  "dry-run",
+  "install-wsl-runtime",
+  "provider",
+]);
 
 function makeError(message, usage) {
   return { ok: false, error: message, usage };
@@ -108,10 +122,9 @@ function parseArgv(argv) {
   switch (cmd) {
     case "doctor": {
       const sub = positional.shift();
-      if (sub != null && sub !== "wsl") {
+      if (sub != null && sub !== "wsl" && sub !== "harness") {
         return makeError(`unknown doctor subcommand: ${sub}`);
       }
-      // Allowed flags: --distro, --probe-runtime, --help.
       for (const f of Object.keys(flags)) {
         if (!["distro", "probe-runtime"].includes(f)) {
           return makeError(`flag --${f} is not valid for 'doctor'`);
@@ -127,27 +140,27 @@ function parseArgv(argv) {
       };
     }
     case "setup": {
-      const sub = positional.shift();
+      let sub = positional.shift();
       if (sub == null) {
-        // `terminal-commander setup` alone -> setup help.
-        return { ok: true, command: "setup", subcommand: null, flags, positional, help: true };
+        return {
+          ok: true,
+          command: "setup",
+          subcommand: "harness",
+          flags,
+          positional,
+          help,
+        };
       }
-      if (sub !== "cursor-wsl") {
+      if (sub === "harness") {
+        sub = "harness";
+      } else if (sub === "cursor-wsl") {
+        sub = "cursor-wsl";
+      } else {
         return makeError(`unknown setup subcommand: ${sub}`);
       }
-      const allowed = [
-        "distro",
-        "global",
-        "project",
-        "force",
-        "clobber-backup",
-        "print-config",
-        "dry-run",
-        "install-wsl-runtime",
-      ];
       for (const f of Object.keys(flags)) {
-        if (!allowed.includes(f)) {
-          return makeError(`flag --${f} is not valid for 'setup cursor-wsl'`);
+        if (!HARNESS_SETUP_FLAGS.has(f)) {
+          return makeError(`flag --${f} is not valid for 'setup ${sub}'`);
         }
       }
       if (flags.global === true && flags.project != null) {
@@ -156,7 +169,7 @@ function parseArgv(argv) {
       return {
         ok: true,
         command: "setup",
-        subcommand: "cursor-wsl",
+        subcommand: sub,
         flags,
         positional,
         help,
@@ -218,8 +231,10 @@ USAGE
 COMMANDS
   doctor                              Print Windows host diagnostics.
   doctor wsl                          Run the read-only WSL discovery probe.
-  setup cursor-wsl                    Set up Cursor MCP config to launch the
-                                      WWS04 bridge into a WSL distro.
+  doctor harness                      List detected vs configured MCP harnesses.
+  setup                               Bootstrap all detected harnesses (default).
+  setup harness                       Same as setup (explicit).
+  setup cursor-wsl                    Deprecated; use setup harness.
   pair create                         Generate a 6-digit pairing code (optional).
   pair accept <code>                  Validate a pairing code (deferred handshake).
 
@@ -233,11 +248,12 @@ EXAMPLES
   terminal-commander pair create
 `;
 
-const DOCTOR_USAGE = `terminal-commander doctor [wsl] [--distro <name>] [--probe-runtime]
+const DOCTOR_USAGE = `terminal-commander doctor [wsl|harness] [--distro <name>] [--probe-runtime]
 
   doctor                              Print Windows host diagnostics.
   doctor wsl                          Run the read-only WSL probe (detect +
                                       optional runtime presence check).
+  doctor harness                      Show harness detection / config status.
 
 FLAGS
   --distro <name>                     Operator-supplied WSL distro to probe.
@@ -247,9 +263,17 @@ FLAGS
   --help, -h                          Show this panel.
 `;
 
-const SETUP_USAGE = `terminal-commander setup cursor-wsl [flags]
+const SETUP_USAGE = `terminal-commander setup [harness] [flags]
 
-Write or merge a Cursor MCP config that points at the WWS04 bridge shim.
+Bootstrap: ensure WSL runtime (Windows) and merge MCP config for every
+detected harness (Cursor, Codex CLI, Claude, ...).
+
+Subcommands:
+  setup                               Full harness bootstrap (default).
+  setup harness                       Same as setup.
+  setup cursor-wsl                    Deprecated alias (Cursor-focused).
+
+Legacy cursor-wsl flags still apply to harness / cursor-wsl:
 
 DISTRO SELECTION PRIORITY
   1. --distro <name>            (operator override)
@@ -273,13 +297,11 @@ FLAGS
                                       Writes nothing.
   --dry-run                           Print the planned actions and exit 0.
                                       Writes nothing. Performs no spawn.
-  --install-wsl-runtime               Attempt one bounded inside-WSL install
-                                      via 'npm install -g terminal-commander'.
-                                      NO sudo. NO password. Returns
-                                      install_permission_required or
-                                      npm_package_unpublished honestly on
-                                      failure. Until NPM07 publish lands,
-                                      expect npm_package_unpublished.
+  --install-wsl-runtime               Alias for default WSL ensure (always on
+                                      for bootstrap unless TC_SKIP_BOOTSTRAP=1).
+  --provider <id>                     Configure only one harness (cursor,
+                                      codex-cli, claude-code, claude-desktop,
+                                      gemini, kimi).
   --help, -h                          Show this panel.
 
 SAFETY

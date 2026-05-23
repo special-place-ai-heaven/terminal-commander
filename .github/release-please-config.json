@@ -9,7 +9,7 @@
   "group-pull-request-title-pattern": "chore: release",
   "pull-request-title-pattern": "chore: release",
   "draft": false,
-  "prerelease": true,
+  "prerelease": false,
   "plugins": [
     {
       "type": "linked-versions",

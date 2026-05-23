@@ -30,6 +30,7 @@
   "files": [
     "bin/",
     "lib/",
+    "scripts/",
     "README.md",
     "LICENSE"
   ],
@@ -38,6 +39,7 @@
     "@terminal-commander/linux-arm64": "0.1.1-beta.1"
   },
   "scripts": {
+    "install": "node scripts/install.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {

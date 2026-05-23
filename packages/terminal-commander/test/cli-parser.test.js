@@ -102,12 +102,12 @@ test("setup cursor-wsl --project requires a value", () => {
   assert.match(r.error, /flag --project requires a value/);
 });
 
-test("setup with no subcommand routes to help", () => {
+test("setup with no subcommand defaults to harness", () => {
   const r = parseArgv(["setup"]);
   assert.equal(r.ok, true);
   assert.equal(r.command, "setup");
-  assert.equal(r.subcommand, null);
-  assert.equal(r.help, true);
+  assert.equal(r.subcommand, "harness");
+  assert.equal(r.help, false);
 });
 
 test("setup rejects unknown subcommand", () => {

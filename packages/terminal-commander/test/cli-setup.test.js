@@ -15,6 +15,7 @@ const {
   SETUP_STATUSES,
   INSTALL_PROBE_CMD,
 } = require("../lib/cli/setup_cursor_wsl.js");
+const { INSTALL_PROBE_CMD: CONST_INSTALL } = require("../lib/bootstrap/constants.js");
 const { DETECT_REASONS } = require("../lib/wsl/detect.js");
 const { DOCTOR_STATUSES } = require("../lib/wsl/doctor.js");
 
@@ -51,7 +52,8 @@ function makeStubStateWriter() {
 }
 
 test("INSTALL_PROBE_CMD is the locked constant", () => {
-  assert.equal(INSTALL_PROBE_CMD, "npm install -g terminal-commander");
+  assert.equal(INSTALL_PROBE_CMD, CONST_INSTALL);
+  assert.match(INSTALL_PROBE_CMD, /npm install -g terminal-commander/);
 });
 
 test("SETUP_STATUSES includes the full closed enum", () => {
@@ -359,7 +361,7 @@ test("--install-wsl-runtime constructs the locked argv shape", async () => {
     "--",
     "bash",
     "-lc",
-    "npm install -g terminal-commander",
+    INSTALL_PROBE_CMD,
   ]);
 });
 

@@ -17,8 +17,8 @@
 //   3. Optionally runs the WWS03 `wslDoctor({ probeRuntime: true })`
 //      gate (skipped iff `env.TC_WSL_SKIP_DOCTOR === '1'`); refuses
 //      with `runtime_missing` when the WSL distro does not yet have
-//      `terminal-commander-mcp` installed. No install attempt — that
-//      belongs to WWS06 behind explicit `--install-wsl-runtime`.
+//      `terminal-commander-mcp` installed. INSTALL01 may run one-shot
+//      lazy bootstrap (ensureWslRuntime) unless TC_SKIP_BOOTSTRAP=1.
 //   4. Builds a defensive `filteredEnv` copy of `process.env` with
 //      token-shaped variables stripped (see SECRET_ENV_PATTERNS).
 //   5. Spawns:
@@ -41,6 +41,18 @@
 const { spawn } = require("node:child_process");
 const { detectWsl, DETECT_REASONS } = require("./detect.js");
 const { wslDoctor, DOCTOR_STATUSES } = require("./doctor.js");
+const { ensureWslRuntime, ENSURE_STATUSES } = require("../bootstrap/ensure_wsl_runtime.js");
+const {
+  tryAcquireBootstrapLock,
+  releaseBootstrapLock,
+} = require("../bootstrap/lock.js");
+const { shouldSkipBootstrap } = require("../bootstrap/skip.js");
+const {
+  buildFilteredEnv,
+  isSecretEnvKey,
+  SECRET_ENV_PATTERNS,
+  EXPLICIT_SECRET_KEYS,
+} = require("./filtered_env.js");
 const {
   assertSafeDistroName,
   isSafeDistroName,
@@ -65,60 +77,6 @@ const BRIDGE_STATUSES = Object.freeze({
 // Constant probe string. No operator value is ever interpolated into
 // this string.
 const BRIDGE_PROBE_CMD = "exec terminal-commander-mcp";
-
-// Token-shaped env var keys are stripped from the child's environment
-// before spawn. The bridge does NOT require any of these to function;
-// stripping them is a defensive belt-and-braces measure so a
-// misconfigured Cursor or shell session cannot leak secrets through
-// the WSL pipe.
-const EXPLICIT_SECRET_KEYS = Object.freeze([
-  "NPM_TOKEN",
-  "NPM_TOKEN_TC",
-  "CARGO_REGISTRY_TOKEN",
-  "CARGO_REGISTRY_TOKEN_TC",
-  "RELEASE_PLEASE_TOKEN",
-  "RELEASE_PLEASE_TOKEN_TC",
-  "GITHUB_TOKEN",
-  "GH_TOKEN",
-  "OPENAI_API_KEY",
-  "ANTHROPIC_API_KEY",
-  "SLACK_TOKEN",
-]);
-
-const SECRET_ENV_PATTERNS = Object.freeze([
-  /_TOKEN$/i,
-  /_SECRET$/i,
-  /_PASSWORD$/i,
-  /_PASS$/i,
-  /_API_KEY$/i,
-  /_APIKEY$/i,
-  /^AWS_SESSION_TOKEN$/i,
-  /^AWS_SECRET_ACCESS_KEY$/i,
-]);
-
-function isSecretEnvKey(key) {
-  if (EXPLICIT_SECRET_KEYS.includes(key)) return true;
-  for (const re of SECRET_ENV_PATTERNS) {
-    if (re.test(key)) return true;
-  }
-  return false;
-}
-
-/**
- * Build a defensive copy of the parent env with token-shaped vars
- * removed. The helper never reads the values of the stripped keys.
- *
- * @param {NodeJS.ProcessEnv} parentEnv
- * @returns {NodeJS.ProcessEnv}
- */
-function buildFilteredEnv(parentEnv) {
-  const out = {};
-  for (const key of Object.keys(parentEnv)) {
-    if (isSecretEnvKey(key)) continue;
-    out[key] = parentEnv[key];
-  }
-  return out;
-}
 
 function buildResult(partial) {
   return {
@@ -323,7 +281,36 @@ async function spawnWslBridge(opts) {
       wslPath,
       timeoutMs,
     });
-    if (doc.status === DOCTOR_STATUSES.RUNTIME_MISSING) {
+    let runtimeMissing = doc.status === DOCTOR_STATUSES.RUNTIME_MISSING;
+    if (runtimeMissing && !shouldSkipBootstrap(env)) {
+      const lock = tryAcquireBootstrapLock({ platform, env });
+      if (lock.acquired) {
+        try {
+          const ensure = await (o.ensureWslRuntime || ensureWslRuntime)({
+            distro,
+            platform,
+            env,
+            exec: o.exec,
+            wslPath,
+            timeoutMs,
+          });
+          if (ensure.status === ENSURE_STATUSES.OK) {
+            const retry = await doctor({
+              distro,
+              platform,
+              probeRuntime: true,
+              detectResult,
+              wslPath,
+              timeoutMs,
+            });
+            runtimeMissing = retry.status === DOCTOR_STATUSES.RUNTIME_MISSING;
+          }
+        } finally {
+          releaseBootstrapLock({ platform, env });
+        }
+      }
+    }
+    if (runtimeMissing) {
       return buildResult({
         status: BRIDGE_STATUSES.RUNTIME_MISSING,
         distro,

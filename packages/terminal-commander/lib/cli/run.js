@@ -12,7 +12,12 @@
 
 const { parseArgv, USAGE, DOCTOR_USAGE, SETUP_USAGE, PAIR_USAGE } = require("./parser.js");
 const { runDoctor } = require("./doctor.js");
-const { runSetupCursorWsl } = require("./setup_cursor_wsl.js");
+const {
+  runSetupHarness,
+  runSetupDefault,
+  runSetupCursorWslDeprecated,
+} = require("./setup_harness.js");
+const { runDoctorHarness } = require("./doctor_harness.js");
 const { runPairCreate } = require("./pair_create.js");
 const { runPairAccept } = require("./pair_accept.js");
 
@@ -56,6 +61,9 @@ async function run(opts) {
   }
   switch (parsed.command) {
     case "doctor":
+      if (parsed.subcommand === "harness") {
+        return runDoctorHarness({ platform, env });
+      }
       return runDoctor({
         subcommand: parsed.subcommand,
         flags: parsed.flags,
@@ -64,19 +72,32 @@ async function run(opts) {
         doctor: o.doctor,
       });
     case "setup":
-      if (parsed.subcommand !== "cursor-wsl") {
-        return helpResult(SETUP_USAGE);
+      if (parsed.subcommand === "cursor-wsl") {
+        return runSetupCursorWslDeprecated({
+          flags: parsed.flags,
+          platform,
+          env,
+          detect: o.detect,
+          doctor: o.doctor,
+          installExec: o.installExec,
+          exec: o.installExec,
+          writeConfig: o.writeConfig,
+          writeState: o.writeState,
+        });
       }
-      return runSetupCursorWsl({
-        flags: parsed.flags,
-        platform,
-        env,
-        detect: o.detect,
-        doctor: o.doctor,
-        installExec: o.installExec,
-        writeConfig: o.writeConfig,
-        writeState: o.writeState,
-      });
+      if (parsed.subcommand === "harness" || parsed.subcommand == null) {
+        return runSetupHarness({
+          flags: parsed.flags,
+          platform,
+          env,
+          detect: o.detect,
+          doctor: o.doctor,
+          installExec: o.installExec,
+          ensureWslRuntime: o.ensureWslRuntime,
+          writeState: o.writeState,
+        });
+      }
+      return helpResult(SETUP_USAGE);
     case "pair":
       if (parsed.subcommand == null) {
         return helpResult(PAIR_USAGE);

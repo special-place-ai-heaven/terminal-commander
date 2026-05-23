@@ -21,11 +21,11 @@
 #   When release-please reports `releases_created == 'true'`, three
 #   downstream jobs run on the same workflow invocation:
 #     1. publish-linux-x64   — builds `@terminal-commander/linux-x64`
-#                              binaries and `npm publish --tag beta`.
+#                              binaries and `npm publish` (dist-tag latest).
 #     2. publish-linux-arm64 — builds `@terminal-commander/linux-arm64`
-#                              binaries and `npm publish --tag beta`.
+#                              binaries and `npm publish`.
 #     3. publish-root        — depends on the two platform jobs above;
-#                              `npm publish --tag beta` for the root
+#                              `npm publish` for the root wrapper (latest).
 #                              `terminal-commander` wrapper.
 #   First npm publish uses `secrets.NPM_TOKEN_TC` via
 #   `NODE_AUTH_TOKEN` (trusted-publisher OIDC not yet configured on
@@ -247,13 +247,13 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --tag beta --access public
+      - name: npm publish --access public
         shell: bash
         working-directory: packages/terminal-commander-linux-x64
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
-          npm publish --tag beta --access public
+          npm publish --access public
 
   # ----------------------------------------------------------------
   # JOB 3 — publish-linux-arm64 (NPM07).
@@ -351,13 +351,13 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --tag beta --access public
+      - name: npm publish --access public
         shell: bash
         working-directory: packages/terminal-commander-linux-arm64
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
-          npm publish --tag beta --access public
+          npm publish --access public
 
   # ----------------------------------------------------------------
   # JOB 4 — publish-root (NPM07).
@@ -431,10 +431,10 @@ jobs:
           console.log(`deps-exact-pin: ok`);
           NODE
 
-      - name: npm publish --tag beta
+      - name: npm publish
         shell: bash
         working-directory: packages/terminal-commander
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
-          npm publish --tag beta
+          npm publish
