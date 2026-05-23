@@ -378,9 +378,32 @@ the pair commands ever being run.
   live whitelist, and runs `child_process.spawn` with
   `shell: false`. No other site in the wrapper invokes
   `wsl.exe`.
-- `lib/wsl/detect.js` (WWS03): runs `wsl.exe -l -v` only.
-- `lib/wsl/doctor.js` (WWS03): runs `wsl.exe -d <distro> -- bash
-  -lc 'command -v terminal-commanderd'` etc. Read-only diagnostics.
+- `lib/wsl/distro-name.js` (WWS03, **landed**): exports
+  `isSafeDistroName` + `assertSafeDistroName`. Conservative
+  whitelist `^[A-Za-z0-9._-]{1,64}$`; rejects whitespace, quote,
+  semicolon, pipe, dollar, backtick, slash, backslash, NUL, and
+  every other shell metacharacter. The only operator-supplied
+  string that the WWS chain ever passes to `wsl.exe`.
+- `lib/wsl/detect.js` (WWS03, **landed**): runs `wsl.exe -l -v`
+  only. Parses verbose output (default-marker `*`, state, WSL
+  version) and tolerates UTF-16 LE BOM + NUL-padded ASCII + CRLF.
+  Executor-injectable for tests. Returns a typed
+  `{ host_platform, wsl_callable, default_distro, distros, reason }`
+  record with `reason` in the closed enum
+  `{ ok, unsupported_host, wsl_not_found, no_distros,
+  wsl_command_failed, check_timeout }`.
+- `lib/wsl/doctor.js` (WWS03, **landed**): read-only WSL doctor.
+  Validates the operator-supplied distro twice (character
+  whitelist + live `detectWsl()` membership) before passing it as
+  a single argv element after `-d`. Optional inside-distro probe
+  (`opts.probeRuntime === true`) runs exactly one constant
+  command — `command -v terminal-commander-mcp` — and never
+  concatenates operator input into the `bash -lc` argument.
+  Returns a typed `{ status, reason, distro, runtime_present,
+  hint }` record with `status` covering
+  `{ ok, unsupported_host, wsl_not_found, no_distros,
+  distro_not_found, unsafe_distro_name, wsl_command_failed,
+  runtime_missing, runtime_present, doctor_not_run, check_timeout }`.
 - `lib/cursor/config.js` (WWS05): pure JSON merge + validate. No
   spawn, no network.
 - `lib/cursor/write.js` (WWS05): atomic write + backup. No
@@ -585,9 +608,14 @@ WWS01 contract by document path AND date.
 - **WWS02**: widen root `os` to `["linux", "win32"]`; platform
   packages unchanged; resolver returns `{ reason: "bridge_required" }`
   on `win32`; the three shims branch on Windows per §4.1.
-- **WWS03**: `lib/wsl/detect.js` + `lib/wsl/doctor.js`; runs
-  `wsl.exe` only; distro whitelist; UTF-16 LE BOM tolerated;
-  read-only.
+- **WWS03** (**landed**): `lib/wsl/distro-name.js` +
+  `lib/wsl/detect.js` + `lib/wsl/doctor.js`; runs `wsl.exe` only;
+  distro whitelist `^[A-Za-z0-9._-]{1,64}$`; UTF-16 LE BOM +
+  NUL-padded ASCII + CRLF tolerated; read-only; default
+  `probeRuntime` is `false` (doctor returns the `OK` /
+  `doctor_not_run` pair until probing is explicitly opted in);
+  helpers are library-only (the three `bin/*` shims stay
+  byte-identical to the WWS02 baseline).
 - **WWS04**: `lib/wsl/spawn.js` — single entry-point spawn helper.
   `shell: false`, argv array only, `windowsHide: true`,
   whitelist-validated distro. `terminal-commander-mcp` shim

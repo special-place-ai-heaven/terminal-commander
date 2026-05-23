@@ -268,7 +268,11 @@ the bridge end-to-end.
 The full design is locked in
 [`docs/release/windows-wsl-bridge-contract.md`](../release/windows-wsl-bridge-contract.md)
 (WWS01). The implementation is staged across WWS02 (root npm
-package widened to install on Windows), WWS04 (the
+package widened to install on Windows), WWS03 (the read-only
+discovery layer: `lib/wsl/distro-name.js` distro safety
+whitelist, `lib/wsl/detect.js` `wsl.exe -l -v` parser, and
+`lib/wsl/doctor.js` read-only `terminal-commander-mcp`-presence
+probe — library-only, no CLI surface yet), WWS04 (the
 `terminal-commander-mcp` bridge shim that actually invokes
 `wsl.exe`), WWS05 (the Cursor config writer), and WWS06 (the
 setup / doctor / pair CLI). Until WWS04 ships, the three commands

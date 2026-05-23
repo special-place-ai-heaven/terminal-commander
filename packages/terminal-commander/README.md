@@ -62,6 +62,47 @@ writer lands in WWS05; the setup CLI lands in WWS06. The contract
 locking all of this is
 [`docs/release/windows-wsl-bridge-contract.md`](https://github.com/special-place-administrator/terminal-commander/blob/main/docs/release/windows-wsl-bridge-contract.md).
 
+### Windows discovery helpers (WWS03)
+
+WWS03 adds a JS-only, read-only Windows discovery helper layer
+under `lib/wsl/`:
+
+- `lib/wsl/distro-name.js` exports `isSafeDistroName(name)` and
+  `assertSafeDistroName(name)`. Distro names accepted by future
+  bridge / setup callers must match `^[A-Za-z0-9._-]{1,64}$` —
+  whitespace, quotes, semicolons, pipes, dollars, backticks,
+  slashes, backslashes, and NUL bytes are all rejected.
+- `lib/wsl/detect.js` exports `detectWsl(opts)`. Runs only
+  `wsl.exe -l -v` (`shell: false`, `windowsHide: true`, argv
+  array). Parses verbose output (default-marker `*`, state, WSL
+  version). Tolerates UTF-16 LE BOM + NUL-padded ASCII + CRLF.
+  Returns `{ host_platform, wsl_callable, default_distro,
+  distros, reason }` with `reason` in `{ ok, unsupported_host,
+  wsl_not_found, no_distros, wsl_command_failed, check_timeout
+  }`.
+- `lib/wsl/doctor.js` exports `wslDoctor(opts)`. Validates the
+  operator-supplied distro twice (character whitelist + live
+  `detectWsl()` membership) before passing it as a single argv
+  element after `-d`. The optional inside-distro runtime probe is
+  off by default (`probeRuntime: false`); when enabled it runs
+  exactly one constant command — `command -v
+  terminal-commander-mcp` — and never concatenates operator input
+  into the `bash -lc` argument. Returns `{ status, reason, distro,
+  runtime_present, hint }` with `status` covering `{ ok,
+  unsupported_host, wsl_not_found, no_distros, distro_not_found,
+  unsafe_distro_name, wsl_command_failed, runtime_missing,
+  runtime_present, doctor_not_run, check_timeout }`.
+
+WWS03 ships these helpers as library-only modules — the three
+`bin/` shims still refuse on Windows with the WWS02 bounded-stderr
++ exit 64 behaviour. WWS04 (`lib/wsl/spawn.js`) owns the actual
+bridge spawn; WWS06 (`terminal-commander setup cursor-wsl` /
+`doctor` / `pair`) owns the CLI surface and the optional
+`%LOCALAPPDATA%\terminal-commander\setup.json` writer. WWS03 itself
+performs no file writes, no install, no sudo, no credential
+handling, no Cursor configuration, no pairing, and no network
+calls.
+
 ## Commands
 
 | Command | Purpose |
