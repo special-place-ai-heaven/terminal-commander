@@ -17,19 +17,20 @@
 #   the matching `v<version>` tag on the SAME workflow run (because
 #   the merge commit triggers `push: main`).
 #
-# NPM07 portion (new):
+# NPM07 portion (publish jobs):
 #   When release-please reports `releases_created == 'true'`, three
 #   downstream jobs run on the same workflow invocation:
 #     1. publish-linux-x64   — builds `@terminal-commander/linux-x64`
-#                              binaries and `npm publish --provenance`.
+#                              binaries and `npm publish --tag beta`.
 #     2. publish-linux-arm64 — builds `@terminal-commander/linux-arm64`
-#                              binaries and `npm publish --provenance`.
+#                              binaries and `npm publish --tag beta`.
 #     3. publish-root        — depends on the two platform jobs above;
-#                              `npm publish --provenance` for the root
+#                              `npm publish --tag beta` for the root
 #                              `terminal-commander` wrapper.
-#   All three publish jobs use npm trusted publishing via OIDC; the
-#   only secret used is `secrets.GITHUB_TOKEN`. No `NPM_TOKEN`, no
-#   `NPM_TOKEN_TC`, no `CARGO_REGISTRY_TOKEN`, no PAT.
+#   First npm publish uses `secrets.NPM_TOKEN_TC` via
+#   `NODE_AUTH_TOKEN` (trusted-publisher OIDC not yet configured on
+#   npmjs.com for all three package names). No `CARGO_REGISTRY_TOKEN`,
+#   no PAT, no `RELEASE_PLEASE_TOKEN_TC`.
 #
 # This workflow does NOT:
 #   - reference any long-lived secret (NPM_TOKEN, NPM_TOKEN_TC,
@@ -39,8 +40,8 @@
 #     non-publishing CI gate),
 #   - auto-merge the release PR,
 #   - touch `crates/**`, `Cargo.toml`, `Cargo.lock`, or `scripts/**`,
-#   - request `id-token: write` for the release-please job; only the
-#     publish jobs get OIDC permissions and only when needed.
+#   - request `id-token: write` (OIDC may return after trusted
+#     publisher is configured on npmjs.com for all three names).
 #
 # Action pin doctrine (NPM06):
 #   `googleapis/release-please-action` is pinned to immutable commit
@@ -117,10 +118,9 @@ jobs:
   # Builds the three Rust binaries for x86_64-unknown-linux-gnu,
   # stages them into `packages/terminal-commander-linux-x64/bin/`,
   # and publishes `@terminal-commander/linux-x64` to npm via
-  # trusted publishing.
+  # npm publish via NPM_TOKEN_TC.
   #
-  # Permissions: id-token: write (OIDC for npm trusted publishing)
-  #              contents: read  (checkout)
+  # Permissions: contents: read (checkout)
   # ----------------------------------------------------------------
   publish-linux-x64:
     name: publish-linux-x64
@@ -128,7 +128,6 @@ jobs:
     if: needs.release-please.outputs.releases_created == 'true'
     runs-on: ubuntu-24.04
     permissions:
-      id-token: write
       contents: read
     steps:
       - name: Checkout (released SHA on main)
@@ -206,11 +205,13 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --provenance --tag beta --access public
+      - name: npm publish --tag beta --access public
         shell: bash
         working-directory: packages/terminal-commander-linux-x64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
-          npm publish --provenance --tag beta --access public
+          npm publish --tag beta --access public
 
   # ----------------------------------------------------------------
   # JOB 3 — publish-linux-arm64 (NPM07).
@@ -229,7 +230,6 @@ jobs:
     if: needs.release-please.outputs.releases_created == 'true'
     runs-on: ubuntu-24.04-arm
     permissions:
-      id-token: write
       contents: read
     steps:
       - name: Checkout (released SHA on main)
@@ -303,11 +303,13 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --provenance --tag beta --access public
+      - name: npm publish --tag beta --access public
         shell: bash
         working-directory: packages/terminal-commander-linux-arm64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
-          npm publish --provenance --tag beta --access public
+          npm publish --tag beta --access public
 
   # ----------------------------------------------------------------
   # JOB 4 — publish-root (NPM07).
@@ -329,7 +331,6 @@ jobs:
     if: needs.release-please.outputs.releases_created == 'true'
     runs-on: ubuntu-24.04
     permissions:
-      id-token: write
       contents: read
     steps:
       - name: Checkout (released SHA on main)
@@ -375,8 +376,10 @@ jobs:
           console.log(`deps-exact-pin: ok`);
           NODE
 
-      - name: npm publish --provenance --tag beta
+      - name: npm publish --tag beta
         shell: bash
         working-directory: packages/terminal-commander
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
-          npm publish --provenance --tag beta
+          npm publish --tag beta
