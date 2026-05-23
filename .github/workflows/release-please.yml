@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The Terminal Commander Authors
 #
-# NPM06 — release-please manifest-mode workflow.
+# release-please + npm trusted publishing (NPM06 + NPM07).
 #
-# Purpose:
+# NPM06 portion:
 #   On every push to `main`, run release-please in manifest mode so
 #   Conventional Commits drive a single shared-version release PR
 #   across the three npm packages:
@@ -14,16 +14,33 @@
 #   The release PR carries the version bump on each `package.json`
 #   plus a CHANGELOG entry. When (and only when) the operator merges
 #   the release PR, release-please creates the GitHub Release and
-#   the matching `v<version>` tag.
+#   the matching `v<version>` tag on the SAME workflow run (because
+#   the merge commit triggers `push: main`).
+#
+# NPM07 portion (new):
+#   When release-please reports `releases_created == 'true'`, three
+#   downstream jobs run on the same workflow invocation:
+#     1. publish-linux-x64   — builds `@terminal-commander/linux-x64`
+#                              binaries and `npm publish --provenance`.
+#     2. publish-linux-arm64 — builds `@terminal-commander/linux-arm64`
+#                              binaries and `npm publish --provenance`.
+#     3. publish-root        — depends on the two platform jobs above;
+#                              `npm publish --provenance` for the root
+#                              `terminal-commander` wrapper.
+#   All three publish jobs use npm trusted publishing via OIDC; the
+#   only secret used is `secrets.GITHUB_TOKEN`. No `NPM_TOKEN`, no
+#   `NPM_TOKEN_TC`, no `CARGO_REGISTRY_TOKEN`, no PAT.
 #
 # This workflow does NOT:
-#   - publish to the npm registry (NPM07 owns publishing),
-#   - reference or read any `NPM_TOKEN` or other long-lived secret,
-#   - request `id-token: write` (no OIDC at NPM06; NPM07 owns that),
-#   - call the NPM05 `npm-binary-build` workflow,
+#   - reference any long-lived secret (NPM_TOKEN, NPM_TOKEN_TC,
+#     CARGO_REGISTRY_TOKEN_TC, RELEASE_PLEASE_TOKEN_TC),
+#   - publish to crates.io,
+#   - call the NPM05 `npm-binary-build` workflow (kept separate as a
+#     non-publishing CI gate),
 #   - auto-merge the release PR,
 #   - touch `crates/**`, `Cargo.toml`, `Cargo.lock`, or `scripts/**`,
-#   - install a Node toolchain, run npm, or execute the package code.
+#   - request `id-token: write` for the release-please job; only the
+#     publish jobs get OIDC permissions and only when needed.
 #
 # Action pin doctrine (NPM06):
 #   `googleapis/release-please-action` is pinned to immutable commit
@@ -31,6 +48,16 @@
 #   tag `v4.4.1` (the most recent v4 patch on 2026-05-23). v4 is
 #   chosen over v5 because the manifest-mode shape used in this
 #   chain matches the v4 README and the Symforge precedent.
+#
+# Binary-source decision (NPM07):
+#   The publish jobs build the three Rust release binaries INLINE
+#   (from the merge-commit checkout of `main`, which is the same SHA
+#   that release-please tagged). The publish workflow does NOT
+#   download artifacts from the `npm-binary-build` workflow; that
+#   keeps the npm provenance attestation tied to THIS workflow's
+#   build steps and avoids cross-workflow artifact-retention
+#   coupling. `npm-binary-build` remains an independent CI gate
+#   that runs on every push and never publishes.
 
 name: release-please
 
@@ -40,23 +67,39 @@ on:
       - main
   workflow_dispatch:
 
-# Release-please needs to commit version bumps + the CHANGELOG into a
-# release PR (`contents: write`) and to open / update that PR
-# (`pull-requests: write`). No publish surface. No id-token.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: release-please-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  RUST_TOOLCHAIN: "1.95.0"
+  NODE_VERSION: "20"
+
 jobs:
+  # ----------------------------------------------------------------
+  # JOB 1 — release-please (NPM06).
+  #
+  # Owns the release PR + tag/Release surface. Needs `contents: write`
+  # to push version bumps + CHANGELOG into the release PR, and
+  # `pull-requests: write` to open / update that PR. No id-token.
+  # ----------------------------------------------------------------
   release-please:
     name: release-please
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      paths_released: ${{ steps.release.outputs.paths_released }}
+      tag_name: ${{ steps.release.outputs['packages/terminal-commander--tag_name'] }}
+      version: ${{ steps.release.outputs['packages/terminal-commander--version'] }}
     steps:
       - name: release-please (manifest mode)
+        id: release
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
         with:
           # Manifest mode: both files live under .github/ per the
@@ -66,3 +109,274 @@ jobs:
           config-file: .github/release-please-config.json
           manifest-file: .github/.release-please-manifest.json
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ----------------------------------------------------------------
+  # JOB 2 — publish-linux-x64 (NPM07).
+  #
+  # Runs only when release-please created a release on this run.
+  # Builds the three Rust binaries for x86_64-unknown-linux-gnu,
+  # stages them into `packages/terminal-commander-linux-x64/bin/`,
+  # and publishes `@terminal-commander/linux-x64` to npm via
+  # trusted publishing.
+  #
+  # Permissions: id-token: write (OIDC for npm trusted publishing)
+  #              contents: read  (checkout)
+  # ----------------------------------------------------------------
+  publish-linux-x64:
+    name: publish-linux-x64
+    needs: release-please
+    if: needs.release-please.outputs.releases_created == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout (released SHA on main)
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (${{ env.RUST_TOOLCHAIN }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-please-publish-linux-x64
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: cargo build --release (x86_64-unknown-linux-gnu)
+        run: |
+          cargo build --release \
+            --target x86_64-unknown-linux-gnu \
+            -p terminal-commanderd \
+            -p terminal-commander-mcp \
+            -p terminal-commander-cli
+
+      - name: Stage real binaries into platform package
+        shell: bash
+        run: |
+          set -e
+          bin_dir="packages/terminal-commander-linux-x64/bin"
+          src_dir="target/x86_64-unknown-linux-gnu/release"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            if [ ! -x "$src_dir/$bin" ]; then
+              echo "::error::expected release binary not found: $src_dir/$bin"
+              exit 1
+            fi
+            cp "$src_dir/$bin" "$bin_dir/$bin"
+            chmod +x "$bin_dir/$bin"
+          done
+          # Remove the committed .placeholder files from the workspace
+          # tree (NOT from the repo) so they do not end up inside the
+          # tarball alongside the real binaries; the `files: ["bin/"]`
+          # whitelist would otherwise include them.
+          rm -f "$bin_dir"/*.placeholder
+          ls -la "$bin_dir"
+
+      - name: Smoke — staged binaries answer --help
+        shell: bash
+        run: |
+          set -e
+          bin_dir="packages/terminal-commander-linux-x64/bin"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            "./$bin_dir/$bin" --help > /tmp/help-$bin.log 2>&1 || {
+              echo "::error::$bin --help failed";
+              head -50 /tmp/help-$bin.log;
+              exit 1;
+            }
+          done
+
+      - name: Confirm package version matches release-please output
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -e
+          actual=$(node -p "require('./packages/terminal-commander-linux-x64/package.json').version")
+          if [ "$actual" != "$EXPECTED_VERSION" ]; then
+            echo "::error::version mismatch: package.json=$actual release-please=$EXPECTED_VERSION"
+            exit 1
+          fi
+          echo "version-match: $actual"
+
+      - name: npm publish --provenance --tag beta --access public
+        shell: bash
+        working-directory: packages/terminal-commander-linux-x64
+        run: |
+          npm publish --provenance --tag beta --access public
+
+  # ----------------------------------------------------------------
+  # JOB 3 — publish-linux-arm64 (NPM07).
+  #
+  # Native arm64 build on the GitHub-hosted `ubuntu-24.04-arm`
+  # runner. NPM05's live evidence (run 26318082726) confirmed the
+  # runner label is available for this repository. If it ever
+  # becomes unavailable, this job fails with `No runner matching
+  # the specified labels was found: ubuntu-24.04-arm` — that is the
+  # recorded blocker, not a workflow defect. Do NOT fake arm64
+  # execution via QEMU; NPM07 follows the same honesty rule as NPM05.
+  # ----------------------------------------------------------------
+  publish-linux-arm64:
+    name: publish-linux-arm64
+    needs: release-please
+    if: needs.release-please.outputs.releases_created == 'true'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout (released SHA on main)
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (${{ env.RUST_TOOLCHAIN }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-please-publish-linux-arm64
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: cargo build --release (aarch64-unknown-linux-gnu)
+        run: |
+          cargo build --release \
+            --target aarch64-unknown-linux-gnu \
+            -p terminal-commanderd \
+            -p terminal-commander-mcp \
+            -p terminal-commander-cli
+
+      - name: Stage real binaries into platform package
+        shell: bash
+        run: |
+          set -e
+          bin_dir="packages/terminal-commander-linux-arm64/bin"
+          src_dir="target/aarch64-unknown-linux-gnu/release"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            if [ ! -x "$src_dir/$bin" ]; then
+              echo "::error::expected release binary not found: $src_dir/$bin"
+              exit 1
+            fi
+            cp "$src_dir/$bin" "$bin_dir/$bin"
+            chmod +x "$bin_dir/$bin"
+          done
+          rm -f "$bin_dir"/*.placeholder
+          ls -la "$bin_dir"
+
+      - name: Smoke — staged binaries answer --help (native arm64)
+        shell: bash
+        run: |
+          set -e
+          bin_dir="packages/terminal-commander-linux-arm64/bin"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            "./$bin_dir/$bin" --help > /tmp/help-$bin.log 2>&1 || {
+              echo "::error::$bin --help failed";
+              head -50 /tmp/help-$bin.log;
+              exit 1;
+            }
+          done
+
+      - name: Confirm package version matches release-please output
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -e
+          actual=$(node -p "require('./packages/terminal-commander-linux-arm64/package.json').version")
+          if [ "$actual" != "$EXPECTED_VERSION" ]; then
+            echo "::error::version mismatch: package.json=$actual release-please=$EXPECTED_VERSION"
+            exit 1
+          fi
+          echo "version-match: $actual"
+
+      - name: npm publish --provenance --tag beta --access public
+        shell: bash
+        working-directory: packages/terminal-commander-linux-arm64
+        run: |
+          npm publish --provenance --tag beta --access public
+
+  # ----------------------------------------------------------------
+  # JOB 4 — publish-root (NPM07).
+  #
+  # Depends on BOTH platform publishes succeeding. Only then does the
+  # root wrapper publish; its `optionalDependencies` pin the exact
+  # platform-package versions, so publishing the root before the
+  # platform packages would resolve to a non-existent dep.
+  #
+  # The root package has no Rust binaries to build; the `bin/` shims
+  # and `lib/resolve-binary.js` are already in the working tree.
+  # ----------------------------------------------------------------
+  publish-root:
+    name: publish-root
+    needs:
+      - release-please
+      - publish-linux-x64
+      - publish-linux-arm64
+    if: needs.release-please.outputs.releases_created == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout (released SHA on main)
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Run resolver unit tests (root wrapper)
+        shell: bash
+        working-directory: packages/terminal-commander
+        run: |
+          npm test
+
+      - name: Confirm package version + optionalDependencies sync
+        shell: bash
+        working-directory: packages/terminal-commander
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -e
+          node <<'NODE'
+          const pkg = require('./package.json');
+          const expected = process.env.EXPECTED_VERSION;
+          if (pkg.version !== expected) {
+            console.error(`version mismatch: ${pkg.version} != ${expected}`);
+            process.exit(1);
+          }
+          const deps = pkg.optionalDependencies || {};
+          for (const name of [
+            '@terminal-commander/linux-x64',
+            '@terminal-commander/linux-arm64',
+          ]) {
+            if (deps[name] !== expected) {
+              console.error(`${name} optionalDependency = ${deps[name]} != ${expected}`);
+              process.exit(1);
+            }
+          }
+          console.log(`version-match: ${pkg.version}`);
+          console.log(`deps-exact-pin: ok`);
+          NODE
+
+      - name: npm publish --provenance --tag beta
+        shell: bash
+        working-directory: packages/terminal-commander
+        run: |
+          npm publish --provenance --tag beta

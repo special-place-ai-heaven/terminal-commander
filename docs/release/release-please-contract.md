@@ -223,10 +223,24 @@ contract is auditable end-to-end; NPM06 does not implement step 3.
 - [x] Operator preconditions from NPM02 §1.2 still apply (org claim
       gates NPM07, not NPM06).
 
-## 15. NPM07 hand-off
+## 15. NPM07 hand-off (superseded by NPM07; see note)
 
-NPM07 will add a SEPARATE workflow file (path TBD by NPM07; not
-prescribed at NPM06) that:
+> **Superseded 2026-05-23 by NPM07.** The NPM06 hand-off note below
+> originally described a SEPARATE `on: release.published` workflow.
+> NPM07's user-locked design moved publishing INTO this same
+> `release-please.yml` workflow as downstream jobs gated by
+> `release-please.outputs.releases_created == 'true'`. The reason
+> recorded in `docs/release/npm-trusted-publishing-contract.md` §2
+> is the GitHub Actions rule that `GITHUB_TOKEN`-created release
+> events do not trigger downstream `on: release` workflows; and the
+> user explicitly forbade switching release-please to a PAT.
+> The NPM06 release-please job itself is unchanged — only the
+> "where does publish live" decision was deferred to NPM07.
+
+Historical NPM06 hand-off note (kept for audit, not authoritative):
+
+NPM07 was originally going to add a SEPARATE workflow file
+(path TBD; not prescribed at NPM06) that:
 
 - Triggers on `release.published`.
 - Sets `permissions: id-token: write` + `contents: read`.
@@ -237,4 +251,7 @@ prescribed at NPM06) that:
 - Has no `NPM_TOKEN` unless NPM07 records an explicit fallback
   approval.
 
-NPM06 does NOT pre-create that workflow.
+NPM06 did NOT pre-create that workflow. NPM07's actual implementation
+lives inside this same `release-please.yml`; see
+`docs/release/npm-trusted-publishing-contract.md` for the binding
+contract.
