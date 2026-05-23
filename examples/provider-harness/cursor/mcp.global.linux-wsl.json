@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "terminal-commander": {
+      "command": "wsl",
+      "type": "stdio",
+      "args": [
+        "-d",
+        "Ubuntu-24.04",
+        "bash",
+        "-lc",
+        "terminal-commander-mcp"
+      ]
+    }
+  }
+}

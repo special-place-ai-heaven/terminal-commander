@@ -11,6 +11,10 @@ Per-provider walk-throughs:
 - [`codex-cli.md`](codex-cli.md) — Codex CLI MCP stdio config.
 - [`claude-code.md`](claude-code.md) — Claude Code MCP stdio config
   (`--mcp-config` flag + persistent settings).
+- [`cursor.md`](cursor.md) — Cursor MCP stdio config (native Linux,
+  inside-WSL, and Windows-Cursor-to-WSL bridge). Copy-pasteable
+  configs in
+  [`examples/provider-harness/cursor/`](../../examples/provider-harness/cursor/).
 
 A local daemon + MCP stdio smoke (no provider in the loop) lives at
 [`scripts/smoke/verify-runtime-smoke.sh`](../../scripts/smoke/verify-runtime-smoke.sh).
@@ -115,6 +119,9 @@ shapes.
 |---|---|
 | Claude Code stanza | live (TC27) |
 | Codex CLI stanza | live (TC27) |
+| Cursor MCP stanza | live (NPM08, 2026-05-23) — see [`cursor.md`](cursor.md) + [`examples/provider-harness/cursor/`](../../examples/provider-harness/cursor/) |
+| Cursor provider smoke transcript | Not Run (operator-driven; no scripted MCP entry point in Cursor today) |
 | Generic MCP-client recipe | live (TC27) |
 | examples/*.md walk-throughs | live (TC27) |
+| examples/provider-harness/cursor/*.json | live (NPM08) |
 | rmcp stdio adapter wiring | reserved (TC23 follow-up) |

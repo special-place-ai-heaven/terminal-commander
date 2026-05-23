@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "terminal-commander": {
+      "command": "terminal-commander-mcp",
+      "type": "stdio",
+      "env": {
+        "TC_SOCKET": "${TC_DATA}/terminal-commanderd.sock"
+      }
+    }
+  }
+}
