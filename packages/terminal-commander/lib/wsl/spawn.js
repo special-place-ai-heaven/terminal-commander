@@ -58,6 +58,7 @@ const {
   isSafeDistroName,
   UNSAFE_DISTRO_NAME,
 } = require("./distro-name.js");
+const { BRIDGE_PROBE_CMD } = require("../bootstrap/constants.js");
 
 const BRIDGE_STATUSES = Object.freeze({
   OK: "ok",
@@ -73,10 +74,6 @@ const BRIDGE_STATUSES = Object.freeze({
   BRIDGE_SPAWN_FAILED: "bridge_spawn_failed",
   BRIDGE_CHILD_EXIT: "bridge_child_exit",
 });
-
-// Constant probe string. No operator value is ever interpolated into
-// this string.
-const BRIDGE_PROBE_CMD = "exec terminal-commander-mcp";
 
 function buildResult(partial) {
   return {

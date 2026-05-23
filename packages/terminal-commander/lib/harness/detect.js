@@ -11,6 +11,7 @@ const { getCursorGlobalConfigPath } = require("../cursor/config.js");
 const {
   codexConfigPath,
   claudeCodeSettingsPath,
+  claudeCodeMcpConfigPath,
   claudeDesktopConfigPath,
   homeDir,
   expandHome,
@@ -49,10 +50,14 @@ function detectCodex(opts) {
 }
 
 function detectClaudeCode(opts) {
-  const p = claudeCodeSettingsPath(opts);
-  const claudeDir = path.dirname(p);
-  if (pathExists(p) || pathExists(claudeDir)) {
-    return { detected: true, reason: "claude_settings_or_dir", config_path: p };
+  const mcpPath = claudeCodeMcpConfigPath(opts);
+  const settingsPath = claudeCodeSettingsPath(opts);
+  const claudeDir = path.dirname(settingsPath);
+  if (pathExists(mcpPath)) {
+    return { detected: true, reason: "claude_json", config_path: mcpPath };
+  }
+  if (pathExists(settingsPath) || pathExists(claudeDir)) {
+    return { detected: true, reason: "claude_settings_or_dir", config_path: mcpPath };
   }
   return { detected: false, reason: "not_found" };
 }

@@ -32,7 +32,15 @@
 
 const { spawn } = require("child_process");
 const { resolveBinary, formatResolveError } = require("../lib/resolve-binary.js");
+const { isWindowsMountedShimPath, tryReexecNativeLinuxMcp } = require("../lib/wsl/native-mcp.js");
 
+if (isWindowsMountedShimPath(__filename)) {
+  if (tryReexecNativeLinuxMcp(process.argv.slice(2))) {
+    // Native Linux MCP owns stdio until exit.
+  } else {
+    process.exit(64);
+  }
+} else {
 const result = resolveBinary({ binary: "terminal-commander-mcp" });
 
 if (result.reason === "bridge_required") {
@@ -83,4 +91,5 @@ if (result.reason === "bridge_required") {
     );
     process.exit(126);
   });
+}
 }

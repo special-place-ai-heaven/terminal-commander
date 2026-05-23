@@ -16,6 +16,12 @@ function entryConfigured(id, opts) {
     const text = fs.readFileSync(d.config_path, "utf8");
     if (id === "cursor") return text.includes("terminal-commander-mcp");
     if (id === "codex-cli") return text.includes("[mcp_servers.terminal_commander]");
+    if (id === "claude-code") {
+      return (
+        text.includes("terminal-commander-mcp") &&
+        text.includes('"terminal_commander"')
+      );
+    }
     return text.includes("terminal-commander-mcp");
   } catch (_e) {
     return false;

@@ -34,8 +34,14 @@ function codexConfigPath(opts) {
   return expandHome("~/.codex/config.toml", opts);
 }
 
+/** General Claude Code settings (permissions, hooks) — not MCP. */
 function claudeCodeSettingsPath(opts) {
   return expandHome("~/.claude/settings.json", opts);
+}
+
+/** User-scope MCP servers for Claude Code (official: ~/.claude.json). */
+function claudeCodeMcpConfigPath(opts) {
+  return expandHome("~/.claude.json", opts);
 }
 
 function claudeDesktopConfigPath(opts) {
@@ -64,5 +70,6 @@ module.exports = {
   expandHome,
   codexConfigPath,
   claudeCodeSettingsPath,
+  claudeCodeMcpConfigPath,
   claudeDesktopConfigPath,
 };

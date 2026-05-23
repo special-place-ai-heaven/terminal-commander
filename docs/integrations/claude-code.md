@@ -58,10 +58,10 @@ claude --mcp-config terminal-commander.mcp.json
 ## Step 2b — persistent settings.json entry
 
 To make Terminal Commander always available, add the same block to
-your Claude Code settings file (`~/.claude/settings.json` on Linux,
-`~/Library/Application Support/Claude/claude_desktop_config.json` on
-macOS, or wherever Claude Code documents the canonical location for
-your install):
+your Claude Code **MCP** file (`~/.claude.json` on all platforms).
+Do not put `mcpServers` in `~/.claude/settings.json` — that file is
+for permissions/hooks; MCP lives in `.claude.json` per
+[Claude Code settings](https://code.claude.com/docs/en/settings).
 
 ```jsonc
 {

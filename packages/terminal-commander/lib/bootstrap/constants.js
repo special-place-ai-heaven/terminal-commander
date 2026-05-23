@@ -13,8 +13,13 @@ const INSTALL_PROBE_CMD = `${LINUX_PATH_PREFIX}npm install -g terminal-commander
 
 const RUNTIME_VERIFY_CMD = `${LINUX_PATH_PREFIX}command -v terminal-commander-mcp && node -e "const a=process.arch==='arm64'?'arm64':'x64';require.resolve('@terminal-commander/linux-'+a)"`;
 
+// WSL must not resolve terminal-commander-mcp from /mnt/c (Windows npm shim);
+// that runs Node as linux and fails optionalDependency resolve.
+const BRIDGE_PROBE_CMD = `${LINUX_PATH_PREFIX}exec terminal-commander-mcp`;
+
 module.exports = {
   LINUX_PATH_PREFIX,
   INSTALL_PROBE_CMD,
   RUNTIME_VERIFY_CMD,
+  BRIDGE_PROBE_CMD,
 };

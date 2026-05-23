@@ -88,8 +88,9 @@ test("BRIDGE_STATUSES exposes the full status enum", () => {
   );
 });
 
-test("BRIDGE_PROBE_CMD is the constant 'exec terminal-commander-mcp'", () => {
-  assert.equal(BRIDGE_PROBE_CMD, "exec terminal-commander-mcp");
+test("BRIDGE_PROBE_CMD uses Linux-first PATH then exec terminal-commander-mcp", () => {
+  assert.match(BRIDGE_PROBE_CMD, /exec terminal-commander-mcp$/);
+  assert.match(BRIDGE_PROBE_CMD, /npm-global\/bin/);
   assert.equal(BRIDGE_PROBE_CMD.includes("${"), false);
   assert.equal(BRIDGE_PROBE_CMD.includes("sudo"), false);
   assert.equal(BRIDGE_PROBE_CMD.includes("install"), false);
@@ -246,18 +247,17 @@ test("happy path spawns wsl.exe with exact argv + options shape", async () => {
   assert.equal(rec.calls.length, 1);
   const call = rec.calls[0];
   assert.equal(call.wslPath, "wsl.exe");
+  assert.equal(call.argv[5], BRIDGE_PROBE_CMD);
   assert.deepEqual(call.argv, [
     "-d",
     "Ubuntu-24.04",
     "--",
     "bash",
     "-lc",
-    "exec terminal-commander-mcp",
+    BRIDGE_PROBE_CMD,
     "--extra",
     "flag",
   ]);
-  // argv[5] is byte-identical to BRIDGE_PROBE_CMD.
-  assert.equal(call.argv[5], BRIDGE_PROBE_CMD);
 });
 
 test("happy path passes filtered env (no token-shaped vars) to spawn", async () => {

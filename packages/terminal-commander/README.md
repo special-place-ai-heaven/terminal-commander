@@ -4,6 +4,15 @@ Local MCP control plane with environment runners. Raw terminal /
 file / PTY output goes in; only vetted, bounded signal comes out;
 context remains available by pointer.
 
+**Harness-first:** Terminal Commander is built for **coding agents**
+(Cursor, Codex, Claude Code, etc.), not for human terminal use. When
+the model needs shell, PTY, or file work, it should call **MCP tools**
+(`command_start_combed`, `bucket_wait`, `pty_*`, …) instead of parsing
+raw terminal scrollback. Humans typically run install / doctor / setup
+once; the product surface is **MCP → `terminal-commander-mcp` →
+`terminal-commanderd` → real sessions** (bash, zsh, PowerShell in WSL,
+etc.).
+
 This npm package is the **root wrapper**. It runs on:
 
 - **Linux + WSL2** as the full runtime host (daemon, MCP stdio
@@ -55,7 +64,7 @@ at this WWS02 milestone:
 | Command | Windows behavior at WWS02 |
 |---------|--------------------------|
 | `terminal-commanderd` | **Refuses** with a single bounded stderr line + exit `64`. Daemon is Unix-only; run it inside a WSL distro. |
-| `terminal-commander-mcp` | **Bridges** to the WSL distro via `wsl.exe`. Resolves the distro from `TC_WSL_DISTRO` (operator override) then `detectWsl().default_distro`; refuses with `no_default_distro` if neither yields a safe + whitelisted name. Optionally probes WSL-side runtime presence via WWS03 `wslDoctor` (default ON; opt-out via `TC_WSL_SKIP_DOCTOR=1`). Spawns `wsl.exe -d <distro> -- bash -lc 'exec terminal-commander-mcp'` with `shell: false`, `windowsHide: true`, `stdio: 'inherit'`. The shim writes nothing to stdout — Cursor's rmcp framing passes through the WSL pipe transparently. Token-shaped env vars are stripped from the child's env. |
+| `terminal-commander-mcp` | **Bridges** to the WSL distro via `wsl.exe`. Resolves the distro from `TC_WSL_DISTRO` (operator override) then `detectWsl().default_distro`; refuses with `no_default_distro` if neither yields a safe + whitelisted name. Optionally probes WSL-side runtime presence via WWS03 `wslDoctor` (default ON; opt-out via `TC_WSL_SKIP_DOCTOR=1`). Spawns `wsl.exe -d <distro> -- bash -lc '<linux-first PATH> exec terminal-commander-mcp'` so WSL does not pick the Windows `/mnt/c/.../nodejs` shim (which would fail `linux-x64` resolve). Inside WSL, if the Windows shim is still invoked, the MCP entrypoint re-execs the native Linux binary. Token-shaped env vars are stripped from the child's env. |
 | `terminal-commander` | **CLI surface** for the WWS chain. WWS06 added `doctor`, `doctor wsl`, `setup cursor-wsl`, `pair create`, `pair accept <code>`. Run `terminal-commander --help` for the full panel. Every `wsl.exe` invocation flows through the WWS04 bridge helper (NO sudo, NO password handling, NO credential broker). The `--install-wsl-runtime` flag attempts ONE constant `npm install -g terminal-commander` invocation inside the chosen distro; it returns `npm_package_unpublished` honestly until NPM07's first publish lands. |
 
 WWS02 is the package-contract slice of the chain. The actual

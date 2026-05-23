@@ -11,7 +11,7 @@ const { writeJsonMcpConfig } = require("./io/json_mcp.js");
 const { writeCodexTomlConfig } = require("./io/toml_mcp.js");
 const {
   codexConfigPath,
-  claudeCodeSettingsPath,
+  claudeCodeMcpConfigPath,
   claudeDesktopConfigPath,
 } = require("./paths.js");
 const { detectProvider } = require("./detect.js");
@@ -115,7 +115,7 @@ function writeProvider(id, opts) {
   if (id === "claude-code" || id === "claude-desktop") {
     const target =
       detection.config_path ||
-      (id === "claude-code" ? claudeCodeSettingsPath(o) : claudeDesktopConfigPath(o));
+      (id === "claude-code" ? claudeCodeMcpConfigPath(o) : claudeDesktopConfigPath(o));
     const stanza = buildJsonMcpStanza(o);
     if (dryRun) {
       return { id, status: HARNESS_WRITE_STATUSES.OK, dry_run: true, path: target, stanza };
