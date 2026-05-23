@@ -179,9 +179,47 @@ jobs:
           fi
           echo "tag_name=${tag}" >> "$GITHUB_OUTPUT"
 
-  # Recovery gate: when release-please cannot tag a merged release PR,
-  # workflow_dispatch force_publish runs the same npm publish jobs
-  # against the manifest version on main.
+  # After auto-merged release PRs, release-please sometimes skips tag/npm.
+  # Close the loop without workflow_dispatch / manual force_publish.
+  ensure-release:
+    name: ensure-release
+    needs: release-please
+    if: github.event_name == 'push' && inputs.recovery_release_as == ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      publish: ${{ steps.ensure.outputs.publish }}
+      version: ${{ steps.ensure.outputs.version }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Ensure tag, GitHub release, and npm publish gap
+        id: ensure
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+        run: bash scripts/release/ensure-release-complete.sh
+
+      - name: release-please finalize (missing tag only)
+        if: steps.ensure.outputs.need_release_please == 'true'
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
+        with:
+          config-file: .github/release-please-config.json
+          manifest-file: .github/.release-please-manifest.json
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+          skip-github-pull-request: true
+
+  # Recovery gate: workflow_dispatch force_publish (manual recovery only).
   publish-version:
     name: publish-version
     if: github.event_name == 'workflow_dispatch' && inputs.force_publish == true
@@ -217,11 +255,13 @@ jobs:
     name: publish-linux-x64
     needs:
       - release-please
+      - ensure-release
       - publish-version
     if: >-
       always() &&
       !cancelled() &&
       (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true')
     runs-on: ubuntu-24.04
     permissions:
@@ -292,7 +332,7 @@ jobs:
       - name: Confirm package version matches release-please output
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
           actual=$(node -p "require('./packages/terminal-commander-linux-x64/package.json').version")
@@ -337,11 +377,13 @@ jobs:
     name: publish-linux-arm64
     needs:
       - release-please
+      - ensure-release
       - publish-version
     if: >-
       always() &&
       !cancelled() &&
       (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true')
     runs-on: ubuntu-24.04-arm
     permissions:
@@ -408,7 +450,7 @@ jobs:
       - name: Confirm package version matches release-please output
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
           actual=$(node -p "require('./packages/terminal-commander-linux-arm64/package.json').version")
@@ -453,6 +495,7 @@ jobs:
     name: publish-root
     needs:
       - release-please
+      - ensure-release
       - publish-version
       - publish-linux-x64
       - publish-linux-arm64
@@ -460,6 +503,7 @@ jobs:
       always() &&
       !cancelled() &&
       (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true') &&
       needs.publish-linux-x64.result == 'success' &&
       needs.publish-linux-arm64.result == 'success'
@@ -492,7 +536,7 @@ jobs:
         shell: bash
         working-directory: packages/terminal-commander
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
           node <<'NODE'

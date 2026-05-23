@@ -149,12 +149,19 @@ release PR. `chore:` / `ci:` / `docs:` alone do not open a release.
 
 On merge (automated):
 
-1. release-please creates the GitHub Release and the `v<version>` tag.
-2. The release-please workflow updates `.github/.release-please-manifest.json`
-   to the new version on the default branch.
-3. NPM07's publish workflow (to be added in NPM07) listens to the
-   `release.published` event and runs `npm publish --provenance`
-   against the platform packages first, then the root wrapper.
+1. release-please creates the GitHub Release and the `v<version>` tag (with
+   a post-merge tag retry pass).
+2. **`ensure-release` job** (same workflow): if the tag is missing, points
+   at the wrong SHA, the GitHub Release is missing, or npm does not yet have
+   the version, it retags HEAD, creates the release, and sets `publish=true`
+   so the npm publish jobs run — no `workflow_dispatch` / manual
+   `force_publish` required.
+3. Publish jobs push `@terminal-commander/linux-x64`,
+   `@terminal-commander/linux-arm64`, then `terminal-commander` to npm.
+
+Do **not** hand-edit `package.json` versions, push tags, or run
+`force_publish` for normal releases; that bypasses the automation and
+caused the 0.1.4 stall.
 
 NPM06 stops at step 1. Steps 2 and 3 are described here only so the
 contract is auditable end-to-end; NPM06 does not implement step 3.
