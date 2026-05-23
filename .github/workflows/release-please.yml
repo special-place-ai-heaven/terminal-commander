@@ -39,7 +39,7 @@
 #   - publish to crates.io,
 #   - call the NPM05 `npm-binary-build` workflow (kept separate as a
 #     non-publishing CI gate),
-#   - auto-merge the release PR,
+#   - auto-merge the release PR (release-pr-sync.yml; feat/fix only),
 #   - touch `crates/**`, `Cargo.toml`, `Cargo.lock`, or `scripts/**`,
 #   - request `id-token: write` (OIDC may return after trusted
 #     publisher is configured on npmjs.com for all three names).

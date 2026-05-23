@@ -131,14 +131,23 @@ synchronizes all three `package.json` files in the release PR.
   execute any package code. release-please-action handles the
   manifest update internally and pushes commits via the GitHub API.
 
-## 8. Release PR review-gating
+## 8. Release PR automation (no human merge)
 
-Release PRs are NOT auto-merged. The operator reviews + merges the
-release PR manually for the first beta cuts. This matches NPM02 §7
-("Release PR is review-gated; no auto-merge through the first beta
-cuts").
+When release-please opens or updates the release PR
+(`release-please--branches--main` → `main`):
 
-On merge:
+1. `release-pr-sync.yml` syncs `optionalDependencies`, retitles the PR
+   to `chore: release ${version}`, and **auto-merges** with
+   `gh pr merge --merge --admin --delete-branch` (token:
+   `RELEASE_PLEASE_TOKEN_TC`).
+2. Waits for **required** PR checks when configured (`gh pr checks
+   --watch`); if checks stall or fail, the workflow still attempts
+   admin merge so releases are not blocked on manual click-through.
+
+`feat:` / `fix:` (and breaking commits) on `main` drive the next
+release PR. `chore:` / `ci:` / `docs:` alone do not open a release.
+
+On merge (automated):
 
 1. release-please creates the GitHub Release and the `v<version>` tag.
 2. The release-please workflow updates `.github/.release-please-manifest.json`
