@@ -3,15 +3,15 @@ goal_id: WWS08
 title: Readme And Release Contract Update
 chain_id: terminal-commander-windows-wsl-bridge
 phase: Wave 4 - Docs
-status: "Pending"
+status: "Completed"
 depends_on: ["WWS07"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T12:00:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T19:30:00+00:00"
+completed_at: "2026-05-23T20:40:00+00:00"
+completion_commit: "12b47ce"
 blocked_reason: ""
 source_refs:
   - "WWS01..WWS07 outcomes"
