@@ -56,11 +56,71 @@ at this WWS02 milestone:
 | `terminal-commander` | **Refuses** with a single bounded stderr line + exit `64`. WWS06 adds the `setup cursor-wsl` / `doctor` / `pair` subcommands. |
 
 WWS02 is the package-contract slice of the chain. The actual
-Windows -> WSL bridge invocation (`wsl.exe -d <distro> bash -lc
-terminal-commander-mcp`) lands in WWS04; the Cursor MCP config
-writer lands in WWS05; the setup CLI lands in WWS06. The contract
+Windows -> WSL bridge invocation (`wsl.exe -d <distro> -- bash -lc
+'exec terminal-commander-mcp'`) lands in WWS04 (already landed).
+The Cursor MCP config writer is shipped at WWS05 (already landed
+as `lib/cursor/`). The setup CLI lands in WWS06. The contract
 locking all of this is
 [`docs/release/windows-wsl-bridge-contract.md`](https://github.com/special-place-administrator/terminal-commander/blob/main/docs/release/windows-wsl-bridge-contract.md).
+
+### Cursor config writer (WWS05)
+
+The root package also ships a JS-only Cursor `mcp.json` writer under
+`lib/cursor/`. It is a library-only surface at WWS05; the CLI
+subcommand that exposes it (`terminal-commander setup cursor-wsl`)
+arrives at WWS06.
+
+Default generated stanza (Linux native / inside-WSL OR Windows
+bridge, both forms identical to Cursor):
+
+```json
+{
+  "mcpServers": {
+    "terminal-commander": {
+      "type": "stdio",
+      "command": "terminal-commander-mcp"
+    }
+  }
+}
+```
+
+When the operator wants to pin a specific WSL distro instead of
+letting the WWS04 bridge resolve via `wsl.exe -l -v` default, an
+optional `env.TC_WSL_DISTRO` is added (distro name double-validated
+via the WWS03 safety whitelist before it lands in the config):
+
+```json
+{
+  "mcpServers": {
+    "terminal-commander": {
+      "type": "stdio",
+      "command": "terminal-commander-mcp",
+      "env": {
+        "TC_WSL_DISTRO": "Ubuntu-24.04"
+      }
+    }
+  }
+}
+```
+
+Safety invariants:
+
+- Preserves every unrelated `mcpServers` entry untouched.
+- Refuses to overwrite an existing `terminal-commander` entry
+  unless `force: true`. Always creates `<mcp.json>.bak` before
+  overwrite. Refuses if `.bak` already exists unless
+  `clobber_backup: true`.
+- Reads at most 256 KiB of existing `mcp.json` (`config_too_large`
+  refusal above that).
+- Refuses `invalid_json` without modifying the original file.
+- Atomic write via a same-directory `mcp.json.tmp.<random>` +
+  `renameSync`. Every path the writer touches stays inside the
+  resolved Cursor scope dir.
+- NO `child_process`, NO spawn, NO `wsl.exe`, NO network, NO
+  secrets/tokens/credentials/passwords. The only env key the
+  writer ever emits is `TC_WSL_DISTRO`.
+- Stdout-silent — all status text returns via the typed result
+  record.
 
 ### Windows discovery helpers (WWS03)
 

@@ -415,10 +415,25 @@ the pair commands ever being run.
   `{ ok, unsupported_host, wsl_not_found, no_distros,
   distro_not_found, unsafe_distro_name, wsl_command_failed,
   runtime_missing, runtime_present, doctor_not_run, check_timeout }`.
-- `lib/cursor/config.js` (WWS05): pure JSON merge + validate. No
-  spawn, no network.
-- `lib/cursor/write.js` (WWS05): atomic write + backup. No
-  spawn, no network.
+- `lib/cursor/config.js` (WWS05, **landed**): pure stanza-builder
+  + path resolver + JSON parse / merge / validate. Default
+  generated Windows stanza is the WWS04 bridge form
+  `{ "type": "stdio", "command": "terminal-commander-mcp" }`;
+  optional `env.TC_WSL_DISTRO` is added when the operator passed
+  a safe distro (WWS03 whitelist) and, if `requireKnownDistro:
+  true`, the distro was present in `detectWsl().distros`. No
+  other env key is ever emitted. No spawn. No network. No file
+  I/O. `MAX_CONFIG_BYTES = 256 * 1024` size cap.
+- `lib/cursor/write.js` (WWS05, **landed**): atomic write +
+  `.bak` backup orchestrator. Refuses existing `terminal-commander`
+  entry without `force: true`. Refuses pre-existing `.bak` without
+  `clobber_backup: true`. Atomic-write via
+  `<path>.tmp.<random>` in the SAME directory + `renameSync`. Every
+  path touched (final, tmp, bak) stays inside the resolved Cursor
+  scope dir (`path_not_allowed` otherwise). No spawn. No network.
+  No `child_process` import. Stdout-silent; status returns via a
+  typed `{ status, path, backup_path, server, was_present, hint }`
+  record. 12-status closed enum.
 - `lib/cli/setup_cursor_wsl.js` + friends (WWS06): orchestrate
   the above helpers. No new spawn surface beyond `lib/wsl/spawn.js`.
 
@@ -641,9 +656,18 @@ WWS01 contract by document path AND date.
   Windows; the daemon + admin-CLI shims stay byte-identical to the
   WWS02 contract (refuse with bounded stderr + exit 64). The shim
   writes nothing to stdout (rmcp framing).
-- **WWS05**: `lib/cursor/config.js` + `lib/cursor/write.js`.
-  Pure JSON merge + atomic write + backup. Existing-entry policy
-  per §6.3. Never prints absolute paths to stdout.
+- **WWS05** (**landed**): `lib/cursor/config.js` + `lib/cursor/write.js`.
+  Pure stanza-builder + path resolver + JSON parse / merge /
+  validate + atomic write (`<path>.tmp.<random>` in SAME dir +
+  `renameSync`) + `.bak` backup. Default stanza is the WWS04
+  bridge form (`{ "command": "terminal-commander-mcp" }`); optional
+  `env.TC_WSL_DISTRO` when operator supplied safe distro.
+  Refuses existing `terminal-commander` entry without `force:
+  true`; refuses pre-existing `.bak` without `clobber_backup:
+  true`. `MAX_CONFIG_BYTES = 256 KiB`. 12-status closed enum.
+  NO `child_process`. NO spawn. NO network. NO env key written
+  beyond `TC_WSL_DISTRO`. Stdout-silent. Library-only; CLI surface
+  remains with WWS06.
 - **WWS06**: `lib/cli/setup_cursor_wsl.js` + `lib/cli/doctor.js`
   + `lib/cli/pair_create.js` + `lib/cli/pair_accept.js`.
   `--install-wsl-runtime` flag gating automatic install. Distro

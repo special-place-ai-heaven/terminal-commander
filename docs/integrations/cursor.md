@@ -256,6 +256,50 @@ it is secondary evidence, not provider-harness success.
   output exactly. Some installations rename Ubuntu (e.g.
   `Ubuntu-22.04`, `Ubuntu`); the example uses `Ubuntu-24.04`.
 
+## 11a. Auto-generated config (WWS05)
+
+WWS05 ships a JS-only writer under
+`packages/terminal-commander/lib/cursor/` that produces the
+correct Cursor `mcp.json` stanza for the WWS04 bridge path. It is
+a library API at WWS05; the CLI subcommand
+(`terminal-commander setup cursor-wsl`) that calls it arrives at
+WWS06. Operators who want to invoke the writer directly today can
+do so via `node`:
+
+```js
+const { writeCursorMcpConfig } = require("terminal-commander/lib/cursor/write.js");
+const r = writeCursorMcpConfig({
+  scope: "global",            // or "project" with explicit projectRoot
+  distro: "Ubuntu-24.04",     // optional; double-validated before emit
+  force: false,               // refuse-existing-terminal-commander default
+  clobber_backup: false,      // refuse pre-existing .bak default
+});
+// r.status is one of: config_created, config_updated, already_exists,
+//   invalid_json, config_too_large, path_not_allowed,
+//   project_root_required, unsafe_distro_name, distro_not_found,
+//   backup_failed, write_failed, unsupported_host.
+// r.path / r.backup_path / r.server / r.was_present / r.hint follow.
+```
+
+Safety guarantees:
+
+- Preserves every unrelated `mcpServers` entry untouched.
+- Refuses to overwrite an existing `terminal-commander` entry
+  unless `force: true` is passed. Always creates `<mcp.json>.bak`
+  before overwrite. Refuses if `.bak` already exists unless
+  `clobber_backup: true`.
+- Reads at most 256 KiB of existing `mcp.json`
+  (`config_too_large` refusal above that).
+- Refuses `invalid_json` without modifying the original file.
+- Atomic write via a same-directory `mcp.json.tmp.<random>` +
+  `renameSync`. Every path the writer touches stays inside the
+  resolved Cursor scope dir (`path_not_allowed` otherwise).
+- NO `child_process`, NO spawn, NO `wsl.exe`, NO network, NO
+  secrets/tokens/credentials/passwords. The only env key the
+  writer ever emits is `TC_WSL_DISTRO`.
+- Stdout-silent — all status text returns via the typed result
+  record.
+
 ## 11b. Windows bridge roadmap (WWS chain)
 
 The Windows config block in §6 is the **current manual path**:
@@ -276,15 +320,20 @@ probe), WWS04 (the `terminal-commander-mcp` bridge shim
 `lib/wsl/spawn.js` that actually invokes `wsl.exe -d <distro> --
 bash -lc 'exec terminal-commander-mcp'` with double-validated
 distro, `stdio: 'inherit'`, and token-shaped env vars stripped),
-WWS05 (the Cursor config writer), and WWS06 (the setup / doctor /
-pair CLI). With WWS04 landed, Cursor on Windows that invokes
-`terminal-commander-mcp` will now transparently bridge into the
-WSL distro chosen by `TC_WSL_DISTRO` or the WSL default — provided
-the WSL-side `terminal-commander-mcp` is installed (the bridge
-short-circuits with `runtime_missing` until WWS06 lands the
-optional `--install-wsl-runtime` flag). The manual `wsl.exe`
-config in §6 remains a valid alternative for operators who prefer
-to invoke `wsl.exe` directly from `mcp.json`.
+WWS05 (the Cursor config writer — `lib/cursor/config.js` +
+`lib/cursor/write.js` — now landed as library-only; auto-generates
+the bridge stanza, refuses to clobber existing `terminal-commander`
+entries without `force`, always creates `.bak` before overwrite,
+atomic-writes via a same-directory tmp file + rename), and WWS06
+(the setup / doctor / pair CLI). With WWS04 + WWS05 landed, Cursor
+on Windows that invokes `terminal-commander-mcp` will now
+transparently bridge into the WSL distro chosen by
+`TC_WSL_DISTRO` or the WSL default — provided the WSL-side
+`terminal-commander-mcp` is installed (the bridge short-circuits
+with `runtime_missing` until WWS06 lands the optional
+`--install-wsl-runtime` flag). The manual `wsl.exe` config in §6
+remains a valid alternative for operators who prefer to invoke
+`wsl.exe` directly from `mcp.json`.
 
 ## 12. Source status
 

@@ -88,9 +88,14 @@ the bridge short-circuits with a single bounded stderr line + exit
 cursor-wsl --install-wsl-runtime` to automate that step; until then,
 operators install inside WSL by hand.
 
-The Cursor config writer (`terminal-commander setup cursor-wsl`) is
-still pending WWS05 / WWS06. Until that lands, copy `mcp.json`
-manually as described in §"How to use" above.
+The Cursor config writer is now available as a library at WWS05
+(`packages/terminal-commander/lib/cursor/`). It produces the same
+stanza as `mcp.global.linux-wsl.json` for the WWS04 bridge path
+and merges it into the operator's existing Cursor `mcp.json`
+without clobbering unrelated MCP servers. The `terminal-commander
+setup cursor-wsl` CLI surface that wraps it remains pending WWS06.
+See `docs/integrations/cursor.md` §11a for the WWS05 writer API
+contract.
 
 ## Source status
 
