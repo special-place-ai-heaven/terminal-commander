@@ -13,6 +13,8 @@
 //   terminal-commander setup harness [flags] [--help]
 //   terminal-commander setup cursor-wsl [flags] [--help]  (deprecated)
 //   terminal-commander doctor harness
+//   terminal-commander doctor daemon [--distro <name>]
+//   terminal-commander setup daemon-autostart [--distro <name>] [--dry-run]
 //   terminal-commander pair --help
 //   terminal-commander pair create [--distro <name>] [--help]
 //   terminal-commander pair accept <code> [--help]
@@ -122,7 +124,7 @@ function parseArgv(argv) {
   switch (cmd) {
     case "doctor": {
       const sub = positional.shift();
-      if (sub != null && sub !== "wsl" && sub !== "harness") {
+      if (sub != null && sub !== "wsl" && sub !== "harness" && sub !== "daemon") {
         return makeError(`unknown doctor subcommand: ${sub}`);
       }
       for (const f of Object.keys(flags)) {
@@ -155,6 +157,8 @@ function parseArgv(argv) {
         sub = "harness";
       } else if (sub === "cursor-wsl") {
         sub = "cursor-wsl";
+      } else if (sub === "daemon-autostart") {
+        sub = "daemon-autostart";
       } else {
         return makeError(`unknown setup subcommand: ${sub}`);
       }
@@ -232,7 +236,9 @@ COMMANDS
   doctor                              Print Windows host diagnostics.
   doctor wsl                          Run the read-only WSL discovery probe.
   doctor harness                      List detected vs configured MCP harnesses.
+  doctor daemon                       Daemon socket + autostart status (WSL probe on Windows).
   setup                               Bootstrap all detected harnesses (default).
+  setup daemon-autostart              Install systemd user unit or profile autostart in WSL/Linux.
   setup harness                       Same as setup (explicit).
   setup cursor-wsl                    Deprecated; use setup harness.
   pair create                         Generate a 6-digit pairing code (optional).

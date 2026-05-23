@@ -88,8 +88,9 @@ test("BRIDGE_STATUSES exposes the full status enum", () => {
   );
 });
 
-test("BRIDGE_PROBE_CMD uses Linux-first PATH then exec terminal-commander-mcp", () => {
+test("BRIDGE_PROBE_CMD ensures daemon then exec terminal-commander-mcp", () => {
   assert.match(BRIDGE_PROBE_CMD, /exec terminal-commander-mcp$/);
+  assert.match(BRIDGE_PROBE_CMD, /autostart\.sh/);
   assert.match(BRIDGE_PROBE_CMD, /npm-global\/bin/);
   assert.equal(BRIDGE_PROBE_CMD.includes("${"), false);
   assert.equal(BRIDGE_PROBE_CMD.includes("sudo"), false);

@@ -41,19 +41,24 @@ the operator's UID. Operators copy it to
 
 The example unit does NOT install. It is a starting point.
 
-### 3.2 WSL2 (no systemd)
+### 3.2 WSL2 autostart (systemd or profile hook)
 
-Per `docs/research/wsl-boundary.md`, WSL2 distros do NOT have
-systemd by default. The daemon is launched manually from the
-operator's shell rc file or wrapper script:
+`npm install -g terminal-commander` (Windows bootstrap) and
+`terminal-commander setup daemon-autostart` install autostart inside
+the WSL distro:
 
-```bash
-# In ~/.profile or ~/.bashrc, after the cargo bin path is set:
-if [ -z "$TERMINAL_COMMANDERD_PID" ]; then
-    terminal-commanderd >>"$HOME/.cache/tcmd.log" 2>&1 &
-    export TERMINAL_COMMANDERD_PID=$!
-fi
-```
+1. **systemd user unit** when systemd is running (Ubuntu 24.04+ WSL
+   default). Enables `terminal-commanderd.service` at user session start.
+2. **Profile hook** otherwise: managed block in `~/.profile` /
+   `~/.bashrc` / `~/.zshrc` sources
+   `~/.config/terminal-commander/autostart.sh`, which starts the daemon
+   if the UDS socket is absent.
+
+The Windows MCP bridge also sources `autostart.sh` before spawning
+`terminal-commander-mcp`, so the daemon comes up on first harness use
+even before the next login shell.
+
+Opt-out: `TC_SKIP_DAEMON_AUTOSTART=1` or `TC_BOOTSTRAP_START_DAEMON=0`.
 
 Filesystem placement: the daemon SQLite database MUST live on a
 native Linux filesystem (ext4 / btrfs / xfs on WSL2), NEVER on

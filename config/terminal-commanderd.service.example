@@ -14,8 +14,9 @@ After=default.target
 Type=simple
 # Use $HOME/.cargo/bin/terminal-commanderd if that is where cargo
 # installed it.
-ExecStart=%h/.cargo/bin/terminal-commanderd
+ExecStart=%h/.cargo/bin/terminal-commanderd --data-dir %h/.local/share/terminal-commanderd start --mode ipc-server
 Restart=on-failure
+RestartSec=3
 RestartSec=5
 # Hardening (PRIVILEGE_MODEL.md section 11.3): bare-metal Linux only.
 ProtectSystem=strict

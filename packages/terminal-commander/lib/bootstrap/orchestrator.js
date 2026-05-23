@@ -12,6 +12,15 @@ const { writeSetupJson, readSetupJson } = require("../cli/setup_state.js");
 const { detectAllHarnesses } = require("../harness/detect.js");
 const { writeAllHarnesses, HARNESS_WRITE_STATUSES } = require("../harness/write_all.js");
 const { ensureWslRuntime, ENSURE_STATUSES } = require("./ensure_wsl_runtime.js");
+const {
+  ensureDaemonAutostartInWsl,
+  ENSURE_DAEMON_STATUSES,
+} = require("./ensure_daemon_autostart.js");
+const {
+  installDaemonAutostart,
+  shouldInstallDaemonAutostart,
+  AUTOSTART_STATUSES,
+} = require("../daemon/autostart.js");
 const { tryAcquireBootstrapLock, releaseBootstrapLock } = require("./lock.js");
 const { shouldSkipBootstrap, isGlobalNpmInstall } = require("./skip.js");
 
@@ -175,6 +184,50 @@ async function runBootstrap(opts) {
         } else {
           lines.push("terminal-commander: WSL runtime already present.");
         }
+      }
+
+      if (distro && shouldInstallDaemonAutostart(env) && o.skipDaemonAutostart !== true) {
+        const daemonEnsure = await (o.ensureDaemonAutostartInWsl || ensureDaemonAutostartInWsl)({
+          distro,
+          platform,
+          env,
+          exec: o.exec,
+          wslPath: o.wslPath,
+          timeoutMs: o.timeoutMs,
+        });
+        if (daemonEnsure.status === ENSURE_DAEMON_STATUSES.OK) {
+          lines.push("terminal-commander: WSL daemon autostart installed (systemd or profile).");
+        } else if (daemonEnsure.status === ENSURE_DAEMON_STATUSES.SKIPPED) {
+          /* no line */
+        } else if (!failSoft) {
+          lines.push(
+            `terminal-commander: WSL daemon autostart: ${daemonEnsure.status} — ${daemonEnsure.hint}`,
+          );
+        } else {
+          lines.push(
+            `terminal-commander: WSL daemon autostart not installed (${daemonEnsure.status}); start manually in WSL.`,
+          );
+        }
+      }
+    }
+
+    if (platform === "linux" && shouldInstallDaemonAutostart(env) && o.skipDaemonAutostart !== true) {
+      const localDaemon = (o.installDaemonAutostart || installDaemonAutostart)({
+        platform,
+        env,
+        dry_run: o.dry_run === true,
+      });
+      if (localDaemon.status === AUTOSTART_STATUSES.SYSTEMD_ENABLED) {
+        lines.push(`terminal-commander: ${localDaemon.hint}`);
+      } else if (
+        localDaemon.status === AUTOSTART_STATUSES.PROFILE_HOOK ||
+        localDaemon.status === AUTOSTART_STATUSES.OK
+      ) {
+        lines.push(`terminal-commander: ${localDaemon.hint}`);
+      } else if (localDaemon.status === AUTOSTART_STATUSES.BINARY_MISSING) {
+        lines.push(
+          "terminal-commander: terminal-commanderd not on PATH; daemon autostart deferred until binary is installed.",
+        );
       }
     }
 

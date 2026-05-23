@@ -34,7 +34,10 @@ Opt-out:
 `npm install -g terminal-commander` on Linux or inside WSL:
 
 - Runs harness detect + config merge only (no WSL nested install).
-- Does NOT auto-start `terminal-commanderd` unless `TC_BOOTSTRAP_START_DAEMON=1` (future; default off at INSTALL01).
+- After harness merge, installs **daemon autostart** inside WSL (systemd
+  user unit when available, else profile hook). Opt-out:
+  `TC_SKIP_DAEMON_AUTOSTART=1` or `TC_BOOTSTRAP_START_DAEMON=0`.
+- On Linux-native global install, same autostart install runs locally.
 
 ## 3. npm lifecycle (NPM02 amendment)
 

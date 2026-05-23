@@ -18,6 +18,8 @@ const {
   runSetupCursorWslDeprecated,
 } = require("./setup_harness.js");
 const { runDoctorHarness } = require("./doctor_harness.js");
+const { runDoctorDaemon } = require("./doctor_daemon.js");
+const { runSetupDaemonAutostart } = require("./setup_daemon_autostart.js");
 const { runPairCreate } = require("./pair_create.js");
 const { runPairAccept } = require("./pair_accept.js");
 
@@ -64,6 +66,9 @@ async function run(opts) {
       if (parsed.subcommand === "harness") {
         return runDoctorHarness({ platform, env });
       }
+      if (parsed.subcommand === "daemon") {
+        return runDoctorDaemon({ platform, env, flags: parsed.flags });
+      }
       return runDoctor({
         subcommand: parsed.subcommand,
         flags: parsed.flags,
@@ -72,6 +77,14 @@ async function run(opts) {
         doctor: o.doctor,
       });
     case "setup":
+      if (parsed.subcommand === "daemon-autostart") {
+        return runSetupDaemonAutostart({
+          flags: parsed.flags,
+          platform,
+          env,
+          detect: o.detect,
+        });
+      }
       if (parsed.subcommand === "cursor-wsl") {
         return runSetupCursorWslDeprecated({
           flags: parsed.flags,

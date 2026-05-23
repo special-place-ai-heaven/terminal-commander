@@ -15,11 +15,21 @@ const RUNTIME_VERIFY_CMD = `${LINUX_PATH_PREFIX}command -v terminal-commander-mc
 
 // WSL must not resolve terminal-commander-mcp from /mnt/c (Windows npm shim);
 // that runs Node as linux and fails optionalDependency resolve.
-const BRIDGE_PROBE_CMD = `${LINUX_PATH_PREFIX}exec terminal-commander-mcp`;
+const BRIDGE_DAEMON_ENSURE =
+  '. "$HOME/.config/terminal-commander/autostart.sh" 2>/dev/null || true; ';
+
+const BRIDGE_PROBE_CMD = `${LINUX_PATH_PREFIX}${BRIDGE_DAEMON_ENSURE}exec terminal-commander-mcp`;
 
 module.exports = {
   LINUX_PATH_PREFIX,
   INSTALL_PROBE_CMD,
   RUNTIME_VERIFY_CMD,
+  BRIDGE_DAEMON_ENSURE,
   BRIDGE_PROBE_CMD,
+  getInstallDaemonAutostartCmd,
 };
+
+function getInstallDaemonAutostartCmd() {
+  const { buildWslInstallCommand } = require("../daemon/autostart.js");
+  return buildWslInstallCommand();
+}
