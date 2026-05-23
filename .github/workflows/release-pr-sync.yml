@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+# Keep release-please PRs publishable: optionalDependencies must match version.
+name: release-pr-sync
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  sync-optional-dependencies:
+    if: github.head_ref == 'release-please--branches--main'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout release PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Sync optionalDependencies
+        run: node scripts/release/sync-optional-dependencies.js
+
+      - name: Commit and push if changed
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet packages/terminal-commander/package.json; then
+            echo "optionalDependencies already synced"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/terminal-commander/package.json
+          git commit -m "chore: sync optionalDependencies to package version"
+          git push origin HEAD:${{ github.head_ref }}
