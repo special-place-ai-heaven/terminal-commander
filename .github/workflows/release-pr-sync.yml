@@ -26,6 +26,19 @@ jobs:
       - name: Sync optionalDependencies
         run: node scripts/release/sync-optional-dependencies.js
 
+      - name: Ensure release PR title includes version
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+        run: |
+          set -euo pipefail
+          ver=$(node -p "require('./packages/terminal-commander/package.json').version")
+          want="chore: release ${ver}"
+          title=$(gh pr view "${{ github.event.pull_request.number }}" --json title --jq .title)
+          if [ "$title" != "$want" ]; then
+            gh pr edit "${{ github.event.pull_request.number }}" --title "$want"
+            echo "retitled PR to: ${want}"
+          fi
+
       - name: Commit and push if changed
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
