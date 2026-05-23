@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.4](https://github.com/special-place-administrator/terminal-commander/compare/v0.1.3...v0.1.4) (2026-05-23)
+
+
+### Features
+
+* **bootstrap:** zero-touch npm install with lazy MCP repair ([b7b2e9f](https://github.com/special-place-administrator/terminal-commander/commit/b7b2e9fb093274dfe8d6f6a9205b1dd13a6736e1))
+* **daemon:** autostart on WSL boot and before MCP bridge ([499c093](https://github.com/special-place-administrator/terminal-commander/commit/499c093ccdb72b8a23f01b305f430946213042de))
+
+
+### Bug Fixes
+
+* **windows:** reliable WSL MCP bridge and harness config paths ([13cae8e](https://github.com/special-place-administrator/terminal-commander/commit/13cae8e194eedae06f26f21c798cc298dbd57fbf))
+
 ## [0.1.3](https://github.com/special-place-administrator/terminal-commander/compare/v0.1.2...v0.1.3) (2026-05-23)
 
 
