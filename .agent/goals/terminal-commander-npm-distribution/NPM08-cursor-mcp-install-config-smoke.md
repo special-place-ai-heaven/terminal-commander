@@ -3,13 +3,13 @@ goal_id: NPM08
 title: Cursor Mcp Install Config Smoke
 chain_id: terminal-commander-npm-distribution
 phase: Wave 5 - Provider smoke
-status: "Pending"
+status: "In progress"
 depends_on: ["NPM07"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T00:00:00+00:00"
-started_at: ""
+started_at: "2026-05-23T05:00:00+00:00"
 completed_at: ""
 completion_commit: ""
 blocked_reason: ""
@@ -17,6 +17,7 @@ source_refs:
   - "Cursor MCP stdio config docs"
   - "docs/integrations/codex-cli.md (existing pattern from TC46)"
   - "docs/integrations/claude-code.md (existing pattern from TC46)"
+  - "User directive 2026-05-23: docs/integrations/CURSOR_MCP-equivalent + examples/provider-harness/cursor/*.json (4 configs + README)"
 risk_level: "low"
 ---
 
@@ -31,6 +32,25 @@ main
 ## Mission Context
 
 NPM07 produced a published npm package. NPM08 documents the Cursor MCP install path against the published package and runs the live Cursor smoke if the operator host has Cursor available. If not, this goal records `Not Run` with the exact blocker — never promoted to PASS.
+
+### Prep amendment (NPM08, 2026-05-23)
+
+User directive widened the deliverable set beyond the original goal-file mini-spec:
+
+- Add `examples/provider-harness/cursor/` directory with concrete config examples (`mcp.global.linux-wsl.json`, `mcp.project.linux-wsl.json`, `mcp.global.native-linux.json`, `README.md`).
+- Keep `docs/integrations/cursor.md` (per goal-file naming convention, matches sibling `claude-code.md`, `codex-cli.md`).
+- Add `.cursor/mcp.json` to `forbidden_files` so no active repo-level Cursor config is committed.
+
+No silent widening. Recorded here. Live Cursor smoke is still operator-driven; this amendment does not change that.
+
+### NPM07 published-package state correction (NPM08, 2026-05-23)
+
+The original NPM08 mission context said "NPM07 produced a published npm package." That is incomplete. As of NPM08 start:
+
+- NPM07 added the publish workflow (output-gated, OIDC, no token).
+- NPM07's live run successfully ran release-please with `releases_created='false'`; all three publish jobs were `skipped`.
+- No `npm publish` has executed against the registry. The first live publish is **Pending operator npmjs.com setup + a release PR merge**, both recorded in `docs/release/npm-trusted-publishing-contract.md` §14.
+- The Cursor docs in NPM08 must therefore distinguish (a) the future published-npm install path, (b) the current local-tarball smoke path, and (c) the Cursor manual config path.
 
 ## Mini-Spec
 
@@ -47,6 +67,7 @@ allowed_files_or_area:
 - docs/integrations/cursor.md (new)
 - docs/integrations/README.md (status table refresh)
 - docs/release/**
+- examples/provider-harness/cursor/** (new — config examples + README per user directive 2026-05-23)
 - scripts/smoke/** (only if a non-interactive Cursor harness exists; otherwise no script)
 - .agent/goals/terminal-commander-npm-distribution/NPM08-*.md
 
@@ -55,8 +76,9 @@ forbidden_files:
 - Cargo.toml
 - Cargo.lock
 - rules/**, config/**
-- packages/**
+- packages/** (the npm package set is locked; NPM08 does not modify packages)
 - .github/workflows/**
+- .cursor/mcp.json (no active repo-level Cursor config committed)
 - secrets / tokens / private paths anywhere
 
 contracts_or_interfaces:
