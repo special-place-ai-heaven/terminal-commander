@@ -194,12 +194,19 @@ calls.
 
 ## Beta status
 
-`Conditional Go` (TC48 baseline). The npm package is **not yet
-published**; all three names remain `E404` on the registry. The
-publish floor recommended by WWS01 is `WWS02 + WWS04 + WWS05 +
-WWS06 + WWS08`. Publishing the current root with the WWS02
-amendment alone would still leave Windows operators without a
-working bridge.
+`Conditional Go` (TC48 baseline). First npm beta publish is
+release-please driven on `main` (operator-approved). Until the
+registry lists a version, all three names may still return `E404`.
+
+## Release marker (first npm beta)
+
+- **Root wrapper** (`terminal-commander`): bridge and setup surface on
+  Windows; full Linux/WSL2 runtime via platform `optionalDependencies`.
+- **Platform packages** (`@terminal-commander/linux-x64`,
+  `@terminal-commander/linux-arm64`): carry prebuilt Linux binaries only.
+- Supported install surfaces: **linux x64**, **linux arm64**, and
+  **win32** for the root package contract (runtime remains in WSL on
+  Windows). No macOS package. No musl / Alpine package.
 
 ## Documentation
 
