@@ -3,15 +3,15 @@ goal_id: NPM10
 title: Bootstrap First Npm Publish With Token
 chain_id: terminal-commander-npm-distribution
 phase: Wave 6 - Bootstrap exception
-status: "In progress"
+status: "Completed"
 depends_on: ["NPM09"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T10:30:00+00:00"
 started_at: "2026-05-23T11:00:00+00:00"
-completed_at: ""
-completion_commit: ""
+completed_at: "2026-05-23T12:00:00+00:00"
+completion_commit: "9353fb4"
 blocked_reason: ""
 source_refs:
   - "NPM07 docs/release/npm-trusted-publishing-contract.md (OIDC-only contract this goal explicitly exempts)"
@@ -193,3 +193,96 @@ Run NPM10 only on branch `main`. Create the guarded `workflow_dispatch`-only boo
 ## Final Report Format
 
 Objective / Changes / Files created / Workflow shape / Two-gate behavior / Verification / Evidence / Commit / Operator next steps (dispatch + follow-up disable) / Known gaps / Next goal (NPM11 follow-up to disable the token workflow + verify trusted publisher).
+
+## Final Report
+
+Objective:
+- Land the one-time bootstrap publish workflow + policy-exception doc + chain plumbing. Do not dispatch. Do not publish.
+
+Changes (verified work commit `9353fb4`):
+- `.github/workflows/npm-bootstrap-publish.yml` (new). `workflow_dispatch`-only, two-gate confirm, 5 jobs.
+- `docs/release/npm-bootstrap-first-publish.md` (new, 12 sections).
+- `BACKLOG.md` (modified): P1.5 amended; P1.5b added (disable + rotate follow-up).
+- `RELEASE_CHECKLIST.md` (modified): "NPM10 bootstrap exception" section added.
+- `.agent/goals/terminal-commander-npm-distribution/GOAL_CHAIN_INDEX.md` (modified): chain status banner ("reopened for NPM10"); summary table extended with NPM10 row.
+- `.agent/goals/terminal-commander-npm-distribution/RUN_ORDER.md` (modified): row 11 added for NPM10.
+- `.agent/goals/terminal-commander-npm-distribution/NPM10-*.md` (new goal file).
+
+Workflow shape:
+- Trigger: `workflow_dispatch` ONLY (no push, no release, no schedule, no pull_request, no workflow_run).
+- Inputs: `dry_run` (boolean, default true), `confirm_publish` (string, default empty; must equal exact `publish-terminal-commander-beta` for real publish).
+- Permissions: workflow-level `contents: read` (no `id-token: write`, no `packages: write`, no other claim).
+- Jobs (5):
+  - `resolve-gates` — computes `real_publish` output (true iff both gates flipped)
+  - `publish-linux-x64` (`ubuntu-24.04`) — `needs: resolve-gates`
+  - `publish-linux-arm64` (`ubuntu-24.04-arm`) — `needs: resolve-gates`
+  - `publish-root` (`ubuntu-24.04`) — `needs: [resolve-gates, publish-linux-x64, publish-linux-arm64]`
+  - `post-publish-reminder` — `if: needs.resolve-gates.outputs.real_publish == 'true'`
+- Secrets referenced: `secrets.NPM_TOKEN_TC` only (3x, once per publish job env binding).
+- No `--provenance` flag (token publishes do not satisfy npm provenance honestly).
+- Pre-publish E404 guard on every name; refuses to publish if registry already hosts the name.
+- Native arm64 build on `ubuntu-24.04-arm` (no QEMU).
+
+Two-gate behavior:
+- Default dispatch (`dry_run=true` OR `confirm_publish != expected`): all publish steps run `npm publish --dry-run`. No registry mutation.
+- Real publish (`dry_run=false` AND `confirm_publish == "publish-terminal-commander-beta"`): real `npm publish --tag beta` (platform packages add `--access public`). `post-publish-reminder` job fires.
+
+Verification (Linux WSL2, `CARGO_TARGET_DIR=target-wsl`, post cargo clean):
+- PASS `git branch --show-current` → `main`
+- PASS `git status --short` clean (pre-status-commit)
+- PASS `cargo metadata --no-deps`
+- PASS `cargo fmt --all --check`
+- PASS `cargo clippy --workspace --all-targets -- -D warnings` (clean)
+- PASS `cargo test --workspace` (43 result lines, all `ok`)
+- PASS `cargo nextest run --workspace` (347/347, 0 skipped)
+- PASS TC46 smoke 8/8
+- PASS NPM04 smoke 12 PASS lines
+- PASS 3 `npm pack --dry-run` clean (7/5/5 files at 0.1.0-beta.1)
+- PASS YAML parse: all 3 workflows
+- PASS version sync `0.1.0-beta.1` across 3 package.json + 3 manifest entries; root optionalDependencies exact-pin
+- PASS MCP guard 1 doc/negative-assertion only
+- PASS MCP guard 2 no matches
+- PASS forbidden-paths diff (--ignore-cr-at-eol) empty over `crates/ Cargo.toml Cargo.lock rules/ config/ scripts/ packages/ .github/workflows/release-please.yml .github/workflows/npm-binary-build.yml .github/release-please-config.json .github/.release-please-manifest.json`
+- PASS no `CARGO_REGISTRY_TOKEN_TC` reference anywhere active
+- PASS no `RELEASE_PLEASE_TOKEN_TC` reference anywhere active
+- PASS no `cargo publish` / `crates.io` step
+- PASS no postinstall added to any package.json
+- PASS workflow registers `secrets.NPM_TOKEN_TC` only (3 sites; all inside guarded publish jobs)
+
+Evidence — explicit acceptance:
+- Workflow file exists; `workflow_dispatch` only; two-gate confirm wired.
+- `docs/release/npm-bootstrap-first-publish.md` documents policy exception, dispatch flow, post-publish operator steps, and rollback story.
+- BACKLOG P1.5b documents the disable + rotate follow-up.
+- NPM07 OIDC workflow at `.github/workflows/release-please.yml` UNCHANGED. NPM05 `npm-binary-build.yml` UNCHANGED.
+- TC48 `Conditional Go` posture preserved.
+
+State at NPM10 close (recorded honestly):
+- The workflow was created and committed only. **It was NOT dispatched.** No `gh workflow run npm-bootstrap-publish.yml` was executed.
+- **No `npm publish` occurred.** No package was created on npm. All three names remain E404.
+- `NPM_TOKEN_TC` is referenced ONLY in the guarded workflow YAML (3 sites). It was NOT printed in any log, NOT used by any workflow run, NOT echoed to stdout.
+- `CARGO_REGISTRY_TOKEN_TC` remains UNUSED.
+- `RELEASE_PLEASE_TOKEN_TC` remains UNUSED.
+- `release-please.yml` continues to be the standing publish capability; the NPM07 OIDC + provenance contract is otherwise unchanged.
+
+Commits:
+- Verified work commit: `9353fb4`
+- Goal status commit: this commit
+
+Operator next steps:
+1. Push these two commits to `origin/main`.
+2. Verify `NPM_TOKEN_TC` has publish authority for the `@terminal-commander` scope on npmjs.com.
+3. Open Actions tab, dispatch `npm-bootstrap-publish` with `dry_run=true`, `confirm_publish=""`. Verify all 5 jobs succeed with publish steps in dry-run mode.
+4. Re-dispatch with `dry_run=false`, `confirm_publish="publish-terminal-commander-beta"`. `post-publish-reminder` fires.
+5. Configure trusted publisher on each of the three npmjs.com package pages with workflow filename `release-please.yml`.
+6. Delete or rename `.github/workflows/npm-bootstrap-publish.yml`.
+7. Rotate / invalidate `NPM_TOKEN_TC` on npmjs.com.
+8. Open NPM11 to capture the disable + rotation in one commit pair.
+
+Known gaps / blockers:
+- Live bootstrap publish is **Pending operator dispatch**. NPM10 close does NOT trigger it.
+- Cursor / Codex / Claude Code provider live smokes still **Not Run**. Promotion to `Go` requires at least one provider transcript.
+- The NPM10 workflow is intentionally a one-time path. Until P1.5b (NPM11) lands, the workflow is dispatchable in the repo — that is the bootstrap window. Operators should not dispatch it again after the first publish.
+
+Next goal:
+- NPM11 (TBD) — disable the bootstrap workflow + rotate `NPM_TOKEN_TC` + verify trusted publisher live. Open after the first publish succeeds and trusted publisher is configured.
+- A separate user-locked chain `terminal-commander-windows-wsl-bridge` (WWS01..WWS07 outlined by user) is the next product-focus chain after NPM11; NOT opened at NPM10 close.

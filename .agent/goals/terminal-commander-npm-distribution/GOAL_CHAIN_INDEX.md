@@ -27,7 +27,7 @@ Language: ASCII only.
 | NPM08 | Cursor MCP install config smoke                                | Completed (6ab2343) |
 | NPM08b| README project normative overhaul                              | Completed (cacfef5) |
 | NPM09 | Release dry-run and beta publish review                        | Completed (b2770e1) |
-| NPM10 | Bootstrap first npm publish with NPM_TOKEN_TC (exception)      | In progress         |
+| NPM10 | Bootstrap first npm publish with NPM_TOKEN_TC (exception)      | Completed (9353fb4) |
 
 ## Target user experience (assumption — locked at NPM02)
 
