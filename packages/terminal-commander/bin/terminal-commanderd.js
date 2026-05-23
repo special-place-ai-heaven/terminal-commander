@@ -2,18 +2,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 //
-// NPM03 shim for `terminal-commanderd`. Resolves the matching
-// Terminal Commander platform binary and exec's it. Bounded behavior:
+// NPM03 shim for `terminal-commanderd`, extended at WWS02 to add a
+// bridge-required branch for Windows hosts.
+//
+// Bounded behavior:
 //
 //   - Reads only `process.platform` and `process.arch`.
-//   - Calls `child_process.spawn` with `shell: false` and
-//     `stdio: 'inherit'`.
-//   - Forwards `process.argv.slice(2)` verbatim. No shell interpolation.
-//   - Mirrors the child's exit code on parent exit.
-//   - Never reads files. Never opens sockets.
-//   - On unsupported platform or missing platform package, exits with
-//     code 64 (matches TC40 unsupported-platform exit) and writes one
-//     bounded stderr line.
+//   - On Linux + supported arch + platform package installed:
+//     `child_process.spawn` the Rust binary with `shell: false` and
+//     `stdio: 'inherit'`. Forwards `process.argv.slice(2)` verbatim
+//     (no shell interpolation). Mirrors the child's exit code on
+//     parent exit.
+//   - On Windows (any arch): refuses with a single bounded stderr
+//     line + exits 64. The daemon does NOT run inside the Windows
+//     bridge; the operator must run it from a WSL distro. WWS04
+//     wires the MCP shim into the bridge; the daemon shim stays a
+//     hard refusal because the Unix-only runtime invariants (UDS,
+//     PTY, peer-cred) cannot honor a Windows-native daemon.
+//   - On any other unsupported platform / missing platform package:
+//     exits 64 with the existing bounded stderr line.
+//   - Never reads files. Never opens sockets. Never invokes
+//     wsl.exe.
 
 "use strict";
 
@@ -21,6 +30,16 @@ const { spawn } = require("child_process");
 const { resolveBinary, formatResolveError } = require("../lib/resolve-binary.js");
 
 const result = resolveBinary({ binary: "terminal-commanderd" });
+
+if (result.reason === "bridge_required") {
+  process.stderr.write(
+    "terminal-commander: terminal-commanderd runs only inside Linux / WSL. " +
+      "Run it from a WSL distro (e.g. 'wsl -d <distro> -- bash -lc \"terminal-commanderd start --mode ipc-server\"'), " +
+      "or use 'terminal-commander setup cursor-wsl' on Windows after WWS06 lands.\n",
+  );
+  process.exit(64);
+}
+
 if (result.reason !== "ok") {
   process.stderr.write(formatResolveError(result) + "\n");
   process.exit(64);

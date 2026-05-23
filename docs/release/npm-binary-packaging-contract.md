@@ -411,6 +411,66 @@ Specifically:
       no-secrets rule.
 - [x] Per-goal recommendations for NPM03–NPM07 (§10).
 
+## 13b. WWS02 amendment (2026-05-23)
+
+The `terminal-commander-windows-wsl-bridge` chain (WWS01..WWS09)
+landed a single binding change to this contract at WWS02. Every
+other lock above is preserved verbatim.
+
+| Field | NPM02 lock | WWS02 amendment | Rationale |
+|-------|-----------|-----------------|-----------|
+| Root `packages/terminal-commander/package.json` `os` | `["linux"]` | `["linux", "win32"]` | The WWS chain reframes the project as an **MCP control plane with environment runners**: Linux / WSL is the real runtime host; Windows is a **bridge / setup surface only**. Widening root `os` lets `npm install -g terminal-commander` succeed on Windows while npm's `os` / `cpu` filter on `optionalDependencies` (NPM02 §4.3) keeps both Linux platform packages out of the Windows install. No Rust binary ships on Windows. No native daemon claim. See `docs/release/windows-wsl-bridge-contract.md` (WWS01, commit `6220eb2`) for the full design + 15 binding decisions D-01..D-15. |
+
+Preserved (UNCHANGED at WWS02):
+
+- §1 Package names (`terminal-commander`,
+  `@terminal-commander/linux-x64`,
+  `@terminal-commander/linux-arm64`).
+- §2 Install command (`npm install -g terminal-commander`).
+- §3.1 Supported npm binary platforms (linux-x64 +
+  linux-arm64). Windows is NOT a binary platform; it is a
+  bridge-only host.
+- §3.2 Unsupported (Windows-native runtime still rejected;
+  macOS / musl / Alpine still rejected).
+- §4.1 Package architecture (`optionalDependencies`-via-npm
+  filtering, no postinstall, no RT-compile).
+- §4.3 `optionalDependencies` semantics (`engines.npm: ">=8"`
+  preserved on root so Windows installs cleanly skip the
+  Linux platform packages).
+- §4.4 Shim behavior contract — extended with a new
+  `bridge_required` resolver branch. WWS02 wires the three bin
+  shims to refuse with a single bounded stderr line + exit `64`
+  on Windows; the actual `wsl.exe` invocation belongs to WWS04.
+- §6 Versioning contract (single shared `0.1.0-beta.1`; no
+  bump at WWS02).
+- §7 Release contract (release-please manifest mode + OIDC
+  trusted publishing). NPM10 bootstrap workflow remains
+  committed-but-not-dispatched. WWS01 §14.1 RECOMMENDS keeping
+  it paused until at minimum `WWS02 + WWS04 + WWS05 + WWS06 +
+  WWS08` land — publishing a known-broken `beta.1` would burn a
+  beta number.
+- §8 Cursor contract (stanza shape unchanged; WWS05 ships the
+  config writer; WWS06 wires the setup CLI).
+- §9 Safety contract — extended with the bridge invariants in
+  WWS01 §4.4 (whitelist-validated distro, argv-array spawn,
+  `shell: false`, `windowsHide: true`). No new MCP tools. MCP
+  guard greps remain clean.
+- §10 NPM03–NPM07 per-goal recommendations.
+- §11 Risks — extended at WWS01 §16 with R-WWS-01..R-WWS-10.
+- §12 Alternatives considered.
+
+Behavioral evidence (WWS02 verification commit):
+- Resolver tests: 20 cases pass (12 NPM03 baseline + 8 WWS02
+  cases including `win32/x64` `bridge_required`, `win32/arm64`
+  `bridge_required`, `freebsd` regression guard,
+  formatResolveError bounded ASCII single-line bridge case,
+  and three shim spawn-no-`wsl.exe` static guards).
+- `npm pack` dry-runs clean on all three packages with no file
+  count or version change.
+- Platform-package `package.json` files diff empty after WWS02
+  (`packages/terminal-commander-linux-x64/package.json` and
+  `-linux-arm64/package.json` unchanged).
+
 ## 14. Evidence
 
 - NPM01 audit: `docs/release/npm-distribution-audit.md` (commit

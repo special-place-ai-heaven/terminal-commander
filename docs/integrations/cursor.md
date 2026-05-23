@@ -256,6 +256,25 @@ it is secondary evidence, not provider-harness success.
   output exactly. Some installations rename Ubuntu (e.g.
   `Ubuntu-22.04`, `Ubuntu`); the example uses `Ubuntu-24.04`.
 
+## 11b. Windows bridge roadmap (WWS chain)
+
+The Windows config block in §6 is the **current manual path**:
+operator copies the JSON, substitutes their distro, restarts
+Cursor. A future release will replace it with a single setup
+command (`terminal-commander setup cursor-wsl`) that auto-detects
+WSL, picks a distro, writes `~/.cursor/mcp.json`, and verifies
+the bridge end-to-end.
+
+The full design is locked in
+[`docs/release/windows-wsl-bridge-contract.md`](../release/windows-wsl-bridge-contract.md)
+(WWS01). The implementation is staged across WWS02 (root npm
+package widened to install on Windows), WWS04 (the
+`terminal-commander-mcp` bridge shim that actually invokes
+`wsl.exe`), WWS05 (the Cursor config writer), and WWS06 (the
+setup / doctor / pair CLI). Until WWS04 ships, the three commands
+on Windows refuse with a single bounded stderr line + exit `64`;
+the manual `wsl.exe` config in §6 remains the only working path.
+
 ## 12. Source status
 
 | Component | Status |

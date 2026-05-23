@@ -1,17 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 //
-// NPM03 platform resolver.
+// NPM03 platform resolver (extended at WWS02 for win32 bridge mode).
 //
-// Maps `process.platform` + `process.arch` to the matching Terminal
-// Commander platform npm package and returns the absolute path to a
-// requested Rust binary. Bounded behavior:
+// Maps `process.platform` + `process.arch` to one of:
 //
-//   - Only `linux/x64` and `linux/arm64` are supported.
-//   - Returns `{ binaryPath: null, ... }` on unsupported platform OR
-//     when the platform package is not installed.
-//   - Never reads files. Never opens sockets. Never spawns a child.
-//     (The bin shims own the spawn step.)
+//   - `ok`                       Linux + supported arch + platform
+//                                package installed; shims spawn the
+//                                resolved Rust binary.
+//   - `bridge_required`          Windows host (any arch). The root
+//                                package is bridge/setup only on
+//                                Windows; no Rust binary ships. The
+//                                shims branch to a bounded refusal
+//                                (terminal-commanderd) or a
+//                                "pending WWS04/WWS06" stub message
+//                                (terminal-commander-mcp,
+//                                terminal-commander). WWS04 owns the
+//                                real wsl.exe bridge spawn; this
+//                                resolver does NOT call wsl.exe.
+//   - `platform_package_missing` Linux + supported arch but
+//                                `optionalDependencies` was skipped.
+//   - `unsupported_platform`     macOS / FreeBSD / unknown / Linux
+//                                arches outside x64+arm64.
+//   - `invalid_binary`           Resolver called with a binary name
+//                                not in ALLOWED_BINARIES.
+//
+// Bounded behavior preserved:
+//
+//   - Never reads files outside `require.resolve` of the platform
+//     package's own `package.json`.
+//   - Never opens sockets.
+//   - Never spawns a child.
+//   - Never invokes wsl.exe (deferred to WWS04 lib/wsl/spawn.js).
+//   - The shims own the spawn step on Linux; on Windows the shims
+//     refuse with a single bounded stderr line + exit 64.
 //
 // The resolver is pure; it is exercised by `test/resolve-binary.test.js`.
 
@@ -43,7 +65,7 @@ const ALLOWED_BINARIES = Object.freeze([
  * @returns {{
  *   platformPackage: string|null,
  *   binaryPath: string|null,
- *   reason: "ok"|"unsupported_platform"|"platform_package_missing"|"invalid_binary",
+ *   reason: "ok"|"bridge_required"|"unsupported_platform"|"platform_package_missing"|"invalid_binary",
  *   supportedTargets: ReadonlyArray<{platform:string,arch:string,pkg:string}>
  * }}
  */
@@ -58,6 +80,15 @@ function resolveBinary(opts) {
       platformPackage: null,
       binaryPath: null,
       reason: "invalid_binary",
+      supportedTargets: SUPPORTED_TARGETS,
+    };
+  }
+
+  if (platform === "win32") {
+    return {
+      platformPackage: null,
+      binaryPath: null,
+      reason: "bridge_required",
       supportedTargets: SUPPORTED_TARGETS,
     };
   }
@@ -114,6 +145,9 @@ function formatResolveError(result, opts) {
   const targets = result.supportedTargets
     .map((t) => `${t.platform}-${t.arch}`)
     .join(", ");
+  if (result.reason === "bridge_required") {
+    return `terminal-commander: Windows host detected (${platform}-${arch}); root package is bridge/setup only, native runtime targets are ${targets}`;
+  }
   if (result.reason === "unsupported_platform") {
     return `terminal-commander: unsupported platform ${platform}-${arch}; supported: ${targets}`;
   }
