@@ -1,0 +1,286 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Terminal Commander Authors
+#
+# NPM05 — npm binary build matrix.
+#
+# Purpose:
+#   Build the three Rust binaries for the locked NPM02 target triples,
+#   stage them into the matching platform package, run `npm pack` for
+#   the root wrapper + each platform package, and upload the resulting
+#   tarballs as workflow artifacts. The TC46 local smoke + the TC47
+#   load regression run on the x64 leg only.
+#
+# This workflow does NOT:
+#   - publish to the npm registry,
+#   - touch a release-please config,
+#   - run an OIDC / trusted-publishing step,
+#   - reference any NPM_TOKEN or other long-lived secret,
+#   - mutate the committed `packages/<plat>/bin/*.placeholder` files
+#     on the workflow runner: the real binaries are written into the
+#     SAME paths on the runner only, the workflow does not push them
+#     back to the repository.
+#
+# Honest cross-arch posture:
+#   - The `linux-x64` matrix leg runs end-to-end every step (build,
+#     pack, smoke, load).
+#   - The `linux-arm64` matrix leg uses the GitHub-hosted runner
+#     label `ubuntu-24.04-arm` AT IMPLEMENTATION TIME. Availability
+#     depends on the repository's runner allowance. If the arm64
+#     runner is not yet available for this repository, the arm64 leg
+#     will fail with `No runner matching the specified labels was
+#     found: ubuntu-24.04-arm`. That failure is the BLOCKER, not a
+#     defect of the workflow; the operator records it on the run
+#     and either acquires the arm64 runner allowance or replaces
+#     the leg with QEMU `cross` in a follow-up amendment.
+#   - The arm64 leg therefore runs only the binary-level checks
+#     (`cargo build --release` for the arm64 triple, `--help` /
+#     `--version` smoke, `npm pack` of the arm64 platform package).
+#     Full TC46 + TC47 regressions are skipped on arm64 because
+#     they belong to the runtime gate that the x64 leg already
+#     enforces.
+
+name: npm-binary-build
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "packages/**"
+      - "scripts/smoke/**"
+      - ".github/workflows/npm-binary-build.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "packages/**"
+      - "scripts/smoke/**"
+      - ".github/workflows/npm-binary-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Lock down the GitHub token. Artifact upload uses the implicit
+# `GITHUB_TOKEN` granted by the runner; no `id-token` claim is
+# requested at NPM05 (NPM07 will add that for trusted publishing).
+concurrency:
+  group: npm-binary-build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Matches RELEASE_CHECKLIST.md doctrine + Symforge precedent.
+  RUST_TOOLCHAIN: "1.95.0"
+  # Workflow targets node 20 LTS; package.json declares engines.node ">=18".
+  NODE_VERSION: "20"
+  # Use the standard release target dir so cache + smoke share state.
+  CARGO_TARGET_DIR: "${{ github.workspace }}/target"
+
+jobs:
+  build:
+    strategy:
+      # Do NOT cancel the x64 leg when the arm64 leg fails (or vice
+      # versa); arm64 may be Blocked on this repository today.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform_pkg: terminal-commander-linux-x64
+            full_smoke: true
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform_pkg: terminal-commander-linux-arm64
+            full_smoke: false
+
+    runs-on: ${{ matrix.runner }}
+    name: build-${{ matrix.name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (${{ env.RUST_TOOLCHAIN }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: npm-binary-build-${{ matrix.name }}
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # ------------------------------------------------------------------
+      # Pre-build gates — full set on x64, narrow set on arm64.
+      # These mirror the local NPM04 gate set documented in the goal
+      # final report.
+      # ------------------------------------------------------------------
+
+      - name: cargo fmt --all --check
+        if: matrix.full_smoke
+        run: cargo fmt --all --check
+
+      - name: cargo clippy (-D warnings)
+        if: matrix.full_smoke
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo nextest run --workspace
+        if: matrix.full_smoke
+        uses: taiki-e/install-action@nextest
+      # The action above installs `cargo-nextest`; the actual run is
+      # the next step.
+
+      - name: nextest workspace
+        if: matrix.full_smoke
+        run: cargo nextest run --workspace
+
+      - name: TC47 load gate (8 stress tests)
+        if: matrix.full_smoke
+        run: cargo test -p terminal-commanderd --test load_noise_backpressure -- --nocapture
+
+      - name: MCP grep guard 1 — no spawn / no socket in crates/mcp
+        if: matrix.full_smoke
+        shell: bash
+        run: |
+          set -e
+          # The matches must be doc / negative-assertion only (existing
+          # baseline). Fail if a new "real" match appears.
+          out=$(grep -RE "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp || true)
+          echo "$out"
+          # Heuristic: doc lines start with `//!` or `//` or live in a
+          # comment-only test assertion. The hard fail is if a binding
+          # name (no leading comment slashes) appears in source.
+          if echo "$out" | grep -E "^crates/mcp/(src|tests)/[^:]+:[ \t]*(let|use|fn|pub|impl|let mut)" >/dev/null; then
+            echo "::error::MCP guard 1 caught a non-doc match"
+            exit 1
+          fi
+
+      - name: MCP grep guard 2 — no direct fs in crates/mcp/src
+        if: matrix.full_smoke
+        shell: bash
+        run: |
+          set -e
+          if grep -RE "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src; then
+            echo "::error::MCP guard 2 caught a direct-fs path"
+            exit 1
+          fi
+
+      # ------------------------------------------------------------------
+      # Build the three release binaries for this matrix leg's target.
+      # ------------------------------------------------------------------
+
+      - name: cargo build --release --target ${{ matrix.target }}
+        run: |
+          cargo build --release \
+            --target ${{ matrix.target }} \
+            -p terminal-commanderd \
+            -p terminal-commander-mcp \
+            -p terminal-commander-cli
+
+      - name: Stage real binaries into platform package
+        shell: bash
+        run: |
+          set -e
+          bin_dir="packages/${{ matrix.platform_pkg }}/bin"
+          src_dir="target/${{ matrix.target }}/release"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            if [ ! -x "$src_dir/$bin" ]; then
+              echo "::error::expected release binary not found: $src_dir/$bin"
+              exit 1
+            fi
+            cp "$src_dir/$bin" "$bin_dir/$bin"
+            chmod +x "$bin_dir/$bin"
+          done
+          # Sanity: the placeholders sit alongside the real binaries.
+          # We do not delete the placeholders here so the runner's
+          # `packages/` tree mirrors the NPM05 design exactly.
+          ls -la "$bin_dir"
+
+      - name: Smoke — binary --help
+        shell: bash
+        run: |
+          set -e
+          bin_dir="packages/${{ matrix.platform_pkg }}/bin"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            "./$bin_dir/$bin" --help > /tmp/help-$bin.log 2>&1 || {
+              echo "::error::$bin --help failed";
+              head -50 /tmp/help-$bin.log;
+              exit 1;
+            }
+          done
+
+      - name: Smoke — daemon self-check (x64 only — uses local UDS)
+        if: matrix.full_smoke
+        shell: bash
+        run: |
+          set -e
+          tmp=$(mktemp -d -t tc-npm05-check.XXXXXX)
+          "./packages/${{ matrix.platform_pkg }}/bin/terminal-commanderd" --data-dir "$tmp" check
+          rm -rf "$tmp"
+
+      # ------------------------------------------------------------------
+      # npm pack — root + platform packages.
+      # ------------------------------------------------------------------
+
+      - name: npm pack — platform package
+        shell: bash
+        run: |
+          set -e
+          mkdir -p tarballs
+          ( cd packages/${{ matrix.platform_pkg }} && npm pack --pack-destination "$GITHUB_WORKSPACE/tarballs" )
+
+      - name: npm pack — root wrapper (x64 only)
+        if: matrix.full_smoke
+        shell: bash
+        run: |
+          set -e
+          mkdir -p tarballs
+          ( cd packages/terminal-commander && npm pack --pack-destination "$GITHUB_WORKSPACE/tarballs" )
+
+      - name: List tarball contents
+        shell: bash
+        run: ls -la tarballs/
+
+      # ------------------------------------------------------------------
+      # Full NPM04 install + MCP stdio smoke — x64 only.
+      # The script handles arm64 host detection on its own, but the
+      # arm64 runner does not have the Rust workspace cache primed
+      # for a separate cargo invocation; we skip it on arm64 to keep
+      # the matrix leg under the GitHub-hosted runner timeout.
+      # ------------------------------------------------------------------
+
+      - name: NPM04 install + MCP stdio smoke (x64 only)
+        if: matrix.full_smoke
+        shell: bash
+        run: |
+          # The smoke builds binaries again into its own CARGO_TARGET_DIR.
+          # Override so it does not redo `target/<triple>/release/`.
+          export CARGO_TARGET_DIR="${{ github.workspace }}/target-smoke"
+          bash scripts/smoke/verify-npm-local-install.sh
+
+      # ------------------------------------------------------------------
+      # Upload the tarballs as workflow artifacts.
+      # ------------------------------------------------------------------
+
+      - name: Upload tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarballs-${{ matrix.name }}
+          path: tarballs/*.tgz
+          if-no-files-found: error
+          retention-days: 14
