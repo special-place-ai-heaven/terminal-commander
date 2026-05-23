@@ -3,15 +3,15 @@ goal_id: WWS03
 title: Wsl Distro Discovery And Runtime Doctor
 chain_id: terminal-commander-windows-wsl-bridge
 phase: Wave 1 - Setup helpers
-status: "Pending"
+status: "Completed"
 depends_on: ["WWS02"]
 target_branch: "main"
 prohibited_branches: ["master", "feature/terminal-commander-mvp", "feature/terminal-commander-runtime", "production", "release"]
 worktree_hint: ""
 created_at: "2026-05-23T12:00:00+00:00"
-started_at: ""
-completed_at: ""
-completion_commit: ""
+started_at: "2026-05-23T11:30:00+00:00"
+completed_at: "2026-05-23T13:15:00+00:00"
+completion_commit: "ec8441e"
 blocked_reason: ""
 source_refs:
   - "WWS01 contract (docs/release/windows-wsl-bridge-contract.md) — §7 distro selection, §10.2 lib/wsl/detect.js + lib/wsl/doctor.js, §15 D-06 / D-07 / D-12, §12 failure-mode table"
