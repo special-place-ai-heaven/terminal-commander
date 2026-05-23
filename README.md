@@ -2,330 +2,268 @@
 
 # Terminal Commander
 
-**Terminal Commander** is a local realtime signal-channel and
-tool-control abstraction layer for LLM coding agents.
+**Terminal Commander** is a local realtime signal channel and MCP
+tool-control surface for LLM coding agents. It runs entirely on
+your machine — daemon, MCP stdio adapter, and admin CLI — and
+turns noisy terminal, file, and PTY streams into bounded, structured
+signal that an LLM can read by cursor without ever seeing the raw
+output.
 
 It is NOT a CLI command runner.
 It is NOT a shell bridge.
 It is NOT a log shipper.
-
-Its job: convert noisy continuous terminal and filesystem streams
-into small structured signal events that an LLM can read by cursor,
-plus bounded context windows when the LLM needs to look closer.
+It is NOT a remote service.
 
 ```text
-Raw terminal/file output goes in.
-Only vetted, relevant signal comes out.
+Raw terminal/file/PTY output goes in.
+Only vetted, structured signal comes out.
 Context remains available by pointer.
 ```
 
-## Problem
+## Value: all signal, no raw noise
 
-Current coding-agent terminal interaction is inefficient:
-
-```text
-agent runs command
-command emits huge output
-agent periodically tails output
-agent greps or scans chunks
-agent misses signal between probes
-agent burns tokens on noise
-agent repeats
-```
-
-This is especially bad for package installation, large builds, test
-suites, compilers, long-running shell commands, WSL workflows,
-generated logs and reports, and interactive command prompts.
-
-Terminal Commander moves that parsing burden out of the LLM and
-into a local streaming system.
-
-## How an LLM uses it
-
-The LLM never reads a noisy terminal stream directly. The LLM
-says, in effect:
-
-```text
-Run this command.
-Watch stdout, stderr, and these files.
-Use these registry rules.
-Notify me only when useful signal appears.
-Give me context around event X if needed.
-```
-
-Terminal Commander handles the stream continuously and exposes
-structured events such as:
-
-- command failed,
-- test failed,
-- package missing,
-- compiler error,
-- permission denied,
-- sudo/password prompt,
-- stalled command,
-- file changed,
-- artifact generated,
-- repeated warning collapsed,
-- numeric threshold crossed.
-
-The LLM consumes those events by cursor. When it wants to look at
-the raw lines around an event, it asks for a bounded context window
-by pointer — it never receives the whole stream.
-
-## Why the design is shaped this way
-
-- **No raw stream lane to the LLM.** Every LLM-visible response is
-  bounded and structured. A "give me the full stdout" tool would
-  defeat the purpose.
-- **Bounded outputs everywhere.** Bucket reads cap at 10 000
-  events. File reads cap at 64 KiB. Context windows cap at 1024
-  frames / 64 KiB.
-- **Pointer-or-reason invariant.** Every event with
-  `severity >= medium` carries a `SourcePointer` OR a typed
-  `pointer_unavailable_reason`. The LLM is never left guessing
-  whether context exists.
-- **No MCP root shell.** The MCP server is a thin adapter. It
-  contains no `Command::spawn`, no file open outside its own
-  config, no network listener.
-- **No network listener at all.** The daemon is reachable only
-  over a local Unix domain socket with peer-credential checks.
-- **Policy gate before every spawn.** Four closed-set profiles
-  (`developer_local`, `repo_only`, `read_only_observer`,
-  `admin_debug`) plus a shell-interpreter deny list that prevents
-  `command_start_combed` from degrading into a shell bridge.
-- **Persistent audit log.** Every policy-relevant action lands in
-  SQLite with a closed-set decision label. No in-memory audit on
-  the production path.
-- **Bucket waits don't busy-poll.** `bucket_wait` parks on a tokio
-  `Notify`. On timeout it returns a heartbeat, never raw text.
+- **Probes** observe commands, files, PTY streams, and runtime state.
+- **Sifters** + **registry rules** extract useful events (errors,
+  package-missing, stalls, prompts, artifacts, regressions).
+- **Buckets** expose bounded, cursor-based structured signal streams.
+- **Context pointers** provide bounded surrounding context ONLY when
+  the LLM asks — never as a raw firehose.
+- The LLM speaks intent (`run this`, `watch that`, `notify me when
+  X`); the daemon, probes, and sifters do the parsing toil.
 
 ## Architecture
 
 ```text
-                +-----------------------------------+
-                |   LLM / MCP client                |
-                |   (Claude Code, Codex CLI, ...)   |
-                +-----------------------------------+
-                          |
-                          |  MCP (rmcp stdio)
-                          v
-                +-----------------------------------+
-                |  terminal-commander-mcp           |  crates/mcp
-                |  - thin adapter                   |
-                |  - NO Command::spawn              |
-                |  - NO network listener            |
-                |  - forwards every call to daemon  |
-                +-----------------------------------+
-                          |
-                          |  Local UDS (length-prefixed JSON,
-                          |  peer-cred checked, 256 KiB frame cap)
-                          v
-+---------------------------------------------------------------+
-|  terminal-commanderd  (crates/daemon)                         |
-|                                                               |
-|  IPC server                                                   |
-|    system_discover  health  policy_status  self_check         |
-|    bucket_events_since  bucket_wait  bucket_summary           |
-|    event_context  (command_* surfaced via the MCP layer)      |
-|         every accepted request -> PersistentAudit row         |
-|                                                               |
-|  Command runtime  (argv-only; NO shell bridge)                |
-|    1. validate argv (bounded item count and size)             |
-|    2. shell-interpreter deny list                             |
-|    3. PolicyEngine::evaluate(CommandStart)                    |
-|    4. spawn ProcessProbe (tokio::process, stdin = null)       |
-|    5. JobManager start + lifecycle waiter                     |
-|                                                               |
-|  Router                                                       |
-|    bucket_create  bucket_append  bucket_events_since          |
-|    bucket_wait (Notify-backed)  event_context                 |
-|    every action -> PersistentAudit                            |
-|                                                               |
-|  Policy engine                                                |
-|    4 profiles, sudo/doas/su/pkexec/kexec/polkit deny doctrine |
-|    14 default-deny sensitive path suffixes                    |
-|                                                               |
-|  Persistent audit                                             |
-|    SQLite audit_records table, closed-set decisions,          |
-|    bounded subject / reason / metadata_json                   |
-+---------------------------------------------------------------+
-                          |
-                          v
-+---------------------------------------------------------------+
-|  Probes  (crates/probes)                                      |
-|  +---------------------------+  +--------------------------+  |
-|  | process_probe             |  | file_probe               |  |
-|  | tokio::process::Command   |  | follow / create-after /  |  |
-|  | non-interactive           |  | truncate / rotate        |  |
-|  +---------------------------+  +--------------------------+  |
-|  +---------------------------+  +--------------------------+  |
-|  | directory_probe           |  | terminal / PTY probe     |  |
-|  | create / modify / delete  |  | ANSI normalization +     |  |
-|  |                           |  | prompt detection         |  |
-|  +---------------------------+  +--------------------------+  |
-+---------------------------------------------------------------+
-                          |
-                          v
-+---------------------------------------------------------------+
-|  Sifter runtime  (crates/sifters)                             |
-|  keyword (aho-corasick), regex (RegexSet), multiline,         |
-|  dedupe, suppression, progress, prompt, stall, condition,     |
-|  correlation, artifact parsers.                               |
-|  Probes hand SourceFrames in. Sifters emit one EventDraft     |
-|  per match.                                                   |
-+---------------------------------------------------------------+
-                          |
-                          v
-+---------------------------------------------------------------+
-|  In-memory bucket manager  (crates/core::bucket)              |
-|    per-bucket Notify wakeup -> bucket_wait, no busy poll      |
-|    count-cap + TTL retention, drop-oldest + dropped_count     |
-|                                                               |
-|  Context ring  (crates/core::context)                         |
-|    per-probe SourceFrame ring, anchored windows by FrameId    |
-|                                                               |
-|  Job manager  (crates/core::job)                              |
-|    Starting / Running / Exited / Failed / Cancelled           |
-|    synthesizes command_exited / command_failed lifecycle      |
-|                                                               |
-|  Event store + registry  (crates/store)                       |
-|    SQLite (rusqlite + bundled SQLite + FTS5),                 |
-|    manual migration runner, audit log table                   |
-+---------------------------------------------------------------+
+   +-----------------------------------------------+
+   |   LLM / MCP client                            |
+   |   (Cursor, Claude Code, Codex CLI, generic)   |
+   +-----------------------------------------------+
+                       |
+                       |  MCP stdio (rmcp 1.7.0)
+                       v
+   +-----------------------------------------------+
+   |  terminal-commander-mcp        (crates/mcp)   |
+   |  thin adapter; NO Command::spawn;             |
+   |  NO file open; NO network listener            |
+   +-----------------------------------------------+
+                       |
+                       |  Local UDS, peer-cred checked,
+                       |  length-prefixed JSON, 256 KiB cap
+                       v
+   +-----------------------------------------------+
+   |  terminal-commanderd         (crates/daemon)  |
+   |  IPC server, policy engine, job manager,      |
+   |  router, persistent audit (SQLite)            |
+   +-----------------------------------------------+
+                       |
+        +--------------+---------------+
+        v              v               v
+   +-----------+  +-----------+  +------------------+
+   | process / |  | sifters / |  | in-memory bucket |
+   | file /    |->|  registry |->| manager + ring   |
+   | directory |  | runtime   |  | context + audit  |
+   | / PTY     |  +-----------+  +------------------+
+   | probes    |
+   +-----------+
 ```
 
-Data flows DOWN this stack. Signal flows UP. Only structured
-events and bounded context cross the IPC boundary.
+Data flows DOWN the stack. Signal flows UP. Only bounded JSON
+envelopes cross the IPC boundary — no raw stream lane reaches the
+LLM. The MCP server is a thin adapter; the daemon owns every probe,
+every spawn, and every audit write.
 
-## Core concepts
+Authoritative deeper docs:
+- [`docs/runtime/REALTIME_SIGNAL_CHANNEL.md`](docs/runtime/REALTIME_SIGNAL_CHANNEL.md) — product semantics.
+- [`docs/runtime/UDS_IPC.md`](docs/runtime/UDS_IPC.md) — local UDS IPC.
+- [`docs/runtime/COMMAND_RUNTIME.md`](docs/runtime/COMMAND_RUNTIME.md) — command lifecycle + policy gate.
+- [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md) — locked MCP tool list with bounds and policy gates.
+- [`docs/security/PRIVILEGE_MODEL.md`](docs/security/PRIVILEGE_MODEL.md) — security envelope.
 
-### Daemon
+## Feature matrix
 
-`terminal-commanderd` is the long-running local process. It owns
-the SQLite event store, the audit log, the in-memory bucket
-manager, the context ring, the job manager, the policy engine, the
-sifter runtime, and the local UDS server.
+| Area | Surface | Status |
+|------|---------|--------|
+| `terminal-commanderd` daemon | bootstrap / IPC server / persistent audit / sub-commands `check` / `start` / `print-config` | live (TC33–TC48) |
+| Bounded UDS IPC | length-prefixed JSON over a local Unix domain socket, peer-cred checked, 256 KiB frame cap | live (TC37) |
+| `terminal-commander-mcp` stdio server | rmcp 1.7.0 stdio adapter, no `Command::spawn`, no file open, no network listener | live (TC40 + ongoing) |
+| Persistent audit | SQLite `audit_records` with closed-set decision labels | live (TC35) |
+| `command_start_combed` | argv-only spawn with policy-gated start + shell-interpreter deny | live (TC38 / TC41) |
+| `command_status` | bounded lifecycle/status JSON envelope | live (TC41 / TC45) |
+| `bucket_events_since` | cursor-bounded read with severity / kind / limit filters | live (TC39 / TC41) |
+| `bucket_wait` | `Notify`-backed park with heartbeat-on-timeout, never raw text | live (TC39 / TC41) |
+| `bucket_summary` | per-bucket counters | live (TC39 / TC41) |
+| `event_context` | pointer-anchored window, 1024 frames / 64 KiB cap, typed `unavailable_reason` on miss | live (TC39 / TC41) |
+| Registry upsert / test / activate / deactivate | dynamic rule registry with scoped live rebind | live (TC42 / TC42b / TC42c / TC42d) |
+| `file_read_window` / `file_search` | bounded path-policy-gated file tools | live (TC43) |
+| `file_watch_start` / `_stop` / `_list` | bounded file/directory watch with sifters | live (TC43) |
+| `pty_command_start` / `_write_stdin` / `_stop` / `_list` | PTY surface with **secret-prompt-deny on stdin** | live (TC44) |
+| `runtime_state` / `probe_list` / `probe_status` | aggregate runtime view | live (TC45) |
+| TC47 load / noise / backpressure gate | 8 stress tests | live (TC47) |
+| npm wrapper + platform package layout | `terminal-commander` root + `@terminal-commander/linux-x64` + `@terminal-commander/linux-arm64` with `optionalDependencies`, no postinstall | live (NPM02 / NPM03 / NPM04) |
+| GitHub Actions npm-binary-build matrix | linux-x64 (full smoke) + linux-arm64 (build + pack); both pass on `ubuntu-24.04` and `ubuntu-24.04-arm` | live (NPM05) |
+| release-please manifest mode | manifest-mode config at `.github/`, single shared `0.1.0-beta.1` version, linked-versions plugin | live (NPM06) |
+| npm trusted publishing (OIDC + provenance) | output-gated publish jobs inside `release-please.yml`; no `NPM_TOKEN`, no PAT | live workflow (NPM07); **first live publish pending** operator npmjs.com trusted-publisher setup + a release PR merge |
+| Cursor MCP config examples | native Linux / inside-WSL + Windows → WSL bridge | live (NPM08) |
+| Cursor provider live smoke transcript | requires operator GUI steps (no headless Cursor MCP entry point on host) | **Not Run** |
+| Codex CLI + Claude Code provider live smokes | operator-driven | **Not Run** (TC46 / TC48 baseline) |
 
-The daemon is unprivileged by default. There is no setuid binary,
-no polkit rule, no system-level systemd unit. A user-level
-systemd-unit example ships under `config/`.
+## Install
 
-Subcommands:
+Terminal Commander runs on **Linux** and **WSL2**. Initial npm
+platforms are **linux-x64** and **linux-arm64**. There is **no
+macOS-native, no Windows-native, and no musl / Alpine package**
+claim at this time — the daemon UDS is Unix-only and the runtime
+chain (TC44 `non_goals`) explicitly defers those targets.
 
-```text
-terminal-commanderd check          # bootstrap + self-check report, exit
-terminal-commanderd start          # bootstrap + bind UDS, idle until SIGTERM
-terminal-commanderd print-config   # render the resolved config back to TOML
+### Future published path (pending first live publish)
+
+Once the operator completes the npmjs.com trusted-publisher
+preconditions in [`docs/release/npm-trusted-publishing-contract.md`](docs/release/npm-trusted-publishing-contract.md) §8
+and the first release PR merges, the install command will be:
+
+```sh
+npm install -g terminal-commander
 ```
 
-### MCP server
+After install, the following commands land on `$PATH`:
 
-`terminal-commander-mcp` is the provider-neutral interface used by
-Claude Code, Codex CLI, IDE agents, or other LLM harnesses.
+- `terminal-commanderd`        — daemon
+- `terminal-commander-mcp`     — MCP stdio adapter
+- `terminal-commander`         — admin CLI
 
-It is a thin adapter. It contains no `Command::spawn`, no file open
-outside its own config, and no network listener. Every tool call is
-forwarded to the daemon over the local UDS.
+This path is **not active yet**; no npm publish has executed against
+the registry. See [§ Current beta status](#current-beta-status).
 
-### Probes
+### Current pre-publish path
 
-A probe observes a source and produces normalized `SourceFrame`s.
-It does NOT decide significance.
+Build + pack + install the same packages locally without touching
+npmjs.com:
 
-- `process_probe` — spawns and watches a command (non-interactive).
-- `file_probe` — follows a file, handles create-after-start,
-  truncation, and rotation.
-- `directory_probe` — watches a directory for create / modify /
-  delete events; surfaces basic artifact summaries.
-- `terminal_probe` / PTY — attaches to an interactive PTY stream
-  (ANSI normalization + prompt detection ship today; PTY spawn is
-  a follow-up).
-- `journal_probe` — watches systemd/journal output where allowed.
-- `artifact_probe` — summarizes structured reports such as JUnit
-  XML or coverage JSON.
+```sh
+bash scripts/smoke/verify-npm-local-install.sh
+```
 
-### Sifters
+The smoke script produces real release binaries via `cargo build
+--release`, stages them into the matching platform package's `bin/`,
+runs `npm pack`, installs the resulting tarballs into a sandboxed
+`--prefix`, and exercises the three commands end-to-end (daemon
+self-check + MCP stdio handshake + `tools/list` returning 29 tools).
+Documented in [`docs/release/npm-binary-packaging-contract.md`](docs/release/npm-binary-packaging-contract.md).
 
-A sifter extracts signal from noise. Rule types:
+### Cargo-built path (always available)
 
-- keyword,
-- regex,
-- numeric condition,
-- multiline block,
-- progress detector,
-- prompt detector,
-- stall detector,
-- dedupe rule,
-- suppression rule,
-- correlation rule,
-- artifact parser.
+```sh
+cargo build --release \
+  -p terminal-commanderd \
+  -p terminal-commander-mcp \
+  -p terminal-commander-cli
+```
 
-Sifters live in a dynamic registry so an LLM can search, select,
-create, test, version, and activate them at runtime.
+The CLI's Cargo package name is `terminal-commander-cli`; the binary
+name is `terminal-commander` (per the `[[bin]]` section in
+`crates/cli/Cargo.toml`).
 
-### Signal buckets
+## Quickstart
 
-A bucket is a cursor-based stream of structured `SignalEvent`s.
-**A bucket is not a raw log.**
+```sh
+# 1. Start the daemon (replace TC_DATA with any writable directory)
+export TC_DATA="${XDG_STATE_HOME:-$HOME/.local/state}/terminal-commander"
+mkdir -p "$TC_DATA"
+terminal-commanderd --data-dir "$TC_DATA" start --mode ipc-server
+```
 
-Per-bucket retention: count cap (default 100 000) AND TTL (default
-24 h). Drop-oldest, with `dropped_count` exposed so the LLM knows
-when retention discarded older signal.
+Leave the daemon running in a separate terminal or under a process
+supervisor.
 
-Each event carries:
+```sh
+# 2. Configure Cursor MCP. Copy ONE of these into ~/.cursor/mcp.json
+#    (or your workspace's .cursor/mcp.json):
+#
+#    examples/provider-harness/cursor/mcp.global.native-linux.json
+#    examples/provider-harness/cursor/mcp.project.linux-wsl.json
+#    examples/provider-harness/cursor/mcp.global.linux-wsl.json   (Windows → WSL bridge)
+#
+# See: docs/integrations/cursor.md
+```
 
-- monotonic per-bucket `seq` number,
-- timestamp (RFC 3339),
-- severity (`trace` / `debug` / `info` / `low` / `medium` / `high`
-  / `critical`),
-- open-string `kind`,
-- short single-line summary,
-- optional captures map (string → string, insertion-ordered),
-- optional source pointer or typed `pointer_unavailable_reason`,
-- optional rule reference and tags,
-- dedupe / suppression metadata.
+```sh
+# 3. Inside Cursor (or any MCP client), ask for the tool list and
+#    verify the 29 TC45 tools are visible, then call:
+#
+#      health
+#      system_discover
+```
 
-Example shape (informal):
+```sh
+# 4. Run a real flow (works against any MCP client):
+#
+#    command_start_combed argv=["echo","hello"]
+#    bucket_wait        bucket_id=<from_combed>  cursor=0  timeout_ms=2000
+#    command_status     job_id=<from_combed>
+```
+
+Every response is a bounded JSON envelope. No raw stdout or stderr
+appears in the LLM transcript.
+
+## Cursor MCP integration
+
+Cursor reads MCP server configs from `~/.cursor/mcp.json` (global)
+or `<workspace>/.cursor/mcp.json` (project). This repo does NOT
+ship an active `.cursor/mcp.json` — operators copy intentionally
+from `examples/provider-harness/cursor/` into their own scope.
+
+Full walk-through: [`docs/integrations/cursor.md`](docs/integrations/cursor.md).
+
+### Native Linux / inside-WSL Cursor
 
 ```json
 {
-  "event_id": "evt_01HX...",
-  "bucket_id": "bkt_01HX...",
-  "seq": 1842,
-  "timestamp": "2026-05-20T20:11:34.218+02:00",
-  "severity": "high",
-  "kind": "missing_package",
-  "summary": "APT could not locate package libssl-dev",
-  "captures": { "package": "libssl-dev" },
-  "source": {
-    "probe_id": "probe_01HX...",
-    "source_type": "process",
-    "stream": "stderr",
-    "job_id": "job_01HX..."
-  },
-  "pointer": { "frame_id": "frame_01HX...", "line": 318 }
+  "mcpServers": {
+    "terminal-commander": {
+      "command": "terminal-commander-mcp",
+      "type": "stdio"
+    }
+  }
 }
 ```
 
-### Context by pointer
+[`examples/provider-harness/cursor/mcp.global.native-linux.json`](examples/provider-harness/cursor/mcp.global.native-linux.json)
 
-Raw stream data is available **only** through bounded windows. The
-LLM asks:
+### Windows Cursor → WSL bridge
 
-```text
-event_context(bucket_id, event_id, before, after, max_bytes)
+```json
+{
+  "mcpServers": {
+    "terminal-commander": {
+      "command": "wsl",
+      "type": "stdio",
+      "args": ["-d", "Ubuntu-24.04", "bash", "-lc", "terminal-commander-mcp"]
+    }
+  }
+}
 ```
 
-The daemon resolves the event's `SourcePointer` against the
-per-probe context ring and returns a bounded window. If the anchor
-frame has already been evicted from the ring, the response carries
-a typed `unavailable_reason` — it never invents raw text. Hard
-caps: 1024 frames, 64 KiB.
+[`examples/provider-harness/cursor/mcp.global.linux-wsl.json`](examples/provider-harness/cursor/mcp.global.linux-wsl.json)
 
-## MCP tool surface
+Substitute your WSL distribution name from `wsl --list --verbose`.
 
-The provider-neutral interface used by an LLM harness. Current
-catalogue: 29 live tools (TC45 surface).
+### Cursor live smoke status
+
+**Not Run.** Cursor 3.5.30 is installed on the verification host,
+but Cursor today has no documented non-interactive MCP discovery /
+tool-call entry point — there is no `cursor --list-mcp-tools`
+subcommand, and the `cursor-agent` headless CLI is not installed.
+Live smoke requires operator-driven GUI steps (open Cursor → place
+config → start daemon → ask Cursor chat to list MCP tools and call
+`health` → capture transcript). Not scriptable in this session;
+not promoted to PASS.
+
+The local daemon + MCP stdio smoke
+([`scripts/smoke/verify-runtime-smoke.sh`](scripts/smoke/verify-runtime-smoke.sh))
+is secondary evidence only — it proves the local transport surface
+without a provider in the loop.
+
+## MCP tool catalogue (29 tools)
 
 ```text
 system_discover            health                    policy_status
@@ -343,26 +281,10 @@ pty_command_list
 runtime_state              probe_list                probe_status
 ```
 
-Beta source-status snapshot (full evidence in
-`EVIDENCE_REPORT_RUNTIME.md`):
-
-- Persistent audit (TC35), UDS IPC (TC37), command runtime (TC38),
-  bucket / context APIs (TC39), rmcp stdio adapter (TC40), MCP
-  command + bucket tools (TC41), dynamic registry (TC42 /
-  TC42b / TC42c / TC42d), file tools (TC43), PTY + secret-prompt
-  deny (TC44), aggregate runtime view (TC45): all **live**.
-- Local daemon + MCP stdio smoke (TC46): **live** (secondary
-  evidence; not provider-harness success on its own).
-- Codex CLI and Claude Code provider live smokes (TC46):
-  **Not Run** on the verification host. Exact blockers and
-  config-only examples in `docs/integrations/`.
-- Load / noise / backpressure gate (TC47): **live**, 8/8 stress
-  tests passing.
-- Beta recommendation (TC48): **Conditional Go**. See
-  `RELEASE_CHECKLIST.md`.
-
-The most important tool is `bucket_wait`. It lets the LLM wait for
-meaningful signal without polling raw output:
+The most important tool is `bucket_wait`: the LLM parks on a
+`Notify`-backed channel and receives a bounded JSON envelope when
+matching signal arrives — or `heartbeat = true` on timeout, never
+raw text:
 
 ```json
 {
@@ -376,136 +298,186 @@ meaningful signal without polling raw output:
 }
 ```
 
-If nothing matching arrives in `timeout_ms`, the response is
-`heartbeat = true` with an empty `events` array. Never a raw
-output dump.
+Full per-tool bounds, policy gates, and shapes:
+[`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
 
-The locked tool list with per-tool bounds and policy gates lives in
-`docs/mcp/TOOL_CONTROL_SURFACE.md`.
-
-## Safety model
-
-Terminal Commander runs locally. The security envelope is explicit:
-
-- The MCP server is unprivileged. A structural test in
-  `crates/daemon/tests/security.rs` enforces no `Command::spawn`,
-  no `TcpListener`, and no `UdpSocket` in the MCP crate.
-- The daemon is unprivileged by default. No setuid binary, no
-  polkit rule, no installed system service.
-- All command execution passes the policy engine BEFORE spawn.
-- The command runtime applies a shell-interpreter deny list
-  BEFORE policy: `sh`, `bash`, `dash`, `zsh`, `fish`, `ksh`,
-  `csh`, `tcsh`, `ash`, `busybox`, `powershell`, `powershell.exe`,
-  `pwsh`, `pwsh.exe`, `cmd`, `cmd.exe`. argv whose basename
-  matches any of these is rejected. `command_start_combed` is
-  argv-only and is not a shell bridge.
-- The policy `COMMANDS_DENY` set (sudo, doas, su, pkexec, kexec,
-  polkit-agent, polkit-auth-agent-1) is rejected by every profile.
-- File access respects 14 default-deny path suffixes covering
-  private keys, credential stores, sudoers, and token caches.
-- Every policy-relevant action is audited to a persistent SQLite
-  audit log with a closed-set decision label. No in-memory audit
-  ever appears on a production path.
-- The local UDS server fails closed on Linux / WSL when peer
-  credentials cannot be obtained.
-- No network listener exists in the daemon or in the MCP crate.
-
-Default-denied sensitive areas include private keys, password
-files, credential stores, and token caches unless explicitly
-allowed by policy.
-
-## Configuration
+## Settings and configuration
 
 Operator-tunable settings live in `terminal-commanderd.toml`. A
 safe-to-commit example ships at
-`config/terminal-commanderd.example.toml`. Notable knobs:
+[`config/terminal-commanderd.example.toml`](config/terminal-commanderd.example.toml).
 
-- `daemon.data_dir` — where the SQLite DB and audit log live. MUST
-  be a native Linux filesystem; WSL `/mnt/c` is rejected at writer
-  open.
-- `daemon.socket_path` — local UDS path; defaults to
-  `<data_dir>/terminal-commanderd.sock`.
-- `daemon.runtime_mode` — `self_check` / `foreground_idle` /
-  `ipc_server`.
-- `policy.profile` — `developer_local` / `repo_only` /
-  `read_only_observer` / `admin_debug`.
-- `retention.max_events` / `retention.ttl_seconds` — per-bucket
-  caps.
-- `audit.retention_days` — audit log retention.
-- `limits.file_window_bytes` — clamped at config load to 64 KiB.
-- `limits.bucket_read_limit` — clamped at config load to 10 000.
+Selected knobs:
+
+| Key | Purpose | Default / constraint |
+|---|---|---|
+| `daemon.data_dir` | SQLite DB + audit log location | MUST be a native Linux filesystem; WSL `/mnt/c` is rejected at writer open |
+| `daemon.socket_path` | local UDS path | `<data_dir>/terminal-commanderd.sock` |
+| `daemon.runtime_mode` | how `start` runs | `self_check` / `foreground_idle` / `ipc_server` |
+| `policy.profile` | policy profile | `developer_local` / `repo_only` / `read_only_observer` / `admin_debug` |
+| `retention.max_events` | per-bucket cap | clamped to 100 000 |
+| `retention.ttl_seconds` | per-bucket TTL | 24 h default |
+| `audit.retention_days` | audit log retention | operator-controlled |
+| `limits.file_window_bytes` | file-read window cap | clamped at config load to 64 KiB |
+| `limits.bucket_read_limit` | bucket-read cap | clamped at config load to 10 000 |
+
+Environment variables used by the MCP adapter:
+
+| Var | Purpose |
+|---|---|
+| `TC_SOCKET` | optional override for the daemon UDS path the adapter connects to; defaults to `<data_dir>/terminal-commanderd.sock`. Used in the `mcp.project.linux-wsl.json` Cursor example via `${TC_DATA}/terminal-commanderd.sock`. |
+
+No other config keys are advertised here. Path-policy / bounded-output
+caveats: every command spawn passes through the policy engine BEFORE
+it runs; every file read passes through the path-suffix deny list;
+every audit record lands in SQLite with a closed-set decision label.
+
+## Safety posture
+
+Terminal Commander runs locally with a deliberately narrow security
+envelope:
+
+- **No MCP root shell.** `terminal-commander-mcp` is a thin adapter
+  with no `Command::spawn` of its own.
+- **No network listener.** Neither the daemon nor the MCP crate
+  opens a TCP / UDP / HTTP / SSE socket. Reachability is local UDS
+  only, peer-cred checked.
+- **No raw stream endpoint.** No tool returns raw stdout / stderr.
+  Every response is a bounded JSON envelope (`bucket_wait` returns
+  events or a heartbeat; `event_context` returns a bounded pointer-
+  anchored window with `unavailable_reason` on miss).
+- **No MCP-side command spawn.** Structural grep guard:
+  `rg "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp`
+  yields only doc / negative-assertion matches.
+- **No MCP-side file reads.** Structural grep guard:
+  `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src`
+  yields no matches.
+- **No shell bridge.** `command_start_combed` is argv-only and runs
+  a shell-interpreter deny list (`sh`, `bash`, `dash`, `zsh`,
+  `fish`, `ksh`, `csh`, `tcsh`, `ash`, `busybox`, `powershell`,
+  `pwsh`, `cmd`, plus `.exe` variants) BEFORE the policy engine.
+- **No automatic password entry.** `pty_command_write_stdin`
+  rejects writes that look like secret-prompt responses
+  (sudo/SSH/GPG prompt patterns) per TC44.
+- **Persistent audit.** Every policy-relevant action lands in
+  SQLite's `audit_records` table with a closed-set decision label.
+  No in-memory audit on a production path.
+- **Bounded outputs.** Bucket reads cap at 10 000 events. File
+  reads cap at 64 KiB. Context windows cap at 1024 frames / 64 KiB.
+- **Pointer-or-reason invariant.** Every `severity >= medium` event
+  carries either a `SourcePointer` or a typed `pointer_unavailable_reason`.
+  Context-by-pointer is always bounded.
+- **Policy gate before every spawn.** Four closed-set profiles
+  (`developer_local`, `repo_only`, `read_only_observer`,
+  `admin_debug`). Default-deny suffix list covers private keys,
+  credential stores, sudoers, and token caches.
+
+Full security boundary: [`docs/security/PRIVILEGE_MODEL.md`](docs/security/PRIVILEGE_MODEL.md).
+Threat model + structural enforcement: [`SECURITY.md`](SECURITY.md).
+
+## Current beta status
+
+**Conditional Go** (TC48 baseline, preserved through NPM01–NPM08).
+
+What is green:
+
+- Local daemon + MCP stdio + npm-install smoke all pass.
+  - TC46 runtime smoke (`scripts/smoke/verify-runtime-smoke.sh`): 8/8 PASS.
+  - NPM04 npm-install smoke (`scripts/smoke/verify-npm-local-install.sh`): 12 PASS (end-to-end MCP stdio against npm-installed binaries).
+  - `cargo nextest run --workspace`: 347/347 PASS, 0 skipped.
+- TC47 load / noise / backpressure gate: 8/8 stress tests passing.
+- NPM05 GitHub Actions npm-binary-build matrix: PASS on both
+  `ubuntu-24.04` (full smoke) and `ubuntu-24.04-arm` (build + pack).
+- NPM06 release-please live workflow runs cleanly on every push;
+  no-ops when no `feat:` / `fix:` commits since the last release.
+- NPM07 trusted-publishing workflow runs cleanly: on a normal push
+  the three publish jobs are correctly **skipped** because
+  `releases_created` evaluates to `false`. No `NPM_TOKEN`, no
+  `CARGO_REGISTRY_TOKEN_TC`, no `RELEASE_PLEASE_TOKEN_TC`
+  referenced. `npm-binary-build.yml` remains a separate
+  non-publishing CI gate.
+
+What is **Not Run / pending** (and why beta is `Conditional Go`,
+not `Go`):
+
+- **Cursor provider live smoke**: Not Run. No documented
+  non-interactive entry point on the verification host. Requires
+  operator GUI steps.
+- **Codex CLI + Claude Code provider live smokes**: Not Run on the
+  verification host (TC46 / TC48 baseline).
+- **First live npm publish**: pending two operator-driven steps:
+  1. Claim `@terminal-commander` org on npmjs.com and configure the
+     trusted publisher for all three package names
+     (`terminal-commander`, `@terminal-commander/linux-x64`,
+     `@terminal-commander/linux-arm64`) with workflow filename
+     `release-please.yml`. See
+     [`docs/release/npm-trusted-publishing-contract.md`](docs/release/npm-trusted-publishing-contract.md) §8.
+  2. A Conventional-Commits `feat:` / `fix:` commit lands on `main`,
+     release-please opens a release PR, and the operator merges it.
+
+Beta cannot promote to `Go` until at least one provider live smoke
+transcript is attached. `Not Run` is **not** PASS.
+
+Authoritative beta artifacts:
+[`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
+[`EVIDENCE_REPORT_RUNTIME.md`](EVIDENCE_REPORT_RUNTIME.md),
+[`RISK_REGISTER.md`](RISK_REGISTER.md),
+[`BACKLOG.md`](BACKLOG.md).
+
+## Build and verify locally
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo nextest run --workspace
+bash scripts/smoke/verify-runtime-smoke.sh
+bash scripts/smoke/verify-npm-local-install.sh
+```
+
+UDS IPC and command-runtime integration tests are Unix-only. Native
+Windows compiles the workspace but skips those tests; use WSL2 to
+exercise the full surface. Testing doctrine: [`TESTING.md`](TESTING.md).
 
 ## Repository layout
 
 ```text
 .agent/
   goals/
-    terminal-commander-mvp/        # library + scaffold goals
-    terminal-commander-runtime/    # daemon runtime + IPC goals
+    terminal-commander-mvp/             # library + scaffold goals
+    terminal-commander-runtime/         # daemon runtime + IPC goals (TC33–TC48)
+    terminal-commander-npm-distribution/# npm packaging + Cursor (NPM01–NPM09)
 
 crates/
-  core/                            # terminal-commander-core
-  sifters/                         # terminal-commander-sifters
-  probes/                          # terminal-commander-probes
-  store/                           # terminal-commander-store
-  daemon/                          # terminal-commanderd
-  mcp/                             # terminal-commander-mcp
-  cli/                             # terminal-commander-cli
+  core/      sifters/   probes/   store/   daemon/   mcp/   cli/
+
+packages/
+  terminal-commander/                   # npm root wrapper (JS shims)
+  terminal-commander-linux-x64/         # platform binary package (linux/x64)
+  terminal-commander-linux-arm64/       # platform binary package (linux/arm64)
+
+examples/
+  provider-harness/cursor/              # copy-pasteable Cursor MCP configs
+  bucket_wait_demo.md
+  dynamic_rule_demo.md
 
 config/
   terminal-commanderd.example.toml
   terminal-commanderd.service.example
 
 rules/
-  apt.json  cargo.json  gcc.json  generic.terminal.json
-  make.json  npm.json  pytest.json
-
-tests/
-  fixtures/                        # contracts, terminal, files, ...
+  apt.json   cargo.json   gcc.json   generic.terminal.json
+  make.json  npm.json     pytest.json
 
 docs/
-  runtime/                         # REALTIME_SIGNAL_CHANNEL.md,
-                                   # UDS_IPC.md, COMMAND_RUNTIME.md
-  mcp/                             # TOOL_CONTROL_SURFACE.md
-  audits/                          # runtime reality audit
-  contracts/                       # wire-shape fixtures + enums
-  storage/  security/  install/  research/
+  runtime/   mcp/        install/   integrations/
+  release/   security/   audits/    contracts/
+  storage/   research/   rules/
 ```
-
-## Building and verifying
-
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo nextest run --workspace
-```
-
-UDS IPC and command-runtime integration tests are Unix-only.
-Windows native compiles the workspace but skips those tests; use
-WSL2 to exercise the full surface.
-
-## Runtime contract
-
-The runtime chain (`.agent/goals/terminal-commander-runtime/`) is
-the realtime-signal-channel lock-in for this codebase. Two
-documents are normative:
-
-- `docs/runtime/REALTIME_SIGNAL_CHANNEL.md` — product semantics:
-  Terminal Commander is a realtime signal channel and tool-control
-  abstraction layer for LLM agents, not a CLI command runner.
-- `docs/mcp/TOOL_CONTROL_SURFACE.md` — locked MCP tool list with
-  per-tool bounds and policy gates.
-
-If a planned feature would create a raw-stream lane, bypass the
-policy engine, open a network listener, or hard-code an MCP tool
-list that diverges from the live dispatcher, it is a contract
-violation and the relevant goal stops and amends the runtime
-contract.
 
 ## Development approach
 
-The project develops through small, sequential `/goal` files. Each
+The project advances through small, sequential `/goal` files. Each
 goal is:
 
 - branch-safe,
@@ -516,13 +488,19 @@ goal is:
 - explicit about allowed and forbidden files,
 - clear about stop conditions and acceptance criteria.
 
+The two-commit landing pattern (verified work commit + status
+commit) and the prep-amendment-first rule for any scope drift come
+from the TC43+ runtime chain and are preserved across the NPM
+chain.
+
 ## License
 
-Apache-2.0; see LICENSE.
+Apache-2.0; see [`LICENSE`](LICENSE).
 
 SPDX identifier: `Apache-2.0`. The full Apache License 2.0 text is
 in the `LICENSE` file at the repository root, and `NOTICE` records
 the rmcp relicensing transition relevant to the supply-chain
 (`cargo-deny`) license allowlist. See
-`docs/research/license-decision.md` for the decision rationale, and
-`CONTRIBUTING.md` for the per-file SPDX header expectation.
+[`docs/research/license-decision.md`](docs/research/license-decision.md)
+for the decision rationale and [`CONTRIBUTING.md`](CONTRIBUTING.md)
+for the per-file SPDX header expectation.
