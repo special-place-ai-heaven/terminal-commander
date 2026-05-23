@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.4](https://github.com/special-place-administrator/terminal-commander/compare/v0.1.3...v0.1.4) (2026-05-23)
+
+
+### Features
+
+* **bootstrap:** zero-touch npm install with lazy MCP repair on first connect
+* **daemon:** autostart on WSL boot (systemd or profile) and before MCP bridge
+
+### Bug Fixes
+
+* **windows:** WSL MCP bridge uses Linux-first PATH and re-execs native MCP when Windows shim is invoked under /mnt/c
+* **harness:** Claude Code MCP writes target ~/.claude.json
+
 ## [0.1.3](https://github.com/special-place-administrator/terminal-commander/compare/v0.1.2...v0.1.3) (2026-05-23)
 
 
