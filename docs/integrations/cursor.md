@@ -272,12 +272,19 @@ package widened to install on Windows), WWS03 (the read-only
 discovery layer: `lib/wsl/distro-name.js` distro safety
 whitelist, `lib/wsl/detect.js` `wsl.exe -l -v` parser, and
 `lib/wsl/doctor.js` read-only `terminal-commander-mcp`-presence
-probe — library-only, no CLI surface yet), WWS04 (the
-`terminal-commander-mcp` bridge shim that actually invokes
-`wsl.exe`), WWS05 (the Cursor config writer), and WWS06 (the
-setup / doctor / pair CLI). Until WWS04 ships, the three commands
-on Windows refuse with a single bounded stderr line + exit `64`;
-the manual `wsl.exe` config in §6 remains the only working path.
+probe), WWS04 (the `terminal-commander-mcp` bridge shim
+`lib/wsl/spawn.js` that actually invokes `wsl.exe -d <distro> --
+bash -lc 'exec terminal-commander-mcp'` with double-validated
+distro, `stdio: 'inherit'`, and token-shaped env vars stripped),
+WWS05 (the Cursor config writer), and WWS06 (the setup / doctor /
+pair CLI). With WWS04 landed, Cursor on Windows that invokes
+`terminal-commander-mcp` will now transparently bridge into the
+WSL distro chosen by `TC_WSL_DISTRO` or the WSL default — provided
+the WSL-side `terminal-commander-mcp` is installed (the bridge
+short-circuits with `runtime_missing` until WWS06 lands the
+optional `--install-wsl-runtime` flag). The manual `wsl.exe`
+config in §6 remains a valid alternative for operators who prefer
+to invoke `wsl.exe` directly from `mcp.json`.
 
 ## 12. Source status
 

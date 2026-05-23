@@ -51,6 +51,47 @@ Language: ASCII only.
 - No `postinstall` downloader; no Rust compile during `npm install`;
   no Mac / Windows-native package claim; no musl / Alpine claim.
 
+## WWS04: Windows bridge shim landed (alternative to `mcp.global.linux-wsl.json`)
+
+With WWS04 landed, Windows operators have two working paths to point
+Cursor at Terminal Commander:
+
+1. **Manual `wsl.exe` invocation in `mcp.json`** (this directory's
+   `mcp.global.linux-wsl.json`). The operator hard-codes the WSL
+   distro into the `args` array. This path was the only one
+   available before WWS04 and remains valid.
+2. **Native `terminal-commander-mcp` invocation** (post-WWS04). After
+   `npm install -g terminal-commander` on Windows, `mcp.json` can
+   simply call the command name — the WWS04 bridge shim transparently
+   spawns `wsl.exe -d <distro> -- bash -lc 'exec terminal-commander-mcp'`
+   inside the WSL distro selected by `TC_WSL_DISTRO` env or
+   `wsl.exe -l -v` default. Distro names are double-validated (safety
+   whitelist + live distro membership) before any spawn; token-shaped
+   env vars are stripped from the child env; the shim writes nothing
+   to stdout so rmcp framing passes through transparently:
+
+   ```json
+   {
+     "mcpServers": {
+       "terminal-commander": {
+         "type": "stdio",
+         "command": "terminal-commander-mcp"
+       }
+     }
+   }
+   ```
+
+The WWS04 path requires that the WSL-side runtime is installed (`npm
+install -g terminal-commander` from within the distro). If it is not,
+the bridge short-circuits with a single bounded stderr line + exit
+64 (`runtime_missing`). WWS06 will add `terminal-commander setup
+cursor-wsl --install-wsl-runtime` to automate that step; until then,
+operators install inside WSL by hand.
+
+The Cursor config writer (`terminal-commander setup cursor-wsl`) is
+still pending WWS05 / WWS06. Until that lands, copy `mcp.json`
+manually as described in §"How to use" above.
+
 ## Source status
 
 - Files created at NPM08 (2026-05-23).

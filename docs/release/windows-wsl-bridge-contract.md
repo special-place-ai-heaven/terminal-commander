@@ -373,11 +373,22 @@ the pair commands ever being run.
 
 ### 10.2 What WWS chain adds (Windows side)
 
-- `lib/wsl/spawn.js` (WWS04): single-entry helper that constructs
-  the `wsl.exe` argv array, validates the distro against the
-  live whitelist, and runs `child_process.spawn` with
-  `shell: false`. No other site in the wrapper invokes
-  `wsl.exe`.
+- `lib/wsl/spawn.js` (WWS04, **landed**): exports
+  `spawnWslBridge(opts)`. Resolves the bridge distro from a closed
+  priority chain (`TC_WSL_DISTRO` env -> `detectWsl().default_distro`
+  -> bounded `no_default_distro` refusal), double-validates it via
+  `assertSafeDistroName` + live `detectWsl()` whitelist membership,
+  optionally runs the WWS03 `wslDoctor({ probeRuntime: true })` gate
+  (opt-out via `TC_WSL_SKIP_DOCTOR=1`), strips token-shaped env vars
+  via `buildFilteredEnv`, and spawns `wsl.exe -d <distro> -- bash
+  -lc 'exec terminal-commander-mcp' [...userArgv]` with EXACTLY
+  `{ shell: false, windowsHide: true, stdio: 'inherit', env: filteredEnv }`.
+  Forwards `SIGINT` / `SIGTERM` from the parent to the child, mirrors
+  the child's exit code / signal back into the parent.
+  `BRIDGE_PROBE_CMD` is a literal constant; no operator value is
+  interpolated into the `bash -lc` argument. The shim writes nothing
+  to stdout; rmcp framing passes through the WSL pipe transparently.
+  This is the single bridge spawn site in the entire wrapper.
 - `lib/wsl/distro-name.js` (WWS03, **landed**): exports
   `isSafeDistroName` + `assertSafeDistroName`. Conservative
   whitelist `^[A-Za-z0-9._-]{1,64}$`; rejects whitespace, quote,
@@ -616,11 +627,20 @@ WWS01 contract by document path AND date.
   `doctor_not_run` pair until probing is explicitly opted in);
   helpers are library-only (the three `bin/*` shims stay
   byte-identical to the WWS02 baseline).
-- **WWS04**: `lib/wsl/spawn.js` — single entry-point spawn helper.
-  `shell: false`, argv array only, `windowsHide: true`,
-  whitelist-validated distro. `terminal-commander-mcp` shim
-  dispatches through this helper on Windows; `terminal-commanderd`
-  shim refuses; admin CLI shim exposes setup subcommands.
+- **WWS04** (**landed**): `lib/wsl/spawn.js` — single entry-point
+  bridge spawn helper. `shell: false`, argv array only,
+  `windowsHide: true`, `stdio: 'inherit'`, distro double-validated
+  (`assertSafeDistroName` + live whitelist), `BRIDGE_PROBE_CMD =
+  'exec terminal-commander-mcp'` is a literal constant (no
+  interpolation), distro priority chain
+  `TC_WSL_DISTRO` -> `detectWsl().default_distro` -> bounded
+  `no_default_distro` refusal, optional runtime-presence gate via
+  WWS03 `wslDoctor` (opt-out: `TC_WSL_SKIP_DOCTOR=1`), token-shaped
+  env vars stripped via `buildFilteredEnv`. The
+  `terminal-commander-mcp` shim dispatches through this helper on
+  Windows; the daemon + admin-CLI shims stay byte-identical to the
+  WWS02 contract (refuse with bounded stderr + exit 64). The shim
+  writes nothing to stdout (rmcp framing).
 - **WWS05**: `lib/cursor/config.js` + `lib/cursor/write.js`.
   Pure JSON merge + atomic write + backup. Existing-entry policy
   per §6.3. Never prints absolute paths to stdout.

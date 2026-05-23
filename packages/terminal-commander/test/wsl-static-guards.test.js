@@ -25,7 +25,7 @@ const PKG_ROOT = path.resolve(__dirname, "..");
 const LIB_WSL_DIR = path.join(PKG_ROOT, "lib", "wsl");
 const BIN_DIR = path.join(PKG_ROOT, "bin");
 
-const HELPER_FILES = ["distro-name.js", "detect.js", "doctor.js", "index.js"];
+const HELPER_FILES = ["distro-name.js", "detect.js", "doctor.js", "spawn.js", "index.js"];
 
 function readSource(file) {
   return fs.readFileSync(path.join(LIB_WSL_DIR, file), "utf8");
@@ -136,7 +136,7 @@ test("lib/wsl helpers spawn only wsl.exe (first spawn argument is wslPath / 'wsl
   // first argument MUST be the identifier `wslPath` (an injected
   // parameter). No literal command name should appear as the first
   // argument.
-  for (const file of ["detect.js", "doctor.js"]) {
+  for (const file of ["detect.js", "doctor.js", "spawn.js"]) {
     const src = readSource(file);
     const spawnCalls = [...src.matchAll(/\bspawn\s*\(\s*([^,\s)]+)/g)];
     assert.ok(
@@ -182,7 +182,7 @@ test("lib/wsl helpers do not import or invoke the bin/* shims", () => {
 });
 
 test("lib/wsl helpers use shell: false and windowsHide: true on every spawn", () => {
-  for (const file of ["detect.js", "doctor.js"]) {
+  for (const file of ["detect.js", "doctor.js", "spawn.js"]) {
     const src = readSource(file);
     // Every spawn block must include shell: false within ~400 chars.
     const spawnIdx = [...src.matchAll(/\bspawn\s*\(/g)].map((m) => m.index);
@@ -281,10 +281,12 @@ test("lib/wsl helpers do not open any TCP/UDP socket or HTTP client", () => {
   }
 });
 
-test("lib/wsl helpers do not forward any env var to the spawn call", () => {
-  // The spawn() options object inside detect.js / doctor.js must
-  // NOT include an `env:` key. Default behaviour inherits PATH only;
-  // explicit env passthrough is forbidden at WWS03.
+test("detect.js + doctor.js do not forward any env var to the spawn call", () => {
+  // detect/doctor spawn() options must NOT include an `env:` key.
+  // Default behaviour inherits PATH only; explicit env passthrough is
+  // forbidden at WWS03. spawn.js (WWS04) IS allowed to set
+  // `env: filteredEnv`, but only after passing through buildFilteredEnv;
+  // that is enforced by the spawn.js-specific test below.
   for (const file of ["detect.js", "doctor.js"]) {
     const src = readSource(file);
     const spawnIdx = [...src.matchAll(/\bspawn\s*\(/g)].map((m) => m.index);
@@ -296,5 +298,102 @@ test("lib/wsl helpers do not forward any env var to the spawn call", () => {
         `${file} spawn at index ${idx} must not set env:`,
       );
     }
+  }
+});
+
+test("spawn.js passes only the filteredEnv identifier to spawn's env option (no raw process.env)", () => {
+  // WWS04 spawn.js DOES set env: on the bridge spawn call, but the
+  // identifier passed MUST be `env` (the parameter that the
+  // production-path wrapper already filtered via `buildFilteredEnv`).
+  // It must NEVER pass `process.env` directly to spawn, and must
+  // never pass an unfiltered parameter named anything other than
+  // `env`. We strip comments + strings first so JSDoc examples
+  // don't trip the guard.
+  const src = readSource("spawn.js");
+  const code = stripCommentsAndStrings(src);
+  const spawnIdx = [...code.matchAll(/\bspawn\s*\(/g)].map((m) => m.index);
+  assert.ok(spawnIdx.length > 0, "spawn.js should call spawn");
+  for (const idx of spawnIdx) {
+    const window = code.slice(idx, idx + 600);
+    assert.match(
+      window,
+      /\benv\s*:\s*env\b/,
+      `spawn.js spawn at index ${idx} must pass env: env (the already-filtered param), got:\n${window.slice(0, 400)}`,
+    );
+    assert.equal(
+      /\benv\s*:\s*process\.env\b/.test(window),
+      false,
+      `spawn.js spawn at index ${idx} must not pass process.env directly, got:\n${window.slice(0, 400)}`,
+    );
+  }
+});
+
+test("spawn.js never concatenates operator input into the bash -lc string", () => {
+  // BRIDGE_PROBE_CMD must be a constant literal; no template
+  // interpolation or `+` concatenation with the distro / argv.
+  const src = readSource("spawn.js");
+  const code = stripCommentsAndStrings(src);
+  assert.equal(
+    /BRIDGE_PROBE_CMD\s*\+/.test(code),
+    false,
+    `spawn.js executable code must not concatenate onto BRIDGE_PROBE_CMD`,
+  );
+  assert.equal(
+    /\+\s*BRIDGE_PROBE_CMD\b/.test(code),
+    false,
+    `spawn.js executable code must not concatenate before BRIDGE_PROBE_CMD`,
+  );
+  // No template literal in executable code (string literals are
+  // stripped; any remaining backtick would be a syntax mark we did
+  // not strip — fail loudly).
+  assert.equal(
+    /`/.test(code),
+    false,
+    `spawn.js executable code must contain no template literals; excerpt:\n${code.slice(0, 600)}`,
+  );
+  // No `distro +` / `+ distro` string concat anywhere in executable code.
+  assert.equal(
+    /\bdistro\s*\+\s*['"`]/.test(code),
+    false,
+    `spawn.js must not concatenate distro into a string literal`,
+  );
+});
+
+test("spawn.js argv array literal includes exactly one BRIDGE_PROBE_CMD use", () => {
+  // The argv build is the security-critical site. We assert the
+  // executable code contains exactly one occurrence of the
+  // BRIDGE_PROBE_CMD identifier inside an array literal that begins
+  // with the constants '-d', distro, '--', 'bash', '-lc'.
+  const src = readSource("spawn.js");
+  // Find the argv = [ ... ] declaration; do a structural match.
+  assert.match(
+    src,
+    /argv\s*=\s*\[\s*['"]-d['"]\s*,\s*distro\s*,\s*['"]--['"]\s*,\s*['"]bash['"]\s*,\s*['"]-lc['"]\s*,\s*BRIDGE_PROBE_CMD/,
+    "spawn.js argv literal must match ['-d', distro, '--', 'bash', '-lc', BRIDGE_PROBE_CMD, ...]",
+  );
+});
+
+test("spawn.js does not log token values; secret-key list is a STRIP list, not a forward list", () => {
+  // The implementation may NAME the secret keys (they are stripped),
+  // but it must never use their VALUES. We assert there is no
+  // console.* / process.stdout.write / process.stderr.write call
+  // whose argument expression references env[<SECRET_KEY>] or
+  // parentEnv[<SECRET_KEY>].
+  const src = readSource("spawn.js");
+  const code = stripCommentsAndStrings(src);
+  for (const secret of ["NPM_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]) {
+    // Detect any read access pattern like env[secret] / env.SECRET.
+    const dotRe = new RegExp(`\\benv\\.${secret}\\b`);
+    const idxRe = new RegExp(`\\benv\\[\\s*['"]${secret}['"]\\s*\\]`);
+    assert.equal(
+      dotRe.test(code),
+      false,
+      `spawn.js must not read env.${secret}`,
+    );
+    assert.equal(
+      idxRe.test(code),
+      false,
+      `spawn.js must not read env['${secret}']`,
+    );
   }
 });

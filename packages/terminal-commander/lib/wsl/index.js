@@ -8,9 +8,11 @@
 const detect = require("./detect.js");
 const doctor = require("./doctor.js");
 const distroName = require("./distro-name.js");
+const bridge = require("./spawn.js");
 
 module.exports = {
   ...detect,
   ...doctor,
   ...distroName,
+  ...bridge,
 };

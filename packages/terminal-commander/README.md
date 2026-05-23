@@ -52,7 +52,7 @@ at this WWS02 milestone:
 | Command | Windows behavior at WWS02 |
 |---------|--------------------------|
 | `terminal-commanderd` | **Refuses** with a single bounded stderr line + exit `64`. Daemon is Unix-only; run it inside a WSL distro. |
-| `terminal-commander-mcp` | **Refuses** with a single bounded stderr line + exit `64`. WWS04 replaces this with the real `wsl.exe` bridge shim. |
+| `terminal-commander-mcp` | **Bridges** to the WSL distro via `wsl.exe`. Resolves the distro from `TC_WSL_DISTRO` (operator override) then `detectWsl().default_distro`; refuses with `no_default_distro` if neither yields a safe + whitelisted name. Optionally probes WSL-side runtime presence via WWS03 `wslDoctor` (default ON; opt-out via `TC_WSL_SKIP_DOCTOR=1`). Spawns `wsl.exe -d <distro> -- bash -lc 'exec terminal-commander-mcp'` with `shell: false`, `windowsHide: true`, `stdio: 'inherit'`. The shim writes nothing to stdout — Cursor's rmcp framing passes through the WSL pipe transparently. Token-shaped env vars are stripped from the child's env. |
 | `terminal-commander` | **Refuses** with a single bounded stderr line + exit `64`. WWS06 adds the `setup cursor-wsl` / `doctor` / `pair` subcommands. |
 
 WWS02 is the package-contract slice of the chain. The actual
