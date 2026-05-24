@@ -83,7 +83,25 @@ async fn accept_loop(
         if first {
             builder.first_pipe_instance(true);
         }
-        let server = match builder.create(&pipe_name) {
+        #[cfg(windows)]
+        let sddl = match crate::ipc::pipe_acl::build_sddl_for_current_user() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "terminal-commanderd: SDDL build failed: {e}; falling back to default ACL"
+                );
+                String::new()
+            }
+        };
+        #[cfg(windows)]
+        let server_result = if sddl.is_empty() {
+            builder.create(&pipe_name)
+        } else {
+            crate::ipc::pipe_acl::create_named_pipe_with_sddl(&pipe_name, &sddl, first)
+        };
+        #[cfg(not(windows))]
+        let server_result = builder.create(&pipe_name);
+        let server = match server_result {
             Ok(s) => s,
             Err(e) => {
                 // Transient error: log and retry. Only exit on
