@@ -31,6 +31,10 @@ output to make progress.
 These are explicitly out of scope for the MVP and must not be silently
 expanded. Defer or document them as future work.
 
+Tier-1 targets are Windows-x64 native and Linux-x64 native (the
+latter also covers WSL Ubuntu through the Linux artifact). See
+`docs/adr/ADR-native-tier1-runtime.md`.
+
 - Hosted SaaS, remote ingestion, or cross-host federation. Terminal
   Commander runs locally on a single machine.
 - Replacing the LLM harness or the MCP client. Terminal Commander is
@@ -42,9 +46,8 @@ expanded. Defer or document them as future work.
   with an audit log; Landlock and seccomp-bpf are post-MVP hardening.
   See `docs/research/policy-prior-art.md` and
   `docs/research/_USER_DECISIONS.md` (row "Policy enforcement (MVP)").
-- macOS native and Windows-native shipping. Linux native and WSL2 are
-  primary. macOS/Windows-native are deferred per
-  `docs/research/_USER_DECISIONS.md`.
+- macOS support beyond build-only artifacts. macOS is tier-3 per
+  `docs/adr/ADR-native-tier1-runtime.md`.
 - A full TUI or GUI. The operator surface is a CLI; the LLM surface is
   MCP.
 - Privileged installation as the default. Privilege escalation paths

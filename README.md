@@ -385,7 +385,7 @@ scripts/smoke/   runtime, npm, Windows bridge verification
 |------|--------|
 | Daemon + UDS IPC + 29 MCP tools | Live |
 | npm `terminal-commander@0.1.4` on `latest` | Live |
-| Windows install bootstrap + bridge | Live |
+| Windows native install | In progress (see `docs/adr/ADR-native-tier1-runtime.md`) |
 | Harness auto-config + daemon autostart | Live |
 | Automated release + npm publish | Live |
 | macOS / native Windows daemon | Not planned (WSL path on Windows) |

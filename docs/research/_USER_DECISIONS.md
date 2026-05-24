@@ -23,6 +23,7 @@ Source: direct user input in goal session.
 | Policy enforcement (MVP) | Advisory in-process + audit log | Kernel-level Landlock/seccomp-bpf documented as post-MVP hardening roadmap. |
 | Prior-art research | Behavior survey only | No copied source. Cite for inspiration / differentiation only. |
 | Platforms | Linux native + WSL2 primary | macOS / Windows-native deferred. |
+| 2026-05-24 | Tier-1 native runtime decision | Windows-x64 + Linux-x64 are tier-1 native targets; macOS is build-only tier-3; WSL = Linux artifact (no bridge). See `docs/adr/ADR-native-tier1-runtime.md`. | accepted |
 
 ## Implications for architect
 
