@@ -17,12 +17,14 @@ test('SIGINT during cold-start wait returns early without spawning MCP', async (
   const fakeDaemon = path.join(tmpDir, `fake-daemon-noop-${process.pid}.js`);
   fs.writeFileSync(fakeDaemon, 'setInterval(()=>{},1000);');
 
-  // Fake MCP: writes a marker file if it ever runs. It must NOT run.
+  // Fake MCP: writes a marker file if it ever runs, then EXITS so the
+  // regression case fails fast (clean assertion failure) instead of
+  // hanging on setInterval until an external timeout.
   const markerFile = path.join(tmpDir, `mcp-ran-${process.pid}.marker`);
   const fakeMcp = path.join(tmpDir, `fake-mcp-noop-${process.pid}.js`);
   fs.writeFileSync(
     fakeMcp,
-    `require('fs').writeFileSync(${JSON.stringify(markerFile)}, 'ran'); setInterval(()=>{}, 1000);`,
+    `require('fs').writeFileSync(${JSON.stringify(markerFile)}, 'ran'); process.exit(0);`,
   );
   // Remove any stale marker from a previous run.
   try { fs.unlinkSync(markerFile); } catch (_e) {}
@@ -40,7 +42,18 @@ test('SIGINT during cold-start wait returns early without spawning MCP', async (
   // Emit SIGINT — triggers the registered SIGINT handler synchronously.
   process.emit('SIGINT');
 
-  const outcome = await sessionPromise;
+  // Defensive timeout: even with the fake MCP exiting fast, if the
+  // supervisor itself wedged we should fail loud rather than hang CI.
+  const TIMEOUT_MS = 15_000;
+  const outcome = await Promise.race([
+    sessionPromise,
+    new Promise((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`runHarnessMcpSession did not resolve within ${TIMEOUT_MS}ms`)),
+        TIMEOUT_MS,
+      ),
+    ),
+  ]);
 
   assert.equal(outcome.code, 130, `expected exit 130 on SIGINT, got ${outcome.code}`);
   assert.equal(outcome.signal, 'SIGINT', `expected signal SIGINT, got ${outcome.signal}`);
