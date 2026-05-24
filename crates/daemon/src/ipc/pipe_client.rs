@@ -15,6 +15,17 @@ use crate::ipc::protocol::{
     decode_payload,
 };
 
+/// Win32 ERROR_PIPE_BUSY (231 / 0xE7): server exists but no instance is
+/// currently waiting for a connection (between accept and recreate).
+const ERROR_PIPE_BUSY_OS: i32 =
+    windows::Win32::Foundation::ERROR_PIPE_BUSY.0.cast_signed();
+
+/// Maximum number of retries when the named pipe is busy.
+const PIPE_BUSY_RETRIES: u32 = 50; // 50 × 20 ms = 1 000 ms
+
+/// Delay between retries when the named pipe is busy.
+const PIPE_BUSY_DELAY_MS: u64 = 20;
+
 /// Client to the parent daemon named pipe.
 #[derive(Debug, Clone)]
 pub struct DaemonClient {
@@ -71,9 +82,43 @@ impl DaemonClient {
 
     async fn round_trip(&self, env: &RequestEnvelope) -> Result<ResponseEnvelope, IpcError> {
         let pipe_name = self.pipe_path.to_string_lossy().into_owned();
-        let mut client = ClientOptions::new()
-            .open(&pipe_name)
-            .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("pipe connect: {e}")))?;
+
+        // The accept loop keeps one pending pipe instance and recreates it after
+        // each connect (see pipe_server.rs accept loop).  Between the accept of
+        // client A and the recreate for client B, any concurrent open returns
+        // ERROR_PIPE_BUSY (Win32 231) even though the daemon is healthy.
+        //
+        // Tokio docs recommend retrying on this error:
+        // https://docs.rs/tokio/latest/tokio/net/windows/named_pipe/struct.ClientOptions.html
+        //
+        // Budget: PIPE_BUSY_RETRIES × PIPE_BUSY_DELAY_MS = 1 000 ms, well within
+        // the outer 5-second request timeout set in `call`.
+        let mut client = {
+            let mut attempt = 0u32;
+            loop {
+                match ClientOptions::new().open(&pipe_name) {
+                    Ok(p) => break p,
+                    Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY_OS) => {
+                        attempt += 1;
+                        if attempt >= PIPE_BUSY_RETRIES {
+                            return Err(IpcError::new(
+                                IpcErrorCode::Internal,
+                                format!(
+                                    "pipe connect: ERROR_PIPE_BUSY after {attempt} retries: {e}"
+                                ),
+                            ));
+                        }
+                        tokio::time::sleep(Duration::from_millis(PIPE_BUSY_DELAY_MS)).await;
+                    }
+                    Err(e) => {
+                        return Err(IpcError::new(
+                            IpcErrorCode::Internal,
+                            format!("pipe connect: {e}"),
+                        ));
+                    }
+                }
+            }
+        };
         let frame = super::protocol::encode_frame(env)?;
         client
             .write_all(&frame)
