@@ -26,14 +26,16 @@ structured signal events, wait for new bucket events by cursor, fetch
 bounded context around an event, and never need to read raw terminal
 output to make progress.
 
-## 3. Non-goals
-
-These are explicitly out of scope for the MVP and must not be silently
-expanded. Defer or document them as future work.
+## 2a. In-scope platforms
 
 Tier-1 targets are Windows-x64 native and Linux-x64 native (the
 latter also covers WSL Ubuntu through the Linux artifact). See
 `docs/adr/ADR-native-tier1-runtime.md`.
+
+## 3. Non-goals
+
+These are explicitly out of scope for the MVP and must not be silently
+expanded. Defer or document them as future work.
 
 - Hosted SaaS, remote ingestion, or cross-host federation. Terminal
   Commander runs locally on a single machine.

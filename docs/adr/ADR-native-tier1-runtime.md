@@ -4,8 +4,7 @@ Status: Accepted
 Date: 2026-05-24
 Supersedes: parts of SPEC.md §3 (non-goals) and earlier statements in
 `docs/research/_USER_DECISIONS.md` that excluded Windows native shipping.
-Related: `docs/adr/ADR-parent-environment-runners.md`,
-`docs/audits/2026-05-24-windows-mcp-connect-closed-findings.md` §13.
+Related: `docs/audits/2026-05-24-windows-mcp-connect-closed-findings.md` §13.
 
 ## Context
 
