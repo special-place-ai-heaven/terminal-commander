@@ -73,25 +73,34 @@ async fn accept_loop(
     if *shutdown.borrow() {
         return;
     }
-    let mut first_instance = true;
+    let mut first = true;
     loop {
         if *shutdown.borrow() {
             break;
         }
-        let server = match if first_instance {
-            first_instance = false;
-            ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(&pipe_name)
-        } else {
-            ServerOptions::new().create(&pipe_name)
-        } {
+        let mut builder = ServerOptions::new();
+        if first {
+            builder.first_pipe_instance(true);
+        }
+        let server = match builder.create(&pipe_name) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("terminal-commanderd: pipe create failed: {e}");
-                break;
+                // Transient error: log and retry. Only exit on
+                // explicit shutdown.
+                eprintln!(
+                    "terminal-commanderd: pipe create transient error: {e}; retrying in 100ms"
+                );
+                tokio::select! {
+                    biased;
+                    res = shutdown.changed() => {
+                        if res.is_err() || *shutdown.borrow() { break; }
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                }
+                continue;
             }
         };
+        first = false;
         tokio::select! {
             biased;
             res = shutdown.changed() => {
