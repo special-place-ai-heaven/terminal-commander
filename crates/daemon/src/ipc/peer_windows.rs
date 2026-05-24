@@ -89,9 +89,12 @@ fn resolve_sid_and_image(pid: u32) -> Option<(String, Option<PathBuf>)> {
 
         let mut buf16 = vec![0u16; 1024];
         let mut len = buf16.len() as u32;
+        // PROCESS_NAME_FORMAT(0) = PROCESS_NAME_NATIVE returns NT device
+        // paths (`\Device\HarddiskVolume3\...`) which are operator-hostile
+        // in audit logs. Use the Win32 form (`C:\Program Files\...`).
         let image = if QueryFullProcessImageNameW(
             proc,
-            PROCESS_NAME_FORMAT(0),
+            PROCESS_NAME_FORMAT(1),
             windows::core::PWSTR(buf16.as_mut_ptr()),
             &mut len,
         )
