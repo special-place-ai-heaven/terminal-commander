@@ -105,6 +105,7 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
             .call(
                 1,
                 IpcRequest::CommandStartCombed(terminal_commanderd::CommandStartParams {
+                    environment: None,
                     argv: vec!["sleep".to_owned(), "1".to_owned()],
                     cwd: None,
                     env: vec![],
@@ -139,6 +140,7 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
             .call(
                 3,
                 IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
                     argv: vec![
                         "python3".to_owned(),
                         "-u".to_owned(),

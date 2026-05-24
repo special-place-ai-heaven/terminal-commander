@@ -546,6 +546,9 @@ pub const MAX_COMMAND_GRACE_MS: u64 = 60_000;
 /// `Duration` so the JSON form stays human-readable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandStartParams {
+    /// Target environment (default local parent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<terminal_commander_core::EnvironmentSpec>,
     /// argv. `argv[0]` is the program; rest are passed verbatim.
     /// Shell-string passthrough is forbidden; `argv[0]` matching the
     /// shell-bridge deny list is rejected before the policy gate.
@@ -959,6 +962,8 @@ pub const MAX_PTY_STDIN_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtyCommandStartParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<terminal_commander_core::EnvironmentSpec>,
     pub argv: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<std::path::PathBuf>,

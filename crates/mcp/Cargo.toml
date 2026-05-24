@@ -26,18 +26,21 @@ terminal-commander-core.workspace = true
 terminal-commander-sifters = { version = "0.0.0", path = "../sifters" }
 terminal-commander-store = { version = "0.0.0", path = "../store" }
 terminal-commanderd = { version = "0.0.0", path = "../daemon" }
+terminal-commander-supervisor = { path = "../supervisor" }
 thiserror = "2.0.18"
 time = "0.3.47"
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "io-std", "io-util", "net"] }
 
-[target.'cfg(unix)'.dependencies]
 rmcp = { workspace = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "io-util"] }
-
-[target.'cfg(unix)'.dev-dependencies]
-rmcp = { version = "=1.7.0", features = ["server", "client", "macros", "transport-io"] }
+# Integration tests (mcp_live_command_e2e, daemon_unavailable_envelope, pty_tools_live_e2e)
+# instantiate rmcp's in-process client (ClientHandler, RoleClient) so the test
+# binaries need the "client" feature explicitly. Production mcp crate is server-only
+# so this is dev-only.
+rmcp = { workspace = true, features = ["client"] }

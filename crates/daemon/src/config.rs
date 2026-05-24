@@ -256,6 +256,18 @@ impl DaemonConfig {
             .unwrap_or_else(|| self.daemon.data_dir.join("terminal-commanderd.sock"))
     }
 
+    /// Windows named-pipe path for parent IPC (`\\.\pipe\...`).
+    #[must_use]
+    pub fn pipe_name(&self) -> String {
+        if let Some(ref custom) = self.daemon.socket_path {
+            return custom.to_string_lossy().into_owned();
+        }
+        let user = std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "default".to_owned());
+        format!(r"\\.\pipe\terminal-commander-{user}")
+    }
+
     /// Validate the loaded config. Clamps soft per-call limits down
     /// to the hard caps. Rejects clearly-broken values.
     fn validate_and_clamp(&mut self) -> Result<()> {

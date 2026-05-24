@@ -227,12 +227,13 @@ test("doctor.js never concatenates operator input into a bash -lc string", () =>
   assert.equal(/\bdistro\s*\+\s*['"`]/.test(code), false);
 });
 
-test("bin/* shims are UNCHANGED at WWS03 (no terminal-commander-mcp wsl.exe bridge launched yet)", () => {
-  // The shim files MUST still match the WWS02 contract: bridge_required
-  // branch with exit 64, no wsl.exe invocation in executable code.
-  // This is the same static guard as shim-win32-branch.test.js, kept
-  // here as a WWS03-level regression so any accidental WWS03-time
-  // edit to a shim fails CI loudly.
+test("bin/* shims contain no wsl.exe literal invocation in executable code (Phase 3 regression guard)", () => {
+  // Phase 3 renamed the shim contract: win32-x64 is now a native target.
+  // The bridge_required reason no longer exists in the resolver (win32-x64
+  // resolves via @terminal-commander/windows-x64). The shims may still
+  // reference "bridge_required" as dead code / legacy guard, but they
+  // MUST NOT spawn wsl.exe literally in executable code — that is still
+  // owned by lib/wsl/spawn.js behind the TC_USE_LEGACY_WSL_BRIDGE gate.
   for (const shim of [
     "terminal-commanderd.js",
     "terminal-commander-mcp.js",
@@ -243,18 +244,12 @@ test("bin/* shims are UNCHANGED at WWS03 (no terminal-commander-mcp wsl.exe brid
     assert.equal(
       /wsl\.exe/i.test(code),
       false,
-      `${shim} must not invoke wsl.exe in executable code at WWS03`,
+      `${shim} must not invoke wsl.exe in executable code`,
     );
     assert.equal(
       /\bspawn\s*\(\s*['"`]wsl/i.test(code),
       false,
-      `${shim} must not spawn('wsl', ...) at WWS03`,
-    );
-    // And the WWS02 bridge_required branch must still be present.
-    assert.match(
-      src,
-      /bridge_required/,
-      `${shim} must keep the bridge_required branch from WWS02`,
+      `${shim} must not spawn('wsl', ...) in executable code`,
     );
   }
 });

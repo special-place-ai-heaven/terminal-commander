@@ -37,6 +37,7 @@ impl PeerCred {
     }
 }
 
+#[cfg(unix)]
 /// Resolve peer credentials for a tokio `UnixStream`.
 ///
 /// Returns `None` if the OS does not return credentials or the

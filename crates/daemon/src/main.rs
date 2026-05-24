@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 //! `terminal-commanderd`: the Terminal Commander daemon.
 //!
 //! Source-status: live runtime bootstrap (TC36) + UDS IPC (TC37) on
@@ -50,8 +52,7 @@ enum Cmd {
     /// Bootstrap runtime, run a self-check, print the report, exit.
     Check,
     /// Bootstrap runtime and run a non-exit daemon mode. Defaults to
-    /// `ipc-server` on Unix; falls back to `foreground-idle` on
-    /// non-Unix targets.
+    /// `ipc-server` (named pipe on Windows, UDS on Unix).
     Start {
         /// Override the daemon run mode for this invocation.
         #[arg(long, value_enum)]
@@ -123,32 +124,36 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(unix)]
 const fn default_start_mode() -> StartMode {
     StartMode::IpcServer
 }
 
-#[cfg(not(unix))]
-const fn default_start_mode() -> StartMode {
-    StartMode::ForegroundIdle
-}
-
 fn resolve_config(cli: &Cli) -> Result<DaemonConfig, ExitCode> {
-    if let Some(p) = cli.config.as_ref() {
-        let mut cfg = DaemonConfig::load(p).map_err(|e| {
+    let mut cfg = if let Some(p) = cli.config.as_ref() {
+        let mut loaded = DaemonConfig::load(p).map_err(|e| {
             eprintln!("terminal-commanderd: config load error: {e}");
             ExitCode::from(1)
         })?;
         if let Some(dd) = cli.data_dir.as_ref() {
-            cfg.daemon.data_dir.clone_from(dd);
+            loaded.daemon.data_dir.clone_from(dd);
         }
-        return Ok(cfg);
+        loaded
+    } else if let Some(dd) = cli.data_dir.as_ref() {
+        DaemonConfig::defaults_in(dd)
+    } else {
+        DaemonConfig::defaults_in(platform_default_data_dir())
+    };
+    apply_socket_env_override(&mut cfg);
+    Ok(cfg)
+}
+
+/// Per-harness session supervisor sets `TC_SOCKET` to an isolated UDS or pipe.
+fn apply_socket_env_override(cfg: &mut DaemonConfig) {
+    if let Ok(socket) = std::env::var("TC_SOCKET")
+        && !socket.is_empty()
+    {
+        cfg.daemon.socket_path = Some(PathBuf::from(socket));
     }
-    if let Some(dd) = cli.data_dir.as_ref() {
-        return Ok(DaemonConfig::defaults_in(dd));
-    }
-    let default_data = platform_default_data_dir();
-    Ok(DaemonConfig::defaults_in(default_data))
 }
 
 #[allow(clippy::option_if_let_else)] // three-arm cascade is clearer as if/else if/else

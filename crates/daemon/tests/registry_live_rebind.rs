@@ -161,6 +161,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
             .call(
                 2,
                 IpcRequest::CommandStartCombed(terminal_commanderd::CommandStartParams {
+                    environment: None,
                     argv: vec!["sleep".to_owned(), "1".to_owned()],
                     cwd: None,
                     env: vec![],
@@ -179,6 +180,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
             .call(
                 3,
                 IpcRequest::CommandStartCombed(terminal_commanderd::CommandStartParams {
+                    environment: None,
                     argv: vec!["sleep".to_owned(), "1".to_owned()],
                     cwd: None,
                     env: vec![],

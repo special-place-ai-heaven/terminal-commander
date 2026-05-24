@@ -16,18 +16,28 @@
 //! No TCP. No UDP. No HTTP. No command execution. Method set is the
 //! TC37 minimum (see `protocol.rs`); TC38/TC39/TC41 add more.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+
 use terminal_commander_store::AuditEntry;
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use tokio::sync::watch;
+
+use terminal_commander_supervisor::identity::PeerIdentity;
 
 use crate::audit::AuditSink;
 use crate::command::{CommandError, CommandStartRequest};
-use crate::ipc::peer::{self, PeerCred};
+use crate::environment::{EnvironmentRouter, RouteOutcome};
+#[cfg(unix)]
+use crate::ipc::peer;
+use crate::ipc::protocol::PtyCommandWriteStdinParams;
 use crate::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStatusParams,
@@ -41,21 +51,26 @@ use crate::ipc::protocol::{
     IpcRequest, IpcResponse, IpcResult, MAX_BUCKET_READ_LIMIT, MAX_COMMAND_ENV_ITEMS,
     MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES, MAX_CONTEXT_FRAMES, MAX_FILE_READ_BYTES,
     MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES, MAX_FILE_SEARCH_SCAN_BYTES,
-    MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES,
-    MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES, PolicyStatusResponse, ProbeKind,
-    ProbeListEntry, ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListEntry,
-    PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams,
-    PtyCommandStopResponse, PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse,
+    MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
+    PolicyStatusResponse, ProbeKind, ProbeListEntry, ProbeListResponse, ProbeStatusParams,
+    ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStopParams,
     RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
     RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
     RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
     RegistryTestMatch, RegistryTestParams, RegistryTestResponse, RegistryUpsertParams,
     RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope, RuntimeActiveRule,
     RuntimeBucketSummary, RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
-    decode_payload, encode_frame,
+};
+#[cfg(unix)]
+use crate::ipc::protocol::{
+    MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES, PtyCommandListEntry,
+    PtyCommandStartResponse, PtyCommandStopResponse, PtyCommandWriteStdinResponse, decode_payload,
+    encode_frame,
 };
 use crate::state::DaemonState;
+use terminal_commander_core::EnvironmentSpec;
 
+#[cfg(unix)]
 /// Handle returned from [`IpcServer::spawn`]. Drop the handle to
 /// signal the accept loop to stop; call [`ServerHandle::shutdown`]
 /// to await orderly shutdown.
@@ -63,12 +78,14 @@ use crate::state::DaemonState;
 /// Backed by `tokio::sync::watch::channel(false)`: the sticky
 /// "shutdown requested" flag survives the race between
 /// [`IpcServer::spawn`] returning and the accept loop's first poll.
+#[cfg(unix)]
 pub struct ServerHandle {
     shutdown_tx: watch::Sender<bool>,
     join: Option<tokio::task::JoinHandle<()>>,
     socket_path: PathBuf,
 }
 
+#[cfg(unix)]
 impl ServerHandle {
     /// Signal shutdown and wait for the accept loop to exit. The
     /// socket file is removed before returning.
@@ -87,6 +104,7 @@ impl ServerHandle {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         // Best-effort cleanup if the operator does not call shutdown.
@@ -98,6 +116,7 @@ impl Drop for ServerHandle {
     }
 }
 
+#[cfg(unix)]
 /// IPC server. Owns the listener, the daemon state, and the boot
 /// timestamp used by the `health` method.
 pub struct IpcServer {
@@ -106,6 +125,7 @@ pub struct IpcServer {
     socket_path: PathBuf,
 }
 
+#[cfg(unix)]
 impl IpcServer {
     /// Construct a server. Does NOT bind the listener yet.
     #[must_use]
@@ -142,6 +162,7 @@ impl IpcServer {
     }
 }
 
+#[cfg(unix)]
 async fn accept_loop(
     listener: UnixListener,
     state: Arc<DaemonState>,
@@ -189,17 +210,28 @@ async fn accept_loop(
     }
 }
 
+#[cfg(unix)]
 async fn handle_connection(
     mut stream: UnixStream,
     state: Arc<DaemonState>,
     boot: Instant,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let peer = peer::resolve(&stream);
+    let peer_cred = peer::resolve(&stream);
+    // Build a PeerIdentity from the resolved cred (or Unknown).
+    let identity: PeerIdentity = peer_cred.map_or_else(
+        || PeerIdentity::unknown_because("peer credentials unavailable"),
+        |c| PeerIdentity::Unix {
+            uid: c.uid,
+            gid: c.gid,
+            pid: c.pid,
+        },
+    );
+
     // Linux/WSL: fail-closed when peer creds are missing.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        if peer.is_none() {
+        if !identity.is_known() {
             // Emit an audit row for the refused connection. The
             // subject is a synthetic descriptor so we can correlate
             // refusals in the audit log without ever writing peer
@@ -210,7 +242,7 @@ async fn handle_connection(
                 "unknown_peer",
                 "deny",
                 Some("peer credentials unavailable (Linux/WSL fail-closed)".to_owned()),
-                None,
+                &identity,
             );
             // Refuse: send a structured error, then close.
             let env = ResponseEnvelope {
@@ -229,8 +261,8 @@ async fn handle_connection(
 
     // Audit the connection itself once, before any request.
     {
-        let subject = peer.map_or_else(|| "unknown_peer".to_owned(), |p| p.to_audit_string());
-        emit_audit(&state, "ipc_connect", &subject, "info", None, peer);
+        let subject = identity_audit_subject(&identity);
+        emit_audit(&state, "ipc_connect", &subject, "info", None, &identity);
     }
 
     // Sticky shutdown: if the flag is already true, do not even
@@ -259,7 +291,7 @@ async fn handle_connection(
                         break;
                     }
                     ReadOutcome::Ok(req_env) => {
-                        let resp = dispatch(&state, boot, &req_env, peer).await;
+                        let resp = dispatch(&state, boot, &req_env, &identity).await;
                         if let Err(io_err) = write_envelope(&mut stream, &resp).await {
                             emit_audit_internal_error(
                                 &state,
@@ -275,6 +307,7 @@ async fn handle_connection(
     }
 }
 
+#[cfg(unix)]
 #[allow(clippy::large_enum_variant)]
 enum ReadOutcome {
     Ok(RequestEnvelope),
@@ -282,6 +315,7 @@ enum ReadOutcome {
     Eof,
 }
 
+#[cfg(unix)]
 async fn read_envelope(stream: &mut UnixStream) -> ReadOutcome {
     // 4-byte length prefix.
     let mut len_buf = [0_u8; 4];
@@ -315,6 +349,7 @@ async fn read_envelope(stream: &mut UnixStream) -> ReadOutcome {
     }
 }
 
+#[cfg(unix)]
 async fn write_envelope(
     stream: &mut UnixStream,
     env: &ResponseEnvelope,
@@ -344,7 +379,7 @@ async fn dispatch(
     state: &Arc<DaemonState>,
     boot: Instant,
     req_env: &RequestEnvelope,
-    peer: Option<PeerCred>,
+    peer: &PeerIdentity,
 ) -> ResponseEnvelope {
     let (method_name, response_result) = match &req_env.request {
         IpcRequest::SystemDiscover => {
@@ -381,10 +416,31 @@ async fn dispatch(
             Ok(r) => ("event_context", IpcResult::Ok { response: r }),
             Err(e) => ("event_context", IpcResult::Err { error: e }),
         },
-        IpcRequest::CommandStartCombed(p) => match handle_command_start_combed(state, p) {
-            Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
-            Err(e) => ("command_start_combed", IpcResult::Err { error: e }),
-        },
+        IpcRequest::CommandStartCombed(p) => {
+            let env = p.environment.clone().unwrap_or_default();
+            if matches!(env, EnvironmentSpec::Local) {
+                match handle_command_start_combed(state, p) {
+                    Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
+                    Err(e) => ("command_start_combed", IpcResult::Err { error: e }),
+                }
+            } else {
+                match EnvironmentRouter::route_request(state, &env, &req_env.request).await {
+                    Ok(RouteOutcome::RunnerResponse(r)) => {
+                        ("command_start_combed", IpcResult::Ok { response: *r })
+                    }
+                    Ok(RouteOutcome::Local) => match handle_command_start_combed(state, p) {
+                        Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
+                        Err(e) => ("command_start_combed", IpcResult::Err { error: e }),
+                    },
+                    Err(e) => (
+                        "command_start_combed",
+                        IpcResult::Err {
+                            error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
+                        },
+                    ),
+                }
+            }
+        }
         IpcRequest::CommandStatus(p) => match handle_command_status(state, p) {
             Ok(r) => ("command_status", IpcResult::Ok { response: r }),
             Err(e) => ("command_status", IpcResult::Err { error: e }),
@@ -437,10 +493,31 @@ async fn dispatch(
             let r = handle_file_watch_list(state);
             ("file_watch_list", IpcResult::Ok { response: r })
         }
-        IpcRequest::PtyCommandStart(p) => match handle_pty_command_start(state, p) {
-            Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
-            Err(e) => ("pty_command_start", IpcResult::Err { error: e }),
-        },
+        IpcRequest::PtyCommandStart(p) => {
+            let env = p.environment.clone().unwrap_or_default();
+            if matches!(env, EnvironmentSpec::Local) {
+                match handle_pty_command_start(state, p) {
+                    Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
+                    Err(e) => ("pty_command_start", IpcResult::Err { error: e }),
+                }
+            } else {
+                match EnvironmentRouter::route_request(state, &env, &req_env.request).await {
+                    Ok(RouteOutcome::RunnerResponse(r)) => {
+                        ("pty_command_start", IpcResult::Ok { response: *r })
+                    }
+                    Ok(RouteOutcome::Local) => match handle_pty_command_start(state, p) {
+                        Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
+                        Err(e) => ("pty_command_start", IpcResult::Err { error: e }),
+                    },
+                    Err(e) => (
+                        "pty_command_start",
+                        IpcResult::Err {
+                            error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
+                        },
+                    ),
+                }
+            }
+        }
         IpcRequest::PtyCommandWriteStdin(p) => match handle_pty_command_write_stdin(state, p).await
         {
             Ok(r) => ("pty_command_write_stdin", IpcResult::Ok { response: r }),
@@ -470,7 +547,7 @@ async fn dispatch(
     // Audit one row per accepted request. The decision label reflects
     // whether the dispatcher produced an `Ok` response or a typed
     // error.
-    let subject = peer.map_or_else(|| "unknown_peer".to_owned(), |p| p.to_audit_string());
+    let subject = identity_audit_subject(peer);
     let decision = if matches!(response_result, IpcResult::Ok { .. }) {
         "info"
     } else {
@@ -1047,7 +1124,10 @@ fn handle_registry_activate(
     // TC43: file watches share the activation registry.
     let watch_report = state.watch.rebind_watches_in_scope(Some(scope));
     // TC44: PTY jobs share the activation registry.
-    let pty_report = state.pty.rebind_jobs_in_scope(Some(scope));
+    #[cfg(unix)]
+    let pty_rebound = state.pty.rebind_jobs_in_scope(Some(scope)).jobs_rebound;
+    #[cfg(not(unix))]
+    let pty_rebound = 0u32;
     Ok(IpcResponse::RegistryActivate(RegistryActivateResponse {
         rule_id: def.id,
         version,
@@ -1056,7 +1136,7 @@ fn handle_registry_activate(
         jobs_rebound: cmd_report
             .jobs_rebound
             .saturating_add(watch_report.watches_rebound)
-            .saturating_add(pty_report.jobs_rebound),
+            .saturating_add(pty_rebound),
     }))
 }
 
@@ -1087,7 +1167,10 @@ fn handle_registry_deactivate(
     // (no fake historical un-matches).
     let cmd_report = state.command.rebind_jobs_in_scope(Some(scope));
     let watch_report = state.watch.rebind_watches_in_scope(Some(scope));
-    let pty_report = state.pty.rebind_jobs_in_scope(Some(scope));
+    #[cfg(unix)]
+    let pty_rebound = state.pty.rebind_jobs_in_scope(Some(scope)).jobs_rebound;
+    #[cfg(not(unix))]
+    let pty_rebound = 0u32;
     Ok(IpcResponse::RegistryDeactivate(
         RegistryDeactivateResponse {
             rule_id: params.rule_id.clone(),
@@ -1097,7 +1180,7 @@ fn handle_registry_deactivate(
             jobs_rebound: cmd_report
                 .jobs_rebound
                 .saturating_add(watch_report.watches_rebound)
-                .saturating_add(pty_report.jobs_rebound),
+                .saturating_add(pty_rebound),
         },
     ))
 }
@@ -1150,11 +1233,14 @@ fn validate_scope_against_live_jobs(
                 .live_watches()
                 .iter()
                 .any(|w| w.bucket_id == bucket_id);
+            #[cfg(unix)]
             let in_pty = state
                 .pty
                 .live_jobs()
                 .iter()
                 .any(|j| j.bucket_id == bucket_id);
+            #[cfg(not(unix))]
+            let in_pty = false;
             if in_command || in_watch || in_pty {
                 Ok(())
             } else {
@@ -1174,7 +1260,10 @@ fn validate_scope_against_live_jobs(
                 .live_watches()
                 .iter()
                 .any(|w| w.watch_id == job_id);
+            #[cfg(unix)]
             let in_pty = state.pty.live_jobs().iter().any(|j| j.job_id == job_id);
+            #[cfg(not(unix))]
+            let in_pty = false;
             if in_command || in_watch || in_pty {
                 Ok(())
             } else {
@@ -1198,7 +1287,10 @@ fn validate_scope_against_live_jobs(
                 .live_watches()
                 .iter()
                 .any(|w| w.probe_id == probe_id);
+            #[cfg(unix)]
             let in_pty = state.pty.live_jobs().iter().any(|j| j.probe_id == probe_id);
+            #[cfg(not(unix))]
+            let in_pty = false;
             if in_command || in_watch || in_pty {
                 Ok(())
             } else {
@@ -1220,28 +1312,57 @@ fn emit_audit(
     subject: &str,
     decision: &str,
     reason: Option<String>,
-    peer: Option<PeerCred>,
+    peer: &PeerIdentity,
 ) {
     let mut entry = AuditEntry::new(format!("ipc_{action}"), subject, decision).with_actor("ipc");
     if let Some(r) = reason {
         entry = entry.with_reason(r);
     }
-    if let Some(p) = peer {
-        // Pre-serialized JSON metadata. Stays well inside
-        // MAX_AUDIT_METADATA_BYTES.
-        let meta = format!(
-            r#"{{"uid":{},"gid":{},"pid":{}}}"#,
-            p.uid,
-            p.gid,
-            p.pid.map_or_else(|| "null".to_owned(), |x| x.to_string())
-        );
-        entry = entry.with_metadata_json(meta);
-    }
+    // Attach peer metadata as pre-serialized JSON. Stays well inside
+    // MAX_AUDIT_METADATA_BYTES.
+    let meta = match peer {
+        PeerIdentity::Unix { uid, gid, pid } => format!(
+            r#"{{"kind":"unix","uid":{},"gid":{},"pid":{}}}"#,
+            uid,
+            gid,
+            pid.map_or_else(|| "null".to_owned(), |x| x.to_string())
+        ),
+        PeerIdentity::Windows { sid, pid, image } => format!(
+            r#"{{"kind":"windows","sid":{},"pid":{},"image":{}}}"#,
+            serde_json::to_string(sid).unwrap_or_else(|_| "null".to_owned()),
+            pid.map_or_else(|| "null".to_owned(), |x| x.to_string()),
+            image
+                .as_deref()
+                .and_then(|p| p.to_str())
+                .and_then(|s| serde_json::to_string(s).ok())
+                .unwrap_or_else(|| "null".to_owned()),
+        ),
+        PeerIdentity::Unknown { reason: r } => format!(
+            r#"{{"kind":"unknown","reason":{}}}"#,
+            r.as_deref()
+                .and_then(|s| serde_json::to_string(s).ok())
+                .unwrap_or_else(|| "null".to_owned()),
+        ),
+    };
+    entry = entry.with_metadata_json(meta);
     // Best-effort; audit unhealth must not DOS the IPC path.
     let sink: Arc<dyn AuditSink> = Arc::clone(&state.audit) as Arc<dyn AuditSink>;
     let _ = sink.emit(&entry);
 }
 
+fn identity_audit_subject(identity: &PeerIdentity) -> String {
+    match identity {
+        PeerIdentity::Unix { uid, pid, .. } => {
+            format!("uid={uid}:pid={}", pid.map_or(0, |p| p))
+        }
+        PeerIdentity::Windows { sid, pid, .. } => {
+            format!("sid={sid}:pid={}", pid.map_or(0, |p| p))
+        }
+        PeerIdentity::Unknown { .. } => "unknown_peer".to_owned(),
+    }
+}
+
+#[cfg(unix)]
 fn emit_audit_internal_error(state: &Arc<DaemonState>, action: &str, message: &str) {
     let entry = AuditEntry::new(format!("ipc_{action}"), "internal", "error")
         .with_actor("ipc")
@@ -1551,6 +1672,46 @@ fn handle_file_watch_stop(
 // reach live PTY jobs via the standard rebind path.
 // =====================================================================
 
+#[cfg(not(unix))]
+fn pty_ipc_unsupported() -> IpcError {
+    IpcError::new(
+        IpcErrorCode::UnsupportedPlatform,
+        "PTY command runtime is not available on this platform yet (ConPTY support pending)",
+    )
+}
+
+#[cfg(not(unix))]
+fn handle_pty_command_start(
+    _state: &Arc<DaemonState>,
+    _params: &PtyCommandStartParams,
+) -> Result<IpcResponse, IpcError> {
+    Err(pty_ipc_unsupported())
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unused_async)] // async matches the unix signature; removed when unix impl lands
+async fn handle_pty_command_write_stdin(
+    _state: &Arc<DaemonState>,
+    _params: &PtyCommandWriteStdinParams,
+) -> Result<IpcResponse, IpcError> {
+    Err(pty_ipc_unsupported())
+}
+
+#[cfg(not(unix))]
+fn handle_pty_command_stop(
+    _state: &Arc<DaemonState>,
+    _params: &PtyCommandStopParams,
+) -> Result<IpcResponse, IpcError> {
+    Err(pty_ipc_unsupported())
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::missing_const_for_fn)] // `Arc` is not const-compatible; body is a stub placeholder
+fn handle_pty_command_list(_state: &Arc<DaemonState>) -> IpcResponse {
+    IpcResponse::PtyCommandList(PtyCommandListResponse { entries: vec![] })
+}
+
+#[cfg(unix)]
 fn handle_pty_command_start(
     state: &Arc<DaemonState>,
     params: &PtyCommandStartParams,
@@ -1623,6 +1784,7 @@ fn handle_pty_command_start(
     }
 }
 
+#[cfg(unix)]
 async fn handle_pty_command_write_stdin(
     state: &Arc<DaemonState>,
     params: &PtyCommandWriteStdinParams,
@@ -1661,6 +1823,7 @@ async fn handle_pty_command_write_stdin(
     }
 }
 
+#[cfg(unix)]
 fn handle_pty_command_stop(
     state: &Arc<DaemonState>,
     params: &PtyCommandStopParams,
@@ -1841,6 +2004,7 @@ fn handle_probe_status(
     }
 }
 
+#[cfg(unix)]
 fn handle_pty_command_list(state: &Arc<DaemonState>) -> IpcResponse {
     let entries: Vec<PtyCommandListEntry> = state
         .pty
@@ -1882,4 +2046,14 @@ fn handle_file_watch_list(state: &Arc<DaemonState>) -> IpcResponse {
         )
         .collect();
     IpcResponse::FileWatchList(FileWatchListResponse { entries })
+}
+
+/// Dispatch entry for alternate transports (named pipe on Windows).
+pub async fn dispatch_envelope(
+    state: &Arc<DaemonState>,
+    boot: Instant,
+    req_env: &RequestEnvelope,
+    peer: &PeerIdentity,
+) -> ResponseEnvelope {
+    dispatch(state, boot, req_env, peer).await
 }

@@ -181,6 +181,7 @@ fn megabyte_scale_noisy_stdout_emits_signal_without_raw_leak() {
             .call(
                 3,
                 IpcRequest::CommandStartCombed(CommandStartParams {
+                    environment: None,
                     argv: noisy_argv(total_lines, needle_count),
                     cwd: None,
                     env: vec![],
@@ -322,6 +323,7 @@ fn bucket_wait_heartbeat_respects_timeout_without_busy_poll() {
             .call(
                 2,
                 IpcRequest::CommandStartCombed(CommandStartParams {
+                    environment: None,
                     argv: vec!["sleep".to_owned(), "5".to_owned()],
                     cwd: None,
                     env: vec![],
@@ -414,6 +416,7 @@ fn bucket_events_since_limit_clamps_to_max() {
             .call(
                 3,
                 IpcRequest::CommandStartCombed(CommandStartParams {
+                    environment: None,
                     argv: noisy_argv(200, 200),
                     cwd: None,
                     env: vec![],
@@ -540,6 +543,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
             .call(
                 3,
                 IpcRequest::CommandStartCombed(CommandStartParams {
+                    environment: None,
                     argv: noisy_argv(500, 10),
                     cwd: None,
                     env: vec![],
@@ -558,6 +562,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
             .call(
                 4,
                 IpcRequest::CommandStartCombed(CommandStartParams {
+                    environment: None,
                     argv: noisy_argv(500, 0),
                     cwd: None,
                     env: vec![],
@@ -701,6 +706,7 @@ fn runtime_state_stays_bounded_under_live_load() {
                 .call(
                     1,
                     IpcRequest::CommandStartCombed(CommandStartParams {
+                        environment: None,
                         argv: noisy_argv(2_000, 5),
                         cwd: None,
                         env: vec![],
@@ -789,6 +795,7 @@ fn event_context_window_stays_bounded() {
             .call(
                 3,
                 IpcRequest::CommandStartCombed(CommandStartParams {
+                    environment: None,
                     argv: noisy_argv(2_000, 3),
                     cwd: None,
                     env: vec![],
@@ -909,6 +916,7 @@ fn bucket_dropped_count_visible_when_retention_evicts() {
             .call(
                 3,
                 IpcRequest::CommandStartCombed(CommandStartParams {
+                    environment: None,
                     argv: noisy_argv(2_000, 100),
                     cwd: None,
                     env: vec![],
@@ -1028,6 +1036,7 @@ for i in range(120):
             .call(
                 2,
                 IpcRequest::CommandStartCombed(CommandStartParams {
+                    environment: None,
                     argv: vec![
                         "python3".to_owned(),
                         "-u".to_owned(),

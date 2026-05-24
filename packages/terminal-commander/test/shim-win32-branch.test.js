@@ -78,76 +78,60 @@ function runShim(shimName, platform, arch, extraEnv) {
   }
 }
 
-test("terminal-commanderd.js on win32 refuses with exit 64 and bounded message", () => {
+test("terminal-commanderd.js on win32 attempts native binary or fails with bounded message", () => {
+  // Phase 3: win32-x64 is now a SUPPORTED_TARGET with the native Windows
+  // package. The shim resolves @terminal-commander/windows-x64 and either
+  // spawns the binary (if installed) or exits 64 with a platform_package_missing
+  // or spawn-error message. The old bridge-required / WSL refusal no longer occurs.
   const r = runShim("terminal-commanderd.js", "win32", "x64");
-  assert.equal(r.status, 64, `unexpected exit code; stderr=${r.stderr} stdout=${r.stdout}`);
+  // Either the binary runs (any exit code) or the package is missing (exit 64).
+  // What must NOT happen: the shim must still exit without signaling.
   assert.equal(r.signal, null);
+  // The shim must write nothing to stdout regardless of outcome.
   assert.equal(r.stdout, "");
-  // Single stderr line + a trailing newline.
-  assert.equal(r.stderr.endsWith("\n"), true);
-  assert.equal(r.stderr.split("\n").filter(Boolean).length, 1);
-  assert.match(r.stderr, /terminal-commanderd runs only inside Linux \/ WSL/);
-  assert.match(r.stderr, /WSL distro/);
-  // Must NOT mention wsl.exe execution by THIS process.
-  // (The hint may name a wsl command for the operator to copy, but
-  // the shim itself ran nothing.)
+  // The shim must NOT produce the old bridge-required / WSL error message.
+  assert.equal(r.stderr.includes("terminal-commanderd runs only inside Linux"), false);
   assert.equal(r.stderr.includes("Spawned wsl"), false);
 });
 
-test("terminal-commander-mcp.js on win32 enters WWS04 bridge path; refuses with bounded error when no WSL distro is reachable", () => {
-  // WWS04 wires the bridge. On the verification machine there is no
-  // guarantee the WSL runtime is installed inside the chosen distro,
-  // so the bridge will short-circuit with `runtime_missing` (or
-  // `no_default_distro` if no WSL is configured at all). Either way,
-  // the shim must write NOTHING to stdout, write a bounded single
-  // stderr line, and exit 64. We force win32 + invalid TC_WSL_DISTRO
-  // so the bridge stops at `distro_not_found` deterministically — no
-  // real wsl.exe invocation can produce that distro name.
+test("terminal-commander-mcp.js on win32 uses native supervisor path (Phase 3)", () => {
+  // Phase 3: win32-x64 is now a supported target. The mcp shim on win32
+  // no longer enters the WWS04 WSL bridge path. Instead it goes through
+  // the isWindowsMountedShimPath / native-mcp path, then falls through
+  // to runHarnessMcpSession if the native binary is available.
+  // TC_USE_LEGACY_WSL_BRIDGE must not be set for this test.
   const r = runShim("terminal-commander-mcp.js", "win32", "x64", {
-    TC_WSL_DISTRO: "Bogus-Distro-That-Cannot-Exist-XYZ-9999",
-    TC_WSL_SKIP_DOCTOR: "1",
+    TC_SUPERVISOR_ALLOW_SPAWN: "0",
   });
-  assert.equal(r.status, 64, `unexpected exit code; stderr=${r.stderr} stdout=${r.stdout}`);
+  // The shim must never produce WSL-specific bridge output.
   assert.equal(r.signal, null);
   assert.equal(r.stdout, "", "shim must write nothing to stdout (rmcp framing)");
-  assert.equal(r.stderr.endsWith("\n"), true);
-  // Bounded: one logical line of stderr.
-  assert.equal(r.stderr.split("\n").filter(Boolean).length, 1);
-  // Either runs through detect first and reports wsl_not_found /
-  // no_distros / distro_not_found / no_default_distro depending on
-  // host state. All four are acceptable bounded outcomes.
-  assert.match(
-    r.stderr,
-    /not found in 'wsl -l -v'|wsl\.exe not found on PATH|no distro is registered|no WSL distro selected/,
-  );
+  assert.equal(r.stderr.includes("Spawned wsl"), false);
+  assert.equal(r.stderr.includes("no distro"), false);
+  assert.equal(r.stderr.includes("wsl.exe not found"), false);
 });
 
-test("terminal-commander.js on win32 prints CLI usage (WWS06 setup/doctor/pair surface)", () => {
-  // No argv -> CLI runs the help path. exit 0; output goes to stderr
-  // (shim writes the result.output to stderr) and includes the WWS06
-  // command surface.
+test("terminal-commander.js on win32 arm64 exits 64 with unsupported_platform message", () => {
+  // win32-arm64 is NOT in SUPPORTED_TARGETS (only win32-x64 was added).
+  // The shim calls resolveBinary({platform:'win32', arch:'arm64'}) which
+  // returns unsupported_platform; formatResolveError is called and the
+  // shim exits 64 with a bounded stderr message. The bridge_required path
+  // and lib/cli/run.js delegation no longer trigger on win32-arm64.
   const r = runShim("terminal-commander.js", "win32", "arm64");
-  assert.equal(r.status, 0, `unexpected exit code; stderr=${r.stderr} stdout=${r.stdout}`);
+  assert.equal(r.status, 64, `unexpected exit code; stderr=${r.stderr} stdout=${r.stdout}`);
   assert.equal(r.signal, null);
-  // The shim writes the help text to stderr. Cursor never invokes
-  // `terminal-commander` itself (Cursor calls `terminal-commander-mcp`),
-  // so stdout cleanliness is not strictly required here — but the help
-  // panel SHOULD include the locked subcommand names.
-  assert.match(r.stderr, /terminal-commander\b/);
-  assert.match(r.stderr, /doctor/);
-  assert.match(r.stderr, /setup cursor-wsl/);
-  assert.match(r.stderr, /pair create/);
+  assert.match(r.stderr, /unsupported platform win32-arm64/);
+  // Message must mention at least one supported target.
+  assert.match(r.stderr, /win32-x64/);
 });
 
-test("shim bin/* files contain no wsl.exe literal invocation; bridge spawn is owned by lib/wsl/spawn.js (executable code only)", () => {
-  // WWS04 invariant: the three shim files MUST NOT literally
-  // `spawn('wsl', ...)` themselves. The Windows MCP shim may
-  // require() lib/wsl/spawn.js and call spawnWslBridge(); the spawn
-  // helper is the only site that can name wsl.exe in argv. The
-  // daemon + admin-CLI shims still refuse with bounded stderr +
-  // exit 64 at WWS04 (WWS06 owns the admin CLI surface).
-  // We strip comments + quoted string literals before grepping, so
-  // only executable code is checked.
+test("shim bin/* files contain no wsl.exe literal invocation in executable code (Phase 3 contract)", () => {
+  // Phase 3 contract: the three shim files MUST NOT literally spawn wsl.exe.
+  // terminal-commanderd.js and terminal-commander.js still use
+  // spawn(result.binaryPath, ...) for the native binary path.
+  // terminal-commander-mcp.js delegates to runHarnessMcpSession (Phase 3
+  // native supervisor) instead of spawn(result.binaryPath) directly.
+  // Both daemon + cli shims must still spawn result.binaryPath.
   function stripCommentsAndStrings(src) {
     let out = "";
     let i = 0;
@@ -205,18 +189,30 @@ test("shim bin/* files contain no wsl.exe literal invocation; bridge spawn is ow
       false,
       `${shim} must not spawn('wsl', ...) in executable code: code-only excerpt = ${codeOnly.slice(0, 400)}`,
     );
-    // Defense in depth: the spawn() call (if any literal spawn() is
-    // present in the shim) must spawn the resolved Linux binary path
-    // returned by the resolver, never a literal wsl invocation. The
-    // WWS04 mcp.js shim moved its Linux spawn into the `else` block
-    // of the resolver switch — the assertion below still matches
-    // because `spawn(result.binaryPath` appears verbatim there.
+  }
+
+  // terminal-commanderd.js and terminal-commander.js still spawn result.binaryPath.
+  for (const shim of ["terminal-commanderd.js", "terminal-commander.js"]) {
+    const body = fs.readFileSync(path.join(BIN_DIR, shim), "utf8");
+    const codeOnly = stripCommentsAndStrings(body);
     assert.match(
       codeOnly,
       /\bspawn\s*\(\s*result\.binaryPath/,
-      `${shim} must spawn result.binaryPath, not a literal command`,
+      `${shim} must spawn result.binaryPath (not a literal command)`,
     );
   }
+
+  // terminal-commander-mcp.js (Phase 3) delegates to runHarnessMcpSession
+  // instead of spawn(result.binaryPath) — the native supervisor owns the
+  // process lifecycle. The legacy WSL bridge path (spawnWslBridge) is
+  // still present but gated behind TC_USE_LEGACY_WSL_BRIDGE=1.
+  const mcpBody = fs.readFileSync(path.join(BIN_DIR, "terminal-commander-mcp.js"), "utf8");
+  const mcpCode = stripCommentsAndStrings(mcpBody);
+  assert.match(
+    mcpCode,
+    /\brunHarnessMcpSession\s*\(/,
+    "terminal-commander-mcp.js must delegate to runHarnessMcpSession (Phase 3 native supervisor)",
+  );
 });
 
 test("terminal-commander-mcp.js delegates to lib/wsl/spawn.js on bridge_required (WWS04 wiring)", () => {

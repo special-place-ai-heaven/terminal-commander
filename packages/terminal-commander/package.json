@@ -35,8 +35,9 @@
     "LICENSE"
   ],
   "optionalDependencies": {
+    "@terminal-commander/linux-arm64": "0.1.4",
     "@terminal-commander/linux-x64": "0.1.4",
-    "@terminal-commander/linux-arm64": "0.1.4"
+    "@terminal-commander/windows-x64": "file:../terminal-commander-windows-x64"
   },
   "scripts": {
     "install": "node scripts/install.js",

@@ -88,6 +88,15 @@ The product runs as two processes per user.
 - Privilege posture: unprivileged by default. A future privileged
   helper mode is documented in TC02 but is not the default.
 
+Platform notes: Linux x64 uses Unix-domain socket IPC under
+`$XDG_RUNTIME_DIR/terminal-commander/daemon.sock` (fallback
+`~/.local/share/terminal-commander/run/daemon.sock`). Windows x64
+uses named-pipe IPC at `\\.\pipe\terminal-commander\<USER>\daemon`
+with a security descriptor restricted to LocalSystem, Administrators,
+and the current user SID. WSL Ubuntu runs the Linux x64 binary; no
+bridge is required. macOS targets are tier-3 build-only per
+`docs/adr/ADR-native-tier1-runtime.md`.
+
 ### 2.3 Two-process is locked, IPC is deferred
 
 The two-process split is user-provided per

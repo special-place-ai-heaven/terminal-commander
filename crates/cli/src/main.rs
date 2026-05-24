@@ -12,6 +12,10 @@
 //! when TC21's transport swap happens.
 
 use clap::{Parser, Subcommand};
+use terminal_commander_supervisor::ensure::{EnsureDaemonOptions, EnsureDaemonStatus};
+use terminal_commander_supervisor::paths::{
+    endpoint_from_socket_path, resolve_socket_path, resolve_state_dir,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -75,46 +79,40 @@ enum BucketsOp {
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    let exit = run(cli);
-    std::process::ExitCode::from(exit)
+    run(cli)
 }
 
-fn run(cli: Cli) -> u8 {
+fn run(cli: Cli) -> std::process::ExitCode {
     match cli.cmd {
-        Command::Status => {
-            println!("terminal-commanderd: STATUS");
-            println!("  build version : {}", env!("CARGO_PKG_VERSION"));
-            println!("  state         : not running (TC25 stub; IPC arrives in TC21 follow-up)");
-            0
-        }
-        Command::Doctor => run_doctor(),
+        Command::Status => print_status(),
+        Command::Doctor => std::process::ExitCode::from(run_doctor()),
         Command::Rules { op } => match op {
             RulesOp::List => {
                 println!("rules: (run via MCP registry_search in TC24+)");
-                0
+                std::process::ExitCode::SUCCESS
             }
             RulesOp::Show { rule_id } => {
                 println!("rule {rule_id}: not found (offline CLI; daemon attach deferred)");
-                3
+                std::process::ExitCode::from(3)
             }
         },
         Command::Buckets { op } => match op {
             BucketsOp::List => {
                 println!("buckets: 0 (offline CLI)");
-                0
+                std::process::ExitCode::SUCCESS
             }
             BucketsOp::Show { bucket_id } => {
                 println!("bucket {bucket_id}: not found (offline CLI)");
-                3
+                std::process::ExitCode::from(3)
             }
         },
         Command::Jobs => {
             println!("jobs: 0 (offline CLI)");
-            0
+            std::process::ExitCode::SUCCESS
         }
         Command::Probes => {
             println!("probes: 0 (offline CLI)");
-            0
+            std::process::ExitCode::SUCCESS
         }
         Command::Policy => {
             println!("policy:");
@@ -123,13 +121,71 @@ fn run(cli: Cli) -> u8 {
                 "  commands.deny : sudo, doas, su, pkexec, kexec, polkit-agent, polkit-auth-agent-1"
             );
             println!("  default-deny paths: 14 suffixes (see POLICY.md section 5)");
-            0
+            std::process::ExitCode::SUCCESS
         }
         Command::Audit { limit } => {
             println!("audit (last {limit}): empty (offline CLI; daemon attach deferred)");
-            0
+            std::process::ExitCode::SUCCESS
         }
     }
+}
+
+fn print_status() -> std::process::ExitCode {
+    let state_dir = resolve_state_dir();
+    let log_path = state_dir.join("logs").join("terminal-commanderd.log");
+    let endpoint_path = resolve_socket_path();
+    let endpoint = endpoint_from_socket_path(&endpoint_path);
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("terminal-commander: tokio runtime build failed: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    let status = rt.block_on(async {
+        let opts = EnsureDaemonOptions {
+            daemon_binary: std::path::PathBuf::from("terminal-commanderd"),
+            state_dir: state_dir.clone(),
+            log_dir: state_dir.join("logs"),
+            endpoint,
+            startup_timeout: std::time::Duration::from_secs(1),
+            allow_spawn: false,
+        };
+        terminal_commander_supervisor::ensure::ensure_daemon(opts).await
+    });
+
+    let (daemon_text, pid_text, exit_code) = match &status {
+        EnsureDaemonStatus::AlreadyRunning { pid, .. } => (
+            "running",
+            pid.map_or_else(|| "-".into(), |p| p.to_string()),
+            std::process::ExitCode::SUCCESS,
+        ),
+        EnsureDaemonStatus::Started { pid, .. } => (
+            "running",
+            pid.map_or_else(|| "-".into(), |p| p.to_string()),
+            std::process::ExitCode::SUCCESS,
+        ),
+        EnsureDaemonStatus::Unavailable { .. } => (
+            "unavailable",
+            "-".to_string(),
+            std::process::ExitCode::from(1),
+        ),
+    };
+
+    println!("terminal-commander status:");
+    println!("  version       : {}", env!("CARGO_PKG_VERSION"));
+    println!("  endpoint      : {}", endpoint_path.display());
+    println!("  daemon        : {daemon_text}");
+    println!("  pid           : {pid_text}");
+    println!("  log_path      : {}", log_path.display());
+    println!("  state_dir     : {}", state_dir.display());
+
+    exit_code
 }
 
 fn run_doctor() -> u8 {
@@ -196,9 +252,11 @@ mod tests {
     }
 
     #[test]
-    fn cli_status_exits_zero() {
+    fn cli_status_exits_without_panic() {
+        // With no daemon running, print_status returns ExitCode::from(1).
+        // We only assert it doesn't panic; the exact exit code depends on
+        // whether a daemon is live on the probe endpoint.
         let cli = Cli::parse_from(["terminal-commander", "status"]);
-        let code = run(cli);
-        assert_eq!(code, 0);
+        let _code = run(cli);
     }
 }

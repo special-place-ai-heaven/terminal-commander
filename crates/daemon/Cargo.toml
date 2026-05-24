@@ -17,6 +17,11 @@ path = "src/lib.rs"
 name = "terminal-commanderd"
 path = "src/main.rs"
 
+[[test]]
+name = "pipe_peer_identity"
+path = "tests/pipe_peer_identity.rs"
+required-features = ["test-util"]
+
 [dependencies]
 parking_lot = "0.12.5"
 time = "0.3"
@@ -25,14 +30,50 @@ terminal-commander-core.workspace = true
 terminal-commander-sifters.workspace = true
 terminal-commander-probes.workspace = true
 terminal-commander-store.workspace = true
+terminal-commander-supervisor = { path = "../supervisor" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 clap = { version = "4.6.1", features = ["derive"] }
 toml = "0.9"
 thiserror = "2.0.18"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
 
-[lints]
-workspace = true
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[features]
+test-util = []
+
+# Replicate workspace lints rather than using `workspace = true` so
+# that we can allow `unsafe_code` for the Win32 peer-identity module
+# (peer_windows.rs), which must call unsafe Win32 FFI functions.
+# All other workspace lints are preserved verbatim.
+[lints.rust]
+unsafe_code = "allow"          # Win32 FFI in peer_windows.rs
+unreachable_pub = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"
+significant_drop_tightening = "allow"
 
 [dev-dependencies]
 regex = "1.12.3"

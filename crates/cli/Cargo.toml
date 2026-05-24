@@ -17,6 +17,8 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
 terminal-commander-core.workspace = true
+terminal-commander-supervisor = { path = "../supervisor" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

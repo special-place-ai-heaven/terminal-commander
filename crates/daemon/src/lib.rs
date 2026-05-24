@@ -11,13 +11,14 @@
 //! Source-status:
 //! - Router + Policy + Audit: live.
 //! - Daemon runtime bootstrap: live (TC36).
-//! - UDS IPC transport: live (TC37) on Unix; unsupported on Windows
-//!   (use WSL2). rmcp transport adapter remains deferred to TC40.
+//! - Local IPC transport: live (TC37) — UDS on Unix, named pipe on Windows.
+//!   Optional environment runners (WSL, SSH) route probe ops from the parent.
 
 pub mod activation;
 pub mod audit;
 pub mod command;
 pub mod config;
+pub mod environment;
 pub mod file_watch;
 pub mod ipc;
 pub mod policy;
@@ -67,6 +68,8 @@ pub use ipc::{
 };
 #[cfg(unix)]
 pub use ipc::{DaemonClient, IpcServer, PeerCred, ServerHandle};
+#[cfg(windows)]
+pub use ipc::{DaemonClient, PeerCred, PipeServer, PipeServerHandle};
 pub use policy::{
     COMMANDS_DENY, DEFAULT_DENY_PATH_SUFFIXES, PolicyAction, PolicyDecision, PolicyEngine,
     PolicyProfile, PolicyVerdict,
