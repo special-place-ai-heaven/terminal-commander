@@ -26,9 +26,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 
+use terminal_commander_supervisor::identity::PeerIdentity;
+
 use crate::audit::AuditSink;
 use crate::command::{CommandError, CommandStartRequest};
-use crate::ipc::peer::{self, PeerCred};
+#[cfg(unix)]
+use crate::ipc::peer;
 use crate::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStatusParams,
@@ -206,11 +209,21 @@ async fn handle_connection(
     boot: Instant,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let peer = peer::resolve(&stream);
+    let peer_cred = peer::resolve(&stream);
+    // Build a PeerIdentity from the resolved cred (or Unknown).
+    let identity: PeerIdentity = match peer_cred {
+        Some(c) => PeerIdentity::Unix {
+            uid: c.uid,
+            gid: c.gid,
+            pid: c.pid,
+        },
+        None => PeerIdentity::unknown_because("peer credentials unavailable"),
+    };
+
     // Linux/WSL: fail-closed when peer creds are missing.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        if peer.is_none() {
+        if !identity.is_known() {
             // Emit an audit row for the refused connection. The
             // subject is a synthetic descriptor so we can correlate
             // refusals in the audit log without ever writing peer
@@ -221,7 +234,7 @@ async fn handle_connection(
                 "unknown_peer",
                 "deny",
                 Some("peer credentials unavailable (Linux/WSL fail-closed)".to_owned()),
-                None,
+                &identity,
             );
             // Refuse: send a structured error, then close.
             let env = ResponseEnvelope {
@@ -240,8 +253,8 @@ async fn handle_connection(
 
     // Audit the connection itself once, before any request.
     {
-        let subject = peer.map_or_else(|| "unknown_peer".to_owned(), |p| p.to_audit_string());
-        emit_audit(&state, "ipc_connect", &subject, "info", None, peer);
+        let subject = identity_audit_subject(&identity);
+        emit_audit(&state, "ipc_connect", &subject, "info", None, &identity);
     }
 
     // Sticky shutdown: if the flag is already true, do not even
@@ -270,7 +283,7 @@ async fn handle_connection(
                         break;
                     }
                     ReadOutcome::Ok(req_env) => {
-                        let resp = dispatch(&state, boot, &req_env, peer).await;
+                        let resp = dispatch(&state, boot, &req_env, &identity).await;
                         if let Err(io_err) = write_envelope(&mut stream, &resp).await {
                             emit_audit_internal_error(
                                 &state,
@@ -357,7 +370,7 @@ async fn dispatch(
     state: &Arc<DaemonState>,
     boot: Instant,
     req_env: &RequestEnvelope,
-    peer: Option<PeerCred>,
+    peer: &PeerIdentity,
 ) -> ResponseEnvelope {
     let (method_name, response_result) = match &req_env.request {
         IpcRequest::SystemDiscover => {
@@ -525,7 +538,7 @@ async fn dispatch(
     // Audit one row per accepted request. The decision label reflects
     // whether the dispatcher produced an `Ok` response or a typed
     // error.
-    let subject = peer.map_or_else(|| "unknown_peer".to_owned(), |p| p.to_audit_string());
+    let subject = identity_audit_subject(peer);
     let decision = if matches!(response_result, IpcResult::Ok { .. }) {
         "info"
     } else {
@@ -1290,26 +1303,54 @@ fn emit_audit(
     subject: &str,
     decision: &str,
     reason: Option<String>,
-    peer: Option<PeerCred>,
+    peer: &PeerIdentity,
 ) {
     let mut entry = AuditEntry::new(format!("ipc_{action}"), subject, decision).with_actor("ipc");
     if let Some(r) = reason {
         entry = entry.with_reason(r);
     }
-    if let Some(p) = peer {
-        // Pre-serialized JSON metadata. Stays well inside
-        // MAX_AUDIT_METADATA_BYTES.
-        let meta = format!(
-            r#"{{"uid":{},"gid":{},"pid":{}}}"#,
-            p.uid,
-            p.gid,
-            p.pid.map_or_else(|| "null".to_owned(), |x| x.to_string())
-        );
-        entry = entry.with_metadata_json(meta);
-    }
+    // Attach peer metadata as pre-serialized JSON. Stays well inside
+    // MAX_AUDIT_METADATA_BYTES.
+    let meta = match peer {
+        PeerIdentity::Unix { uid, gid, pid } => format!(
+            r#"{{"kind":"unix","uid":{},"gid":{},"pid":{}}}"#,
+            uid,
+            gid,
+            pid.map_or_else(|| "null".to_owned(), |x| x.to_string())
+        ),
+        PeerIdentity::Windows { sid, pid, image } => format!(
+            r#"{{"kind":"windows","sid":{},"pid":{},"image":{}}}"#,
+            serde_json::to_string(sid).unwrap_or_else(|_| "null".to_owned()),
+            pid.map_or_else(|| "null".to_owned(), |x| x.to_string()),
+            image
+                .as_deref()
+                .and_then(|p| p.to_str())
+                .and_then(|s| serde_json::to_string(s).ok())
+                .unwrap_or_else(|| "null".to_owned()),
+        ),
+        PeerIdentity::Unknown { reason: r } => format!(
+            r#"{{"kind":"unknown","reason":{}}}"#,
+            r.as_deref()
+                .and_then(|s| serde_json::to_string(s).ok())
+                .unwrap_or_else(|| "null".to_owned()),
+        ),
+    };
+    entry = entry.with_metadata_json(meta);
     // Best-effort; audit unhealth must not DOS the IPC path.
     let sink: Arc<dyn AuditSink> = Arc::clone(&state.audit) as Arc<dyn AuditSink>;
     let _ = sink.emit(&entry);
+}
+
+fn identity_audit_subject(identity: &PeerIdentity) -> String {
+    match identity {
+        PeerIdentity::Unix { uid, pid, .. } => {
+            format!("uid={uid}:pid={}", pid.map_or(0, |p| p))
+        }
+        PeerIdentity::Windows { sid, pid, .. } => {
+            format!("sid={sid}:pid={}", pid.map_or(0, |p| p))
+        }
+        PeerIdentity::Unknown { .. } => "unknown_peer".to_owned(),
+    }
 }
 
 fn emit_audit_internal_error(state: &Arc<DaemonState>, action: &str, message: &str) {
@@ -2000,7 +2041,7 @@ pub async fn dispatch_envelope(
     state: &Arc<DaemonState>,
     boot: Instant,
     req_env: &RequestEnvelope,
-    peer: Option<PeerCred>,
+    peer: &PeerIdentity,
 ) -> ResponseEnvelope {
     dispatch(state, boot, req_env, peer).await
 }

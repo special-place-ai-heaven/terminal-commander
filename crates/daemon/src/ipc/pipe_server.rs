@@ -7,12 +7,13 @@ use std::io;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::watch;
 
+use terminal_commander_supervisor::identity::PeerIdentity;
+
 use crate::ipc::framing::{read_request, write_response};
-use crate::ipc::peer::PeerCred;
+use crate::ipc::peer_windows::peer_identity_for;
 use crate::ipc::protocol::RequestEnvelope;
 use crate::ipc::server::dispatch_envelope;
 use crate::state::DaemonState;
@@ -127,13 +128,11 @@ async fn handle_pipe_connection(
     mut server: NamedPipeServer,
     state: Arc<DaemonState>,
     boot: Instant,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> io::Result<()> {
-    let peer = Some(PeerCred {
-        uid: 0,
-        gid: 0,
-        pid: None,
-    });
+    let identity: PeerIdentity = peer_identity_for(&server);
+    #[cfg(any(test, feature = "test-util"))]
+    state.test_record_peer_identity(identity.clone());
     loop {
         if *shutdown.borrow() {
             break;
@@ -142,7 +141,7 @@ async fn handle_pipe_connection(
             Ok(r) => r,
             Err(_) => break,
         };
-        let resp = dispatch_envelope(&state, boot, &req, peer).await;
+        let resp = dispatch_envelope(&state, boot, &req, &identity).await;
         write_response(&mut server, &resp).await?;
     }
     Ok(())

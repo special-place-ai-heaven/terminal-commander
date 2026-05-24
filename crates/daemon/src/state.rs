@@ -90,6 +90,11 @@ pub struct DaemonState {
     /// `UnsupportedPlatform`.
     #[cfg(unix)]
     pub pty: Arc<PtyRuntime>,
+    /// Last peer identity observed by the pipe/socket server. Only
+    /// present in test builds; used by integration tests to assert
+    /// that the Win32 peer-resolution path ran.
+    #[cfg(any(test, feature = "test-util"))]
+    pub test_last_peer: std::sync::Mutex<Option<terminal_commander_supervisor::identity::PeerIdentity>>,
 }
 
 impl std::fmt::Debug for DaemonState {
@@ -215,6 +220,8 @@ impl DaemonState {
             watch,
             #[cfg(unix)]
             pty,
+            #[cfg(any(test, feature = "test-util"))]
+            test_last_peer: std::sync::Mutex::new(None),
         })
     }
 
@@ -225,6 +232,28 @@ impl DaemonState {
         // PersistentAudit is the only Arc<PersistentAudit> we hand
         // back. By construction, true.
         Arc::strong_count(&self.audit) >= 1
+    }
+
+    /// Record the peer identity observed by the named-pipe server.
+    /// Only compiled in test/test-util builds.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn test_record_peer_identity(
+        &self,
+        identity: terminal_commander_supervisor::identity::PeerIdentity,
+    ) {
+        if let Ok(mut g) = self.test_last_peer.lock() {
+            *g = Some(identity);
+        }
+    }
+
+    /// Return a clone of the last recorded peer identity, or `None`
+    /// if none has been recorded yet.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn test_last_observed_peer_identity(
+        &self,
+    ) -> Option<terminal_commander_supervisor::identity::PeerIdentity> {
+        self.test_last_peer.lock().ok()?.clone()
     }
 }
 

@@ -1122,10 +1122,12 @@ dependencies = [
  "terminal-commander-probes",
  "terminal-commander-sifters",
  "terminal-commander-store",
+ "terminal-commander-supervisor",
  "thiserror",
  "time",
  "tokio",
  "toml",
+ "windows",
 ]
 
 [[package]]

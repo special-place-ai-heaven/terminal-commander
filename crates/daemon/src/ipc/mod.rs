@@ -26,6 +26,9 @@ pub mod server;
 #[cfg(windows)]
 pub mod pipe_server;
 
+#[cfg(windows)]
+pub mod peer_windows;
+
 #[cfg(unix)]
 pub mod client;
 
