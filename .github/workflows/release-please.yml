@@ -241,25 +241,62 @@ jobs:
           echo "publish-version: $version"
 
   # ----------------------------------------------------------------
-  # JOB 2 — publish-linux-x64 (NPM07).
+  # JOBS 2-11 — platform build + publish (NPM07).
   #
-  # Runs only when release-please created a release on this run.
-  # Builds the three Rust binaries for x86_64-unknown-linux-gnu,
-  # stages them into `packages/terminal-commander-linux-x64/bin/`,
-  # and publishes `@terminal-commander/linux-x64` to npm via
-  # npm publish via NPM_TOKEN_TC.
+  # For each of the 5 platforms (linux-x64, linux-arm64, windows-x64,
+  # mac-x64, mac-arm64) there is a pair of jobs:
   #
-  # Permissions: contents: read (checkout)
+  #   build-<platform>   — calls reusable `_build-platform-binary.yml`
+  #                        which compiles the 3 Rust binaries on the
+  #                        appropriate native runner, stages them into
+  #                        the platform package's bin/ dir, tars to
+  #                        preserve the +x bit, and uploads the tar as
+  #                        a `tc-bin-<platform>` artifact.
+  #
+  #   publish-<platform> — downloads the bin.tar artifact on a small
+  #                        ubuntu-24.04 runner, extracts it (restoring
+  #                        the executable bit), validates the package
+  #                        version against release-please's output, and
+  #                        runs `npm publish --access public` against
+  #                        `@terminal-commander/<platform>`.
+  #
+  # 0.2.0 token-mode auth: NODE_AUTH_TOKEN: secrets.NPM_TOKEN_TC.
+  # No `--provenance`, no `id-token: write`, no Node 22.14. Task 23
+  # owns the OIDC cutover after operator one-time UI setup on
+  # npmjs.com (trusted publishers).
+  #
+  # Drift-proof: every platform binary build flows through the single
+  # reusable workflow `_build-platform-binary.yml`, the same workflow
+  # called by the PR-time `npm-binary-build.yml` CI gate. Same source
+  # of truth for both PR validation and release-time publish.
   # ----------------------------------------------------------------
+
+  # ---------- linux-x64 ----------
+  build-linux-x64:
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+    if: >-
+      always() && !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    uses: ./.github/workflows/_build-platform-binary.yml
+    with:
+      platform: linux-x64
+      upload_artifact: true
+
   publish-linux-x64:
     name: publish-linux-x64
     needs:
       - release-please
       - ensure-release
       - publish-version
+      - build-linux-x64
     if: >-
-      always() &&
-      !cancelled() &&
+      always() && !cancelled() &&
+      needs.build-linux-x64.result == 'success' &&
       (needs.release-please.outputs.releases_created == 'true' ||
       (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true')
@@ -270,64 +307,27 @@ jobs:
       - name: Checkout (released SHA on main)
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (${{ env.RUST_TOOLCHAIN }})
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: x86_64-unknown-linux-gnu
-
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-please-publish-linux-x64
-
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
-      - name: cargo build --release (x86_64-unknown-linux-gnu)
-        run: |
-          cargo build --release \
-            --target x86_64-unknown-linux-gnu \
-            -p terminal-commanderd \
-            -p terminal-commander-mcp \
-            -p terminal-commander-cli
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-linux-x64
+          path: packages/terminal-commander-linux-x64/
 
-      - name: Stage real binaries into platform package
+      - name: Extract bin.tar (preserves +x mode)
         shell: bash
         run: |
-          set -e
-          bin_dir="packages/terminal-commander-linux-x64/bin"
-          src_dir="target/x86_64-unknown-linux-gnu/release"
-          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
-            if [ ! -x "$src_dir/$bin" ]; then
-              echo "::error::expected release binary not found: $src_dir/$bin"
-              exit 1
-            fi
-            cp "$src_dir/$bin" "$bin_dir/$bin"
-            chmod +x "$bin_dir/$bin"
-          done
-          # Remove the committed .placeholder files from the workspace
-          # tree (NOT from the repo) so they do not end up inside the
-          # tarball alongside the real binaries; the `files: ["bin/"]`
-          # whitelist would otherwise include them.
-          rm -f "$bin_dir"/*.placeholder
-          ls -la "$bin_dir"
-
-      - name: Smoke — staged binaries answer --help
-        shell: bash
-        run: |
-          set -e
-          bin_dir="packages/terminal-commander-linux-x64/bin"
-          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
-            "./$bin_dir/$bin" --help > /tmp/help-$bin.log 2>&1 || {
-              echo "::error::$bin --help failed";
-              head -50 /tmp/help-$bin.log;
-              exit 1;
-            }
-          done
+          set -euo pipefail
+          cd packages/terminal-commander-linux-x64
+          rm -rf bin
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
 
       - name: Confirm package version matches release-please output
         shell: bash
@@ -342,7 +342,7 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --access public
+      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
         shell: bash
         working-directory: packages/terminal-commander-linux-x64
         env:
@@ -352,6 +352,7 @@ jobs:
           if npm publish --access public; then
             exit 0
           fi
+          # Recovery: workflow_dispatch + force_publish + already-on-registry → exit 0.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
             ver=$(node -p "require('./package.json').version")
             name=$(node -p "require('./package.json').name")
@@ -362,46 +363,41 @@ jobs:
           fi
           exit 1
 
-  # ----------------------------------------------------------------
-  # JOB 3 — publish-linux-arm64 (NPM07).
-  #
-  # Native arm64 build on the GitHub-hosted `ubuntu-24.04-arm`
-  # runner. NPM05's live evidence (run 26318082726) confirmed the
-  # runner label is available for this repository. If it ever
-  # becomes unavailable, this job fails with `No runner matching
-  # the specified labels was found: ubuntu-24.04-arm` — that is the
-  # recorded blocker, not a workflow defect. Do NOT fake arm64
-  # execution via QEMU; NPM07 follows the same honesty rule as NPM05.
-  # ----------------------------------------------------------------
+  # ---------- linux-arm64 ----------
+  build-linux-arm64:
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+    if: >-
+      always() && !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    uses: ./.github/workflows/_build-platform-binary.yml
+    with:
+      platform: linux-arm64
+      upload_artifact: true
+
   publish-linux-arm64:
     name: publish-linux-arm64
     needs:
       - release-please
       - ensure-release
       - publish-version
+      - build-linux-arm64
     if: >-
-      always() &&
-      !cancelled() &&
+      always() && !cancelled() &&
+      needs.build-linux-arm64.result == 'success' &&
       (needs.release-please.outputs.releases_created == 'true' ||
       (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true')
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
       - name: Checkout (released SHA on main)
         uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (${{ env.RUST_TOOLCHAIN }})
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: aarch64-unknown-linux-gnu
-
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-please-publish-linux-arm64
 
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
         uses: actions/setup-node@v4
@@ -409,43 +405,21 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
-      - name: cargo build --release (aarch64-unknown-linux-gnu)
-        run: |
-          cargo build --release \
-            --target aarch64-unknown-linux-gnu \
-            -p terminal-commanderd \
-            -p terminal-commander-mcp \
-            -p terminal-commander-cli
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-linux-arm64
+          path: packages/terminal-commander-linux-arm64/
 
-      - name: Stage real binaries into platform package
+      - name: Extract bin.tar (preserves +x mode)
         shell: bash
         run: |
-          set -e
-          bin_dir="packages/terminal-commander-linux-arm64/bin"
-          src_dir="target/aarch64-unknown-linux-gnu/release"
-          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
-            if [ ! -x "$src_dir/$bin" ]; then
-              echo "::error::expected release binary not found: $src_dir/$bin"
-              exit 1
-            fi
-            cp "$src_dir/$bin" "$bin_dir/$bin"
-            chmod +x "$bin_dir/$bin"
-          done
-          rm -f "$bin_dir"/*.placeholder
-          ls -la "$bin_dir"
-
-      - name: Smoke — staged binaries answer --help (native arm64)
-        shell: bash
-        run: |
-          set -e
-          bin_dir="packages/terminal-commander-linux-arm64/bin"
-          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
-            "./$bin_dir/$bin" --help > /tmp/help-$bin.log 2>&1 || {
-              echo "::error::$bin --help failed";
-              head -50 /tmp/help-$bin.log;
-              exit 1;
-            }
-          done
+          set -euo pipefail
+          cd packages/terminal-commander-linux-arm64
+          rm -rf bin
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
 
       - name: Confirm package version matches release-please output
         shell: bash
@@ -460,7 +434,7 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --access public
+      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
         shell: bash
         working-directory: packages/terminal-commander-linux-arm64
         env:
@@ -480,16 +454,293 @@ jobs:
           fi
           exit 1
 
+  # ---------- windows-x64 ----------
+  build-windows-x64:
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+    if: >-
+      always() && !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    uses: ./.github/workflows/_build-platform-binary.yml
+    with:
+      platform: windows-x64
+      upload_artifact: true
+
+  publish-windows-x64:
+    name: publish-windows-x64
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - build-windows-x64
+    if: >-
+      always() && !cancelled() &&
+      needs.build-windows-x64.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (released SHA on main)
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-windows-x64
+          path: packages/terminal-commander-windows-x64/
+
+      - name: Extract bin.tar (preserves +x mode)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/terminal-commander-windows-x64
+          rm -rf bin
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
+
+      - name: Confirm package version matches release-please output
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(node -p "require('./packages/terminal-commander-windows-x64/package.json').version")
+          if [ "$actual" != "$EXPECTED_VERSION" ]; then
+            echo "::error::version mismatch: package.json=$actual release-please=$EXPECTED_VERSION"
+            exit 1
+          fi
+          echo "version-match: $actual"
+
+      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
+        shell: bash
+        working-directory: packages/terminal-commander-windows-x64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+        run: |
+          set -e
+          if npm publish --access public; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(node -p "require('./package.json').version")
+            name=$(node -p "require('./package.json').name")
+            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+              echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
+              exit 0
+            fi
+          fi
+          exit 1
+
+  # ---------- mac-x64 ----------
+  build-mac-x64:
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+    if: >-
+      always() && !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    uses: ./.github/workflows/_build-platform-binary.yml
+    with:
+      platform: mac-x64
+      upload_artifact: true
+
+  publish-mac-x64:
+    name: publish-mac-x64
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - build-mac-x64
+    if: >-
+      always() && !cancelled() &&
+      needs.build-mac-x64.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (released SHA on main)
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-mac-x64
+          path: packages/terminal-commander-mac-x64/
+
+      - name: Extract bin.tar (preserves +x mode)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/terminal-commander-mac-x64
+          rm -rf bin
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
+
+      - name: Confirm package version matches release-please output
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(node -p "require('./packages/terminal-commander-mac-x64/package.json').version")
+          if [ "$actual" != "$EXPECTED_VERSION" ]; then
+            echo "::error::version mismatch: package.json=$actual release-please=$EXPECTED_VERSION"
+            exit 1
+          fi
+          echo "version-match: $actual"
+
+      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
+        shell: bash
+        working-directory: packages/terminal-commander-mac-x64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+        run: |
+          set -e
+          if npm publish --access public; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(node -p "require('./package.json').version")
+            name=$(node -p "require('./package.json').name")
+            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+              echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
+              exit 0
+            fi
+          fi
+          exit 1
+
+  # ---------- mac-arm64 ----------
+  build-mac-arm64:
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+    if: >-
+      always() && !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    uses: ./.github/workflows/_build-platform-binary.yml
+    with:
+      platform: mac-arm64
+      upload_artifact: true
+
+  publish-mac-arm64:
+    name: publish-mac-arm64
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - build-mac-arm64
+    if: >-
+      always() && !cancelled() &&
+      needs.build-mac-arm64.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (released SHA on main)
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-mac-arm64
+          path: packages/terminal-commander-mac-arm64/
+
+      - name: Extract bin.tar (preserves +x mode)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/terminal-commander-mac-arm64
+          rm -rf bin
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
+
+      - name: Confirm package version matches release-please output
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(node -p "require('./packages/terminal-commander-mac-arm64/package.json').version")
+          if [ "$actual" != "$EXPECTED_VERSION" ]; then
+            echo "::error::version mismatch: package.json=$actual release-please=$EXPECTED_VERSION"
+            exit 1
+          fi
+          echo "version-match: $actual"
+
+      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
+        shell: bash
+        working-directory: packages/terminal-commander-mac-arm64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+        run: |
+          set -e
+          if npm publish --access public; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(node -p "require('./package.json').version")
+            name=$(node -p "require('./package.json').name")
+            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+              echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
+              exit 0
+            fi
+          fi
+          exit 1
+
   # ----------------------------------------------------------------
-  # JOB 4 — publish-root (NPM07).
+  # JOB 12 — publish-root (NPM07).
   #
-  # Depends on BOTH platform publishes succeeding. Only then does the
+  # Depends on ALL 5 platform publishes succeeding. Only then does the
   # root wrapper publish; its `optionalDependencies` pin the exact
   # platform-package versions, so publishing the root before the
   # platform packages would resolve to a non-existent dep.
   #
   # The root package has no Rust binaries to build; the `bin/` shims
   # and `lib/resolve-binary.js` are already in the working tree.
+  #
+  # Auth: stays on NODE_AUTH_TOKEN + Node 20 for 0.2.0. Task 23 owns
+  # the OIDC + --provenance cutover once npmjs.com trusted-publisher
+  # UI setup is complete for all 6 npm package names.
   # ----------------------------------------------------------------
   publish-root:
     name: publish-root
@@ -499,14 +750,19 @@ jobs:
       - publish-version
       - publish-linux-x64
       - publish-linux-arm64
+      - publish-windows-x64
+      - publish-mac-x64
+      - publish-mac-arm64
     if: >-
-      always() &&
-      !cancelled() &&
+      always() && !cancelled() &&
       (needs.release-please.outputs.releases_created == 'true' ||
       (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true') &&
       needs.publish-linux-x64.result == 'success' &&
-      needs.publish-linux-arm64.result == 'success'
+      needs.publish-linux-arm64.result == 'success' &&
+      needs.publish-windows-x64.result == 'success' &&
+      needs.publish-mac-x64.result == 'success' &&
+      needs.publish-mac-arm64.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
