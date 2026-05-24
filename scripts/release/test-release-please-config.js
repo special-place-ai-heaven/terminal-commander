@@ -62,3 +62,23 @@ test("manifest tracks all 6 packages at same version", () => {
     assert.ok(manifest[dir], `manifest missing ${dir}`);
   }
 });
+
+test("root optionalDependencies pin all 5 platform packages by version (not file:)", () => {
+  const pkg = require("../../packages/terminal-commander/package.json");
+  const expected = pkg.version;
+  const od = pkg.optionalDependencies || {};
+  for (const dep of [
+    "@terminal-commander/linux-x64",
+    "@terminal-commander/linux-arm64",
+    "@terminal-commander/windows-x64",
+    "@terminal-commander/mac-x64",
+    "@terminal-commander/mac-arm64",
+  ]) {
+    assert.ok(od[dep], `missing optionalDependency ${dep}`);
+    assert.ok(
+      !od[dep].startsWith("file:"),
+      `${dep} must be version-pinned, not file:`
+    );
+    assert.equal(od[dep], expected, `${dep} = ${od[dep]} != ${expected}`);
+  }
+});

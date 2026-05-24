@@ -35,9 +35,11 @@
     "LICENSE"
   ],
   "optionalDependencies": {
-    "@terminal-commander/linux-arm64": "0.1.4",
     "@terminal-commander/linux-x64": "0.1.4",
-    "@terminal-commander/windows-x64": "file:../terminal-commander-windows-x64"
+    "@terminal-commander/linux-arm64": "0.1.4",
+    "@terminal-commander/windows-x64": "0.1.4",
+    "@terminal-commander/mac-x64": "0.1.4",
+    "@terminal-commander/mac-arm64": "0.1.4"
   },
   "scripts": {
     "install": "node scripts/install.js",
@@ -49,6 +51,7 @@
   },
   "os": [
     "linux",
-    "win32"
+    "win32",
+    "darwin"
   ]
 }
