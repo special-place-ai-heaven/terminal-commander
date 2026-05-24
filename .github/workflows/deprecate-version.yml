@@ -35,7 +35,10 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         shell: bash
         run: |
+          # Codex review I5 (2026-05-25): collect failures + fail loud if any
+          # deprecate attempt errored. Silent "|| true" succeeded with zero work.
           set -e
+          failures=()
           for pkg in \
             terminal-commander \
             @terminal-commander/linux-x64 \
@@ -44,8 +47,21 @@ jobs:
             @terminal-commander/mac-x64 \
             @terminal-commander/mac-arm64; do
             echo "── npm deprecate ${pkg}@${{ inputs.version }}"
-            npm deprecate "${pkg}@${{ inputs.version }}" "${{ inputs.reason }}" || true
+            if ! npm deprecate "${pkg}@${{ inputs.version }}" "${{ inputs.reason }}"; then
+              # 404 (version doesn't exist) is acceptable — it means publish
+              # didn't reach this package. Anything else (auth fail, 5xx) is fatal.
+              if npm view "${pkg}@${{ inputs.version }}" version >/dev/null 2>&1; then
+                # Version exists but deprecate failed → real failure
+                failures+=("$pkg")
+              else
+                echo "::warning::${pkg}@${{ inputs.version }} not on registry (skip)"
+              fi
+            fi
           done
+          if [ ${#failures[@]} -gt 0 ]; then
+            echo "::error::deprecation failed for: ${failures[*]}"
+            exit 1
+          fi
 
   yank-cargo:
     runs-on: ubuntu-24.04
@@ -57,6 +73,7 @@ jobs:
         shell: bash
         run: |
           set -e
+          failures=()
           for crate in \
             terminal-commander-core \
             terminal-commander-sifters \
@@ -66,5 +83,19 @@ jobs:
             terminal-commanderd \
             terminal-commander-mcp; do
             echo "── cargo yank ${crate}@${{ inputs.version }}"
-            cargo yank --version "${{ inputs.version }}" "$crate" || true
+            if ! cargo yank --version "${{ inputs.version }}" "$crate"; then
+              # crates.io HTTP API confirms whether crate@ver exists
+              http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                -H 'User-Agent: terminal-commander-deprecate (https://github.com/special-place-administrator/terminal-commander)' \
+                "https://crates.io/api/v1/crates/${crate}/${{ inputs.version }}")
+              if [ "$http_code" = "200" ]; then
+                failures+=("$crate")
+              else
+                echo "::warning::${crate}@${{ inputs.version }} not on crates.io (HTTP $http_code, skip)"
+              fi
+            fi
           done
+          if [ ${#failures[@]} -gt 0 ]; then
+            echo "::error::yank failed for: ${failures[*]}"
+            exit 1
+          fi

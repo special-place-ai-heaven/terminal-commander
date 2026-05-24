@@ -1,0 +1,3 @@
+Placeholder for terminal-commander.exe (CLI) on win32/x86_64. Replaced by
+GitHub Actions release-please.yml + npm-binary-build.yml with the real
+`cargo build --release --target x86_64-pc-windows-msvc` artifact.

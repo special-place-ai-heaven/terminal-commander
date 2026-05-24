@@ -834,7 +834,22 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
-          npm publish
+          set -e
+          if npm publish; then
+            exit 0
+          fi
+          # Recovery: workflow_dispatch + force_publish + already-on-registry → exit 0
+          # so cargo publish chain (which depends on publish-root success) can still run.
+          # Without this, a re-run after root already published would E409 + block cargo.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(node -p "require('./package.json').version")
+            name=$(node -p "require('./package.json').name")
+            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+              echo "::warning::${name}@${ver} already on registry (force_publish recovery — letting cargo chain proceed)"
+              exit 0
+            fi
+          fi
+          exit 1
 
   # ----------------------------------------------------------------
   # JOBS 13-19 — cargo publish chain (7 crates in strict dep order).
@@ -919,8 +934,35 @@ jobs:
             cat /tmp/api.json
           fi
           exit 1
-      - name: Wait 60s for crates.io index propagation
-        run: sleep 60
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
 
   # ---------- terminal-commander-sifters ----------
   publish-cargo-terminal-commander-sifters:
@@ -983,8 +1025,35 @@ jobs:
             cat /tmp/api.json
           fi
           exit 1
-      - name: Wait 60s for crates.io index propagation
-        run: sleep 60
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
 
   # ---------- terminal-commander-probes ----------
   publish-cargo-terminal-commander-probes:
@@ -1047,8 +1116,35 @@ jobs:
             cat /tmp/api.json
           fi
           exit 1
-      - name: Wait 60s for crates.io index propagation
-        run: sleep 60
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
 
   # ---------- terminal-commander-store ----------
   publish-cargo-terminal-commander-store:
@@ -1111,8 +1207,35 @@ jobs:
             cat /tmp/api.json
           fi
           exit 1
-      - name: Wait 60s for crates.io index propagation
-        run: sleep 60
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
 
   # ---------- terminal-commander-supervisor ----------
   publish-cargo-terminal-commander-supervisor:
@@ -1175,8 +1298,35 @@ jobs:
             cat /tmp/api.json
           fi
           exit 1
-      - name: Wait 60s for crates.io index propagation
-        run: sleep 60
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
 
   # ---------- terminal-commanderd ----------
   publish-cargo-terminal-commanderd:
@@ -1239,8 +1389,35 @@ jobs:
             cat /tmp/api.json
           fi
           exit 1
-      - name: Wait 60s for crates.io index propagation
-        run: sleep 60
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
 
   # ---------- terminal-commander-mcp ----------
   publish-cargo-terminal-commander-mcp:
@@ -1303,8 +1480,35 @@ jobs:
             cat /tmp/api.json
           fi
           exit 1
-      - name: Wait 60s for crates.io index propagation
-        run: sleep 60
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
 
   # ----------------------------------------------------------------
   # JOB — post-publish smoke verification (5 platforms in parallel)
@@ -1491,8 +1695,25 @@ jobs:
 
   mark-release-broken:
     name: mark-release-broken
+    # Codex review I6 (2026-05-25): fire on EITHER publish-job failures OR verify failures.
+    # Prior version only listened to verify jobs — but if one platform publish fails,
+    # publish-root + verify jobs SKIP (don't fail), so the issue was never filed.
+    # Now we listen across the whole release path so any failure → P0 issue.
     needs:
       - release-please
+      - publish-linux-x64
+      - publish-linux-arm64
+      - publish-windows-x64
+      - publish-mac-x64
+      - publish-mac-arm64
+      - publish-root
+      - publish-cargo-terminal-commander-core
+      - publish-cargo-terminal-commander-sifters
+      - publish-cargo-terminal-commander-probes
+      - publish-cargo-terminal-commander-store
+      - publish-cargo-terminal-commander-supervisor
+      - publish-cargo-terminal-commanderd
+      - publish-cargo-terminal-commander-mcp
       - verify-linux-x64
       - verify-linux-arm64
       - verify-windows-x64
@@ -1500,7 +1721,20 @@ jobs:
       - verify-mac-arm64
     if: |
       always() && !cancelled() &&
-      (needs.verify-linux-x64.result == 'failure' ||
+      (needs.publish-linux-x64.result == 'failure' ||
+       needs.publish-linux-arm64.result == 'failure' ||
+       needs.publish-windows-x64.result == 'failure' ||
+       needs.publish-mac-x64.result == 'failure' ||
+       needs.publish-mac-arm64.result == 'failure' ||
+       needs.publish-root.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-core.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-sifters.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-probes.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-store.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-supervisor.result == 'failure' ||
+       needs.publish-cargo-terminal-commanderd.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-mcp.result == 'failure' ||
+       needs.verify-linux-x64.result == 'failure' ||
        needs.verify-linux-arm64.result == 'failure' ||
        needs.verify-windows-x64.result == 'failure' ||
        needs.verify-mac-x64.result == 'failure' ||
@@ -1511,6 +1745,21 @@ jobs:
       - name: Compose issue body to a file (avoids YAML heredoc fragility)
         env:
           VER: ${{ needs.release-please.outputs.version }}
+          # Publish job results
+          PUB_LX64: ${{ needs.publish-linux-x64.result }}
+          PUB_LARM: ${{ needs.publish-linux-arm64.result }}
+          PUB_WIN:  ${{ needs.publish-windows-x64.result }}
+          PUB_MX64: ${{ needs.publish-mac-x64.result }}
+          PUB_MARM: ${{ needs.publish-mac-arm64.result }}
+          PUB_ROOT: ${{ needs.publish-root.result }}
+          PUB_CORE: ${{ needs.publish-cargo-terminal-commander-core.result }}
+          PUB_SIFTERS: ${{ needs.publish-cargo-terminal-commander-sifters.result }}
+          PUB_PROBES: ${{ needs.publish-cargo-terminal-commander-probes.result }}
+          PUB_STORE: ${{ needs.publish-cargo-terminal-commander-store.result }}
+          PUB_SUPERVISOR: ${{ needs.publish-cargo-terminal-commander-supervisor.result }}
+          PUB_DAEMON: ${{ needs.publish-cargo-terminal-commanderd.result }}
+          PUB_MCP: ${{ needs.publish-cargo-terminal-commander-mcp.result }}
+          # Verify job results
           RES_LX64: ${{ needs.verify-linux-x64.result }}
           RES_LARM: ${{ needs.verify-linux-arm64.result }}
           RES_WIN:  ${{ needs.verify-windows-x64.result }}
@@ -1519,16 +1768,33 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -e
-          # Use printf, NOT heredoc — heredoc indentation + GH-Actions YAML
-          # is a known footgun.
-          printf 'Release **%s** failed post-publish smoke verification.\n\n' "$VER" > /tmp/body.md
-          printf 'Verify job results:\n' >> /tmp/body.md
+          # printf, NOT heredoc — heredoc indentation + GH-Actions YAML is fragile.
+          printf 'Release **%s** failed somewhere in the publish pipeline.\n\n' "$VER" > /tmp/body.md
+          printf 'NPM publish:\n' >> /tmp/body.md
+          printf '- linux-x64   : %s\n' "$PUB_LX64"  >> /tmp/body.md
+          printf '- linux-arm64 : %s\n' "$PUB_LARM"  >> /tmp/body.md
+          printf '- windows-x64 : %s\n' "$PUB_WIN"   >> /tmp/body.md
+          printf '- mac-x64     : %s\n' "$PUB_MX64"  >> /tmp/body.md
+          printf '- mac-arm64   : %s\n' "$PUB_MARM"  >> /tmp/body.md
+          printf '- root        : %s\n\n' "$PUB_ROOT" >> /tmp/body.md
+          printf 'Cargo publish:\n' >> /tmp/body.md
+          printf '- core        : %s\n' "$PUB_CORE" >> /tmp/body.md
+          printf '- sifters     : %s\n' "$PUB_SIFTERS" >> /tmp/body.md
+          printf '- probes      : %s\n' "$PUB_PROBES" >> /tmp/body.md
+          printf '- store       : %s\n' "$PUB_STORE" >> /tmp/body.md
+          printf '- supervisor  : %s\n' "$PUB_SUPERVISOR" >> /tmp/body.md
+          printf '- daemon      : %s\n' "$PUB_DAEMON" >> /tmp/body.md
+          printf '- mcp         : %s\n\n' "$PUB_MCP" >> /tmp/body.md
+          printf 'Post-publish verify:\n' >> /tmp/body.md
           printf '- linux-x64   : %s\n' "$RES_LX64"  >> /tmp/body.md
           printf '- linux-arm64 : %s\n' "$RES_LARM"  >> /tmp/body.md
           printf '- windows-x64 : %s\n' "$RES_WIN"   >> /tmp/body.md
           printf '- mac-x64     : %s\n' "$RES_MX64"  >> /tmp/body.md
           printf '- mac-arm64   : %s\n\n' "$RES_MARM" >> /tmp/body.md
-          printf '**Action required:** Run `.github/workflows/deprecate-version.yml` for version %s ASAP, then triage + patch release.\n\n' "$VER" >> /tmp/body.md
+          printf '**Action required:**\n' >> /tmp/body.md
+          printf '1. Run `bash scripts/release/recover-partial-publish.sh %s` to identify missing artifacts.\n' "$VER" >> /tmp/body.md
+          printf '2. If some packages shipped + some failed: re-run release-please.yml with `force_publish: true` (the E409-tolerant pattern republishes only missing).\n' >> /tmp/body.md
+          printf '3. If a published version is broken: run `.github/workflows/deprecate-version.yml` for version %s, then patch release.\n\n' "$VER" >> /tmp/body.md
           printf 'Workflow run: %s\n' "$RUN_URL" >> /tmp/body.md
       - name: Open P0 issue (PAT first, fall back to GITHUB_TOKEN if PAT is the broken one)
         env:
