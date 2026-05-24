@@ -12,7 +12,10 @@
 //! when TC21's transport swap happens.
 
 use clap::{Parser, Subcommand};
-use terminal_commander_supervisor::ensure::{Endpoint, EnsureDaemonOptions, EnsureDaemonStatus};
+use terminal_commander_supervisor::ensure::{EnsureDaemonOptions, EnsureDaemonStatus};
+use terminal_commander_supervisor::paths::{
+    endpoint_from_socket_path, resolve_socket_path, resolve_state_dir,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -123,60 +126,6 @@ fn run(cli: Cli) -> std::process::ExitCode {
         Command::Audit { limit } => {
             println!("audit (last {limit}): empty (offline CLI; daemon attach deferred)");
             std::process::ExitCode::SUCCESS
-        }
-    }
-}
-
-fn resolve_state_dir() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("TC_DATA") {
-        return std::path::PathBuf::from(p);
-    }
-    #[cfg(windows)]
-    {
-        if let Ok(p) = std::env::var("LOCALAPPDATA") {
-            return std::path::PathBuf::from(p)
-                .join("terminal-commander")
-                .join("state");
-        }
-    }
-    #[cfg(unix)]
-    {
-        if let Ok(p) = std::env::var("XDG_STATE_HOME") {
-            return std::path::PathBuf::from(p).join("terminal-commander");
-        }
-        if let Ok(p) = std::env::var("HOME") {
-            return std::path::PathBuf::from(p).join(".local/share/terminal-commander");
-        }
-    }
-    std::env::temp_dir()
-        .join("terminal-commander")
-        .join("state")
-}
-
-fn resolve_socket_path() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("TC_SOCKET") {
-        return std::path::PathBuf::from(p);
-    }
-    #[cfg(windows)]
-    {
-        let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
-        std::path::PathBuf::from(format!(r"\\.\pipe\terminal-commander-{user}-default"))
-    }
-    #[cfg(unix)]
-    {
-        return resolve_state_dir().join("terminal-commanderd.sock");
-    }
-}
-
-fn endpoint_from_socket_path(p: &std::path::Path) -> Endpoint {
-    let s = p.to_string_lossy();
-    if s.starts_with(r"\\.\pipe\") {
-        Endpoint::WindowsPipe {
-            name: s.into_owned(),
-        }
-    } else {
-        Endpoint::UnixSocket {
-            path: p.to_path_buf(),
         }
     }
 }

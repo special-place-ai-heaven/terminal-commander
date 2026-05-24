@@ -18,37 +18,22 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use terminal_commander_supervisor::ensure::EnsureDaemonStatus;
+use terminal_commander_supervisor::paths;
 use terminal_commanderd::ipc::protocol::{IpcError, IpcRequest, IpcResponse};
-
-/// Default UDS path used when nothing is passed on the command line
-/// or in `TC_SOCKET`. Mirrors the daemon's default
-/// `<HOME>/.local/share/terminal-commanderd/terminal-commanderd.sock`.
-pub const DEFAULT_SOCKET_SUFFIX: &str = ".local/share/terminal-commanderd/terminal-commanderd.sock";
-
-/// Environment variable that overrides the daemon socket path.
-pub const SOCKET_ENV: &str = "TC_SOCKET";
 
 /// Resolve the socket path the MCP adapter should connect to.
 ///
 /// Resolution order:
 /// 1. Explicit override (CLI flag) when provided.
-/// 2. `TC_SOCKET` env var.
-/// 3. `<HOME>/.local/share/terminal-commanderd/terminal-commanderd.sock`.
-/// 4. Fallback: `./terminal-commanderd.sock`.
+/// 2. Delegates to [`terminal_commander_supervisor::paths::resolve_socket_path`]:
+///    `TC_SOCKET` env var, then platform default matching the daemon's
+///    `DaemonConfig::socket_path()` / `DaemonConfig::pipe_name()` exactly.
 #[must_use]
 pub fn resolve_socket_path(cli_override: Option<&std::path::Path>) -> std::path::PathBuf {
     if let Some(p) = cli_override {
         return p.to_path_buf();
     }
-    if let Ok(v) = std::env::var(SOCKET_ENV)
-        && !v.is_empty()
-    {
-        return std::path::PathBuf::from(v);
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return std::path::PathBuf::from(home).join(DEFAULT_SOCKET_SUFFIX);
-    }
-    std::path::PathBuf::from("terminal-commanderd.sock")
+    paths::resolve_socket_path()
 }
 
 /// Shared, cheaply-cloneable handle to the `EnsureDaemonStatus`

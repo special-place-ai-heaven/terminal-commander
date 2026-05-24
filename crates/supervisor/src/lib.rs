@@ -5,3 +5,4 @@
 
 pub mod ensure;
 pub mod identity;
+pub mod paths;

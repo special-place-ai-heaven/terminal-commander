@@ -45,6 +45,7 @@ mod unix_main {
     use terminal_commander_supervisor::ensure::{
         Endpoint, EnsureDaemonOptions, EnsureDaemonStatus, ensure_daemon,
     };
+    use terminal_commander_supervisor::paths;
 
     /// Default daemon startup timeout.
     const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -95,18 +96,15 @@ mod unix_main {
         PathBuf::from("terminal-commanderd")
     }
 
-    /// Derive the daemon state directory: CLI flag > `$HOME/.local/share/terminal-commanderd`.
+    /// Derive the daemon state directory: CLI flag > supervisor canonical default.
+    ///
+    /// Delegates to [`terminal_commander_supervisor::paths::resolve_state_dir`] for
+    /// the default, which matches `DaemonConfig`'s startup path exactly.
     fn resolve_state_dir(cli_override: Option<PathBuf>) -> PathBuf {
         if let Some(p) = cli_override {
             return p;
         }
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("terminal-commanderd");
-        }
-        PathBuf::from(".terminal-commanderd")
+        paths::resolve_state_dir()
     }
 
     /// Return true when `TC_SUPERVISOR_ALLOW_SPAWN` is NOT set to `"0"`.
