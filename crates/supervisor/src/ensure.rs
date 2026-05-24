@@ -103,7 +103,11 @@ pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
         };
     }
 
-    // 2. Spawn daemon (binary path required to exist).
+    // 2. Spawn daemon. Only fail-fast on BinaryNotFound when the caller
+    // gave us an absolute or relative path (something with a separator).
+    // A bare name like "terminal-commanderd" is intentionally resolved
+    // via PATH at spawn time, so we MUST let Command::spawn try first
+    // rather than rejecting on a CWD-only existence check.
     //
     // Note: this branch uses blocking std::fs and std::process::Command
     // inside an async fn. Under tokio's multi-threaded runtime this
@@ -112,7 +116,13 @@ pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
     // acceptable for Phase 3. If diagnostics fidelity ever requires
     // capturing per-syscall latency or this is called from a hot
     // path, wrap the blocking section in `tokio::task::spawn_blocking`.
-    if !opts.daemon_binary.exists() {
+    let binary_has_separator = opts
+        .daemon_binary
+        .components()
+        .nth(1)
+        .is_some()
+        || opts.daemon_binary.is_absolute();
+    if binary_has_separator && !opts.daemon_binary.exists() {
         return EnsureDaemonStatus::Unavailable {
             reason: DaemonUnavailableReason::BinaryNotFound,
             diagnostics: Diagnostics {
@@ -260,5 +270,39 @@ mod tests {
         };
         let status = ensure_daemon(opts).await;
         assert!(matches!(status, EnsureDaemonStatus::Unavailable { .. }));
+    }
+
+    #[tokio::test]
+    async fn bare_binary_name_does_not_fail_fast_on_missing_check() {
+        // Bare name "definitely-not-installed-xyz" — PATH resolution must
+        // be left to Command::spawn, which will fail at spawn time, not
+        // at the existence-check fast-path.
+        let dir = tempfile::TempDir::new().unwrap();
+        let opts = EnsureDaemonOptions {
+            daemon_binary: PathBuf::from("definitely-not-installed-xyz"),
+            state_dir: dir.path().into(),
+            log_dir: dir.path().into(),
+            endpoint: Endpoint::WindowsPipe {
+                name: r"\\.\pipe\unused".into(),
+            },
+            startup_timeout: Duration::from_millis(10),
+            allow_spawn: true,
+        };
+        let status = ensure_daemon(opts).await;
+        match status {
+            EnsureDaemonStatus::Unavailable { reason, diagnostics } => {
+                // Reason MUST be SpawnFailed, not BinaryNotFound — proves
+                // the existence check did not fast-fail on the bare name.
+                assert!(
+                    matches!(reason, DaemonUnavailableReason::SpawnFailed),
+                    "expected SpawnFailed, got {reason:?}"
+                );
+                assert!(
+                    diagnostics.startup_attempted,
+                    "startup must have been attempted (spawn was called)"
+                );
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
     }
 }
