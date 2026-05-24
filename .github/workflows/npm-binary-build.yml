@@ -160,20 +160,24 @@ jobs:
         if: matrix.full_smoke
         run: cargo test -p terminal-commanderd --test load_noise_backpressure -- --nocapture
 
-      - name: MCP grep guard 1 — no spawn / no socket in crates/mcp
+      - name: MCP grep guard 1 — no spawn / no socket in crates/mcp source
         if: matrix.full_smoke
         shell: bash
         run: |
           set -e
-          # The matches must be doc / negative-assertion only (existing
-          # baseline). Fail if a new "real" match appears.
-          out=$(grep -RE "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp || true)
+          # Enforce the security promise: the MCP RUNTIME never spawns
+          # user code and never opens network listeners. Scope the guard
+          # to production source (crates/mcp/src) only. Test files
+          # (crates/mcp/tests) are exempt because end-to-end tests
+          # legitimately spawn the daemon + mcp binaries to drive them
+          # (e.g. stdin_eof_survives).
+          out=$(grep -RE "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp/src || true)
           echo "$out"
           # Heuristic: doc lines start with `//!` or `//` or live in a
           # comment-only test assertion. The hard fail is if a binding
-          # name (no leading comment slashes) appears in source.
-          if echo "$out" | grep -E "^crates/mcp/(src|tests)/[^:]+:[ \t]*(let|use|fn|pub|impl|let mut)" >/dev/null; then
-            echo "::error::MCP guard 1 caught a non-doc match"
+          # name (no leading comment slashes) appears in production source.
+          if echo "$out" | grep -E "^crates/mcp/src/[^:]+:[ \t]*(let|use|fn|pub|impl|let mut)" >/dev/null; then
+            echo "::error::MCP guard 1 caught a non-doc match in production source"
             exit 1
           fi
 
