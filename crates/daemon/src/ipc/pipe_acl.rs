@@ -29,12 +29,17 @@ fn current_user_sid() -> std::io::Result<String> {
         // First call: get required buffer size.
         let mut needed = 0u32;
         let _ = GetTokenInformation(token, TokenUser, None, 0, &raw mut needed);
-        let mut buf = vec![0u8; needed as usize];
+        // Allocate an 8-byte-aligned buffer big enough for `needed` bytes.
+        // align_of::<TOKEN_USER>() is at most align_of::<u64>() = 8 on x64.
+        // Vec<u8> is only byte-aligned; casting to *const TOKEN_USER from it
+        // is undefined behavior. Vec<u64> guarantees 8-byte alignment.
+        let aligned_len = (needed as usize).div_ceil(std::mem::size_of::<u64>());
+        let mut buf: Vec<u64> = vec![0u64; aligned_len.max(1)];
 
         if let Err(e) = GetTokenInformation(
             token,
             TokenUser,
-            Some(buf.as_mut_ptr().cast()),
+            Some(buf.as_mut_ptr().cast::<core::ffi::c_void>()),
             needed,
             &raw mut needed,
         ) {
@@ -42,8 +47,9 @@ fn current_user_sid() -> std::io::Result<String> {
             return Err(std::io::Error::other(format!("GetTokenInformation: {e}")));
         }
 
-        // SAFETY: Windows allocates the buffer aligned for TOKEN_USER.
-        #[allow(clippy::cast_ptr_alignment, clippy::ptr_as_ptr)]
+        // SAFETY: buf is Vec<u64>, so it is 8-byte aligned, which matches
+        // align_of::<TOKEN_USER>() on x64 (contains a *mut SID pointer).
+        // Windows filled the buffer with a valid TOKEN_USER + appended SID bytes.
         let token_user = &*(buf.as_ptr().cast::<TOKEN_USER>());
         let mut sid_str = windows::core::PWSTR::null();
         if let Err(e) = ConvertSidToStringSidW(token_user.User.Sid, &raw mut sid_str) {
