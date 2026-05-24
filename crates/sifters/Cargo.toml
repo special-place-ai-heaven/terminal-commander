@@ -1,6 +1,9 @@
 [package]
 name = "terminal-commander-sifters"
-description = "Sifter runtime: keyword, regex, condition, multiline, dedupe, suppression, stall, progress, prompt, correlation, artifact parsers."
+description = "Output sifters (capture, filter, ring-buffer) for Terminal Commander."
+readme = "README.md"
+keywords = ["terminal-commander", "mcp"]
+categories = ["development-tools"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

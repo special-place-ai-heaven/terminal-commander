@@ -1,6 +1,9 @@
 [package]
 name = "terminal-commander-probes"
-description = "Probe runners: process, file, PTY, directory, future journal/artifact probes."
+description = "Probe definitions for the Terminal Commander observability surface."
+readme = "README.md"
+keywords = ["terminal-commander", "mcp"]
+categories = ["development-tools"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,7 +16,7 @@ publish.workspace = true
 [dependencies]
 parking_lot = "0.12.5"
 terminal-commander-core.workspace = true
-terminal-commander-sifters = { version = "0.0.0", path = "../sifters" }
+terminal-commander-sifters = { version = "0.2.0", path = "../sifters" }
 thiserror = "2.0.18"
 tokio = { workspace = true, features = ["process", "macros", "rt-multi-thread", "io-util", "sync", "time", "fs"] }
 vte = "0.15.0"

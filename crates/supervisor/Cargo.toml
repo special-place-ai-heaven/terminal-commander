@@ -1,9 +1,17 @@
 [package]
 name = "terminal-commander-supervisor"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+description = "Cross-platform supervisor for Terminal Commander daemon — IPC bring-up, peer identity, ensure-daemon helpers."
+readme = "README.md"
+keywords = ["terminal-commander", "mcp", "daemon", "supervisor"]
+categories = ["development-tools"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+publish.workspace = true
 
 [lib]
 name = "terminal_commander_supervisor"
