@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
 use terminal_commander_supervisor::ensure::{
-    Endpoint, EnsureDaemonOptions, EnsureDaemonStatus, ensure_daemon,
+    DaemonUnavailableReason, Endpoint, EnsureDaemonOptions, EnsureDaemonStatus,
+    ensure_daemon,
 };
 
 #[cfg(unix)]
@@ -45,7 +46,9 @@ async fn no_listener_no_spawn_returns_unavailable() {
     };
     let status = ensure_daemon(opts).await;
     match status {
-        EnsureDaemonStatus::Unavailable { diagnostics, .. } => {
+        EnsureDaemonStatus::Unavailable { reason, diagnostics } => {
+            assert!(matches!(reason, DaemonUnavailableReason::EndpointBindFailed),
+                "expected EndpointBindFailed, got {reason:?}");
             assert!(!diagnostics.startup_attempted);
         }
         other => panic!("expected Unavailable, got {other:?}"),

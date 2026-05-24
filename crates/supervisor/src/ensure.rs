@@ -103,6 +103,14 @@ pub async fn ensure_daemon(
     }
 
     // 2. Spawn daemon (binary path required to exist).
+    //
+    // Note: this branch uses blocking std::fs and std::process::Command
+    // inside an async fn. Under tokio's multi-threaded runtime this
+    // starves a single worker thread per call, not the whole runtime.
+    // Spawn is rare and fast on Windows/Linux so the tradeoff is
+    // acceptable for Phase 3. If diagnostics fidelity ever requires
+    // capturing per-syscall latency or this is called from a hot
+    // path, wrap the blocking section in `tokio::task::spawn_blocking`.
     if !opts.daemon_binary.exists() {
         return EnsureDaemonStatus::Unavailable {
             reason: DaemonUnavailableReason::BinaryNotFound,
@@ -179,6 +187,12 @@ pub async fn ensure_daemon(
         }
     };
     let pid = Some(child.id());
+    // `child` is dropped at the end of this function. On both Unix
+    // and Windows, dropping std::process::Child does NOT terminate
+    // the underlying process — it only releases the handle. That is
+    // the intended daemon semantics here: the spawned terminal-
+    // commanderd outlives the supervisor call.
+    drop(child);
 
     // 3. Wait for endpoint bind up to startup_timeout.
     let deadline = std::time::Instant::now() + opts.startup_timeout;
@@ -217,6 +231,10 @@ async fn probe_endpoint(endpoint: &Endpoint) -> bool {
         Endpoint::UnixSocket { .. } => false,
         #[cfg(windows)]
         Endpoint::WindowsPipe { name } => {
+            // ClientOptions::new().open is synchronous; same tokio
+            // contract caveat as the blocking I/O in ensure_daemon
+            // step 2 (acceptable for Phase 3, revisit if probed in a
+            // hot path).
             use tokio::net::windows::named_pipe::ClientOptions;
             ClientOptions::new().open(name.as_str()).is_ok()
         }
