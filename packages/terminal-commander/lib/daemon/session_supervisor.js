@@ -113,7 +113,12 @@ function spawnDaemonHidden(daemonBinary, dataDir, ipcEndpoint, env) {
   if (process.platform === "win32") {
     opts.creationFlags = CREATE_NO_WINDOW;
   }
-  return spawn(daemonBinary, args, opts);
+  const child = spawn(daemonBinary, args, opts);
+  // The child inherits a duplicate of logFd; release the parent's
+  // copy so one fd per session does not leak in long-lived supervisor
+  // processes. Log rotation TODO: deferred to Phase 4.
+  try { fs.closeSync(logFd); } catch (_e) {}
+  return child;
 }
 
 function killProcessTree(child) {
