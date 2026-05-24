@@ -77,19 +77,151 @@ pub struct EnsureDaemonOptions {
 /// This function must not panic; it must always return a structured
 /// status the caller can render to the operator.
 pub async fn ensure_daemon(
-    _opts: EnsureDaemonOptions,
+    opts: EnsureDaemonOptions,
 ) -> EnsureDaemonStatus {
-    // Phase 4.1 scaffold: stubbed unavailable result; Task 5 implements
-    // the live probe + spawn loop.
+    let start = std::time::Instant::now();
+
+    // 1. Probe endpoint first.
+    if probe_endpoint(&opts.endpoint).await {
+        return EnsureDaemonStatus::AlreadyRunning {
+            endpoint: opts.endpoint,
+            pid: None,
+        };
+    }
+
+    if !opts.allow_spawn {
+        return EnsureDaemonStatus::Unavailable {
+            reason: DaemonUnavailableReason::EndpointBindFailed,
+            diagnostics: Diagnostics {
+                endpoint: opts.endpoint,
+                log_path: None,
+                last_error: Some("endpoint unreachable; spawn disabled".into()),
+                startup_attempted: false,
+                startup_elapsed_ms: start.elapsed().as_millis() as u64,
+            },
+        };
+    }
+
+    // 2. Spawn daemon (binary path required to exist).
+    if !opts.daemon_binary.exists() {
+        return EnsureDaemonStatus::Unavailable {
+            reason: DaemonUnavailableReason::BinaryNotFound,
+            diagnostics: Diagnostics {
+                endpoint: opts.endpoint,
+                log_path: None,
+                last_error: Some(format!(
+                    "daemon binary not found: {}",
+                    opts.daemon_binary.display()
+                )),
+                startup_attempted: false,
+                startup_elapsed_ms: start.elapsed().as_millis() as u64,
+            },
+        };
+    }
+    let _ = std::fs::create_dir_all(&opts.log_dir);
+    let log_path = opts.log_dir.join("terminal-commanderd.log");
+    let log_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return EnsureDaemonStatus::Unavailable {
+                reason: DaemonUnavailableReason::SpawnFailed,
+                diagnostics: Diagnostics {
+                    endpoint: opts.endpoint,
+                    log_path: Some(log_path),
+                    last_error: Some(format!("open log: {e}")),
+                    startup_attempted: false,
+                    startup_elapsed_ms: start.elapsed().as_millis() as u64,
+                },
+            };
+        }
+    };
+    let log_file_err = match log_file.try_clone() {
+        Ok(f) => f,
+        Err(e) => {
+            return EnsureDaemonStatus::Unavailable {
+                reason: DaemonUnavailableReason::SpawnFailed,
+                diagnostics: Diagnostics {
+                    endpoint: opts.endpoint,
+                    log_path: Some(log_path),
+                    last_error: Some(format!("clone log fd: {e}")),
+                    startup_attempted: false,
+                    startup_elapsed_ms: start.elapsed().as_millis() as u64,
+                },
+            };
+        }
+    };
+    let mut cmd = std::process::Command::new(&opts.daemon_binary);
+    cmd.arg("--data-dir")
+        .arg(&opts.state_dir)
+        .arg("start")
+        .arg("--mode")
+        .arg("ipc-server")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_file_err));
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return EnsureDaemonStatus::Unavailable {
+                reason: DaemonUnavailableReason::SpawnFailed,
+                diagnostics: Diagnostics {
+                    endpoint: opts.endpoint,
+                    log_path: Some(log_path),
+                    last_error: Some(format!("spawn: {e}")),
+                    startup_attempted: true,
+                    startup_elapsed_ms: start.elapsed().as_millis() as u64,
+                },
+            };
+        }
+    };
+    let pid = Some(child.id());
+
+    // 3. Wait for endpoint bind up to startup_timeout.
+    let deadline = std::time::Instant::now() + opts.startup_timeout;
+    while std::time::Instant::now() < deadline {
+        if probe_endpoint(&opts.endpoint).await {
+            return EnsureDaemonStatus::Started {
+                endpoint: opts.endpoint,
+                pid,
+                log_path,
+            };
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     EnsureDaemonStatus::Unavailable {
-        reason: DaemonUnavailableReason::SpawnFailed,
+        reason: DaemonUnavailableReason::StartupTimeout,
         diagnostics: Diagnostics {
-            endpoint: Endpoint::WindowsPipe { name: String::new() },
-            log_path: None,
-            last_error: Some("ensure_daemon not yet implemented".into()),
-            startup_attempted: false,
-            startup_elapsed_ms: 0,
+            endpoint: opts.endpoint,
+            log_path: Some(log_path),
+            last_error: Some(format!(
+                "endpoint did not bind within {}ms",
+                opts.startup_timeout.as_millis()
+            )),
+            startup_attempted: true,
+            startup_elapsed_ms: start.elapsed().as_millis() as u64,
         },
+    }
+}
+
+async fn probe_endpoint(endpoint: &Endpoint) -> bool {
+    match endpoint {
+        #[cfg(unix)]
+        Endpoint::UnixSocket { path } => {
+            tokio::net::UnixStream::connect(path).await.is_ok()
+        }
+        #[cfg(not(unix))]
+        Endpoint::UnixSocket { .. } => false,
+        #[cfg(windows)]
+        Endpoint::WindowsPipe { name } => {
+            use tokio::net::windows::named_pipe::ClientOptions;
+            ClientOptions::new().open(name.as_str()).is_ok()
+        }
+        #[cfg(not(windows))]
+        Endpoint::WindowsPipe { .. } => false,
     }
 }
 
