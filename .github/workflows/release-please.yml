@@ -547,10 +547,8 @@ jobs:
             process.exit(1);
           }
           const deps = pkg.optionalDependencies || {};
-          for (const name of [
-            '@terminal-commander/linux-x64',
-            '@terminal-commander/linux-arm64',
-          ]) {
+          const { PLATFORM_PACKAGES } = require('../../scripts/release/platform-packages.js');
+          for (const name of PLATFORM_PACKAGES) {
             if (deps[name] !== expected) {
               console.error(`${name} optionalDependency = ${deps[name]} != ${expected}`);
               process.exit(1);

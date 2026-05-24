@@ -82,3 +82,30 @@ test("root optionalDependencies pin all 5 platform packages by version (not file
     assert.equal(od[dep], expected, `${dep} = ${od[dep]} != ${expected}`);
   }
 });
+
+test("platform-packages.js lists all 5 platforms", () => {
+  const { PLATFORM_PACKAGES } = require("./platform-packages.js");
+  assert.deepEqual(new Set(PLATFORM_PACKAGES), new Set([
+    "@terminal-commander/linux-x64",
+    "@terminal-commander/linux-arm64",
+    "@terminal-commander/windows-x64",
+    "@terminal-commander/mac-x64",
+    "@terminal-commander/mac-arm64",
+  ]));
+});
+
+test("sync-optional-dependencies.js consumes shared PLATFORM_PACKAGES", () => {
+  const src = require("fs").readFileSync(
+    require("path").join(__dirname, "sync-optional-dependencies.js"),
+    "utf8"
+  );
+  assert.ok(src.includes("PLATFORM_PACKAGES"), "sync script must use shared constant");
+});
+
+test("verify-optional-dependencies.js consumes shared PLATFORM_PACKAGES", () => {
+  const src = require("fs").readFileSync(
+    require("path").join(__dirname, "verify-optional-dependencies.js"),
+    "utf8"
+  );
+  assert.ok(src.includes("PLATFORM_PACKAGES"), "verify script must use shared constant");
+});
