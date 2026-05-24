@@ -44,3 +44,21 @@ test("all 5 platform packages have release-please entries", () => {
     assert.equal(cfg.packages[dir]["release-type"], "node");
   }
 });
+
+test("manifest tracks all 6 packages at same version", () => {
+  const manifest = require("../../.github/.release-please-manifest.json");
+  const entries = Object.entries(manifest);
+  assert.equal(entries.length, 6, `manifest has ${entries.length} entries, expected 6`);
+  const versions = new Set(entries.map(([, v]) => v));
+  assert.equal(versions.size, 1, "all manifest entries should share the same version");
+  for (const dir of [
+    "packages/terminal-commander",
+    "packages/terminal-commander-linux-x64",
+    "packages/terminal-commander-linux-arm64",
+    "packages/terminal-commander-windows-x64",
+    "packages/terminal-commander-mac-x64",
+    "packages/terminal-commander-mac-arm64",
+  ]) {
+    assert.ok(manifest[dir], `manifest missing ${dir}`);
+  }
+});
