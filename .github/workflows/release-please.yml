@@ -179,6 +179,20 @@ jobs:
           fi
           echo "tag_name=${tag}" >> "$GITHUB_OUTPUT"
 
+      - name: Assert cargo workspace version matches release-please version
+        if: steps.final.outputs.releases_created == 'true'
+        shell: bash
+        env:
+          EXPECTED: ${{ steps.final.outputs.version }}
+        run: |
+          set -e
+          actual=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo workspace version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+          echo "npm-cargo version parity: $actual"
+
   # After auto-merged release PRs, release-please sometimes skips tag/npm.
   # Close the loop without workflow_dispatch / manual force_publish.
   ensure-release:
@@ -821,3 +835,473 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
           npm publish
+
+  # ----------------------------------------------------------------
+  # JOBS 13-19 — cargo publish chain (7 crates in strict dep order).
+  #
+  # Dep order is non-negotiable: each crate's path-deps must already
+  # be on the registry when its tarball is uploaded, or cargo rejects
+  # the publish. Order:
+  #   core → sifters → probes → store → supervisor → daemon → mcp
+  #
+  # 0.2.0 token-mode auth: CARGO_REGISTRY_TOKEN: secrets.CARGO_REGISTRY_TOKEN_TC.
+  # No OIDC, no id-token: write. Task 23 owns the OIDC cutover after
+  # operator one-time UI setup on crates.io (trusted publishers).
+  #
+  # Each job waits 60s after publish for crates.io index propagation
+  # so the next crate's resolver sees the freshly-published prior.
+  #
+  # Recovery branch (workflow_dispatch + force_publish): on publish
+  # failure, query crates.io HTTP API (deterministic JSON) — if the
+  # crate version already exists (HTTP 200) treat as success.
+  # ----------------------------------------------------------------
+
+  # ---------- terminal-commander-core ----------
+  publish-cargo-terminal-commander-core:
+    name: publish-cargo-terminal-commander-core
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-root
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-root.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-core
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-core | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-core
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-core; then
+            exit 0
+          fi
+          # Recovery: crates.io HTTP API — deterministic JSON.
+          # Returns 200 + JSON if version exists, 404 if not.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-core | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-core/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-core@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Wait 60s for crates.io index propagation
+        run: sleep 60
+
+  # ---------- terminal-commander-sifters ----------
+  publish-cargo-terminal-commander-sifters:
+    name: publish-cargo-terminal-commander-sifters
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commander-core
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commander-core.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-sifters
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-sifters | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-sifters
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-sifters; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-sifters | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-sifters/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-sifters@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Wait 60s for crates.io index propagation
+        run: sleep 60
+
+  # ---------- terminal-commander-probes ----------
+  publish-cargo-terminal-commander-probes:
+    name: publish-cargo-terminal-commander-probes
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commander-sifters
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commander-sifters.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-probes
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-probes | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-probes
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-probes; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-probes | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-probes/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-probes@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Wait 60s for crates.io index propagation
+        run: sleep 60
+
+  # ---------- terminal-commander-store ----------
+  publish-cargo-terminal-commander-store:
+    name: publish-cargo-terminal-commander-store
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commander-probes
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commander-probes.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-store
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-store | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-store
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-store; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-store | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-store/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-store@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Wait 60s for crates.io index propagation
+        run: sleep 60
+
+  # ---------- terminal-commander-supervisor ----------
+  publish-cargo-terminal-commander-supervisor:
+    name: publish-cargo-terminal-commander-supervisor
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commander-store
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commander-store.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-supervisor
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-supervisor | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-supervisor
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-supervisor; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-supervisor | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-supervisor/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-supervisor@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Wait 60s for crates.io index propagation
+        run: sleep 60
+
+  # ---------- terminal-commanderd ----------
+  publish-cargo-terminal-commanderd:
+    name: publish-cargo-terminal-commanderd
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commander-supervisor
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commander-supervisor.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commanderd
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commanderd | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commanderd
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commanderd; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commanderd | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commanderd/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commanderd@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Wait 60s for crates.io index propagation
+        run: sleep 60
+
+  # ---------- terminal-commander-mcp ----------
+  publish-cargo-terminal-commander-mcp:
+    name: publish-cargo-terminal-commander-mcp
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commanderd
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commanderd.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-mcp
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-mcp | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-mcp
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-mcp; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-mcp | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-mcp/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-mcp@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Wait 60s for crates.io index propagation
+        run: sleep 60

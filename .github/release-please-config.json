@@ -34,7 +34,8 @@
         { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/linux-arm64']" },
         { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/windows-x64']" },
         { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/mac-x64']" },
-        { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/mac-arm64']" }
+        { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/mac-arm64']" },
+        { "type": "generic", "path": "../../Cargo.toml" }
       ]
     },
     "packages/terminal-commander-linux-x64": {
