@@ -31,7 +31,6 @@ thiserror = "2.0.18"
 time = "0.3.47"
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "io-std", "io-util", "net"] }
 
-[target.'cfg(unix)'.dependencies]
 rmcp = { workspace = true }
 
 [lints]
@@ -40,6 +39,3 @@ workspace = true
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "io-util"] }
-
-[target.'cfg(unix)'.dev-dependencies]
-rmcp = { version = "=1.7.0", features = ["server", "client", "macros", "transport-io"] }

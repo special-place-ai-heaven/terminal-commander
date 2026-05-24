@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! Daemon UDS client wrapper for the MCP stdio adapter (TC40).
+//! Daemon IPC client wrapper for the MCP stdio adapter (TC40).
 //!
 //! Wraps `terminal_commanderd::DaemonClient` and adds:
 //! - correlation-id generation,
 //! - structured error mapping to MCP tool errors,
 //! - bounded, audit-friendly call sites for every MCP tool to call into.
 //!
-//! Unix-only: the daemon's UDS transport itself is Unix-only. The MCP
-//! binary refuses to start on non-Unix targets.
+//! Transport: UDS on Unix, Windows named pipe on Windows. The
+//! underlying `terminal_commanderd::DaemonClient` is already
+//! platform-dispatched (see `crates/daemon/src/ipc/`).
 //!
 //! Source-status: live (TC40).
 
@@ -134,12 +135,15 @@ mod tests {
     fn resolve_returns_a_socket_path() {
         // Don't manipulate environment (the workspace forbids unsafe
         // and `set_var` is now unsafe). Just verify that the resolver
-        // always returns a path whose final component is the daemon
-        // socket file name, regardless of which arm fires.
+        // always returns a non-empty path, regardless of platform arm.
+        // Unix: ends with `terminal-commanderd.sock`.
+        // Windows: starts with `\\.\pipe\terminal-commander-`.
         let got = resolve_socket_path(None);
+        let s = got.to_string_lossy();
         assert!(
-            got.to_string_lossy().ends_with("terminal-commanderd.sock")
-                || got.to_string_lossy().ends_with(".sock"),
+            s.ends_with("terminal-commanderd.sock")
+                || s.ends_with(".sock")
+                || s.starts_with(r"\\.\pipe\terminal-commander-"),
             "got: {got:?}"
         );
     }

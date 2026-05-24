@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 
+// These lints fire on the repetitive daemon-status guard pattern and
+// inline `use` items in tool handlers.  The patterns are intentional
+// (guard must appear before each IPC call; `use` is scoped to keep
+// type names out of the module top-level).  Suppress rather than
+// restructure, per Task 3.5.5 "do not change tool implementations".
+#![allow(clippy::collapsible_if, clippy::items_after_statements)]
+
 //! MCP tool surface served by the rmcp stdio adapter (TC40).
 //!
 //! This module defines [`TerminalCommanderMcpServer`], the rmcp
@@ -899,6 +906,7 @@ impl TerminalCommanderMcpServer {
         }
         let env: Vec<(String, String)> = params.env.into_iter().map(|e| (e.key, e.value)).collect();
         let ipc = PtyCommandStartParams {
+            environment: None,
             argv: params.argv,
             cwd: params.cwd.map(std::path::PathBuf::from),
             env,
@@ -1220,6 +1228,7 @@ impl McpCommandStartParams {
         let cwd = self.cwd.map(std::path::PathBuf::from);
         let env: Vec<(String, String)> = self.env.into_iter().map(|e| (e.key, e.value)).collect();
         CommandStartParams {
+            environment: None,
             argv: self.argv,
             cwd,
             env,

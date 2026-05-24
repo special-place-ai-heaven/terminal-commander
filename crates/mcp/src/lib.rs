@@ -17,9 +17,7 @@
 //! Source-status: live (TC23 in-process surface + TC40 rmcp stdio
 //! adapter for discovery/status tools).
 
-#[cfg(unix)]
 pub mod daemon_client;
-#[cfg(unix)]
 pub mod tools;
 
 use std::sync::Arc;

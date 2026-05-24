@@ -17,8 +17,7 @@ use crate::ipc::protocol::{
 
 /// Win32 ERROR_PIPE_BUSY (231 / 0xE7): server exists but no instance is
 /// currently waiting for a connection (between accept and recreate).
-const ERROR_PIPE_BUSY_OS: i32 =
-    windows::Win32::Foundation::ERROR_PIPE_BUSY.0.cast_signed();
+const ERROR_PIPE_BUSY_OS: i32 = windows::Win32::Foundation::ERROR_PIPE_BUSY.0.cast_signed();
 
 /// Maximum number of retries when the named pipe is busy.
 const PIPE_BUSY_RETRIES: u32 = 50; // 50 × 20 ms = 1 000 ms

@@ -116,12 +116,8 @@ pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
     // acceptable for Phase 3. If diagnostics fidelity ever requires
     // capturing per-syscall latency or this is called from a hot
     // path, wrap the blocking section in `tokio::task::spawn_blocking`.
-    let binary_has_separator = opts
-        .daemon_binary
-        .components()
-        .nth(1)
-        .is_some()
-        || opts.daemon_binary.is_absolute();
+    let binary_has_separator =
+        opts.daemon_binary.components().nth(1).is_some() || opts.daemon_binary.is_absolute();
     if binary_has_separator && !opts.daemon_binary.exists() {
         return EnsureDaemonStatus::Unavailable {
             reason: DaemonUnavailableReason::BinaryNotFound,
@@ -290,7 +286,10 @@ mod tests {
         };
         let status = ensure_daemon(opts).await;
         match status {
-            EnsureDaemonStatus::Unavailable { reason, diagnostics } => {
+            EnsureDaemonStatus::Unavailable {
+                reason,
+                diagnostics,
+            } => {
                 // Reason MUST be SpawnFailed, not BinaryNotFound — proves
                 // the existence check did not fast-fail on the bare name.
                 assert!(
