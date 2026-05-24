@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Terminal Commander Authors
+#
+# Operator panic-button: deprecate a broken published version across
+# all 6 npm packages (root + 5 platforms) + 7 cargo crates.
+# npm: marks tarballs deprecated (warns on install).
+# cargo: yanks (prevents new resolution of the version).
+
+name: deprecate-version
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
+        description: "Version to deprecate, e.g. 0.2.0"
+      reason:
+        required: true
+        type: string
+        description: "Deprecation message users see on install (e.g., 'broken X, install 0.2.1')"
+
+permissions:
+  contents: read
+
+jobs:
+  deprecate-npm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+        shell: bash
+        run: |
+          set -e
+          for pkg in \
+            terminal-commander \
+            @terminal-commander/linux-x64 \
+            @terminal-commander/linux-arm64 \
+            @terminal-commander/windows-x64 \
+            @terminal-commander/mac-x64 \
+            @terminal-commander/mac-arm64; do
+            echo "── npm deprecate ${pkg}@${{ inputs.version }}"
+            npm deprecate "${pkg}@${{ inputs.version }}" "${{ inputs.reason }}" || true
+          done
+
+  yank-cargo:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: "1.95.0" }
+      - env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        shell: bash
+        run: |
+          set -e
+          for crate in \
+            terminal-commander-core \
+            terminal-commander-sifters \
+            terminal-commander-probes \
+            terminal-commander-store \
+            terminal-commander-supervisor \
+            terminal-commanderd \
+            terminal-commander-mcp; do
+            echo "── cargo yank ${crate}@${{ inputs.version }}"
+            cargo yank --version "${{ inputs.version }}" "$crate" || true
+          done
