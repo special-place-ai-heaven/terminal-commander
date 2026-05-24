@@ -74,6 +74,18 @@ async fn accept_loop(
     if *shutdown.borrow() {
         return;
     }
+    // SDDL is process-stable (current user's SID does not change), so
+    // build once before the loop instead of on every accept iteration.
+    #[cfg(windows)]
+    let sddl = match crate::ipc::pipe_acl::build_sddl_for_current_user() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "terminal-commanderd: SDDL build failed: {e}; falling back to default ACL"
+            );
+            String::new()
+        }
+    };
     let mut first = true;
     loop {
         if *shutdown.borrow() {
@@ -83,16 +95,6 @@ async fn accept_loop(
         if first {
             builder.first_pipe_instance(true);
         }
-        #[cfg(windows)]
-        let sddl = match crate::ipc::pipe_acl::build_sddl_for_current_user() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "terminal-commanderd: SDDL build failed: {e}; falling back to default ACL"
-                );
-                String::new()
-            }
-        };
         #[cfg(windows)]
         let server_result = if sddl.is_empty() {
             builder.create(&pipe_name)
