@@ -31,7 +31,10 @@ pub struct Diagnostics {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum EnsureDaemonStatus {
-    AlreadyRunning { endpoint: Endpoint, pid: Option<u32> },
+    AlreadyRunning {
+        endpoint: Endpoint,
+        pid: Option<u32>,
+    },
     Started {
         endpoint: Endpoint,
         pid: Option<u32>,
@@ -76,9 +79,7 @@ pub struct EnsureDaemonOptions {
 ///
 /// This function must not panic; it must always return a structured
 /// status the caller can render to the operator.
-pub async fn ensure_daemon(
-    opts: EnsureDaemonOptions,
-) -> EnsureDaemonStatus {
+pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
     let start = std::time::Instant::now();
 
     // 1. Probe endpoint first.
@@ -224,9 +225,7 @@ pub async fn ensure_daemon(
 async fn probe_endpoint(endpoint: &Endpoint) -> bool {
     match endpoint {
         #[cfg(unix)]
-        Endpoint::UnixSocket { path } => {
-            tokio::net::UnixStream::connect(path).await.is_ok()
-        }
+        Endpoint::UnixSocket { path } => tokio::net::UnixStream::connect(path).await.is_ok(),
         #[cfg(not(unix))]
         Endpoint::UnixSocket { .. } => false,
         #[cfg(windows)]
@@ -253,7 +252,9 @@ mod tests {
             daemon_binary: PathBuf::from("nonexistent"),
             state_dir: PathBuf::from("."),
             log_dir: PathBuf::from("."),
-            endpoint: Endpoint::WindowsPipe { name: r"\\.\pipe\unused".into() },
+            endpoint: Endpoint::WindowsPipe {
+                name: r"\\.\pipe\unused".into(),
+            },
             startup_timeout: Duration::from_millis(10),
             allow_spawn: false,
         };

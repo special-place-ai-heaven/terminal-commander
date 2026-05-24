@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use tokio::io::{AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::windows::named_pipe::ClientOptions;
 
 use crate::ipc::framing::read_frame;
@@ -71,9 +71,9 @@ impl DaemonClient {
 
     async fn round_trip(&self, env: &RequestEnvelope) -> Result<ResponseEnvelope, IpcError> {
         let pipe_name = self.pipe_path.to_string_lossy().into_owned();
-        let mut client = ClientOptions::new().open(&pipe_name).map_err(|e| {
-            IpcError::new(IpcErrorCode::Internal, format!("pipe connect: {e}"))
-        })?;
+        let mut client = ClientOptions::new()
+            .open(&pipe_name)
+            .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("pipe connect: {e}")))?;
         let frame = super::protocol::encode_frame(env)?;
         client
             .write_all(&frame)

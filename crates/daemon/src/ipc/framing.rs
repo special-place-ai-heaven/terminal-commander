@@ -33,7 +33,9 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>,
 }
 
 /// Decode a request envelope from a stream.
-pub async fn read_request<R: AsyncRead + Unpin>(reader: &mut R) -> Result<RequestEnvelope, IpcError> {
+pub async fn read_request<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<RequestEnvelope, IpcError> {
     let payload = read_frame(reader).await?;
     decode_payload::<RequestEnvelope>(&payload)
 }

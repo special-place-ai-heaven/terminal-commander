@@ -23,9 +23,11 @@ async fn mcp_stdin_eof_does_not_kill_daemon() {
     let mcp_bin = env!("CARGO_BIN_EXE_terminal-commander-mcp");
 
     let mut daemon = std::process::Command::new(daemon_bin)
-        .arg("--data-dir").arg(&data_dir)
+        .arg("--data-dir")
+        .arg(&data_dir)
         .arg("start")
-        .arg("--mode").arg("ipc-server")
+        .arg("--mode")
+        .arg("ipc-server")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -51,7 +53,10 @@ async fn mcp_stdin_eof_does_not_kill_daemon() {
     assert_eq!(status.code(), Some(0), "MCP should exit 0 on stdin EOF");
 
     // Verify daemon still alive.
-    assert!(daemon.try_wait().expect("try_wait").is_none(), "daemon should still be running");
+    assert!(
+        daemon.try_wait().expect("try_wait").is_none(),
+        "daemon should still be running"
+    );
 
     daemon.kill().ok();
     let _ = daemon.wait();

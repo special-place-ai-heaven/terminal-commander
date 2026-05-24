@@ -211,6 +211,7 @@ MCP-capable clients (Continue, Cursor, Cline, etc.) is opportunistic.
 | Aggregate runtime view  | TC45        | `runtime_state`, `probe_list`, `probe_status` aggregate read-only across the three runtimes. |
 | Local smoke harness     | TC46        | `scripts/smoke/verify-runtime-smoke.sh` proves the daemon + MCP stdio path end-to-end. |
 | Load / noise / backpressure gate | TC47 | 8 stress tests covering megabyte-scale stdout, bucket caps, drop counters, cross-talk isolation, mid-stream rebind. |
+| Windows native IPC (Phases 0-3) | feature/native-tier1-phases-0-3 | Named-pipe ACL (SDDL), peer-SID resolution via Win32 FFI, pipe server accept loop; all 258 tests pass; clippy -D warnings clean. |
 
 Resolved items remain listed so reviewers can map current code to
 the P0 backlog that drove the chain. Move new items into P1/P2/P3

@@ -16,22 +16,28 @@
 //! No TCP. No UDP. No HTTP. No command execution. Method set is the
 //! TC37 minimum (see `protocol.rs`); TC38/TC39/TC41 add more.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+
 use terminal_commander_store::AuditEntry;
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use tokio::sync::watch;
 
 use terminal_commander_supervisor::identity::PeerIdentity;
 
 use crate::audit::AuditSink;
 use crate::command::{CommandError, CommandStartRequest};
+use crate::environment::{EnvironmentRouter, RouteOutcome};
 #[cfg(unix)]
 use crate::ipc::peer;
+use crate::ipc::protocol::PtyCommandWriteStdinParams;
 use crate::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStatusParams,
@@ -45,20 +51,22 @@ use crate::ipc::protocol::{
     IpcRequest, IpcResponse, IpcResult, MAX_BUCKET_READ_LIMIT, MAX_COMMAND_ENV_ITEMS,
     MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES, MAX_CONTEXT_FRAMES, MAX_FILE_READ_BYTES,
     MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES, MAX_FILE_SEARCH_SCAN_BYTES,
-    MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES,
-    MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES, PolicyStatusResponse, ProbeKind,
-    ProbeListEntry, ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListEntry,
-    PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams,
-    PtyCommandStopResponse, PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse,
+    MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
+    PolicyStatusResponse, ProbeKind, ProbeListEntry, ProbeListResponse, ProbeStatusParams,
+    ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStopParams,
     RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
     RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
     RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
     RegistryTestMatch, RegistryTestParams, RegistryTestResponse, RegistryUpsertParams,
     RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope, RuntimeActiveRule,
     RuntimeBucketSummary, RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
-    decode_payload, encode_frame,
 };
-use crate::environment::{EnvironmentRouter, RouteOutcome};
+#[cfg(unix)]
+use crate::ipc::protocol::{
+    MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES, PtyCommandListEntry,
+    PtyCommandStartResponse, PtyCommandStopResponse, PtyCommandWriteStdinResponse, decode_payload,
+    encode_frame,
+};
 use crate::state::DaemonState;
 use terminal_commander_core::EnvironmentSpec;
 
@@ -299,6 +307,7 @@ async fn handle_connection(
     }
 }
 
+#[cfg(unix)]
 #[allow(clippy::large_enum_variant)]
 enum ReadOutcome {
     Ok(RequestEnvelope),
@@ -409,10 +418,15 @@ async fn dispatch(
         },
         IpcRequest::CommandStartCombed(p) => {
             let env = p.environment.clone().unwrap_or_default();
-            if !matches!(env, EnvironmentSpec::Local) {
+            if matches!(env, EnvironmentSpec::Local) {
+                match handle_command_start_combed(state, p) {
+                    Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
+                    Err(e) => ("command_start_combed", IpcResult::Err { error: e }),
+                }
+            } else {
                 match EnvironmentRouter::route_request(state, &env, &req_env.request).await {
                     Ok(RouteOutcome::RunnerResponse(r)) => {
-                        ("command_start_combed", IpcResult::Ok { response: r })
+                        ("command_start_combed", IpcResult::Ok { response: *r })
                     }
                     Ok(RouteOutcome::Local) => match handle_command_start_combed(state, p) {
                         Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
@@ -424,11 +438,6 @@ async fn dispatch(
                             error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
                         },
                     ),
-                }
-            } else {
-                match handle_command_start_combed(state, p) {
-                    Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
-                    Err(e) => ("command_start_combed", IpcResult::Err { error: e }),
                 }
             }
         }
@@ -486,10 +495,15 @@ async fn dispatch(
         }
         IpcRequest::PtyCommandStart(p) => {
             let env = p.environment.clone().unwrap_or_default();
-            if !matches!(env, EnvironmentSpec::Local) {
+            if matches!(env, EnvironmentSpec::Local) {
+                match handle_pty_command_start(state, p) {
+                    Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
+                    Err(e) => ("pty_command_start", IpcResult::Err { error: e }),
+                }
+            } else {
                 match EnvironmentRouter::route_request(state, &env, &req_env.request).await {
                     Ok(RouteOutcome::RunnerResponse(r)) => {
-                        ("pty_command_start", IpcResult::Ok { response: r })
+                        ("pty_command_start", IpcResult::Ok { response: *r })
                     }
                     Ok(RouteOutcome::Local) => match handle_pty_command_start(state, p) {
                         Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
@@ -501,11 +515,6 @@ async fn dispatch(
                             error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
                         },
                     ),
-                }
-            } else {
-                match handle_pty_command_start(state, p) {
-                    Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
-                    Err(e) => ("pty_command_start", IpcResult::Err { error: e }),
                 }
             }
         }
@@ -1353,6 +1362,7 @@ fn identity_audit_subject(identity: &PeerIdentity) -> String {
     }
 }
 
+#[cfg(unix)]
 fn emit_audit_internal_error(state: &Arc<DaemonState>, action: &str, message: &str) {
     let entry = AuditEntry::new(format!("ipc_{action}"), "internal", "error")
         .with_actor("ipc")
@@ -1679,6 +1689,7 @@ fn handle_pty_command_start(
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unused_async)] // async matches the unix signature; removed when unix impl lands
 async fn handle_pty_command_write_stdin(
     _state: &Arc<DaemonState>,
     _params: &PtyCommandWriteStdinParams,
@@ -1695,6 +1706,7 @@ fn handle_pty_command_stop(
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::missing_const_for_fn)] // `Arc` is not const-compatible; body is a stub placeholder
 fn handle_pty_command_list(_state: &Arc<DaemonState>) -> IpcResponse {
     IpcResponse::PtyCommandList(PtyCommandListResponse { entries: vec![] })
 }

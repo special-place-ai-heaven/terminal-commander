@@ -94,7 +94,8 @@ pub struct DaemonState {
     /// present in test builds; used by integration tests to assert
     /// that the Win32 peer-resolution path ran.
     #[cfg(any(test, feature = "test-util"))]
-    pub test_last_peer: std::sync::Mutex<Option<terminal_commander_supervisor::identity::PeerIdentity>>,
+    pub test_last_peer:
+        std::sync::Mutex<Option<terminal_commander_supervisor::identity::PeerIdentity>>,
 }
 
 impl std::fmt::Debug for DaemonState {

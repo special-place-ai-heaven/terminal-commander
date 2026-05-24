@@ -39,9 +39,7 @@ use crate::state::{BootstrapError, DaemonState};
 ///
 /// Uses `try_init` so that a pre-existing global subscriber (e.g.
 /// in integration tests) does not cause a panic.
-fn init_file_logging(
-    data_dir: &std::path::Path,
-) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+fn init_file_logging(data_dir: &std::path::Path) -> tracing_appender::non_blocking::WorkerGuard {
     let log_dir = data_dir.join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
     let file_appender = tracing_appender::rolling::never(&log_dir, "terminal-commanderd.log");
@@ -51,7 +49,7 @@ fn init_file_logging(
         .with_ansi(false)
         .with_target(false)
         .try_init();
-    Some(guard)
+    guard
 }
 
 /// Top-level runtime error.

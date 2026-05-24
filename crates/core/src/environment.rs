@@ -6,21 +6,16 @@
 use serde::{Deserialize, Serialize};
 
 /// Which execution environment a probe targets.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EnvironmentSpec {
     /// Probes run in the parent daemon process (default).
+    #[default]
     Local,
     /// Linux runtime inside a WSL2 distro (runner daemon in distro).
     WslDistro { distro: String },
     /// Reserved for remote SSH runner (not implemented in M1).
     SshHost { host: String },
-}
-
-impl Default for EnvironmentSpec {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 impl EnvironmentSpec {

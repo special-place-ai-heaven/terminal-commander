@@ -38,7 +38,9 @@ impl PeerIdentity {
 
     #[must_use]
     pub fn unknown_because(reason: impl Into<String>) -> Self {
-        PeerIdentity::Unknown { reason: Some(reason.into()) }
+        PeerIdentity::Unknown {
+            reason: Some(reason.into()),
+        }
     }
 }
 
@@ -54,7 +56,11 @@ mod tests {
 
     #[test]
     fn unix_identity_is_known() {
-        let id = PeerIdentity::Unix { uid: 1000, gid: 1000, pid: Some(42) };
+        let id = PeerIdentity::Unix {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(42),
+        };
         assert!(id.is_known());
     }
 
@@ -82,7 +88,11 @@ mod tests {
 
     #[test]
     fn round_trip_unix() {
-        let id = PeerIdentity::Unix { uid: 1000, gid: 1000, pid: Some(42) };
+        let id = PeerIdentity::Unix {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(42),
+        };
         let s = serde_json::to_string(&id).unwrap();
         let back: PeerIdentity = serde_json::from_str(&s).unwrap();
         assert_eq!(id, back);

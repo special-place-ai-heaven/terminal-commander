@@ -4,35 +4,42 @@
 // Windows parent → WSL runner daemon (control channel, not MCP stdio).
 
 use std::path::PathBuf;
-use std::time::Duration;
 
-use crate::ipc::protocol::{IpcRequest, IpcResponse};
+use crate::ipc::protocol::IpcRequest;
 
 use super::router::{RouteError, RouteOutcome};
 
 /// Default runner socket inside the distro (Linux path).
+// Phase 4: used when the Unix IPC relay is wired up.
+#[allow(dead_code)]
 const RUNNER_SOCK_SUFFIX: &str = ".local/share/terminal-commanderd/terminal-commanderd.sock";
 
 /// Forward one IPC request to the runner daemon in `distro`.
-pub async fn forward_to_runner(distro: &str, request: &IpcRequest) -> Result<RouteOutcome, RouteError> {
+// `async` is needed on the unix branch; the windows branch is a stub until Phase 4.
+#[allow(clippy::unused_async)]
+pub async fn forward_to_runner(
+    distro: &str,
+    request: &IpcRequest,
+) -> Result<RouteOutcome, RouteError> {
     let sock = runner_socket_path(distro)?;
     #[cfg(unix)]
     {
+        use std::time::Duration;
         let client = crate::ipc::DaemonClient::new(&sock).with_timeout(Duration::from_secs(30));
         let response = client
             .call(1, request.clone())
             .await
             .map_err(|e| RouteError::RunnerIpc(e.message))?;
-        return Ok(RouteOutcome::RunnerResponse(response));
+        return Ok(RouteOutcome::RunnerResponse(Box::new(response)));
     }
     #[cfg(windows)]
     {
         let _ = (sock, request);
-        return Err(RouteError::Unavailable(
+        Err(RouteError::Unavailable(
             "WSL runner IPC from Windows parent uses a frame relay (planned); \
              use EnvironmentSpec::Local for native Windows terminals"
                 .to_owned(),
-        ));
+        ))
     }
 }
 

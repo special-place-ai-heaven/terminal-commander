@@ -8,32 +8,27 @@
 #![allow(unsafe_code)]
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
-use windows::Win32::Security::{
-    GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
-};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 pub fn build_sddl_for_current_user() -> std::io::Result<String> {
     let user_sid = current_user_sid()?;
     // Owner: current user. DACL: LocalSystem full, Admins full,
     // current user full. Everyone denied implicitly (no allow entry).
-    let sddl = format!(
-        "O:{sid}D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{sid})",
-        sid = user_sid
-    );
+    let sddl = format!("O:{user_sid}D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{user_sid})");
     Ok(sddl)
 }
 
 fn current_user_sid() -> std::io::Result<String> {
     unsafe {
         let mut token = HANDLE::default();
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token)
             .map_err(|e| std::io::Error::other(format!("OpenProcessToken: {e}")))?;
 
         // First call: get required buffer size.
         let mut needed = 0u32;
-        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &raw mut needed);
         let mut buf = vec![0u8; needed as usize];
 
         if let Err(e) = GetTokenInformation(
@@ -41,17 +36,21 @@ fn current_user_sid() -> std::io::Result<String> {
             TokenUser,
             Some(buf.as_mut_ptr().cast()),
             needed,
-            &mut needed,
+            &raw mut needed,
         ) {
             let _ = CloseHandle(token);
             return Err(std::io::Error::other(format!("GetTokenInformation: {e}")));
         }
 
-        let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
+        // SAFETY: Windows allocates the buffer aligned for TOKEN_USER.
+        #[allow(clippy::cast_ptr_alignment, clippy::ptr_as_ptr)]
+        let token_user = &*(buf.as_ptr().cast::<TOKEN_USER>());
         let mut sid_str = windows::core::PWSTR::null();
-        if let Err(e) = ConvertSidToStringSidW(token_user.User.Sid, &mut sid_str) {
+        if let Err(e) = ConvertSidToStringSidW(token_user.User.Sid, &raw mut sid_str) {
             let _ = CloseHandle(token);
-            return Err(std::io::Error::other(format!("ConvertSidToStringSidW: {e}")));
+            return Err(std::io::Error::other(format!(
+                "ConvertSidToStringSidW: {e}"
+            )));
         }
         let s = sid_str.to_string().unwrap_or_default();
         // LocalFree the string buffer allocated by ConvertSidToStringSidW.
@@ -94,14 +93,14 @@ pub fn create_named_pipe_with_sddl(
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             PCWSTR(wide_sddl.as_ptr()),
             1, // SDDL_REVISION_1
-            &mut sd,
+            &raw mut sd,
             None,
         )
-        .map_err(|e| {
-            std::io::Error::other(format!("ConvertStringSecurityDescriptor: {e}"))
-        })?;
+        .map_err(|e| std::io::Error::other(format!("ConvertStringSecurityDescriptor: {e}")))?;
 
         let sa = SECURITY_ATTRIBUTES {
+            // SECURITY_ATTRIBUTES is a small fixed struct; the cast is always safe.
+            #[allow(clippy::cast_possible_truncation)]
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: sd.0,
             bInheritHandle: false.into(),
@@ -118,9 +117,7 @@ pub fn create_named_pipe_with_sddl(
         }
 
         // PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT as NAMED_PIPE_MODE.
-        let pipe_mode = NAMED_PIPE_MODE(
-            PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0,
-        );
+        let pipe_mode = NAMED_PIPE_MODE(PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0);
 
         let handle = CreateNamedPipeW(
             PCWSTR(wide_name.as_ptr()),
@@ -130,7 +127,7 @@ pub fn create_named_pipe_with_sddl(
             4096,
             4096,
             0,
-            Some(&sa),
+            Some(&raw const sa),
         );
 
         // LocalFree the security descriptor allocated by
@@ -143,8 +140,6 @@ pub fn create_named_pipe_with_sddl(
 
         // SAFETY: handle was created with FILE_FLAG_OVERLAPPED; tokio
         // NamedPipeServer::from_raw_handle requires an OVERLAPPED handle.
-        tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
-            handle.0 as _,
-        )
+        tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(handle.0.cast())
     }
 }

@@ -54,7 +54,7 @@ impl PipeServer {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let state = Arc::clone(&self.state);
         let boot = self.boot;
-        let pipe_name = self.pipe_name.clone();
+        let pipe_name = self.pipe_name;
         let join = tokio::spawn(async move {
             accept_loop(pipe_name, state, boot, shutdown_rx).await;
         });
@@ -80,9 +80,7 @@ async fn accept_loop(
     let sddl = match crate::ipc::pipe_acl::build_sddl_for_current_user() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "terminal-commanderd: SDDL build failed: {e}; falling back to default ACL"
-            );
+            eprintln!("terminal-commanderd: SDDL build failed: {e}; falling back to default ACL");
             String::new()
         }
     };
@@ -116,7 +114,7 @@ async fn accept_loop(
                     res = shutdown.changed() => {
                         if res.is_err() || *shutdown.borrow() { break; }
                     }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                    () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
                 }
                 continue;
             }

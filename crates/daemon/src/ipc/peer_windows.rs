@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use terminal_commander_supervisor::identity::PeerIdentity;
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
-use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows::Win32::System::Pipes::GetNamedPipeClientProcessId;
 use windows::Win32::System::Threading::{
     OpenProcess, OpenProcessToken, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -27,15 +27,14 @@ pub fn peer_identity_for(server: &NamedPipeServer) -> PeerIdentity {
     let handle = HANDLE(raw_handle);
     let mut pid: u32 = 0;
     let pid_opt = unsafe {
-        if GetNamedPipeClientProcessId(handle, &mut pid).is_ok() && pid != 0 {
+        if GetNamedPipeClientProcessId(handle, &raw mut pid).is_ok() && pid != 0 {
             Some(pid)
         } else {
             None
         }
     };
-    let (sid, image) = match pid_opt.and_then(resolve_sid_and_image) {
-        Some(pair) => pair,
-        None => return PeerIdentity::unknown_because("could not resolve peer SID"),
+    let Some((sid, image)) = pid_opt.and_then(resolve_sid_and_image) else {
+        return PeerIdentity::unknown_because("could not resolve peer SID");
     };
     if sid.is_empty() {
         return PeerIdentity::unknown_because("empty SID returned by Win32");
@@ -51,14 +50,14 @@ fn resolve_sid_and_image(pid: u32) -> Option<(String, Option<PathBuf>)> {
     unsafe {
         let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut token = HANDLE::default();
-        if OpenProcessToken(proc, TOKEN_QUERY, &mut token).is_err() {
+        if OpenProcessToken(proc, TOKEN_QUERY, &raw mut token).is_err() {
             let _ = CloseHandle(proc);
             return None;
         }
 
         // First call: get required buffer size.
         let mut needed: u32 = 0;
-        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &raw mut needed);
         let mut buf = vec![0u8; needed as usize];
 
         if GetTokenInformation(
@@ -66,7 +65,7 @@ fn resolve_sid_and_image(pid: u32) -> Option<(String, Option<PathBuf>)> {
             TokenUser,
             Some(buf.as_mut_ptr().cast()),
             needed,
-            &mut needed,
+            &raw mut needed,
         )
         .is_err()
         {
@@ -75,9 +74,11 @@ fn resolve_sid_and_image(pid: u32) -> Option<(String, Option<PathBuf>)> {
             return None;
         }
 
-        let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
+        // SAFETY: Windows allocates the buffer aligned for TOKEN_USER.
+        #[allow(clippy::cast_ptr_alignment, clippy::ptr_as_ptr)]
+        let token_user = &*(buf.as_ptr().cast::<TOKEN_USER>());
         let mut sid_str = windows::core::PWSTR::null();
-        if ConvertSidToStringSidW(token_user.User.Sid, &mut sid_str).is_err() {
+        if ConvertSidToStringSidW(token_user.User.Sid, &raw mut sid_str).is_err() {
             let _ = CloseHandle(token);
             let _ = CloseHandle(proc);
             return None;
@@ -88,6 +89,8 @@ fn resolve_sid_and_image(pid: u32) -> Option<(String, Option<PathBuf>)> {
         LocalFree(HLOCAL(sid_str.0.cast::<core::ffi::c_void>()));
 
         let mut buf16 = vec![0u16; 1024];
+        // SAFETY: buf16.len() is 1024, well within u32 range.
+        #[allow(clippy::cast_possible_truncation)]
         let mut len = buf16.len() as u32;
         // PROCESS_NAME_FORMAT(0) = PROCESS_NAME_NATIVE returns NT device
         // paths (`\Device\HarddiskVolume3\...`) which are operator-hostile
@@ -96,7 +99,7 @@ fn resolve_sid_and_image(pid: u32) -> Option<(String, Option<PathBuf>)> {
             proc,
             PROCESS_NAME_FORMAT(1),
             windows::core::PWSTR(buf16.as_mut_ptr()),
-            &mut len,
+            &raw mut len,
         )
         .is_ok()
         {

@@ -12,9 +12,7 @@
 //! when TC21's transport swap happens.
 
 use clap::{Parser, Subcommand};
-use terminal_commander_supervisor::ensure::{
-    EnsureDaemonOptions, EnsureDaemonStatus, Endpoint,
-};
+use terminal_commander_supervisor::ensure::{Endpoint, EnsureDaemonOptions, EnsureDaemonStatus};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -162,9 +160,7 @@ fn resolve_socket_path() -> std::path::PathBuf {
     #[cfg(windows)]
     {
         let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
-        return std::path::PathBuf::from(format!(
-            r"\\.\pipe\terminal-commander-{user}-default"
-        ));
+        std::path::PathBuf::from(format!(r"\\.\pipe\terminal-commander-{user}-default"))
     }
     #[cfg(unix)]
     {
@@ -217,12 +213,12 @@ fn print_status() -> std::process::ExitCode {
     let (daemon_text, pid_text, exit_code) = match &status {
         EnsureDaemonStatus::AlreadyRunning { pid, .. } => (
             "running",
-            pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+            pid.map_or_else(|| "-".into(), |p| p.to_string()),
             std::process::ExitCode::SUCCESS,
         ),
         EnsureDaemonStatus::Started { pid, .. } => (
             "running",
-            pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+            pid.map_or_else(|| "-".into(), |p| p.to_string()),
             std::process::ExitCode::SUCCESS,
         ),
         EnsureDaemonStatus::Unavailable { .. } => (

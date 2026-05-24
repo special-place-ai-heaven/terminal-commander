@@ -27,7 +27,7 @@ pub enum RouteOutcome {
     /// Caller should dispatch on parent `DaemonState` as today.
     Local,
     /// Response already obtained from runner IPC.
-    RunnerResponse(IpcResponse),
+    RunnerResponse(Box<IpcResponse>),
 }
 
 /// Parent-side environment router (M1).

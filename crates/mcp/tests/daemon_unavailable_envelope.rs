@@ -68,8 +68,8 @@ async fn paired_service_unavailable() -> (
     let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
     let socket = nonexistent_socket();
     let status = DaemonStatusHandle::new(make_unavailable_status());
-    let daemon = McpDaemonClient::with_status(socket, status)
-        .with_timeout(Duration::from_millis(150));
+    let daemon =
+        McpDaemonClient::with_status(socket, status).with_timeout(Duration::from_millis(150));
     let server = TerminalCommanderMcpServer::new(daemon);
 
     let server_handle =
@@ -112,12 +112,14 @@ async fn initialize_and_list_tools_works_when_daemon_unavailable() {
 /// Assert a single daemon-requiring tool call returns the
 /// `daemon_unavailable` structured error envelope (not a panic, not a raw
 /// transport error).
-async fn assert_daemon_unavailable_envelope(client: &rmcp::service::RunningService<rmcp::RoleClient, TestClient>, tool: &str) {
+async fn assert_daemon_unavailable_envelope(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, TestClient>,
+    tool: &str,
+) {
     let params = CallToolRequestParams::new(tool.to_owned());
-    let err = client
-        .call_tool(params)
-        .await
-        .expect_err(&format!("expected error from {tool} when daemon unavailable"));
+    let err = client.call_tool(params).await.expect_err(&format!(
+        "expected error from {tool} when daemon unavailable"
+    ));
     let rendered = err.to_string();
     assert!(
         rendered.contains("daemon_unavailable"),

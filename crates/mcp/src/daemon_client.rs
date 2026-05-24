@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use terminal_commanderd::ipc::protocol::{IpcError, IpcRequest, IpcResponse};
 use terminal_commander_supervisor::ensure::EnsureDaemonStatus;
+use terminal_commanderd::ipc::protocol::{IpcError, IpcRequest, IpcResponse};
 
 /// Default UDS path used when nothing is passed on the command line
 /// or in `TC_SOCKET`. Mirrors the daemon's default
@@ -66,7 +66,10 @@ impl DaemonStatusHandle {
         self.0.lock().unwrap().clone()
     }
     pub fn is_unavailable(&self) -> bool {
-        matches!(*self.0.lock().unwrap(), EnsureDaemonStatus::Unavailable { .. })
+        matches!(
+            *self.0.lock().unwrap(),
+            EnsureDaemonStatus::Unavailable { .. }
+        )
     }
 }
 
@@ -94,7 +97,10 @@ impl McpDaemonClient {
     /// Construct a client pre-loaded with the supervisor status from
     /// startup. Tools use `status()` to short-circuit when unavailable.
     #[must_use]
-    pub fn with_status(socket_path: impl Into<std::path::PathBuf>, status: DaemonStatusHandle) -> Self {
+    pub fn with_status(
+        socket_path: impl Into<std::path::PathBuf>,
+        status: DaemonStatusHandle,
+    ) -> Self {
         Self {
             inner: terminal_commanderd::DaemonClient::new(socket_path),
             next_id: Arc::new(AtomicU64::new(1)),

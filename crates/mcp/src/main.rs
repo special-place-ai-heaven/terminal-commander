@@ -163,7 +163,10 @@ mod unix_main {
                         log_path.display()
                     );
                 }
-                EnsureDaemonStatus::Unavailable { reason, diagnostics } => {
+                EnsureDaemonStatus::Unavailable {
+                    reason,
+                    diagnostics,
+                } => {
                     eprintln!(
                         "terminal-commander-mcp: daemon unavailable ({reason:?}); \
                          continuing in degraded mode. last_error: {:?}",
@@ -173,8 +176,7 @@ mod unix_main {
             }
 
             let status_handle = DaemonStatusHandle::new(status);
-            let daemon =
-                McpDaemonClient::with_status(socket_path, status_handle);
+            let daemon = McpDaemonClient::with_status(socket_path, status_handle);
             let server = TerminalCommanderMcpServer::new(daemon);
 
             let service = match server.serve(stdio()).await {
