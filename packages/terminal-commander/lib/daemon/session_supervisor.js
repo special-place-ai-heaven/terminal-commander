@@ -218,6 +218,9 @@ async function runHarnessMcpSession(opts) {
     TC_SOCKET: paths.ipcEndpoint,
     TC_SESSION_ID: paths.sessionId,
     TC_DATA: paths.dataDir,
+    // Prevent the Rust MCP supervisor from spawning a second daemon.
+    // The JS wrapper already owns the daemon; the MCP child must probe-only.
+    TC_SUPERVISOR_ALLOW_SPAWN: "0",
   };
 
   return new Promise((resolve) => {

@@ -53,29 +53,45 @@ async fn mcp_stdin_eof_does_not_kill_daemon() {
         "mcp binary not found at {mcp_bin:?}; run `cargo build` first"
     );
 
-    let mut daemon = std::process::Command::new(&daemon_bin)
+    // Resolve the endpoint path the daemon binds to — must be set BEFORE
+    // spawning the daemon so we can pass it via TC_SOCKET on both platforms.
+    //
+    // Unix: <data_dir>/terminal-commanderd.sock (set via TC_SOCKET).
+    // Windows: unique named pipe per test run, passed to both the daemon
+    // and the MCP child via TC_SOCKET so the test never touches the
+    // per-user global pipe that another daemon or test may already own.
+    #[cfg(unix)]
+    let tc_socket_env: Option<std::path::PathBuf> = Some(data_dir.join("terminal-commanderd.sock"));
+    #[cfg(windows)]
+    let tc_socket_env: Option<std::path::PathBuf> = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let pid = std::process::id();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        Some(std::path::PathBuf::from(format!(
+            r"\\.\pipe\tc-test-stdin-eof-{pid}-{nanos}"
+        )))
+    };
+
+    let mut daemon_cmd = std::process::Command::new(&daemon_bin);
+    daemon_cmd
         .arg("--data-dir")
         .arg(&data_dir)
         .arg("start")
         .arg("--mode")
         .arg("ipc-server")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn daemon");
+        .stderr(std::process::Stdio::null());
+    // On Windows, bind the daemon to the unique test pipe so it does not
+    // claim the user's default global pipe.
+    if let Some(ref sock) = tc_socket_env {
+        daemon_cmd.env("TC_SOCKET", sock);
+    }
+    let mut daemon = daemon_cmd.spawn().expect("spawn daemon");
 
     // Wait briefly for daemon to bind.
     tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Resolve the endpoint path the daemon binds to.
-    // Unix: <data_dir>/terminal-commanderd.sock (set via TC_SOCKET).
-    // Windows: \\.\pipe\terminal-commander-<USERNAME> — the daemon uses
-    // the username-based pipe name regardless of --data-dir, so we leave
-    // TC_SOCKET unset on Windows and let both sides agree on the default.
-    #[cfg(unix)]
-    let tc_socket_env: Option<std::path::PathBuf> = Some(data_dir.join("terminal-commanderd.sock"));
-    #[cfg(windows)]
-    let tc_socket_env: Option<std::path::PathBuf> = None;
 
     let mut mcp_cmd = std::process::Command::new(&mcp_bin);
     mcp_cmd

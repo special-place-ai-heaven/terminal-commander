@@ -69,10 +69,14 @@ fn resolve_daemon_binary(cli_override: Option<PathBuf>) -> PathBuf {
         return p;
     }
     if let Ok(exe) = std::env::current_exe() {
+        #[cfg(windows)]
+        let sibling_name = "terminal-commanderd.exe";
+        #[cfg(not(windows))]
+        let sibling_name = "terminal-commanderd";
         let sibling = exe
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."))
-            .join("terminal-commanderd");
+            .join(sibling_name);
         if sibling.exists() {
             return sibling;
         }
