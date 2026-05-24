@@ -39,3 +39,8 @@ workspace = true
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "io-util"] }
+# Integration tests (mcp_live_command_e2e, daemon_unavailable_envelope, pty_tools_live_e2e)
+# instantiate rmcp's in-process client (ClientHandler, RoleClient) so the test
+# binaries need the "client" feature explicitly. Production mcp crate is server-only
+# so this is dev-only.
+rmcp = { workspace = true, features = ["client"] }
