@@ -17,6 +17,7 @@
 pub mod activation;
 pub mod bucket;
 pub mod context;
+pub mod environment;
 pub mod error;
 pub mod event;
 pub mod ids;
@@ -27,6 +28,7 @@ pub mod severity;
 pub mod source;
 
 pub use activation::ActivationScope;
+pub use environment::EnvironmentSpec;
 pub use job::{DEFAULT_JOB_GRACE, JobConfig, JobExitInfo, JobManager, JobRecord, JobState};
 
 pub use bucket::{

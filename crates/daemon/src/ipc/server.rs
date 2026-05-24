@@ -22,6 +22,7 @@ use std::time::Instant;
 
 use terminal_commander_store::AuditEntry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 
@@ -54,8 +55,11 @@ use crate::ipc::protocol::{
     RuntimeBucketSummary, RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
     decode_payload, encode_frame,
 };
+use crate::environment::{EnvironmentRouter, RouteOutcome};
 use crate::state::DaemonState;
+use terminal_commander_core::EnvironmentSpec;
 
+#[cfg(unix)]
 /// Handle returned from [`IpcServer::spawn`]. Drop the handle to
 /// signal the accept loop to stop; call [`ServerHandle::shutdown`]
 /// to await orderly shutdown.
@@ -63,12 +67,14 @@ use crate::state::DaemonState;
 /// Backed by `tokio::sync::watch::channel(false)`: the sticky
 /// "shutdown requested" flag survives the race between
 /// [`IpcServer::spawn`] returning and the accept loop's first poll.
+#[cfg(unix)]
 pub struct ServerHandle {
     shutdown_tx: watch::Sender<bool>,
     join: Option<tokio::task::JoinHandle<()>>,
     socket_path: PathBuf,
 }
 
+#[cfg(unix)]
 impl ServerHandle {
     /// Signal shutdown and wait for the accept loop to exit. The
     /// socket file is removed before returning.
@@ -87,6 +93,7 @@ impl ServerHandle {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         // Best-effort cleanup if the operator does not call shutdown.
@@ -98,6 +105,7 @@ impl Drop for ServerHandle {
     }
 }
 
+#[cfg(unix)]
 /// IPC server. Owns the listener, the daemon state, and the boot
 /// timestamp used by the `health` method.
 pub struct IpcServer {
@@ -106,6 +114,7 @@ pub struct IpcServer {
     socket_path: PathBuf,
 }
 
+#[cfg(unix)]
 impl IpcServer {
     /// Construct a server. Does NOT bind the listener yet.
     #[must_use]
@@ -142,6 +151,7 @@ impl IpcServer {
     }
 }
 
+#[cfg(unix)]
 async fn accept_loop(
     listener: UnixListener,
     state: Arc<DaemonState>,
@@ -189,6 +199,7 @@ async fn accept_loop(
     }
 }
 
+#[cfg(unix)]
 async fn handle_connection(
     mut stream: UnixStream,
     state: Arc<DaemonState>,
@@ -282,6 +293,7 @@ enum ReadOutcome {
     Eof,
 }
 
+#[cfg(unix)]
 async fn read_envelope(stream: &mut UnixStream) -> ReadOutcome {
     // 4-byte length prefix.
     let mut len_buf = [0_u8; 4];
@@ -315,6 +327,7 @@ async fn read_envelope(stream: &mut UnixStream) -> ReadOutcome {
     }
 }
 
+#[cfg(unix)]
 async fn write_envelope(
     stream: &mut UnixStream,
     env: &ResponseEnvelope,
@@ -381,10 +394,31 @@ async fn dispatch(
             Ok(r) => ("event_context", IpcResult::Ok { response: r }),
             Err(e) => ("event_context", IpcResult::Err { error: e }),
         },
-        IpcRequest::CommandStartCombed(p) => match handle_command_start_combed(state, p) {
-            Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
-            Err(e) => ("command_start_combed", IpcResult::Err { error: e }),
-        },
+        IpcRequest::CommandStartCombed(p) => {
+            let env = p.environment.clone().unwrap_or_default();
+            if !matches!(env, EnvironmentSpec::Local) {
+                match EnvironmentRouter::route_request(state, &env, &req_env.request).await {
+                    Ok(RouteOutcome::RunnerResponse(r)) => {
+                        ("command_start_combed", IpcResult::Ok { response: r })
+                    }
+                    Ok(RouteOutcome::Local) => match handle_command_start_combed(state, p) {
+                        Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
+                        Err(e) => ("command_start_combed", IpcResult::Err { error: e }),
+                    },
+                    Err(e) => (
+                        "command_start_combed",
+                        IpcResult::Err {
+                            error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
+                        },
+                    ),
+                }
+            } else {
+                match handle_command_start_combed(state, p) {
+                    Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
+                    Err(e) => ("command_start_combed", IpcResult::Err { error: e }),
+                }
+            }
+        }
         IpcRequest::CommandStatus(p) => match handle_command_status(state, p) {
             Ok(r) => ("command_status", IpcResult::Ok { response: r }),
             Err(e) => ("command_status", IpcResult::Err { error: e }),
@@ -437,10 +471,31 @@ async fn dispatch(
             let r = handle_file_watch_list(state);
             ("file_watch_list", IpcResult::Ok { response: r })
         }
-        IpcRequest::PtyCommandStart(p) => match handle_pty_command_start(state, p) {
-            Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
-            Err(e) => ("pty_command_start", IpcResult::Err { error: e }),
-        },
+        IpcRequest::PtyCommandStart(p) => {
+            let env = p.environment.clone().unwrap_or_default();
+            if !matches!(env, EnvironmentSpec::Local) {
+                match EnvironmentRouter::route_request(state, &env, &req_env.request).await {
+                    Ok(RouteOutcome::RunnerResponse(r)) => {
+                        ("pty_command_start", IpcResult::Ok { response: r })
+                    }
+                    Ok(RouteOutcome::Local) => match handle_pty_command_start(state, p) {
+                        Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
+                        Err(e) => ("pty_command_start", IpcResult::Err { error: e }),
+                    },
+                    Err(e) => (
+                        "pty_command_start",
+                        IpcResult::Err {
+                            error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
+                        },
+                    ),
+                }
+            } else {
+                match handle_pty_command_start(state, p) {
+                    Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
+                    Err(e) => ("pty_command_start", IpcResult::Err { error: e }),
+                }
+            }
+        }
         IpcRequest::PtyCommandWriteStdin(p) => match handle_pty_command_write_stdin(state, p).await
         {
             Ok(r) => ("pty_command_write_stdin", IpcResult::Ok { response: r }),
@@ -1047,7 +1102,10 @@ fn handle_registry_activate(
     // TC43: file watches share the activation registry.
     let watch_report = state.watch.rebind_watches_in_scope(Some(scope));
     // TC44: PTY jobs share the activation registry.
-    let pty_report = state.pty.rebind_jobs_in_scope(Some(scope));
+    #[cfg(unix)]
+    let pty_rebound = state.pty.rebind_jobs_in_scope(Some(scope)).jobs_rebound;
+    #[cfg(not(unix))]
+    let pty_rebound = 0u32;
     Ok(IpcResponse::RegistryActivate(RegistryActivateResponse {
         rule_id: def.id,
         version,
@@ -1056,7 +1114,7 @@ fn handle_registry_activate(
         jobs_rebound: cmd_report
             .jobs_rebound
             .saturating_add(watch_report.watches_rebound)
-            .saturating_add(pty_report.jobs_rebound),
+            .saturating_add(pty_rebound),
     }))
 }
 
@@ -1087,7 +1145,10 @@ fn handle_registry_deactivate(
     // (no fake historical un-matches).
     let cmd_report = state.command.rebind_jobs_in_scope(Some(scope));
     let watch_report = state.watch.rebind_watches_in_scope(Some(scope));
-    let pty_report = state.pty.rebind_jobs_in_scope(Some(scope));
+    #[cfg(unix)]
+    let pty_rebound = state.pty.rebind_jobs_in_scope(Some(scope)).jobs_rebound;
+    #[cfg(not(unix))]
+    let pty_rebound = 0u32;
     Ok(IpcResponse::RegistryDeactivate(
         RegistryDeactivateResponse {
             rule_id: params.rule_id.clone(),
@@ -1097,7 +1158,7 @@ fn handle_registry_deactivate(
             jobs_rebound: cmd_report
                 .jobs_rebound
                 .saturating_add(watch_report.watches_rebound)
-                .saturating_add(pty_report.jobs_rebound),
+                .saturating_add(pty_rebound),
         },
     ))
 }
@@ -1150,11 +1211,14 @@ fn validate_scope_against_live_jobs(
                 .live_watches()
                 .iter()
                 .any(|w| w.bucket_id == bucket_id);
+            #[cfg(unix)]
             let in_pty = state
                 .pty
                 .live_jobs()
                 .iter()
                 .any(|j| j.bucket_id == bucket_id);
+            #[cfg(not(unix))]
+            let in_pty = false;
             if in_command || in_watch || in_pty {
                 Ok(())
             } else {
@@ -1174,7 +1238,10 @@ fn validate_scope_against_live_jobs(
                 .live_watches()
                 .iter()
                 .any(|w| w.watch_id == job_id);
+            #[cfg(unix)]
             let in_pty = state.pty.live_jobs().iter().any(|j| j.job_id == job_id);
+            #[cfg(not(unix))]
+            let in_pty = false;
             if in_command || in_watch || in_pty {
                 Ok(())
             } else {
@@ -1198,7 +1265,10 @@ fn validate_scope_against_live_jobs(
                 .live_watches()
                 .iter()
                 .any(|w| w.probe_id == probe_id);
+            #[cfg(unix)]
             let in_pty = state.pty.live_jobs().iter().any(|j| j.probe_id == probe_id);
+            #[cfg(not(unix))]
+            let in_pty = false;
             if in_command || in_watch || in_pty {
                 Ok(())
             } else {
@@ -1551,6 +1621,44 @@ fn handle_file_watch_stop(
 // reach live PTY jobs via the standard rebind path.
 // =====================================================================
 
+#[cfg(not(unix))]
+fn pty_ipc_unsupported() -> IpcError {
+    IpcError::new(
+        IpcErrorCode::UnsupportedPlatform,
+        "PTY command runtime is not available on this platform yet (ConPTY support pending)",
+    )
+}
+
+#[cfg(not(unix))]
+fn handle_pty_command_start(
+    _state: &Arc<DaemonState>,
+    _params: &PtyCommandStartParams,
+) -> Result<IpcResponse, IpcError> {
+    Err(pty_ipc_unsupported())
+}
+
+#[cfg(not(unix))]
+async fn handle_pty_command_write_stdin(
+    _state: &Arc<DaemonState>,
+    _params: &PtyCommandWriteStdinParams,
+) -> Result<IpcResponse, IpcError> {
+    Err(pty_ipc_unsupported())
+}
+
+#[cfg(not(unix))]
+fn handle_pty_command_stop(
+    _state: &Arc<DaemonState>,
+    _params: &PtyCommandStopParams,
+) -> Result<IpcResponse, IpcError> {
+    Err(pty_ipc_unsupported())
+}
+
+#[cfg(not(unix))]
+fn handle_pty_command_list(_state: &Arc<DaemonState>) -> IpcResponse {
+    IpcResponse::PtyCommandList(PtyCommandListResponse { entries: vec![] })
+}
+
+#[cfg(unix)]
 fn handle_pty_command_start(
     state: &Arc<DaemonState>,
     params: &PtyCommandStartParams,
@@ -1623,6 +1731,7 @@ fn handle_pty_command_start(
     }
 }
 
+#[cfg(unix)]
 async fn handle_pty_command_write_stdin(
     state: &Arc<DaemonState>,
     params: &PtyCommandWriteStdinParams,
@@ -1661,6 +1770,7 @@ async fn handle_pty_command_write_stdin(
     }
 }
 
+#[cfg(unix)]
 fn handle_pty_command_stop(
     state: &Arc<DaemonState>,
     params: &PtyCommandStopParams,
@@ -1841,6 +1951,7 @@ fn handle_probe_status(
     }
 }
 
+#[cfg(unix)]
 fn handle_pty_command_list(state: &Arc<DaemonState>) -> IpcResponse {
     let entries: Vec<PtyCommandListEntry> = state
         .pty
@@ -1882,4 +1993,14 @@ fn handle_file_watch_list(state: &Arc<DaemonState>) -> IpcResponse {
         )
         .collect();
     IpcResponse::FileWatchList(FileWatchListResponse { entries })
+}
+
+/// Dispatch entry for alternate transports (named pipe on Windows).
+pub async fn dispatch_envelope(
+    state: &Arc<DaemonState>,
+    boot: Instant,
+    req_env: &RequestEnvelope,
+    peer: Option<PeerCred>,
+) -> ResponseEnvelope {
+    dispatch(state, boot, req_env, peer).await
 }

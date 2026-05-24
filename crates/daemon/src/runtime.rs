@@ -229,12 +229,43 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-/// Non-Unix stub. Returns an explicit unsupported-platform error.
-#[cfg(not(unix))]
-pub async fn run_ipc_server(_config: DaemonConfig) -> Result<(), RuntimeError> {
-    Err(RuntimeError::Signal(
-        "terminal-commanderd UDS IPC is Unix-only; use WSL2 on Windows".to_owned(),
-    ))
+/// Windows named-pipe IPC server.
+#[cfg(windows)]
+pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
+    use std::sync::Arc;
+
+    use crate::ipc::PipeServer;
+
+    let (state, rep) = run_self_check(config)?;
+    eprintln!("{}", rep.render());
+
+    let pipe_name = state.config.pipe_name();
+    eprintln!(
+        "terminal-commanderd: binding named pipe at {pipe_name}"
+    );
+    let server = PipeServer::new(Arc::new(state), pipe_name);
+    let handle = server
+        .spawn()
+        .map_err(|e| RuntimeError::Signal(format!("pipe bind: {e}")))?;
+    eprintln!(
+        "terminal-commanderd: IPC server bound (Windows named pipe). \
+         Send Ctrl-C to shut down."
+    );
+
+    wait_for_shutdown_signal_windows().await?;
+    eprintln!("terminal-commanderd: shutdown signal received, draining...");
+    handle.shutdown().await;
+    eprintln!("terminal-commanderd: IPC server exited cleanly.");
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn wait_for_shutdown_signal_windows() -> Result<(), RuntimeError> {
+    // Ctrl-C on Windows.
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|e| RuntimeError::Signal(format!("ctrl-c listen: {e}")))?;
+    Ok(())
 }
 
 #[cfg(unix)]

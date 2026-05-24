@@ -17,14 +17,20 @@
 
 pub mod protocol;
 
-#[cfg(unix)]
+pub mod framing;
+
 pub mod peer;
 
-#[cfg(unix)]
 pub mod server;
+
+#[cfg(windows)]
+pub mod pipe_server;
 
 #[cfg(unix)]
 pub mod client;
+
+#[cfg(windows)]
+pub mod pipe_client;
 
 pub use protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
@@ -60,11 +66,18 @@ pub use protocol::{
 // re-exported at the crate root via `pub use command::{...}`, so we
 // deliberately leave them out of this list to avoid an E0252 clash.
 
-#[cfg(unix)]
 pub use peer::PeerCred;
+
+pub use server::dispatch_envelope;
 
 #[cfg(unix)]
 pub use server::{IpcServer, ServerHandle};
 
+#[cfg(windows)]
+pub use pipe_server::{PipeServer, PipeServerHandle};
+
 #[cfg(unix)]
 pub use client::DaemonClient;
+
+#[cfg(windows)]
+pub use pipe_client::DaemonClient;
