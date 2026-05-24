@@ -200,9 +200,15 @@ async function runHarnessMcpSession(opts) {
     // explicit via `terminal-commander maintenance cleanup --older-than 7d`.
   };
 
-  const onSignal = () => cleanup();
-  process.on("SIGINT", onSignal);
-  process.on("SIGTERM", onSignal);
+  let cancelSignal = null;
+  const onSignal = (sig) => {
+    cancelSignal = sig || "SIGINT";
+    cleanup();
+  };
+  const onSigInt = () => onSignal("SIGINT");
+  const onSigTerm = () => onSignal("SIGTERM");
+  process.on("SIGINT", onSigInt);
+  process.on("SIGTERM", onSigTerm);
 
   daemon = spawnDaemonHidden(o.daemonBinary, paths.dataDir, paths.ipcEndpoint, env);
 
@@ -226,6 +232,18 @@ async function runHarnessMcpSession(opts) {
   // tools/list and daemon-free tools; daemon-requiring tools will
   // surface daemon_unavailable, which is the honest status.
 
+  // Guard: if a signal arrived during the readiness wait, cleanup() has
+  // already run (daemon killed, cleaned=true). Do NOT proceed to spawn MCP —
+  // that would leave an orphan child after the user cancelled.
+  if (cleaned) {
+    process.off("SIGINT", onSigInt);
+    process.off("SIGTERM", onSigTerm);
+    return {
+      code: cancelSignal === "SIGTERM" ? 143 : 130,
+      signal: cancelSignal || "SIGINT",
+    };
+  }
+
   const mcpEnv = {
     ...env,
     TC_SOCKET: paths.ipcEndpoint,
@@ -247,15 +265,15 @@ async function runHarnessMcpSession(opts) {
     mcp.on("exit", (code, signal) => {
       if (daemon) killProcessTree(daemon);
       cleaned = true;
-      process.off("SIGINT", onSignal);
-      process.off("SIGTERM", onSignal);
+      process.off("SIGINT", onSigInt);
+      process.off("SIGTERM", onSigTerm);
       resolve({ code: code == null ? 1 : code, signal: signal || null });
     });
 
     mcp.on("error", () => {
       cleanup();
-      process.off("SIGINT", onSignal);
-      process.off("SIGTERM", onSignal);
+      process.off("SIGINT", onSigInt);
+      process.off("SIGTERM", onSigTerm);
       resolve({ code: 126, signal: null });
     });
   });

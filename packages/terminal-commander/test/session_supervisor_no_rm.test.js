@@ -9,6 +9,52 @@ const path = require('node:path');
 
 const { runHarnessMcpSession, SESSIONS_ROOT } = require('../lib/daemon/session_supervisor.js');
 
+test('SIGINT during cold-start wait returns early without spawning MCP', async () => {
+  const node = process.execPath;
+  const tmpDir = os.tmpdir();
+
+  // Fake daemon: stays alive but never binds the IPC pipe (so waitForIpc blocks).
+  const fakeDaemon = path.join(tmpDir, `fake-daemon-noop-${process.pid}.js`);
+  fs.writeFileSync(fakeDaemon, 'setInterval(()=>{},1000);');
+
+  // Fake MCP: writes a marker file if it ever runs. It must NOT run.
+  const markerFile = path.join(tmpDir, `mcp-ran-${process.pid}.marker`);
+  const fakeMcp = path.join(tmpDir, `fake-mcp-noop-${process.pid}.js`);
+  fs.writeFileSync(
+    fakeMcp,
+    `require('fs').writeFileSync(${JSON.stringify(markerFile)}, 'ran'); setInterval(()=>{}, 1000);`,
+  );
+  // Remove any stale marker from a previous run.
+  try { fs.unlinkSync(markerFile); } catch (_e) {}
+
+  const sessionPromise = runHarnessMcpSession({
+    daemonBinary: node,
+    mcpBinary: node,
+    argv: [fakeMcp],
+    env: { ...process.env },
+  });
+
+  // Wait briefly so we're inside the cold-start waitForIpc window.
+  await new Promise((r) => setTimeout(r, 500));
+
+  // Emit SIGINT — triggers the registered SIGINT handler synchronously.
+  process.emit('SIGINT');
+
+  const outcome = await sessionPromise;
+
+  assert.equal(outcome.code, 130, `expected exit 130 on SIGINT, got ${outcome.code}`);
+  assert.equal(outcome.signal, 'SIGINT', `expected signal SIGINT, got ${outcome.signal}`);
+  assert.ok(
+    !fs.existsSync(markerFile),
+    'MCP must NOT have spawned — marker file exists, meaning the orphan-MCP bug regressed',
+  );
+
+  // Cleanup
+  try { fs.unlinkSync(fakeDaemon); } catch (_e) {}
+  try { fs.unlinkSync(fakeMcp); } catch (_e) {}
+  try { fs.unlinkSync(markerFile); } catch (_e) {}
+});
+
 test('session base directory survives MCP child exit', async () => {
   const node = process.execPath;
   const tmpDir = os.tmpdir();
