@@ -206,12 +206,25 @@ async function runHarnessMcpSession(opts) {
 
   daemon = spawnDaemonHidden(o.daemonBinary, paths.dataDir, paths.ipcEndpoint, env);
 
-  void waitForIpc(paths.ipcEndpoint, STARTUP_TIMEOUT_MS).then((ready) => {
-    if (ready && daemon && daemon.pid) {
-      manifest.daemon_pid = daemon.pid;
-      writeManifest(paths.manifestPath, manifest);
-    }
-  });
+  // Await daemon readiness BEFORE spawning the MCP child. Otherwise the
+  // MCP child's Rust supervisor (with TC_SUPERVISOR_ALLOW_SPAWN=0) would
+  // probe-and-find-nothing on cold start, freeze its DaemonStatusHandle
+  // to Unavailable, and return daemon_unavailable for every tool call
+  // for the rest of the session.
+  //
+  // A short total budget (5s) is enough on typical cold starts:
+  // named-pipe + UDS bind under 200ms. If the daemon really cannot
+  // come up, fall through and let MCP serve in degraded mode anyway —
+  // better than no session at all.
+  const COLD_START_BUDGET_MS = 5_000;
+  const ready = await waitForIpc(paths.ipcEndpoint, COLD_START_BUDGET_MS);
+  if (ready && daemon && daemon.pid) {
+    manifest.daemon_pid = daemon.pid;
+    writeManifest(paths.manifestPath, manifest);
+  }
+  // If !ready: continue anyway. The MCP child will still serve
+  // tools/list and daemon-free tools; daemon-requiring tools will
+  // surface daemon_unavailable, which is the honest status.
 
   const mcpEnv = {
     ...env,
