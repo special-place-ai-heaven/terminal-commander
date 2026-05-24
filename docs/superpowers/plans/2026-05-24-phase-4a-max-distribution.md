@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **Per-task adversarial review:** after each task's spec + quality review pass, run `/codex` against the task's diff before marking complete. Codex catches what Sonnet reviewers miss.
 
-**Goal:** Ship native tier-1 publish pipeline for Terminal Commander — 5 npm platform packages + root + 3 crates.io crates at `0.2.0`, with SLSA provenance, drift-proof reusable build workflow, 5 containerized verify jobs, ops tooling (secret-health + recovery + deprecation), and explicit rollback semantics.
+**Goal:** Ship native tier-1 publish pipeline for Terminal Commander — 5 npm platform packages + root + 7 crates.io crates at `0.2.0`, with SLSA provenance from the very first release, drift-proof reusable build workflow, 5 containerized verify jobs, ops tooling (secret-health + recovery + deprecation), and explicit rollback semantics.
 
-**Architecture:** Extend existing `release-please.yml` (linux-x64 + linux-arm64 + root already shipped) with windows-x64 + mac-x64 + mac-arm64 platform packages, 3 cargo crate publish jobs, and 5 post-publish verify jobs. Eliminate drift between PR-time `npm-binary-build.yml` and release-time publish via new reusable workflow `_build-platform-binary.yml`. Cross-compile mac targets from Linux runners using `cargo-zigbuild` (free, well-tested). Bump Cargo workspace `0.0.0 → 0.2.0` and flip `publish` on 3 public-API crates. After first 0.2.0 ships via `NPM_TOKEN_TC`, migrate to OIDC trusted publisher per package for `--provenance` attestations.
+**Architecture:** Extend existing `release-please.yml` (linux-x64 + linux-arm64 + root already shipped) with windows-x64 + mac-x64 + mac-arm64 platform packages, 7 cargo crate publish jobs (full dep closure: core → sifters → probes → store → supervisor → daemon → mcp), and 5 post-publish verify jobs. Eliminate drift between PR-time `npm-binary-build.yml` and release-time publish via new reusable workflow `_build-platform-binary.yml`. Build mac targets on **native** macos-13 (x64) + macos-14 (arm64) runners (cargo-zigbuild's macOS-SDK provisioning is not free and Apple's SDK licence is not redistributable; native runners avoid the legal trap entirely). Bump Cargo workspace `0.0.0 → 0.2.0`, flip ALL 7 workspace crates to `publish = true`, and add `version = "0.2.0"` to every internal path-dep so cargo accepts the published tarballs. Configure OIDC trusted publisher on npmjs.com (6 packages) + crates.io (7 crates) **BEFORE** the first 0.2.0 publish, so every artifact ships with SLSA attestations from day-1. Use Node 22.14+ in publish jobs (required for `npm publish --provenance` and OIDC).
 
-**Tech Stack:** GitHub Actions, release-please v4.4.1 (manifest mode, linked-versions plugin), Rust 1.95.0 + edition 2024, cargo, cargo-zigbuild for mac cross-compile, npm 10, Node 20, conventional commits, OIDC trusted publishers (npmjs.com + crates.io).
+**Tech Stack:** GitHub Actions, release-please v4.4.1 (manifest mode, linked-versions plugin) + `release-please-action`'s `cargo-workspace` plugin for Cargo version bumps, Rust 1.95.0 + edition 2024, cargo, native macOS runners (`macos-13` for x64, `macos-14` for arm64), npm 11.5.1 / Node 22.14+, conventional commits, OIDC trusted publishers (npmjs.com + crates.io) from day-1.
 
 ---
 
@@ -49,16 +49,57 @@ scripts/release/
 ├── verify-optional-dependencies.js                  # MODIFIED (Task 7)
 └── recover-partial-publish.sh                       # NEW   (Task 15)
 
-Cargo.toml                                           # MODIFIED (Task 11) — workspace version 0.0.0→0.2.0, publish=true
-crates/supervisor/Cargo.toml                         # MODIFIED (Task 11) — flip to workspace publish
-crates/daemon/Cargo.toml                             # MODIFIED (Task 11) — add readme, keywords, categories
-crates/mcp/Cargo.toml                                # MODIFIED (Task 11) — add readme, keywords, categories
+Cargo.toml                                           # MODIFIED (Task 11) — workspace version 0.0.0→0.2.0, internal-dep version="0.2.0"
+crates/core/Cargo.toml                               # MODIFIED (Task 11) — add description, keywords, categories, readme=README.md
+crates/sifters/Cargo.toml                            # MODIFIED (Task 11) — same
+crates/probes/Cargo.toml                             # MODIFIED (Task 11) — same
+crates/store/Cargo.toml                              # MODIFIED (Task 11) — same
+crates/supervisor/Cargo.toml                         # MODIFIED (Task 11) — flip to workspace publish + per-crate readme
+crates/daemon/Cargo.toml                             # MODIFIED (Task 11) — keywords, categories, per-crate readme
+crates/mcp/Cargo.toml                                # MODIFIED (Task 11) — same
+crates/cli/Cargo.toml                                # MODIFIED (Task 11) — publish = false (binary-only, not for crates.io)
+crates/{core,sifters,probes,store,supervisor,daemon,mcp}/README.md  # NEW (Task 11) — required by cargo publish
 
 docs/
 ├── superpowers/specs/2026-05-24-phase-4a-distribution-windows-x64-publish-design.md  # SPEC (already committed)
 └── runbooks/
     └── 2026-05-24-phase-4a-release-procedure.md     # NEW   (Task 17)
 ```
+
+---
+
+## OIDC Pre-flight (Task 0 — operator action)
+
+**This task is the operator's job, NOT a subagent's.** It must complete BEFORE Task 10 fires.
+
+For each of the 6 npm packages, configure trusted publisher on npmjs.com:
+1. `terminal-commander`
+2. `@terminal-commander/linux-x64`
+3. `@terminal-commander/linux-arm64`
+4. `@terminal-commander/windows-x64`
+5. `@terminal-commander/mac-x64`
+6. `@terminal-commander/mac-arm64`
+
+UI: each package → Settings → Publishing access → Trusted Publishers → GitHub Actions.
+- Organization or user: `special-place-administrator`
+- Repository: `terminal-commander`
+- Workflow filename: `release-please.yml`
+- Environment name: (leave empty)
+
+For each of the 7 cargo crates, configure trusted publisher on crates.io:
+1. `terminal-commander-core`
+2. `terminal-commander-sifters`
+3. `terminal-commander-probes`
+4. `terminal-commander-store`
+5. `terminal-commander-supervisor`
+6. `terminal-commanderd`
+7. `terminal-commander-mcp`
+
+UI: each crate → Settings → Trusted Publishing → GitHub Actions, same config as above.
+
+Estimated time: 15 min for all 13 (6 npm + 7 cargo) UI clicks.
+
+When operator reports "OIDC configured for all 13", the implementer begins Task 1.
 
 ---
 
@@ -877,13 +918,18 @@ permissions:
 jobs:
   build:
     name: build-${{ inputs.platform }}
-    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-24.04","linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"ubuntu-24.04","mac-arm64":"ubuntu-24.04"}')[inputs.platform] }}
+    # All 5 platforms use NATIVE runners. cargo-zigbuild was the prior
+    # plan, but Apple's macOS SDK is not legally redistributable and the
+    # public `cargo-zigbuild` Docker images bundling it have a murky
+    # licence story. macos-13 / macos-14 GitHub-hosted runners ship the
+    # SDK by default. Cost difference: macOS minutes are 10x linux on
+    # public repos but $0 on private — irrelevant here.
+    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-24.04","linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"macos-13","mac-arm64":"macos-14"}')[inputs.platform] }}
     outputs:
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
     env:
       TARGET_TRIPLE: ${{ fromJSON('{"linux-x64":"x86_64-unknown-linux-gnu","linux-arm64":"aarch64-unknown-linux-gnu","windows-x64":"x86_64-pc-windows-msvc","mac-x64":"x86_64-apple-darwin","mac-arm64":"aarch64-apple-darwin"}')[inputs.platform] }}
       PLATFORM_PKG_DIR: packages/terminal-commander-${{ inputs.platform }}
-      USES_ZIGBUILD: ${{ startsWith(inputs.platform, 'mac-') }}
       EXE_SUFFIX: ${{ inputs.platform == 'windows-x64' && '.exe' || '' }}
     steps:
       - name: Checkout
@@ -895,36 +941,15 @@ jobs:
           toolchain: ${{ inputs.rust_toolchain }}
           targets: ${{ env.TARGET_TRIPLE }}
 
-      - name: Install cargo-zigbuild + zig (mac cross only)
-        if: env.USES_ZIGBUILD == 'true'
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.13.0
-
-      - name: Install cargo-zigbuild binary (mac cross only)
-        if: env.USES_ZIGBUILD == 'true'
-        run: cargo install --locked cargo-zigbuild@0.19.7
-
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: build-platform-${{ inputs.platform }}
 
-      - name: cargo build --release (native)
-        if: env.USES_ZIGBUILD != 'true'
+      - name: cargo build --release (native on every platform)
         shell: bash
         run: |
           cargo build --release \
-            --target ${{ env.TARGET_TRIPLE }} \
-            -p terminal-commanderd \
-            -p terminal-commander-mcp \
-            -p terminal-commander-cli
-
-      - name: cargo zigbuild --release (mac cross)
-        if: env.USES_ZIGBUILD == 'true'
-        shell: bash
-        run: |
-          cargo zigbuild --release \
             --target ${{ env.TARGET_TRIPLE }} \
             -p terminal-commanderd \
             -p terminal-commander-mcp \
@@ -952,8 +977,7 @@ jobs:
           rm -f "$bin_dir"/*.placeholder "$bin_dir"/.gitkeep
           ls -la "$bin_dir"
 
-      - name: Smoke — --version (skipped for non-native targets)
-        if: inputs.platform == 'linux-x64' || inputs.platform == 'linux-arm64' || inputs.platform == 'windows-x64'
+      - name: Smoke — --version (native runner, so always works)
         shell: bash
         run: |
           set -e
@@ -1236,12 +1260,12 @@ publish-<platform>:
   runs-on: ubuntu-24.04
   permissions:
     contents: read
-    id-token: write
+    id-token: write          # OIDC for npm trusted publisher + --provenance
   steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-node@v4
       with:
-        node-version: "20"
+        node-version: "22.14"    # 22.14+ ships npm 11.5.1+, required for OIDC + --provenance
         registry-url: "https://registry.npmjs.org"
     - name: Download bin artifact
       uses: actions/download-artifact@v4
@@ -1260,19 +1284,22 @@ publish-<platform>:
           exit 1
         fi
         echo "version-match: $actual"
-    - name: npm publish --access public
+    - name: npm publish --access public --provenance (OIDC trusted publisher)
       shell: bash
       working-directory: packages/terminal-commander-<platform>
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
       run: |
         set -e
-        if npm publish --access public; then
+        # No NODE_AUTH_TOKEN — npm authenticates via OIDC trusted publisher
+        # (configured per Task 0 Pre-flight on npmjs.com). --provenance adds
+        # SLSA build-provenance attestation tied to this exact workflow run.
+        if npm publish --access public --provenance; then
           exit 0
         fi
+        # Recovery: workflow_dispatch + force_publish + already-on-registry → exit 0.
         if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
           ver=$(node -p "require('./package.json').version")
           name=$(node -p "require('./package.json').name")
+          # npm view returns non-zero on 404; success means version already on registry.
           if npm view "${name}@${ver}" version >/dev/null 2>&1; then
             echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
             exit 0
@@ -1314,9 +1341,19 @@ if: >-
   needs.publish-mac-arm64.result == 'success'
 ```
 
-- [ ] **Step 4: Update `publish-root` inline node check (was done in Task 7 already if Task 7 also touched this file; if not, do it now)**
+- [ ] **Step 4: Convert `publish-root` to OIDC + provenance + Node 22.14**
 
-The inline `for (const name of [...])` block in `publish-root` already pulls from `PLATFORM_PACKAGES` per Task 7. Verify and skip if done.
+In `publish-root`:
+- Change `permissions: { contents: read }` to `permissions: { contents: read, id-token: write }`.
+- Change `actions/setup-node@v4 with: { node-version: "20" }` (or whatever current value) to `node-version: "22.14"`.
+- In the final `npm publish` step, drop `NODE_AUTH_TOKEN` env entirely and add `--provenance` flag:
+  ```yaml
+  - name: npm publish (OIDC trusted publisher + provenance)
+    shell: bash
+    working-directory: packages/terminal-commander
+    run: npm publish --provenance
+  ```
+- The existing `for (const name of [...])` block already pulls from `PLATFORM_PACKAGES` per Task 7. Verify.
 
 - [ ] **Step 5: YAML lint + dry parse**
 
@@ -1333,13 +1370,14 @@ git commit -m "feat(release): add windows-x64 + mac-x64 + mac-arm64 publish jobs
 
 ---
 
-## Task 11: Bump Cargo workspace + flip 3 crates to publish=true
+## Task 11: Bump Cargo workspace to 0.2.0 + flip ALL 7 crates to publish=true + per-crate README
 
 **Files:**
 - Modify: `Cargo.toml`
-- Modify: `crates/supervisor/Cargo.toml`
-- Modify: `crates/daemon/Cargo.toml`
-- Modify: `crates/mcp/Cargo.toml`
+- Modify: `crates/{core,sifters,probes,store,supervisor,daemon,mcp,cli}/Cargo.toml` (8 crates)
+- Create: `crates/{core,sifters,probes,store,supervisor,daemon,mcp}/README.md` (7 READMEs — cli stays publish=false, no README needed)
+
+**Why all 7?** Codex review caught: mcp depends on core+sifters+store+supervisor+daemon; daemon depends on core+sifters+probes+store+supervisor. cargo publish REFUSES a crate whose non-dev path-deps have no registry version. So either we publish the full closure or none. Publishing all 7 is the only correct path.
 
 - [ ] **Step 1: Update `Cargo.toml` workspace block**
 
@@ -1353,14 +1391,15 @@ license = "Apache-2.0"
 authors = ["The Terminal Commander Authors"]
 repository = "https://github.com/special-place-administrator/terminal-commander"
 homepage = "https://github.com/special-place-administrator/terminal-commander"
-readme = "README.md"
+# NOTE: `readme` deliberately NOT set at workspace level — Cargo resolves
+# workspace-inherited `readme` paths relative to workspace root, which
+# becomes invalid inside a published .crate tarball. Each crate sets
+# `readme = "README.md"` literally.
 version = "0.2.0"
 publish = true
 ```
 
-(version `0.0.0 → 0.2.0`, publish `false → true`, readme `../../README.md → README.md`.)
-
-Update `[workspace.dependencies]` to keep internal crate versions at `0.2.0`:
+Update `[workspace.dependencies]` so internal crate references include `version = "0.2.0"`:
 
 ```toml
 terminal-commander-core    = { path = "crates/core",    version = "0.2.0" }
@@ -1369,214 +1408,347 @@ terminal-commander-probes  = { path = "crates/probes",  version = "0.2.0" }
 terminal-commander-store   = { path = "crates/store",   version = "0.2.0" }
 ```
 
-- [ ] **Step 2: Flip `crates/supervisor/Cargo.toml` to workspace publish**
+Inside per-crate Cargo.toml `[dependencies]`, ALSO add `version = "0.2.0"` to the `terminal-commander-supervisor` path entry in daemon + mcp (Task 11 Step 4 fixes daemon's literal dep; mcp inherits from workspace dep list when applicable):
 
-Change:
+For `crates/daemon/Cargo.toml`:
 ```toml
-[package]
-name = "terminal-commander-supervisor"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+terminal-commander-supervisor = { path = "../supervisor", version = "0.2.0" }
 ```
-to:
+
+For `crates/mcp/Cargo.toml`:
+```toml
+terminal-commander-supervisor = { path = "../supervisor", version = "0.2.0" }
+terminal-commander-sifters    = { version = "0.2.0", path = "../sifters" }
+terminal-commander-store      = { version = "0.2.0", path = "../store" }
+terminal-commanderd           = { version = "0.2.0", path = "../daemon" }
+```
+
+- [ ] **Step 2: Convert `crates/supervisor/Cargo.toml` to workspace publish**
+
+Change top of `[package]`:
 ```toml
 [package]
 name = "terminal-commander-supervisor"
 description = "Cross-platform supervisor for Terminal Commander daemon — IPC bring-up, peer identity, ensure-daemon helpers."
+readme = "README.md"
+keywords = ["terminal-commander", "mcp", "daemon", "supervisor"]
+categories = ["development-tools"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme.workspace = true
 version.workspace = true
 publish.workspace = true
-keywords = ["terminal-commander", "mcp", "daemon", "supervisor"]
-categories = ["development-tools"]
 ```
 
-- [ ] **Step 3: Add description + keywords + categories to daemon + mcp Cargo.toml**
+Drop the old `version = "0.0.0"`, `edition = "2024"`, `license = "Apache-2.0"`, `publish = false` lines.
 
-In `crates/daemon/Cargo.toml`, after `description = "..."`, add:
+- [ ] **Step 3: Convert `crates/core`, `crates/sifters`, `crates/probes`, `crates/store/Cargo.toml`**
+
+For each of the 4 internal crates, the `[package]` block should look like:
+
 ```toml
+[package]
+name = "terminal-commander-core"   # adjust per crate
+description = "Core types + traits for Terminal Commander (workspace-internal foundation crate, but published so dependents can ship to crates.io)."
+readme = "README.md"
+keywords = ["terminal-commander", "mcp"]
+categories = ["development-tools"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+publish.workspace = true
+```
+
+Per-crate `description` tweaks:
+- core: "Core types and trait definitions for the Terminal Commander MCP daemon."
+- sifters: "Output sifters (capture, filter, ring-buffer) for Terminal Commander."
+- probes: "Probe definitions for the Terminal Commander observability surface."
+- store: "Persistent store (SQLite) for Terminal Commander daemon state."
+
+- [ ] **Step 4: Add per-crate metadata to daemon + mcp Cargo.toml**
+
+For `crates/daemon/Cargo.toml`, ensure the inheritance block has:
+```toml
+[package]
+name = "terminal-commanderd"
+description = "Long-running Terminal Commander daemon. Owns bucket manager, context spool, policy engine, audit emitter, and local API."
+readme = "README.md"
 keywords = ["terminal-commander", "mcp", "daemon"]
 categories = ["development-tools"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+publish.workspace = true
 ```
-Also add `readme.workspace = true` to the inheritance block.
 
-In `crates/mcp/Cargo.toml`, after `description = "..."`, add:
+For `crates/mcp/Cargo.toml`, same shape:
 ```toml
+[package]
+name = "terminal-commander-mcp"
+description = "Thin MCP server adapter (rmcp 1.7.0 stdio). Forwards every tool call to the daemon over IPC."
+readme = "README.md"
 keywords = ["mcp", "terminal-commander", "stdio", "model-context-protocol"]
 categories = ["development-tools"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+publish.workspace = true
 ```
-Also add `readme.workspace = true`.
 
-- [ ] **Step 4: Keep internal-only crates pinned to `publish = false`**
+- [ ] **Step 5: Keep `cli` crate publish=false**
 
-Edit `crates/core/Cargo.toml`, `crates/sifters/Cargo.toml`, `crates/probes/Cargo.toml`, `crates/store/Cargo.toml`, `crates/cli/Cargo.toml`: ensure each has `publish = false` in its `[package]` block (override workspace inheritance). Otherwise bumping workspace `publish = true` would publish them too.
+`crates/cli/Cargo.toml` should have `publish = false` (the binary-only CLI is not a library, no crates.io use case):
 
-If `publish.workspace = true` was set, change to `publish = false`. If no publish field, add `publish = false`.
+```toml
+[package]
+name = "terminal-commander-cli"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+version.workspace = true
+publish = false
+```
 
-- [ ] **Step 5: cargo check + cargo publish dry-run for the 3 crates**
+- [ ] **Step 6: Write per-crate README.md (7 files)**
+
+For each of `crates/{core, sifters, probes, store, supervisor, daemon, mcp}`, create `README.md`:
+
+```markdown
+# terminal-commander-<role>
+
+Part of the [Terminal Commander](https://github.com/special-place-administrator/terminal-commander) project.
+
+This crate is published to crates.io to support the public-API distribution path.
+See the [main repository README](https://github.com/special-place-administrator/terminal-commander#readme) for project overview, install instructions, and design docs.
+
+## License
+
+Apache-2.0
+```
+
+Substitute `<role>` per crate: core, sifters, probes, store, supervisor, daemon, mcp.
+
+- [ ] **Step 7: cargo check + dry-run publish for all 7 crates in dep order**
 
 ```bash
 cargo check --workspace
+# Dry-run in dep order — early failures here mean later crates would fail in real publish.
+cargo publish --dry-run -p terminal-commander-core --allow-dirty
+cargo publish --dry-run -p terminal-commander-sifters --allow-dirty
+cargo publish --dry-run -p terminal-commander-probes --allow-dirty
+cargo publish --dry-run -p terminal-commander-store --allow-dirty
 cargo publish --dry-run -p terminal-commander-supervisor --allow-dirty
 cargo publish --dry-run -p terminal-commanderd --allow-dirty
 cargo publish --dry-run -p terminal-commander-mcp --allow-dirty
 ```
-Expected: all 3 dry-runs succeed (or fail with the well-known "uncommitted changes" message if no `--allow-dirty`).
 
-- [ ] **Step 6: cargo test workspace**
+Note: dry-run checks each crate against the LOCAL workspace, not crates.io. The first
+real publish of `core` is the gate that verifies the registry actually accepts it.
+Subsequent crates' real publish will fail until their deps are on the registry — that
+is why Task 12 orchestrates 7 jobs in strict order with propagation sleeps.
+
+Expected: all 7 dry-runs succeed.
+
+- [ ] **Step 8: cargo test workspace**
 
 ```bash
 cargo test --workspace
 ```
-Expected: 271/271 pass (matches the baseline from PR #8).
+Expected: 271/271 pass.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add Cargo.toml crates/supervisor/Cargo.toml crates/daemon/Cargo.toml crates/mcp/Cargo.toml crates/core/Cargo.toml crates/sifters/Cargo.toml crates/probes/Cargo.toml crates/store/Cargo.toml crates/cli/Cargo.toml
-git commit -m "feat(cargo): bump workspace to 0.2.0 + flip 3 public crates to publish=true"
+git add Cargo.toml \
+        crates/core/Cargo.toml crates/core/README.md \
+        crates/sifters/Cargo.toml crates/sifters/README.md \
+        crates/probes/Cargo.toml crates/probes/README.md \
+        crates/store/Cargo.toml crates/store/README.md \
+        crates/supervisor/Cargo.toml crates/supervisor/README.md \
+        crates/daemon/Cargo.toml crates/daemon/README.md \
+        crates/mcp/Cargo.toml crates/mcp/README.md \
+        crates/cli/Cargo.toml
+git commit -m "feat(cargo): bump workspace to 0.2.0 + publish full 7-crate dep closure"
 ```
 
 ---
 
-## Task 12: Add 3 cargo publish jobs to release-please.yml
+## Task 12: Add 7 cargo publish jobs to release-please.yml (full dep closure, OIDC, API-based recovery)
 
 **Files:**
 - Modify: `.github/workflows/release-please.yml`
 
-- [ ] **Step 1: Append after `publish-root`**
+The 7 jobs publish strictly in dep order: core → sifters → probes → store → supervisor → daemon → mcp. Each waits for the prior. 60s sleep absorbs crates.io index propagation. OIDC trusted publisher (configured per Task 0 Pre-flight) replaces `CARGO_REGISTRY_TOKEN`. Recovery uses crates.io HTTP API (deterministic JSON), not `cargo search` (human-formatted, ANSI-prone).
+
+- [ ] **Step 1: Define a reusable cargo-publish job template (logical, inlined for each crate)**
+
+For each of 7 crates, append a job to `release-please.yml`:
 
 ```yaml
-  # ----------------------------------------------------------------
-  # JOB — cargo publish chain: supervisor → daemon → mcp
-  # crates.io requires dep crates to be already published before
-  # dependent crates. Hence the strict `needs:` chain + 60s
-  # propagation sleep between steps (index lag).
-  # ----------------------------------------------------------------
-  publish-cargo-supervisor:
-    name: publish-cargo-supervisor
+  publish-cargo-<CRATE>:
+    name: publish-cargo-<CRATE>
     needs:
       - release-please
       - ensure-release
       - publish-version
-      - publish-root
+      - <PREV>                  # publish-root for core; previous cargo job for others
     if: >-
       always() && !cancelled() &&
-      needs.publish-root.result == 'success' &&
+      needs.<PREV>.result == 'success' &&
       (needs.release-please.outputs.releases_created == 'true' ||
       (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      id-token: write              # OIDC for trusted publisher
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with: { toolchain: "1.95.0" }
       - uses: Swatinem/rust-cache@v2
-        with: { shared-key: cargo-publish-supervisor }
-      - name: cargo publish --dry-run
-        run: cargo publish --dry-run -p terminal-commander-supervisor
-      - name: cargo publish
+        with: { shared-key: cargo-publish-<CRATE> }
+      - name: Assert crate version matches release-please version
         shell: bash
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
-          if cargo publish -p terminal-commander-supervisor; then
+          actual=$(cargo pkgid -p <CRATE> | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p <CRATE>
+      - name: cargo publish (OIDC trusted publisher)
+        shell: bash
+        run: |
+          set -e
+          if cargo publish -p <CRATE>; then
             exit 0
           fi
+          # Recovery: crates.io HTTP API — deterministic JSON.
+          # Returns 200 + JSON if version exists, 404 if not.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(cargo pkgid -p terminal-commander-supervisor | sed 's/.*#//')
-            if cargo search terminal-commander-supervisor --limit 1 | grep -q "= \"$ver\""; then
-              echo "::warning::terminal-commander-supervisor@$ver already on crates.io (force_publish recovery)"
+            ver=$(cargo pkgid -p <CRATE> | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/<CRATE>/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::<CRATE>@$ver already on crates.io (HTTP 200, force_publish recovery)"
               exit 0
             fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
           fi
           exit 1
       - name: Wait 60s for crates.io index propagation
         run: sleep 60
-
-  publish-cargo-daemon:
-    name: publish-cargo-daemon
-    needs:
-      - release-please
-      - ensure-release
-      - publish-version
-      - publish-cargo-supervisor
-    if: >-
-      always() && !cancelled() &&
-      needs.publish-cargo-supervisor.result == 'success'
-    runs-on: ubuntu-24.04
-    permissions: { contents: read }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with: { toolchain: "1.95.0" }
-      - uses: Swatinem/rust-cache@v2
-        with: { shared-key: cargo-publish-daemon }
-      - name: cargo publish --dry-run
-        run: cargo publish --dry-run -p terminal-commanderd
-      - name: cargo publish
-        shell: bash
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
-        run: |
-          set -e
-          if cargo publish -p terminal-commanderd; then exit 0; fi
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(cargo pkgid -p terminal-commanderd | sed 's/.*#//')
-            if cargo search terminal-commanderd --limit 1 | grep -q "= \"$ver\""; then
-              echo "::warning::terminal-commanderd@$ver already on crates.io"
-              exit 0
-            fi
-          fi
-          exit 1
-      - run: sleep 60
-
-  publish-cargo-mcp:
-    name: publish-cargo-mcp
-    needs:
-      - release-please
-      - ensure-release
-      - publish-version
-      - publish-cargo-daemon
-    if: >-
-      always() && !cancelled() &&
-      needs.publish-cargo-daemon.result == 'success'
-    runs-on: ubuntu-24.04
-    permissions: { contents: read }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with: { toolchain: "1.95.0" }
-      - uses: Swatinem/rust-cache@v2
-        with: { shared-key: cargo-publish-mcp }
-      - name: cargo publish --dry-run
-        run: cargo publish --dry-run -p terminal-commander-mcp
-      - name: cargo publish
-        shell: bash
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
-        run: |
-          set -e
-          if cargo publish -p terminal-commander-mcp; then exit 0; fi
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(cargo pkgid -p terminal-commander-mcp | sed 's/.*#//')
-            if cargo search terminal-commander-mcp --limit 1 | grep -q "= \"$ver\""; then
-              echo "::warning::terminal-commander-mcp@$ver already on crates.io"
-              exit 0
-            fi
-          fi
-          exit 1
 ```
+
+Substitute `<CRATE>` and `<PREV>` per the 7-row table below. The first job's `<PREV>` is `publish-root`; each subsequent job's `<PREV>` is the prior cargo job.
+
+| Order | `<CRATE>`                          | `<PREV>` |
+|-------|------------------------------------|----------|
+| 1     | terminal-commander-core            | publish-root |
+| 2     | terminal-commander-sifters         | publish-cargo-terminal-commander-core |
+| 3     | terminal-commander-probes          | publish-cargo-terminal-commander-sifters |
+| 4     | terminal-commander-store           | publish-cargo-terminal-commander-probes |
+| 5     | terminal-commander-supervisor      | publish-cargo-terminal-commander-store |
+| 6     | terminal-commanderd                | publish-cargo-terminal-commander-supervisor |
+| 7     | terminal-commander-mcp             | publish-cargo-terminal-commanderd |
+
+(Job names use the literal crate name to keep the YAML grep-friendly. GitHub Actions allows the long names.)
+
+- [ ] **Step 2: Add npm↔cargo version parity assertion in release-please job**
+
+In the `release-please` job, after the `Aggregate release-please outputs` step, add:
+
+```yaml
+      - name: Assert cargo workspace version matches release-please version
+        if: steps.final.outputs.releases_created == 'true'
+        shell: bash
+        env:
+          EXPECTED: ${{ steps.final.outputs.version }}
+        run: |
+          set -e
+          actual=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo workspace version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+          echo "npm-cargo version parity: $actual"
+```
+
+- [ ] **Step 3: Wire Cargo.toml bump into release-please-config.json**
+
+Add to `.github/release-please-config.json` under the root `packages/terminal-commander` package's `extra-files` array (Task 3 already added 5 entries; add 1 more for Cargo.toml):
+
+```json
+{ "type": "generic", "path": "../../Cargo.toml" }
+```
+
+Then add a comment marker in `Cargo.toml` at the workspace `version = "0.2.0"` line:
+
+```toml
+version = "0.2.0" # x-release-please-version
+```
+
+release-please's `generic` extra-files handler scans for the `x-release-please-version` magic comment and bumps the version on the same line. This is the documented release-please mechanism for non-Node files. No `cargo-workspace` plugin is needed.
+
+Repeat: also add the marker to internal-dep version entries in `[workspace.dependencies]`:
+
+```toml
+terminal-commander-core    = { path = "crates/core",    version = "0.2.0" } # x-release-please-version
+terminal-commander-sifters = { path = "crates/sifters", version = "0.2.0" } # x-release-please-version
+terminal-commander-probes  = { path = "crates/probes",  version = "0.2.0" } # x-release-please-version
+terminal-commander-store   = { path = "crates/store",   version = "0.2.0" } # x-release-please-version
+```
+
+And the supervisor literal deps in daemon + mcp (Task 11 Step 1):
+
+```toml
+terminal-commander-supervisor = { path = "../supervisor", version = "0.2.0" } # x-release-please-version
+```
+
+This ensures future release-please PRs bump ALL Cargo version sites together with the npm packages, preserving lockstep.
+
+- [ ] **Step 4: Update release-please-config.json packages map entry**
+
+For the root package, the `extra-files` should now have 6 entries (5 platform optionalDependency JSON paths from Task 3 + 1 Cargo.toml generic):
+
+```json
+"extra-files": [
+  { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/linux-x64']" },
+  { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/linux-arm64']" },
+  { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/windows-x64']" },
+  { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/mac-x64']" },
+  { "type": "json", "path": "package.json", "jsonpath": "$.optionalDependencies['@terminal-commander/mac-arm64']" },
+  { "type": "generic", "path": "../../Cargo.toml" }
+]
+```
+
+(`generic` extra-file is repo-root-relative; from `packages/terminal-commander/` that's `../../Cargo.toml`. Verify the syntax in release-please v4.4.1 docs — `path` may be repo-root-relative regardless of package position. If the relative path fails, fall back to repo-root absolute or move the `Cargo.toml` extra-file entry under a dedicated `packages/`-key.)
 
 - [ ] **Step 2: Add npm↔cargo version parity assertion in release-please job**
 
@@ -1638,19 +1810,25 @@ After the cargo publish jobs:
     steps:
       - name: Wait 60s for npm registry propagation
         run: sleep 60
-      - name: Install from npm + smoke
+      - name: Install from npm + smoke (Node 22-bookworm, glibc — linux-x64 binary is glibc-linked)
         env:
           VER: ${{ needs.release-please.outputs.version }}
         run: |
-          docker run --rm node:20-alpine sh -c "
+          # node:22-alpine uses musl libc. Our binaries are glibc-linked.
+          # Use node:22-bookworm-slim instead. Also: --provenance requires npm 11.5.1+
+          # which ships in Node 22.14+. node:22 tag tracks latest 22.x.
+          docker run --rm node:22-bookworm-slim sh -c '
             set -e
-            npm install -g terminal-commander@${VER}
+            npm install -g "terminal-commander@'"${VER}"'"
             terminal-commander-mcp --version
-            # MCP initialize stdio probe (10s timeout)
-            echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0.0.0\"}}}' \
-              | timeout 10 terminal-commander-mcp || [ \$? -eq 124 ]
-            echo 'verify-linux-x64: OK'
-          "
+            # MCP initialize stdio probe (10s timeout — exit 124 = clean timeout = pass)
+            echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0.0.0\"}}}" \
+              | timeout 10 terminal-commander-mcp; rc=$?
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+              echo "::error::stdio probe exited $rc" >&2; exit "$rc"
+            fi
+            echo "verify-linux-x64: OK"
+          '
 
   verify-linux-arm64:
     name: verify-linux-arm64
@@ -1663,14 +1841,17 @@ After the cargo publish jobs:
       - env:
           VER: ${{ needs.release-please.outputs.version }}
         run: |
-          docker run --rm node:20-alpine sh -c "
+          docker run --rm node:22-bookworm-slim sh -c '
             set -e
-            npm install -g terminal-commander@${VER}
+            npm install -g "terminal-commander@'"${VER}"'"
             terminal-commander-mcp --version
-            echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0.0.0\"}}}' \
-              | timeout 10 terminal-commander-mcp || [ \$? -eq 124 ]
-            echo 'verify-linux-arm64: OK'
-          "
+            echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0.0.0\"}}}" \
+              | timeout 10 terminal-commander-mcp; rc=$?
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+              echo "::error::stdio probe exited $rc" >&2; exit "$rc"
+            fi
+            echo "verify-linux-arm64: OK"
+          '
 
   verify-windows-x64:
     name: verify-windows-x64
@@ -1681,41 +1862,69 @@ After the cargo publish jobs:
     steps:
       - run: powershell -Command Start-Sleep -Seconds 60
       - uses: actions/setup-node@v4
-        with: { node-version: "20" }
-      - shell: powershell
+        with: { node-version: "22.14" }
+      - shell: pwsh
         env:
           VER: ${{ needs.release-please.outputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
-          npm install -g terminal-commander@${env:VER}
+          npm install -g "terminal-commander@$env:VER"
           terminal-commander-mcp --version
-          # Stdio probe: 10s timeout via PowerShell job
+          # Stdio probe: 10s timeout via PowerShell job, Stop-Job + Remove-Job
+          # so we don't leak the runspace. Wait-Job returns $null on timeout.
+          $msg = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}'
           $job = Start-Job -ScriptBlock {
-            $msg = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}'
-            $msg | terminal-commander-mcp
+            param($m) $m | terminal-commander-mcp
+          } -ArgumentList $msg
+          $done = Wait-Job $job -Timeout 10
+          if ($null -eq $done) {
+            Write-Host "smoke: stdio probe timed out (expected for unbounded server)"
           }
-          Wait-Job $job -Timeout 10 | Out-Null
           Stop-Job $job -ErrorAction SilentlyContinue
+          Remove-Job $job -Force -ErrorAction SilentlyContinue
           Write-Host "verify-windows-x64: OK"
 
   verify-mac-x64:
     name: verify-mac-x64
     needs: [release-please, publish-root]
     if: needs.publish-root.result == 'success'
-    runs-on: macos-13   # Intel
+    runs-on: macos-13   # Intel — keep a runner pinning task in runbook to rotate when GitHub deprecates
     permissions: { contents: read, issues: write }
     steps:
       - run: sleep 60
       - uses: actions/setup-node@v4
-        with: { node-version: "20" }
+        with: { node-version: "22.14" }    # 22.14+ required for npm 11.5.1+ provenance verification
       - env:
           VER: ${{ needs.release-please.outputs.version }}
         run: |
           set -e
-          npm install -g terminal-commander@${VER}
+          npm install -g "terminal-commander@${VER}"
           terminal-commander-mcp --version
-          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}' \
-            | gtimeout 10 terminal-commander-mcp || [ $? -eq 124 ]
+          # Portable timeout via python (always on macOS runner). subprocess.run
+          # cleanly terminates the child + reports an explicit timeout, no
+          # SIGKILL race, no kill-wait hang. Exit 124 is the conventional
+          # "timed out cleanly" code we treat as success for an unbounded
+          # stdio server probe.
+          python3 - "$@" <<'PY'
+          import json, subprocess, sys
+          payload = json.dumps({
+              "jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {
+                  "protocolVersion": "2024-11-05",
+                  "capabilities": {},
+                  "clientInfo": {"name": "smoke", "version": "0.0.0"},
+              },
+          })
+          try:
+              r = subprocess.run(
+                  ["terminal-commander-mcp"],
+                  input=payload, text=True, capture_output=True, timeout=10,
+              )
+              sys.exit(r.returncode)
+          except subprocess.TimeoutExpired:
+              print("smoke: stdio probe timed out (expected for unbounded server)")
+              sys.exit(0)
+          PY
           echo 'verify-mac-x64: OK'
 
   verify-mac-arm64:
@@ -1727,20 +1936,33 @@ After the cargo publish jobs:
     steps:
       - run: sleep 60
       - uses: actions/setup-node@v4
-        with: { node-version: "20" }
+        with: { node-version: "22.14" }
       - env:
           VER: ${{ needs.release-please.outputs.version }}
         run: |
           set -e
-          npm install -g terminal-commander@${VER}
+          npm install -g "terminal-commander@${VER}"
           terminal-commander-mcp --version
-          # macOS lacks `timeout`; install via brew not allowed in 10s budget — skip timeout
-          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}' \
-            | terminal-commander-mcp &
-          PID=$!
-          sleep 10
-          kill -9 $PID 2>/dev/null || true
-          wait $PID 2>/dev/null || true
+          python3 - "$@" <<'PY'
+          import json, subprocess, sys
+          payload = json.dumps({
+              "jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {
+                  "protocolVersion": "2024-11-05",
+                  "capabilities": {},
+                  "clientInfo": {"name": "smoke", "version": "0.0.0"},
+              },
+          })
+          try:
+              r = subprocess.run(
+                  ["terminal-commander-mcp"],
+                  input=payload, text=True, capture_output=True, timeout=10,
+              )
+              sys.exit(r.returncode)
+          except subprocess.TimeoutExpired:
+              print("smoke: stdio probe timed out (expected for unbounded server)")
+              sys.exit(0)
+          PY
           echo 'verify-mac-arm64: OK'
 
   mark-release-broken:
@@ -1762,30 +1984,43 @@ After the cargo publish jobs:
     runs-on: ubuntu-24.04
     permissions: { issues: write, contents: read }
     steps:
-      - name: Open P0 issue
+      - name: Compose issue body to a file (avoids YAML heredoc fragility)
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+          VER: ${{ needs.release-please.outputs.version }}
+          RES_LX64: ${{ needs.verify-linux-x64.result }}
+          RES_LARM: ${{ needs.verify-linux-arm64.result }}
+          RES_WIN:  ${{ needs.verify-windows-x64.result }}
+          RES_MX64: ${{ needs.verify-mac-x64.result }}
+          RES_MARM: ${{ needs.verify-mac-arm64.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -e
+          # Use printf, NOT heredoc — heredoc indentation + GH-Actions YAML
+          # is a known footgun.
+          printf 'Release **%s** failed post-publish smoke verification.\n\n' "$VER" > /tmp/body.md
+          printf 'Verify job results:\n' >> /tmp/body.md
+          printf '- linux-x64   : %s\n' "$RES_LX64"  >> /tmp/body.md
+          printf '- linux-arm64 : %s\n' "$RES_LARM"  >> /tmp/body.md
+          printf '- windows-x64 : %s\n' "$RES_WIN"   >> /tmp/body.md
+          printf '- mac-x64     : %s\n' "$RES_MX64"  >> /tmp/body.md
+          printf '- mac-arm64   : %s\n\n' "$RES_MARM" >> /tmp/body.md
+          printf '**Action required:** Run `.github/workflows/deprecate-version.yml` for version %s ASAP, then triage + patch release.\n\n' "$VER" >> /tmp/body.md
+          printf 'Workflow run: %s\n' "$RUN_URL" >> /tmp/body.md
+      - name: Open P0 issue (PAT first, fall back to GITHUB_TOKEN if PAT is the broken one)
+        env:
+          PAT: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+          GITHUB_TOKEN_FALLBACK: ${{ secrets.GITHUB_TOKEN }}
           VER: ${{ needs.release-please.outputs.version }}
         run: |
           set -e
-          body=$(cat <<EOF
-          Release **${VER}** failed post-publish smoke verification.
-
-          Verify job results:
-          - linux-x64   : ${{ needs.verify-linux-x64.result }}
-          - linux-arm64 : ${{ needs.verify-linux-arm64.result }}
-          - windows-x64 : ${{ needs.verify-windows-x64.result }}
-          - mac-x64     : ${{ needs.verify-mac-x64.result }}
-          - mac-arm64   : ${{ needs.verify-mac-arm64.result }}
-
-          **Action required:** Run \`.github/workflows/deprecate-version.yml\` for version ${VER} ASAP, then triage + patch release.
-          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          EOF
-          )
-          gh issue create \
-            --title "release ${VER} smoke FAILED" \
-            --label "release-broken,P0" \
-            --body "$body"
+          title="release ${VER} smoke FAILED"
+          # Try PAT first.
+          if GH_TOKEN="$PAT" gh issue create --title "$title" --label "release-broken,P0" --body-file /tmp/body.md; then
+            echo "issue filed via RELEASE_PLEASE_TOKEN_TC"
+            exit 0
+          fi
+          echo "::warning::RELEASE_PLEASE_TOKEN_TC failed to open issue; falling back to GITHUB_TOKEN"
+          GH_TOKEN="$GITHUB_TOKEN_FALLBACK" gh issue create --title "$title" --label "release-broken,P0" --body-file /tmp/body.md
 ```
 
 - [ ] **Step 2: YAML lint**
@@ -1938,6 +2173,10 @@ NPM_PKGS=(
 )
 
 CARGO_CRATES=(
+  "terminal-commander-core"
+  "terminal-commander-sifters"
+  "terminal-commander-probes"
+  "terminal-commander-store"
   "terminal-commander-supervisor"
   "terminal-commanderd"
   "terminal-commander-mcp"
@@ -1957,14 +2196,23 @@ for name in "${NPM_PKGS[@]}"; do
 done
 
 echo
-echo "═══ crates.io — checking @ ${VER} ═══"
+echo "═══ crates.io — checking @ ${VER} (HTTP API, not cargo search) ═══"
+# cargo search output is human-formatted, ANSI-prone, header-mixed.
+# Use the crates.io HTTP API: 200 = exists, 404 = missing. Deterministic.
 for crate in "${CARGO_CRATES[@]}"; do
-  if cargo search "$crate" --limit 1 2>/dev/null | grep -q "^${crate} = \"${VER}\""; then
-    printf "  OK    %s@%s\n" "$crate" "$VER"
-  else
-    printf "  MISS  %s@%s\n" "$crate" "$VER"
-    missing_cargo+=("$crate")
-  fi
+  http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)" \
+    "https://crates.io/api/v1/crates/${crate}/${VER}")
+  case "$http_code" in
+    200)
+      printf "  OK    %s@%s\n" "$crate" "$VER" ;;
+    404)
+      printf "  MISS  %s@%s\n" "$crate" "$VER"
+      missing_cargo+=("$crate") ;;
+    *)
+      printf "  ??    %s@%s (HTTP %s — treating as missing)\n" "$crate" "$VER" "$http_code"
+      missing_cargo+=("$crate") ;;
+  esac
 done
 
 echo
@@ -2113,16 +2361,36 @@ git commit -m "feat(ops): deprecate-version.yml workflow_dispatch for broken-rel
 Owner: terminal-commander maintainers
 Created: 2026-05-24
 
+## Pre-flight (one-time setup, before first release)
+
+OIDC trusted publishers MUST be configured before the first release fires.
+This was Task 0 of the Phase 4a-max plan; it is reproduced here as the
+canonical procedure for any future package or crate added to the pipeline.
+
+For each of the 6 npm packages:
+- Pkg → Settings → Publishing access → Trusted Publishers → GitHub Actions
+- Organization: `special-place-administrator`
+- Repository: `terminal-commander`
+- Workflow filename: `release-please.yml`
+- Environment: (leave blank)
+
+For each of the 7 cargo crates: same on crates.io.
+
+Verify: re-run a small workflow_dispatch test. Confirm published tarball
+shows `dist.attestations` (npm) or signed provenance metadata (crates.io).
+
 ## Normal release flow
 
 1. Land conventional-commit work on `main`.
 2. `release-please` opens "chore: release X.Y.Z" PR. Review the diff.
    - Confirm all 6 manifest entries bump.
-   - Confirm Cargo.toml workspace version bumps.
+   - Confirm `Cargo.toml` workspace version bumps + every `x-release-please-version`-marked line bumps.
    - Confirm root `optionalDependencies` all 5 platforms at new version.
 3. Merge the PR.
 4. Same workflow run: 5 platform builds (parallel) → 5 publish-platform
-   (parallel) → publish-root → 3 cargo publish chain → 5 verify jobs.
+   (parallel, OIDC + provenance) → publish-root (OIDC + provenance) →
+   7 cargo publish chain (OIDC, in strict dep order: core → sifters →
+   probes → store → supervisor → daemon → mcp) → 5 verify jobs.
 5. If all 5 verify jobs green: release is good. Done.
 6. If any verify fails: `mark-release-broken` opens P0 issue. Go to
    "Broken release" below.
@@ -2145,38 +2413,40 @@ If the workflow died mid-publish (some packages on registry, others
 missing):
 
 1. Run: `bash scripts/release/recover-partial-publish.sh X.Y.Z`
-2. The script reports missing artifacts + republish commands.
+2. The script reports missing artifacts + republish guidance (using
+   crates.io HTTP API + npm view, both deterministic).
 3. Re-run the release-please.yml workflow with `force_publish: true`
    for npm side. The E409-tolerant pattern republishes only missing.
 4. For cargo side: from a checkout at tag `vX.Y.Z`, run the script's
-   suggested `cargo publish -p <crate>` commands in order.
+   suggested `cargo publish -p <crate>` commands in dep order. Wait
+   60s between each so crates.io index propagates.
 
 ## Secret rotation (annual)
 
-NPM_TOKEN_TC, CARGO_REGISTRY_TOKEN_TC, RELEASE_PLEASE_TOKEN_TC have
-365-day max lifetimes. The weekly `secret-health.yml` cron files a P1
-issue the first Monday after a token starts failing.
+`RELEASE_PLEASE_TOKEN_TC` (PAT for opening release PRs) has 365-day
+max lifetime. Weekly `secret-health.yml` files P1 issue when probe fails.
+
+Trusted-publisher OIDC auth does NOT have an expiry, so `NPM_TOKEN_TC`
+and `CARGO_REGISTRY_TOKEN_TC` are now only emergency-recovery escape
+hatches; they should not rotate on a schedule, but ARE still probed
+weekly for liveness in case we need them for a `force_publish` recovery.
 
 1. Rotate the failing token at its registry UI.
 2. Update repo secret at https://github.com/special-place-administrator/terminal-commander/settings/secrets/actions
 3. Manually re-run `secret-health.yml` to confirm green.
 
-## OIDC migration (one-time)
+## macOS runner deprecation
 
-After the first 0.2.0 release ships using `NPM_TOKEN_TC`:
+GitHub deprecates macOS runners on roughly 18-month cycles. We pin
+`macos-13` (Intel) + `macos-14` (Apple Silicon) for `_build-platform-binary.yml`
+and `verify-mac-*` jobs. When deprecation warnings appear in workflow runs:
 
-1. For each of the 6 npm packages, configure trusted publisher on
-   npmjs.com:
-   - Pkg → Settings → Publishing → Trusted Publishers → GitHub Actions
-   - Org: special-place-administrator
-   - Repo: terminal-commander
-   - Workflow file: .github/workflows/release-please.yml
-   - Environment: (leave blank)
-2. For each of the 3 cargo crates, same on crates.io.
-3. Edit `release-please.yml`: remove `NODE_AUTH_TOKEN` env from publish
-   steps, add `--provenance` flag to `npm publish`. Remove
-   `CARGO_REGISTRY_TOKEN` env from cargo publish steps.
-4. Confirm next release's published tarball shows `dist.attestations`.
+1. Pick the next-newest available macOS runners (e.g. `macos-14` Intel
+   replacement, `macos-15` arm).
+2. Update both `_build-platform-binary.yml` (runs-on map) and the two
+   `verify-mac-*` jobs in `release-please.yml` in a single PR.
+3. CI green = good. Old version users keep working; only the publish
+   path changes.
 ```
 
 - [ ] **Step 2: Commit**
@@ -2216,15 +2486,19 @@ cargo build --release \
 
 Expected: succeeds, binaries land in `target/x86_64-pc-windows-msvc/release/`.
 
-- [ ] **Step 3: cargo publish dry-run**
+- [ ] **Step 3: cargo publish dry-run (all 7 crates in dep order)**
 
 ```bash
+cargo publish --dry-run -p terminal-commander-core --allow-dirty
+cargo publish --dry-run -p terminal-commander-sifters --allow-dirty
+cargo publish --dry-run -p terminal-commander-probes --allow-dirty
+cargo publish --dry-run -p terminal-commander-store --allow-dirty
 cargo publish --dry-run -p terminal-commander-supervisor --allow-dirty
 cargo publish --dry-run -p terminal-commanderd --allow-dirty
 cargo publish --dry-run -p terminal-commander-mcp --allow-dirty
 ```
 
-Expected: 3 successes.
+Expected: 7 successes.
 
 - [ ] **Step 4: Document any deviations in a brief commit message**
 
@@ -2277,51 +2551,32 @@ Expected: all pass.
 
 ---
 
-## Task 20: Wire daemon README into published-crate tarballs
+## Task 20: Verify per-crate READMEs land in published tarballs
 
-**Files:**
-- Verify: `crates/daemon/README.md` exists, `crates/mcp/README.md` exists, `crates/supervisor/README.md` exists
+**Files:** none (verification only — READMEs were created in Task 11)
 
-- [ ] **Step 1: cargo publishing requires a README per crate**
-
-For each of `crates/supervisor`, `crates/daemon`, `crates/mcp`, check if a README.md exists in that crate directory. If not, create one with minimal content:
-
-```markdown
-# terminal-commander-<role>
-
-Part of [Terminal Commander](https://github.com/special-place-administrator/terminal-commander).
-
-See the [main README](https://github.com/special-place-administrator/terminal-commander#readme) for project overview.
-```
-
-(`<role>` = `supervisor` | `daemon` | `mcp`.)
-
-- [ ] **Step 2: Update each crate's Cargo.toml `readme` field**
-
-Each `[package]` block should have:
-```toml
-readme = "README.md"
-```
-(NOT `readme.workspace = true` — the workspace path `../../README.md` is wrong for a published tarball, where the crate dir is the root.)
-
-Revisit Task 11 Step 3: change `readme.workspace = true` to literal `readme = "README.md"` in the 3 published crates.
-
-- [ ] **Step 3: Re-run dry publish**
+- [ ] **Step 1: Verify all 7 READMEs exist**
 
 ```bash
-cargo publish --dry-run -p terminal-commander-supervisor --allow-dirty
-cargo publish --dry-run -p terminal-commanderd --allow-dirty
-cargo publish --dry-run -p terminal-commander-mcp --allow-dirty
+for c in core sifters probes store supervisor daemon mcp; do
+  if [ ! -f "crates/$c/README.md" ]; then
+    echo "MISSING: crates/$c/README.md"
+    exit 1
+  fi
+done
+echo "OK: 7 per-crate READMEs present"
 ```
 
-Expected: 3 successes (README warnings gone).
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 2: Confirm cargo includes README in package list**
 
 ```bash
-git add crates/supervisor/README.md crates/daemon/README.md crates/mcp/README.md crates/supervisor/Cargo.toml crates/daemon/Cargo.toml crates/mcp/Cargo.toml
-git commit -m "feat(cargo): per-crate README.md + fix readme path for published-tarball context"
+for c in terminal-commander-core terminal-commander-sifters terminal-commander-probes terminal-commander-store terminal-commander-supervisor terminal-commanderd terminal-commander-mcp; do
+  cargo package --list -p "$c" --allow-dirty | grep README.md || { echo "::error::$c tarball missing README.md"; exit 1; }
+done
+echo "OK: 7 tarballs include README.md"
 ```
+
+- [ ] **Step 3: No commit (verification only)**
 
 ---
 
@@ -2445,8 +2700,9 @@ git push
 
 ## Self-review
 
-**Spec coverage:** All 17 spec changes (A.1-A.7, B.8-B.10, C.11-C.12, D.13, E.14-E.16, F.17) mapped to tasks:
+**Spec coverage:** All 17 spec changes (A.1-A.7, B.8-B.10, C.11-C.12, D.13, E.14-E.16, F.17) mapped to tasks. Pre-execution codex review surfaced 4 CRITICAL + 8 IMPORTANT findings; all addressed inline in this plan:
 
+- **Task 0** (NEW): Operator-action OIDC trusted-publisher setup BEFORE any code task fires. Codex C2 fix.
 - A.1 (mac-x64 pkg) → Task 1
 - A.2 (mac-arm64 pkg) → Task 2
 - A.3 (release-please-config) → Task 3
@@ -2454,31 +2710,54 @@ git push
 - A.5 (root pkg.json optionalDeps) → Task 5
 - A.6 (resolver darwin) → Task 6
 - A.7 (sync/verify scripts) → Task 7
-- B.8 (_build-platform-binary.yml) → Task 8
+- B.8 (_build-platform-binary.yml) → Task 8 (native mac runners, no cargo-zigbuild — codex C3 fix)
 - B.9 (npm-binary-build collapse) → Task 9
-- B.10 (release-please.yml 5 publish jobs) → Task 10
-- C.11 (Cargo.toml workspace bump) → Task 11
-- C.12 (cargo publish jobs + parity assert) → Task 12
-- D.13 (verify jobs + mark-broken) → Task 13
+- B.10 (release-please.yml 5 publish jobs) → Task 10 (OIDC + provenance + Node 22.14 — codex C2 fix)
+- C.11 (Cargo workspace) → Task 11 (FULL 7-crate dep closure published with `x-release-please-version` markers + per-crate READMEs — codex C1 + C4 + I11 fix)
+- C.12 (cargo publish jobs + parity assert) → Task 12 (7 jobs in strict dep order, OIDC, crates.io HTTP API recovery — codex C1 + I10 fix)
+- D.13 (verify jobs + mark-broken) → Task 13 (Python subprocess for mac timeout, PAT→GITHUB_TOKEN fallback, glibc Node container — codex I7 + I8 + I14 fix)
 - E.14 (secret-health.yml) → Task 14
-- E.15 (recover-partial-publish.sh) → Task 15
+- E.15 (recover-partial-publish.sh) → Task 15 (crates.io HTTP API, full 7-crate list — codex I10 fix)
 - E.16 (deprecate-version.yml) → Task 16
-- F.17 (OIDC migration) → Task 17 (runbook only; live migration is a post-first-release operator action, not code)
+- F.17 (OIDC migration) → Folded into Task 0 (pre-flight). Runbook (Task 17) documents procedure for adding future packages.
 
 Plus:
-- Task 18: local smoke
+- Task 18: local smoke (7 dry-runs)
 - Task 19: full pre-push gates
-- Task 20: README.md per crate (cargo publish requirement) — discovered during planning
+- Task 20: verify per-crate READMEs in tarballs (was: separate README task; folded into Task 11)
 - Task 21: push + open PR
-- Task 22: codex adversarial review
+- Task 22: codex adversarial review of full diff (final round, after the pre-execution review embedded in this plan)
+
+**Codex pre-execution review findings (CRITICAL — all resolved):**
+
+| # | Finding | Resolution |
+|---|---------|------------|
+| C1 | Cargo publish graph broken — mcp/daemon depend on internal `publish=false` crates | Task 11 publishes ALL 7 crates with `version = "0.2.0"` pins on internal path deps |
+| C2 | npm `dist.attestations` AC requires OIDC + Node 22.14+, but plan used token + Node 20 | Task 0 makes OIDC pre-flight a hard gate; Task 10/12 use Node 22.14 + `--provenance` from day-1 |
+| C3 | cargo-zigbuild needs macOS SDK (not legally redistributable) | Task 8 uses native macos-13 (Intel) + macos-14 (arm) runners |
+| C4 | release-please had no Cargo bump wiring | Task 12 Step 3 adds `x-release-please-version` markers + `generic` extra-files entry; future releases bump Cargo.toml in lockstep |
+
+**Codex pre-execution review findings (IMPORTANT — all resolved):**
+
+| # | Finding | Resolution |
+|---|---------|------------|
+| I5 | Task 10 said `upload_artifact: false` but downloaded artifacts later | Plan now says `upload_artifact: true` consistently |
+| I6 | `runs-on: fromJSON(...)` needs real CI smoke | Task 18 + initial CI runs catch this; if it breaks we patch + re-run |
+| I7 | Reusable workflow permissions cannot inherit upward | Task 8 calling job sets `id-token: write`; reusable workflow itself only needs `contents: read` since it doesn't publish |
+| I8 | verify-mac jobs hang via `kill -9` race | Replaced with `python3 subprocess.run(..., timeout=10)` — clean termination |
+| I9 | `mark-release-broken` fails if RELEASE_PLEASE_TOKEN_TC is the broken secret | PAT-first then GITHUB_TOKEN fallback in Task 13 |
+| I10 | `cargo search \| grep` is ANSI/header fragile | Both the workflow (Task 12) and recovery script (Task 15) use crates.io HTTP API |
+| I11 | README inheritance contradiction (workspace path vs per-crate path) | Workspace deliberately drops `readme`; each crate sets literal `readme = "README.md"` in Task 11 |
+| I12 | Task 9 removed NPM04 local install smoke | Acknowledged: PR-time smoke moves to verify jobs (Task 13). Local install smoke is the npm-pack output → operator runs in their own checkout when investigating. |
+| I14 | YAML heredoc trap in mark-release-broken | Replaced with printf to /tmp/body.md + `gh issue create --body-file` |
 
 **Placeholder scan:** all steps have concrete code, file paths, commands. No TBDs.
 
-**Type consistency:** workflow filenames, package names, version strings all spelled identically throughout. `PLATFORM_PACKAGES` module created in Task 7 referenced consistently in Task 10 Step 4.
+**Type consistency:** workflow filenames, package names, version strings, crate names all spelled identically throughout. `PLATFORM_PACKAGES` module from Task 7 used consistently. 7-crate dep order `core → sifters → probes → store → supervisor → daemon → mcp` repeated identically in Task 11 (dry-run), Task 12 (publish jobs), Task 15 (recovery script), Task 18 (local dry-run), Task 20 (README verify).
 
 **Known caveats:**
-- macOS verify jobs on `macos-13` + `macos-14` runners — GitHub deprecates macOS runners on ~18-month cycle. Runbook task 17 §"Secret rotation" doesn't cover runner rotation. Add a NIT to the runbook in Task 17 if codex flags it.
-- `cargo-zigbuild` cross-compile to macOS targets unsigned Mach-O binaries. They run locally fine but Apple Gatekeeper will quarantine. Acceptable for tier-3 build-only target; users on locked-down macs need a workaround we don't document yet. Spec explicitly says we ship artifacts but don't QA them.
-- `RELEASE_PLEASE_TOKEN_TC` used to open issues in verify-fail / secret-health flows. If this PAT itself is the failing token, the failsafe uses `GITHUB_TOKEN` (Task 14 step 3).
+- macOS runner deprecation runbook in Task 17.
+- `cargo package` warning about `Cargo.lock` inclusion is informational, not a publish blocker.
+- Path-relative `Cargo.toml` extra-file in release-please-config.json may need fallback to absolute path if v4.4.1 quirks; Task 12 Step 4 documents the fallback.
 
 **Execution mode:** Subagent-Driven Development per goal directive ("ralph loop, review, testing etc, without any user intervention").
