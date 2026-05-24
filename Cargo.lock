@@ -1050,6 +1050,7 @@ dependencies = [
  "terminal-commander-core",
  "terminal-commander-sifters",
  "terminal-commander-store",
+ "terminal-commander-supervisor",
  "terminal-commanderd",
  "thiserror",
  "time",

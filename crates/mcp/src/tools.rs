@@ -54,6 +54,7 @@ use terminal_commanderd::ipc::protocol::{
 };
 
 use crate::daemon_client::McpDaemonClient;
+use terminal_commander_supervisor::ensure::EnsureDaemonStatus;
 
 /// Wire-stable tool-status enum advertised by `system_discover`.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -360,6 +361,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpCommandStartParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let ipc = params.into_ipc();
         match self.daemon.call(IpcRequest::CommandStartCombed(ipc)).await {
             Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
@@ -386,6 +392,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpCommandStatusParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let job_id = parse_id::<terminal_commander_core::ids::JobIdKind>("job_id", &params.job_id)
             .map_err(invalid_params)?;
         let ipc = CommandStatusParams { job_id };
@@ -405,6 +416,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpBucketEventsSinceParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let ipc = params.into_ipc().map_err(invalid_params)?;
         match self.daemon.call(IpcRequest::BucketEventsSince(ipc)).await {
             Ok(IpcResponse::BucketEventsSince(r)) => json_tool_result(&bucket_events_payload(&r)),
@@ -421,6 +437,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpBucketWaitParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let ipc = params.into_ipc().map_err(invalid_params)?;
         match self.daemon.call(IpcRequest::BucketWait(ipc)).await {
             Ok(IpcResponse::BucketWait(r)) => json_tool_result(&bucket_wait_payload(&r)),
@@ -437,6 +458,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpBucketSummaryParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let bucket_id =
             parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", &params.bucket_id)
                 .map_err(invalid_params)?;
@@ -456,6 +482,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpEventContextParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let ipc = params.into_ipc().map_err(invalid_params)?;
         match self.daemon.call(IpcRequest::EventContext(ipc)).await {
             Ok(IpcResponse::EventContext(r)) => json_tool_result(&event_context_payload(&r)),
@@ -472,6 +503,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistrySearchParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let ipc = RegistrySearchParams {
             query: params.query,
             limit: params.limit,
@@ -493,6 +529,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryGetParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let ipc = RegistryGetParams {
             rule_id: params.rule_id,
             version: params.version,
@@ -515,6 +556,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryUpsertParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let definition: RuleDefinition = serde_json::from_str(&params.definition_json)
             .map_err(|e| invalid_params(format!("definition_json: {e}")))?;
         let ipc = RegistryUpsertParams { definition };
@@ -538,6 +584,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryTestParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let mut samples: Vec<RegistryTestSample> = Vec::with_capacity(params.samples.len());
         for s in params.samples {
             let stream = match s.stream.as_deref() {
@@ -576,6 +627,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryActivateParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let scope = match params.scope {
             Some(s) => Some(s.into_ipc_scope()?),
             None => None,
@@ -612,6 +668,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryDeactivateParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let scope = match params.scope {
             Some(s) => Some(s.into_ipc_scope()?),
             None => None,
@@ -645,6 +706,11 @@ impl TerminalCommanderMcpServer {
         description = "Snapshot of every currently-active rule. Returns id + version + severity + event_kind + tags."
     )]
     async fn registry_list_active(&self) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         match self.daemon.call(IpcRequest::RegistryListActive).await {
             Ok(IpcResponse::RegistryListActive(RegistryListActiveResponse { entries })) => {
                 json_tool_result(&serde_json::json!({ "entries": entries }))
@@ -662,6 +728,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpFileReadWindowParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let ipc = FileReadWindowParams {
             path: std::path::PathBuf::from(params.path),
             start_line: params.start_line,
@@ -695,6 +766,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpFileSearchParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let ipc = FileSearchParams {
             path: std::path::PathBuf::from(params.path),
             query: params.query,
@@ -727,6 +803,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpFileWatchStartParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let ipc = FileWatchStartParams {
             path: std::path::PathBuf::from(params.path),
             bucket_config: None,
@@ -758,6 +839,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpFileWatchStopParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         use terminal_commander_core::ids::JobIdKind;
         let watch_id =
             parse_id::<JobIdKind>("watch_id", &params.watch_id).map_err(invalid_params)?;
@@ -784,6 +870,11 @@ impl TerminalCommanderMcpServer {
     /// `file_watch_list` — snapshot of live file watches.
     #[tool(description = "Snapshot of every currently-live file watch.")]
     async fn file_watch_list(&self) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         match self.daemon.call(IpcRequest::FileWatchList).await {
             Ok(IpcResponse::FileWatchList(FileWatchListResponse { entries })) => {
                 json_tool_result(&serde_json::json!({ "entries": entries }))
@@ -801,6 +892,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpPtyCommandStartParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         let env: Vec<(String, String)> = params.env.into_iter().map(|e| (e.key, e.value)).collect();
         let ipc = PtyCommandStartParams {
             argv: params.argv,
@@ -836,6 +932,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpPtyCommandWriteStdinParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         use terminal_commander_core::ids::JobIdKind;
         let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
         let ipc = PtyCommandWriteStdinParams {
@@ -867,6 +968,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpPtyCommandStopParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         use terminal_commander_core::ids::JobIdKind;
         let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
         let ipc = PtyCommandStopParams { job_id };
@@ -896,6 +1002,11 @@ impl TerminalCommanderMcpServer {
     /// `pty_command_list` — snapshot of live PTY jobs.
     #[tool(description = "Snapshot of every currently-live PTY job.")]
     async fn pty_command_list(&self) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         match self.daemon.call(IpcRequest::PtyCommandList).await {
             Ok(IpcResponse::PtyCommandList(PtyCommandListResponse { entries })) => {
                 json_tool_result(&serde_json::json!({ "entries": entries }))
@@ -910,6 +1021,11 @@ impl TerminalCommanderMcpServer {
         description = "Bounded aggregate runtime snapshot across all runtimes. Read-only; never returns raw stream content."
     )]
     async fn runtime_state(&self) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         match self.daemon.call(IpcRequest::RuntimeState).await {
             Ok(IpcResponse::RuntimeState(r)) => {
                 let _ = std::any::type_name::<RuntimeStateResponse>();
@@ -925,6 +1041,11 @@ impl TerminalCommanderMcpServer {
         description = "Flat list of every live probe across command / pty / file-watch runtimes."
     )]
     async fn probe_list(&self) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         match self.daemon.call(IpcRequest::ProbeList).await {
             Ok(IpcResponse::ProbeList(ProbeListResponse { probes })) => {
                 json_tool_result(&serde_json::json!({ "probes": probes }))
@@ -942,6 +1063,11 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpProbeStatusParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(s) = self.daemon.status() {
+            if s.is_unavailable() {
+                return Err(daemon_unavailable_error(&s.current()));
+            }
+        }
         use terminal_commander_core::ids::ProbeIdKind;
         let probe_id =
             parse_id::<ProbeIdKind>("probe_id", &params.probe_id).map_err(invalid_params)?;
@@ -1016,6 +1142,19 @@ fn unexpected_variant(resp: &IpcResponse) -> McpError {
 #[must_use]
 pub fn format_ipc_error(e: &IpcError) -> String {
     format!("daemon ipc error [{:?}]: {}", e.code, e.message)
+}
+
+/// Build a structured `daemon_unavailable` MCP error envelope.
+/// Returned by daemon-requiring tools when the supervisor reports the
+/// daemon is not reachable, so callers get a typed error instead of a
+/// transport-level connection failure.
+fn daemon_unavailable_error(status: &EnsureDaemonStatus) -> McpError {
+    let payload = serde_json::json!({
+        "code": "daemon_unavailable",
+        "message": "terminal-commanderd is not reachable",
+        "details": status,
+    });
+    McpError::internal_error("daemon_unavailable", Some(payload))
 }
 
 /// Build an MCP `invalid_params` error from a free-form reason. Used

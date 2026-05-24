@@ -14,9 +14,11 @@
 //! Source-status: live (TC40).
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use terminal_commanderd::ipc::protocol::{IpcError, IpcRequest, IpcResponse};
+use terminal_commander_supervisor::ensure::EnsureDaemonStatus;
 
 /// Default UDS path used when nothing is passed on the command line
 /// or in `TC_SOCKET`. Mirrors the daemon's default
@@ -49,12 +51,32 @@ pub fn resolve_socket_path(cli_override: Option<&std::path::Path>) -> std::path:
     std::path::PathBuf::from("terminal-commanderd.sock")
 }
 
+/// Shared, cheaply-cloneable handle to the `EnsureDaemonStatus`
+/// returned at MCP startup. Tool dispatch reads this to decide whether
+/// to short-circuit with a `daemon_unavailable` envelope.
+#[derive(Debug, Clone)]
+pub struct DaemonStatusHandle(Arc<Mutex<EnsureDaemonStatus>>);
+
+impl DaemonStatusHandle {
+    pub fn new(status: EnsureDaemonStatus) -> Self {
+        Self(Arc::new(Mutex::new(status)))
+    }
+    #[allow(dead_code)]
+    pub fn current(&self) -> EnsureDaemonStatus {
+        self.0.lock().unwrap().clone()
+    }
+    pub fn is_unavailable(&self) -> bool {
+        matches!(*self.0.lock().unwrap(), EnsureDaemonStatus::Unavailable { .. })
+    }
+}
+
 /// Forwarding wrapper around the daemon's `DaemonClient`. Adds a
 /// monotonic correlation id per call so the IPC envelope is unique.
 #[derive(Debug, Clone)]
 pub struct McpDaemonClient {
     inner: terminal_commanderd::DaemonClient,
     next_id: Arc<AtomicU64>,
+    status: Option<DaemonStatusHandle>,
 }
 
 impl McpDaemonClient {
@@ -65,7 +87,24 @@ impl McpDaemonClient {
         Self {
             inner: terminal_commanderd::DaemonClient::new(socket_path),
             next_id: Arc::new(AtomicU64::new(1)),
+            status: None,
         }
+    }
+
+    /// Construct a client pre-loaded with the supervisor status from
+    /// startup. Tools use `status()` to short-circuit when unavailable.
+    #[must_use]
+    pub fn with_status(socket_path: impl Into<std::path::PathBuf>, status: DaemonStatusHandle) -> Self {
+        Self {
+            inner: terminal_commanderd::DaemonClient::new(socket_path),
+            next_id: Arc::new(AtomicU64::new(1)),
+            status: Some(status),
+        }
+    }
+
+    /// Return the supervisor status handle if one was set at construction.
+    pub fn status(&self) -> Option<DaemonStatusHandle> {
+        self.status.clone()
     }
 
     /// Override the per-call request timeout.
