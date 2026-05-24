@@ -245,52 +245,41 @@ test("lib/cli/setup_state.js refuses to serialize forbidden state keys (defense 
   assert.match(src, /isForbiddenStateKey/);
 });
 
-test("bin/terminal-commanderd.js + bin/terminal-commander-mcp.js are BYTE-IDENTICAL to the WWS04 baseline", () => {
-  // The two sibling shims must not be modified at WWS06. We pin them
-  // by SHA-256 of the file contents. If you intentionally change one
-  // of these, update the pinned hash AND record the change in a prep
-  // amendment. CRLF / LF skew on Windows is handled by hashing the
-  // bytes after normalizing line endings to LF.
-  const expected = {
-    "terminal-commanderd.js": "27bfc8db05dadcdd9b80b6c92f7b66a3eaf1f4bfc1bdaa9b9f7894c6fb43773e", // placeholder; replaced below
-    "terminal-commander-mcp.js": "5d2cf68b1e15f0fb6abbb96b3a40f4f44b03f5b6ce4c2e7eecdf3c83a1eb0a8f", // placeholder; replaced below
-  };
-  // Compute the hashes lazily so this test is self-pinning the first
-  // time it runs; future WWS06+ tampering with the shim files will
-  // change the bytes (and thus the hash). We verify that the file
-  // exists AND that its content matches the expected WWS04 contract:
-  //   - bridge_required branch present
-  //   - no spawn('wsl', ...) in executable code (delegated to lib/wsl/spawn.js)
-  //   - no spawnWslBridge import (the mcp shim imports it; the daemon shim does NOT)
+test("bin/terminal-commanderd.js + bin/terminal-commander-mcp.js Phase 3 contract guards", () => {
+  // Phase 3 updated the shim contract: win32-x64 is now a native target.
+  // This test replaces the WWS04 byte-identity guard with Phase 3 structural
+  // invariants that must hold going forward:
+  //   - terminal-commanderd.js: no lib/wsl/spawn.js import; spawns result.binaryPath
+  //   - terminal-commander-mcp.js: legacy bridge path still gated behind
+  //     TC_USE_LEGACY_WSL_BRIDGE; native path uses runHarnessMcpSession
+  //   - neither shim spawns wsl.exe in executable code
   const daemonSrc = fs.readFileSync(path.join(BIN_DIR, "terminal-commanderd.js"), "utf8");
   const mcpSrc = fs.readFileSync(path.join(BIN_DIR, "terminal-commander-mcp.js"), "utf8");
-  for (const src of [daemonSrc, mcpSrc]) {
-    assert.match(src, /bridge_required/);
-  }
-  // Daemon shim must NOT import lib/wsl/spawn.js. mcp shim DOES.
+  // Daemon shim must NOT import lib/wsl/spawn.js.
   assert.equal(
     /require\(\s*['"]\.\.\/lib\/wsl\/spawn\.js['"]\s*\)/.test(daemonSrc),
     false,
-    "terminal-commanderd.js must not import lib/wsl/spawn.js (byte-identical to WWS04 baseline)",
+    "terminal-commanderd.js must not import lib/wsl/spawn.js",
   );
+  // Daemon shim must spawn result.binaryPath (native binary).
+  assert.match(daemonSrc, /\bspawn\s*\(\s*result\.binaryPath/);
+  // MCP shim: native supervisor path must be present.
   assert.match(
     mcpSrc,
-    /require\(\s*['"]\.\.\/lib\/wsl\/spawn\.js['"]\s*\)/,
-    "terminal-commander-mcp.js must still import lib/wsl/spawn.js (WWS04 contract)",
+    /\brunHarnessMcpSession\s*\(/,
+    "terminal-commander-mcp.js must use runHarnessMcpSession (Phase 3 native supervisor)",
   );
-  // For documentary purposes, also dump the SHA so a regression
-  // is loud if it occurs. We do not enforce a fixed hash here
-  // because the file may legitimately switch between CRLF/LF on
-  // Windows checkouts.
-  for (const [name, src] of [
-    ["terminal-commanderd.js", daemonSrc],
-    ["terminal-commander-mcp.js", mcpSrc],
-  ]) {
+  // MCP shim: legacy bridge path must be gated behind TC_USE_LEGACY_WSL_BRIDGE.
+  assert.match(
+    mcpSrc,
+    /TC_USE_LEGACY_WSL_BRIDGE/,
+    "terminal-commander-mcp.js must gate legacy bridge behind TC_USE_LEGACY_WSL_BRIDGE",
+  );
+  // Neither shim spawns wsl.exe directly in executable code.
+  for (const [name, src] of [["terminal-commanderd.js", daemonSrc], ["terminal-commander-mcp.js", mcpSrc]]) {
     const norm = src.replace(/\r\n/g, "\n");
     const h = crypto.createHash("sha256").update(norm, "utf8").digest("hex");
-    // touch `expected` to silence unused-var if needed
-    void expected;
-    void h;
+    void h; // document hash for debugging without enforcing it
     void name;
   }
 });

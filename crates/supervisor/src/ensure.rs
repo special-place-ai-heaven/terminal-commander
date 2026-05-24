@@ -169,12 +169,23 @@ pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
             };
         }
     };
+    // Derive the TC_SOCKET env var from the user-selected endpoint so
+    // the daemon binds exactly the same path/pipe that the MCP adapter
+    // is probing. Without this, the daemon would fall back to its
+    // compiled-in default socket path while the supervisor probes the
+    // user-specified one, causing every cold-start readiness check to
+    // time out.
+    let tc_socket_val: std::ffi::OsString = match &opts.endpoint {
+        Endpoint::UnixSocket { path } => path.as_os_str().into(),
+        Endpoint::WindowsPipe { name } => name.into(),
+    };
     let mut cmd = std::process::Command::new(&opts.daemon_binary);
     cmd.arg("--data-dir")
         .arg(&opts.state_dir)
         .arg("start")
         .arg("--mode")
         .arg("ipc-server")
+        .env("TC_SOCKET", &tc_socket_val)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_file_err));

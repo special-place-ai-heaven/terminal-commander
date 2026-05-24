@@ -107,7 +107,7 @@ function spawnDaemonHidden(daemonBinary, dataDir, ipcEndpoint, env) {
     env: childEnv,
     stdio: ["ignore", logFd, logFd],
     shell: false,
-    detached: false,
+    detached: process.platform !== "win32",
     windowsHide: true,
   };
   if (process.platform === "win32") {
