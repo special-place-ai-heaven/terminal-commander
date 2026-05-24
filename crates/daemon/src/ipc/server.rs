@@ -219,14 +219,14 @@ async fn handle_connection(
 ) {
     let peer_cred = peer::resolve(&stream);
     // Build a PeerIdentity from the resolved cred (or Unknown).
-    let identity: PeerIdentity = match peer_cred {
-        Some(c) => PeerIdentity::Unix {
+    let identity: PeerIdentity = peer_cred.map_or_else(
+        || PeerIdentity::unknown_because("peer credentials unavailable"),
+        |c| PeerIdentity::Unix {
             uid: c.uid,
             gid: c.gid,
             pid: c.pid,
         },
-        None => PeerIdentity::unknown_because("peer credentials unavailable"),
-    };
+    );
 
     // Linux/WSL: fail-closed when peer creds are missing.
     #[cfg(any(target_os = "linux", target_os = "android"))]

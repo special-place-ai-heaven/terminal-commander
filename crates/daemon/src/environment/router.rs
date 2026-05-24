@@ -38,6 +38,11 @@ impl EnvironmentRouter {
     ///
     /// M1: only `EnvironmentSpec::WslDistro` on Windows triggers runner
     /// forwarding when the WSL runner client is available.
+    // On Linux/macOS the windows-only WSL runner arm is stripped, leaving
+    // no .await inside the function body. The async signature must stay
+    // for symmetry with the Windows build, so allow clippy::unused_async
+    // on non-Windows targets only.
+    #[cfg_attr(not(windows), allow(clippy::unused_async))]
     pub async fn route_request(
         _state: &Arc<DaemonState>,
         env: &EnvironmentSpec,
