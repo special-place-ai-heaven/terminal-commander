@@ -17,17 +17,20 @@ use crate::ensure::Endpoint;
 /// log file, the IPC endpoint (Unix), and any other per-user state.
 ///
 /// Resolution order:
-/// 1. `TC_DATA` env var (overrides everything).
+/// 1. `TC_DATA` env var (overrides everything; empty string is treated as unset).
 /// 2. Windows: `%LOCALAPPDATA%\terminal-commanderd\state`.
-/// 3. Unix: `$XDG_STATE_HOME/terminal-commanderd` or
-///    `$HOME/.local/share/terminal-commanderd`.
+/// 3. Unix: `$HOME/.local/share/terminal-commanderd`.
+///    NOTE: `XDG_STATE_HOME` is intentionally NOT consulted here. The daemon's
+///    `platform_default_data_dir()` ignores `XDG_STATE_HOME` and goes straight to
+///    `$HOME/.local/share/terminal-commanderd`. Consumers must probe the same path
+///    the daemon binds or they will always report `daemon: unavailable`.
 /// 4. Fallback: `$TMPDIR/terminal-commanderd/state`.
 ///
 /// The subdirectory name is `terminal-commanderd` (with the `d` suffix),
 /// matching `DaemonConfig`'s startup default exactly.
 #[must_use]
 pub fn resolve_state_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("TC_DATA") {
+    if let Some(p) = std::env::var("TC_DATA").ok().filter(|s| !s.is_empty()) {
         return PathBuf::from(p);
     }
     #[cfg(windows)]
@@ -38,9 +41,7 @@ pub fn resolve_state_dir() -> PathBuf {
     }
     #[cfg(unix)]
     {
-        if let Ok(p) = std::env::var("XDG_STATE_HOME") {
-            return PathBuf::from(p).join("terminal-commanderd");
-        }
+        // Do NOT consult XDG_STATE_HOME — daemon ignores it.
         if let Ok(p) = std::env::var("HOME") {
             return PathBuf::from(p)
                 .join(".local")
@@ -60,10 +61,11 @@ pub fn resolve_state_dir() -> PathBuf {
 /// - Unix: `<state_dir>/terminal-commanderd.sock`.
 ///   Matches `DaemonConfig::socket_path()` exactly.
 ///
-/// May be overridden by `TC_SOCKET` env var.
+/// May be overridden by `TC_SOCKET` env var (empty string is treated as unset,
+/// matching `apply_socket_env_override` in the daemon).
 #[must_use]
 pub fn resolve_socket_path() -> PathBuf {
-    if let Ok(p) = std::env::var("TC_SOCKET") {
+    if let Some(p) = std::env::var("TC_SOCKET").ok().filter(|s| !s.is_empty()) {
         return PathBuf::from(p);
     }
     #[cfg(windows)]
@@ -165,6 +167,75 @@ mod tests {
         assert!(
             !s.ends_with("-default"),
             "got {s} — pipe must match daemon DaemonConfig::pipe_name() which has no -default suffix"
+        );
+    }
+
+    #[test]
+    fn empty_tc_data_is_ignored() {
+        // SAFETY: see tc_data_env_overrides_everything comment.
+        let prev = std::env::var("TC_DATA").ok();
+        unsafe { std::env::set_var("TC_DATA", "") };
+        let result = resolve_state_dir();
+        match prev {
+            Some(p) => unsafe { std::env::set_var("TC_DATA", p) },
+            None => unsafe { std::env::remove_var("TC_DATA") },
+        }
+        // Empty must NOT produce an empty PathBuf — it must fall through
+        // to the platform default.
+        assert!(
+            !result.as_os_str().is_empty(),
+            "empty TC_DATA must fall through to platform default, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn empty_tc_socket_is_ignored() {
+        // SAFETY: see tc_data_env_overrides_everything comment.
+        let prev = std::env::var("TC_SOCKET").ok();
+        unsafe { std::env::set_var("TC_SOCKET", "") };
+        let result = resolve_socket_path();
+        match prev {
+            Some(p) => unsafe { std::env::set_var("TC_SOCKET", p) },
+            None => unsafe { std::env::remove_var("TC_SOCKET") },
+        }
+        assert!(
+            !result.as_os_str().is_empty(),
+            "empty TC_SOCKET must fall through to platform default, got {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn xdg_state_home_is_ignored_on_unix() {
+        // Matches daemon's platform_default_data_dir which does NOT consult XDG.
+        // SAFETY: see tc_data_env_overrides_everything comment.
+        let prev_xdg = std::env::var("XDG_STATE_HOME").ok();
+        let prev_tc = std::env::var("TC_DATA").ok();
+        let prev_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", "/should-be-ignored");
+            std::env::remove_var("TC_DATA");
+            std::env::set_var("HOME", "/test-home");
+        }
+        let result = resolve_state_dir();
+        unsafe {
+            match prev_xdg {
+                Some(p) => std::env::set_var("XDG_STATE_HOME", p),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+            match prev_tc {
+                Some(p) => std::env::set_var("TC_DATA", p),
+                None => std::env::remove_var("TC_DATA"),
+            }
+            match prev_home {
+                Some(p) => std::env::set_var("HOME", p),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert_eq!(
+            result,
+            std::path::PathBuf::from("/test-home/.local/share/terminal-commanderd"),
+            "XDG_STATE_HOME must NOT be consulted (daemon ignores it)"
         );
     }
 }
