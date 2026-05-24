@@ -81,6 +81,7 @@ print("pty bye", flush=True)
             .call(
                 1,
                 IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
                     argv: vec![
                         "python3".to_owned(),
                         "-u".to_owned(),
@@ -140,6 +141,7 @@ fn pty_command_rejects_shell_interpreter() {
             .call(
                 1,
                 IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
                     argv: vec!["bash".to_owned()],
                     cwd: None,
                     env: vec![],
@@ -168,6 +170,7 @@ fn pty_command_rejects_empty_argv() {
             .call(
                 1,
                 IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
                     argv: vec![],
                     cwd: None,
                     env: vec![],
@@ -201,6 +204,7 @@ fn pty_write_stdin_oversized_is_rejected() {
             .call(
                 1,
                 IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
                     argv: vec![
                         "python3".to_owned(),
                         "-u".to_owned(),
@@ -296,6 +300,7 @@ time.sleep(2)
             .call(
                 1,
                 IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
                     argv: vec![
                         "python3".to_owned(),
                         "-u".to_owned(),
