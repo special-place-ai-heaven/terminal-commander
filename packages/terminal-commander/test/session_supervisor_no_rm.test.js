@@ -44,16 +44,24 @@ test('SIGINT during cold-start wait returns early without spawning MCP', async (
 
   // Defensive timeout: even with the fake MCP exiting fast, if the
   // supervisor itself wedged we should fail loud rather than hang CI.
+  // Clear the timer on the success path so Node doesn't stay alive
+  // for the full window after the test passes.
   const TIMEOUT_MS = 15_000;
-  const outcome = await Promise.race([
-    sessionPromise,
-    new Promise((_, reject) =>
-      setTimeout(
-        () => reject(new Error(`runHarnessMcpSession did not resolve within ${TIMEOUT_MS}ms`)),
-        TIMEOUT_MS,
-      ),
-    ),
-  ]);
+  let timeoutHandle;
+  let outcome;
+  try {
+    outcome = await Promise.race([
+      sessionPromise,
+      new Promise((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new Error(`runHarnessMcpSession did not resolve within ${TIMEOUT_MS}ms`)),
+          TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 
   assert.equal(outcome.code, 130, `expected exit 130 on SIGINT, got ${outcome.code}`);
   assert.equal(outcome.signal, 'SIGINT', `expected signal SIGINT, got ${outcome.signal}`);
