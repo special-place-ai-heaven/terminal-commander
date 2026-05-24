@@ -30,6 +30,30 @@ use crate::config::DaemonConfig;
 use crate::policy::{PolicyAction, PolicyDecision};
 use crate::state::{BootstrapError, DaemonState};
 
+/// Initialize a non-blocking file appender that writes to
+/// `<data_dir>/logs/terminal-commanderd.log`.
+///
+/// Returns a [`tracing_appender::non_blocking::WorkerGuard`] that
+/// must be kept alive for the duration of the process — dropping it
+/// early will flush and close the writer prematurely.
+///
+/// Uses `try_init` so that a pre-existing global subscriber (e.g.
+/// in integration tests) does not cause a panic.
+fn init_file_logging(
+    data_dir: &std::path::Path,
+) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    let log_dir = data_dir.join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_appender = tracing_appender::rolling::never(&log_dir, "terminal-commanderd.log");
+    let (nb, guard) = tracing_appender::non_blocking(file_appender);
+    let _ = tracing_subscriber::fmt()
+        .with_writer(nb)
+        .with_ansi(false)
+        .with_target(false)
+        .try_init();
+    Some(guard)
+}
+
 /// Top-level runtime error.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -204,28 +228,27 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
 
     use crate::ipc::IpcServer;
 
+    let _log_guard = init_file_logging(&config.daemon.data_dir);
+
     let (state, rep) = run_self_check(config)?;
-    eprintln!("{}", rep.render());
+    tracing::info!("{}", rep.render());
 
     let socket_path = state.config.socket_path();
-    eprintln!(
-        "terminal-commanderd: binding UDS at {}",
-        socket_path.display()
-    );
+    tracing::info!("binding UDS at {}", socket_path.display());
     let server = IpcServer::new(Arc::new(state), socket_path);
     let handle = server
         .spawn()
         .map_err(|e| RuntimeError::Signal(format!("UDS bind: {e}")))?;
-    eprintln!(
-        "terminal-commanderd: IPC server bound. \
+    tracing::info!(
+        "IPC server bound. \
          Method set: system_discover, health, policy_status, self_check. \
          Send SIGINT (Ctrl-C) or SIGTERM to shut down."
     );
 
     wait_for_shutdown_signal().await?;
-    eprintln!("terminal-commanderd: shutdown signal received, draining...");
+    tracing::info!("shutdown signal received, draining...");
     handle.shutdown().await;
-    eprintln!("terminal-commanderd: IPC server exited cleanly.");
+    tracing::info!("IPC server exited cleanly.");
     Ok(())
 }
 
@@ -236,26 +259,26 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
 
     use crate::ipc::PipeServer;
 
+    let _log_guard = init_file_logging(&config.daemon.data_dir);
+
     let (state, rep) = run_self_check(config)?;
-    eprintln!("{}", rep.render());
+    tracing::info!("{}", rep.render());
 
     let pipe_name = state.config.pipe_name();
-    eprintln!(
-        "terminal-commanderd: binding named pipe at {pipe_name}"
-    );
+    tracing::info!("binding named pipe at {pipe_name}");
     let server = PipeServer::new(Arc::new(state), pipe_name);
     let handle = server
         .spawn()
         .map_err(|e| RuntimeError::Signal(format!("pipe bind: {e}")))?;
-    eprintln!(
-        "terminal-commanderd: IPC server bound (Windows named pipe). \
+    tracing::info!(
+        "IPC server bound (Windows named pipe). \
          Send Ctrl-C to shut down."
     );
 
     wait_for_shutdown_signal_windows().await?;
-    eprintln!("terminal-commanderd: shutdown signal received, draining...");
+    tracing::info!("shutdown signal received, draining...");
     handle.shutdown().await;
-    eprintln!("terminal-commanderd: IPC server exited cleanly.");
+    tracing::info!("IPC server exited cleanly.");
     Ok(())
 }
 
