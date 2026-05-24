@@ -1383,13 +1383,26 @@ jobs:
           terminal-commander-mcp --version
           # Stdio probe: 10s timeout via PowerShell job, Stop-Job + Remove-Job
           # so we don't leak the runspace. Wait-Job returns $null on timeout.
+          # Linux + Mac verify treat timeout as pass + non-zero quick exit as fail.
+          # Windows must behave the same: only timeout is acceptable; any other
+          # non-success state (Failed, fast non-zero exit) must fail loud.
           $msg = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}'
           $job = Start-Job -ScriptBlock {
             param($m) $m | terminal-commander-mcp
           } -ArgumentList $msg
           $done = Wait-Job $job -Timeout 10
-          if ($null -eq $done) {
+          $timedOut = ($null -eq $done)
+          if ($timedOut) {
             Write-Host "smoke: stdio probe timed out (expected for unbounded server)"
+          } else {
+            # Job completed within 10s. Receive output + inspect state.
+            $output = Receive-Job $job -ErrorAction SilentlyContinue
+            if ($output) { $output | ForEach-Object { Write-Host "stdio: $_" } }
+            if ($job.State -ne 'Completed') {
+              Stop-Job $job -ErrorAction SilentlyContinue
+              Remove-Job $job -Force -ErrorAction SilentlyContinue
+              throw "verify-windows-x64: MCP exited fast in state '$($job.State)' — install is broken"
+            }
           }
           Stop-Job $job -ErrorAction SilentlyContinue
           Remove-Job $job -Force -ErrorAction SilentlyContinue
