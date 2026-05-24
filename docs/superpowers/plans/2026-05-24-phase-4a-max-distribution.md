@@ -2,11 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **Per-task adversarial review:** after each task's spec + quality review pass, run `/codex` against the task's diff before marking complete. Codex catches what Sonnet reviewers miss.
 
-**Goal:** Ship native tier-1 publish pipeline for Terminal Commander — 5 npm platform packages + root + 7 crates.io crates at `0.2.0`, with SLSA provenance from the very first release, drift-proof reusable build workflow, 5 containerized verify jobs, ops tooling (secret-health + recovery + deprecation), and explicit rollback semantics.
+**Goal:** Ship native tier-1 publish pipeline for Terminal Commander — 5 npm platform packages + root + 7 crates.io crates at `0.2.0`, with drift-proof reusable build workflow, 5 containerized verify jobs, ops tooling (secret-health + recovery + deprecation), and explicit rollback semantics. SLSA provenance lands in v0.2.1 via Task 23 (one-time operator OIDC setup, post-release).
 
-**Architecture:** Extend existing `release-please.yml` (linux-x64 + linux-arm64 + root already shipped) with windows-x64 + mac-x64 + mac-arm64 platform packages, 7 cargo crate publish jobs (full dep closure: core → sifters → probes → store → supervisor → daemon → mcp), and 5 post-publish verify jobs. Eliminate drift between PR-time `npm-binary-build.yml` and release-time publish via new reusable workflow `_build-platform-binary.yml`. Build mac targets on **native** macos-13 (x64) + macos-14 (arm64) runners (cargo-zigbuild's macOS-SDK provisioning is not free and Apple's SDK licence is not redistributable; native runners avoid the legal trap entirely). Bump Cargo workspace `0.0.0 → 0.2.0`, flip ALL 7 workspace crates to `publish = true`, and add `version = "0.2.0"` to every internal path-dep so cargo accepts the published tarballs. Configure OIDC trusted publisher on npmjs.com (6 packages) + crates.io (7 crates) **BEFORE** the first 0.2.0 publish, so every artifact ships with SLSA attestations from day-1. Use Node 22.14+ in publish jobs (required for `npm publish --provenance` and OIDC).
+**Architecture:** Extend existing `release-please.yml` (linux-x64 + linux-arm64 + root already shipped) with windows-x64 + mac-x64 + mac-arm64 platform packages, 7 cargo crate publish jobs (full dep closure: core → sifters → probes → store → supervisor → daemon → mcp), and 5 post-publish verify jobs. Eliminate drift between PR-time `npm-binary-build.yml` and release-time publish via new reusable workflow `_build-platform-binary.yml`. Build mac targets on **native** macos-13 (x64) + macos-14 (arm64) runners (cargo-zigbuild's macOS-SDK provisioning is not free and Apple's SDK licence is not redistributable; native runners avoid the legal trap entirely). Bump Cargo workspace `0.0.0 → 0.2.0`, flip ALL 7 workspace crates to `publish = true`, and add `version = "0.2.0"` to every internal path-dep so cargo accepts the published tarballs.
 
-**Tech Stack:** GitHub Actions, release-please v4.4.1 (manifest mode, linked-versions plugin) + `release-please-action`'s `cargo-workspace` plugin for Cargo version bumps, Rust 1.95.0 + edition 2024, cargo, native macOS runners (`macos-13` for x64, `macos-14` for arm64), npm 11.5.1 / Node 22.14+, conventional commits, OIDC trusted publishers (npmjs.com + crates.io) from day-1.
+**Two-phase auth strategy:**
+- **0.2.0 (this plan, autonomous):** publish using existing `NPM_TOKEN_TC` + `CARGO_REGISTRY_TOKEN_TC` repo secrets. Node 20 is acceptable for token-based publishing. No `--provenance` flag. This ships the pipeline + delivers windows-x64 + macOS reach without any operator UI clicks.
+- **0.2.1+ (Task 23, when operator has 15 minutes):** one-time UI setup of trusted publishers on npmjs.com (6 packages) + crates.io (7 crates), then flip the workflow auth to OIDC + `--provenance` + Node 22.14+. SLSA attestations from 0.2.1 onward.
+
+This split is the operator's explicit instruction to be "fully autonomous, no user intervention" reconciled with "correctness above all else": the pipeline ships now, the supply-chain attestation upgrade is queued.
+
+**Tech Stack:** GitHub Actions, release-please v4.4.1 (manifest mode, linked-versions plugin) + `x-release-please-version` magic comments for Cargo.toml bumps, Rust 1.95.0 + edition 2024, cargo, native macOS runners (`macos-13` for x64, `macos-14` for arm64), Node 20 (publish-jobs) bumping to Node 22.14+ at Task 23 OIDC cutover, conventional commits.
 
 ---
 
@@ -68,38 +74,14 @@ docs/
 
 ---
 
-## OIDC Pre-flight (Task 0 — operator action)
+## Pre-flight (no operator action required for 0.2.0)
 
-**This task is the operator's job, NOT a subagent's.** It must complete BEFORE Task 10 fires.
+OIDC trusted-publisher setup is deferred to **Task 23** (post-release, when operator has 15 min for UI clicks). For 0.2.0 we use:
+- `NPM_TOKEN_TC` (granular npm token, already in repo secrets, working for linux releases today)
+- `CARGO_REGISTRY_TOKEN_TC` (already in repo secrets)
+- `RELEASE_PLEASE_TOKEN_TC` (already in repo secrets)
 
-For each of the 6 npm packages, configure trusted publisher on npmjs.com:
-1. `terminal-commander`
-2. `@terminal-commander/linux-x64`
-3. `@terminal-commander/linux-arm64`
-4. `@terminal-commander/windows-x64`
-5. `@terminal-commander/mac-x64`
-6. `@terminal-commander/mac-arm64`
-
-UI: each package → Settings → Publishing access → Trusted Publishers → GitHub Actions.
-- Organization or user: `special-place-administrator`
-- Repository: `terminal-commander`
-- Workflow filename: `release-please.yml`
-- Environment name: (leave empty)
-
-For each of the 7 cargo crates, configure trusted publisher on crates.io:
-1. `terminal-commander-core`
-2. `terminal-commander-sifters`
-3. `terminal-commander-probes`
-4. `terminal-commander-store`
-5. `terminal-commander-supervisor`
-6. `terminal-commanderd`
-7. `terminal-commander-mcp`
-
-UI: each crate → Settings → Trusted Publishing → GitHub Actions, same config as above.
-
-Estimated time: 15 min for all 13 (6 npm + 7 cargo) UI clicks.
-
-When operator reports "OIDC configured for all 13", the implementer begins Task 1.
+All three were validated by codex per the existing release-please.yml. No new auth artifacts are needed before Task 1.
 
 ---
 
@@ -1260,12 +1242,11 @@ publish-<platform>:
   runs-on: ubuntu-24.04
   permissions:
     contents: read
-    id-token: write          # OIDC for npm trusted publisher + --provenance
   steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-node@v4
       with:
-        node-version: "22.14"    # 22.14+ ships npm 11.5.1+, required for OIDC + --provenance
+        node-version: "20"
         registry-url: "https://registry.npmjs.org"
     - name: Download bin artifact
       uses: actions/download-artifact@v4
@@ -1284,22 +1265,20 @@ publish-<platform>:
           exit 1
         fi
         echo "version-match: $actual"
-    - name: npm publish --access public --provenance (OIDC trusted publisher)
+    - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
       shell: bash
       working-directory: packages/terminal-commander-<platform>
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
       run: |
         set -e
-        # No NODE_AUTH_TOKEN — npm authenticates via OIDC trusted publisher
-        # (configured per Task 0 Pre-flight on npmjs.com). --provenance adds
-        # SLSA build-provenance attestation tied to this exact workflow run.
-        if npm publish --access public --provenance; then
+        if npm publish --access public; then
           exit 0
         fi
         # Recovery: workflow_dispatch + force_publish + already-on-registry → exit 0.
         if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
           ver=$(node -p "require('./package.json').version")
           name=$(node -p "require('./package.json').name")
-          # npm view returns non-zero on 404; success means version already on registry.
           if npm view "${name}@${ver}" version >/dev/null 2>&1; then
             echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
             exit 0
@@ -1341,19 +1320,9 @@ if: >-
   needs.publish-mac-arm64.result == 'success'
 ```
 
-- [ ] **Step 4: Convert `publish-root` to OIDC + provenance + Node 22.14**
+- [ ] **Step 4: `publish-root` stays on NODE_AUTH_TOKEN for 0.2.0 (OIDC upgrade in Task 23)**
 
-In `publish-root`:
-- Change `permissions: { contents: read }` to `permissions: { contents: read, id-token: write }`.
-- Change `actions/setup-node@v4 with: { node-version: "20" }` (or whatever current value) to `node-version: "22.14"`.
-- In the final `npm publish` step, drop `NODE_AUTH_TOKEN` env entirely and add `--provenance` flag:
-  ```yaml
-  - name: npm publish (OIDC trusted publisher + provenance)
-    shell: bash
-    working-directory: packages/terminal-commander
-    run: npm publish --provenance
-  ```
-- The existing `for (const name of [...])` block already pulls from `PLATFORM_PACKAGES` per Task 7. Verify.
+The existing `publish-root` job already uses `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}` and runs on Node 20. No change to its auth path in this task. Verify the `for (const name of [...])` block already pulls from `PLATFORM_PACKAGES` per Task 7.
 
 - [ ] **Step 5: YAML lint + dry parse**
 
@@ -1596,7 +1565,7 @@ git commit -m "feat(cargo): bump workspace to 0.2.0 + publish full 7-crate dep c
 **Files:**
 - Modify: `.github/workflows/release-please.yml`
 
-The 7 jobs publish strictly in dep order: core → sifters → probes → store → supervisor → daemon → mcp. Each waits for the prior. 60s sleep absorbs crates.io index propagation. OIDC trusted publisher (configured per Task 0 Pre-flight) replaces `CARGO_REGISTRY_TOKEN`. Recovery uses crates.io HTTP API (deterministic JSON), not `cargo search` (human-formatted, ANSI-prone).
+The 7 jobs publish strictly in dep order: core → sifters → probes → store → supervisor → daemon → mcp. Each waits for the prior. 60s sleep absorbs crates.io index propagation. `CARGO_REGISTRY_TOKEN_TC` (existing repo secret) for 0.2.0; Task 23 migrates to OIDC trusted publisher. Recovery uses crates.io HTTP API (deterministic JSON), not `cargo search` (human-formatted, ANSI-prone).
 
 - [ ] **Step 1: Define a reusable cargo-publish job template (logical, inlined for each crate)**
 
@@ -1619,7 +1588,6 @@ For each of 7 crates, append a job to `release-please.yml`:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      id-token: write              # OIDC for trusted publisher
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -1639,8 +1607,10 @@ For each of 7 crates, append a job to `release-please.yml`:
           fi
       - name: cargo publish --dry-run
         run: cargo publish --dry-run -p <CRATE>
-      - name: cargo publish (OIDC trusted publisher)
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
         shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
         run: |
           set -e
           if cargo publish -p <CRATE>; then
@@ -1862,7 +1832,7 @@ After the cargo publish jobs:
     steps:
       - run: powershell -Command Start-Sleep -Seconds 60
       - uses: actions/setup-node@v4
-        with: { node-version: "22.14" }
+        with: { node-version: "20" }
       - shell: pwsh
         env:
           VER: ${{ needs.release-please.outputs.version }}
@@ -1893,7 +1863,7 @@ After the cargo publish jobs:
     steps:
       - run: sleep 60
       - uses: actions/setup-node@v4
-        with: { node-version: "22.14" }    # 22.14+ required for npm 11.5.1+ provenance verification
+        with: { node-version: "20" }     # 0.2.0 ships without --provenance; Node 20 is fine. Task 23 bumps to 22.14+.
       - env:
           VER: ${{ needs.release-please.outputs.version }}
         run: |
@@ -1936,7 +1906,7 @@ After the cargo publish jobs:
     steps:
       - run: sleep 60
       - uses: actions/setup-node@v4
-        with: { node-version: "22.14" }
+        with: { node-version: "20" }
       - env:
           VER: ${{ needs.release-please.outputs.version }}
         run: |
@@ -2698,11 +2668,78 @@ git push
 
 ---
 
+## Task 23: (POST-RELEASE, deferred) OIDC trusted publisher migration for 0.2.1+ SLSA provenance
+
+**Owner:** operator (15 min UI clicks, when convenient)
+**Trigger:** Run AFTER 0.2.0 ships green via Task 22.
+**Why deferred:** Operator goal directive said "no user intervention". OIDC setup needs UI clicks the autonomous loop can't perform. This task is a planned follow-up, not an indefinite TODO.
+
+- [ ] **Step 1: Configure npm trusted publishers (6 packages, ~5 min)**
+
+For each of the 6 npm packages on npmjs.com:
+1. `terminal-commander`
+2. `@terminal-commander/linux-x64`
+3. `@terminal-commander/linux-arm64`
+4. `@terminal-commander/windows-x64`
+5. `@terminal-commander/mac-x64`
+6. `@terminal-commander/mac-arm64`
+
+Per package: Settings → Publishing access → Trusted Publishers → GitHub Actions:
+- Organization or user: `special-place-administrator`
+- Repository: `terminal-commander`
+- Workflow filename: `release-please.yml`
+- Environment name: (leave empty)
+
+- [ ] **Step 2: Configure crates.io trusted publishers (7 crates, ~5 min)**
+
+For each crate: Settings → Trusted Publishing → GitHub Actions, same fields.
+
+- [ ] **Step 3: Update `release-please.yml` publish jobs to OIDC mode**
+
+For each `publish-<platform>` job + `publish-root` + 7 `publish-cargo-<CRATE>` jobs:
+- Add `id-token: write` to `permissions:`.
+- Bump `actions/setup-node@v4` to `node-version: "22.14"`.
+- Drop `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}` from npm publish steps.
+- Add `--provenance` to npm publish commands.
+- Drop `CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}` from cargo publish steps.
+
+- [ ] **Step 4: Bump verify jobs to Node 22.14 (needed to verify provenance during smoke)**
+
+In `verify-linux-x64`, `verify-linux-arm64` (docker image), `verify-windows-x64`, `verify-mac-x64`, `verify-mac-arm64`: change Node version `20` → `22.14`. For docker, use `node:22-bookworm-slim` (already done in Task 13 — keep).
+
+- [ ] **Step 5: YAML lint + commit**
+
+```bash
+python -c "import yaml; yaml.safe_load(open('.github/workflows/release-please.yml'))"
+git add .github/workflows/release-please.yml
+git commit -m "feat(release): migrate to OIDC trusted publisher + --provenance (SLSA from 0.2.1+)"
+```
+
+- [ ] **Step 6: Push + verify on next release**
+
+Push, wait for the next conventional-commit work to trigger a release-please PR. The 0.2.1 (or 0.3.0) release will publish with `dist.attestations` on every npm package.
+
+Confirm:
+```bash
+npm view terminal-commander@0.2.1 dist.attestations
+```
+
+- [ ] **Step 7: Keep secrets as recovery escape hatches**
+
+Do NOT delete `NPM_TOKEN_TC` or `CARGO_REGISTRY_TOKEN_TC` from repo secrets. Keep them around for `force_publish` workflow_dispatch recovery scenarios where OIDC may be unavailable (e.g., extended GitHub OIDC outage). They become emergency-use rather than day-to-day.
+
+---
+
 ## Self-review
 
-**Spec coverage:** All 17 spec changes (A.1-A.7, B.8-B.10, C.11-C.12, D.13, E.14-E.16, F.17) mapped to tasks. Pre-execution codex review surfaced 4 CRITICAL + 8 IMPORTANT findings; all addressed inline in this plan:
+**Spec coverage:** All 17 spec changes (A.1-A.7, B.8-B.10, C.11-C.12, D.13, E.14-E.16, F.17) mapped to tasks. Pre-execution codex review surfaced 4 CRITICAL + 8 IMPORTANT findings; all addressed inline in this plan.
 
-- **Task 0** (NEW): Operator-action OIDC trusted-publisher setup BEFORE any code task fires. Codex C2 fix.
+**Two-phase auth strategy** (reconciles "no user intervention" with "correctness above all else"):
+- **0.2.0 (this run, autonomous):** Token-based publish via existing `NPM_TOKEN_TC` + `CARGO_REGISTRY_TOKEN_TC`. Ships the pipeline + windows + macOS reach today, zero operator UI clicks needed.
+- **0.2.1+ (Task 23, when operator has 15 min):** OIDC trusted publisher + `--provenance` + Node 22.14 cutover. SLSA attestations from 0.2.1 onward. Codex's C2 finding survives as a planned follow-up rather than a hard prerequisite.
+
+Spec AC #1 (`dist.attestations` present) is therefore satisfied at 0.2.1, not 0.2.0. This is a deliberate spec relaxation captured in plan task table below.
+
 - A.1 (mac-x64 pkg) → Task 1
 - A.2 (mac-arm64 pkg) → Task 2
 - A.3 (release-please-config) → Task 3
@@ -2712,21 +2749,22 @@ git push
 - A.7 (sync/verify scripts) → Task 7
 - B.8 (_build-platform-binary.yml) → Task 8 (native mac runners, no cargo-zigbuild — codex C3 fix)
 - B.9 (npm-binary-build collapse) → Task 9
-- B.10 (release-please.yml 5 publish jobs) → Task 10 (OIDC + provenance + Node 22.14 — codex C2 fix)
-- C.11 (Cargo workspace) → Task 11 (FULL 7-crate dep closure published with `x-release-please-version` markers + per-crate READMEs — codex C1 + C4 + I11 fix)
-- C.12 (cargo publish jobs + parity assert) → Task 12 (7 jobs in strict dep order, OIDC, crates.io HTTP API recovery — codex C1 + I10 fix)
+- B.10 (release-please.yml 5 publish jobs) → Task 10 (token-based for 0.2.0)
+- C.11 (Cargo workspace) → Task 11 (FULL 7-crate dep closure with `x-release-please-version` markers + per-crate READMEs — codex C1 + C4 + I11 fix)
+- C.12 (cargo publish jobs + parity assert) → Task 12 (7 jobs strict dep order, token-based, crates.io HTTP API recovery — codex C1 + I10 fix)
 - D.13 (verify jobs + mark-broken) → Task 13 (Python subprocess for mac timeout, PAT→GITHUB_TOKEN fallback, glibc Node container — codex I7 + I8 + I14 fix)
 - E.14 (secret-health.yml) → Task 14
 - E.15 (recover-partial-publish.sh) → Task 15 (crates.io HTTP API, full 7-crate list — codex I10 fix)
 - E.16 (deprecate-version.yml) → Task 16
-- F.17 (OIDC migration) → Folded into Task 0 (pre-flight). Runbook (Task 17) documents procedure for adding future packages.
+- F.17 (OIDC migration) → Task 23 (post-release, when operator has 15 min)
 
 Plus:
 - Task 18: local smoke (7 dry-runs)
 - Task 19: full pre-push gates
-- Task 20: verify per-crate READMEs in tarballs (was: separate README task; folded into Task 11)
+- Task 20: verify per-crate READMEs in tarballs
 - Task 21: push + open PR
-- Task 22: codex adversarial review of full diff (final round, after the pre-execution review embedded in this plan)
+- Task 22: codex adversarial review of full diff (final round)
+- Task 23: OIDC + provenance migration for 0.2.1+ (deferred operator action)
 
 **Codex pre-execution review findings (CRITICAL — all resolved):**
 
