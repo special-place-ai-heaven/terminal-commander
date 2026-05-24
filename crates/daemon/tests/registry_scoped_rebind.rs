@@ -74,6 +74,7 @@ fn sleeper(
     correlation: u64,
 ) -> impl std::future::Future<Output = IpcResponse> + '_ {
     let req = IpcRequest::CommandStartCombed(CommandStartParams {
+        environment: None,
         argv: vec!["sleep".to_owned(), "1".to_owned()],
         cwd: None,
         env: vec![],

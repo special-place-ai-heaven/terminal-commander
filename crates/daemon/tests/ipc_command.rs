@@ -64,6 +64,7 @@ fn build_server(data: &std::path::Path) -> (Arc<DaemonState>, terminal_commander
 
 fn small_start_params(argv: &[&str]) -> CommandStartParams {
     CommandStartParams {
+        environment: None,
         argv: argv.iter().map(|s| (*s).to_owned()).collect(),
         cwd: None,
         env: Vec::new(),
