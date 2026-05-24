@@ -42,10 +42,13 @@ jobs:
     # All 5 platforms use NATIVE runners. cargo-zigbuild was the prior
     # plan, but Apple's macOS SDK is not legally redistributable and the
     # public `cargo-zigbuild` Docker images bundling it have a murky
-    # licence story. macos-13 / macos-14 GitHub-hosted runners ship the
-    # SDK by default. Cost difference: macOS minutes are 10x linux on
-    # public repos but $0 on private — irrelevant here.
-    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-24.04","linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"macos-13","mac-arm64":"macos-14"}')[inputs.platform] }}
+    # licence story. GitHub-hosted macOS runners ship the SDK by default.
+    #
+    # Runner labels (verified 2026-05-25):
+    #   - macos-13 was retired 2025-12-04. Use macos-15-intel for Intel.
+    #   - macos-14 still active for Apple Silicon (M1+).
+    # When GitHub deprecates either, see runbook §"macOS runner deprecation".
+    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-24.04","linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"macos-15-intel","mac-arm64":"macos-14"}')[inputs.platform] }}
     outputs:
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
     env:
@@ -101,10 +104,13 @@ jobs:
       - name: Smoke — --version (native runner, so always works)
         shell: bash
         run: |
-          set -e
+          # pipefail so a crashing binary doesn't get masked by head's exit 0.
+          set -euo pipefail
           bin_dir="${PLATFORM_PKG_DIR}/bin"
           for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
-            "./${bin_dir}/${bin}${EXE_SUFFIX}" --version 2>&1 | head -5
+            # Capture output FIRST (preserves binary's exit code), then truncate for log.
+            out=$("./${bin_dir}/${bin}${EXE_SUFFIX}" --version 2>&1)
+            printf '%s\n' "$out" | head -5
           done
 
       - name: Compute artifact metadata
@@ -113,11 +119,24 @@ jobs:
         run: |
           echo "artifact_name=tc-bin-${{ inputs.platform }}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload bin/ as artifact
+      # actions/upload-artifact@v4 zips the path before upload, which DROPS
+      # the executable bit on Linux/macOS (downloads come back as 0644).
+      # Tar the bin/ dir first to preserve the +x mode. Consumers then untar
+      # via `tar -xf bin.tar` after download-artifact.
+      - name: Tar bin/ to preserve executable bit
+        if: inputs.upload_artifact == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${PLATFORM_PKG_DIR}"
+          tar -cf bin.tar bin/
+          ls -la bin.tar
+
+      - name: Upload bin.tar as artifact
         if: inputs.upload_artifact == true
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.artifact_name }}
-          path: ${{ env.PLATFORM_PKG_DIR }}/bin/
+          path: ${{ env.PLATFORM_PKG_DIR }}/bin.tar
           if-no-files-found: error
           retention-days: 14
