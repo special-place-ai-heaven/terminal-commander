@@ -60,7 +60,7 @@ async function runBootstrap(opts) {
   const mode = o.mode || "cli";
   const lines = [];
   const failSoft = mode === "install" || mode === "lazy";
-  const emitOutput = o.emitOutput !== false;
+  const emitOutput = o.emitOutput === true;
   const autoConfigure = mode === "install" || mode === "lazy" || o.auto_configure === true;
 
   if (shouldSkipBootstrap(env)) {

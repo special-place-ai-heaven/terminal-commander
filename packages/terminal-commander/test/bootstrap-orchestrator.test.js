@@ -106,6 +106,78 @@ test("runBootstrap cli mode fails loudly when requested harness write fails", as
   assert.equal(r.harness_results[0].harness_status, "backup_failed");
 });
 
+test("runBootstrap returns diagnostics without writing stderr by default", async () => {
+  const writes = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = function write(chunk, ...args) {
+    writes.push(String(chunk));
+    if (typeof args[args.length - 1] === "function") {
+      args[args.length - 1]();
+    }
+    return true;
+  };
+  try {
+    const r = await runBootstrap({
+      mode: "cli",
+      platform: "linux",
+      env: { HOME: process.env.HOME || process.env.USERPROFILE || "/tmp" },
+      force: true,
+      acquireLock: false,
+      skipDaemonAutostart: true,
+      writeAllHarnesses: () => [
+        {
+          id: "codex-cli",
+          status: "failed",
+          harness_status: "backup_failed",
+          hint: "terminal-commander: codex config.toml backup failed",
+        },
+      ],
+    });
+    assert.equal(r.status, "harness_failed");
+    assert.match(r.output, /codex config\.toml backup failed/);
+    assert.deepEqual(writes, []);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+});
+
+test("runBootstrap writes stderr only when emitOutput is explicit", async () => {
+  const writes = [];
+  const originalWrite = process.stderr.write;
+  process.stderr.write = function write(chunk, ...args) {
+    writes.push(String(chunk));
+    if (typeof args[args.length - 1] === "function") {
+      args[args.length - 1]();
+    }
+    return true;
+  };
+  try {
+    const r = await runBootstrap({
+      mode: "cli",
+      platform: "linux",
+      env: { HOME: process.env.HOME || process.env.USERPROFILE || "/tmp" },
+      force: true,
+      acquireLock: false,
+      skipDaemonAutostart: true,
+      emitOutput: true,
+      writeAllHarnesses: () => [
+        {
+          id: "codex-cli",
+          status: "failed",
+          harness_status: "backup_failed",
+          hint: "terminal-commander: codex config.toml backup failed",
+        },
+      ],
+    });
+    assert.equal(r.status, "harness_failed");
+    assert.deepEqual(writes, [
+      "terminal-commander: codex config.toml backup failed\n",
+    ]);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+});
+
 test("runBootstrap install mode keeps provider write failures fail-soft", async () => {
   const r = await runBootstrap({
     mode: "install",
