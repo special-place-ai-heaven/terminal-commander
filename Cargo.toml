@@ -19,8 +19,8 @@ edition = "2024"
 rust-version = "1.92"
 license = "Apache-2.0"
 authors = ["The Terminal Commander Authors"]
-repository = "https://github.com/special-place-administrator/terminal-commander"
-homepage = "https://github.com/special-place-administrator/terminal-commander"
+repository = "https://github.com/special-place-ai-heaven/terminal-commander"
+homepage = "https://github.com/special-place-ai-heaven/terminal-commander"
 # NOTE: workspace-level `readme` is intentionally omitted. Cargo resolves
 # workspace-inherited `readme` paths relative to the workspace root, which
 # does not work inside published per-crate tarballs (the workspace root is

@@ -27,7 +27,7 @@ test("runBootstrap install mode auto-configures harnesses (force)", async () => 
     platform: "linux",
     env: {
       npm_lifecycle_event: "install",
-      npm_lifecycle_script: "node scripts/install.js",
+      npm_lifecycle_script: "terminal-commander setup harness",
       HOME: process.env.HOME || process.env.USERPROFILE || "/tmp",
     },
     acquireLock: false,

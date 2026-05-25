@@ -3,14 +3,14 @@
   "version": "0.1.8",
   "description": "Terminal Commander prebuilt Rust binaries for darwin/x86_64. Internal platform package consumed by the `terminal-commander` root wrapper via optionalDependencies; do not depend on this package directly.",
   "license": "Apache-2.0",
-  "author": "special-place-administrator",
+  "author": "special-place-ai-heaven",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/special-place-administrator/terminal-commander.git"
+    "url": "git+https://github.com/special-place-ai-heaven/terminal-commander.git"
   },
-  "homepage": "https://github.com/special-place-administrator/terminal-commander#readme",
+  "homepage": "https://github.com/special-place-ai-heaven/terminal-commander#readme",
   "bugs": {
-    "url": "https://github.com/special-place-administrator/terminal-commander/issues"
+    "url": "https://github.com/special-place-ai-heaven/terminal-commander/issues"
   },
   "keywords": [
     "terminal-commander",

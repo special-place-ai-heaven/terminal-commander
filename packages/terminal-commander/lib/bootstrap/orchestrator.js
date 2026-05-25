@@ -106,7 +106,7 @@ async function runBootstrap(opts) {
 
       if (detectResult.reason === DETECT_REASONS.WSL_NOT_FOUND) {
         const msg =
-          "terminal-commander: WSL not found; install WSL (wsl --install), then run npm install -g terminal-commander again.";
+          "terminal-commander: WSL not found; install WSL (wsl --install), then run terminal-commander setup harness again.";
         lines.push(msg);
         logStderr(lines);
         return {

@@ -251,7 +251,7 @@ test("bin/terminal-commanderd.js + bin/terminal-commander-mcp.js Phase 3 contrac
   // invariants that must hold going forward:
   //   - terminal-commanderd.js: no lib/wsl/spawn.js import; spawns result.binaryPath
   //   - terminal-commander-mcp.js: legacy bridge path still gated behind
-  //     TC_USE_LEGACY_WSL_BRIDGE; native path uses runHarnessMcpSession
+  //     TC_USE_LEGACY_WSL_BRIDGE; native path directly spawns result.binaryPath
   //   - neither shim spawns wsl.exe in executable code
   const daemonSrc = fs.readFileSync(path.join(BIN_DIR, "terminal-commanderd.js"), "utf8");
   const mcpSrc = fs.readFileSync(path.join(BIN_DIR, "terminal-commander-mcp.js"), "utf8");
@@ -263,12 +263,14 @@ test("bin/terminal-commanderd.js + bin/terminal-commander-mcp.js Phase 3 contrac
   );
   // Daemon shim must spawn result.binaryPath (native binary).
   assert.match(daemonSrc, /\bspawn\s*\(\s*result\.binaryPath/);
-  // MCP shim: native supervisor path must be present.
+  // MCP shim: native path must spawn the resolved native MCP binary directly.
   assert.match(
     mcpSrc,
-    /\brunHarnessMcpSession\s*\(/,
-    "terminal-commander-mcp.js must use runHarnessMcpSession (Phase 3 native supervisor)",
+    /\bspawn\s*\(\s*result\.binaryPath/,
+    "terminal-commander-mcp.js must directly spawn result.binaryPath",
   );
+  assert.equal(/session_supervisor/.test(mcpSrc), false);
+  assert.equal(/windowsHide/.test(mcpSrc), false);
   // MCP shim: legacy bridge path must be gated behind TC_USE_LEGACY_WSL_BRIDGE.
   assert.match(
     mcpSrc,

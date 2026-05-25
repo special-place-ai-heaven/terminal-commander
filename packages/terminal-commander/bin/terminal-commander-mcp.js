@@ -4,6 +4,7 @@
 
 "use strict";
 
+const { spawn } = require("child_process");
 const { resolveBinary, formatResolveError } = require("../lib/resolve-binary.js");
 const { isWindowsMountedShimPath, tryReexecNativeLinuxMcp } = require("../lib/wsl/native-mcp.js");
 
@@ -37,24 +38,23 @@ if (isWindowsMountedShimPath(__filename)) {
     process.stderr.write(`${formatResolveError(result)}\n`);
     process.exit(64);
   } else {
-    const daemonResult = resolveBinary({ binary: "terminal-commanderd" });
-    if (daemonResult.reason !== "ok") {
-      process.stderr.write(`${formatResolveError(daemonResult)}\n`);
-      process.exit(64);
-    }
-    const { runHarnessMcpSession } = require("../lib/daemon/session_supervisor.js");
-    (async () => {
-      const outcome = await runHarnessMcpSession({
-        daemonBinary: daemonResult.binaryPath,
-        mcpBinary: result.binaryPath,
-        argv: process.argv.slice(2),
-        env: process.env,
-      });
-      if (outcome.signal) {
-        process.kill(process.pid, outcome.signal);
+    const child = spawn(result.binaryPath, process.argv.slice(2), {
+      stdio: "inherit",
+      shell: false,
+      env: process.env,
+    });
+
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        process.kill(process.pid, signal);
         return;
       }
-      process.exit(outcome.code);
-    })().catch(() => process.exit(64));
+      process.exit(code == null ? 1 : code);
+    });
+
+    child.on("error", (err) => {
+      process.stderr.write(`terminal-commander: failed to spawn ${result.binaryPath}: ${err.code || err.message}\n`);
+      process.exit(126);
+    });
   }
 }

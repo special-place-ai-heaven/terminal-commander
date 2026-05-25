@@ -66,7 +66,7 @@ function renderSystemdUnit(daemonBinary) {
   const bin = daemonBinary || "terminal-commanderd";
   return `[Unit]
 Description=Terminal Commander daemon (user)
-Documentation=https://github.com/special-place-administrator/terminal-commander
+Documentation=https://github.com/special-place-ai-heaven/terminal-commander
 After=default.target
 
 [Service]

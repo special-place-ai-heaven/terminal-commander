@@ -1,8 +1,8 @@
 # terminal-commander
 
-npm root wrapper for [Terminal Commander](https://github.com/special-place-administrator/terminal-commander) — local MCP control plane for coding agents.
+npm root wrapper for [Terminal Commander](https://github.com/special-place-ai-heaven/terminal-commander) — local MCP control plane for coding agents.
 
-**Install once (zero-touch):**
+## Install
 
 ```powershell
 # Windows
@@ -14,19 +14,38 @@ npm install -g terminal-commander@latest
 npm install -g terminal-commander@latest
 ```
 
-That configures detected harnesses (Cursor, Codex, Claude, …), installs the WSL runtime on Windows, and sets up daemon autostart. Restart your harness MCP after install.
+Install is passive: no lifecycle bootstrap, no automatic MCP config writes, no
+daemon start, and no hidden WSL install.
+
+Update explicitly:
+
+```sh
+terminal-commander update
+```
+
+This runs `npm install -g terminal-commander@latest`.
+
+Configure harnesses explicitly after install or update:
+
+```sh
+terminal-commander setup harness --provider cursor
+terminal-commander setup harness --provider codex-cli
+terminal-commander setup harness --provider claude-code
+```
 
 ## Commands
 
 | Binary | Role |
 |--------|------|
-| `terminal-commander-mcp` | MCP stdio (Windows → WSL bridge) |
-| `terminal-commanderd` | Daemon (Linux/WSL only) |
+| `terminal-commander-mcp` | MCP stdio adapter |
+| `terminal-commanderd` | Daemon |
 | `terminal-commander` | `doctor harness`, `doctor wsl`, `doctor daemon`, `setup harness` |
 
-## Windows bridge
+## Windows
 
-On `win32`, `terminal-commander-mcp` delegates to WSL via `lib/wsl/spawn.js`:
+On `win32`, the default path uses the `@terminal-commander/windows-x64`
+platform package. The legacy WSL bridge is still available only when
+`TC_USE_LEGACY_WSL_BRIDGE=1`:
 
 - Linux-first `PATH` in `bash -lc` (avoids `/mnt/c/.../nodejs` shim).
 - Sources `~/.config/terminal-commander/autostart.sh` before MCP.
@@ -34,16 +53,19 @@ On `win32`, `terminal-commander-mcp` delegates to WSL via `lib/wsl/spawn.js`:
 
 ## Platform packages
 
-Optional dependencies (Linux only):
+Optional platform dependencies:
 
 - `@terminal-commander/linux-x64`
 - `@terminal-commander/linux-arm64`
+- `@terminal-commander/windows-x64`
+- `@terminal-commander/mac-x64`
+- `@terminal-commander/mac-arm64`
 
 ## Documentation
 
 Full README, architecture diagrams, and integration guides:
 
-<https://github.com/special-place-administrator/terminal-commander/blob/main/README.md>
+<https://github.com/special-place-ai-heaven/terminal-commander/blob/main/README.md>
 
 ## License
 

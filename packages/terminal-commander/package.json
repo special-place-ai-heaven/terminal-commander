@@ -3,14 +3,14 @@
   "version": "0.1.8",
   "description": "Terminal Commander — local MCP-operated terminal/file signal channel. Daemon + MCP stdio adapter + admin CLI. Linux + WSL2 only (per TC44 runtime).",
   "license": "Apache-2.0",
-  "author": "special-place-administrator",
+  "author": "special-place-ai-heaven",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/special-place-administrator/terminal-commander.git"
+    "url": "git+https://github.com/special-place-ai-heaven/terminal-commander.git"
   },
-  "homepage": "https://github.com/special-place-administrator/terminal-commander#readme",
+  "homepage": "https://github.com/special-place-ai-heaven/terminal-commander#readme",
   "bugs": {
-    "url": "https://github.com/special-place-administrator/terminal-commander/issues"
+    "url": "https://github.com/special-place-ai-heaven/terminal-commander/issues"
   },
   "keywords": [
     "mcp",
@@ -30,7 +30,6 @@
   "files": [
     "bin/",
     "lib/",
-    "scripts/",
     "README.md",
     "LICENSE"
   ],
@@ -42,7 +41,6 @@
     "@terminal-commander/mac-arm64": "0.1.8"
   },
   "scripts": {
-    "install": "node scripts/install.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {

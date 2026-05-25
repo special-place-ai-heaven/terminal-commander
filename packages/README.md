@@ -11,6 +11,9 @@ Commander binaries. Locked layout per the
 | `terminal-commander/` | `terminal-commander` | Root wrapper. JS bin shims + platform resolver. Pulls platform binaries via `optionalDependencies`. |
 | `terminal-commander-linux-x64/` | `@terminal-commander/linux-x64` | Linux x86_64 binaries. |
 | `terminal-commander-linux-arm64/` | `@terminal-commander/linux-arm64` | Linux aarch64 binaries. |
+| `terminal-commander-windows-x64/` | `@terminal-commander/windows-x64` | Windows x86_64 binaries. |
+| `terminal-commander-mac-x64/` | `@terminal-commander/mac-x64` | macOS x86_64 binaries. |
+| `terminal-commander-mac-arm64/` | `@terminal-commander/mac-arm64` | macOS aarch64 binaries. |
 
 User-facing install:
 
@@ -28,11 +31,10 @@ Installs three commands on PATH:
 
 - Does NOT run a postinstall downloader.
 - Does NOT compile Rust during `npm install`.
-- Does NOT ship macOS or Windows-native binaries (TC44 runtime is
-  Unix-only).
-- Does NOT touch the filesystem or open sockets beyond resolving +
-  spawning the installed Rust binary. The shims are bounded to
-  `child_process.spawn` with `shell: false` and `stdio: 'inherit'`.
+- Does NOT run lifecycle bootstrap, write harness config, install into WSL,
+  or start daemons during `npm install`.
+- The runtime shims are bounded to direct `child_process.spawn` with
+  `shell: false` and `stdio: 'inherit'`.
 
 ## Local development
 

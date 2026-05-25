@@ -16,13 +16,13 @@ Context stays available by pointer.
 | A local daemon + probes + sifters | A remote service or log shipper |
 | argv-only command control (policy-gated) | A generic shell bridge |
 
-**Latest release:** [`v0.1.4`](https://github.com/special-place-administrator/terminal-commander/releases/latest) on [npm `latest`](https://www.npmjs.com/package/terminal-commander).
+**Latest release:** [`v0.1.8`](https://github.com/special-place-ai-heaven/terminal-commander/releases/latest) on [npm `latest`](https://www.npmjs.com/package/terminal-commander).
 
 ---
 
 ## Who this is for
 
-Terminal Commander is **harness-first**. The primary user is the **coding agent** inside your editor or CLI harness. Humans typically run **one install command** and use `doctor` only when something fails.
+Terminal Commander is **harness-first**. The primary user is the **coding agent** inside your editor or CLI harness. Humans typically run **one install command**, then an explicit `setup harness` command, and use `doctor` only when something fails.
 
 ```mermaid
 flowchart LR
@@ -47,60 +47,55 @@ flowchart LR
 
 ---
 
-## Install (zero-touch)
+## Install
 
-### Windows (recommended path)
-
-One command on the host. Bootstrap runs automatically via the npm `install` script:
+Install from npm:
 
 ```powershell
 npm install -g terminal-commander@latest
 ```
 
-That **automatically**:
+The npm install is passive. It installs the Node launcher plus the matching
+platform optional dependency; it does not run lifecycle bootstrap, write MCP
+configs, install inside WSL, or start daemons.
 
-1. Detects WSL and installs `terminal-commander` **inside** the distro (Linux-first `PATH`, not `/mnt/c` npm shims).
-2. Merges MCP config for every **detected** harness (Cursor, Codex, Claude Code, Claude Desktop, …).
-3. Installs **daemon autostart** (systemd user unit when available, else profile hook).
-4. Starts the daemon if the UDS socket is not already present.
+Update explicitly:
 
-Then **restart your harness** (e.g. reload Cursor MCP). No `setup harness` step required.
-
-```mermaid
-sequenceDiagram
-  participant You as Operator
-  participant npm as npm install -g
-  participant Win as Windows shim
-  participant WSL as WSL distro
-  participant Harness as Cursor / Codex / Claude
-
-  You->>npm: terminal-commander@latest
-  npm->>Win: install lifecycle bootstrap
-  Win->>WSL: npm install -g (linux PATH)
-  Win->>Win: write harness MCP configs
-  Win->>WSL: daemon autostart + start
-  You->>Harness: restart MCP / reload window
-  Harness->>Win: terminal-commander-mcp
-  Win->>WSL: bridge + native MCP
-  WSL->>WSL: terminal-commanderd (UDS)
+```powershell
+terminal-commander update
 ```
 
-**Opt-out:** `set TC_SKIP_BOOTSTRAP=1` before install, or `npm install -g terminal-commander --ignore-scripts`.
+This runs:
 
-### Linux / WSL shell
-
-```sh
+```powershell
 npm install -g terminal-commander@latest
 ```
 
-Installs the matching `@terminal-commander/linux-*` platform package, configures detected harnesses, and sets up daemon autostart on the host.
+`terminal-commander --version` prints the installed version and, when npm can be
+reached quickly, reports when a newer npm release is available.
+
+### Configure harnesses
+
+Run setup explicitly after install or update:
+
+```sh
+terminal-commander setup harness --provider cursor
+terminal-commander setup harness --provider codex-cli
+terminal-commander setup harness --provider claude-code
+terminal-commander setup harness --provider claude-desktop
+```
+
+Omit `--provider` to configure every detected harness. On Windows, setup may
+install the Linux runtime inside the selected WSL distro and configure daemon
+autostart. This is an explicit operator command, not an npm lifecycle side
+effect.
 
 ### Commands on `PATH`
 
 | Command | Role |
 |---------|------|
-| `terminal-commander-mcp` | MCP stdio adapter (Windows: bridges into WSL) |
-| `terminal-commanderd` | Daemon — probes, policy, buckets, audit (Linux/WSL only) |
+| `terminal-commander-mcp` | MCP stdio adapter |
+| `terminal-commanderd` | Daemon — probes, policy, buckets, audit |
 | `terminal-commander` | Doctor / diagnostics CLI |
 
 ---
@@ -144,7 +139,10 @@ flowchart TB
   Router --> Audit
 ```
 
-**Windows note:** Cursor/Codex/Claude on Windows invoke `terminal-commander-mcp` on the host. The shim runs `wsl.exe -d <distro> -- bash -lc '<linux-first PATH> … exec terminal-commander-mcp'`, sources `~/.config/terminal-commander/autostart.sh` so the daemon is up, and avoids the Windows `/mnt/c/.../nodejs` shim that breaks Linux optionalDependencies.
+**Windows note:** Cursor/Codex/Claude on Windows invoke `terminal-commander-mcp`
+on the host. The default path uses the Windows x64 platform package. The legacy
+WSL bridge remains available behind `TC_USE_LEGACY_WSL_BRIDGE=1` for operators
+who still want the Linux runtime path.
 
 **Platforms:**
 
@@ -152,9 +150,11 @@ flowchart TB
 |---------|----------------|--------------|
 | Daemon + UDS | Yes | No (runs in WSL) |
 | MCP stdio | Native | Bridge to WSL |
-| npm install bootstrap | Harness + autostart | WSL runtime + harness + autostart |
+| npm package | Passive launcher + platform optional dependency | Passive launcher + platform optional dependency |
+| setup | Explicit harness + autostart setup | Explicit WSL runtime + harness + autostart setup |
 
-No macOS-native package. No Windows-native PTY/UDS daemon (deferred).
+Prebuilt npm platform packages are published for Linux x64/arm64, Windows x64,
+and macOS x64/arm64.
 
 Deeper docs: [`docs/runtime/REALTIME_SIGNAL_CHANNEL.md`](docs/runtime/REALTIME_SIGNAL_CHANNEL.md), [`docs/runtime/UDS_IPC.md`](docs/runtime/UDS_IPC.md), [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
 
@@ -172,14 +172,15 @@ Deeper docs: [`docs/runtime/REALTIME_SIGNAL_CHANNEL.md`](docs/runtime/REALTIME_S
 
 ## Harness configuration
 
-After install, MCP configs should already contain a `terminal-commander` (or `terminal_commander`) entry. If not, first MCP connect runs **lazy bootstrap** (same steps as install).
+After install or update, run `terminal-commander setup harness` explicitly to
+write MCP config. The package install itself never mutates harness config.
 
-| Harness | Config location | Auto-configured |
+| Harness | Config location | Setup support |
 |---------|-----------------|-----------------|
-| Cursor | `~/.cursor/mcp.json` (or project `.cursor/mcp.json`) | Yes |
-| Codex CLI | `~/.codex/config.toml` → `[mcp_servers.terminal_commander]` | Yes |
-| Claude Code | `~/.claude.json` → `mcpServers` | Yes |
-| Claude Desktop | `%AppData%\Claude\claude_desktop_config.json` (Windows) | Yes |
+| Cursor | `~/.cursor/mcp.json` (or project `.cursor/mcp.json`) | `terminal-commander setup harness --provider cursor` |
+| Codex CLI | `~/.codex/config.toml` -> `[mcp_servers.terminal_commander]` | `terminal-commander setup harness --provider codex-cli` |
+| Claude Code | `~/.claude.json` -> `mcpServers` | `terminal-commander setup harness --provider claude-code` |
+| Claude Desktop | `%AppData%\Claude\claude_desktop_config.json` (Windows) | `terminal-commander setup harness --provider claude-desktop` |
 
 **Generated Cursor stanza (Windows bridge):**
 
@@ -207,7 +208,8 @@ Copy-paste examples: [`examples/provider-harness/cursor/`](examples/provider-har
 
 ## Daemon lifecycle
 
-On Linux/WSL, install/bootstrap configures autostart. You should **not** need a manual `terminal-commanderd start` for normal harness use.
+On Linux/WSL, explicit setup configures autostart. You should **not** need a
+manual `terminal-commanderd start` for normal harness use after setup.
 
 | Mechanism | When |
 |-----------|------|
@@ -336,7 +338,7 @@ Example daemon config: [`config/terminal-commanderd.example.toml`](config/termin
 ## Develop from source
 
 ```sh
-git clone https://github.com/special-place-administrator/terminal-commander.git
+git clone https://github.com/special-place-ai-heaven/terminal-commander.git
 cd terminal-commander
 
 cargo fmt --all --check

@@ -48,8 +48,8 @@ Language: ASCII only.
   non-secret `TC_SOCKET` path.
 - No auto-run permissions. The operator confirms each tool call in
   the Cursor chat panel.
-- No `postinstall` downloader; no Rust compile during `npm install`;
-  no Mac / Windows-native package claim; no musl / Alpine claim.
+- No `postinstall` downloader, lifecycle bootstrap, or Rust compile during
+  `npm install`; no musl / Alpine claim.
 
 ## WWS04: Windows bridge shim landed (alternative to `mcp.global.linux-wsl.json`)
 

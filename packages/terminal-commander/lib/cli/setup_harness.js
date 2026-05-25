@@ -45,7 +45,7 @@ async function runSetupDefault(opts) {
 
 async function runSetupCursorWslDeprecated(opts) {
   process.stderr.write(
-    "terminal-commander: setup cursor-wsl is deprecated; use 'terminal-commander setup harness' or rely on npm install -g bootstrap.\n",
+    "terminal-commander: setup cursor-wsl is deprecated; use 'terminal-commander setup harness'.\n",
   );
   const o = opts || {};
   const flags = { ...(o.flags || {}), "install-wsl-runtime": true };

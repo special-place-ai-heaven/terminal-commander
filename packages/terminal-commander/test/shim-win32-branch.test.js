@@ -94,11 +94,11 @@ test("terminal-commanderd.js on win32 attempts native binary or fails with bound
   assert.equal(r.stderr.includes("Spawned wsl"), false);
 });
 
-test("terminal-commander-mcp.js on win32 uses native supervisor path (Phase 3)", () => {
+test("terminal-commander-mcp.js on win32 uses native direct-spawn path (Phase 3)", () => {
   // Phase 3: win32-x64 is now a supported target. The mcp shim on win32
   // no longer enters the WWS04 WSL bridge path. Instead it goes through
   // the isWindowsMountedShimPath / native-mcp path, then falls through
-  // to runHarnessMcpSession if the native binary is available.
+  // to spawn(result.binaryPath) if the native binary is available.
   // TC_USE_LEGACY_WSL_BRIDGE must not be set for this test.
   const r = runShim("terminal-commander-mcp.js", "win32", "x64", {
     TC_SUPERVISOR_ALLOW_SPAWN: "0",
@@ -129,9 +129,8 @@ test("shim bin/* files contain no wsl.exe literal invocation in executable code 
   // Phase 3 contract: the three shim files MUST NOT literally spawn wsl.exe.
   // terminal-commanderd.js and terminal-commander.js still use
   // spawn(result.binaryPath, ...) for the native binary path.
-  // terminal-commander-mcp.js delegates to runHarnessMcpSession (Phase 3
-  // native supervisor) instead of spawn(result.binaryPath) directly.
-  // Both daemon + cli shims must still spawn result.binaryPath.
+  // terminal-commander-mcp.js also spawns result.binaryPath directly so
+  // Cursor sees a plain native MCP child, not a hidden Node supervisor.
   function stripCommentsAndStrings(src) {
     let out = "";
     let i = 0;
@@ -191,8 +190,8 @@ test("shim bin/* files contain no wsl.exe literal invocation in executable code 
     );
   }
 
-  // terminal-commanderd.js and terminal-commander.js still spawn result.binaryPath.
-  for (const shim of ["terminal-commanderd.js", "terminal-commander.js"]) {
+  // All three shims spawn result.binaryPath.
+  for (const shim of ["terminal-commanderd.js", "terminal-commander.js", "terminal-commander-mcp.js"]) {
     const body = fs.readFileSync(path.join(BIN_DIR, shim), "utf8");
     const codeOnly = stripCommentsAndStrings(body);
     assert.match(
@@ -202,17 +201,14 @@ test("shim bin/* files contain no wsl.exe literal invocation in executable code 
     );
   }
 
-  // terminal-commander-mcp.js (Phase 3) delegates to runHarnessMcpSession
-  // instead of spawn(result.binaryPath) — the native supervisor owns the
-  // process lifecycle. The legacy WSL bridge path (spawnWslBridge) is
+  // terminal-commander-mcp.js (Phase 3) must not route through the
+  // session supervisor. The legacy WSL bridge path (spawnWslBridge) is
   // still present but gated behind TC_USE_LEGACY_WSL_BRIDGE=1.
   const mcpBody = fs.readFileSync(path.join(BIN_DIR, "terminal-commander-mcp.js"), "utf8");
   const mcpCode = stripCommentsAndStrings(mcpBody);
-  assert.match(
-    mcpCode,
-    /\brunHarnessMcpSession\s*\(/,
-    "terminal-commander-mcp.js must delegate to runHarnessMcpSession (Phase 3 native supervisor)",
-  );
+  assert.equal(/runHarnessMcpSession/.test(mcpCode), false);
+  assert.equal(/session_supervisor/.test(mcpBody), false);
+  assert.equal(/windowsHide/.test(mcpBody), false);
 });
 
 test("terminal-commander-mcp.js delegates to lib/wsl/spawn.js on bridge_required (WWS04 wiring)", () => {
