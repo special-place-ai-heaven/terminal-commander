@@ -27,7 +27,7 @@ homepage = "https://github.com/special-place-administrator/terminal-commander"
 # not in the tarball). Each publishable crate declares its own
 # `readme = "README.md"` and ships a small per-crate README so crates.io
 # has rendered content.
-version = "0.1.7" # x-release-please-version
+version = "0.1.8" # x-release-please-version
 publish = true
 
 [workspace.dependencies]
@@ -35,10 +35,10 @@ publish = true
 # workspace level so member manifests stay terse. The explicit
 # `version = "..."` is required for `cargo publish` to accept the
 # resolved tarball (path-only deps are unpublishable).
-terminal-commander-core    = { path = "crates/core",    version = "0.1.7" } # x-release-please-version
-terminal-commander-sifters = { path = "crates/sifters", version = "0.1.7" } # x-release-please-version
-terminal-commander-probes  = { path = "crates/probes",  version = "0.1.7" } # x-release-please-version
-terminal-commander-store   = { path = "crates/store",   version = "0.1.7" } # x-release-please-version
+terminal-commander-core    = { path = "crates/core",    version = "0.1.8" } # x-release-please-version
+terminal-commander-sifters = { path = "crates/sifters", version = "0.1.8" } # x-release-please-version
+terminal-commander-probes  = { path = "crates/probes",  version = "0.1.8" } # x-release-please-version
+terminal-commander-store   = { path = "crates/store",   version = "0.1.8" } # x-release-please-version
 
 # Third-party crates referenced by SPEC / TC04 contract. Each is
 # declared here so member crates pick the same version. Concrete
