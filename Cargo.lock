@@ -1077,6 +1077,7 @@ dependencies = [
  "terminal-commander-core",
  "terminal-commander-supervisor",
  "tokio",
+ "windows",
 ]
 
 [[package]]

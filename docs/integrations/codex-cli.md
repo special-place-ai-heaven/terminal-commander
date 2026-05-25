@@ -1,131 +1,74 @@
 # Codex CLI integration
 
-Connect [Codex CLI](https://developers.openai.com/codex) to Terminal Commander
-over MCP stdio. Codex supports MCP servers via `~/.codex/config.toml` —
-this doc ships a copy-pasteable config that points Codex at the
-locally-built `terminal-commander-mcp` adapter, which forwards every
-tool call to the local `terminal-commanderd` daemon over its Unix
-domain socket.
+Connect Codex CLI to Terminal Commander through MCP stdio.
 
-No secrets, no tokens, no machine-specific absolute paths.
+Install and write the MCP config:
 
-## Prerequisites
-
-- Linux or WSL2 (Terminal Commander's daemon UDS is Unix-only).
-- A built workspace. The smoke script and these examples assume
-  `CARGO_TARGET_DIR=target-wsl`, but any target dir works as long as
-  `terminal-commanderd` and `terminal-commander-mcp` are on `$PATH`
-  or referenced by absolute path in `config.toml`.
-
-Build the binaries once:
-
-```sh
-cargo build -p terminal-commanderd -p terminal-commander-mcp --bins
+```powershell
+npm install -g terminal-commander@latest
+terminal-commander setup harness --provider codex-cli
 ```
 
-## Step 1 — start the daemon
+The npm install is passive. The setup command is the explicit step that merges
+Terminal Commander into `~/.codex/config.toml`.
 
-The daemon must be running before Codex spawns the MCP adapter.
+## Config Shape
 
-```sh
-# Replace TC_DATA with any writable directory. The daemon creates
-# `$TC_DATA/terminal-commanderd.sock`.
-export TC_DATA="${XDG_STATE_HOME:-$HOME/.local/state}/terminal-commander"
-mkdir -p "$TC_DATA"
-
-terminal-commanderd --data-dir "$TC_DATA" start --mode ipc-server
-```
-
-Leave the daemon running in a separate terminal (or under your
-process supervisor of choice).
-
-## Step 2 — point Codex at the MCP adapter
-
-Add the following block to `~/.codex/config.toml`:
+Codex CLI reads MCP servers from `~/.codex/config.toml`:
 
 ```toml
-# Terminal Commander MCP stdio adapter.
-#
-# - Codex spawns this binary; the binary serves an rmcp stdio MCP
-#   server and forwards every tool call to the daemon UDS at
-#   `$TC_DATA/terminal-commanderd.sock`.
-# - `TC_DATA` MUST match the value the daemon was started with.
-# - No credentials. No network. No raw stream lane.
 [mcp_servers.terminal_commander]
 command = "terminal-commander-mcp"
-# Optional: list of CLI args. The adapter supports `--socket <path>`
-# but we prefer the env-var path so the same config works regardless
-# of where the daemon is started from.
 args = []
-# Optional: env block. Codex passes this verbatim to the child process.
-[mcp_servers.terminal_commander.env]
-TC_SOCKET = "${TC_DATA}/terminal-commanderd.sock"
 ```
 
-If `terminal-commander-mcp` is not on your `$PATH`, replace
-`command` with an absolute or workspace-relative path. Avoid
-hardcoding `/home/<your-user>/...` in committed configs.
+Only add an env block when you intentionally use a non-default daemon endpoint:
 
-## Step 3 — discover the tools
+```toml
+[mcp_servers.terminal_commander.env]
+TC_SOCKET = "/path/to/terminal-commanderd.sock"
+```
 
-In a Codex session, ask for the list of available MCP tools. You
-should see at least the 29 tools shipped by Terminal Commander
-TC45, e.g.:
+On Windows, the default endpoint is a local named pipe and normally does not
+need `TC_SOCKET`. On Unix, the default endpoint is a Unix domain socket.
 
-- `system_discover`
-- `health`
-- `policy_status`
-- `command_start_combed`
-- `bucket_wait`
-- `bucket_events_since`
-- `command_status`
-- `file_read_window`
-- `file_search`
-- `file_watch_start`
-- `file_watch_stop`
-- `file_watch_list`
-- `pty_command_start`
-- `pty_command_write_stdin`
-- `pty_command_stop`
-- `pty_command_list`
-- `registry_*`
-- `runtime_state`
-- `probe_list`
-- `probe_status`
+## Verify
 
-## Step 4 — minimal flow
+1. Run `terminal-commander doctor harness`.
+2. Start a new Codex CLI session.
+3. Ask Codex to list available MCP tools.
+
+Expected Terminal Commander tools include `system_discover`, `health`,
+`policy_status`, `command_start_combed`, `bucket_wait`,
+`bucket_events_since`, `command_status`, `file_read_window`, `file_search`,
+`file_watch_start`, `file_watch_stop`, `file_watch_list`, `pty_command_start`,
+`pty_command_write_stdin`, `pty_command_stop`, `pty_command_list`,
+`registry_*`, `runtime_state`, `probe_list`, and `probe_status`.
+
+## Minimal Flow
 
 Ask the assistant to:
 
-1. Call `command_start_combed` with argv `["echo", "hello"]`.
-2. Call `bucket_wait` with the returned `bucket_id` and `cursor: 0`.
-3. Call `command_status` with the returned `job_id`.
+1. Call `system_discover`.
+2. Call `command_start_combed` with argv `["echo", "hello"]`.
+3. Call `bucket_wait` with the returned `bucket_id` and `cursor: 0`.
+4. Call `command_status` with the returned `job_id`.
 
-Every response is a bounded JSON envelope. No raw stdout / stderr
-appears anywhere in the conversation.
+Every response is bounded JSON. Raw stdout/stderr should not be pasted into the
+conversation.
 
 ## Troubleshooting
 
-- **Codex reports the MCP server failed to start.** Confirm
-  `terminal-commander-mcp` runs from your shell with the same env. The
-  adapter is Unix-only; on native Windows it refuses to start and
-  exits with code 64.
-- **`daemon ipc error [Internal]: request timed out`.** The daemon is
-  not running or `TC_SOCKET` does not match the daemon's socket path.
-  Re-check `$TC_DATA/terminal-commanderd.sock` exists.
-- **No tools listed.** Codex caches tool catalogues per server name;
-  rename `terminal_commander` to invalidate the cache, or restart
-  Codex.
+| Symptom | Check |
+| --- | --- |
+| Codex reports the MCP server failed to start | Confirm `terminal-commander-mcp --help` works from the same user account. |
+| No tools listed | Restart Codex CLI or rename the server key to refresh the catalogue. |
+| Daemon unavailable | Run `terminal-commander doctor daemon`; the MCP adapter normally attempts daemon auto-start on connect. |
+| Non-default endpoint | Set `TC_SOCKET` explicitly in the MCP env block. |
 
-## Smoke evidence requirements
+## Smoke Evidence
 
-Per the TC46 acceptance criteria, the Codex provider-harness smoke is
-considered "live" only if a Codex session actually invokes one of the
-Terminal Commander tools and the response is observed in the session
-transcript. If your environment lacks a usable Codex CLI / auth /
-config, mark the provider smoke as `Not Run` or `Blocked` in your
-report and cite the exact reason.
-
-A local daemon + MCP stdio smoke (without Codex in the loop) is
-available via `scripts/smoke/verify-runtime-smoke.sh`; it is
-secondary evidence, not provider-harness success.
+A provider smoke is live only when a Codex CLI session invokes one Terminal
+Commander tool and the bounded response is visible in the session transcript.
+The local runtime smoke script proves Terminal Commander works without Codex in
+the loop, but it is not a provider-harness smoke by itself.

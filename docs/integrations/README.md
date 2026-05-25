@@ -1,26 +1,29 @@
 # Provider Integration Examples - Terminal Commander
 
-Status: TC46 — updated for the TC45 29-tool surface.
+Status: current public integration index for the 29-tool MCP surface.
 
 Provider-neutral MCP integration recipes. NO secrets, NO machine-
 specific paths. The MCP server is launched by the LLM harness as a
 child process over rmcp stdio (per `docs/security/PRIVILEGE_MODEL.md`
-section 4) and forwards every tool call through the daemon UDS.
+section 4) and forwards every tool call through the daemon's local IPC endpoint
+(Unix domain socket on Unix, named pipe on Windows).
 
 Per-provider walk-throughs:
-- [`codex-cli.md`](codex-cli.md) — Codex CLI MCP stdio config (`~/.codex/config.toml`).
-- [`claude-code.md`](claude-code.md) — Claude Code MCP stdio config
+- [`codex-cli.md`](codex-cli.md) - Codex CLI MCP stdio config (`~/.codex/config.toml`).
+- [`claude-code.md`](claude-code.md) - Claude Code MCP stdio config
   (`--mcp-config` flag + persistent settings).
-- [`cursor.md`](cursor.md) — Cursor MCP stdio config (native Linux,
-  inside-WSL, and Windows-Cursor-to-WSL bridge). Copy-pasteable
+- [`cursor.md`](cursor.md) - Cursor MCP stdio config (native Linux,
+  inside-WSL, and legacy Windows-Cursor-to-WSL bridge). Copy-pasteable
   configs in
   [`examples/provider-harness/cursor/`](../../examples/provider-harness/cursor/).
-- [`gemini.md`](gemini.md) — Gemini stub (INSTALL01; path unverified).
-- [`kimi.md`](kimi.md) — Kimi stub (INSTALL01; path unverified).
+- [`gemini.md`](gemini.md) - Gemini stub (INSTALL01; path unverified).
+- [`kimi.md`](kimi.md) - Kimi stub (INSTALL01; path unverified).
 
-**Windows one-step install:** `npm install -g terminal-commander` runs
-bootstrap (see [`../release/install-bootstrap-contract.md`](../release/install-bootstrap-contract.md))
-and merges MCP config for every detected harness.
+**Install behavior:** `npm install -g terminal-commander` is passive. It installs
+the wrapper plus the matching native platform package. Run
+`terminal-commander setup harness` explicitly to merge MCP config for detected
+harnesses, or add `--provider cursor`, `--provider codex-cli`,
+`--provider claude-code`, or `--provider claude-desktop` to target one harness.
 
 A local daemon + MCP stdio smoke (no provider in the loop) lives at
 [`scripts/smoke/verify-runtime-smoke.sh`](../../scripts/smoke/verify-runtime-smoke.sh).
@@ -29,9 +32,9 @@ transport surface works without a provider. Provider-harness success
 requires actually running the provider against one of the configs
 above and observing tool calls in the session transcript.
 
-The rest of this page is the TC27 baseline kept for historical
-context; the modern TC45 surface advertises 29 tools and the
-per-provider walk-throughs above are the authoritative source.
+The rest of this page is the older provider-neutral baseline kept for historical
+context; the modern surface advertises 29 tools and the per-provider
+walk-throughs above are the authoritative source.
 
 Language: ASCII only.
 
@@ -56,7 +59,7 @@ Verify discovery:
 ```bash
 # Inside Claude Code:
 /mcp
-# Should list terminal-commander with the 5 MVP tools.
+# Should list terminal-commander with the live tool surface.
 ```
 
 Sample prompt (uses bucket_wait):
@@ -91,7 +94,7 @@ terminal-commander-mcp 2>terminal-commander-mcp.log
 stderr carries log lines; stdout is the rmcp transport. Do NOT
 pipe stdout through any pretty-printer.
 
-## 4. The five MVP tools (quick reference)
+## 4. Core tools (quick reference)
 
 | Tool | Bounded shape | Use |
 |---|---|---|
@@ -119,11 +122,11 @@ shapes.
 
 | Component | Status |
 |---|---|
-| Claude Code stanza | live (TC27) |
-| Codex CLI stanza | live (TC27) |
-| Cursor MCP stanza | live (NPM08, 2026-05-23) — see [`cursor.md`](cursor.md) + [`examples/provider-harness/cursor/`](../../examples/provider-harness/cursor/) |
+| Claude Code stanza | live |
+| Codex CLI stanza | live |
+| Cursor MCP stanza | live - see [`cursor.md`](cursor.md) + [`examples/provider-harness/cursor/`](../../examples/provider-harness/cursor/) |
 | Cursor provider smoke transcript | Not Run (operator-driven; no scripted MCP entry point in Cursor today) |
-| Generic MCP-client recipe | live (TC27) |
-| examples/*.md walk-throughs | live (TC27) |
-| examples/provider-harness/cursor/*.json | live (NPM08) |
-| rmcp stdio adapter wiring | reserved (TC23 follow-up) |
+| Generic MCP-client recipe | live |
+| examples/*.md walk-throughs | live |
+| examples/provider-harness/cursor/*.json | live; includes legacy WSL bridge example |
+| rmcp stdio adapter wiring | live |

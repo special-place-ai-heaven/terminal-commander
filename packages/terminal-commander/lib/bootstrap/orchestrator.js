@@ -100,6 +100,14 @@ async function runBootstrap(opts) {
   try {
 
     if (platform === "win32") {
+      const wantsWslRuntime =
+        env.TC_USE_LEGACY_WSL_BRIDGE === "1" ||
+        typeof o.distro === "string" ||
+        typeof env.TC_WSL_DISTRO === "string";
+
+      if (!wantsWslRuntime) {
+        lines.push("terminal-commander: native Windows MCP path selected; WSL bootstrap skipped.");
+      } else {
       const detect = o.detect || detectWsl;
       const detectResult = await detect({ platform, wslPath: o.wslPath, timeoutMs: o.timeoutMs });
       knownDistros = detectResult.distros || [];
@@ -233,6 +241,7 @@ async function runBootstrap(opts) {
           wslPath: o.wslPath,
           timeoutMs: o.startDaemonTimeoutMs || 45_000,
         });
+      }
       }
     }
 

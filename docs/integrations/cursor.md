@@ -1,477 +1,132 @@
 # Cursor MCP integration
 
-Connect [Cursor](https://cursor.com) to Terminal Commander over MCP
-stdio. Cursor supports MCP servers via a `mcp.json` configuration
-file at either of two scopes (global, project) — this doc ships
-copy-pasteable configs for the three supported host shapes:
+Connect Cursor to Terminal Commander through MCP stdio.
 
-1. Native Linux Cursor (or Cursor running inside WSL).
-2. Project-scoped MCP on Linux / WSL.
-3. Windows Cursor invoking the WSL-hosted `terminal-commander-mcp`
-   over the `wsl.exe` bridge.
+Cursor reads MCP servers from `mcp.json`. Terminal Commander can write that
+file for you:
 
-No secrets, no tokens, no machine-specific absolute paths.
-
-Language: ASCII only.
-
-## 1. Prerequisites
-
-- Linux or WSL2 host for the daemon. Terminal Commander's daemon UDS
-  is Unix-only; native Windows is unsupported (TC44 `non_goals`).
-- One of the install paths below provides the binaries:
-  - **Future (post-NPM07 live publish):** `npm install -g
-    terminal-commander` produces `terminal-commanderd`,
-    `terminal-commander-mcp`, and `terminal-commander` on `$PATH`.
-    This path is **pending** the first live publish; see
-    `docs/release/npm-trusted-publishing-contract.md` §14 for the
-    blocking operator preconditions.
-  - **Current pre-publish:** the NPM04 local-tarball smoke
-    (`scripts/smoke/verify-npm-local-install.sh`) builds + packs +
-    installs into a sandbox prefix, exactly the same binaries the
-    published package will ship. Operators who want to try Cursor
-    against pre-publish binaries can install the local tarballs into
-    a non-sandboxed `--prefix` and add that `bin/` to `$PATH`.
-  - **Cargo-built path:** `cargo build -p terminal-commanderd -p
-    terminal-commander-mcp -p terminal-commander-cli --bins` and
-    point Cursor at the absolute or workspace-relative paths.
-
-## 2. Where Cursor reads MCP config
-
-Cursor reads MCP server configs from two locations (current
-documented behavior at the time of this writing):
-
-| Scope | Path | When to use |
-|-------|------|-------------|
-| Global | `~/.cursor/mcp.json` | The MCP server is available in every Cursor workspace. |
-| Project | `.cursor/mcp.json` at the workspace root | The MCP server is available only when this workspace is open. |
-
-NEVER commit your local `.cursor/mcp.json` into a shared repo
-without reviewing it — it is part of your security boundary
-(MCP servers run with your user permissions). This Terminal
-Commander repo intentionally does NOT ship an active
-`.cursor/mcp.json`; copy from `examples/provider-harness/cursor/`
-into your own scope.
-
-## 3. Start the daemon
-
-The daemon must be running before Cursor (or any MCP client) spawns
-the adapter.
-
-```sh
-# Replace TC_DATA with any writable directory the daemon will own.
-# The daemon creates `$TC_DATA/terminal-commanderd.sock`.
-export TC_DATA="${XDG_STATE_HOME:-$HOME/.local/state}/terminal-commander"
-mkdir -p "$TC_DATA"
-
-terminal-commanderd --data-dir "$TC_DATA" start --mode ipc-server
+```powershell
+npm install -g terminal-commander@latest
+terminal-commander setup harness --provider cursor
 ```
 
-Leave the daemon running in a separate terminal (or under a process
-supervisor). Cursor's MCP layer spawns `terminal-commander-mcp` as a
-child process; the adapter forwards every tool call to the daemon
-UDS.
+The npm install is passive. The setup command is the explicit step that merges
+the Cursor MCP stanza.
 
-## 4. Native Linux / inside-WSL Cursor
+## Config Locations
 
-If Cursor is running on Linux (or inside a WSL distribution), the
-simplest config is:
+| Scope | Path | When to use |
+| --- | --- | --- |
+| Global | `~/.cursor/mcp.json` on Unix, `%USERPROFILE%\.cursor\mcp.json` on Windows | Available in every Cursor workspace |
+| Project | `.cursor/mcp.json` at the workspace root | Available only for that workspace |
+
+Do not commit a personal `.cursor/mcp.json` without review. MCP servers run
+with your user permissions.
+
+## Recommended Config
+
+Use this shape on Linux, Windows, macOS, WSL, and project scopes:
 
 ```json
 {
   "mcpServers": {
     "terminal-commander": {
+      "type": "stdio",
       "command": "terminal-commander-mcp",
-      "type": "stdio"
+      "args": []
     }
   }
 }
 ```
 
-Copy from
-[`examples/provider-harness/cursor/mcp.global.native-linux.json`](../../examples/provider-harness/cursor/mcp.global.native-linux.json)
-into `~/.cursor/mcp.json`.
+`terminal-commander setup harness --provider cursor` writes this server entry
+and preserves unrelated MCP servers.
 
-If your daemon is running in a non-default `$TC_DATA`, add the
-`env` block:
+## Windows
+
+Windows uses the native `@terminal-commander/windows-x64` package by default.
+Cursor launches `terminal-commander-mcp` on the Windows host. The adapter talks
+to the daemon over a local named pipe and can start the sibling
+`terminal-commanderd.exe` when needed.
+
+No WSL bridge is required for the default path.
+
+The legacy Windows-to-WSL path is still available for operators who explicitly
+want it:
 
 ```json
 {
   "mcpServers": {
     "terminal-commander": {
-      "command": "terminal-commander-mcp",
       "type": "stdio",
+      "command": "terminal-commander-mcp",
+      "args": [],
       "env": {
-        "TC_SOCKET": "${TC_DATA}/terminal-commanderd.sock"
+        "TC_USE_LEGACY_WSL_BRIDGE": "1",
+        "TC_WSL_DISTRO": "Ubuntu"
       }
     }
   }
 }
 ```
 
-`TC_DATA` must match the value the daemon was started with. The
-adapter does NOT spawn a daemon on its own; it only connects to an
-existing UDS path.
+Use the legacy path only when the Terminal Commander runtime is intentionally
+installed inside WSL and the Windows host should bridge into that distro.
 
-## 5. Project-scoped Cursor MCP
+## Verify In Cursor
 
-For a workspace-local config, place
-[`examples/provider-harness/cursor/mcp.project.linux-wsl.json`](../../examples/provider-harness/cursor/mcp.project.linux-wsl.json)
-at `<workspace-root>/.cursor/mcp.json`. The shape is identical
-to the global config; only the file location changes.
+1. Run `terminal-commander doctor harness`.
+2. Reload Cursor.
+3. Open Cursor Settings -> Tools & MCP.
+4. Confirm `terminal-commander` is enabled and connected.
+5. In a new agent chat, ask:
 
-This is the right choice when:
-
-- multiple Cursor projects need different MCP server sets,
-- the MCP server should only be visible inside a specific repo,
-- you want the config to live in version control alongside the
-  workspace (in which case carefully review the file every time —
-  MCP servers run with your user permissions).
-
-## 6. Windows Cursor → WSL bridge
-
-When Cursor runs natively on Windows but the Terminal Commander
-daemon runs inside WSL (the supported host topology, since the
-daemon UDS is Unix-only), Cursor must launch the adapter via
-`wsl.exe`.
-
-```json
-{
-  "mcpServers": {
-    "terminal-commander": {
-      "command": "wsl",
-      "type": "stdio",
-      "args": [
-        "-d",
-        "Ubuntu-24.04",
-        "bash",
-        "-lc",
-        "terminal-commander-mcp"
-      ]
-    }
-  }
-}
+```text
+List every MCP server prefix and Terminal Commander tool you can call.
 ```
 
-Copy from
-[`examples/provider-harness/cursor/mcp.global.linux-wsl.json`](../../examples/provider-harness/cursor/mcp.global.linux-wsl.json)
-into `%USERPROFILE%\.cursor\mcp.json` on Windows. Substitute your
-WSL distribution name (`Ubuntu-24.04` in the example) for the one
-returned by `wsl --list --verbose`.
+Expected Terminal Commander tools include `system_discover`, `health`,
+`command_start_combed`, `bucket_wait`, `bucket_events_since`,
+`command_status`, `file_read_window`, `file_search`, `file_watch_start`,
+`file_watch_stop`, `file_watch_list`, `pty_command_start`,
+`pty_command_write_stdin`, `pty_command_stop`, `pty_command_list`,
+`registry_*`, `runtime_state`, `probe_list`, and `probe_status`.
 
-Notes on this bridge:
+## Minimal Agent Flow
 
-- `bash -lc` ensures `$PATH` is set from the login shell so the
-  `terminal-commander-mcp` shim resolves correctly.
-- The daemon must already be running INSIDE the WSL distro. The
-  Windows side does not start it. A common pattern is a systemd
-  user service or a `tmux` / `screen` session inside WSL.
-- stdin / stdout flow over the `wsl.exe` pipe transparently;
-  rmcp framing is preserved.
+Ask Cursor to use Terminal Commander:
 
-## 7. Verify tool discovery in Cursor
-
-Open Cursor and:
-
-1. **Settings → Features → MCP**. The `terminal-commander` server
-   should appear and report "Connected" once the daemon is up.
-2. In the Cursor chat panel, ask:
-   > List the MCP tools you have available.
-   You should see the 29 TC45 tools (`system_discover`, `health`,
-   `command_start_combed`, `bucket_wait`, `bucket_events_since`,
-   `command_status`, `file_read_window`, `file_search`,
-   `file_watch_start` / `_stop` / `_list`, `pty_command_start` /
-   `_write_stdin` / `_stop` / `_list`, `registry_*`, `runtime_state`,
-   `probe_list`, `probe_status`, etc.).
-3. Ask Cursor to call `health`. The response is a bounded JSON
-   envelope; no raw stream text appears in the chat.
-
-## 8. Minimal real flow
-
-Ask Cursor to:
-
-1. Call `command_start_combed` with argv `["echo", "hello"]`.
-2. Call `bucket_wait` with the returned `bucket_id` and `cursor: 0`,
-   `timeout_ms: 2000`.
-3. Call `command_status` with the returned `job_id`.
-
-Every response is a bounded JSON envelope. No raw stdout / stderr
-appears in the chat transcript. This is the same flow documented in
-`docs/integrations/codex-cli.md` § "Step 4 — minimal flow".
-
-## 9. Smoke evidence requirements
-
-Per the TC46 acceptance criteria, the Cursor provider-harness smoke
-is considered "live" only if a Cursor session actually invokes one
-of the Terminal Commander tools AND the response is observed in
-the session transcript. If your environment lacks a usable Cursor
-install / auth / config, mark the provider smoke as `Not Run` or
-`Blocked` in your report and cite the exact reason.
-
-Cursor's MCP discovery + tool invocation flow today does NOT have
-a documented headless / scripted entry point — the operator must
-open Cursor, configure the MCP server, observe the chat tool
-catalogue, and capture a transcript or screenshot. There is no
-`cursor --list-mcp-tools` subcommand at present. A local daemon +
-MCP stdio smoke (without Cursor in the loop) is available via
-[`scripts/smoke/verify-runtime-smoke.sh`](../../scripts/smoke/verify-runtime-smoke.sh);
-it is secondary evidence, not provider-harness success.
-
-## 10. Security notes
-
-- MCP servers execute local code under your user permissions.
-  Treat every `mcp.json` entry the same way you treat a shell
-  alias — review before adopting.
-- This config exposes ONLY `terminal-commander-mcp`. No raw shell
-  is bridged. No HTTP/SSE transport is configured. No environment
-  secrets are passed.
-- Terminal Commander's MCP surface (TC45) is bounded: 29 tools
-  with JSON envelopes, no raw stream lane. The MCP guard greps
-  remain green:
-  - `rg "Command::new|Command::spawn|TcpListener|UdpSocket"
-    crates/mcp` — doc / negative-assertion matches only.
-  - `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end"
-    crates/mcp/src` — no matches.
-- Do NOT add auto-run / auto-execute permissions to the
-  `terminal-commander` MCP entry. The operator confirms each tool
-  call in the Cursor chat panel.
-- Do NOT include credentials, API keys, or env secrets in
-  `mcp.json`. The `env` block is only for non-secret transport
-  variables (e.g. `TC_SOCKET`).
-
-## 11. Troubleshooting
-
-- **Cursor reports "MCP server failed to start".** Confirm
-  `terminal-commander-mcp` runs from your shell with the same env.
-  The adapter is Unix-only; on native Windows it refuses to start
-  and exits with code 64. Use the WSL bridge configuration in §6.
-- **`daemon ipc error [Internal]: request timed out`.** The daemon
-  is not running or `TC_SOCKET` does not match the daemon's socket
-  path. Confirm `$TC_DATA/terminal-commanderd.sock` exists and is
-  readable from the user that launched Cursor.
-- **No tools listed in Cursor MCP settings.** Cursor caches tool
-  catalogues per server name; rename `terminal-commander` to
-  invalidate the cache, or restart Cursor.
-- **WSL bridge prints `wsl.exe: no such command` or hangs.**
-  Confirm the distro name in `args` matches `wsl --list --verbose`
-  output exactly. Some installations rename Ubuntu (e.g.
-  `Ubuntu-22.04`, `Ubuntu`); the example uses `Ubuntu-24.04`.
-
-## 11a. Auto-generated config (WWS05)
-
-WWS05 ships a JS-only writer under
-`packages/terminal-commander/lib/cursor/` that produces the
-correct Cursor `mcp.json` stanza for the WWS04 bridge path. It is
-a library API at WWS05; the CLI subcommand
-(`terminal-commander setup cursor-wsl`) that calls it arrives at
-WWS06. Operators who want to invoke the writer directly today can
-do so via `node`:
-
-```js
-const { writeCursorMcpConfig } = require("terminal-commander/lib/cursor/write.js");
-const r = writeCursorMcpConfig({
-  scope: "global",            // or "project" with explicit projectRoot
-  distro: "Ubuntu-24.04",     // optional; double-validated before emit
-  force: false,               // refuse-existing-terminal-commander default
-  clobber_backup: false,      // refuse pre-existing .bak default
-});
-// r.status is one of: config_created, config_updated, already_exists,
-//   invalid_json, config_too_large, path_not_allowed,
-//   project_root_required, unsafe_distro_name, distro_not_found,
-//   backup_failed, write_failed, unsupported_host.
-// r.path / r.backup_path / r.server / r.was_present / r.hint follow.
+```text
+Call system_discover.
+Start argv ["echo","hello"] with command_start_combed.
+Wait on the returned bucket with bucket_wait.
+Read command_status for the returned job.
 ```
 
-Safety guarantees:
+The response should be bounded JSON. Cursor should not paste raw terminal
+scrollback into the chat.
 
-- Preserves every unrelated `mcpServers` entry untouched.
-- Refuses to overwrite an existing `terminal-commander` entry
-  unless `force: true` is passed. Always creates `<mcp.json>.bak`
-  before overwrite. Refuses if `.bak` already exists unless
-  `clobber_backup: true`.
-- Reads at most 256 KiB of existing `mcp.json`
-  (`config_too_large` refusal above that).
-- Refuses `invalid_json` without modifying the original file.
-- Atomic write via a same-directory `mcp.json.tmp.<random>` +
-  `renameSync`. Every path the writer touches stays inside the
-  resolved Cursor scope dir (`path_not_allowed` otherwise).
-- NO `child_process`, NO spawn, NO `wsl.exe`, NO network, NO
-  secrets/tokens/credentials/passwords. The only env key the
-  writer ever emits is `TC_WSL_DISTRO`.
-- Stdout-silent — all status text returns via the typed result
-  record.
+## Troubleshooting
 
-## 11d. Windows bridge smoke (WWS07)
+| Symptom | Check |
+| --- | --- |
+| Cursor shows server start error | Run `terminal-commander-mcp --help` and `terminal-commander doctor daemon` from the same user account. |
+| Cursor cannot find the command | Confirm the npm global bin directory is on the Windows or Unix `PATH` visible to Cursor. |
+| Tools are missing after a config change | Reload Cursor or disable/enable the server in Tools & MCP. |
+| Daemon is unavailable | Run `terminal-commander doctor daemon`; the MCP adapter normally attempts daemon auto-start on connect. |
+| You intentionally use WSL | Set `TC_USE_LEGACY_WSL_BRIDGE=1` and `TC_WSL_DISTRO=<name>` in the server env. |
 
-WWS07 ships `scripts/smoke/verify-windows-bridge-smoke.ps1`, a
-PowerShell smoke script that exercises the entire Windows -> WSL
-bridge path:
+## Security Notes
 
-```powershell
-# Dry-run (no live CLI invocations; print planned actions only):
-powershell -ExecutionPolicy Bypass `
-  -File scripts/smoke/verify-windows-bridge-smoke.ps1 -DryRun
+- The Cursor config exposes only `terminal-commander-mcp`.
+- No HTTP or SSE transport is configured.
+- Do not put API keys or secrets in `mcp.json`.
+- Terminal Commander tools return bounded JSON and pointer-based context.
+- Command execution is argv-first and policy-gated by the daemon.
 
-# Live (drives the WWS06 CLI; reports runtime_missing honestly
-# until the WSL-side terminal-commander-mcp is installed):
-powershell -ExecutionPolicy Bypass `
-  -File scripts/smoke/verify-windows-bridge-smoke.ps1
+## Manual Examples
 
-# Optional flags:
-#   -Distro <name>            override the default WSL distro
-#   -InstallWslRuntime        opt into 'setup cursor-wsl
-#                             --install-wsl-runtime' (NPM07-gated)
-#   -WriteCursorConfig        opt into a Cursor config write;
-#                             -TempCursorScope defaults on so the
-#                             write lands in a temp directory, not
-#                             the operator's real mcp.json.
-```
-
-Smoke output is bounded: `PASS  <step>` / `FAIL  <step>` /
-`NOTE  <text>` / `INFO  <text>` lines, one per check.
-
-Safety boundary:
-
-- NO direct `wsl.exe` or `child_process` call from PowerShell.
-  The only spawn surface is `node`; all `wsl.exe` calls flow
-  through the WWS04 `lib/wsl/spawn.js` helper.
-- NO sudo. NO password prompt. NO env credential.
-- The operator's real `%USERPROFILE%\.cursor\mcp.json` is NEVER
-  touched by default. `-WriteCursorConfig` is required to opt
-  into a real write; `-TempCursorScope` defaults on whenever
-  `-WriteCursorConfig` is supplied so the write lands in a temp
-  directory.
-- NO npm publish. NO workflow dispatch. NO tag / release / PR.
-- `runtime_missing` is RECORDED, not promoted to FAIL. The
-  script exits 0 on overall honest evidence.
-
-### Cursor GUI provider smoke (operator-driven)
-
-Cursor has no documented headless / scripted MCP discovery entry
-point at the time of WWS07 close (no `cursor --list-mcp-tools`
-subcommand). To promote the Cursor provider smoke from `Not Run`
-to PASS, an operator must perform these steps and attach the
-chat transcript:
-
-1. Run `terminal-commander setup cursor-wsl` (or
-   `terminal-commander setup cursor-wsl --project <repo>` for a
-   workspace-scoped config) — once the WSL-side runtime is
-   installed (`runtime_missing` blocks this until NPM07
-   publishes).
-2. Open Cursor on Windows.
-3. Open `Settings -> Features -> MCP`. The `terminal-commander`
-   server entry should be present and report "Connected".
-4. In the Cursor chat panel, ask: "Call the `health` MCP tool."
-5. Verify the response is a bounded JSON envelope (no raw
-   stdout/stderr text in the chat transcript).
-6. Optionally run the minimal flow from §8.
-7. Capture the chat transcript (text + timestamps) and attach
-   to the WWS07 evidence record. Until that attachment lands,
-   the Cursor provider smoke remains `Not Run` honestly.
-
-The direct bridge MCP round-trip (initialize + tools/list +
-health) executed by the PowerShell smoke when the WSL runtime is
-present is NOT the same as the Cursor provider smoke. WWS09
-gates the beta-posture promotion (`Conditional Go` -> `Go`) on
-at least one provider live smoke PASS.
-
-## 11b. Windows bridge roadmap (WWS chain)
-
-The Windows config block in §6 is the **current manual path**:
-operator copies the JSON, substitutes their distro, restarts
-Cursor. A future release will replace it with a single setup
-command (`terminal-commander setup cursor-wsl`) that auto-detects
-WSL, picks a distro, writes `~/.cursor/mcp.json`, and verifies
-the bridge end-to-end.
-
-The full design is locked in
-[`docs/release/windows-wsl-bridge-contract.md`](../release/windows-wsl-bridge-contract.md)
-(WWS01). The implementation is staged across WWS02 (root npm
-package widened to install on Windows), WWS03 (the read-only
-discovery layer: `lib/wsl/distro-name.js` distro safety
-whitelist, `lib/wsl/detect.js` `wsl.exe -l -v` parser, and
-`lib/wsl/doctor.js` read-only `terminal-commander-mcp`-presence
-probe), WWS04 (the `terminal-commander-mcp` bridge shim
-`lib/wsl/spawn.js` that actually invokes `wsl.exe -d <distro> --
-bash -lc 'exec terminal-commander-mcp'` with double-validated
-distro, `stdio: 'inherit'`, and token-shaped env vars stripped),
-WWS05 (the Cursor config writer — `lib/cursor/config.js` +
-`lib/cursor/write.js` — library-only; auto-generates the bridge
-stanza, refuses to clobber existing `terminal-commander` entries
-without `force`, always creates `.bak` before overwrite,
-atomic-writes via a same-directory tmp file + rename), and WWS06
-(the setup / doctor / pair CLI — now landed; see §11c). With
-WWS04 + WWS05 + WWS06 landed, Cursor on Windows that invokes
-`terminal-commander-mcp` will now transparently bridge into the
-WSL distro chosen by `TC_WSL_DISTRO` or the WSL default —
-provided the WSL-side `terminal-commander-mcp` is installed (the
-bridge short-circuits with `runtime_missing` until the operator
-runs `terminal-commander setup cursor-wsl --install-wsl-runtime`
-after NPM07 first-publish, or installs manually inside the
-distro). The manual `wsl.exe` config in §6 remains a valid
-alternative for operators who prefer to invoke `wsl.exe`
-directly from `mcp.json`.
-
-## 11c. WWS06 setup / doctor / pair CLI
-
-The Windows admin CLI has landed. Operator entry points:
-
-```powershell
-# Print Windows host overview.
-terminal-commander doctor
-
-# Read-only WSL discovery + optional runtime presence probe.
-terminal-commander doctor wsl
-terminal-commander doctor wsl --distro Ubuntu-24.04 --probe-runtime
-
-# Write the Cursor MCP config that points at the WWS04 bridge.
-# Default --global; --project <path> opts into workspace scope.
-terminal-commander setup cursor-wsl --print-config
-terminal-commander setup cursor-wsl --dry-run
-terminal-commander setup cursor-wsl
-terminal-commander setup cursor-wsl --force
-terminal-commander setup cursor-wsl --distro Ubuntu-24.04
-terminal-commander setup cursor-wsl --install-wsl-runtime
-
-# Optional pairing (deferred handshake; operator confirmation only).
-terminal-commander pair create
-terminal-commander pair accept 123456
-```
-
-Distro selection priority (locked): `--distro <name>` ->
-`TC_WSL_DISTRO` env -> `detectWsl().default_distro` -> bounded
-`no_default_distro_ambiguous` refusal with the candidate list.
-
-Hard safety boundary (locked at WWS06):
-
-- NO sudo. NO `sudo -S`. NO password prompt. NO env credential.
-- NO LLM-supplied secret is forwarded through MCP / chat /
-  bucket / log / audit / env / Cursor config / setup.json /
-  pair.json.
-- `--install-wsl-runtime` issues exactly ONE constant
-  `wsl.exe -d <distro> -- bash -lc 'npm install -g
-  terminal-commander'` command via the WWS04 bridge argv shape.
-  Permission failures return `install_permission_required` (no
-  retry under sudo); npm E404 returns `npm_package_unpublished`.
-- Setup state under `%LOCALAPPDATA%\terminal-commander\setup.json`
-  contains only `{ schema_version, distro, cursor_scope,
-  created_at, updated_at }`. Pair state under `pair.json`
-  contains only `{ schema_version, pair_id (uuid v7), code,
-  created_at, accepted_at, distro }`. Neither file holds tokens,
-  passwords, env values, or command history.
-
-Until NPM07 publishes the npm package, `setup cursor-wsl
---install-wsl-runtime` is expected to return
-`npm_package_unpublished`. Operators can install manually
-inside the WSL distro via `npm install -g terminal-commander`
-once the package is published.
-
-## 12. Source status
-
-| Component | Status |
-|---|---|
-| `docs/integrations/cursor.md` (this file) | live (NPM08, 2026-05-23) |
-| `examples/provider-harness/cursor/*.json` | live (NPM08, 2026-05-23) — copy intentionally |
-| `npm install -g terminal-commander` install path | pending NPM07 live publish + operator preconditions |
-| Local-tarball pre-publish install path | live (NPM04) |
-| Cursor provider smoke transcript | **Not Run** (operator-driven; see §9) |
-| MCP guard greps | green (unchanged from TC45 / NPM02 baseline) |
+Example files live in
+[`examples/provider-harness/cursor/`](../../examples/provider-harness/cursor/).
+The native example is the recommended shape. The `linux-wsl` example is kept as
+a legacy manual bridge reference for operators who still need it.

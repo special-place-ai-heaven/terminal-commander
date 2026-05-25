@@ -1,7 +1,7 @@
 {
   "name": "terminal-commander",
   "version": "0.1.9",
-  "description": "Terminal Commander — local MCP-operated terminal/file signal channel. Daemon + MCP stdio adapter + admin CLI. Linux + WSL2 only (per TC44 runtime).",
+  "description": "Terminal Commander: local MCP-operated terminal/file signal channel with native Linux, Windows, and macOS packages.",
   "license": "Apache-2.0",
   "author": "special-place-ai-heaven",
   "repository": {

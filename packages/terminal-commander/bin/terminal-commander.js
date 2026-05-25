@@ -6,13 +6,16 @@
 // handled here so users can inspect or refresh the npm-managed install
 // even if the native binary is missing.
 //
-// Normal commands spawn the resolved platform binary with shell:false
-// and stdio:inherit, mirroring the native exit code or signal.
+// Native inspection commands spawn the resolved platform binary with
+// shell:false and stdio:inherit. JS-only setup/pair/update commands
+// stay in this wrapper so they work even when the native CLI is present.
 
 "use strict";
 
 const { spawn } = require("child_process");
+const fs = require("fs");
 const https = require("https");
+const path = require("path");
 const pkg = require("../package.json");
 const { resolveBinary, formatResolveError } = require("../lib/resolve-binary.js");
 
@@ -26,8 +29,35 @@ function isUpdateRequest(argv) {
   return argv.length === 1 && argv[0] === "update";
 }
 
-function npmProgram() {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
+function isJsCliRequest(argv) {
+  const command = argv[0];
+  if (command === "setup" || command === "pair") {
+    return true;
+  }
+  if (command === "doctor") {
+    return argv[1] === "wsl" || argv[1] === "harness" || argv[1] === "daemon";
+  }
+  return false;
+}
+
+function npmInvocation() {
+  const args = ["install", "-g", "terminal-commander@latest"];
+  if (process.platform !== "win32") {
+    return { command: "npm", args };
+  }
+
+  const candidates = [];
+  if (process.env.npm_execpath && path.extname(process.env.npm_execpath).toLowerCase() === ".js") {
+    candidates.push(process.env.npm_execpath);
+  }
+  candidates.push(path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"));
+
+  const npmCli = candidates.find((candidate) => candidate && fs.existsSync(candidate));
+  if (npmCli) {
+    return { command: process.execPath, args: [npmCli, ...args] };
+  }
+
+  return null;
 }
 
 function numericVersionParts(version) {
@@ -119,7 +149,62 @@ async function runVersion() {
 }
 
 function runUpdate() {
-  const child = spawn(npmProgram(), ["install", "-g", "terminal-commander@latest"], {
+  const invocation = npmInvocation();
+  if (!invocation) {
+    process.stderr.write(
+      "terminal-commander: npm CLI entrypoint not found; reinstall Node/npm and retry `terminal-commander update`.\n",
+    );
+    process.exit(126);
+  }
+
+  runUpdatePreflight((preflightCode) => {
+    if (preflightCode !== 0) {
+      process.stderr.write(
+        `terminal-commander: update preflight failed with exit code ${preflightCode}; close Terminal Commander processes and retry.\n`,
+      );
+      process.exit(preflightCode || 1);
+      return;
+    }
+    const child = spawn(invocation.command, invocation.args, {
+      stdio: "inherit",
+      shell: false,
+      env: process.env,
+    });
+
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        process.kill(process.pid, signal);
+        return;
+      }
+      process.exit(code == null ? 1 : code);
+    });
+
+    child.on("error", (err) => {
+      process.stderr.write(
+        `terminal-commander: failed to start npm update: ${err.code || err.message}\n`,
+      );
+      process.exit(126);
+    });
+  });
+}
+
+function runUpdatePreflight(done) {
+  if (process.platform !== "win32") {
+    done(0);
+    return;
+  }
+
+  const result = resolveBinary({ binary: "terminal-commander" });
+  if (result.reason !== "ok") {
+    done(0);
+    return;
+  }
+
+  const child = spawn(result.binaryPath, [
+    "update-locks",
+    "--bin-dir",
+    path.dirname(result.binaryPath),
+  ], {
     stdio: "inherit",
     shell: false,
     env: process.env,
@@ -127,18 +212,39 @@ function runUpdate() {
 
   child.on("exit", (code, signal) => {
     if (signal) {
-      process.kill(process.pid, signal);
+      done(1);
       return;
     }
-    process.exit(code == null ? 1 : code);
+    done(code == null ? 1 : code);
   });
 
   child.on("error", (err) => {
     process.stderr.write(
-      `terminal-commander: failed to start npm update: ${err.code || err.message}\n`,
+      `terminal-commander: failed to start update preflight: ${err.code || err.message}\n`,
     );
-    process.exit(126);
+    done(126);
   });
+}
+
+function writeCliResult(result) {
+  if (result.output) {
+    const stream = result.exit_code === 0 ? process.stdout : process.stderr;
+    stream.write(result.output);
+    if (!result.output.endsWith("\n")) stream.write("\n");
+  }
+  process.exit(typeof result.exit_code === "number" ? result.exit_code : 64);
+}
+
+function runJsCli() {
+  const { run } = require("../lib/cli/run.js");
+  run({ argv: args })
+    .then(writeCliResult)
+    .catch((err) => {
+      process.stderr.write(
+        `terminal-commander: CLI internal error: ${err && err.code ? err.code : "unknown"}\n`,
+      );
+      process.exit(64);
+    });
 }
 
 if (isVersionRequest(args)) {
@@ -150,24 +256,13 @@ if (isVersionRequest(args)) {
     });
 } else if (isUpdateRequest(args)) {
   runUpdate();
+} else if (isJsCliRequest(args)) {
+  runJsCli();
 } else {
   const result = resolveBinary({ binary: "terminal-commander" });
 
   if (result.reason === "bridge_required") {
-    const { run } = require("../lib/cli/run.js");
-    (async () => {
-      const r = await run();
-      if (r.output) {
-        process.stderr.write(r.output);
-        if (!r.output.endsWith("\n")) process.stderr.write("\n");
-      }
-      process.exit(typeof r.exit_code === "number" ? r.exit_code : 64);
-    })().catch((err) => {
-      process.stderr.write(
-        `terminal-commander: CLI internal error: ${err && err.code ? err.code : "unknown"}\n`,
-      );
-      process.exit(64);
-    });
+    runJsCli();
   } else if (result.reason !== "ok") {
     process.stderr.write(formatResolveError(result) + "\n");
     process.exit(64);

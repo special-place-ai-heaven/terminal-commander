@@ -57,6 +57,31 @@ test("runBootstrap skips on TC_SKIP_BOOTSTRAP", async () => {
   assert.equal(r.exit_code, 0);
 });
 
+test("runBootstrap win32 defaults to native MCP path without WSL probe", async () => {
+  let detectCalled = false;
+  const writes = [];
+  const r = await runBootstrap({
+    mode: "cli",
+    platform: "win32",
+    env: { USERPROFILE: "C:\\Users\\example" },
+    dry_run: true,
+    acquireLock: false,
+    detect: async () => {
+      detectCalled = true;
+      throw new Error("WSL probe must not run for native default");
+    },
+    writeAllHarnesses: (opts) => {
+      writes.push(opts);
+      return [{ id: "cursor", status: "ok" }];
+    },
+  });
+  assert.equal(r.exit_code, 0);
+  assert.equal(detectCalled, false);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].distro, null);
+  assert.match(r.output, /native Windows MCP path selected/);
+});
+
 test("runBootstrap linux writes harness without WSL", async () => {
   if (process.platform === "win32") return;
   const r = await runBootstrap({

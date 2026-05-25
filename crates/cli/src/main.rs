@@ -17,6 +17,8 @@ use terminal_commander_supervisor::paths::{
     endpoint_from_socket_path, resolve_socket_path, resolve_state_dir,
 };
 
+mod update_locks;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "terminal-commander",
@@ -58,6 +60,13 @@ enum Command {
         /// Limit on records to display.
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+    /// Hidden npm-update preflight: stop TC binaries loaded from one install bin dir.
+    #[command(hide = true)]
+    UpdateLocks {
+        /// Platform package bin directory that owns the binaries allowed to stop.
+        #[arg(long)]
+        bin_dir: std::path::PathBuf,
     },
 }
 
@@ -126,6 +135,17 @@ fn run(cli: Cli) -> std::process::ExitCode {
         Command::Audit { limit } => {
             println!("audit (last {limit}): empty (offline CLI; daemon attach deferred)");
             std::process::ExitCode::SUCCESS
+        }
+        Command::UpdateLocks { bin_dir } => {
+            let result = update_locks::stop_installed_processes(&bin_dir);
+            for line in &result.lines {
+                eprintln!("{line}");
+            }
+            if result.errors == 0 {
+                std::process::ExitCode::SUCCESS
+            } else {
+                std::process::ExitCode::from(1)
+            }
         }
     }
 }
@@ -247,6 +267,15 @@ mod tests {
         let cli = Cli::parse_from(["terminal-commander", "audit", "--limit", "10"]);
         match cli.cmd {
             Command::Audit { limit } => assert_eq!(limit, 10),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_hidden_update_locks() {
+        let cli = Cli::parse_from(["terminal-commander", "update-locks", "--bin-dir", "."]);
+        match cli.cmd {
+            Command::UpdateLocks { bin_dir } => assert_eq!(bin_dir, std::path::PathBuf::from(".")),
             _ => panic!("wrong variant"),
         }
     }

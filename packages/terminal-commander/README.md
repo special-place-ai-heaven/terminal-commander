@@ -1,57 +1,53 @@
 # terminal-commander
 
-npm root wrapper for [Terminal Commander](https://github.com/special-place-ai-heaven/terminal-commander) — local MCP control plane for coding agents.
+npm root wrapper for [Terminal Commander](https://github.com/special-place-ai-heaven/terminal-commander), a local MCP control plane for coding agents.
 
 ## Install
 
 ```powershell
-# Windows
-npm install -g terminal-commander@latest
-```
-
-```sh
-# Linux / WSL
 npm install -g terminal-commander@latest
 ```
 
 Install is passive: no lifecycle bootstrap, no automatic MCP config writes, no
-daemon start, and no hidden WSL install.
+daemon start, no WSL install, and no hidden helper process.
 
-Update explicitly:
+Configure harnesses explicitly:
 
-```sh
+```powershell
+terminal-commander setup harness
+```
+
+Or target one provider:
+
+```powershell
+terminal-commander setup harness --provider cursor
+terminal-commander setup harness --provider codex-cli
+terminal-commander setup harness --provider claude-code
+terminal-commander setup harness --provider claude-desktop
+```
+
+## Update
+
+```powershell
 terminal-commander update
 ```
 
 This runs `npm install -g terminal-commander@latest`.
 
-Configure harnesses explicitly after install or update:
-
-```sh
-terminal-commander setup harness --provider cursor
-terminal-commander setup harness --provider codex-cli
-terminal-commander setup harness --provider claude-code
-```
+On Windows, update first runs a native scoped lock preflight. It terminates only
+Terminal Commander binaries currently running from the installed npm platform
+package `bin` directory. It does not invoke `cmd.exe`, PowerShell, `taskkill`, or
+downloaded scripts.
 
 ## Commands
 
 | Binary | Role |
-|--------|------|
-| `terminal-commander-mcp` | MCP stdio adapter |
-| `terminal-commanderd` | Daemon |
-| `terminal-commander` | `doctor harness`, `doctor wsl`, `doctor daemon`, `setup harness` |
+| --- | --- |
+| `terminal-commander` | Admin CLI: version, update, setup, doctor, native diagnostics |
+| `terminal-commander-mcp` | MCP stdio adapter launched by the LLM harness |
+| `terminal-commanderd` | Local daemon for IPC, probes, policy, buckets, and audit |
 
-## Windows
-
-On `win32`, the default path uses the `@terminal-commander/windows-x64`
-platform package. The legacy WSL bridge is still available only when
-`TC_USE_LEGACY_WSL_BRIDGE=1`:
-
-- Linux-first `PATH` in `bash -lc` (avoids `/mnt/c/.../nodejs` shim).
-- Sources `~/.config/terminal-commander/autostart.sh` before MCP.
-- Re-execs native Linux MCP if the Windows shim is still invoked under `/mnt/c`.
-
-## Platform packages
+## Platform Packages
 
 Optional platform dependencies:
 
@@ -60,6 +56,9 @@ Optional platform dependencies:
 - `@terminal-commander/windows-x64`
 - `@terminal-commander/mac-x64`
 - `@terminal-commander/mac-arm64`
+
+Windows uses the native `@terminal-commander/windows-x64` package by default.
+The legacy Windows-to-WSL bridge is opt-in with `TC_USE_LEGACY_WSL_BRIDGE=1`.
 
 ## Documentation
 

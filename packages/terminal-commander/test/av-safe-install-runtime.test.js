@@ -4,6 +4,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -44,9 +45,11 @@ test("admin CLI update is explicit npm update with no shell wrapper", () => {
   );
 
   assert.match(src, /terminal-commander@latest/);
-  assert.match(src, /npm\.cmd/);
+  assert.match(src, /update-locks/);
+  assert.match(src, /npm-cli\.js/);
+  assert.match(src, /process\.execPath/);
   assert.match(src, /shell:\s*false/);
-  assert.doesNotMatch(src, /cmd\.exe|cmd \/c|powershell|ExecutionPolicy|windowsHide/);
+  assert.doesNotMatch(src, /npm\.cmd|taskkill|cmd\.exe|cmd \/c|powershell|ExecutionPolicy|windowsHide/);
 });
 
 test("admin CLI version advisory checks npm registry without spawning npm", () => {
@@ -58,4 +61,22 @@ test("admin CLI version advisory checks npm registry without spawning npm", () =
   assert.match(src, /registry\.npmjs\.org\/terminal-commander\/latest/);
   assert.match(src, /Update available/);
   assert.doesNotMatch(src, /npm view/);
+});
+
+test("JS-only control-plane commands route before native binary spawn", () => {
+  const shim = path.join(PKG_ROOT, "bin", "terminal-commander.js");
+  for (const args of [
+    ["setup", "--help"],
+    ["pair", "--help"],
+    ["doctor", "harness", "--help"],
+  ]) {
+    const r = spawnSync(process.execPath, [shim, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+    });
+    assert.equal(r.status, 0, `${args.join(" ")} failed: ${r.stderr}`);
+    assert.equal(r.stderr, "");
+    assert.match(r.stdout, /terminal-commander/);
+  }
 });

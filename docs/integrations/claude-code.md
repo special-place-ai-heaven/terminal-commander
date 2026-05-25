@@ -1,39 +1,33 @@
 # Claude Code integration
 
-Connect [Claude Code](https://docs.claude.com/en/docs/claude-code) to
-Terminal Commander over MCP stdio. Claude Code supports MCP servers
-either through `~/.claude/settings.json` / `claude_desktop_config.json`
-style configuration, or by passing `--mcp-config <path>` when
-launching `claude`. Either path lets you point Claude Code at the
-locally-built `terminal-commander-mcp` adapter, which forwards every
-tool call to the local `terminal-commanderd` daemon over its Unix
-domain socket.
+Connect Claude Code to Terminal Commander through MCP stdio.
 
-No secrets, no tokens, no machine-specific absolute paths.
+Install and write the MCP config:
 
-## Prerequisites
-
-- Linux or WSL2 (Terminal Commander's daemon UDS is Unix-only).
-- A built workspace.
-
-```sh
-cargo build -p terminal-commanderd -p terminal-commander-mcp --bins
+```powershell
+npm install -g terminal-commander@latest
+terminal-commander setup harness --provider claude-code
 ```
 
-## Step 1 — start the daemon
+The npm install is passive. The setup command is the explicit step that merges
+Terminal Commander into Claude Code's MCP config.
 
-```sh
-export TC_DATA="${XDG_STATE_HOME:-$HOME/.local/state}/terminal-commander"
-mkdir -p "$TC_DATA"
+## Config Shape
 
-terminal-commanderd --data-dir "$TC_DATA" start --mode ipc-server
+Claude Code accepts MCP servers in a JSON `mcpServers` block:
+
+```json
+{
+  "mcpServers": {
+    "terminal_commander": {
+      "command": "terminal-commander-mcp",
+      "args": []
+    }
+  }
+}
 ```
 
-Leave the daemon running.
-
-## Step 2a — `--mcp-config` flag (recommended for first try)
-
-Save the following as `terminal-commander.mcp.json`:
+Only add an env block when you intentionally use a non-default daemon endpoint:
 
 ```json
 {
@@ -42,80 +36,52 @@ Save the following as `terminal-commander.mcp.json`:
       "command": "terminal-commander-mcp",
       "args": [],
       "env": {
-        "TC_SOCKET": "${TC_DATA}/terminal-commanderd.sock"
+        "TC_SOCKET": "/path/to/terminal-commanderd.sock"
       }
     }
   }
 }
 ```
 
-Launch Claude Code with the config:
+On Windows, the default endpoint is a local named pipe and normally does not
+need `TC_SOCKET`. On Unix, the default endpoint is a Unix domain socket.
 
-```sh
-claude --mcp-config terminal-commander.mcp.json
-```
+## Verify
 
-## Step 2b — persistent settings.json entry
+1. Run `terminal-commander doctor harness`.
+2. Restart Claude Code.
+3. Run `/mcp` and confirm `terminal_commander` is connected.
 
-To make Terminal Commander always available, add the same block to
-your Claude Code **MCP** file (`~/.claude.json` on all platforms).
-Do not put `mcpServers` in `~/.claude/settings.json` — that file is
-for permissions/hooks; MCP lives in `.claude.json` per
-[Claude Code settings](https://code.claude.com/docs/en/settings).
+Expected Terminal Commander tools include `system_discover`, `health`,
+`policy_status`, `command_start_combed`, `bucket_wait`,
+`bucket_events_since`, `command_status`, `file_read_window`, `file_search`,
+`file_watch_start`, `file_watch_stop`, `file_watch_list`, `pty_command_start`,
+`pty_command_write_stdin`, `pty_command_stop`, `pty_command_list`,
+`registry_*`, `runtime_state`, `probe_list`, and `probe_status`.
 
-```jsonc
-{
-  // ...existing settings...
-  "mcpServers": {
-    "terminal_commander": {
-      "command": "terminal-commander-mcp",
-      "args": [],
-      "env": {
-        "TC_SOCKET": "${TC_DATA}/terminal-commanderd.sock"
-      }
-    }
-  }
-}
-```
+## Minimal Flow
 
-Restart Claude Code.
+Ask Claude Code to:
 
-## Step 3 — discover the tools
+1. Call `system_discover`.
+2. Call `command_start_combed` with argv `["echo", "hello"]`.
+3. Call `bucket_wait` with the returned `bucket_id` and `cursor: 0`.
+4. Call `command_status` with the returned `job_id`.
 
-Inside Claude Code use the `/mcp` slash command to confirm Terminal
-Commander is connected. You should see the 29-tool TC45 catalogue
-(see [`codex-cli.md`](codex-cli.md) for the full list).
-
-## Step 4 — minimal flow
-
-Ask the assistant to:
-
-1. Call `command_start_combed` with argv `["echo", "hello"]`.
-2. Call `bucket_wait` with the returned `bucket_id` and `cursor: 0`.
-3. Call `command_status` with the returned `job_id`.
-
-Every response is a bounded JSON envelope.
+Every response is bounded JSON.
 
 ## Troubleshooting
 
-- **`/mcp` shows no servers.** Confirm Claude Code loaded the
-  config file (`--mcp-config` path is absolute, settings file is the
-  right one for your platform). Re-launch.
-- **`terminal-commander-mcp` exits immediately.** It is Unix-only.
-  On native Windows it returns exit code 64 with a stderr message;
-  use WSL2.
-- **Requests time out.** The daemon is not running or `TC_SOCKET`
-  does not match the daemon socket path.
+| Symptom | Check |
+| --- | --- |
+| `/mcp` shows no Terminal Commander server | Confirm Claude Code loaded the config and restart the session. |
+| MCP server failed to start | Confirm `terminal-commander-mcp --help` works from the same user account. |
+| Daemon unavailable | Run `terminal-commander doctor daemon`; the MCP adapter normally attempts daemon auto-start on connect. |
+| Non-default endpoint | Set `TC_SOCKET` explicitly in the MCP env block. |
 
-## Smoke evidence requirements
+## Smoke Evidence
 
-The Claude Code provider-harness smoke is considered "live" only if
-a Claude Code session actually invokes one of the Terminal Commander
-tools and the response is observed in the session transcript. If
-your environment lacks a usable Claude Code CLI (no `claude` binary,
-no auth, sandboxed CI, etc.), mark the provider smoke as `Not Run`
-or `Blocked` in your report and cite the exact reason.
-
-A local daemon + MCP stdio smoke without Claude Code in the loop is
-available via `scripts/smoke/verify-runtime-smoke.sh`; it is
-secondary evidence, not provider-harness success.
+A provider smoke is live only when a Claude Code session invokes one Terminal
+Commander tool and the bounded response is visible in the session transcript.
+The local runtime smoke script proves Terminal Commander works without Claude
+Code in the loop, but it is not a provider-harness smoke by itself.
