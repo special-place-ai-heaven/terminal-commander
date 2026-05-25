@@ -26,6 +26,19 @@ jobs:
       - name: Sync optionalDependencies
         run: node scripts/release/sync-optional-dependencies.js
 
+      - name: Sync Cargo workspace version to npm package version
+        shell: bash
+        run: |
+          # release-please's `extra-files` does not allow paths outside the
+          # package directory (no `..` allowed). To keep Cargo.toml +
+          # crates/{daemon,mcp,probes}/Cargo.toml versions in lockstep with
+          # the npm package version, sync them here in the release-pr-sync
+          # workflow. Runs only on release-please's branch (gated by job if:).
+          set -euo pipefail
+          target_ver=$(node -p "require('./packages/terminal-commander/package.json').version")
+          echo "target version: ${target_ver}"
+          python3 scripts/release/sync-cargo-versions.py "${target_ver}"
+
       - name: Ensure release PR title includes version
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
@@ -44,14 +57,24 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
         run: |
           set -euo pipefail
-          if git diff --quiet packages/terminal-commander/package.json; then
-            echo "optionalDependencies already synced"
+          # Include Cargo.toml + crate manifests + Cargo.lock in the change check
+          # (the sync-cargo-versions step above may have bumped them).
+          paths=(
+            packages/terminal-commander/package.json
+            Cargo.toml
+            Cargo.lock
+            crates/daemon/Cargo.toml
+            crates/mcp/Cargo.toml
+            crates/probes/Cargo.toml
+          )
+          if git diff --quiet "${paths[@]}"; then
+            echo "no version sync changes required"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add packages/terminal-commander/package.json
-          git commit -m "chore: sync optionalDependencies to package version"
+          git add "${paths[@]}"
+          git commit -m "chore: sync optionalDependencies + Cargo versions to package version"
           git push origin HEAD:${{ github.head_ref }}
 
       - name: Wait for PR checks (REQUIRED to pass)
