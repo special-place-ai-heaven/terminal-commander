@@ -48,16 +48,28 @@ publish="false"
 if git rev-parse "$tag" >/dev/null 2>&1; then
   tag_sha="$(git rev-parse "${tag}^{commit}")"
   if [ "$tag_sha" != "$head_sha" ]; then
-    # Codex C1 (2026-05-25): refuse to force-move an existing release tag.
-    # A tag pointing somewhere other than HEAD on an ordinary main push means
-    # the release PR has not been merged yet (e.g. we're pushing a feature commit
-    # directly to main while v0.1.4 still points at last week's release).
-    # Force-retagging would silently rewrite history of a published release.
-    echo "::error::tag ${tag} exists at ${tag_sha} but HEAD is ${head_sha}"
-    echo "::error::refusing to force-move. If this IS the intended release PR merge,"
-    echo "::error::run 'git push origin --delete ${tag}' first and re-run."
-    exit 1
+    # Existing tag at ${tag_sha} != HEAD ${head_sha} is the NORMAL case:
+    # the manifest version (e.g. 0.1.4) was already released, and subsequent
+    # commits have landed on main since that release. ensure-release runs on
+    # EVERY main push, so most invocations land here. Do nothing — this is
+    # not a release PR merge; release-please will detect the next release
+    # boundary when conventional commits accumulate enough to bump the version.
+    #
+    # Codex C1 fix (2026-05-25): the prior version force-retagged here, which
+    # silently rewrote published release history. The new version exits 0 with
+    # publish=false (the workflow's downstream publish jobs won't fire).
+    echo "tag ${tag} exists at ${tag_sha}; HEAD ${head_sha} is post-release. No publish work for this push."
+    publish="false"
+    need_rp="false"
+    {
+      echo "version=${version}"
+      echo "publish=${publish}"
+      echo "need_release_please=${need_rp}"
+    } >>"$GITHUB_OUTPUT"
+    exit 0
   fi
+  # tag_sha == head_sha: the release PR was just merged and the tag is
+  # already at HEAD. Continue to npm-publish-gap check below.
 else
   need_rp="true"
 fi
