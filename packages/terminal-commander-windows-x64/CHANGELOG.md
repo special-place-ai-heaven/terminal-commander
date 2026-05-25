@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.8...v0.1.9) (2026-05-25)
+
+
+### Bug Fixes
+
+* make npm distribution av-safe ([af24679](https://github.com/special-place-ai-heaven/terminal-commander/commit/af246791160b0b84fbf0a2501fb9c780e044d83b))
+
 ## [0.1.8](https://github.com/special-place-administrator/terminal-commander/compare/v0.1.7...v0.1.8) (2026-05-25)
 
 
