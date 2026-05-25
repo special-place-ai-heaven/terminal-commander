@@ -551,15 +551,7 @@ impl CommandRuntime {
         let waiter_profile = self.profile_label.clone();
         let waiter_live = Arc::clone(&self.live);
         tokio::spawn(async move {
-            let (final_metrics, outcome) = drive_to_exit(probe).await;
-            // Update the stored metrics for command_status callers.
-            // The binding's `sifter` and `inline_rules` are
-            // preserved so a deactivation racing with the exit
-            // still has a sifter handle to swap (the no-op rebuild
-            // is harmless on a finished probe).
-            if let Some(b) = waiter_live.write().get_mut(&job_id) {
-                b.metrics = final_metrics;
-            }
+            let (mut final_metrics, outcome) = drive_to_exit(probe).await;
 
             // Lifecycle draft.
             let draft = match outcome {
@@ -569,8 +561,20 @@ impl CommandRuntime {
 
             // Append the lifecycle event to the bucket (router does
             // the audit on bucket_append).
-            if let Some(d) = draft.as_ref() {
-                let _ = waiter_router.bucket_append(bucket_id, d.clone());
+            if let Some(d) = draft.as_ref()
+                && waiter_router.bucket_append(bucket_id, d.clone()).is_ok()
+            {
+                final_metrics.events_emitted = final_metrics.events_emitted.saturating_add(1);
+                waiter_jobs.record_event(job_id);
+            }
+
+            // Update the stored metrics for command_status callers.
+            // The binding's `sifter` and `inline_rules` are
+            // preserved so a deactivation racing with the exit
+            // still has a sifter handle to swap (the no-op rebuild
+            // is harmless on a finished probe).
+            if let Some(b) = waiter_live.write().get_mut(&job_id) {
+                b.metrics = final_metrics;
             }
 
             // Emit our own structured audit row for the exit.
