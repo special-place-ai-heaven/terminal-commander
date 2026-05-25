@@ -453,7 +453,7 @@ Preserved (UNCHANGED at WWS02):
   config writer; WWS06 wires the setup CLI).
 - §9 Safety contract — extended with the bridge invariants in
   WWS01 §4.4 (whitelist-validated distro, argv-array spawn,
-  `shell: false`, `windowsHide: true`). No new MCP tools. MCP
+  `shell: false`, no hidden-window option). No new MCP tools. MCP
   guard greps remain clean.
 - §10 NPM03–NPM07 per-goal recommendations.
 - §11 Risks — extended at WWS01 §16 with R-WWS-01..R-WWS-10.
