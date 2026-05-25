@@ -57,10 +57,16 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
         run: |
           set -euo pipefail
-          # Include Cargo.toml + crate manifests + Cargo.lock in the change check
-          # (the sync-cargo-versions step above may have bumped them).
+          # Include npm package graph + Cargo files in the change check.
+          # The sync steps above may have bumped any of them.
           paths=(
+            .github/.release-please-manifest.json
             packages/terminal-commander/package.json
+            packages/terminal-commander-linux-x64/package.json
+            packages/terminal-commander-linux-arm64/package.json
+            packages/terminal-commander-windows-x64/package.json
+            packages/terminal-commander-mac-x64/package.json
+            packages/terminal-commander-mac-arm64/package.json
             Cargo.toml
             Cargo.lock
             crates/daemon/Cargo.toml
