@@ -12,6 +12,7 @@
 //! generation. Persistence is deferred post-MVP.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 use parking_lot::RwLock;
@@ -230,18 +231,17 @@ impl JobManager {
         } else {
             Severity::Low
         };
+        let command = lifecycle_command_label(&config.argv);
         let summary = if nonzero {
             format!(
-                "command failed: {argv:?} (exit={ec:?}, signal={sig:?}, dur_ms={dur})",
-                argv = config.argv,
+                "command failed: {command} (exit={ec:?}, signal={sig:?}, dur_ms={dur})",
                 ec = exit.exit_code,
                 sig = exit.signal,
                 dur = exit.duration_ms,
             )
         } else {
             format!(
-                "command exited cleanly: {argv:?} (dur_ms={dur})",
-                argv = config.argv,
+                "command exited cleanly: {command} (dur_ms={dur})",
                 dur = exit.duration_ms,
             )
         };
@@ -298,6 +298,16 @@ impl JobManager {
     }
 }
 
+fn lifecycle_command_label(argv: &[String]) -> String {
+    let program = argv
+        .first()
+        .and_then(|arg0| Path::new(arg0).file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("<unknown>");
+    format!("program={program:?} argc={}", argv.len())
+}
+
 impl JobExitInfo {
     /// Compute an effective "last_seen" timestamp for the synthetic
     /// exit event: started_at + duration.
@@ -314,6 +324,18 @@ mod tests {
     fn cfg() -> JobConfig {
         JobConfig::new(
             vec!["echo".to_owned(), "hi".to_owned()],
+            BucketId::new(),
+            ProbeId::new(),
+        )
+    }
+
+    fn secret_cfg() -> JobConfig {
+        JobConfig::new(
+            vec![
+                r"C:\Windows\System32\where.exe".to_owned(),
+                "--token=tc_fake_secret_123".to_owned(),
+                "wsl.exe".to_owned(),
+            ],
             BucketId::new(),
             ProbeId::new(),
         )
@@ -357,6 +379,26 @@ mod tests {
         assert!(draft.pointer_unavailable_reason.is_some());
         draft.validate().unwrap();
         assert_eq!(m.get(id).unwrap().state, JobState::Failed);
+    }
+
+    #[test]
+    fn job_lifecycle_summaries_do_not_echo_full_argv() {
+        let m = JobManager::new();
+        let success_id = m.start(secret_cfg());
+        let success = m.finish(success_id, Some(0), None).unwrap();
+        assert_eq!(success.kind, "command_exited");
+        assert!(success.summary.contains("where.exe"));
+        assert!(success.summary.contains("argc=3"));
+        assert!(!success.summary.contains("tc_fake_secret_123"));
+        assert!(!success.summary.contains(r"C:\Windows\System32"));
+
+        let failure_id = m.start(secret_cfg());
+        let failure = m.finish(failure_id, Some(2), None).unwrap();
+        assert_eq!(failure.kind, "command_failed");
+        assert!(failure.summary.contains("where.exe"));
+        assert!(failure.summary.contains("argc=3"));
+        assert!(!failure.summary.contains("tc_fake_secret_123"));
+        assert!(!failure.summary.contains(r"C:\Windows\System32"));
     }
 
     #[test]
