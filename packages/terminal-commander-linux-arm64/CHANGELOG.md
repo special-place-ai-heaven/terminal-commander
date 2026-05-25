@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/special-place-administrator/terminal-commander/compare/v0.1.5...v0.1.6) (2026-05-25)
+
+
+### Bug Fixes
+
+* **release:** sync linux-x64 + linux-arm64 + manifest to 0.1.5 ([e6e37e7](https://github.com/special-place-administrator/terminal-commander/commit/e6e37e72cf50905faf92b4948758c9a0d33eefc9))
+
 ## [0.1.3](https://github.com/special-place-administrator/terminal-commander/compare/v0.1.2...v0.1.3) (2026-05-23)
 
 
