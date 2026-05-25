@@ -4,37 +4,23 @@
     "id": 1,
     "method": "tools/call",
     "params": {
-      "name": "file_search",
-      "arguments": {
-        "path": "README.md",
-        "query": "Terminal Commander",
-        "case_insensitive": true,
-        "max_matches": 10,
-        "max_snippet_bytes": 160
-      }
+      "name": "health",
+      "arguments": {}
     }
   },
-  "tool": "file_search",
+  "tool": "health",
   "_meta": {
-    "schema_anchor": "TC05/mcp-tools/file_search-v1",
-    "fixture_id": "contracts/mcp-tools/file_search.v1.json",
+    "schema_anchor": "TC05/mcp-tools/health-v1",
+    "fixture_id": "contracts/mcp-tools/health.v1.json",
     "status": "live",
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed bounded file search. Success returns capped snippets and never streams whole files."
+    "note": "Daemon-backed liveness ping. Success is a minimal bounded response; daemon startup unavailability is a typed daemon_unavailable error."
   },
   "response_example": {
-    "path": "README.md",
-    "matches": [
-      {
-        "line": 3,
-        "byte_offset": 44,
-        "snippet": "# Terminal Commander"
-      }
-    ],
-    "truncated": false,
-    "bytes_scanned": 4096
+    "ok": true,
+    "uptime_secs": 42
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -58,8 +44,8 @@
     }
   },
   "invariants": [
-    "path and query are required",
-    "max_matches and max_snippet_bytes are optional and daemon-clamped",
-    "success returns bounded snippets, not whole files"
+    "requires_daemon=true in system_discover",
+    "success payload contains only ok and uptime_secs",
+    "does not synthesize liveness while daemon is unavailable"
   ]
 }

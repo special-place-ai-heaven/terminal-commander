@@ -1,0 +1,57 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "file_watch_start",
+      "arguments": {
+        "path": "C:\\work\\app\\build.log",
+        "follow_from_beginning": false
+      }
+    }
+  },
+  "tool": "file_watch_start",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/file_watch_start-v1",
+    "fixture_id": "contracts/mcp-tools/file_watch_start.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed file watch creation. MCP accepts only path and optional follow_from_beginning, then returns ids and a cursor; matching output is read through bucket tools."
+  },
+  "response_example": {
+    "watch_id": "job_018f0000000000000000000000000002",
+    "bucket_id": "bkt_018f0000000000000000000000000002",
+    "probe_id": "prb_018f0000000000000000000000000002",
+    "cursor": 0
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "path is required",
+    "follow_from_beginning is optional and defaults to tail-like follow-end behavior",
+    "watch_id uses the job id wire prefix because file watches are job-addressable",
+    "success payload contains ids and cursor only, never file content or event bodies"
+  ]
+}

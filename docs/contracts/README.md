@@ -1,9 +1,9 @@
 # Contract Schemas - Terminal Commander
 
-Status: MVP draft (TC05 wave-0 deliverable).
-Scope: golden JSON examples + naming + versioning rules. No
-serialization code. No live MCP tools. Concrete Rust types land in
-TC06 (core), TC09 (rules), TC22 (policy), TC23+ (MCP).
+Status: MVP draft (TC05 wave-0 deliverable), updated as later TC
+phases land.
+Scope: golden JSON examples + naming + versioning rules. Live MCP
+fixtures and Rust contracts are now tracked by the fixture map.
 
 Language: ASCII only.
 
@@ -54,27 +54,37 @@ tests/fixtures/
     forbidden/                         # negative examples
       raw-stream-as-events.v1.json
       missing-pointer.v1.json
-    mcp-tools/                         # one file per canonical MCP tool
+    mcp-tool-fixture-map.v1.json       # live/obsolete MCP fixture catalogue
+    mcp-tools/                         # one file per live MCP tool fixture
       system_discover.v1.json
+      health.v1.json
       policy_status.v1.json
+      self_check.v1.json
       command_start_combed.v1.json
       command_status.v1.json
-      command_write_stdin.v1.json
-      command_send_signal.v1.json
-      bucket_create.v1.json
       bucket_events_since.v1.json
       bucket_wait.v1.json
+      bucket_summary.v1.json
       event_context.v1.json
-      probe_create.v1.json
-      probe_bind_rules.v1.json
       registry_search.v1.json
       registry_get.v1.json
-      registry_create.v1.json
+      registry_upsert.v1.json
       registry_test.v1.json
       registry_activate.v1.json
+      registry_deactivate.v1.json
+      registry_list_active.v1.json
       file_read_window.v1.json
       file_search.v1.json
-      file_watch.v1.json
+      file_watch_start.v1.json
+      file_watch_stop.v1.json
+      file_watch_list.v1.json
+      pty_command_start.v1.json
+      pty_command_write_stdin.v1.json
+      pty_command_stop.v1.json
+      pty_command_list.v1.json
+      runtime_state.v1.json
+      probe_list.v1.json
+      probe_status.v1.json
 ```
 
 Each fixture starts with a `_meta` field describing it (fixture id,
@@ -212,17 +222,26 @@ invent new audit actions without amending the doctrine.
 
 ## 7. MCP tool fixtures
 
-Per TC05 contract: the MVP MCP tool surface is the 20 names from
-`README.md:243-266`. One fixture file per tool name exists in
-`tests/fixtures/contracts/mcp-tools/`, even when the body is a
-reserved-but-not-implemented placeholder. Tools whose full
-request/response shape is not yet locked carry `_meta.status =
-"reserved-not-implemented"` and a `request_example` plus
-`response_example_placeholder` that documents the intent.
+The live MCP tool surface is `terminal_commander_mcp::tools::tool_catalogue()`.
+`tests/fixtures/contracts/mcp-tools/system_discover.v1.json` mirrors that live
+catalogue. `tests/fixtures/contracts/mcp-tool-fixture-map.v1.json` is the
+authoritative live/obsolete fixture inventory and drift boundary.
 
-A "missing tool name" is a blocker, not an invention. If a goal
-needs a new tool, it MUST add a fixture file BEFORE it adds Rust
-code that emits the request/response.
+The map classifies each live tool as:
+
+- `covered_live`: current live per-tool fixture exists.
+- `placeholder_for_live_tool`: a live tool still has an old reserved fixture.
+- `missing_fixture`: a live tool has no per-tool fixture yet.
+
+If obsolete fixture files reappear, the map lists them as
+`obsolete_fixture_present` entries whose tool names are no longer in the live
+catalogue. Obsolete entries are explicit debt, not supported tools. The fixture
+map, not `_meta.status` alone, is the source of truth for live-vs-obsolete
+classification.
+
+A live catalogue change, a `system_discover` fixture change, or a fixture-file
+addition/removal MUST update the fixture map in the same patch. The
+`fixture_catalogue_contract` test enforces this drift boundary.
 
 ## 8. The bucket_wait heartbeat contract
 
@@ -245,8 +264,10 @@ mini-spec:
 |---|---|
 | event/bucket/rule/probe/job/source-pointer/context | informative-until-TC06 |
 | policy-decision/audit-record | informative-until-TC22 |
-| mcp-tools/* with full shape | informative-until-TC23/TC24 |
-| mcp-tools/* with reserved-not-implemented | reserved (blocker if invoked before its goal) |
+| mcp-tool-fixture-map.v1.json | live authoritative live/obsolete inventory |
+| mcp-tools/* classified by the map as `covered_live` | current per-tool contract |
+| map entries with `placeholder_for_live_tool` or `missing_fixture` | live-tool coverage debt, blocker before use |
+| mcp-tools/* classified by the map as `obsolete_fixture_present` | obsolete debt, not supported tools |
 | forbidden/* | live (negative-test oracle from now on) |
 
 ## 10. Verification

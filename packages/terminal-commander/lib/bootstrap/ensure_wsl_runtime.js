@@ -68,7 +68,6 @@ function runWslBashLc({ distro, cmd, env, exec, wslPath, timeoutMs }) {
         spawn(wp, a, {
           stdio: ["ignore", "pipe", "pipe"],
           shell: false,
-          windowsHide: true,
           env: e,
         }));
     try {

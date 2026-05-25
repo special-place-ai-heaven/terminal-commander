@@ -1,0 +1,136 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "runtime_state",
+      "arguments": {}
+    }
+  },
+  "tool": "runtime_state",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/runtime_state-v1",
+    "fixture_id": "contracts/mcp-tools/runtime_state.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed aggregate runtime snapshot. Success returns bounded counters and lists for live probes, buckets, and active rule scopes; raw stream content is never returned."
+  },
+  "response_examples": {
+    "empty": {
+      "command_jobs": 0,
+      "pty_jobs": 0,
+      "file_watches": 0,
+      "bucket_count": 0,
+      "active_rules_count": 0,
+      "probes": [],
+      "buckets": [],
+      "active_rules": []
+    },
+    "with_runtime_entries": {
+      "command_jobs": 1,
+      "pty_jobs": 1,
+      "file_watches": 1,
+      "bucket_count": 3,
+      "active_rules_count": 1,
+      "probes": [
+        {
+          "kind": "command",
+          "job_id": "job_018f0000000000000000000000000001",
+          "bucket_id": "bkt_018f0000000000000000000000000001",
+          "probe_id": "prb_018f0000000000000000000000000001",
+          "frames_total": 4,
+          "events_emitted": 1,
+          "secret_prompts_total": 0,
+          "secret_prompt_active": false,
+          "path": null
+        },
+        {
+          "kind": "file_watch",
+          "job_id": "job_018f0000000000000000000000000002",
+          "bucket_id": "bkt_018f0000000000000000000000000002",
+          "probe_id": "prb_018f0000000000000000000000000002",
+          "frames_total": 0,
+          "events_emitted": 0,
+          "secret_prompts_total": 0,
+          "secret_prompt_active": false,
+          "path": "C:\\work\\app\\build.log"
+        },
+        {
+          "kind": "pty",
+          "job_id": "job_018f0000000000000000000000000003",
+          "bucket_id": "bkt_018f0000000000000000000000000003",
+          "probe_id": "prb_018f0000000000000000000000000003",
+          "frames_total": 2,
+          "events_emitted": 0,
+          "secret_prompts_total": 1,
+          "secret_prompt_active": true,
+          "path": null
+        }
+      ],
+      "buckets": [
+        {
+          "bucket_id": "bkt_018f0000000000000000000000000001",
+          "head_seq": 1,
+          "tail_seq": 0,
+          "event_count": 1,
+          "dropped_count": 0
+        },
+        {
+          "bucket_id": "bkt_018f0000000000000000000000000002",
+          "head_seq": 0,
+          "tail_seq": 0,
+          "event_count": 0,
+          "dropped_count": 0
+        },
+        {
+          "bucket_id": "bkt_018f0000000000000000000000000003",
+          "head_seq": 0,
+          "tail_seq": 0,
+          "event_count": 0,
+          "dropped_count": 0
+        }
+      ],
+      "active_rules": [
+        {
+          "rule_id": "rust-compile-error",
+          "version": 3,
+          "event_kind": "compile_error",
+          "scope": {
+            "kind": "global"
+          }
+        }
+      ]
+    }
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "requires_daemon=true in system_discover",
+    "probe kind values are snake_case",
+    "bucket entries contain counters only and do not contain severity histograms",
+    "probe entries contain counters and identifiers only, never raw stream frames",
+    "does not synthesize runtime state while daemon is unavailable"
+  ]
+}

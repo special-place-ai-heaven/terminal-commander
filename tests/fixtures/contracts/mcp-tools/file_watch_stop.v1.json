@@ -1,0 +1,63 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "file_watch_stop",
+      "arguments": {
+        "watch_id": "job_018f0000000000000000000000000002"
+      }
+    }
+  },
+  "tool": "file_watch_stop",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/file_watch_stop-v1",
+    "fixture_id": "contracts/mcp-tools/file_watch_stop.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed file watch stop. watch_id uses the job id wire prefix returned by file_watch_start; success returns final counters only."
+  },
+  "response_example": {
+    "watch_id": "job_018f0000000000000000000000000002",
+    "bucket_id": "bkt_018f0000000000000000000000000002",
+    "frames_total": 8,
+    "events_emitted": 2,
+    "bytes_total": 4096
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "unknown_watch_error_example": {
+    "message": "daemon ipc error [UnknownWatch]: watch id 'job_018f0000000000000000000000000002' is not live",
+    "data": {
+      "ipc_code": "UnknownWatch"
+    }
+  },
+  "invariants": [
+    "watch_id is required and uses the job id wire prefix",
+    "success payload reports watch_id, bucket_id, frames_total, events_emitted, and bytes_total only",
+    "success payload has no probe_id, path, cursor, stopped flag, file content, or event bodies",
+    "stopping an unknown watch is a typed UnknownWatch error, not idempotent success"
+  ]
+}

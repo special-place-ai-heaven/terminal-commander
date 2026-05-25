@@ -181,7 +181,7 @@ test("lib/wsl helpers do not import or invoke the bin/* shims", () => {
   }
 });
 
-test("lib/wsl helpers use shell: false and windowsHide: true on every spawn", () => {
+test("lib/wsl helpers use shell: false and no window-hiding option on every spawn", () => {
   for (const file of ["detect.js", "doctor.js", "spawn.js"]) {
     const src = readSource(file);
     // Every spawn block must include shell: false within ~400 chars.
@@ -194,10 +194,10 @@ test("lib/wsl helpers use shell: false and windowsHide: true on every spawn", ()
         /shell\s*:\s*false/,
         `${file} spawn at index ${idx} must use shell: false`,
       );
-      assert.match(
+      assert.doesNotMatch(
         window,
-        /windowsHide\s*:\s*true/,
-        `${file} spawn at index ${idx} must use windowsHide: true`,
+        /windowsHide/,
+        `${file} spawn at index ${idx} must not request hidden windows`,
       );
     }
   }
@@ -273,6 +273,38 @@ test("lib/wsl helpers do not open any TCP/UDP socket or HTTP client", () => {
         `${file} must not use ${forbidden}; excerpt:\n${code.slice(0, 400)}`,
       );
     }
+  }
+});
+
+test("spawn.js does not invoke lazy bootstrap or runtime install helpers", () => {
+  const src = readSource("spawn.js");
+  const code = stripCommentsAndStrings(src);
+  for (const forbidden of [
+    /\brunBootstrap\b/,
+    /\bensureWslRuntime\b/,
+    /\bensureDaemonAutostartInWsl\b/,
+    /\btryAcquireBootstrapLock\b/,
+    /\breleaseBootstrapLock\b/,
+    /\bharnessNeedsConfiguration\b/,
+    /\bshouldSkipBootstrap\b/,
+  ]) {
+    assert.equal(
+      forbidden.test(code),
+      false,
+      `spawn.js must not invoke ${forbidden}; excerpt:\n${code.slice(0, 900)}`,
+    );
+  }
+  for (const forbiddenPath of [
+    "../bootstrap/orchestrator.js",
+    "../bootstrap/ensure_wsl_runtime.js",
+    "../bootstrap/ensure_daemon_autostart.js",
+    "../bootstrap/lock.js",
+  ]) {
+    assert.equal(
+      src.includes(forbiddenPath),
+      false,
+      `spawn.js must not import ${forbiddenPath}`,
+    );
   }
 });
 

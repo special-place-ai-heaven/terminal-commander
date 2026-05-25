@@ -1,18 +1,54 @@
 {
   "request_example": {
-    "<<DECISION_REQUIRED_AT>>": "TC23"
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "policy_status",
+      "arguments": {}
+    }
   },
   "tool": "policy_status",
   "_meta": {
     "schema_anchor": "TC05/mcp-tools/policy_status-v1",
     "fixture_id": "contracts/mcp-tools/policy_status.v1.json",
-    "status": "reserved-not-implemented",
+    "status": "live",
     "consumed_by": [
-      "TC23"
+      "TC45"
     ],
-    "note": "Reserved per README.md:243-266. Concrete request/response shape locked in TC23. Until then this fixture is a placeholder so the MCP tool surface coverage check (TC23) does not report 'missing tool name' (which would be a blocker, not an invention)."
+    "note": "Daemon-backed MCP status tool. Success returns bounded policy counters and caps; daemon startup unavailability is a typed daemon_unavailable error."
   },
-  "response_example_placeholder": {
-    "<<DECISION_REQUIRED_AT>>": "TC23"
-  }
+  "response_example": {
+    "profile": "developer_local",
+    "commands_deny_count": 8,
+    "default_deny_path_suffix_count": 12,
+    "file_window_bytes": 65536,
+    "bucket_read_limit": 10000
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "requires_daemon=true in system_discover",
+    "response is bounded counters and caps only",
+    "does not synthesize default policy data while daemon is unavailable"
+  ]
 }

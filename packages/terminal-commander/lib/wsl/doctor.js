@@ -18,7 +18,6 @@
 //
 //   spawn("wsl.exe", ["-d", distro, "--", "bash", "-lc", PROBE_CMD], {
 //     shell: false,
-//     windowsHide: true,
 //     stdio: ["ignore", "pipe", "pipe"],
 //   })
 //
@@ -73,7 +72,6 @@ function defaultProbeExec({ wslPath, argv, timeoutMs }) {
       child = spawn(wslPath, argv, {
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
-        windowsHide: true,
       });
     } catch (err) {
       resolve({
@@ -192,8 +190,7 @@ function hintFor(status, distro) {
  * @param {(args: {wslPath:string, argv:string[], timeoutMs:number}) => Promise<{status:number|null,signal:string|null,stdout:Buffer,stderr:Buffer,error:Error|null}>} [opts.exec]
  *     Forwarded to `detectWsl` for discovery AND used for the runtime
  *     probe when `probeRuntime` is true. Default is a thin wrapper
- *     around `child_process.spawn('wsl.exe', argv, { shell: false,
- *     windowsHide: true })`.
+ *     around `child_process.spawn('wsl.exe', argv, { shell: false })`.
  * @param {{ default_distro:string|null, distros:Array<{name:string}>, reason:string }} [opts.detectResult]
  *     Pre-computed detect result. When omitted, `wslDoctor` runs
  *     `detectWsl` itself.

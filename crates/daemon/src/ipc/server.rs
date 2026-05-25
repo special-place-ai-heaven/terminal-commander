@@ -53,19 +53,19 @@ use crate::ipc::protocol::{
     MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES, MAX_FILE_SEARCH_SCAN_BYTES,
     MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
     PolicyStatusResponse, ProbeKind, ProbeListEntry, ProbeListResponse, ProbeStatusParams,
-    ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStopParams,
-    RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
-    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
-    RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
-    RegistryTestMatch, RegistryTestParams, RegistryTestResponse, RegistryUpsertParams,
-    RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope, RuntimeActiveRule,
-    RuntimeBucketSummary, RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
+    ProbeStatusResponse, PtyCommandStartParams, PtyCommandStopParams, RegistryActivateParams,
+    RegistryActivateResponse, RegistryActiveEntry, RegistryDeactivateParams,
+    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryListActiveResponse,
+    RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse, RegistryTestMatch,
+    RegistryTestParams, RegistryTestResponse, RegistryUpsertParams, RegistryUpsertResponse,
+    RequestEnvelope, ResponseEnvelope, RuntimeActiveRule, RuntimeBucketSummary,
+    RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
 };
 #[cfg(unix)]
 use crate::ipc::protocol::{
     MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES, PtyCommandListEntry,
-    PtyCommandStartResponse, PtyCommandStopResponse, PtyCommandWriteStdinResponse, decode_payload,
-    encode_frame,
+    PtyCommandListResponse, PtyCommandStartResponse, PtyCommandStopResponse,
+    PtyCommandWriteStdinResponse, decode_payload, encode_frame,
 };
 use crate::state::DaemonState;
 use terminal_commander_core::EnvironmentSpec;
@@ -527,10 +527,10 @@ async fn dispatch(
             Ok(r) => ("pty_command_stop", IpcResult::Ok { response: r }),
             Err(e) => ("pty_command_stop", IpcResult::Err { error: e }),
         },
-        IpcRequest::PtyCommandList => {
-            let r = handle_pty_command_list(state);
-            ("pty_command_list", IpcResult::Ok { response: r })
-        }
+        IpcRequest::PtyCommandList => match handle_pty_command_list(state) {
+            Ok(r) => ("pty_command_list", IpcResult::Ok { response: r }),
+            Err(e) => ("pty_command_list", IpcResult::Err { error: e }),
+        },
         IpcRequest::RuntimeState => {
             let r = handle_runtime_state(state);
             ("runtime_state", IpcResult::Ok { response: r })
@@ -1706,9 +1706,8 @@ fn handle_pty_command_stop(
 }
 
 #[cfg(not(unix))]
-#[allow(clippy::missing_const_for_fn)] // `Arc` is not const-compatible; body is a stub placeholder
-fn handle_pty_command_list(_state: &Arc<DaemonState>) -> IpcResponse {
-    IpcResponse::PtyCommandList(PtyCommandListResponse { entries: vec![] })
+fn handle_pty_command_list(_state: &Arc<DaemonState>) -> Result<IpcResponse, IpcError> {
+    Err(pty_ipc_unsupported())
 }
 
 #[cfg(unix)]
@@ -2005,7 +2004,7 @@ fn handle_probe_status(
 }
 
 #[cfg(unix)]
-fn handle_pty_command_list(state: &Arc<DaemonState>) -> IpcResponse {
+fn handle_pty_command_list(state: &Arc<DaemonState>) -> Result<IpcResponse, IpcError> {
     let entries: Vec<PtyCommandListEntry> = state
         .pty
         .list()
@@ -2025,7 +2024,9 @@ fn handle_pty_command_list(state: &Arc<DaemonState>) -> IpcResponse {
             },
         )
         .collect();
-    IpcResponse::PtyCommandList(PtyCommandListResponse { entries })
+    Ok(IpcResponse::PtyCommandList(PtyCommandListResponse {
+        entries,
+    }))
 }
 
 fn handle_file_watch_list(state: &Arc<DaemonState>) -> IpcResponse {

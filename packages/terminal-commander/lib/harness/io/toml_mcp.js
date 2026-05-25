@@ -9,6 +9,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { buildTerminalCommanderCommandConfig } = require("../../cursor/config.js");
 
 const SECTION_HEADER = "[mcp_servers.terminal_commander]";
 const ENV_SECTION_HEADER = "[mcp_servers.terminal_commander.env]";
@@ -31,11 +32,12 @@ function sectionExists(text, header) {
 
 function buildCodexTomlBlock(opts) {
   const o = opts || {};
+  const commandConfig = buildTerminalCommanderCommandConfig(o);
   const lines = [
     "# Terminal Commander MCP stdio adapter (merged by terminal-commander bootstrap).",
     SECTION_HEADER,
-    'command = "terminal-commander-mcp"',
-    "args = []",
+    `command = ${JSON.stringify(commandConfig.command)}`,
+    `args = [${commandConfig.args.map((arg) => JSON.stringify(arg)).join(", ")}]`,
   ];
   if (o.includeEnv === true) {
     lines.push("", ENV_SECTION_HEADER);
@@ -112,11 +114,11 @@ function writeCodexTomlConfig(opts) {
   if (fileExisted && o.force === true) {
     merged = removeSection(existing, SECTION_HEADER).trimEnd();
     if (merged.length > 0) merged += "\n\n";
-    merged += buildCodexTomlBlock({ includeEnv: o.includeEnv === true });
+    merged += buildCodexTomlBlock(o);
   } else if (fileExisted) {
-    merged = existing.trimEnd() + "\n\n" + buildCodexTomlBlock({ includeEnv: o.includeEnv === true });
+    merged = existing.trimEnd() + "\n\n" + buildCodexTomlBlock(o);
   } else {
-    merged = buildCodexTomlBlock({ includeEnv: o.includeEnv === true });
+    merged = buildCodexTomlBlock(o);
   }
   try {
     fs.mkdirSync(scopeDir, { recursive: true });

@@ -38,6 +38,14 @@ function rmScope(p) {
   }
 }
 
+function assertTerminalCommanderStanza(stanza) {
+  assert.equal(stanza.type, "stdio");
+  assert.equal(stanza.command, process.execPath);
+  assert.deepEqual(stanza.args, [
+    path.join(__dirname, "..", "bin", "terminal-commander-mcp.js"),
+  ]);
+}
+
 test("project scope: creates config when file missing (config_created)", () => {
   const root = mkScope();
   try {
@@ -48,8 +56,7 @@ test("project scope: creates config when file missing (config_created)", () => {
     assert.equal(r.was_present, false);
     // Verify file contents.
     const data = JSON.parse(fs.readFileSync(r.path, "utf8"));
-    assert.equal(data.mcpServers["terminal-commander"].type, "stdio");
-    assert.equal(data.mcpServers["terminal-commander"].command, "terminal-commander-mcp");
+    assertTerminalCommanderStanza(data.mcpServers["terminal-commander"]);
     assert.equal("env" in data.mcpServers["terminal-commander"], false);
   } finally {
     rmScope(root);
@@ -189,7 +196,7 @@ test("project scope: existing terminal-commander entry overwritten with force; .
     assert.equal(r.was_present, true);
     assert.equal(r.backup_path, cfgPath + ".bak");
     const data = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-    assert.equal(data.mcpServers["terminal-commander"].command, "terminal-commander-mcp");
+    assertTerminalCommanderStanza(data.mcpServers["terminal-commander"]);
     // Unrelated entry preserved.
     assert.equal(data.mcpServers["other-server"].command, "other-cmd");
     // Backup contains the previous file.
@@ -304,7 +311,7 @@ test("round-trip: load existing config with two unrelated servers; add terminal-
     const reloaded = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
     assert.deepEqual(reloaded.mcpServers["vendor-a"], before.mcpServers["vendor-a"]);
     assert.deepEqual(reloaded.mcpServers["vendor-b"], before.mcpServers["vendor-b"]);
-    assert.equal(reloaded.mcpServers["terminal-commander"].command, "terminal-commander-mcp");
+    assertTerminalCommanderStanza(reloaded.mcpServers["terminal-commander"]);
     assert.deepEqual(reloaded.anotherTopLevelKey, { keep: true });
   } finally {
     rmScope(root);

@@ -4,42 +4,34 @@
     "id": 1,
     "method": "tools/call",
     "params": {
-      "name": "file_read_window",
+      "name": "registry_deactivate",
       "arguments": {
-        "path": "README.md",
-        "start_line": 1,
-        "max_lines": 20,
-        "max_bytes": 4096
+        "rule_id": "rust-compile-error",
+        "version": 1,
+        "scope": {
+          "kind": "global"
+        }
       }
     }
   },
-  "tool": "file_read_window",
+  "tool": "registry_deactivate",
   "_meta": {
-    "schema_anchor": "TC05/mcp-tools/file_read_window-v1",
-    "fixture_id": "contracts/mcp-tools/file_read_window.v1.json",
+    "schema_anchor": "TC05/mcp-tools/registry_deactivate-v1",
+    "fixture_id": "contracts/mcp-tools/registry_deactivate.v1.json",
     "status": "live",
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed bounded file read. It returns line windows, not whole files."
+    "note": "Daemon-backed scoped rule deactivation. This fixture uses explicit global scope; do not treat omitted-scope success as locked until the MCP DTO comment and daemon behavior are reconciled."
   },
   "response_example": {
-    "path": "README.md",
-    "lines": [
-      {
-        "line": 1,
-        "byte_offset": 0,
-        "text": "# Terminal Commander"
-      },
-      {
-        "line": 2,
-        "byte_offset": 20,
-        "text": ""
-      }
-    ],
-    "file_bytes": 32768,
-    "truncated": true,
-    "next_byte_offset": 21
+    "rule_id": "rust-compile-error",
+    "version": 1,
+    "was_deactivated": true,
+    "scope": {
+      "kind": "global"
+    },
+    "jobs_rebound": 0
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -63,8 +55,9 @@
     }
   },
   "invariants": [
-    "path is required",
-    "start_line, max_lines, and max_bytes are optional and daemon-clamped",
-    "success returns bounded lines and continuation offset, never a whole-file dump"
+    "rule_id and version are required",
+    "scope is explicit in this fixture",
+    "jobs_rebound is a count, not job output",
+    "success payload reports whether an active binding was closed"
   ]
 }

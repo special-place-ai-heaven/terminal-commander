@@ -6,7 +6,10 @@
 "use strict";
 
 const { writeCursorMcpConfig } = require("../cursor/write.js");
-const { buildTerminalCommanderServerConfig } = require("../cursor/config.js");
+const {
+  buildTerminalCommanderCommandConfig,
+  buildTerminalCommanderServerConfig,
+} = require("../cursor/config.js");
 const { writeJsonMcpConfig } = require("./io/json_mcp.js");
 const { writeCodexTomlConfig } = require("./io/toml_mcp.js");
 const {
@@ -26,17 +29,15 @@ const HARNESS_WRITE_STATUSES = Object.freeze({
 
 function buildJsonMcpStanza(opts) {
   const o = opts || {};
-  if (o.distro && o.platform === "win32") {
-    return {
-      command: "terminal-commander-mcp",
-      args: [],
-      env: { TC_WSL_DISTRO: o.distro },
-    };
-  }
-  return {
-    command: "terminal-commander-mcp",
-    args: [],
+  const commandConfig = buildTerminalCommanderCommandConfig(o);
+  const stanza = {
+    command: commandConfig.command,
+    args: commandConfig.args,
   };
+  if (o.distro && o.platform === "win32") {
+    stanza.env = { TC_WSL_DISTRO: o.distro };
+  }
+  return stanza;
 }
 
 function writeProvider(id, opts) {

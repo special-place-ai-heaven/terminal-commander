@@ -33,6 +33,7 @@ The npm install is intentionally passive:
 - no daemon start
 - no WSL install
 - no shell wrapper
+- no hidden-window helper spawn
 
 Configure detected harnesses explicitly:
 
@@ -201,6 +202,12 @@ by use:
 
 Full contract: [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
 
+Discovery is the source of truth for availability. `system_discover` returns
+`daemon_available` plus per-tool `requires_daemon`, `available`, and
+`unavailable_reason`. It remains callable when the daemon is down. Daemon-backed
+tools return a structured `daemon_unavailable` error when startup status says
+the daemon is unavailable, instead of leaking raw pipe/socket errors.
+
 ## Harness Configuration
 
 `terminal-commander setup harness` detects installed harnesses and writes MCP
@@ -256,10 +263,15 @@ terminal-commander setup daemon-autostart
 `doctor wsl` and `setup daemon-autostart` are mainly for Linux/WSL and legacy
 Windows-to-WSL bridge installations.
 
+The Rust admin CLI does not synthesize fake daemon data. Daemon-backed
+inspection commands that are not wired to live daemon IPC exit `69` with an
+`unavailable` message rather than returning empty or not-found success.
+
 ## Safety Posture
 
 - npm install is passive.
 - Wrapper scripts use direct process spawn with `shell:false`.
+- Windows JS runtime helpers do not request hidden subprocess windows.
 - The MCP adapter speaks stdio and local IPC only.
 - The daemon uses Unix domain sockets on Unix and named pipes on Windows.
 - Command execution is argv-first and policy-gated.

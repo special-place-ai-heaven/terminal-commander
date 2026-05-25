@@ -12,6 +12,7 @@ const path = require("node:path");
 const {
   getCursorGlobalConfigPath,
   getCursorProjectConfigPath,
+  buildTerminalCommanderCommandConfig,
   buildTerminalCommanderServerConfig,
   parseExistingCursorConfig,
   validateCursorConfigShape,
@@ -103,26 +104,48 @@ test("getCursorProjectConfigPath requires explicit projectRoot", () => {
 });
 
 test("buildTerminalCommanderServerConfig default stanza (Linux / native)", () => {
-  const s = buildTerminalCommanderServerConfig({});
-  assert.deepEqual(s, { type: "stdio", command: "terminal-commander-mcp" });
+  const s = buildTerminalCommanderServerConfig({
+    nodePath: "C:/node/node.exe",
+    scriptPath: "C:/pkg/bin/terminal-commander-mcp.js",
+  });
+  assert.deepEqual(s, {
+    type: "stdio",
+    command: "C:/node/node.exe",
+    args: ["C:/pkg/bin/terminal-commander-mcp.js"],
+  });
   assert.equal("env" in s, false);
-  assert.equal("args" in s, false);
 });
 
-test("buildTerminalCommanderServerConfig Windows-bridge stanza without distro is unchanged", () => {
-  const s = buildTerminalCommanderServerConfig();
-  assert.equal(s.command, "terminal-commander-mcp");
+test("buildTerminalCommanderServerConfig uses executable command plus JS shim args", () => {
+  const s = buildTerminalCommanderServerConfig({
+    nodePath: "C:/node/node.exe",
+    scriptPath: "C:/pkg/bin/terminal-commander-mcp.js",
+  });
+  assert.equal(s.command, "C:/node/node.exe");
+  assert.deepEqual(s.args, ["C:/pkg/bin/terminal-commander-mcp.js"]);
   assert.equal(s.type, "stdio");
 });
 
 test("buildTerminalCommanderServerConfig with safe distro adds env.TC_WSL_DISTRO only", () => {
-  const s = buildTerminalCommanderServerConfig({ distro: "Ubuntu-24.04" });
+  const s = buildTerminalCommanderServerConfig({
+    distro: "Ubuntu-24.04",
+    nodePath: "C:/node/node.exe",
+    scriptPath: "C:/pkg/bin/terminal-commander-mcp.js",
+  });
   assert.deepEqual(s, {
     type: "stdio",
-    command: "terminal-commander-mcp",
+    command: "C:/node/node.exe",
+    args: ["C:/pkg/bin/terminal-commander-mcp.js"],
     env: { TC_WSL_DISTRO: "Ubuntu-24.04" },
   });
   assert.equal(Object.keys(s.env).length, 1, "env must contain exactly TC_WSL_DISTRO");
+});
+
+test("buildTerminalCommanderCommandConfig defaults to this package's JS shim", () => {
+  const s = buildTerminalCommanderCommandConfig({ nodePath: "C:/node/node.exe" });
+  assert.equal(s.command, "C:/node/node.exe");
+  assert.equal(path.basename(s.args[0]), "terminal-commander-mcp.js");
+  assert.match(s.args[0].replace(/\\/g, "/"), /\/bin\/terminal-commander-mcp\.js$/);
 });
 
 test("buildTerminalCommanderServerConfig rejects unsafe distro before emitting any stanza", () => {

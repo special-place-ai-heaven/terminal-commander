@@ -1,0 +1,92 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "probe_list",
+      "arguments": {}
+    }
+  },
+  "tool": "probe_list",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/probe_list-v1",
+    "fixture_id": "contracts/mcp-tools/probe_list.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed flat list of live probes across command, file-watch, and supported PTY runtimes. Rows are bounded metadata only and never include raw stream or file content."
+  },
+  "response_examples": {
+    "empty": {
+      "probes": []
+    },
+    "with_live_probes": {
+      "probes": [
+        {
+          "kind": "command",
+          "job_id": "job_018f0000000000000000000000000001",
+          "bucket_id": "bkt_018f0000000000000000000000000001",
+          "probe_id": "prb_018f0000000000000000000000000001",
+          "frames_total": 4,
+          "events_emitted": 1,
+          "secret_prompts_total": 0,
+          "secret_prompt_active": false,
+          "path": null
+        },
+        {
+          "kind": "file_watch",
+          "job_id": "job_018f0000000000000000000000000002",
+          "bucket_id": "bkt_018f0000000000000000000000000002",
+          "probe_id": "prb_018f0000000000000000000000000002",
+          "frames_total": 8,
+          "events_emitted": 2,
+          "secret_prompts_total": 0,
+          "secret_prompt_active": false,
+          "path": "C:\\work\\app\\build.log"
+        },
+        {
+          "kind": "pty",
+          "job_id": "job_018f0000000000000000000000000003",
+          "bucket_id": "bkt_018f0000000000000000000000000003",
+          "probe_id": "prb_018f0000000000000000000000000003",
+          "frames_total": 2,
+          "events_emitted": 0,
+          "secret_prompts_total": 1,
+          "secret_prompt_active": true,
+          "path": null
+        }
+      ]
+    }
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "request has no arguments",
+    "empty probes is a valid success response only when the daemon is reachable",
+    "probe kind values are snake_case: command, file_watch, and pty",
+    "probe rows contain ids, counters, secret-prompt counters and flags, and optional file-watch path only",
+    "probe rows do not contain argv, bytes_total, cursor, rules, cwd, env, stdout, stderr, screen buffers, file content, or event bodies",
+    "daemon unavailable is a typed daemon_unavailable error, not empty success"
+  ]
+}

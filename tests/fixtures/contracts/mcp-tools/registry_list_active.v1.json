@@ -1,0 +1,70 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "registry_list_active",
+      "arguments": {}
+    }
+  },
+  "tool": "registry_list_active",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/registry_list_active-v1",
+    "fixture_id": "contracts/mcp-tools/registry_list_active.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed snapshot of active registry bindings. The response lists scoped rule bindings only; it never includes rule bodies or stream frames."
+  },
+  "response_examples": {
+    "empty": {
+      "entries": []
+    },
+    "one_active_global_rule": {
+      "entries": [
+        {
+          "rule_id": "rust-compile-error",
+          "version": 1,
+          "severity": "high",
+          "event_kind": "compile_error",
+          "tags": [
+            "rust",
+            "compiler"
+          ],
+          "scope": {
+            "kind": "global"
+          }
+        }
+      ]
+    }
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "request has no arguments",
+    "empty entries is a valid success response",
+    "each entry includes rule_id, version, severity, event_kind, tags, and scope",
+    "success payload never contains rule definitions or raw stream frames"
+  ]
+}

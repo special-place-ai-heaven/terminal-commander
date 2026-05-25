@@ -8,9 +8,8 @@
 //! tool call returns a structured `daemon_unavailable` MCP error envelope
 //! rather than a raw transport-level connection error.
 //!
-//! Daemon-free tools (`health`, `system_discover`, `policy_status`,
-//! `self_check`) are NOT expected to short-circuit; they still try the
-//! daemon and may return their own typed errors.
+//! `system_discover` is the only daemon-independent tool. Other tools may
+//! fail through their own typed IPC paths unless guarded explicitly.
 //!
 //! Uses the same in-process duplex transport as `mcp_stdio.rs` — no
 //! real daemon, no process spawn, no unix socket required.
@@ -127,6 +126,15 @@ async fn assert_daemon_unavailable_envelope(
     );
 }
 
+fn first_text(result: &rmcp::model::CallToolResult) -> String {
+    for item in &result.content {
+        if let Some(text) = item.as_text() {
+            return text.text.clone();
+        }
+    }
+    panic!("expected text content in call result");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_start_combed_returns_daemon_unavailable() {
     let (_server, client) = paired_service_unavailable().await;
@@ -186,11 +194,11 @@ async fn pty_command_list_returns_daemon_unavailable() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: daemon-free tools do NOT short-circuit (they still try daemon)
+// Test: discovery stays callable and labels daemon-backed tools honestly
 // ---------------------------------------------------------------------------
 
-/// `system_discover` never calls the daemon; it must succeed even when
-/// the status handle reports Unavailable.
+/// `system_discover` must succeed even if daemon IPC fails and report the
+/// daemon as unavailable in its payload.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn system_discover_succeeds_when_daemon_unavailable() {
     let (_server, client) = paired_service_unavailable().await;
@@ -203,27 +211,67 @@ async fn system_discover_succeeds_when_daemon_unavailable() {
         !result.content.is_empty(),
         "system_discover must return a non-empty payload"
     );
+    let payload: serde_json::Value =
+        serde_json::from_str(&first_text(&result)).expect("system_discover json payload");
+    assert_eq!(
+        payload["daemon_available"], false,
+        "system_discover must make daemon availability explicit"
+    );
+    let tools = payload["tools"]
+        .as_array()
+        .expect("system_discover tools array");
+    assert!(
+        !tools.is_empty(),
+        "system_discover must return the advertised tool catalogue"
+    );
+
+    for tool in tools {
+        let name = tool["name"]
+            .as_str()
+            .expect("tool entry should include a name");
+        let requires_daemon = name != "system_discover";
+        assert_eq!(
+            tool["requires_daemon"], requires_daemon,
+            "{name} requires_daemon mismatch"
+        );
+        assert_eq!(
+            tool["available"], !requires_daemon,
+            "{name} availability mismatch when daemon is unavailable"
+        );
+        if requires_daemon {
+            assert_eq!(
+                tool["unavailable_reason"], "daemon_unavailable",
+                "{name} should explain daemon unavailability"
+            );
+        } else {
+            assert!(
+                tool["unavailable_reason"].is_null(),
+                "{name} should not have an unavailable reason"
+            );
+        }
+    }
     let _ = client.cancel().await;
 }
 
-/// `health` calls the daemon but is NOT guarded — it returns a daemon
-/// connect error (not a daemon_unavailable envelope). Verify it does NOT
-/// return a `daemon_unavailable` message (that would mean the guard leaked
-/// into a daemon-free tool).
+/// Discovery marks `health` as daemon-backed, so call-time behavior must use
+/// the same `daemon_unavailable` envelope.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn health_does_not_return_daemon_unavailable_envelope() {
+async fn health_returns_daemon_unavailable_envelope() {
     let (_server, client) = paired_service_unavailable().await;
-    let params = CallToolRequestParams::new("health");
-    // health should error (no real daemon), but NOT with daemon_unavailable.
-    let err = client
-        .call_tool(params)
-        .await
-        .expect_err("health must error when daemon is unreachable");
-    let rendered = err.to_string();
-    assert!(
-        !rendered.contains("daemon_unavailable"),
-        "health must NOT return daemon_unavailable envelope (it is a daemon-free \
-         tool that errors via the IPC path), got: {rendered}"
-    );
+    assert_daemon_unavailable_envelope(&client, "health").await;
+    let _ = client.cancel().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_status_returns_daemon_unavailable_envelope() {
+    let (_server, client) = paired_service_unavailable().await;
+    assert_daemon_unavailable_envelope(&client, "policy_status").await;
+    let _ = client.cancel().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn self_check_returns_daemon_unavailable_envelope() {
+    let (_server, client) = paired_service_unavailable().await;
+    assert_daemon_unavailable_envelope(&client, "self_check").await;
     let _ = client.cancel().await;
 }

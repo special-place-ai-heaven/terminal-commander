@@ -83,6 +83,19 @@ pub struct ToolCatalogueEntry {
     pub description: &'static str,
 }
 
+/// Tool entry returned by `system_discover`. This wraps the static
+/// catalogue with current runtime availability so clients do not have
+/// to learn daemon reachability by trial-and-error tool calls.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredToolEntry {
+    pub name: &'static str,
+    pub status: ToolStatus,
+    pub description: &'static str,
+    pub requires_daemon: bool,
+    pub available: bool,
+    pub unavailable_reason: Option<&'static str>,
+}
+
 /// Static catalogue of every MCP tool the adapter knows about. Tools
 /// not marked `Live` are NOT registered with the tool router — they
 /// are only advertised here so clients can see what is reserved.
@@ -238,14 +251,47 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
     ]
 }
 
+#[must_use]
+fn tool_requires_daemon(name: &str) -> bool {
+    name != "system_discover"
+}
+
+#[must_use]
+fn discovered_tools(daemon_available: bool) -> Vec<DiscoveredToolEntry> {
+    tool_catalogue()
+        .iter()
+        .map(|tool| {
+            let requires_daemon = tool_requires_daemon(tool.name);
+            let implemented = matches!(tool.status, ToolStatus::Live);
+            let available = implemented && (!requires_daemon || daemon_available);
+            let unavailable_reason = if !implemented {
+                Some("not_implemented")
+            } else if requires_daemon && !daemon_available {
+                Some("daemon_unavailable")
+            } else {
+                None
+            };
+            DiscoveredToolEntry {
+                name: tool.name,
+                status: tool.status,
+                description: tool.description,
+                requires_daemon,
+                available,
+                unavailable_reason,
+            }
+        })
+        .collect()
+}
+
 /// Aggregate payload returned by the `system_discover` tool.
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemDiscoverPayload {
     pub adapter_version: &'static str,
     pub mcp_spec: &'static str,
+    pub daemon_available: bool,
     pub daemon: Option<DiscoverResponse>,
     pub daemon_error: Option<String>,
-    pub tools: Vec<ToolCatalogueEntry>,
+    pub tools: Vec<DiscoveredToolEntry>,
 }
 
 /// MCP server handler. Holds the daemon client and the tool router.
@@ -284,6 +330,13 @@ impl TerminalCommanderMcpServer {
         }
     }
 
+    fn unavailable_startup_daemon_error(&self) -> Option<McpError> {
+        let status = self.daemon.status()?;
+        status
+            .is_unavailable()
+            .then(|| daemon_unavailable_error(&status.current()))
+    }
+
     /// `system_discover` — adapter metadata + tool catalogue.
     /// Forwards to the daemon to fetch live profile/version data; if
     /// the daemon is unreachable the response still carries the
@@ -298,12 +351,14 @@ impl TerminalCommanderMcpServer {
             ),
             Err(e) => (None, Some(format_ipc_error(&e))),
         };
+        let daemon_available = daemon.is_some() && daemon_error.is_none();
         let payload = SystemDiscoverPayload {
             adapter_version: ADAPTER_VERSION,
             mcp_spec: MCP_SPEC_REVISION,
+            daemon_available,
             daemon,
             daemon_error,
-            tools: tool_catalogue().to_vec(),
+            tools: discovered_tools(daemon_available),
         };
         json_tool_result(&payload)
     }
@@ -312,6 +367,9 @@ impl TerminalCommanderMcpServer {
     /// and a typed error otherwise.
     #[tool(description = "Daemon liveness ping. Returns uptime in seconds when reachable.")]
     async fn health(&self) -> Result<CallToolResult, McpError> {
+        if let Some(error) = self.unavailable_startup_daemon_error() {
+            return Err(error);
+        }
         match self.daemon.call(IpcRequest::Health).await {
             Ok(IpcResponse::Health { uptime_secs }) => json_tool_result(&serde_json::json!({
                 "ok": true,
@@ -325,6 +383,9 @@ impl TerminalCommanderMcpServer {
     /// `policy_status` — active profile + per-call caps.
     #[tool(description = "Report the active policy profile and bounded per-call caps.")]
     async fn policy_status(&self) -> Result<CallToolResult, McpError> {
+        if let Some(error) = self.unavailable_startup_daemon_error() {
+            return Err(error);
+        }
         match self.daemon.call(IpcRequest::PolicyStatus).await {
             Ok(IpcResponse::PolicyStatus(PolicyStatusResponse {
                 profile,
@@ -347,6 +408,9 @@ impl TerminalCommanderMcpServer {
     /// `self_check` — re-run daemon self-check; bounded text report.
     #[tool(description = "Re-run the daemon self-check. Returns the bounded text report.")]
     async fn self_check(&self) -> Result<CallToolResult, McpError> {
+        if let Some(error) = self.unavailable_startup_daemon_error() {
+            return Err(error);
+        }
         match self.daemon.call(IpcRequest::SelfCheck).await {
             Ok(IpcResponse::SelfCheck(SelfCheckResponse { report, failures })) => {
                 json_tool_result(&serde_json::json!({
@@ -1769,6 +1833,97 @@ mod tests {
                 "system_discover".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn system_discover_tools_explain_daemon_unavailable() {
+        let tools = discovered_tools(false);
+        assert_eq!(tools.len(), tool_catalogue().len());
+
+        for tool in &tools {
+            let expected_requires_daemon = tool.name != "system_discover";
+            assert_eq!(
+                tool.requires_daemon, expected_requires_daemon,
+                "{} requires_daemon mismatch",
+                tool.name
+            );
+
+            if !expected_requires_daemon {
+                assert!(tool.available, "{} should remain callable", tool.name);
+                assert_eq!(tool.unavailable_reason, None);
+            } else if matches!(tool.status, ToolStatus::Live) {
+                assert!(
+                    !tool.available,
+                    "{} should be unavailable without daemon",
+                    tool.name
+                );
+                assert_eq!(tool.unavailable_reason, Some("daemon_unavailable"));
+            } else {
+                assert!(
+                    !tool.available,
+                    "{} should be unavailable when not implemented",
+                    tool.name
+                );
+                assert_eq!(tool.unavailable_reason, Some("not_implemented"));
+            }
+        }
+    }
+
+    fn unavailable_status_server() -> TerminalCommanderMcpServer {
+        let status = EnsureDaemonStatus::Unavailable {
+            reason: terminal_commander_supervisor::ensure::DaemonUnavailableReason::BinaryNotFound,
+            diagnostics: terminal_commander_supervisor::ensure::Diagnostics {
+                endpoint: terminal_commander_supervisor::ensure::Endpoint::UnixSocket {
+                    path: std::env::temp_dir().join("tc-mcp-unavailable-unit-test.sock"),
+                },
+                log_path: None,
+                last_error: Some("test daemon unavailable".into()),
+                startup_attempted: false,
+                startup_elapsed_ms: 0,
+            },
+        };
+        let daemon = McpDaemonClient::with_status(
+            std::env::temp_dir().join("tc-mcp-unavailable-unit-test.sock"),
+            crate::daemon_client::DaemonStatusHandle::new(status),
+        )
+        .with_timeout(std::time::Duration::from_millis(10));
+        TerminalCommanderMcpServer::new(daemon)
+    }
+
+    fn assert_daemon_unavailable_tool_error(tool: &str, error: &McpError) {
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("daemon_unavailable"),
+            "{tool} should return daemon_unavailable when daemon status is unavailable, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("test daemon unavailable"),
+            "{tool} should include startup diagnostics, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("pipe connect") && !rendered.contains("ipc_code"),
+            "{tool} should not leak raw daemon IPC failure details, got: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_tools_short_circuit_on_unavailable_daemon_status() {
+        let server = unavailable_status_server();
+
+        let health = server.health().await.expect_err("health should fail");
+        assert_daemon_unavailable_tool_error("health", &health);
+
+        let policy = server
+            .policy_status()
+            .await
+            .expect_err("policy_status should fail");
+        assert_daemon_unavailable_tool_error("policy_status", &policy);
+
+        let self_check = server
+            .self_check()
+            .await
+            .expect_err("self_check should fail");
+        assert_daemon_unavailable_tool_error("self_check", &self_check);
     }
 
     #[test]

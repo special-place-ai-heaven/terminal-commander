@@ -17,15 +17,15 @@
 //   3. Optionally runs the WWS03 `wslDoctor({ probeRuntime: true })`
 //      gate (skipped iff `env.TC_WSL_SKIP_DOCTOR === '1'`); refuses
 //      with `runtime_missing` when the WSL distro does not yet have
-//      `terminal-commander-mcp` installed. INSTALL01 may run one-shot
-//      lazy bootstrap (ensureWslRuntime) unless TC_SKIP_BOOTSTRAP=1.
+//      `terminal-commander-mcp` installed. Runtime setup is an
+//      explicit operator action; the bridge never performs lazy
+//      bootstrap or install work.
 //   4. Builds a defensive `filteredEnv` copy of `process.env` with
 //      token-shaped variables stripped (see SECRET_ENV_PATTERNS).
 //   5. Spawns:
 //        wsl.exe -d <distro> -- bash -lc 'exec terminal-commander-mcp' [...userArgv]
 //      with EXACTLY:
-//        { shell: false, windowsHide: true, stdio: 'inherit',
-//          env: filteredEnv }
+//        { shell: false, stdio: 'inherit', env: filteredEnv }
 //      `BRIDGE_PROBE_CMD` is a literal constant; no operator value is
 //      interpolated into the `bash -lc` argument.
 //   6. Forwards SIGINT / SIGTERM from the parent process to the child.
@@ -41,14 +41,6 @@
 const { spawn } = require("node:child_process");
 const { detectWsl, DETECT_REASONS } = require("./detect.js");
 const { wslDoctor, DOCTOR_STATUSES } = require("./doctor.js");
-const { ensureWslRuntime, ENSURE_STATUSES } = require("../bootstrap/ensure_wsl_runtime.js");
-const { runBootstrap, BOOTSTRAP_STATUSES } = require("../bootstrap/orchestrator.js");
-const {
-  tryAcquireBootstrapLock,
-  releaseBootstrapLock,
-} = require("../bootstrap/lock.js");
-const { shouldSkipBootstrap } = require("../bootstrap/skip.js");
-const { harnessNeedsConfiguration } = require("../harness/needs.js");
 const {
   buildFilteredEnv,
   isSecretEnvKey,
@@ -106,7 +98,7 @@ function hintFor(status, distro) {
     case BRIDGE_STATUSES.CHECK_TIMEOUT:
       return "terminal-commander: WSL probe exceeded the configured timeout; the distro may be unusually slow to start.";
     case BRIDGE_STATUSES.RUNTIME_MISSING:
-      return `terminal-commander runtime is not installed inside '${distro}'; run npm install -g terminal-commander on Windows (bootstrap installs into WSL) or set TC_SKIP_BOOTSTRAP=0 and retry MCP.`;
+      return `terminal-commander runtime is not installed inside '${distro}'; run 'terminal-commander setup cursor-wsl --install-wsl-runtime' or install terminal-commander manually inside that WSL distro.`;
     case BRIDGE_STATUSES.BRIDGE_SPAWN_FAILED:
       return "terminal-commander: failed to spawn wsl.exe for the MCP bridge; check that wsl.exe is on PATH and the distro is reachable.";
     case BRIDGE_STATUSES.BRIDGE_CHILD_EXIT:
@@ -161,7 +153,6 @@ function defaultBridgeExec({ wslPath, argv, env }) {
   return spawn(wslPath, argv, {
     stdio: "inherit",
     shell: false,
-    windowsHide: true,
     env: env,
   });
 }
@@ -180,7 +171,7 @@ function defaultBridgeExec({ wslPath, argv, env }) {
  * @param {(args:{wslPath:string, argv:string[], env:object}) => {on:Function, kill:Function, pid:number|null}|object} [opts.exec]
  *     Injected spawn function. Defaults to a thin wrapper around
  *     `child_process.spawn('wsl.exe', argv, { shell:false,
- *     windowsHide:true, stdio:'inherit', env })`.
+ *     stdio:'inherit', env })`.
  * @param {Function} [opts.detect]  Override for `detectWsl`.
  * @param {Function} [opts.doctor]  Override for `wslDoctor`.
  * @param {string} [opts.wslPath="wsl.exe"]
@@ -280,68 +271,7 @@ async function spawnWslBridge(opts) {
       wslPath,
       timeoutMs,
     });
-    let runtimeMissing = doc.status === DOCTOR_STATUSES.RUNTIME_MISSING;
-    const needsLazyBootstrap =
-      !shouldSkipBootstrap(env) &&
-      (runtimeMissing || harnessNeedsConfiguration({ platform, env }));
-    if (needsLazyBootstrap) {
-      const lock = tryAcquireBootstrapLock({ platform, env });
-      if (lock.acquired) {
-        try {
-          const lazy = await (o.runBootstrap || runBootstrap)({
-            mode: "lazy",
-            platform,
-            env,
-            distro,
-            exec: o.exec,
-            wslPath,
-            timeoutMs,
-            require_install_lifecycle: false,
-            detect: o.detect,
-            doctor: o.doctor,
-            ensureWslRuntime: o.ensureWslRuntime,
-            ensureDaemonAutostartInWsl: o.ensureDaemonAutostartInWsl,
-          });
-          if (
-            lazy.status === BOOTSTRAP_STATUSES.BOOTSTRAP_READY ||
-            lazy.status === BOOTSTRAP_STATUSES.BOOTSTRAP_PARTIAL
-          ) {
-            const retry = await doctor({
-              distro,
-              platform,
-              probeRuntime: true,
-              detectResult,
-              wslPath,
-              timeoutMs,
-            });
-            runtimeMissing = retry.status === DOCTOR_STATUSES.RUNTIME_MISSING;
-          } else if (runtimeMissing) {
-            const ensure = await (o.ensureWslRuntime || ensureWslRuntime)({
-              distro,
-              platform,
-              env,
-              exec: o.exec,
-              wslPath,
-              timeoutMs,
-            });
-            if (ensure.status === ENSURE_STATUSES.OK) {
-              const retry = await doctor({
-                distro,
-                platform,
-                probeRuntime: true,
-                detectResult,
-                wslPath,
-                timeoutMs,
-              });
-              runtimeMissing = retry.status === DOCTOR_STATUSES.RUNTIME_MISSING;
-            }
-          }
-        } finally {
-          releaseBootstrapLock({ platform, env });
-        }
-      }
-    }
-    if (runtimeMissing) {
+    if (doc.status === DOCTOR_STATUSES.RUNTIME_MISSING) {
       return buildResult({
         status: BRIDGE_STATUSES.RUNTIME_MISSING,
         distro,

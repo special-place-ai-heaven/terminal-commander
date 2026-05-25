@@ -9,7 +9,7 @@ npm install -g terminal-commander@latest
 ```
 
 Install is passive: no lifecycle bootstrap, no automatic MCP config writes, no
-daemon start, no WSL install, and no hidden helper process.
+daemon start, no WSL install, and no hidden-window subprocess request.
 
 Configure harnesses explicitly:
 
@@ -46,6 +46,18 @@ downloaded scripts.
 | `terminal-commander` | Admin CLI: version, update, setup, doctor, native diagnostics |
 | `terminal-commander-mcp` | MCP stdio adapter launched by the LLM harness |
 | `terminal-commanderd` | Local daemon for IPC, probes, policy, buckets, and audit |
+
+## LLM Trust Contract
+
+`system_discover` is the source of truth for the live MCP tool catalogue. It is
+callable even when the daemon is down and reports `daemon_available` plus
+per-tool `requires_daemon`, `available`, and `unavailable_reason` fields. Tools
+that require the daemon report `daemon_unavailable` instead of forcing clients
+to infer reachability from raw pipe or socket errors.
+
+The admin CLI also refuses fake offline success. Daemon-backed inspection
+commands that are not wired to live daemon IPC exit `69` with an unavailable
+message instead of returning empty or not-found success.
 
 ## Platform Packages
 

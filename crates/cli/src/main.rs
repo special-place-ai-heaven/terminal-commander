@@ -19,6 +19,8 @@ use terminal_commander_supervisor::paths::{
 
 pub(crate) mod update_locks;
 
+const EX_UNAVAILABLE: u8 = 69;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "terminal-commander",
@@ -96,46 +98,17 @@ fn run(cli: Cli) -> std::process::ExitCode {
         Command::Status => print_status(),
         Command::Doctor => std::process::ExitCode::from(run_doctor()),
         Command::Rules { op } => match op {
-            RulesOp::List => {
-                println!("rules: (run via MCP registry_search in TC24+)");
-                std::process::ExitCode::SUCCESS
-            }
-            RulesOp::Show { rule_id } => {
-                println!("rule {rule_id}: not found (offline CLI; daemon attach deferred)");
-                std::process::ExitCode::from(3)
-            }
+            RulesOp::List => daemon_backed_command_unavailable("rules list"),
+            RulesOp::Show { rule_id: _ } => daemon_backed_command_unavailable("rules show"),
         },
         Command::Buckets { op } => match op {
-            BucketsOp::List => {
-                println!("buckets: 0 (offline CLI)");
-                std::process::ExitCode::SUCCESS
-            }
-            BucketsOp::Show { bucket_id } => {
-                println!("bucket {bucket_id}: not found (offline CLI)");
-                std::process::ExitCode::from(3)
-            }
+            BucketsOp::List => daemon_backed_command_unavailable("buckets list"),
+            BucketsOp::Show { bucket_id: _ } => daemon_backed_command_unavailable("buckets show"),
         },
-        Command::Jobs => {
-            println!("jobs: 0 (offline CLI)");
-            std::process::ExitCode::SUCCESS
-        }
-        Command::Probes => {
-            println!("probes: 0 (offline CLI)");
-            std::process::ExitCode::SUCCESS
-        }
-        Command::Policy => {
-            println!("policy:");
-            println!("  active_profile: developer_local (default)");
-            println!(
-                "  commands.deny : sudo, doas, su, pkexec, kexec, polkit-agent, polkit-auth-agent-1"
-            );
-            println!("  default-deny paths: 14 suffixes (see POLICY.md section 5)");
-            std::process::ExitCode::SUCCESS
-        }
-        Command::Audit { limit } => {
-            println!("audit (last {limit}): empty (offline CLI; daemon attach deferred)");
-            std::process::ExitCode::SUCCESS
-        }
+        Command::Jobs => daemon_backed_command_unavailable("jobs"),
+        Command::Probes => daemon_backed_command_unavailable("probes"),
+        Command::Policy => daemon_backed_command_unavailable("policy"),
+        Command::Audit { limit: _ } => daemon_backed_command_unavailable("audit"),
         Command::UpdateLocks { bin_dir } => {
             let result = update_locks::stop_installed_processes(&bin_dir);
             for line in &result.lines {
@@ -148,6 +121,13 @@ fn run(cli: Cli) -> std::process::ExitCode {
             }
         }
     }
+}
+
+fn daemon_backed_command_unavailable(command: &str) -> std::process::ExitCode {
+    eprintln!(
+        "terminal-commander: {command} unavailable: requires live daemon IPC; refusing to synthesize empty or not-found data."
+    );
+    std::process::ExitCode::from(EX_UNAVAILABLE)
 }
 
 fn print_status() -> std::process::ExitCode {

@@ -2,31 +2,84 @@
   "_meta": {
     "fixture_id": "contracts/mcp-tools/event_context.v1.json",
     "schema_anchor": "TC05/mcp-tools/event_context-v1",
-    "status": "informative-until-TC08",
-    "consumed_by": ["TC08", "TC23", "TC29"],
-    "note": "event_context is the bounded raw-frame retrieval tool. It is the ONLY MCP path through which raw frame text reaches the LLM. before/after are required-bounded; max_bytes is a server-side hard cap."
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "event_context is the bounded raw-frame retrieval tool. It is the only MCP path in this batch through which frame text reaches the LLM. before/after/max_bytes are optional client hints clamped by daemon caps."
   },
   "tool": "event_context",
   "request_example": {
-    "event_id": "evt_01HXTC0002",
-    "before": 3,
-    "after": 5,
-    "max_bytes": 4096
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "event_context",
+      "arguments": {
+        "bucket_id": "bkt_018f0000000000000000000000000001",
+        "event_id": "evt_018f0000000000000000000000000002",
+        "before": 3,
+        "after": 5,
+        "max_bytes": 4096
+      }
+    }
   },
   "response_example": {
-    "event_id": "evt_01HXTC0002",
-    "bucket_id": "build_42",
-    "context_window_id": "ctx_probe_apt_7_318",
-    "truncated": false,
-    "evicted": false,
+    "bucket_id": "bkt_018f0000000000000000000000000001",
+    "event_id": "evt_018f0000000000000000000000000002",
+    "anchor_missing": false,
+    "unavailable_reason": null,
+    "pointer_unavailable_reason": null,
     "frames": [
-      { "frame_id": 9818, "line": 315, "stream": "stdout", "text": "Reading package lists... Done" },
-      { "frame_id": 9819, "line": 316, "stream": "stdout", "text": "Building dependency tree... Done" },
-      { "frame_id": 9820, "line": 317, "stream": "stdout", "text": "Reading state information... Done" },
-      { "frame_id": 9821, "line": 318, "stream": "stderr", "text": "E: Unable to locate package libssl-dev" },
-      { "frame_id": 9822, "line": 319, "stream": "stderr", "text": "E: Couldn't find any package by glob 'libssl-dev'" },
-      { "frame_id": 9823, "line": 320, "stream": "stderr", "text": "E: Couldn't find any package by regex 'libssl-dev'" },
-      { "frame_id": 9824, "line": 321, "stream": "meta",   "text": "command exited with code 100" }
-    ]
-  }
+      {
+        "probe_id": "prb_018f0000000000000000000000000001",
+        "frame_id": "frm_018f0000000000000000000000000238",
+        "stream": "stdout",
+        "line": 315,
+        "text": "Reading package lists... Done"
+      },
+      {
+        "probe_id": "prb_018f0000000000000000000000000001",
+        "frame_id": "frm_018f0000000000000000000000000239",
+        "stream": "stderr",
+        "line": 316,
+        "text": "error: unresolved import `crate::missing_module`"
+      },
+      {
+        "probe_id": "prb_018f0000000000000000000000000001",
+        "frame_id": "frm_018f0000000000000000000000000240",
+        "stream": "meta",
+        "line": null,
+        "text": "command exited with code 101"
+      }
+    ],
+    "total_bytes": 124,
+    "truncated": false
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "bucket_id and event_id are required",
+    "frame text is bounded by daemon caps and returned only from event_context",
+    "anchor_missing or unavailable_reason means frames=[]"
+  ]
 }

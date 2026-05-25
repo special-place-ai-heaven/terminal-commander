@@ -67,6 +67,20 @@ const CONFIG_STATUSES = Object.freeze({
   UNSUPPORTED_HOST: "unsupported_host",
 });
 
+function defaultMcpScriptPath() {
+  return path.join(__dirname, "..", "..", "bin", "terminal-commander-mcp.js");
+}
+
+function buildTerminalCommanderCommandConfig(opts) {
+  const o = opts || {};
+  const command = o.nodePath || process.execPath;
+  const scriptPath = o.scriptPath || defaultMcpScriptPath();
+  return {
+    command,
+    args: [scriptPath],
+  };
+}
+
 /**
  * Derive the Cursor global mcp.json path from injected platform +
  * env. Never hardcodes a username; uses standard env vars only.
@@ -131,9 +145,11 @@ function getCursorProjectConfigPath(projectRoot) {
  */
 function buildTerminalCommanderServerConfig(opts) {
   const o = opts || {};
+  const commandConfig = buildTerminalCommanderCommandConfig(o);
   const stanza = {
     type: SERVER_TYPE,
-    command: SERVER_COMMAND,
+    command: commandConfig.command,
+    args: commandConfig.args,
   };
   if (o.distro != null && o.distro !== "") {
     // Distro safety: WWS03 whitelist + optional live whitelist
@@ -286,6 +302,7 @@ module.exports = {
   // pure helpers
   getCursorGlobalConfigPath,
   getCursorProjectConfigPath,
+  buildTerminalCommanderCommandConfig,
   buildTerminalCommanderServerConfig,
   parseExistingCursorConfig,
   validateCursorConfigShape,

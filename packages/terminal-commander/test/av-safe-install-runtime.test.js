@@ -9,6 +9,33 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const PKG_ROOT = path.resolve(__dirname, "..");
+const RUNTIME_JS_ROOTS = Object.freeze([
+  path.join(PKG_ROOT, "bin"),
+  path.join(PKG_ROOT, "lib"),
+]);
+const WSL_HELPERS = Object.freeze([
+  path.join(PKG_ROOT, "lib", "wsl", "detect.js"),
+  path.join(PKG_ROOT, "lib", "wsl", "doctor.js"),
+  path.join(PKG_ROOT, "lib", "wsl", "spawn.js"),
+]);
+const HIDDEN_WINDOW_PATTERNS = Object.freeze([
+  { label: "windowsHide", re: /\bwindowsHide\b/ },
+  { label: "CREATE_NO_WINDOW", re: /\bCREATE_NO_WINDOW\b/ },
+  { label: "SW_HIDE", re: /\bSW_HIDE\b/ },
+]);
+
+function collectJsFiles(dir) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...collectJsFiles(p));
+    } else if (entry.isFile() && entry.name.endsWith(".js")) {
+      out.push(p);
+    }
+  }
+  return out;
+}
 
 test("npm install is passive: no lifecycle script starts bootstrap work", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, "package.json"), "utf8"));
@@ -50,6 +77,24 @@ test("admin CLI update is explicit npm update with no shell wrapper", () => {
   assert.match(src, /process\.execPath/);
   assert.match(src, /shell:\s*false/);
   assert.doesNotMatch(src, /npm\.cmd|taskkill|cmd\.exe|cmd \/c|powershell|ExecutionPolicy|windowsHide/);
+});
+
+test("legacy WSL bridge helpers do not request hidden subprocess windows", () => {
+  for (const file of WSL_HELPERS) {
+    const src = fs.readFileSync(file, "utf8");
+    assert.doesNotMatch(src, /windowsHide/);
+  }
+});
+
+test("runtime JS never requests hidden subprocess windows", () => {
+  const files = RUNTIME_JS_ROOTS.flatMap(collectJsFiles);
+  assert.ok(files.length > 0, "expected runtime JS files to scan");
+  for (const file of files) {
+    const src = fs.readFileSync(file, "utf8");
+    for (const pattern of HIDDEN_WINDOW_PATTERNS) {
+      assert.doesNotMatch(src, pattern.re, `${file} must not contain ${pattern.label}`);
+    }
+  }
 });
 
 test("admin CLI version advisory checks npm registry without spawning npm", () => {

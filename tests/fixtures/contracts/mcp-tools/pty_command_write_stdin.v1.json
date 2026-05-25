@@ -1,0 +1,69 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "pty_command_write_stdin",
+      "arguments": {
+        "job_id": "job_018f0000000000000000000000000003",
+        "bytes": "hello\n"
+      }
+    }
+  },
+  "tool": "pty_command_write_stdin",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/pty_command_write_stdin-v1",
+    "fixture_id": "contracts/mcp-tools/pty_command_write_stdin.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed bounded PTY stdin write. The request field is bytes; writes are denied while a secret prompt is active so LLM-supplied secrets are not forwarded."
+  },
+  "response_example": {
+    "job_id": "job_018f0000000000000000000000000003",
+    "bytes_written": 6,
+    "secret_prompt_active": false
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "unsupported_platform_error_example": {
+    "message": "daemon ipc error [UnsupportedPlatform]: PTY command runtime is not available on this platform yet (ConPTY support pending)",
+    "data": {
+      "ipc_code": "UnsupportedPlatform"
+    }
+  },
+  "secret_input_denied_error_example": {
+    "message": "daemon ipc error [SecretInputDenied]: secret prompt active; LLM-supplied input denied",
+    "data": {
+      "ipc_code": "SecretInputDenied"
+    }
+  },
+  "invariants": [
+    "job_id and bytes are required",
+    "bytes is a UTF-8 string capped at 4096 bytes by the daemon",
+    "response reports bytes_written and post-write secret_prompt_active only",
+    "secret prompts produce a typed SecretInputDenied error and the bytes are not written",
+    "success payload never contains echoed stdin, PTY output, or screen content"
+  ]
+}

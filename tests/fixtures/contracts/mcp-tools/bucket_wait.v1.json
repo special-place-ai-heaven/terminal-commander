@@ -2,50 +2,97 @@
   "_meta": {
     "fixture_id": "contracts/mcp-tools/bucket_wait.v1.json",
     "schema_anchor": "TC05/mcp-tools/bucket_wait-v1",
-    "status": "informative-until-TC17",
-    "consumed_by": ["TC17", "TC23", "TC29"],
-    "note": "bucket_wait is the load-bearing tool for the prime directive. Response carries EITHER non-empty events OR heartbeat=true. Raw stdout/stderr text is NEVER a bucket_wait success shape."
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed wait tool. Response carries either non-empty events or heartbeat=true with empty events. Raw stdout/stderr text is never a success shape."
   },
   "tool": "bucket_wait",
   "request_example": {
-    "bucket": "build_42",
-    "cursor": 1842,
-    "severity_min": "medium",
-    "kind_filter": null,
-    "timeout_ms": 30000
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "bucket_wait",
+      "arguments": {
+        "bucket_id": "bkt_018f0000000000000000000000000001",
+        "cursor": 2,
+        "severity_min": "medium",
+        "kind_filter": null,
+        "limit": 100,
+        "timeout_ms": 30000
+      }
+    }
   },
   "response_examples": {
     "with_events": {
-      "bucket_id": "build_42",
-      "cursor_in": 1842,
-      "next_cursor": 1845,
+      "bucket_id": "bkt_018f0000000000000000000000000001",
+      "cursor_in": 2,
+      "next_cursor": 3,
       "heartbeat": false,
+      "dropped_count": 0,
       "events": [
         {
-          "event_id": "evt_01HXTC0004",
-          "bucket_id": "build_42",
-          "seq": 1844,
-          "timestamp": "2026-05-20T20:11:34.300+02:00",
+          "event_id": "evt_018f0000000000000000000000000002",
+          "bucket_id": "bkt_018f0000000000000000000000000001",
+          "seq": 3,
+          "timestamp": "2026-05-25T17:45:03Z",
           "severity": "high",
           "kind": "compile_error",
           "summary": "rustc E0432: unresolved import `crate::missing_module`",
-          "captures": { "code": "E0432" },
+          "captures": {
+            "code": "E0432"
+          },
           "source": {
-            "probe_id": "probe_cargo_3",
+            "probe_id": "prb_018f0000000000000000000000000001",
             "source_type": "process",
             "stream": "stderr",
-            "job_id": "job_build_2"
+            "job_id": "job_018f0000000000000000000000000001"
           },
-          "pointer": { "frame_id": 240, "line": 7, "context_available": true }
+          "pointer": {
+            "frame_id": "frm_018f0000000000000000000000000240",
+            "line": 7,
+            "stream": "stderr",
+            "context_available": true
+          }
         }
       ]
     },
     "heartbeat": {
-      "bucket_id": "build_42",
-      "cursor_in": 1842,
-      "next_cursor": 1842,
+      "bucket_id": "bkt_018f0000000000000000000000000001",
+      "cursor_in": 3,
+      "next_cursor": 3,
       "heartbeat": true,
+      "dropped_count": 0,
       "events": []
     }
-  }
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "bucket_id and cursor are required",
+    "heartbeat=true implies events=[]",
+    "heartbeat=false implies events is non-empty",
+    "success payload never contains raw stdout or stderr dumps"
+  ]
 }

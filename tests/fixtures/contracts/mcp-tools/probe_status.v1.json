@@ -1,0 +1,71 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "probe_status",
+      "arguments": {
+        "probe_id": "prb_018f0000000000000000000000000002"
+      }
+    }
+  },
+  "tool": "probe_status",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/probe_status-v1",
+    "fixture_id": "contracts/mcp-tools/probe_status.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed lookup for one live probe by probe_id. Unknown probes are typed errors; success returns the same bounded row shape used by probe_list."
+  },
+  "response_example": {
+    "probe": {
+      "kind": "file_watch",
+      "job_id": "job_018f0000000000000000000000000002",
+      "bucket_id": "bkt_018f0000000000000000000000000002",
+      "probe_id": "prb_018f0000000000000000000000000002",
+      "frames_total": 8,
+      "events_emitted": 2,
+      "secret_prompts_total": 0,
+      "secret_prompt_active": false,
+      "path": "C:\\work\\app\\build.log"
+    }
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "unknown_probe_error_example": {
+    "message": "daemon ipc error [UnknownProbe]: probe 'prb_018f0000000000000000000000009999' is not live in any runtime",
+    "data": {
+      "ipc_code": "UnknownProbe"
+    }
+  },
+  "invariants": [
+    "probe_id is required and uses the probe id wire prefix",
+    "probe_status input is probe_id, not job_id or watch_id",
+    "success payload wraps one probe row under probe",
+    "success probe row uses the same bounded shape as probe_list",
+    "success payload never contains argv, bytes_total, cursor, rules, cwd, env, stdout, stderr, screen buffers, file content, or event bodies",
+    "unknown probes return a typed UnknownProbe error, not null, empty success, or synthetic inactive state"
+  ]
+}

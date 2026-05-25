@@ -1,0 +1,54 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "registry_upsert",
+      "arguments": {
+        "definition_json": "{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"keyword\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"stream\":\"stderr\",\"description\":\"Detect rustc compiler errors.\",\"pattern\":null,\"keywords\":[\"error[\"],\"captures\":[],\"summary_template\":\"rustc error marker detected\",\"tags\":[\"rust\",\"compiler\"],\"rate_limit_per_min\":null,\"redact\":[],\"context_hint\":{\"before_lines\":20,\"after_lines\":40},\"examples\":[]}"
+      }
+    }
+  },
+  "tool": "registry_upsert",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/registry_upsert-v1",
+    "fixture_id": "contracts/mcp-tools/registry_upsert.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed immutable registry write. MCP accepts definition_json as a JSON-encoded RuleDefinition string; success returns only the assigned rule id and version."
+  },
+  "response_example": {
+    "rule_id": "rust-compile-error",
+    "version": 1
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "definition_json is required and is a JSON string, not a nested object",
+    "RuleDefinition uses live field names including context_hint.before_lines and context_hint.after_lines",
+    "success payload does not echo the rule definition",
+    "invalid definitions fail instead of being silently accepted"
+  ]
+}

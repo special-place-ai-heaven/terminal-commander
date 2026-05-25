@@ -1,164 +1,129 @@
 # Install / Startup - Terminal Commander
 
-Status: TC26 baseline.
+Status: current install contract as of 2026-05-25.
 
-This document captures the locked install + startup story for the
-Terminal Commander MVP. Per `docs/security/PRIVILEGE_MODEL.md` the
-installer NEVER auto-elevates and NEVER installs a privileged helper.
+This document captures the supported install and startup behavior for
+Terminal Commander. Per `docs/security/PRIVILEGE_MODEL.md`, installers
+never auto-elevate and never install a privileged helper.
 
 Language: ASCII only.
 
-## 1. MVP target platforms
+## 1. Supported package targets
 
-- Linux native (x86_64, aarch64)
-- WSL2 (Linux distribution, NOT Windows native)
+The npm wrapper resolves one optional native platform package:
 
-macOS and Windows-native are deferred (see ROADMAP).
+- `@terminal-commander/linux-x64`
+- `@terminal-commander/linux-arm64`
+- `@terminal-commander/windows-x64`
+- `@terminal-commander/mac-x64`
+- `@terminal-commander/mac-arm64`
 
-## 2. Install model: cargo install + manual wire-up
+Windows uses the native Windows package by default. The legacy
+Windows-to-WSL bridge is opt-in with `TC_USE_LEGACY_WSL_BRIDGE=1`.
 
-MVP ships as a Cargo workspace. There is no setuid binary, no
-distribution package, and no systemd unit at MVP. Operators install
-via:
+## 2. Install model
+
+Primary user install:
 
 ```bash
-cargo install --path crates/daemon       # terminal-commanderd
-cargo install --path crates/mcp          # terminal-commander-mcp
-cargo install --path crates/cli          # terminal-commander
+npm install -g terminal-commander@latest
 ```
 
-Binaries land in `$CARGO_HOME/bin` (default `~/.cargo/bin`).
+The npm install is intentionally passive:
 
-## 3. Startup
+- no `postinstall` bootstrap
+- no MCP config writes
+- no daemon start
+- no WSL install
+- no shell wrapper
+- no hidden-window helper spawn
 
-### 3.1 Linux native (with systemd)
+Development builds can still run the Rust crates directly:
 
-A user-level systemd unit example lives in
-`config/terminal-commanderd.service.example`. It runs the daemon under
-the operator's UID. Operators copy it to
-`~/.config/systemd/user/terminal-commanderd.service` and
-`systemctl --user enable --now terminal-commanderd`.
+```bash
+cargo build --release -p terminal-commanderd -p terminal-commander-mcp -p terminal-commander-cli
+```
 
-The example unit does NOT install. It is a starting point.
+## 3. Explicit setup
 
-### 3.2 WSL2 autostart (systemd or profile hook)
+Harness configuration is an explicit operator action:
 
-`npm install -g terminal-commander` (Windows bootstrap) and
-`terminal-commander setup daemon-autostart` install autostart inside
-the WSL distro:
+```bash
+terminal-commander setup harness
+```
 
-1. **systemd user unit** when systemd is running (Ubuntu 24.04+ WSL
-   default). Enables `terminal-commanderd.service` at user session start.
-2. **Profile hook** otherwise: managed block in `~/.profile` /
-   `~/.bashrc` / `~/.zshrc` sources
-   `~/.config/terminal-commander/autostart.sh`, which starts the daemon
-   if the UDS socket is absent.
+Provider-specific setup is also explicit:
 
-The Windows MCP bridge also sources `autostart.sh` before spawning
-`terminal-commander-mcp`, so the daemon comes up on first harness use
-even before the next login shell.
+```bash
+terminal-commander setup harness --provider cursor
+terminal-commander setup harness --provider codex-cli
+terminal-commander setup harness --provider claude-code
+terminal-commander setup harness --provider claude-desktop
+```
 
-Opt-out: `TC_SKIP_DAEMON_AUTOSTART=1` or `TC_BOOTSTRAP_START_DAEMON=0`.
+Repair commands are explicit. Install and update paths do not silently
+write harness config or WSL files.
 
-Filesystem placement: the daemon SQLite database MUST live on a
-native Linux filesystem (ext4 / btrfs / xfs on WSL2), NEVER on
-`/mnt/c` (drvfs 9P). The TC12 store rejects 9P-backed paths at
-writer open per `EVENT_STORE.md` section 3. See
+## 4. Startup model
+
+The LLM harness launches `terminal-commander-mcp` as a stdio MCP
+adapter. The adapter talks to the local daemon over local IPC:
+
+- Unix-like systems use Unix domain sockets.
+- Windows native uses named pipes.
+
+Daemon startup is owned by the installed adapter/supervisor path when
+the harness invokes `terminal-commander-mcp`, not by npm lifecycle
+scripts. The daemon is local-only; it does not open a network listener.
+
+Linux operators may still use the user-level systemd example at
+`config/terminal-commanderd.service.example`. The example unit does not
+install itself.
+
+## 5. Legacy WSL setup
+
+WSL setup is explicit and legacy-scoped. It is not run by npm install.
+Use WSL-specific setup or doctor commands only when intentionally using
+the legacy Windows-to-WSL bridge.
+
+Filesystem placement for WSL remains strict: the daemon SQLite database
+must live on a native Linux filesystem, never `/mnt/c` drvfs. See
 `config/terminal-commanderd.example.toml` for the recommended
 `data_dir = "$HOME/.local/share/terminal-commanderd"`.
 
-## 4. Config files
+## 6. Configuration
 
 `config/terminal-commanderd.example.toml` is the operator-tunable
-configuration. It sets the policy profile (default
-`developer_local`), retention limits, and data directory. It is
-SAFE TO COMMIT (no secrets).
+configuration. It sets the policy profile, retention limits, and data
+directory. It is safe to commit because it contains no secrets.
 
-## 5. Operator checklist
+## 7. Operator checklist
 
-1. Install the three binaries via `cargo install --path ...`.
-2. Copy `config/terminal-commanderd.example.toml` to
-   `~/.config/terminal-commanderd/terminal-commanderd.toml` and edit.
-3. Verify the data directory is on a native filesystem (NOT
-   /mnt/c on WSL2).
-4. Run `terminal-commander doctor` (TC25 CLI) and check every
-   line says `ok`.
-5. Start the daemon (systemd-user on bare Linux; shell rc on WSL2).
-6. Verify MCP server attaches by running it through your LLM
-   harness (see TC27 examples).
+1. Install with `npm install -g terminal-commander@latest`.
+2. Run `terminal-commander setup harness`.
+3. Run `terminal-commander doctor harness` and
+   `terminal-commander doctor daemon`.
+4. Start the LLM harness and verify `system_discover` reports the live
+   tool catalogue.
 
-## 6. What MVP does NOT install
+## 8. What install never adds
 
 - No setuid binary.
 - No polkit rule.
-- No system-level systemd unit (only user-level example).
+- No system-level systemd unit.
 - No privileged helper.
 - No network-listening service.
+- No hidden-window helper.
+- No automatic WSL runtime install.
 
-These are deliberate gaps. See `docs/security/PRIVILEGE_MODEL.md`
-sections 5, 6, 9.
-
-## 7. Source-status
+## 9. Source-status
 
 | Component | Status |
 |---|---|
-| cargo install paths | live (TC26) |
-| systemd user-unit example | live (TC26) |
-| WSL2 startup snippet | live (TC26) |
-| Daemon runtime bootstrap (TC36) | live |
-| Daemon self-check (TC36) | live |
-| Daemon foreground-idle (TC36) | live |
-| Daemon UDS IPC (TC37) | live (Linux/WSL/macOS/BSD); unsupported on Windows native |
-| rmcp stdio adapter | deferred (TC40) |
-| Distribution packages (deb/rpm/aur) | deferred (post-MVP) |
-| Privileged helper installer | NEVER (PRIVILEGE_MODEL.md) |
-
-## 8. Subcommands (TC36)
-
-`terminal-commanderd` is no longer scaffold-only. The TC04 placeholder
-`refusing to start` exit is removed. Subcommands:
-
-```text
-terminal-commanderd check          # bootstrap + self-check report, exit
-terminal-commanderd start          # bootstrap + foreground idle until
-                                   # SIGINT/SIGTERM. No IPC yet.
-terminal-commanderd print-config   # render the active resolved config
-```
-
-Global flags:
-
-```text
---config <path>     # operator config TOML. Optional.
---data-dir <path>   # override daemon.data_dir. Useful for tests / CI.
-```
-
-What the daemon does on `start` today (TC36 scope):
-
-1. Resolves config from `--config`, `--data-dir`, or platform default
-   (`$HOME/.local/share/terminal-commanderd`).
-2. Validates the config; rejects empty `data_dir`, `/mnt/c/...` paths,
-   zero retention values; clamps over-cap per-call limits down to the
-   codebase hard caps.
-3. Creates the data directory if missing.
-4. Opens the SQLite store with WAL pragmas and applies migrations
-   V0001 / V0002 / V0003 lazily.
-5. Wires the daemon `Router` with a `PersistentAudit` sink so every
-   router action lands as a durable audit row (NEVER `InMemoryAudit`).
-6. Runs the self-check: store reachable, audit round trip, router →
-   persistent audit pipeline, structural sudo deny across profiles.
-7. Idles in foreground until SIGINT / SIGTERM, then exits cleanly.
-
-What `start` does NOT do (deferred by mini-spec):
-
-- No rmcp stdio adapter. (TC40.)
-- No `command_start_combed` process execution. (TC38.)
-- No PTY spawn. (TC44.)
-- No network listener of any kind.
-- No setuid / polkit / privileged helper.
-
-TC37 update: `start` now defaults to the `ipc-server` mode on Unix.
-The daemon binds a local UDS at `<data_dir>/terminal-commanderd.sock`
-(or `daemon.socket_path` if configured) and accepts the minimal TC37
-method set (`system_discover` / `health` / `policy_status` /
-`self_check`). See `docs/runtime/UDS_IPC.md`. To keep the pre-IPC
-behavior, run `terminal-commanderd start --mode foreground-idle`.
+| npm wrapper package | live |
+| Native platform packages | live for Linux, Windows, and macOS targets listed above |
+| rmcp stdio adapter | live |
+| Daemon IPC | live via UDS on Unix-like systems and named pipes on Windows |
+| Explicit harness setup | live |
+| Explicit WSL legacy bridge | live only when opted in |
+| Privileged helper installer | never |

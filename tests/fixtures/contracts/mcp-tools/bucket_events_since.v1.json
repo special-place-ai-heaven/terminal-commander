@@ -1,18 +1,83 @@
 {
   "request_example": {
-    "<<DECISION_REQUIRED_AT>>": "TC23"
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "bucket_events_since",
+      "arguments": {
+        "bucket_id": "bkt_018f0000000000000000000000000001",
+        "cursor": 0,
+        "severity_min": "medium",
+        "kind_filter": null,
+        "limit": 100
+      }
+    }
   },
   "tool": "bucket_events_since",
   "_meta": {
     "schema_anchor": "TC05/mcp-tools/bucket_events_since-v1",
     "fixture_id": "contracts/mcp-tools/bucket_events_since.v1.json",
-    "status": "reserved-not-implemented",
+    "status": "live",
     "consumed_by": [
-      "TC23"
+      "TC45"
     ],
-    "note": "Reserved per README.md:243-266. Concrete request/response shape locked in TC23. Until then this fixture is a placeholder so the MCP tool surface coverage check (TC23) does not report 'missing tool name' (which would be a blocker, not an invention)."
+    "note": "Daemon-backed cursor read. Success returns structured events and cursor metadata; it is not a raw stdout/stderr reader."
   },
-  "response_example_placeholder": {
-    "<<DECISION_REQUIRED_AT>>": "TC23"
-  }
+  "response_example": {
+    "bucket_id": "bkt_018f0000000000000000000000000001",
+    "cursor_in": 0,
+    "next_cursor": 2,
+    "has_more": false,
+    "dropped_count": 0,
+    "events": [
+      {
+        "event_id": "evt_018f0000000000000000000000000001",
+        "bucket_id": "bkt_018f0000000000000000000000000001",
+        "seq": 1,
+        "timestamp": "2026-05-25T17:45:00Z",
+        "severity": "high",
+        "kind": "test_failure",
+        "summary": "npm test failed in av-safe-install-runtime.test.js",
+        "source": {
+          "probe_id": "prb_018f0000000000000000000000000001",
+          "source_type": "process",
+          "stream": "stderr",
+          "job_id": "job_018f0000000000000000000000000001"
+        },
+        "pointer": {
+          "frame_id": "frm_018f0000000000000000000000000042",
+          "line": 7,
+          "stream": "stderr",
+          "context_available": true
+        }
+      }
+    ]
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "bucket_id and cursor are required",
+    "events are structured signal events, not raw terminal streams",
+    "next_cursor is the cursor clients should persist"
+  ]
 }

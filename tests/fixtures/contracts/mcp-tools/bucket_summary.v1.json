@@ -4,33 +4,37 @@
     "id": 1,
     "method": "tools/call",
     "params": {
-      "name": "command_start_combed",
+      "name": "bucket_summary",
       "arguments": {
-        "argv": [
-          "npm",
-          "test"
-        ],
-        "cwd": "C:/AI_STUFF/PROGRAMMING/terminal-commander/packages/terminal-commander",
-        "env": [],
-        "grace_ms": 1000
+        "bucket_id": "bkt_018f0000000000000000000000000001"
       }
     }
   },
-  "tool": "command_start_combed",
+  "tool": "bucket_summary",
   "_meta": {
-    "schema_anchor": "TC05/mcp-tools/command_start_combed-v1",
-    "fixture_id": "contracts/mcp-tools/command_start_combed.v1.json",
+    "schema_anchor": "TC05/mcp-tools/bucket_summary-v1",
+    "fixture_id": "contracts/mcp-tools/bucket_summary.v1.json",
     "status": "live",
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed command starter. Success returns identifiers and a cursor only; stdout/stderr are never returned as success payload text."
+    "note": "Daemon-backed bucket aggregate. Success returns counters and a wire-stable severity histogram only; raw stdout/stderr and event bodies are not part of this contract."
   },
   "response_example": {
-    "job_id": "job_018f0000000000000000000000000001",
     "bucket_id": "bkt_018f0000000000000000000000000001",
-    "probe_id": "prb_018f0000000000000000000000000001",
-    "cursor": 0
+    "head_seq": 0,
+    "tail_seq": 0,
+    "event_count": 0,
+    "dropped_count": 0,
+    "by_severity": {
+      "trace": 0,
+      "debug": 0,
+      "info": 0,
+      "low": 0,
+      "medium": 0,
+      "high": 0,
+      "critical": 0
+    }
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -54,8 +58,9 @@
     }
   },
   "invariants": [
-    "argv is explicit and shell interpreters are daemon-denied",
-    "success payload contains job_id, bucket_id, probe_id, and cursor only",
-    "stdout and stderr are observed through bucket tools, not returned here"
+    "bucket_id is required",
+    "success payload contains aggregate counters only",
+    "by_severity includes trace, debug, info, low, medium, high, and critical",
+    "success payload never contains events or raw stdout/stderr text"
   ]
 }

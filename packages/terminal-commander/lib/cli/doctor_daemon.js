@@ -35,7 +35,6 @@ async function runDoctorDaemon(opts) {
       const child = spawn(o.wslPath || "wsl.exe", argv, {
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
-        windowsHide: true,
         env: buildFilteredEnv(env),
       });
       let out = "";

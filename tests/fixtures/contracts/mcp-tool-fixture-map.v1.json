@@ -1,0 +1,205 @@
+{
+  "_meta": {
+    "fixture_id": "contracts/mcp-tool-fixture-map.v1.json",
+    "schema_anchor": "TC45/mcp-tool-fixture-map-v1",
+    "status": "live-transition-map",
+    "note": "Transitional truth table for MCP tool fixtures. The live source is terminal_commander_mcp::tools::tool_catalogue(); this map records which live tools have real fixtures, which still have placeholders, which are missing fixture files, and which obsolete fixture files remain until a cleanup phase removes or replaces them."
+  },
+  "statuses": {
+    "covered_live": "A live tool has a current fixture whose _meta.status is live.",
+    "placeholder_for_live_tool": "A live tool still has a reserved placeholder fixture.",
+    "missing_fixture": "A live tool from tool_catalogue() has no per-tool fixture file yet.",
+    "obsolete_fixture_present": "A fixture file exists for a tool name that is not in tool_catalogue()."
+  },
+  "daemon_unavailable_shape_statuses": {
+    "not_applicable": "Tool is daemon-independent and does not return the daemon_unavailable error envelope.",
+    "ensure_daemon_status_v1": "unavailable_error_example.data.details is the serialized EnsureDaemonStatus::Unavailable shape.",
+    "legacy_state_unavailable": "Known debt: unavailable_error_example.data.details still uses the old state=unavailable placeholder shape."
+  },
+  "daemon_unavailable_shapes": {
+    "system_discover": "not_applicable",
+    "health": "ensure_daemon_status_v1",
+    "policy_status": "ensure_daemon_status_v1",
+    "self_check": "ensure_daemon_status_v1",
+    "command_start_combed": "ensure_daemon_status_v1",
+    "command_status": "ensure_daemon_status_v1",
+    "bucket_events_since": "ensure_daemon_status_v1",
+    "bucket_wait": "ensure_daemon_status_v1",
+    "bucket_summary": "ensure_daemon_status_v1",
+    "event_context": "ensure_daemon_status_v1",
+    "registry_search": "ensure_daemon_status_v1",
+    "registry_get": "ensure_daemon_status_v1",
+    "registry_upsert": "ensure_daemon_status_v1",
+    "registry_test": "ensure_daemon_status_v1",
+    "registry_activate": "ensure_daemon_status_v1",
+    "registry_deactivate": "ensure_daemon_status_v1",
+    "registry_list_active": "ensure_daemon_status_v1",
+    "file_read_window": "ensure_daemon_status_v1",
+    "file_search": "ensure_daemon_status_v1",
+    "file_watch_start": "ensure_daemon_status_v1",
+    "file_watch_stop": "ensure_daemon_status_v1",
+    "file_watch_list": "ensure_daemon_status_v1",
+    "pty_command_start": "ensure_daemon_status_v1",
+    "pty_command_write_stdin": "ensure_daemon_status_v1",
+    "pty_command_stop": "ensure_daemon_status_v1",
+    "pty_command_list": "ensure_daemon_status_v1",
+    "runtime_state": "ensure_daemon_status_v1",
+    "probe_list": "ensure_daemon_status_v1",
+    "probe_status": "ensure_daemon_status_v1"
+  },
+  "live_tools": [
+    {
+      "name": "system_discover",
+      "fixture": "mcp-tools/system_discover.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "health",
+      "fixture": "mcp-tools/health.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "policy_status",
+      "fixture": "mcp-tools/policy_status.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "self_check",
+      "fixture": "mcp-tools/self_check.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "command_start_combed",
+      "fixture": "mcp-tools/command_start_combed.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "command_status",
+      "fixture": "mcp-tools/command_status.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "bucket_events_since",
+      "fixture": "mcp-tools/bucket_events_since.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "bucket_wait",
+      "fixture": "mcp-tools/bucket_wait.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "bucket_summary",
+      "fixture": "mcp-tools/bucket_summary.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "event_context",
+      "fixture": "mcp-tools/event_context.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "registry_search",
+      "fixture": "mcp-tools/registry_search.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "registry_get",
+      "fixture": "mcp-tools/registry_get.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "registry_upsert",
+      "fixture": "mcp-tools/registry_upsert.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "registry_test",
+      "fixture": "mcp-tools/registry_test.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "registry_activate",
+      "fixture": "mcp-tools/registry_activate.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "registry_deactivate",
+      "fixture": "mcp-tools/registry_deactivate.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "registry_list_active",
+      "fixture": "mcp-tools/registry_list_active.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "file_read_window",
+      "fixture": "mcp-tools/file_read_window.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "file_search",
+      "fixture": "mcp-tools/file_search.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "file_watch_start",
+      "fixture": "mcp-tools/file_watch_start.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "file_watch_stop",
+      "fixture": "mcp-tools/file_watch_stop.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "file_watch_list",
+      "fixture": "mcp-tools/file_watch_list.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "pty_command_start",
+      "fixture": "mcp-tools/pty_command_start.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "pty_command_write_stdin",
+      "fixture": "mcp-tools/pty_command_write_stdin.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "pty_command_stop",
+      "fixture": "mcp-tools/pty_command_stop.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "pty_command_list",
+      "fixture": "mcp-tools/pty_command_list.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "runtime_state",
+      "fixture": "mcp-tools/runtime_state.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "probe_list",
+      "fixture": "mcp-tools/probe_list.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "probe_status",
+      "fixture": "mcp-tools/probe_status.v1.json",
+      "status": "covered_live"
+    }
+  ],
+  "obsolete_fixtures": [],
+  "counts": {
+    "live_tools": 29,
+    "covered_live": 29,
+    "placeholder_for_live_tool": 0,
+    "missing_fixture": 0,
+    "obsolete_fixture_present": 0
+  }
+}

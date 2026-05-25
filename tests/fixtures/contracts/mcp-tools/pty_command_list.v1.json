@@ -1,0 +1,81 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "pty_command_list",
+      "arguments": {}
+    }
+  },
+  "tool": "pty_command_list",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/pty_command_list-v1",
+    "fixture_id": "contracts/mcp-tools/pty_command_list.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed snapshot of live PTY jobs. Success returns bounded identifiers, argv, counters, and secret-prompt flags only; non-Unix daemons return UnsupportedPlatform instead of fake empty success."
+  },
+  "response_examples": {
+    "empty": {
+      "entries": []
+    },
+    "one_live_pty": {
+      "entries": [
+        {
+          "job_id": "job_018f0000000000000000000000000003",
+          "bucket_id": "bkt_018f0000000000000000000000000003",
+          "probe_id": "prb_018f0000000000000000000000000003",
+          "argv": [
+            "python3",
+            "-u",
+            "-c",
+            "print('ready')"
+          ],
+          "frames_total": 2,
+          "events_emitted": 0,
+          "bytes_total": 128,
+          "stdin_bytes_written": 6,
+          "secret_prompts_total": 1,
+          "secret_prompt_active": true
+        }
+      ]
+    }
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "unsupported_platform_error_example": {
+    "message": "daemon ipc error [UnsupportedPlatform]: PTY command runtime is not available on this platform yet (ConPTY support pending)",
+    "data": {
+      "ipc_code": "UnsupportedPlatform"
+    }
+  },
+  "invariants": [
+    "request has no arguments",
+    "empty entries is a valid success response only on a supported daemon",
+    "entries contain ids, argv, counters, and secret-prompt flags only",
+    "success payload never contains a raw PTY screen buffer, stdout, stderr, cwd, env, or file path",
+    "non-Unix daemons return UnsupportedPlatform instead of fake empty success"
+  ]
+}

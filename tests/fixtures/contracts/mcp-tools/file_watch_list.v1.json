@@ -1,0 +1,67 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "file_watch_list",
+      "arguments": {}
+    }
+  },
+  "tool": "file_watch_list",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/file_watch_list-v1",
+    "fixture_id": "contracts/mcp-tools/file_watch_list.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed snapshot of live file watches. Empty entries is a reachable-daemon success state; daemon unavailable is a typed error, not empty success."
+  },
+  "response_examples": {
+    "empty": {
+      "entries": []
+    },
+    "one_live_watch": {
+      "entries": [
+        {
+          "watch_id": "job_018f0000000000000000000000000002",
+          "bucket_id": "bkt_018f0000000000000000000000000002",
+          "probe_id": "prb_018f0000000000000000000000000002",
+          "path": "C:\\work\\app\\build.log",
+          "frames_total": 8,
+          "events_emitted": 2,
+          "bytes_total": 4096
+        }
+      ]
+    }
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "request has no arguments",
+    "empty entries is a valid success response only when the daemon is reachable",
+    "entries contain ids, watched path, and counters only",
+    "success payload never contains file content, event bodies, cursor, rules, cwd, env, stdout, or stderr",
+    "daemon unavailable is a typed daemon_unavailable error, not empty success"
+  ]
+}
