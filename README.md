@@ -1,4 +1,4 @@
-![Terminal Commander](./docs/TC_logo.png)
+![Terminal Commander](./docs/logo.jpg)
 
 # Terminal Commander
 
