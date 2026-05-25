@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.8](https://github.com/special-place-administrator/terminal-commander/compare/v0.1.7...v0.1.8) (2026-05-25)
+
+
+### Features
+
+* **release:** prepare first npm beta publish ([ab4b87e](https://github.com/special-place-administrator/terminal-commander/commit/ab4b87ee952f208391f101cf8cc1f536f0df6106))
+
+
+### Bug Fixes
+
+* **release:** sync linux-x64 + linux-arm64 + manifest to 0.1.5 ([e6e37e7](https://github.com/special-place-administrator/terminal-commander/commit/e6e37e72cf50905faf92b4948758c9a0d33eefc9))
+
 ## [0.1.6](https://github.com/special-place-administrator/terminal-commander/compare/v0.1.5...v0.1.6) (2026-05-25)
 
 
