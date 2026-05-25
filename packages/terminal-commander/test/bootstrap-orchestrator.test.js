@@ -82,6 +82,57 @@ test("runBootstrap win32 defaults to native MCP path without WSL probe", async (
   assert.match(r.output, /native Windows MCP path selected/);
 });
 
+test("runBootstrap cli mode fails loudly when requested harness write fails", async () => {
+  const r = await runBootstrap({
+    mode: "cli",
+    platform: "linux",
+    env: { HOME: process.env.HOME || process.env.USERPROFILE || "/tmp" },
+    force: true,
+    acquireLock: false,
+    skipDaemonAutostart: true,
+    writeAllHarnesses: () => [
+      {
+        id: "codex-cli",
+        status: "failed",
+        harness_status: "backup_failed",
+        path: "/tmp/config.toml",
+        hint: "terminal-commander: codex config.toml backup failed",
+      },
+    ],
+  });
+  assert.equal(r.status, "harness_failed");
+  assert.equal(r.exit_code, 64);
+  assert.match(r.output, /codex config\.toml backup failed/);
+  assert.equal(r.harness_results[0].harness_status, "backup_failed");
+});
+
+test("runBootstrap install mode keeps provider write failures fail-soft", async () => {
+  const r = await runBootstrap({
+    mode: "install",
+    platform: "linux",
+    env: {
+      npm_lifecycle_event: "install",
+      npm_lifecycle_script: "terminal-commander setup harness",
+      HOME: process.env.HOME || process.env.USERPROFILE || "/tmp",
+    },
+    acquireLock: false,
+    require_install_lifecycle: false,
+    skipDaemonAutostart: true,
+    writeAllHarnesses: () => [
+      {
+        id: "codex-cli",
+        status: "failed",
+        harness_status: "backup_failed",
+        hint: "terminal-commander: codex config.toml backup failed",
+      },
+    ],
+  });
+  assert.equal(r.status, "bootstrap_partial");
+  assert.equal(r.exit_code, 0);
+  assert.match(r.output, /codex config\.toml backup failed/);
+  assert.equal(r.harness_results[0].status, "failed");
+});
+
 test("runBootstrap linux writes harness without WSL", async () => {
   if (process.platform === "win32") return;
   const r = await runBootstrap({

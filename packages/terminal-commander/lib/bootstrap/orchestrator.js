@@ -40,6 +40,7 @@ const BOOTSTRAP_STATUSES = Object.freeze({
   NO_DEFAULT_DISTRO: "no_default_distro_ambiguous",
   UNSUPPORTED_HOST: "unsupported_host",
   WSL_RUNTIME_FAILED: "wsl_runtime_failed",
+  HARNESS_FAILED: "harness_failed",
 });
 
 function logStderr(lines) {
@@ -288,15 +289,29 @@ async function runBootstrap(opts) {
         : [];
 
     configured = [];
+    const failedHarnessResults = [];
     for (const r of harnessResults) {
       if (r.status === HARNESS_WRITE_STATUSES.OK) {
         configured.push(r.id);
         if (r.hint) lines.push(r.hint);
       } else if (r.status === HARNESS_WRITE_STATUSES.STUB_UNVERIFIED) {
         lines.push(r.hint || `${r.id}: stub`);
-      } else if (r.status === HARNESS_WRITE_STATUSES.FAILED && r.hint) {
-        lines.push(r.hint);
+      } else if (r.status === HARNESS_WRITE_STATUSES.FAILED) {
+        failedHarnessResults.push(r);
+        lines.push(r.hint || `${r.id}: ${r.harness_status || r.status}`);
       }
+    }
+
+    if (failedHarnessResults.length > 0 && !failSoft) {
+      logStderr(lines);
+      return {
+        status: BOOTSTRAP_STATUSES.HARNESS_FAILED,
+        exit_code: 64,
+        output: lines.join("\n"),
+        lines,
+        harness_results: harnessResults,
+        distro,
+      };
     }
 
     if (o.dry_run !== true) {
