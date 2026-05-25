@@ -95,7 +95,9 @@ jobs:
           fi
           # If checks don't pass within the watch window, FAIL THE JOB.
           # Operator can investigate, push fixes, re-trigger.
-          gh pr checks "$pr" --watch --interval 30 --timeout 7200
+          # gh pr checks doesn't support --timeout. Rely on GitHub Actions'
+          # default 6h job timeout to bound this.
+          gh pr checks "$pr" --watch --interval 30 --fail-fast
 
       - name: Auto-merge release PR
         env:
