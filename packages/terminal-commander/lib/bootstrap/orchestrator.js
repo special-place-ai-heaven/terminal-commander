@@ -60,6 +60,7 @@ async function runBootstrap(opts) {
   const mode = o.mode || "cli";
   const lines = [];
   const failSoft = mode === "install" || mode === "lazy";
+  const emitOutput = o.emitOutput !== false;
   const autoConfigure = mode === "install" || mode === "lazy" || o.auto_configure === true;
 
   if (shouldSkipBootstrap(env)) {
@@ -117,7 +118,7 @@ async function runBootstrap(opts) {
         const msg =
           "terminal-commander: WSL not found; install WSL (wsl --install), then run terminal-commander setup harness again.";
         lines.push(msg);
-        logStderr(lines);
+        if (emitOutput) logStderr(lines);
         return {
           status: BOOTSTRAP_STATUSES.WSL_NOT_FOUND,
           exit_code: failSoft ? 0 : 64,
@@ -128,7 +129,7 @@ async function runBootstrap(opts) {
       if (detectResult.reason === DETECT_REASONS.NO_DISTROS) {
         const msg = "terminal-commander: no WSL distros registered.";
         lines.push(msg);
-        logStderr(lines);
+        if (emitOutput) logStderr(lines);
         return {
           status: BOOTSTRAP_STATUSES.NO_DISTROS,
           exit_code: failSoft ? 0 : 64,
@@ -149,7 +150,7 @@ async function runBootstrap(opts) {
       if (resolved.status !== "ok") {
         const msg = `terminal-commander: could not resolve WSL distro (${resolved.status}).`;
         lines.push(msg);
-        logStderr(lines);
+        if (emitOutput) logStderr(lines);
         return {
           status: BOOTSTRAP_STATUSES.NO_DEFAULT_DISTRO,
           exit_code: failSoft ? 0 : 64,
@@ -186,7 +187,7 @@ async function runBootstrap(opts) {
           if (ensure.status !== ENSURE_STATUSES.OK) {
             lines.push(`terminal-commander: WSL runtime ensure: ${ensure.status} — ${ensure.hint}`);
             if (!failSoft) {
-              logStderr(lines);
+              if (emitOutput) logStderr(lines);
               return {
                 status: BOOTSTRAP_STATUSES.WSL_RUNTIME_FAILED,
                 exit_code: 64,
@@ -303,7 +304,7 @@ async function runBootstrap(opts) {
     }
 
     if (failedHarnessResults.length > 0 && !failSoft) {
-      logStderr(lines);
+      if (emitOutput) logStderr(lines);
       return {
         status: BOOTSTRAP_STATUSES.HARNESS_FAILED,
         exit_code: 64,
@@ -328,7 +329,7 @@ async function runBootstrap(opts) {
       });
     }
 
-    logStderr(lines);
+    if (emitOutput) logStderr(lines);
     const status =
       configured.length > 0
         ? BOOTSTRAP_STATUSES.BOOTSTRAP_READY

@@ -31,6 +31,7 @@ async function runSetupHarness(opts) {
     writeState: o.writeState,
     writeAllHarnesses: o.writeAllHarnesses,
     failSoft: false,
+    emitOutput: false,
   }).then((r) => ({
     status: r.status,
     exit_code: typeof r.exit_code === "number" ? r.exit_code : 0,
@@ -67,6 +68,7 @@ async function runSetupCursorWslDeprecated(opts) {
     writeState: o.writeState,
     writeConfig: o.writeConfig,
     skipWslInstall: flags["dry-run"] === true,
+    emitOutput: false,
   });
   if (boot.exit_code !== 0) {
     return {

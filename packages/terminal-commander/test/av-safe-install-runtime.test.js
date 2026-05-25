@@ -6,6 +6,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const PKG_ROOT = path.resolve(__dirname, "..");
@@ -124,4 +125,43 @@ test("JS-only control-plane commands route before native binary spawn", () => {
     assert.equal(r.stderr, "");
     assert.match(r.stdout, /terminal-commander/);
   }
+});
+
+test("setup harness provider failure emits each diagnostic once", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tc-setup-output-"));
+  const codexDir = path.join(root, ".codex");
+  fs.mkdirSync(codexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, "config.toml"),
+    '[mcp_servers.terminal_commander]\ncommand = "old"\nargs = []\n',
+  );
+  fs.writeFileSync(path.join(codexDir, "config.toml.bak"), "existing backup\n");
+
+  const shim = path.join(PKG_ROOT, "bin", "terminal-commander.js");
+  const r = spawnSync(
+    process.execPath,
+    [shim, "setup", "harness", "--provider", "codex-cli", "--force"],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: root,
+        USERPROFILE: root,
+        TC_SKIP_DAEMON_AUTOSTART: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+    },
+  );
+
+  const stderrLines = r.stderr.trim().split(/\r?\n/).filter(Boolean);
+  const expectedLines = [];
+  if (process.platform === "win32") {
+    expectedLines.push("terminal-commander: native Windows MCP path selected; WSL bootstrap skipped.");
+  }
+  expectedLines.push("codex-cli: backup_failed");
+
+  assert.equal(r.status, 64, r.stderr);
+  assert.equal(r.stdout, "");
+  assert.deepEqual(stderrLines, expectedLines);
 });
