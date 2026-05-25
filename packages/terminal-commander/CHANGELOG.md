@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.9...v0.1.10) (2026-05-25)
+
+
+### Bug Fixes
+
+* make terminal commander setup and update native-first ([35f0ac9](https://github.com/special-place-ai-heaven/terminal-commander/commit/35f0ac9a372a00b5b7a7d1cb1941660791485da0))
+
 ## [0.1.9](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.8...v0.1.9) (2026-05-25)
 
 
