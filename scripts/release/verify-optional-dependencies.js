@@ -2,13 +2,12 @@
 "use strict";
 
 const pkg = require("../../packages/terminal-commander/package.json");
+const { PLATFORM_PACKAGES } = require("./platform-packages.js");
+
 const version = pkg.version;
 const deps = pkg.optionalDependencies || {};
 
-for (const name of [
-  "@terminal-commander/linux-x64",
-  "@terminal-commander/linux-arm64",
-]) {
+for (const name of PLATFORM_PACKAGES) {
   if (deps[name] !== version) {
     console.error(
       `${name} optionalDependency = ${deps[name] ?? "(missing)"} != ${version}`
@@ -17,4 +16,4 @@ for (const name of [
   }
 }
 
-console.log(`optionalDependencies pinned to ${version}`);
+console.log(`optionalDependencies pinned to ${version} (${PLATFORM_PACKAGES.length} platforms)`);

@@ -1,0 +1,4 @@
+# Built binaries land here at release/CI time via cargo build then
+# get staged into the npm tarball. Never commit them — they are large
+# multi-MB artifacts. Only the .placeholder files travel in git.
+bin/*.exe

@@ -25,7 +25,14 @@ if [ "$version" != "$root_ver" ]; then
   exit 1
 fi
 
-for pkg in packages/terminal-commander-linux-x64/package.json packages/terminal-commander-linux-arm64/package.json; do
+# Verify ALL 5 platform packages share the manifest version, not just the 2 linux ones.
+# Codex review I3 (2026-05-25): the prior 2-platform check let drift slip through on
+# windows-x64 + mac-x64 + mac-arm64.
+for pkg in packages/terminal-commander-linux-x64/package.json \
+           packages/terminal-commander-linux-arm64/package.json \
+           packages/terminal-commander-windows-x64/package.json \
+           packages/terminal-commander-mac-x64/package.json \
+           packages/terminal-commander-mac-arm64/package.json; do
   pv="$(node -p "require('./${pkg}').version")"
   if [ "$pv" != "$version" ]; then
     echo "::error::${pkg} version ${pv} != manifest ${version}"
@@ -41,9 +48,15 @@ publish="false"
 if git rev-parse "$tag" >/dev/null 2>&1; then
   tag_sha="$(git rev-parse "${tag}^{commit}")"
   if [ "$tag_sha" != "$head_sha" ]; then
-    echo "retagging ${tag} from ${tag_sha} to HEAD ${head_sha}"
-    git tag -f "$tag" "$head_sha"
-    git push origin "$tag" --force
+    # Codex C1 (2026-05-25): refuse to force-move an existing release tag.
+    # A tag pointing somewhere other than HEAD on an ordinary main push means
+    # the release PR has not been merged yet (e.g. we're pushing a feature commit
+    # directly to main while v0.1.4 still points at last week's release).
+    # Force-retagging would silently rewrite history of a published release.
+    echo "::error::tag ${tag} exists at ${tag_sha} but HEAD is ${head_sha}"
+    echo "::error::refusing to force-move. If this IS the intended release PR merge,"
+    echo "::error::run 'git push origin --delete ${tag}' first and re-run."
+    exit 1
   fi
 else
   need_rp="true"

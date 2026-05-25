@@ -10,6 +10,8 @@ const SUPPORTED_TARGETS = Object.freeze([
   Object.freeze({ platform: "linux", arch: "x64", pkg: "@terminal-commander/linux-x64" }),
   Object.freeze({ platform: "linux", arch: "arm64", pkg: "@terminal-commander/linux-arm64" }),
   Object.freeze({ platform: "win32", arch: "x64", pkg: "@terminal-commander/windows-x64" }),
+  Object.freeze({ platform: "darwin", arch: "x64", pkg: "@terminal-commander/mac-x64" }),
+  Object.freeze({ platform: "darwin", arch: "arm64", pkg: "@terminal-commander/mac-arm64" }),
 ]);
 
 const ALLOWED_BINARIES = Object.freeze([
@@ -22,6 +24,8 @@ const MONOREPO_PLATFORM_DIRS = Object.freeze({
   "@terminal-commander/linux-x64": "terminal-commander-linux-x64",
   "@terminal-commander/linux-arm64": "terminal-commander-linux-arm64",
   "@terminal-commander/windows-x64": "terminal-commander-windows-x64",
+  "@terminal-commander/mac-x64": "terminal-commander-mac-x64",
+  "@terminal-commander/mac-arm64": "terminal-commander-mac-arm64",
 });
 
 function findPlatformPackageJson(target, requireResolve) {
@@ -125,8 +129,7 @@ function formatResolveError(result, opts) {
   if (result.reason === "platform_package_missing") {
     return (
       `terminal-commander: platform package ${result.platformPackage} not installed. ` +
-      `From the terminal-commander package directory run: npm install ${result.platformPackage}@0.1.4 ` +
-      `(or for local dev: npm install file:../terminal-commander-windows-x64), then reinstall globally.`
+      `Reinstall: npm install -g terminal-commander@latest`
     );
   }
   if (result.reason === "invalid_binary") {

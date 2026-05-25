@@ -40,10 +40,16 @@ test("ALLOWED_BINARIES is exactly the three TC commands", () => {
   );
 });
 
-test("SUPPORTED_TARGETS is exactly linux-x64 + linux-arm64 + win32-x64", () => {
-  // Phase 3 added native Windows (win32-x64) to SUPPORTED_TARGETS.
+test("SUPPORTED_TARGETS is exactly linux-x64 + linux-arm64 + win32-x64 + darwin-x64 + darwin-arm64", () => {
+  // Phase 3 added native Windows (win32-x64); Phase 4a-max added darwin/x64 + darwin/arm64.
   const summary = SUPPORTED_TARGETS.map((t) => `${t.platform}-${t.arch}`);
-  assert.deepEqual(summary, ["linux-x64", "linux-arm64", "win32-x64"]);
+  assert.deepEqual(summary, [
+    "linux-x64",
+    "linux-arm64",
+    "win32-x64",
+    "darwin-x64",
+    "darwin-arm64",
+  ]);
 });
 
 test("invalid binary name returns invalid_binary", () => {
@@ -97,17 +103,21 @@ test("linux arm64 with platform package installed resolves to bin path", () => {
   );
 });
 
-test("darwin x64 is rejected as unsupported_platform", () => {
+test("freebsd arm64 is rejected as unsupported_platform (regression guard)", () => {
+  // darwin/x64 + darwin/arm64 became supported in Phase 4a-max; the
+  // 'unsupported on darwin' guard moves to a still-unsupported target
+  // so the bounded error-message + supported-list contract is still
+  // covered for hosts the resolver legitimately rejects.
   const r = resolveBinary({
-    platform: "darwin",
-    arch: "x64",
+    platform: "freebsd",
+    arch: "arm64",
     binary: "terminal-commanderd",
     requireResolve: fakeRequireResolveOk("/stub"),
   });
   assert.equal(r.reason, "unsupported_platform");
   assert.equal(r.binaryPath, null);
-  const msg = formatResolveError(r, { platform: "darwin", arch: "x64" });
-  assert.match(msg, /unsupported platform darwin-x64/);
+  const msg = formatResolveError(r, { platform: "freebsd", arch: "arm64" });
+  assert.match(msg, /unsupported platform freebsd-arm64/);
   assert.match(msg, /linux-x64/);
   assert.match(msg, /linux-arm64/);
 });
@@ -269,17 +279,17 @@ test("formatResolveError returns null on ok result", () => {
 });
 
 test("formatResolveError unsupported_platform message is single-line and bounded", () => {
-  // darwin/arm64 still resolves to unsupported_platform — bridge mode
-  // only triggers on win32, so this test exercises the original
-  // bounded-format invariant on an unsupported host.
+  // freebsd/x64 resolves to unsupported_platform (darwin became supported
+  // in Phase 4a-max). This exercises the bounded-format invariant on a
+  // still-unsupported host.
   const r = resolveBinary({
-    platform: "darwin",
-    arch: "arm64",
+    platform: "freebsd",
+    arch: "x64",
     binary: "terminal-commanderd",
     requireResolve: fakeRequireResolveOk("/stub"),
   });
   assert.equal(r.reason, "unsupported_platform");
-  const msg = formatResolveError(r, { platform: "darwin", arch: "arm64" });
+  const msg = formatResolveError(r, { platform: "freebsd", arch: "x64" });
   assert.equal(msg.includes("\n"), false);
   assert.equal(msg.startsWith("terminal-commander:"), true);
   // Bounded: keep the message under ~200 chars so it does not blow up
@@ -290,8 +300,38 @@ test("formatResolveError unsupported_platform message is single-line and bounded
 test("SUPPORTED_TARGETS is frozen and immutable", () => {
   assert.equal(Object.isFrozen(SUPPORTED_TARGETS), true);
   assert.throws(() => {
-    SUPPORTED_TARGETS.push({ platform: "darwin", arch: "arm64", pkg: "x" });
+    SUPPORTED_TARGETS.push({ platform: "freebsd", arch: "x64", pkg: "x" });
   });
-  // Phase 3 added win32-x64; there are now 3 supported targets.
-  assert.equal(SUPPORTED_TARGETS.length, 3);
+  // Phase 3 added win32-x64; Phase 4a-max added darwin/x64 + darwin/arm64;
+  // there are now 5 supported targets.
+  assert.equal(SUPPORTED_TARGETS.length, 5);
+});
+
+test("SUPPORTED_TARGETS includes darwin/x64 and darwin/arm64", () => {
+  const { SUPPORTED_TARGETS } = require("../lib/resolve-binary.js");
+  const platforms = SUPPORTED_TARGETS.map((t) => `${t.platform}-${t.arch}`);
+  assert.ok(platforms.includes("darwin-x64"), "missing darwin-x64");
+  assert.ok(platforms.includes("darwin-arm64"), "missing darwin-arm64");
+});
+
+test("resolveBinary returns @terminal-commander/mac-x64 for darwin/x64", () => {
+  const { resolveBinary } = require("../lib/resolve-binary.js");
+  const r = resolveBinary({
+    platform: "darwin",
+    arch: "x64",
+    binary: "terminal-commander-mcp",
+    requireResolve: () => { throw new Error("not installed"); },
+  });
+  assert.equal(r.platformPackage, "@terminal-commander/mac-x64");
+});
+
+test("resolveBinary returns @terminal-commander/mac-arm64 for darwin/arm64", () => {
+  const { resolveBinary } = require("../lib/resolve-binary.js");
+  const r = resolveBinary({
+    platform: "darwin",
+    arch: "arm64",
+    binary: "terminal-commander-mcp",
+    requireResolve: () => { throw new Error("not installed"); },
+  });
+  assert.equal(r.platformPackage, "@terminal-commander/mac-arm64");
 });

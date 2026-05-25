@@ -21,17 +21,24 @@ license = "Apache-2.0"
 authors = ["The Terminal Commander Authors"]
 repository = "https://github.com/special-place-administrator/terminal-commander"
 homepage = "https://github.com/special-place-administrator/terminal-commander"
-readme = "../../README.md"
-version = "0.0.0"
-publish = false
+# NOTE: workspace-level `readme` is intentionally omitted. Cargo resolves
+# workspace-inherited `readme` paths relative to the workspace root, which
+# does not work inside published per-crate tarballs (the workspace root is
+# not in the tarball). Each publishable crate declares its own
+# `readme = "README.md"` and ships a small per-crate README so crates.io
+# has rendered content.
+version = "0.2.0" # x-release-please-version
+publish = true
 
 [workspace.dependencies]
 # Inter-crate dependencies (paths). Versions are pinned at the
-# workspace level so member manifests stay terse.
-terminal-commander-core    = { path = "crates/core",    version = "0.0.0" }
-terminal-commander-sifters = { path = "crates/sifters", version = "0.0.0" }
-terminal-commander-probes  = { path = "crates/probes",  version = "0.0.0" }
-terminal-commander-store   = { path = "crates/store",   version = "0.0.0" }
+# workspace level so member manifests stay terse. The explicit
+# `version = "..."` is required for `cargo publish` to accept the
+# resolved tarball (path-only deps are unpublishable).
+terminal-commander-core    = { path = "crates/core",    version = "0.2.0" } # x-release-please-version
+terminal-commander-sifters = { path = "crates/sifters", version = "0.2.0" } # x-release-please-version
+terminal-commander-probes  = { path = "crates/probes",  version = "0.2.0" } # x-release-please-version
+terminal-commander-store   = { path = "crates/store",   version = "0.2.0" } # x-release-please-version
 
 # Third-party crates referenced by SPEC / TC04 contract. Each is
 # declared here so member crates pick the same version. Concrete

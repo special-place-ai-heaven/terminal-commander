@@ -1,6 +1,9 @@
 [package]
 name = "terminal-commander-mcp"
 description = "Thin MCP server adapter (rmcp 1.7.0 stdio). Forwards every tool call to the daemon over IPC."
+readme = "README.md"
+keywords = ["terminal-commander", "mcp"]
+categories = ["development-tools"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -23,10 +26,10 @@ schemars = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 terminal-commander-core.workspace = true
-terminal-commander-sifters = { version = "0.0.0", path = "../sifters" }
-terminal-commander-store = { version = "0.0.0", path = "../store" }
-terminal-commanderd = { version = "0.0.0", path = "../daemon" }
-terminal-commander-supervisor = { path = "../supervisor" }
+terminal-commander-sifters    = { version = "0.2.0", path = "../sifters" } # x-release-please-version
+terminal-commander-store      = { version = "0.2.0", path = "../store" } # x-release-please-version
+terminal-commanderd           = { version = "0.2.0", path = "../daemon" } # x-release-please-version
+terminal-commander-supervisor = { path = "../supervisor", version = "0.2.0" } # x-release-please-version
 thiserror = "2.0.18"
 time = "0.3.47"
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "io-std", "io-util", "net"] }

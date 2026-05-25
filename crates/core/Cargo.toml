@@ -1,6 +1,9 @@
 [package]
 name = "terminal-commander-core"
-description = "Domain types, identifiers, severity, event/source/pointer models. No I/O."
+description = "Core types and trait definitions for the Terminal Commander MCP daemon."
+readme = "README.md"
+keywords = ["terminal-commander", "mcp"]
+categories = ["development-tools"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

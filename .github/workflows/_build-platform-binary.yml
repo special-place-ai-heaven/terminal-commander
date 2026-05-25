@@ -1,0 +1,142 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Terminal Commander Authors
+#
+# Reusable workflow: build the 3 Terminal Commander release binaries
+# for one platform target and stage them into the matching platform
+# package's bin/ directory. Optionally uploads the bin dir as an artifact.
+#
+# Called by:
+#   .github/workflows/npm-binary-build.yml (PR-time CI gate, upload_artifact=true)
+#   .github/workflows/release-please.yml   (publish jobs, upload_artifact=false)
+#
+# Eliminates drift between PR-time build smoke + release-time publish
+# build by constructing both from one source of truth.
+
+name: _build-platform-binary
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        required: true
+        type: string
+        description: "linux-x64 | linux-arm64 | windows-x64 | mac-x64 | mac-arm64"
+      upload_artifact:
+        required: false
+        type: boolean
+        default: false
+      rust_toolchain:
+        required: false
+        type: string
+        default: "1.95.0"
+    outputs:
+      artifact_name:
+        value: ${{ jobs.build.outputs.artifact_name }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build-${{ inputs.platform }}
+    # All 5 platforms use NATIVE runners. cargo-zigbuild was the prior
+    # plan, but Apple's macOS SDK is not legally redistributable and the
+    # public `cargo-zigbuild` Docker images bundling it have a murky
+    # licence story. GitHub-hosted macOS runners ship the SDK by default.
+    #
+    # Runner labels (verified 2026-05-25):
+    #   - macos-13 was retired 2025-12-04. Use macos-15-intel for Intel.
+    #   - macos-14 still active for Apple Silicon (M1+).
+    # When GitHub deprecates either, see runbook §"macOS runner deprecation".
+    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-24.04","linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"macos-15-intel","mac-arm64":"macos-14"}')[inputs.platform] }}
+    outputs:
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
+    env:
+      TARGET_TRIPLE: ${{ fromJSON('{"linux-x64":"x86_64-unknown-linux-gnu","linux-arm64":"aarch64-unknown-linux-gnu","windows-x64":"x86_64-pc-windows-msvc","mac-x64":"x86_64-apple-darwin","mac-arm64":"aarch64-apple-darwin"}')[inputs.platform] }}
+      PLATFORM_PKG_DIR: packages/terminal-commander-${{ inputs.platform }}
+      EXE_SUFFIX: ${{ inputs.platform == 'windows-x64' && '.exe' || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+          targets: ${{ env.TARGET_TRIPLE }}
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-platform-${{ inputs.platform }}
+
+      - name: cargo build --release (native on every platform)
+        shell: bash
+        run: |
+          cargo build --release \
+            --target ${{ env.TARGET_TRIPLE }} \
+            -p terminal-commanderd \
+            -p terminal-commander-mcp \
+            -p terminal-commander-cli
+
+      - name: Stage real binaries into platform package
+        shell: bash
+        run: |
+          set -e
+          bin_dir="${PLATFORM_PKG_DIR}/bin"
+          src_dir="target/${TARGET_TRIPLE}/release"
+          mkdir -p "$bin_dir"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            src="${src_dir}/${bin}${EXE_SUFFIX}"
+            dst="${bin_dir}/${bin}${EXE_SUFFIX}"
+            if [ ! -f "$src" ]; then
+              echo "::error::expected release binary not found: $src"
+              ls -la "$src_dir" || true
+              exit 1
+            fi
+            cp "$src" "$dst"
+            chmod +x "$dst" || true
+          done
+          # Strip the .placeholder + .gitkeep markers committed for empty-dir guarantee.
+          rm -f "$bin_dir"/*.placeholder "$bin_dir"/.gitkeep
+          ls -la "$bin_dir"
+
+      - name: Smoke — --version (native runner, so always works)
+        shell: bash
+        run: |
+          # pipefail so a crashing binary doesn't get masked by head's exit 0.
+          set -euo pipefail
+          bin_dir="${PLATFORM_PKG_DIR}/bin"
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            # Capture output FIRST (preserves binary's exit code), then truncate for log.
+            out=$("./${bin_dir}/${bin}${EXE_SUFFIX}" --version 2>&1)
+            printf '%s\n' "$out" | head -5
+          done
+
+      - name: Compute artifact metadata
+        id: meta
+        shell: bash
+        run: |
+          echo "artifact_name=tc-bin-${{ inputs.platform }}" >> "$GITHUB_OUTPUT"
+
+      # actions/upload-artifact@v4 zips the path before upload, which DROPS
+      # the executable bit on Linux/macOS (downloads come back as 0644).
+      # Tar the bin/ dir first to preserve the +x mode. Consumers then untar
+      # via `tar -xf bin.tar` after download-artifact.
+      - name: Tar bin/ to preserve executable bit
+        if: inputs.upload_artifact == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${PLATFORM_PKG_DIR}"
+          tar -cf bin.tar bin/
+          ls -la bin.tar
+
+      - name: Upload bin.tar as artifact
+        if: inputs.upload_artifact == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: ${{ env.PLATFORM_PKG_DIR }}/bin.tar
+          if-no-files-found: error
+          retention-days: 14

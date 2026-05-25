@@ -8,6 +8,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { PLATFORM_PACKAGES } = require("./platform-packages.js");
 
 const pkgPath = path.join(
   __dirname,
@@ -26,13 +27,9 @@ if (!version) {
 }
 
 pkg.optionalDependencies = pkg.optionalDependencies || {};
-const names = [
-  "@terminal-commander/linux-x64",
-  "@terminal-commander/linux-arm64",
-];
 
 let changed = false;
-for (const name of names) {
+for (const name of PLATFORM_PACKAGES) {
   if (pkg.optionalDependencies[name] !== version) {
     pkg.optionalDependencies[name] = version;
     changed = true;

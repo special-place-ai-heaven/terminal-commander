@@ -1,6 +1,9 @@
 [package]
 name = "terminal-commander-store"
-description = "rusqlite + refinery persistence: event store, bucket cursors, rule registry, audit log. FTS5 search lane."
+description = "Persistent store (SQLite) for Terminal Commander daemon state."
+readme = "README.md"
+keywords = ["terminal-commander", "mcp"]
+categories = ["development-tools"]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

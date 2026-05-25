@@ -179,6 +179,20 @@ jobs:
           fi
           echo "tag_name=${tag}" >> "$GITHUB_OUTPUT"
 
+      - name: Assert cargo workspace version matches release-please version
+        if: steps.final.outputs.releases_created == 'true'
+        shell: bash
+        env:
+          EXPECTED: ${{ steps.final.outputs.version }}
+        run: |
+          set -e
+          actual=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo workspace version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+          echo "npm-cargo version parity: $actual"
+
   # After auto-merged release PRs, release-please sometimes skips tag/npm.
   # Close the loop without workflow_dispatch / manual force_publish.
   ensure-release:
@@ -241,25 +255,62 @@ jobs:
           echo "publish-version: $version"
 
   # ----------------------------------------------------------------
-  # JOB 2 — publish-linux-x64 (NPM07).
+  # JOBS 2-11 — platform build + publish (NPM07).
   #
-  # Runs only when release-please created a release on this run.
-  # Builds the three Rust binaries for x86_64-unknown-linux-gnu,
-  # stages them into `packages/terminal-commander-linux-x64/bin/`,
-  # and publishes `@terminal-commander/linux-x64` to npm via
-  # npm publish via NPM_TOKEN_TC.
+  # For each of the 5 platforms (linux-x64, linux-arm64, windows-x64,
+  # mac-x64, mac-arm64) there is a pair of jobs:
   #
-  # Permissions: contents: read (checkout)
+  #   build-<platform>   — calls reusable `_build-platform-binary.yml`
+  #                        which compiles the 3 Rust binaries on the
+  #                        appropriate native runner, stages them into
+  #                        the platform package's bin/ dir, tars to
+  #                        preserve the +x bit, and uploads the tar as
+  #                        a `tc-bin-<platform>` artifact.
+  #
+  #   publish-<platform> — downloads the bin.tar artifact on a small
+  #                        ubuntu-24.04 runner, extracts it (restoring
+  #                        the executable bit), validates the package
+  #                        version against release-please's output, and
+  #                        runs `npm publish --access public` against
+  #                        `@terminal-commander/<platform>`.
+  #
+  # 0.2.0 token-mode auth: NODE_AUTH_TOKEN: secrets.NPM_TOKEN_TC.
+  # No `--provenance`, no `id-token: write`, no Node 22.14. Task 23
+  # owns the OIDC cutover after operator one-time UI setup on
+  # npmjs.com (trusted publishers).
+  #
+  # Drift-proof: every platform binary build flows through the single
+  # reusable workflow `_build-platform-binary.yml`, the same workflow
+  # called by the PR-time `npm-binary-build.yml` CI gate. Same source
+  # of truth for both PR validation and release-time publish.
   # ----------------------------------------------------------------
+
+  # ---------- linux-x64 ----------
+  build-linux-x64:
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+    if: >-
+      always() && !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    uses: ./.github/workflows/_build-platform-binary.yml
+    with:
+      platform: linux-x64
+      upload_artifact: true
+
   publish-linux-x64:
     name: publish-linux-x64
     needs:
       - release-please
       - ensure-release
       - publish-version
+      - build-linux-x64
     if: >-
-      always() &&
-      !cancelled() &&
+      always() && !cancelled() &&
+      needs.build-linux-x64.result == 'success' &&
       (needs.release-please.outputs.releases_created == 'true' ||
       (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true')
@@ -270,64 +321,27 @@ jobs:
       - name: Checkout (released SHA on main)
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (${{ env.RUST_TOOLCHAIN }})
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: x86_64-unknown-linux-gnu
-
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-please-publish-linux-x64
-
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
-      - name: cargo build --release (x86_64-unknown-linux-gnu)
-        run: |
-          cargo build --release \
-            --target x86_64-unknown-linux-gnu \
-            -p terminal-commanderd \
-            -p terminal-commander-mcp \
-            -p terminal-commander-cli
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-linux-x64
+          path: packages/terminal-commander-linux-x64/
 
-      - name: Stage real binaries into platform package
+      - name: Extract bin.tar (preserves +x mode)
         shell: bash
         run: |
-          set -e
-          bin_dir="packages/terminal-commander-linux-x64/bin"
-          src_dir="target/x86_64-unknown-linux-gnu/release"
-          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
-            if [ ! -x "$src_dir/$bin" ]; then
-              echo "::error::expected release binary not found: $src_dir/$bin"
-              exit 1
-            fi
-            cp "$src_dir/$bin" "$bin_dir/$bin"
-            chmod +x "$bin_dir/$bin"
-          done
-          # Remove the committed .placeholder files from the workspace
-          # tree (NOT from the repo) so they do not end up inside the
-          # tarball alongside the real binaries; the `files: ["bin/"]`
-          # whitelist would otherwise include them.
-          rm -f "$bin_dir"/*.placeholder
-          ls -la "$bin_dir"
-
-      - name: Smoke — staged binaries answer --help
-        shell: bash
-        run: |
-          set -e
-          bin_dir="packages/terminal-commander-linux-x64/bin"
-          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
-            "./$bin_dir/$bin" --help > /tmp/help-$bin.log 2>&1 || {
-              echo "::error::$bin --help failed";
-              head -50 /tmp/help-$bin.log;
-              exit 1;
-            }
-          done
+          set -euo pipefail
+          cd packages/terminal-commander-linux-x64
+          rm -rf bin
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
 
       - name: Confirm package version matches release-please output
         shell: bash
@@ -342,7 +356,7 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --access public
+      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
         shell: bash
         working-directory: packages/terminal-commander-linux-x64
         env:
@@ -352,6 +366,7 @@ jobs:
           if npm publish --access public; then
             exit 0
           fi
+          # Recovery: workflow_dispatch + force_publish + already-on-registry → exit 0.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
             ver=$(node -p "require('./package.json').version")
             name=$(node -p "require('./package.json').name")
@@ -362,46 +377,41 @@ jobs:
           fi
           exit 1
 
-  # ----------------------------------------------------------------
-  # JOB 3 — publish-linux-arm64 (NPM07).
-  #
-  # Native arm64 build on the GitHub-hosted `ubuntu-24.04-arm`
-  # runner. NPM05's live evidence (run 26318082726) confirmed the
-  # runner label is available for this repository. If it ever
-  # becomes unavailable, this job fails with `No runner matching
-  # the specified labels was found: ubuntu-24.04-arm` — that is the
-  # recorded blocker, not a workflow defect. Do NOT fake arm64
-  # execution via QEMU; NPM07 follows the same honesty rule as NPM05.
-  # ----------------------------------------------------------------
+  # ---------- linux-arm64 ----------
+  build-linux-arm64:
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+    if: >-
+      always() && !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    uses: ./.github/workflows/_build-platform-binary.yml
+    with:
+      platform: linux-arm64
+      upload_artifact: true
+
   publish-linux-arm64:
     name: publish-linux-arm64
     needs:
       - release-please
       - ensure-release
       - publish-version
+      - build-linux-arm64
     if: >-
-      always() &&
-      !cancelled() &&
+      always() && !cancelled() &&
+      needs.build-linux-arm64.result == 'success' &&
       (needs.release-please.outputs.releases_created == 'true' ||
       (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true')
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
       - name: Checkout (released SHA on main)
         uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (${{ env.RUST_TOOLCHAIN }})
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: aarch64-unknown-linux-gnu
-
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-please-publish-linux-arm64
 
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
         uses: actions/setup-node@v4
@@ -409,43 +419,21 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
-      - name: cargo build --release (aarch64-unknown-linux-gnu)
-        run: |
-          cargo build --release \
-            --target aarch64-unknown-linux-gnu \
-            -p terminal-commanderd \
-            -p terminal-commander-mcp \
-            -p terminal-commander-cli
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-linux-arm64
+          path: packages/terminal-commander-linux-arm64/
 
-      - name: Stage real binaries into platform package
+      - name: Extract bin.tar (preserves +x mode)
         shell: bash
         run: |
-          set -e
-          bin_dir="packages/terminal-commander-linux-arm64/bin"
-          src_dir="target/aarch64-unknown-linux-gnu/release"
-          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
-            if [ ! -x "$src_dir/$bin" ]; then
-              echo "::error::expected release binary not found: $src_dir/$bin"
-              exit 1
-            fi
-            cp "$src_dir/$bin" "$bin_dir/$bin"
-            chmod +x "$bin_dir/$bin"
-          done
-          rm -f "$bin_dir"/*.placeholder
-          ls -la "$bin_dir"
-
-      - name: Smoke — staged binaries answer --help (native arm64)
-        shell: bash
-        run: |
-          set -e
-          bin_dir="packages/terminal-commander-linux-arm64/bin"
-          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
-            "./$bin_dir/$bin" --help > /tmp/help-$bin.log 2>&1 || {
-              echo "::error::$bin --help failed";
-              head -50 /tmp/help-$bin.log;
-              exit 1;
-            }
-          done
+          set -euo pipefail
+          cd packages/terminal-commander-linux-arm64
+          rm -rf bin
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
 
       - name: Confirm package version matches release-please output
         shell: bash
@@ -460,7 +448,7 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --access public
+      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
         shell: bash
         working-directory: packages/terminal-commander-linux-arm64
         env:
@@ -480,16 +468,293 @@ jobs:
           fi
           exit 1
 
+  # ---------- windows-x64 ----------
+  build-windows-x64:
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+    if: >-
+      always() && !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    uses: ./.github/workflows/_build-platform-binary.yml
+    with:
+      platform: windows-x64
+      upload_artifact: true
+
+  publish-windows-x64:
+    name: publish-windows-x64
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - build-windows-x64
+    if: >-
+      always() && !cancelled() &&
+      needs.build-windows-x64.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (released SHA on main)
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-windows-x64
+          path: packages/terminal-commander-windows-x64/
+
+      - name: Extract bin.tar (preserves +x mode)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/terminal-commander-windows-x64
+          rm -rf bin
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
+
+      - name: Confirm package version matches release-please output
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(node -p "require('./packages/terminal-commander-windows-x64/package.json').version")
+          if [ "$actual" != "$EXPECTED_VERSION" ]; then
+            echo "::error::version mismatch: package.json=$actual release-please=$EXPECTED_VERSION"
+            exit 1
+          fi
+          echo "version-match: $actual"
+
+      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
+        shell: bash
+        working-directory: packages/terminal-commander-windows-x64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+        run: |
+          set -e
+          if npm publish --access public; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(node -p "require('./package.json').version")
+            name=$(node -p "require('./package.json').name")
+            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+              echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
+              exit 0
+            fi
+          fi
+          exit 1
+
+  # ---------- mac-x64 ----------
+  build-mac-x64:
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+    if: >-
+      always() && !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    uses: ./.github/workflows/_build-platform-binary.yml
+    with:
+      platform: mac-x64
+      upload_artifact: true
+
+  publish-mac-x64:
+    name: publish-mac-x64
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - build-mac-x64
+    if: >-
+      always() && !cancelled() &&
+      needs.build-mac-x64.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (released SHA on main)
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-mac-x64
+          path: packages/terminal-commander-mac-x64/
+
+      - name: Extract bin.tar (preserves +x mode)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/terminal-commander-mac-x64
+          rm -rf bin
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
+
+      - name: Confirm package version matches release-please output
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(node -p "require('./packages/terminal-commander-mac-x64/package.json').version")
+          if [ "$actual" != "$EXPECTED_VERSION" ]; then
+            echo "::error::version mismatch: package.json=$actual release-please=$EXPECTED_VERSION"
+            exit 1
+          fi
+          echo "version-match: $actual"
+
+      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
+        shell: bash
+        working-directory: packages/terminal-commander-mac-x64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+        run: |
+          set -e
+          if npm publish --access public; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(node -p "require('./package.json').version")
+            name=$(node -p "require('./package.json').name")
+            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+              echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
+              exit 0
+            fi
+          fi
+          exit 1
+
+  # ---------- mac-arm64 ----------
+  build-mac-arm64:
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+    if: >-
+      always() && !cancelled() &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    uses: ./.github/workflows/_build-platform-binary.yml
+    with:
+      platform: mac-arm64
+      upload_artifact: true
+
+  publish-mac-arm64:
+    name: publish-mac-arm64
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - build-mac-arm64
+    if: >-
+      always() && !cancelled() &&
+      needs.build-mac-arm64.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (released SHA on main)
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-mac-arm64
+          path: packages/terminal-commander-mac-arm64/
+
+      - name: Extract bin.tar (preserves +x mode)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/terminal-commander-mac-arm64
+          rm -rf bin
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
+
+      - name: Confirm package version matches release-please output
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(node -p "require('./packages/terminal-commander-mac-arm64/package.json').version")
+          if [ "$actual" != "$EXPECTED_VERSION" ]; then
+            echo "::error::version mismatch: package.json=$actual release-please=$EXPECTED_VERSION"
+            exit 1
+          fi
+          echo "version-match: $actual"
+
+      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
+        shell: bash
+        working-directory: packages/terminal-commander-mac-arm64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+        run: |
+          set -e
+          if npm publish --access public; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(node -p "require('./package.json').version")
+            name=$(node -p "require('./package.json').name")
+            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+              echo "::warning::${name}@${ver} already on registry (force_publish recovery)"
+              exit 0
+            fi
+          fi
+          exit 1
+
   # ----------------------------------------------------------------
-  # JOB 4 — publish-root (NPM07).
+  # JOB 12 — publish-root (NPM07).
   #
-  # Depends on BOTH platform publishes succeeding. Only then does the
+  # Depends on ALL 5 platform publishes succeeding. Only then does the
   # root wrapper publish; its `optionalDependencies` pin the exact
   # platform-package versions, so publishing the root before the
   # platform packages would resolve to a non-existent dep.
   #
   # The root package has no Rust binaries to build; the `bin/` shims
   # and `lib/resolve-binary.js` are already in the working tree.
+  #
+  # Auth: stays on NODE_AUTH_TOKEN + Node 20 for 0.2.0. Task 23 owns
+  # the OIDC + --provenance cutover once npmjs.com trusted-publisher
+  # UI setup is complete for all 6 npm package names.
   # ----------------------------------------------------------------
   publish-root:
     name: publish-root
@@ -499,14 +764,19 @@ jobs:
       - publish-version
       - publish-linux-x64
       - publish-linux-arm64
+      - publish-windows-x64
+      - publish-mac-x64
+      - publish-mac-arm64
     if: >-
-      always() &&
-      !cancelled() &&
+      always() && !cancelled() &&
       (needs.release-please.outputs.releases_created == 'true' ||
       (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true') &&
       needs.publish-linux-x64.result == 'success' &&
-      needs.publish-linux-arm64.result == 'success'
+      needs.publish-linux-arm64.result == 'success' &&
+      needs.publish-windows-x64.result == 'success' &&
+      needs.publish-mac-x64.result == 'success' &&
+      needs.publish-mac-arm64.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -547,10 +817,8 @@ jobs:
             process.exit(1);
           }
           const deps = pkg.optionalDependencies || {};
-          for (const name of [
-            '@terminal-commander/linux-x64',
-            '@terminal-commander/linux-arm64',
-          ]) {
+          const { PLATFORM_PACKAGES } = require('../../scripts/release/platform-packages.js');
+          for (const name of PLATFORM_PACKAGES) {
             if (deps[name] !== expected) {
               console.error(`${name} optionalDependency = ${deps[name]} != ${expected}`);
               process.exit(1);
@@ -566,4 +834,980 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
-          npm publish
+          set -e
+          if npm publish; then
+            exit 0
+          fi
+          # Recovery: workflow_dispatch + force_publish + already-on-registry → exit 0
+          # so cargo publish chain (which depends on publish-root success) can still run.
+          # Without this, a re-run after root already published would E409 + block cargo.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(node -p "require('./package.json').version")
+            name=$(node -p "require('./package.json').name")
+            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+              echo "::warning::${name}@${ver} already on registry (force_publish recovery — letting cargo chain proceed)"
+              exit 0
+            fi
+          fi
+          exit 1
+
+  # ----------------------------------------------------------------
+  # JOBS 13-19 — cargo publish chain (7 crates in strict dep order).
+  #
+  # Dep order is non-negotiable: each crate's path-deps must already
+  # be on the registry when its tarball is uploaded, or cargo rejects
+  # the publish. Order:
+  #   core → sifters → probes → store → supervisor → daemon → mcp
+  #
+  # 0.2.0 token-mode auth: CARGO_REGISTRY_TOKEN: secrets.CARGO_REGISTRY_TOKEN_TC.
+  # No OIDC, no id-token: write. Task 23 owns the OIDC cutover after
+  # operator one-time UI setup on crates.io (trusted publishers).
+  #
+  # Each job waits 60s after publish for crates.io index propagation
+  # so the next crate's resolver sees the freshly-published prior.
+  #
+  # Recovery branch (workflow_dispatch + force_publish): on publish
+  # failure, query crates.io HTTP API (deterministic JSON) — if the
+  # crate version already exists (HTTP 200) treat as success.
+  # ----------------------------------------------------------------
+
+  # ---------- terminal-commander-core ----------
+  publish-cargo-terminal-commander-core:
+    name: publish-cargo-terminal-commander-core
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-root
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-root.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-core
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-core | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-core
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-core; then
+            exit 0
+          fi
+          # Recovery: crates.io HTTP API — deterministic JSON.
+          # Returns 200 + JSON if version exists, 404 if not.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-core | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-core/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-core@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
+
+  # ---------- terminal-commander-sifters ----------
+  publish-cargo-terminal-commander-sifters:
+    name: publish-cargo-terminal-commander-sifters
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commander-core
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commander-core.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-sifters
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-sifters | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-sifters
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-sifters; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-sifters | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-sifters/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-sifters@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
+
+  # ---------- terminal-commander-probes ----------
+  publish-cargo-terminal-commander-probes:
+    name: publish-cargo-terminal-commander-probes
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commander-sifters
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commander-sifters.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-probes
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-probes | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-probes
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-probes; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-probes | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-probes/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-probes@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
+
+  # ---------- terminal-commander-store ----------
+  publish-cargo-terminal-commander-store:
+    name: publish-cargo-terminal-commander-store
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commander-probes
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commander-probes.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-store
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-store | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-store
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-store; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-store | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-store/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-store@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
+
+  # ---------- terminal-commander-supervisor ----------
+  publish-cargo-terminal-commander-supervisor:
+    name: publish-cargo-terminal-commander-supervisor
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commander-store
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commander-store.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-supervisor
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-supervisor | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-supervisor
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-supervisor; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-supervisor | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-supervisor/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-supervisor@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
+
+  # ---------- terminal-commanderd ----------
+  publish-cargo-terminal-commanderd:
+    name: publish-cargo-terminal-commanderd
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commander-supervisor
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commander-supervisor.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commanderd
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commanderd | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commanderd
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commanderd; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commanderd | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commanderd/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commanderd@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
+
+  # ---------- terminal-commander-mcp ----------
+  publish-cargo-terminal-commander-mcp:
+    name: publish-cargo-terminal-commander-mcp
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commanderd
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commanderd.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-mcp
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-mcp | awk -F'#' '{print $2}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-mcp
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-mcp; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-mcp | awk -F'#' '{print $2}')
+            url="https://crates.io/api/v1/crates/terminal-commander-mcp/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-mcp@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
+
+  # ----------------------------------------------------------------
+  # JOB — post-publish smoke verification (5 platforms in parallel)
+  # Each job installs the published package from registry on the
+  # matching native OS and confirms the MCP binary works. If any
+  # fail, mark-release-broken auto-opens a P0 issue.
+  # ----------------------------------------------------------------
+  verify-linux-x64:
+    name: verify-linux-x64
+    needs: [release-please, publish-root]
+    if: needs.publish-root.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions: { contents: read, issues: write }
+    steps:
+      - name: Wait 60s for npm registry propagation
+        run: sleep 60
+      - name: Install from npm + smoke (Node 22-bookworm, glibc — linux-x64 binary is glibc-linked)
+        env:
+          VER: ${{ needs.release-please.outputs.version }}
+        run: |
+          # node:22-alpine uses musl libc. Our binaries are glibc-linked.
+          # Use node:22-bookworm-slim instead. Also: --provenance requires npm 11.5.1+
+          # which ships in Node 22.14+. node:22 tag tracks latest 22.x.
+          docker run --rm node:22-bookworm-slim sh -c '
+            set -e
+            npm install -g "terminal-commander@'"${VER}"'"
+            terminal-commander-mcp --version
+            # MCP initialize stdio probe (10s timeout — exit 124 = clean timeout = pass)
+            echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0.0.0\"}}}" \
+              | timeout 10 terminal-commander-mcp; rc=$?
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+              echo "::error::stdio probe exited $rc" >&2; exit "$rc"
+            fi
+            echo "verify-linux-x64: OK"
+          '
+
+  verify-linux-arm64:
+    name: verify-linux-arm64
+    needs: [release-please, publish-root]
+    if: needs.publish-root.result == 'success'
+    runs-on: ubuntu-24.04-arm
+    permissions: { contents: read, issues: write }
+    steps:
+      - run: sleep 60
+      - env:
+          VER: ${{ needs.release-please.outputs.version }}
+        run: |
+          docker run --rm node:22-bookworm-slim sh -c '
+            set -e
+            npm install -g "terminal-commander@'"${VER}"'"
+            terminal-commander-mcp --version
+            echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0.0.0\"}}}" \
+              | timeout 10 terminal-commander-mcp; rc=$?
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+              echo "::error::stdio probe exited $rc" >&2; exit "$rc"
+            fi
+            echo "verify-linux-arm64: OK"
+          '
+
+  verify-windows-x64:
+    name: verify-windows-x64
+    needs: [release-please, publish-root]
+    if: needs.publish-root.result == 'success'
+    runs-on: windows-2022
+    permissions: { contents: read, issues: write }
+    steps:
+      - run: powershell -Command Start-Sleep -Seconds 60
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - shell: pwsh
+        env:
+          VER: ${{ needs.release-please.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm install -g "terminal-commander@$env:VER"
+          terminal-commander-mcp --version
+          # Stdio probe: 10s timeout via PowerShell job, Stop-Job + Remove-Job
+          # so we don't leak the runspace. Wait-Job returns $null on timeout.
+          # Linux + Mac verify treat timeout as pass + non-zero quick exit as fail.
+          # Windows must behave the same: only timeout is acceptable; any other
+          # non-success state (Failed, fast non-zero exit) must fail loud.
+          $msg = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}'
+          $job = Start-Job -ScriptBlock {
+            param($m) $m | terminal-commander-mcp
+          } -ArgumentList $msg
+          $done = Wait-Job $job -Timeout 10
+          $timedOut = ($null -eq $done)
+          if ($timedOut) {
+            Write-Host "smoke: stdio probe timed out (expected for unbounded server)"
+          } else {
+            # Job completed within 10s. Receive output + inspect state.
+            $output = Receive-Job $job -ErrorAction SilentlyContinue
+            if ($output) { $output | ForEach-Object { Write-Host "stdio: $_" } }
+            if ($job.State -ne 'Completed') {
+              Stop-Job $job -ErrorAction SilentlyContinue
+              Remove-Job $job -Force -ErrorAction SilentlyContinue
+              throw "verify-windows-x64: MCP exited fast in state '$($job.State)' — install is broken"
+            }
+          }
+          Stop-Job $job -ErrorAction SilentlyContinue
+          Remove-Job $job -Force -ErrorAction SilentlyContinue
+          Write-Host "verify-windows-x64: OK"
+
+  verify-mac-x64:
+    name: verify-mac-x64
+    needs: [release-please, publish-root]
+    if: needs.publish-root.result == 'success'
+    runs-on: macos-15-intel   # Intel — macos-13 retired 2025-12-04; macos-15-intel is the supported Intel image. Keep a runner pinning task in runbook to rotate when GitHub deprecates.
+    permissions: { contents: read, issues: write }
+    steps:
+      - run: sleep 60
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }     # 0.2.0 ships without --provenance; Node 20 is fine. Task 23 bumps to 22.14+.
+      - env:
+          VER: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -e
+          npm install -g "terminal-commander@${VER}"
+          terminal-commander-mcp --version
+          # Portable timeout via python (always on macOS runner). subprocess.run
+          # cleanly terminates the child + reports an explicit timeout, no
+          # SIGKILL race, no kill-wait hang. Exit 124 is the conventional
+          # "timed out cleanly" code we treat as success for an unbounded
+          # stdio server probe.
+          python3 - "$@" <<'PY'
+          import json, subprocess, sys
+          payload = json.dumps({
+              "jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {
+                  "protocolVersion": "2024-11-05",
+                  "capabilities": {},
+                  "clientInfo": {"name": "smoke", "version": "0.0.0"},
+              },
+          })
+          try:
+              r = subprocess.run(
+                  ["terminal-commander-mcp"],
+                  input=payload, text=True, capture_output=True, timeout=10,
+              )
+              sys.exit(r.returncode)
+          except subprocess.TimeoutExpired:
+              print("smoke: stdio probe timed out (expected for unbounded server)")
+              sys.exit(0)
+          PY
+          echo 'verify-mac-x64: OK'
+
+  verify-mac-arm64:
+    name: verify-mac-arm64
+    needs: [release-please, publish-root]
+    if: needs.publish-root.result == 'success'
+    runs-on: macos-14   # Apple Silicon
+    permissions: { contents: read, issues: write }
+    steps:
+      - run: sleep 60
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - env:
+          VER: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -e
+          npm install -g "terminal-commander@${VER}"
+          terminal-commander-mcp --version
+          python3 - "$@" <<'PY'
+          import json, subprocess, sys
+          payload = json.dumps({
+              "jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {
+                  "protocolVersion": "2024-11-05",
+                  "capabilities": {},
+                  "clientInfo": {"name": "smoke", "version": "0.0.0"},
+              },
+          })
+          try:
+              r = subprocess.run(
+                  ["terminal-commander-mcp"],
+                  input=payload, text=True, capture_output=True, timeout=10,
+              )
+              sys.exit(r.returncode)
+          except subprocess.TimeoutExpired:
+              print("smoke: stdio probe timed out (expected for unbounded server)")
+              sys.exit(0)
+          PY
+          echo 'verify-mac-arm64: OK'
+
+  mark-release-broken:
+    name: mark-release-broken
+    # Codex review I6 (2026-05-25): fire on EITHER publish-job failures OR verify failures.
+    # Prior version only listened to verify jobs — but if one platform publish fails,
+    # publish-root + verify jobs SKIP (don't fail), so the issue was never filed.
+    # Now we listen across the whole release path so any failure → P0 issue.
+    needs:
+      - release-please
+      - publish-linux-x64
+      - publish-linux-arm64
+      - publish-windows-x64
+      - publish-mac-x64
+      - publish-mac-arm64
+      - publish-root
+      - publish-cargo-terminal-commander-core
+      - publish-cargo-terminal-commander-sifters
+      - publish-cargo-terminal-commander-probes
+      - publish-cargo-terminal-commander-store
+      - publish-cargo-terminal-commander-supervisor
+      - publish-cargo-terminal-commanderd
+      - publish-cargo-terminal-commander-mcp
+      - verify-linux-x64
+      - verify-linux-arm64
+      - verify-windows-x64
+      - verify-mac-x64
+      - verify-mac-arm64
+    if: |
+      always() && !cancelled() &&
+      (needs.publish-linux-x64.result == 'failure' ||
+       needs.publish-linux-arm64.result == 'failure' ||
+       needs.publish-windows-x64.result == 'failure' ||
+       needs.publish-mac-x64.result == 'failure' ||
+       needs.publish-mac-arm64.result == 'failure' ||
+       needs.publish-root.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-core.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-sifters.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-probes.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-store.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-supervisor.result == 'failure' ||
+       needs.publish-cargo-terminal-commanderd.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-mcp.result == 'failure' ||
+       needs.verify-linux-x64.result == 'failure' ||
+       needs.verify-linux-arm64.result == 'failure' ||
+       needs.verify-windows-x64.result == 'failure' ||
+       needs.verify-mac-x64.result == 'failure' ||
+       needs.verify-mac-arm64.result == 'failure')
+    runs-on: ubuntu-24.04
+    permissions: { issues: write, contents: read }
+    steps:
+      - name: Compose issue body to a file (avoids YAML heredoc fragility)
+        env:
+          VER: ${{ needs.release-please.outputs.version }}
+          # Publish job results
+          PUB_LX64: ${{ needs.publish-linux-x64.result }}
+          PUB_LARM: ${{ needs.publish-linux-arm64.result }}
+          PUB_WIN:  ${{ needs.publish-windows-x64.result }}
+          PUB_MX64: ${{ needs.publish-mac-x64.result }}
+          PUB_MARM: ${{ needs.publish-mac-arm64.result }}
+          PUB_ROOT: ${{ needs.publish-root.result }}
+          PUB_CORE: ${{ needs.publish-cargo-terminal-commander-core.result }}
+          PUB_SIFTERS: ${{ needs.publish-cargo-terminal-commander-sifters.result }}
+          PUB_PROBES: ${{ needs.publish-cargo-terminal-commander-probes.result }}
+          PUB_STORE: ${{ needs.publish-cargo-terminal-commander-store.result }}
+          PUB_SUPERVISOR: ${{ needs.publish-cargo-terminal-commander-supervisor.result }}
+          PUB_DAEMON: ${{ needs.publish-cargo-terminal-commanderd.result }}
+          PUB_MCP: ${{ needs.publish-cargo-terminal-commander-mcp.result }}
+          # Verify job results
+          RES_LX64: ${{ needs.verify-linux-x64.result }}
+          RES_LARM: ${{ needs.verify-linux-arm64.result }}
+          RES_WIN:  ${{ needs.verify-windows-x64.result }}
+          RES_MX64: ${{ needs.verify-mac-x64.result }}
+          RES_MARM: ${{ needs.verify-mac-arm64.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -e
+          # printf, NOT heredoc — heredoc indentation + GH-Actions YAML is fragile.
+          printf 'Release **%s** failed somewhere in the publish pipeline.\n\n' "$VER" > /tmp/body.md
+          printf 'NPM publish:\n' >> /tmp/body.md
+          printf '- linux-x64   : %s\n' "$PUB_LX64"  >> /tmp/body.md
+          printf '- linux-arm64 : %s\n' "$PUB_LARM"  >> /tmp/body.md
+          printf '- windows-x64 : %s\n' "$PUB_WIN"   >> /tmp/body.md
+          printf '- mac-x64     : %s\n' "$PUB_MX64"  >> /tmp/body.md
+          printf '- mac-arm64   : %s\n' "$PUB_MARM"  >> /tmp/body.md
+          printf '- root        : %s\n\n' "$PUB_ROOT" >> /tmp/body.md
+          printf 'Cargo publish:\n' >> /tmp/body.md
+          printf '- core        : %s\n' "$PUB_CORE" >> /tmp/body.md
+          printf '- sifters     : %s\n' "$PUB_SIFTERS" >> /tmp/body.md
+          printf '- probes      : %s\n' "$PUB_PROBES" >> /tmp/body.md
+          printf '- store       : %s\n' "$PUB_STORE" >> /tmp/body.md
+          printf '- supervisor  : %s\n' "$PUB_SUPERVISOR" >> /tmp/body.md
+          printf '- daemon      : %s\n' "$PUB_DAEMON" >> /tmp/body.md
+          printf '- mcp         : %s\n\n' "$PUB_MCP" >> /tmp/body.md
+          printf 'Post-publish verify:\n' >> /tmp/body.md
+          printf '- linux-x64   : %s\n' "$RES_LX64"  >> /tmp/body.md
+          printf '- linux-arm64 : %s\n' "$RES_LARM"  >> /tmp/body.md
+          printf '- windows-x64 : %s\n' "$RES_WIN"   >> /tmp/body.md
+          printf '- mac-x64     : %s\n' "$RES_MX64"  >> /tmp/body.md
+          printf '- mac-arm64   : %s\n\n' "$RES_MARM" >> /tmp/body.md
+          printf '**Action required:**\n' >> /tmp/body.md
+          printf '1. Run `bash scripts/release/recover-partial-publish.sh %s` to identify missing artifacts.\n' "$VER" >> /tmp/body.md
+          printf '2. If some packages shipped + some failed: re-run release-please.yml with `force_publish: true` (the E409-tolerant pattern republishes only missing).\n' >> /tmp/body.md
+          printf '3. If a published version is broken: run `.github/workflows/deprecate-version.yml` for version %s, then patch release.\n\n' "$VER" >> /tmp/body.md
+          printf 'Workflow run: %s\n' "$RUN_URL" >> /tmp/body.md
+      - name: Open P0 issue (PAT first, fall back to GITHUB_TOKEN if PAT is the broken one)
+        env:
+          PAT: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+          GITHUB_TOKEN_FALLBACK: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ needs.release-please.outputs.version }}
+        run: |
+          set -e
+          title="release ${VER} smoke FAILED"
+          # Try PAT first.
+          if GH_TOKEN="$PAT" gh issue create --title "$title" --label "release-broken,P0" --body-file /tmp/body.md; then
+            echo "issue filed via RELEASE_PLEASE_TOKEN_TC"
+            exit 0
+          fi
+          echo "::warning::RELEASE_PLEASE_TOKEN_TC failed to open issue; falling back to GITHUB_TOKEN"
+          GH_TOKEN="$GITHUB_TOKEN_FALLBACK" gh issue create --title "$title" --label "release-broken,P0" --body-file /tmp/body.md
