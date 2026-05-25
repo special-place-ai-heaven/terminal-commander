@@ -24,6 +24,11 @@ const HIDDEN_WINDOW_PATTERNS = Object.freeze([
   { label: "CREATE_NO_WINDOW", re: /\bCREATE_NO_WINDOW\b/ },
   { label: "SW_HIDE", re: /\bSW_HIDE\b/ },
 ]);
+const WINDOWS_SHELL_PATTERNS = Object.freeze([
+  { label: "PowerShell", re: /\bPowerShell\b|\bpowershell\b/ },
+  { label: "cmd.exe", re: /\bcmd\.exe\b|\bcmd\s+\/c\b|\.cmd\b/ },
+  { label: "ExecutionPolicy", re: /\bExecutionPolicy\b/ },
+]);
 
 function collectJsFiles(dir) {
   const out = [];
@@ -93,6 +98,17 @@ test("runtime JS never requests hidden subprocess windows", () => {
   for (const file of files) {
     const src = fs.readFileSync(file, "utf8");
     for (const pattern of HIDDEN_WINDOW_PATTERNS) {
+      assert.doesNotMatch(src, pattern.re, `${file} must not contain ${pattern.label}`);
+    }
+  }
+});
+
+test("runtime JS does not mention Windows shell interpreters", () => {
+  const files = RUNTIME_JS_ROOTS.flatMap(collectJsFiles);
+  assert.ok(files.length > 0, "expected runtime JS files to scan");
+  for (const file of files) {
+    const src = fs.readFileSync(file, "utf8");
+    for (const pattern of WINDOWS_SHELL_PATTERNS) {
       assert.doesNotMatch(src, pattern.re, `${file} must not contain ${pattern.label}`);
     }
   }

@@ -150,7 +150,7 @@ function hintFor(status, distro) {
     case DOCTOR_STATUSES.UNSUPPORTED_HOST:
       return "terminal-commander: host is not Windows; wslDoctor is a Windows-only probe.";
     case DOCTOR_STATUSES.WSL_NOT_FOUND:
-      return "terminal-commander: wsl.exe was not found on PATH; install WSL via 'wsl --install' from an elevated PowerShell, then re-run.";
+      return "terminal-commander: wsl.exe was not found on PATH; install WSL via 'wsl --install' from an elevated Windows terminal, then re-run.";
     case DOCTOR_STATUSES.NO_DISTROS:
       return "terminal-commander: WSL is present but no distro is registered; run 'wsl --install -d Ubuntu-24.04' or pick another distro, then re-run.";
     case DOCTOR_STATUSES.DISTRO_NOT_FOUND:

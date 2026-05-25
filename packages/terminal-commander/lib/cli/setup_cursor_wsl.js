@@ -287,7 +287,7 @@ async function runSetupCursorWsl(opts) {
     case DETECT_REASONS.WSL_NOT_FOUND:
       return buildResult({
         status: SETUP_STATUSES.WSL_NOT_FOUND,
-        output: "wsl.exe was not found on PATH; install WSL via 'wsl --install' from an elevated PowerShell.",
+        output: "wsl.exe was not found on PATH; install WSL via 'wsl --install' from an elevated Windows terminal.",
       });
     case DETECT_REASONS.NO_DISTROS:
       return buildResult({

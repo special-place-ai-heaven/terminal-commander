@@ -145,7 +145,7 @@ async function runDoctor(opts) {
       const summary = buildSummary({
         status: DOCTOR_CLI_STATUSES.WSL_NOT_FOUND,
         host_platform: platform,
-        hint: "wsl.exe was not found on PATH; install WSL via 'wsl --install' from an elevated PowerShell.",
+        hint: "wsl.exe was not found on PATH; install WSL via 'wsl --install' from an elevated Windows terminal.",
       });
       return { status: summary.status, exit_code: 64, output: renderHuman(summary), summary };
     }

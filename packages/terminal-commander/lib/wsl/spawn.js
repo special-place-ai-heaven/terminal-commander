@@ -90,7 +90,7 @@ function hintFor(status, distro) {
     case BRIDGE_STATUSES.DISTRO_NOT_FOUND:
       return `terminal-commander: distro '${distro}' not found in 'wsl -l -v'; install it or set TC_WSL_DISTRO to a registered distro.`;
     case BRIDGE_STATUSES.WSL_NOT_FOUND:
-      return "terminal-commander: wsl.exe not found on PATH; install WSL via 'wsl --install' from an elevated PowerShell, then re-run.";
+      return "terminal-commander: wsl.exe not found on PATH; install WSL via 'wsl --install' from an elevated Windows terminal, then re-run.";
     case BRIDGE_STATUSES.NO_DISTROS:
       return "terminal-commander: WSL is present but no distro is registered; run 'wsl --install -d Ubuntu-24.04' or pick another, then re-run.";
     case BRIDGE_STATUSES.WSL_COMMAND_FAILED:
