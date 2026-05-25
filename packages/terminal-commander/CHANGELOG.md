@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.5](https://github.com/special-place-administrator/terminal-commander/compare/v0.1.4...v0.1.5) (2026-05-25)
+
+
+### Features
+
+* **resolver:** support darwin/x64 + darwin/arm64 platform targets ([44eadd6](https://github.com/special-place-administrator/terminal-commander/commit/44eadd6be09de599efe2c1b32a32efa0fb774634))
+
+
+### Bug Fixes
+
+* **packages:** pin windows-x64 + mac-x64 + mac-arm64 optionalDependencies by version ([25860e3](https://github.com/special-place-administrator/terminal-commander/commit/25860e34a795e52edaada43eb2be95e0bfb394fe))
+
 ## [0.1.4](https://github.com/special-place-administrator/terminal-commander/compare/v0.1.3...v0.1.4) (2026-05-23)
 
 
