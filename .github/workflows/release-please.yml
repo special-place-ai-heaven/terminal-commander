@@ -179,6 +179,13 @@ jobs:
           fi
           echo "tag_name=${tag}" >> "$GITHUB_OUTPUT"
 
+      - name: Checkout for Cargo.toml parity assertion
+        if: steps.final.outputs.releases_created == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
       - name: Assert cargo workspace version matches release-please version
         if: steps.final.outputs.releases_created == 'true'
         shell: bash
@@ -186,7 +193,9 @@ jobs:
           EXPECTED: ${{ steps.final.outputs.version }}
         run: |
           set -e
-          actual=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          # Use awk for robust extraction (sed regex was over-greedy on
+          # the trailing `# x-release-please-version` comment).
+          actual=$(awk '/^version = "/{gsub(/^version = "|".*/, ""); print; exit}' Cargo.toml)
           if [ "$actual" != "$EXPECTED" ]; then
             echo "::error::cargo workspace version ($actual) != release-please version ($EXPECTED)"
             exit 1
@@ -902,7 +911,7 @@ jobs:
           EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
-          actual=$(cargo pkgid -p terminal-commander-core | awk -F'#' '{print $2}')
+          actual=$(cargo pkgid -p terminal-commander-core | awk -F'[@#]' '{print $NF}')
           if [ "$actual" != "$EXPECTED" ]; then
             echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
             exit 1
@@ -921,7 +930,7 @@ jobs:
           # Recovery: crates.io HTTP API — deterministic JSON.
           # Returns 200 + JSON if version exists, 404 if not.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(cargo pkgid -p terminal-commander-core | awk -F'#' '{print $2}')
+            ver=$(cargo pkgid -p terminal-commander-core | awk -F'[@#]' '{print $NF}')
             url="https://crates.io/api/v1/crates/terminal-commander-core/$ver"
             http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
               -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
@@ -995,7 +1004,7 @@ jobs:
           EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
-          actual=$(cargo pkgid -p terminal-commander-sifters | awk -F'#' '{print $2}')
+          actual=$(cargo pkgid -p terminal-commander-sifters | awk -F'[@#]' '{print $NF}')
           if [ "$actual" != "$EXPECTED" ]; then
             echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
             exit 1
@@ -1012,7 +1021,7 @@ jobs:
             exit 0
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(cargo pkgid -p terminal-commander-sifters | awk -F'#' '{print $2}')
+            ver=$(cargo pkgid -p terminal-commander-sifters | awk -F'[@#]' '{print $NF}')
             url="https://crates.io/api/v1/crates/terminal-commander-sifters/$ver"
             http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
               -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
@@ -1086,7 +1095,7 @@ jobs:
           EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
-          actual=$(cargo pkgid -p terminal-commander-probes | awk -F'#' '{print $2}')
+          actual=$(cargo pkgid -p terminal-commander-probes | awk -F'[@#]' '{print $NF}')
           if [ "$actual" != "$EXPECTED" ]; then
             echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
             exit 1
@@ -1103,7 +1112,7 @@ jobs:
             exit 0
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(cargo pkgid -p terminal-commander-probes | awk -F'#' '{print $2}')
+            ver=$(cargo pkgid -p terminal-commander-probes | awk -F'[@#]' '{print $NF}')
             url="https://crates.io/api/v1/crates/terminal-commander-probes/$ver"
             http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
               -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
@@ -1177,7 +1186,7 @@ jobs:
           EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
-          actual=$(cargo pkgid -p terminal-commander-store | awk -F'#' '{print $2}')
+          actual=$(cargo pkgid -p terminal-commander-store | awk -F'[@#]' '{print $NF}')
           if [ "$actual" != "$EXPECTED" ]; then
             echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
             exit 1
@@ -1194,7 +1203,7 @@ jobs:
             exit 0
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(cargo pkgid -p terminal-commander-store | awk -F'#' '{print $2}')
+            ver=$(cargo pkgid -p terminal-commander-store | awk -F'[@#]' '{print $NF}')
             url="https://crates.io/api/v1/crates/terminal-commander-store/$ver"
             http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
               -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
@@ -1268,7 +1277,7 @@ jobs:
           EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
-          actual=$(cargo pkgid -p terminal-commander-supervisor | awk -F'#' '{print $2}')
+          actual=$(cargo pkgid -p terminal-commander-supervisor | awk -F'[@#]' '{print $NF}')
           if [ "$actual" != "$EXPECTED" ]; then
             echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
             exit 1
@@ -1285,7 +1294,7 @@ jobs:
             exit 0
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(cargo pkgid -p terminal-commander-supervisor | awk -F'#' '{print $2}')
+            ver=$(cargo pkgid -p terminal-commander-supervisor | awk -F'[@#]' '{print $NF}')
             url="https://crates.io/api/v1/crates/terminal-commander-supervisor/$ver"
             http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
               -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
@@ -1359,7 +1368,7 @@ jobs:
           EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
-          actual=$(cargo pkgid -p terminal-commanderd | awk -F'#' '{print $2}')
+          actual=$(cargo pkgid -p terminal-commanderd | awk -F'[@#]' '{print $NF}')
           if [ "$actual" != "$EXPECTED" ]; then
             echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
             exit 1
@@ -1376,7 +1385,7 @@ jobs:
             exit 0
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(cargo pkgid -p terminal-commanderd | awk -F'#' '{print $2}')
+            ver=$(cargo pkgid -p terminal-commanderd | awk -F'[@#]' '{print $NF}')
             url="https://crates.io/api/v1/crates/terminal-commanderd/$ver"
             http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
               -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
@@ -1450,7 +1459,7 @@ jobs:
           EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
         run: |
           set -e
-          actual=$(cargo pkgid -p terminal-commander-mcp | awk -F'#' '{print $2}')
+          actual=$(cargo pkgid -p terminal-commander-mcp | awk -F'[@#]' '{print $NF}')
           if [ "$actual" != "$EXPECTED" ]; then
             echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
             exit 1
@@ -1467,7 +1476,7 @@ jobs:
             exit 0
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
-            ver=$(cargo pkgid -p terminal-commander-mcp | awk -F'#' '{print $2}')
+            ver=$(cargo pkgid -p terminal-commander-mcp | awk -F'[@#]' '{print $NF}')
             url="https://crates.io/api/v1/crates/terminal-commander-mcp/$ver"
             http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
               -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
