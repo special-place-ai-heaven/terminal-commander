@@ -86,18 +86,16 @@ Language: ASCII only.
 
 ### 2.1 Windows-host happy path
 
-**Amended by INSTALL01** ([`install-bootstrap-contract.md`](install-bootstrap-contract.md)):
+**Amended by the current explicit setup posture** ([`install-bootstrap-contract.md`](install-bootstrap-contract.md)):
 
 ```powershell
-# Single operator step — bootstrap runs from the npm `install` script.
 npm install -g terminal-commander
+terminal-commander setup harness
 ```
 
-Bootstrap detects WSL, ensures the in-distro runtime (`npm install -g`
-inside the distro with Linux-first PATH), merges MCP config for every
-detected harness (Cursor, Codex CLI, Claude, …), and persists setup
-state. Opt-out: `TC_SKIP_BOOTSTRAP=1` or `--ignore-scripts` then
-`terminal-commander setup harness`.
+The npm install is passive. The explicit setup command merges MCP config for
+detected harnesses and persists setup state. It does not rely on npm lifecycle
+scripts, CMD, PowerShell, or hidden-window process options.
 
 Legacy two-step path (deprecated; `setup cursor-wsl` delegates to bootstrap):
 
@@ -210,7 +208,7 @@ The root `terminal-commander` npm package, when installed on Windows
 | Distro names validated against a whitelist of the strings returned by `wsl.exe -l -v`. | Refuses arbitrary operator-supplied distro names that did not appear in the live `wsl.exe -l -v` output. Prevents `; calc.exe` style injection if the setup file is tampered with. |
 | `stdio: 'inherit'` on stdin / stdout / stderr. | rmcp framing flows transparently through the `wsl.exe` pipe. |
 | No environment secrets passed via argv. | Same NPM03 boundary. |
-| `windowsHide: true` on spawn options. | No spurious console flash. |
+| No hidden-window spawn option (`windowsHide`, `CREATE_NO_WINDOW`, `SW_HIDE`). | Avoids stealth-like process behavior that endpoint tools reasonably flag. |
 | Exit code mirroring. | Operator sees the WSL-side exit code. |
 
 ## 5. WSL / Linux runtime package responsibilities (unchanged)
@@ -387,7 +385,8 @@ the pair commands ever being run.
   (opt-out via `TC_WSL_SKIP_DOCTOR=1`), strips token-shaped env vars
   via `buildFilteredEnv`, and spawns `wsl.exe -d <distro> -- bash
   -lc 'exec terminal-commander-mcp' [...userArgv]` with EXACTLY
-  `{ shell: false, windowsHide: true, stdio: 'inherit', env: filteredEnv }`.
+  `{ shell: false, stdio: 'inherit', env: filteredEnv }` and no hidden-window
+  option.
   Forwards `SIGINT` / `SIGTERM` from the parent to the child, mirrors
   the child's exit code / signal back into the parent.
   `BRIDGE_PROBE_CMD` is a literal constant; no operator value is
@@ -527,7 +526,7 @@ traces; no environment dumps.
 | §4.1 "Preferred (LOCKED)" — `optionalDependencies` shape | Both platform packages `0.1.0-beta.1` exact-pin | Unchanged. | none |
 | §4.3 "`optionalDependencies` semantics" | `engines.npm: ">=8"` so `os` / `cpu` filters work | Unchanged; this is exactly what allows the Windows install to skip both Linux platform packages cleanly. | none |
 | §4.4 "Shim behavior contract" | resolver returns `{ binaryPath: null }` on unsupported platform; shim exits 64 | **Amended**: on `win32`, the resolver returns `{ reason: "bridge_required" }` instead of `unsupported_platform`; the `terminal-commander-mcp` shim dispatches to `lib/wsl/spawn.js`; the `terminal-commanderd` shim refuses with the §4.1 message; the admin CLI shim exposes the new setup subcommands. | WWS02 |
-| §9 "Safety contract" | bounded shim invariants | Extended with the bridge invariants in §4.4 of THIS contract (whitelist-validated distro, argv-array spawn, `shell: false`, `windowsHide: true`). | WWS04 |
+| §9 "Safety contract" | bounded shim invariants | Extended with the bridge invariants in §4.4 of THIS contract (whitelist-validated distro, argv-array spawn, `shell: false`, no hidden-window option). | WWS04 |
 | Root `package.json` `os: ["linux"]` | Locked at NPM02 / NPM03 | **Amended**: widen to `os: ["linux", "win32"]`. Platform packages remain `os: ["linux"]`. | WWS02 |
 
 ### 13.2 NPM02 fields that DO NOT change
@@ -668,8 +667,8 @@ WWS01 contract by document path AND date.
   helpers are library-only (the three `bin/*` shims stay
   byte-identical to the WWS02 baseline).
 - **WWS04** (**landed**): `lib/wsl/spawn.js` — single entry-point
-  bridge spawn helper. `shell: false`, argv array only,
-  `windowsHide: true`, `stdio: 'inherit'`, distro double-validated
+  bridge spawn helper. `shell: false`, argv array only, no hidden-window
+  option, `stdio: 'inherit'`, distro double-validated
   (`assertSafeDistroName` + live whitelist), `BRIDGE_PROBE_CMD =
   'exec terminal-commander-mcp'` is a literal constant (no
   interpolation), distro priority chain

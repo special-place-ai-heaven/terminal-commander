@@ -1,56 +1,53 @@
-# INSTALL01 — Install bootstrap and harness auto-config contract
+# INSTALL01 — Explicit setup harness contract
 
-Status: INSTALL01 deliverable.
+Status: Superseded by AV-safe explicit setup posture.
 Branch: `main`.
 Date: 2026-05-23.
 Supersedes: WWS01 §2.1 (two-step happy path), WWS01 §8 / D-08 (opt-in WSL install only).
-Preserves: NPM02 no postinstall **downloader**; TC44 Unix-only runtime; WWS04 bridge shim rules.
+Preserves: NPM02 no install/postinstall bootstrap, TC44 native runtime, WWS04 bridge shim rules without hidden-window options.
 
 Language: ASCII only.
 
 ## 1. Operator contract (Windows)
 
-After this chain lands, the primary Windows operator path is:
+The primary Windows operator path is intentionally two explicit operator steps:
 
 ```powershell
 npm install -g terminal-commander
+terminal-commander setup harness
 ```
 
-That single command MUST (zero-touch — no `setup` subcommands required):
+`npm install -g terminal-commander` MUST be passive:
 
-1. Run the package `install` lifecycle script (local-only; see §3).
-2. Detect WSL, resolve a distro, and run `npm install -g terminal-commander` **inside** the distro with a Linux-first `PATH` (see §5).
-3. Install **daemon autostart** (systemd user unit or profile hook) and **start the daemon** if not already running.
-4. For each **detected** harness, **merge or update** the Terminal Commander MCP stanza (`--force` semantics on install; always creates `.bak` before overwrite).
-5. Persist bootstrap metadata in `%LOCALAPPDATA%\terminal-commander\setup.json`.
-6. Exit **0** from npm even when WSL is missing (fail-soft with one stderr line).
+1. No `install`, `preinstall`, or `postinstall` lifecycle script.
+2. No MCP config writes.
+3. No WSL probing, nested `npm install`, daemon autostart, or process spawning.
+4. No CMD, PowerShell, hidden-window, taskkill, downloaded helper, or broad process-control behavior.
 
-**First MCP connect** (lazy bootstrap): if anything above was skipped (e.g. lock contention), the Windows→WSL bridge runs the same bootstrap once before spawning `terminal-commander-mcp`.
+`terminal-commander setup harness` is the explicit config-writing command. It writes only detected provider MCP config files, creates backups before overwrite, and reports structured status. Current generated MCP stanzas use an executable `node` command plus a package `.js` shim in `args`; they do not use npm, CMD, or PowerShell as the MCP command.
+
+First MCP connect MUST NOT perform hidden lazy bootstrap. If setup was not run, the harness reports the missing configuration/runtime state honestly.
 
 Opt-out:
 
-- `TC_SKIP_BOOTSTRAP=1` before install.
+- `TC_SKIP_BOOTSTRAP=1` is retained only as a compatibility no-op for older call sites.
 - `TC_SKIP_DAEMON_AUTOSTART=1` to skip daemon service/profile install only.
-- `npm install -g terminal-commander --ignore-scripts` (manual recovery only).
+- `npm install -g terminal-commander --ignore-scripts` is safe but unnecessary because the package has no lifecycle scripts.
 
 ## 2. Operator contract (Linux / WSL)
 
-`npm install -g terminal-commander` on Linux or inside WSL:
+`npm install -g terminal-commander` on Linux or inside WSL is also passive. Run `terminal-commander setup harness` explicitly to write MCP provider config.
 
-- Runs harness detect + config merge only (no WSL nested install).
-- After harness merge, installs **daemon autostart** inside WSL (systemd
-  user unit when available, else profile hook). Opt-out:
-  `TC_SKIP_DAEMON_AUTOSTART=1` or `TC_BOOTSTRAP_START_DAEMON=0`.
-- On Linux-native global install, same autostart install runs locally.
+Daemon startup is a runtime concern, not npm install work. Setup commands may report what they would do, but they must not hide daemon/profile/service installation inside npm lifecycle hooks.
 
 ## 3. npm lifecycle (NPM02 amendment)
 
 | Rule | Locked |
 |------|--------|
-| `postinstall` downloader | Still **forbidden** (GitHub Releases fetch). |
-| `install` script | **Allowed** when it performs only: local filesystem writes, bounded `wsl.exe` spawn for in-distro `npm install -g`, harness detection, stderr logging. |
-| Network from install script | Only the in-distro `npm install -g` (registry.npmjs.org), not artifact download from GitHub Releases. |
-| stdout from install script | **Forbidden** (stderr only). |
+| `preinstall` / `install` / `postinstall` lifecycle script | **Forbidden**. |
+| Postinstall downloader | **Forbidden** (GitHub Releases fetch or any other hidden network fetch). |
+| Network from install script | **Forbidden** because install scripts are forbidden. |
+| stdout/stderr from install script | **Forbidden** because install scripts are forbidden. |
 
 ## 4. Harness registry (INSTALL01 scope)
 

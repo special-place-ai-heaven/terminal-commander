@@ -88,8 +88,7 @@ needed).
   `wslDoctor` runtime gate (opt-out: `TC_WSL_SKIP_DOCTOR=1`) ->
   token-shaped env strip via `buildFilteredEnv` -> `spawn(wsl.exe,
   ['-d', distro, '--', 'bash', '-lc', 'exec terminal-commander-mcp',
-  ...userArgv], { shell:false, windowsHide:true, stdio:'inherit',
-  env:filteredEnv })`.
+  ...userArgv], { shell:false, stdio:'inherit', env:filteredEnv })`.
 - Wired into `bin/terminal-commander-mcp.js` Windows branch.
 - 21 new tests + static guards. The two sibling shims
   (`terminal-commanderd.js`, `terminal-commander.js`) stay

@@ -102,7 +102,7 @@ attached to a follow-up artifact, the beta posture stays
       `RELEASE_PLEASE_TOKEN_TC` reference exists in any active
       workflow path.
 - [ ] No `cargo publish` / `crates.io` step in any workflow.
-- [ ] No `postinstall` **downloader** in any `package.json` (local-only `install` script allowed per INSTALL01).
+- [ ] No `preinstall`, `install`, or `postinstall` lifecycle script in any npm package.
 
 ## Operator preconditions for first live npm publish (NPM07/NPM09)
 
