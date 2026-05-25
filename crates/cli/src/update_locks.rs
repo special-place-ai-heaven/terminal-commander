@@ -11,8 +11,11 @@
 // shelling out to taskkill, cmd.exe, PowerShell, or process-name-wide
 // termination.
 
-use std::path::{Path, PathBuf};
+#![allow(clippy::redundant_pub_crate)]
 
+use std::path::Path;
+
+#[cfg(any(windows, test))]
 const OWNED_BINARIES: &[&str] = &[
     "terminal-commander.exe",
     "terminal-commanderd.exe",
@@ -38,6 +41,7 @@ pub(crate) fn stop_installed_processes(_bin_dir: &Path) -> UpdateLockResult {
     }
 }
 
+#[cfg(any(windows, test))]
 fn normalize_path(path: &Path) -> String {
     let mut s = path.to_string_lossy().replace('/', "\\");
     if let Some(rest) = s.strip_prefix(r"\\?\") {
@@ -49,16 +53,22 @@ fn normalize_path(path: &Path) -> String {
     s.to_lowercase()
 }
 
+#[cfg(any(windows, test))]
+use std::path::PathBuf;
+
+#[cfg(any(windows, test))]
 fn canonical_or_original(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+#[cfg(any(windows, test))]
 fn is_owned_binary_name(name: &str) -> bool {
     OWNED_BINARIES
         .iter()
         .any(|allowed| allowed.eq_ignore_ascii_case(name))
 }
 
+#[cfg(any(windows, test))]
 fn image_is_inside_bin_dir(image: &Path, bin_dir: &Path) -> bool {
     let Some(parent) = image.parent() else {
         return false;
@@ -112,39 +122,40 @@ mod windows_impl {
 
         let current_pid = unsafe { GetCurrentProcessId() };
         let mut entry = PROCESSENTRY32W {
-            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            dwSize: u32::try_from(std::mem::size_of::<PROCESSENTRY32W>())
+                .expect("PROCESSENTRY32W size fits in u32"),
             ..Default::default()
         };
 
-        let mut has_entry = unsafe { Process32FirstW(snapshot.0, &mut entry).is_ok() };
+        let mut has_entry = unsafe { Process32FirstW(snapshot.0, &raw mut entry).is_ok() };
         let mut stopped = 0usize;
         while has_entry {
             let pid = entry.th32ProcessID;
             let name = exe_name_from_entry(&entry);
-            if pid != current_pid && is_owned_binary_name(&name) {
-                if let Some(image) = process_image_path(pid) {
-                    if image_is_inside_bin_dir(&image, bin_dir) {
-                        match terminate_process(pid) {
-                            Ok(waited) => {
-                                stopped += 1;
-                                let wait_note = if waited { "stopped" } else { "terminate_sent" };
-                                result.lines.push(format!(
-                                    "terminal-commander: {wait_note} pid {pid} ({})",
-                                    image.display()
-                                ));
-                            }
-                            Err(err) => {
-                                result.errors += 1;
-                                result.lines.push(format!(
-                                    "terminal-commander: failed to stop pid {pid} ({}): {err}",
-                                    image.display()
-                                ));
-                            }
-                        }
+            if pid != current_pid
+                && is_owned_binary_name(&name)
+                && let Some(image) = process_image_path(pid)
+                && image_is_inside_bin_dir(&image, bin_dir)
+            {
+                match terminate_process(pid) {
+                    Ok(waited) => {
+                        stopped += 1;
+                        let wait_note = if waited { "stopped" } else { "terminate_sent" };
+                        result.lines.push(format!(
+                            "terminal-commander: {wait_note} pid {pid} ({})",
+                            image.display()
+                        ));
+                    }
+                    Err(err) => {
+                        result.errors += 1;
+                        result.lines.push(format!(
+                            "terminal-commander: failed to stop pid {pid} ({}): {err}",
+                            image.display()
+                        ));
                     }
                 }
             }
-            has_entry = unsafe { Process32NextW(snapshot.0, &mut entry).is_ok() };
+            has_entry = unsafe { Process32NextW(snapshot.0, &raw mut entry).is_ok() };
         }
 
         if stopped == 0 && result.errors == 0 {
@@ -168,13 +179,13 @@ mod windows_impl {
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
         let proc = OwnedHandle(handle);
         let mut buf16 = vec![0u16; 2048];
-        let mut len = buf16.len() as u32;
+        let mut len = u32::try_from(buf16.len()).expect("static path buffer length fits in u32");
         let ok = unsafe {
             QueryFullProcessImageNameW(
                 proc.0,
                 PROCESS_NAME_FORMAT(1),
                 windows::core::PWSTR(buf16.as_mut_ptr()),
-                &mut len,
+                &raw mut len,
             )
             .is_ok()
         };

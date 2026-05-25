@@ -17,7 +17,7 @@ use terminal_commander_supervisor::paths::{
     endpoint_from_socket_path, resolve_socket_path, resolve_state_dir,
 };
 
-mod update_locks;
+pub(crate) mod update_locks;
 
 #[derive(Parser, Debug)]
 #[command(
