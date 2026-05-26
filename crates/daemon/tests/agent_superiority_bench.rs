@@ -64,8 +64,7 @@ fn python3_available() -> bool {
     std::process::Command::new("python3")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// A regex rule matching the single error line. status=Active so it is
@@ -303,7 +302,7 @@ fn tc_signal_cost_is_orders_of_magnitude_below_raw_shell_cost() {
             };
             for e in &r.events {
                 signal_events += 1;
-                signal_bytes += serde_json::to_string(e).map(|s| s.len()).unwrap_or(0);
+                signal_bytes += serde_json::to_string(e).map_or(0, |s| s.len());
                 match e.kind.as_str() {
                     "error_seen" => errors_seen += 1,
                     "command_exited" | "command_failed" => command_exited = true,
@@ -331,13 +330,13 @@ fn tc_signal_cost_is_orders_of_magnitude_below_raw_shell_cost() {
             IpcResponse::BucketEventsSince(r) => r,
             other => panic!("unexpected: {other:?}"),
         };
-        let full_drain_bytes = serde_json::to_string(&full.events)
-            .map(|s| s.len())
-            .unwrap_or(0);
+        let full_drain_bytes = serde_json::to_string(&full.events).map_or(0, |s| s.len());
 
         // ~4 chars per token is the standard rough heuristic.
         let raw_tokens = raw_bytes_estimate / 4;
         let signal_tokens = signal_bytes.max(full_drain_bytes) / 4;
+        // Precision loss is irrelevant for a token-ratio readout.
+        #[allow(clippy::cast_precision_loss)]
         let reduction = if signal_bytes == 0 {
             f64::INFINITY
         } else {

@@ -39,7 +39,7 @@ pub use bucket::{
 pub use context::{
     ContextError, ContextLine, ContextRingConfig, ContextRingManager, ContextWindowRequest,
     ContextWindowResponse, DEFAULT_RING_BYTES, DEFAULT_RING_FRAMES, MAX_FRAME_BYTES,
-    MAX_WINDOW_BYTES, MAX_WINDOW_FRAMES, SourceFrame,
+    MAX_WINDOW_BYTES, MAX_WINDOW_FRAMES, RingTail, SourceFrame,
 };
 pub use error::{CoreError, Result};
 pub use event::{Captures, EventDraft, RuleRef, SignalEvent};

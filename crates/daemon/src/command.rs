@@ -157,6 +157,30 @@ pub struct CommandStartResponse {
     pub cursor: u64,
 }
 
+/// No-silence exit receipt (TCE-ERG-1).
+///
+/// Present ONLY when a finished process command produced ZERO
+/// rule-driven events. This is the one sanctioned exception to "TC
+/// never returns raw output": a bounded, truthful tail so a zero-rule
+/// command does not read as breakage.
+///
+/// PTY/file-watch jobs never reach this path (`CommandService` holds
+/// process probes only; `handle_command_status` routes PTY job ids to
+/// `UnknownJob`), so a tail cannot include secret-prompt input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandReceipt {
+    pub exit_code: Option<i32>,
+    /// Frames the command produced that no rule matched, i.e. lines
+    /// the agent would otherwise have scrolled. `frames_total` for a
+    /// zero-rule run.
+    pub lines_suppressed: u64,
+    /// Last N frame texts (oldest first), byte-capped.
+    pub tail: Vec<String>,
+    /// True when the ring evicted earlier frames; the tail may omit
+    /// the start of output.
+    pub tail_incomplete: bool,
+}
+
 /// Bounded status shape. Counters + final exit state only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandStatusResponse {
@@ -172,6 +196,9 @@ pub struct CommandStatusResponse {
     pub exit_code: Option<i32>,
     pub signal: Option<String>,
     pub duration_ms: Option<u64>,
+    /// No-silence receipt; `Some` only for a finished process command
+    /// with zero rule-driven events. See [`CommandReceipt`].
+    pub receipt: Option<CommandReceipt>,
 }
 
 /// EventSink that forwards drafts to the wired `Router`.
@@ -218,6 +245,10 @@ struct JobBinding {
     /// the `ActivationRegistry::snapshot_for_job` lookup needs.
     bucket_id: BucketId,
     probe_id: ProbeId,
+    /// No-silence receipt (TCE-ERG-1). Computed by the lifecycle
+    /// waiter at child exit; read by `status()`. `None` until exit, or
+    /// when any rule matched.
+    receipt: Option<CommandReceipt>,
 }
 
 /// Identity triple for a single live job.
@@ -532,6 +563,7 @@ impl CommandRuntime {
                 inline_rules: inline_rules_for_binding,
                 bucket_id,
                 probe_id,
+                receipt: None,
             },
         );
         self.audit(
@@ -550,8 +582,39 @@ impl CommandRuntime {
         let waiter_audit = Arc::clone(&self.audit);
         let waiter_profile = self.profile_label.clone();
         let waiter_live = Arc::clone(&self.live);
+        let waiter_rings = Arc::clone(&self.rings);
         tokio::spawn(async move {
             let (mut final_metrics, outcome) = drive_to_exit(probe).await;
+
+            // TCE-ERG-1: build the no-silence receipt while
+            // `final_metrics.events_emitted` still reflects ONLY
+            // rule-driven events. The lifecycle bump below would
+            // otherwise inflate it by one. The receipt is emitted only
+            // when zero rules matched (the sanctioned carve-out to the
+            // "never raw output" contract); any rule match leaves it
+            // `None`. Process-only by construction.
+            let rule_driven_events = final_metrics.events_emitted;
+            let receipt_exit_code = match &outcome {
+                ProbeOutcome::Exited { code, .. } => *code,
+                ProbeOutcome::Cancelled => None,
+            };
+            let receipt = if rule_driven_events == 0 {
+                let tail = waiter_rings.tail_frames(probe_id, 5, 4096).unwrap_or(
+                    terminal_commander_core::RingTail {
+                        lines: Vec::new(),
+                        evicted_frames: 0,
+                        truncated: false,
+                    },
+                );
+                Some(CommandReceipt {
+                    exit_code: receipt_exit_code,
+                    lines_suppressed: final_metrics.frames_total,
+                    tail: tail.lines,
+                    tail_incomplete: tail.evicted_frames > 0 || tail.truncated,
+                })
+            } else {
+                None
+            };
 
             // Lifecycle draft.
             let draft = match outcome {
@@ -575,6 +638,7 @@ impl CommandRuntime {
             // is harmless on a finished probe).
             if let Some(b) = waiter_live.write().get_mut(&job_id) {
                 b.metrics = final_metrics;
+                b.receipt = receipt;
             }
 
             // Emit our own structured audit row for the exit.
@@ -725,11 +789,11 @@ impl CommandRuntime {
             .jobs
             .get(job_id)
             .ok_or(CommandError::UnknownJob(job_id))?;
-        let metrics = self
+        let (metrics, receipt) = self
             .live
             .read()
             .get(&job_id)
-            .map(|b| b.metrics.clone())
+            .map(|b| (b.metrics.clone(), b.receipt.clone()))
             .unwrap_or_default();
         Ok(CommandStatusResponse {
             job_id,
@@ -744,6 +808,7 @@ impl CommandRuntime {
             exit_code: rec.exit_info.as_ref().and_then(|e| e.exit_code),
             signal: rec.exit_info.as_ref().and_then(|e| e.signal.clone()),
             duration_ms: rec.exit_info.as_ref().map(|e| e.duration_ms),
+            receipt,
         })
     }
 
