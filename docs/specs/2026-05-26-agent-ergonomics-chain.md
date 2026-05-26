@@ -1,6 +1,7 @@
 # Spec: Agent-Ergonomics Chain (TCE-ERG)
 
-Status: Design (council-reviewed 2026-05-26). Language: ASCII only.
+Status: Design (council-reviewed + adversarial-reviewed 2026-05-26;
+Phase 1 amended per review, ready to plan). Language: ASCII only.
 
 ## Objective
 
@@ -64,11 +65,57 @@ Each phase ends at the behavioral eval, not at "it compiles."
   must return `exited 0; 0 lines suppressed; output: Linux ...`. A
   noisy no-rule run returns `exited 0; 4,812 lines suppressed; tail:
   <last 5 lines>`. Never empty.
-  - Acceptance: a no-rule `command_start` surfaces non-empty, bounded,
-    truthful output through the MCP surface; payload <= MAX_RESPONSE_BYTES.
-  - Crates: daemon (bucket/lifecycle event carries tail + suppressed
-    count; naive last-N from the existing bounded context ring is
-    acceptable for Phase 1, full ring buffer is Phase 2 polish).
+  - Acceptance: a no-rule `command_status` returns a non-empty, bounded,
+    truthful `receipt`; payload well within the 256 KiB transport
+    envelope (MAX_RESPONSE_BYTES in ipc/protocol.rs is 256 KiB, NOT 8 KiB;
+    the 8192 is the per-frame cap in core/context.rs, ample for 5 lines).
+  - Crates: core (new tail read path), daemon (lifecycle waiter builds
+    receipt), mcp (surface on command_status).
+
+  AMENDMENTS (Cursor adversarial review 2026-05-26, all code-verified):
+
+  - **A1 Security carve-out (Critical #1 — real contract conflict).**
+    Live tool descriptions + TC47 promise "never raw output." A bounded
+    tail makes that false unless scoped. Carve-out: the receipt tail is
+    emitted ONLY when ZERO rule-driven events fired for the job (pure
+    no-signal run). Any rule match => no tail, existing behavior holds.
+    Update tools.rs:364-366 / 395-397 description text AND the TC47
+    invariant (load_noise_backpressure.rs:11-13) to state the carve-out
+    explicitly: "structured signals only, EXCEPT a bounded exit receipt
+    when zero rules matched." Add an MCP e2e asserting a rule-match run
+    still carries no tail.
+  - **A2 PTY/secret exclusion (Critical #2 — verified pty.rs:613 appends
+    every line incl. post-secret-prompt).** Phase 1 scope = PROCESS probe
+    ONLY. PTY/file-watch receipts are explicitly out of Phase 1. A
+    secret-prompt tail (`secret_prompts_total > 0`) MUST suppress the tail
+    and say `tail withheld (secret prompt in session)`. PTY tail with
+    redaction is deferred to a later phase.
+  - **A3 Tail read API (High #3 — buffer exists, read path does not).**
+    `ContextRingManager::window()` is anchor-only; lifecycle events have
+    `pointer: None` so `event_context` cannot anchor a receipt. Add
+    `RingInner::tail` + `ContextRingManager::tail_frames(probe_id,
+    max_lines, max_bytes) -> { lines: Vec<String>, evicted_frames: u64,
+    truncated: bool }`. Frames are a `VecDeque<SourceFrame>` so this is
+    `iter().rev().take(n)` reversed; trivial, bounded, no new buffer.
+    Correction to the council "no ring buffer required" line: the BUFFER
+    needs none, the READ PATH is the new work.
+  - **A4 Delivery surface (High #4).** Golden path = `command_status`
+    `receipt` field (the lifecycle waiter at command.rs:553-578 already
+    writes `b.metrics`; attach the receipt there). One documented path,
+    not "the MCP surface" hand-wave.
+  - **A5 Suppressed metric (High #5).** `frames_suppressed` does not
+    exist. Define `lines_suppressed = frames_total - rule_driven_events`,
+    where `rule_driven_events` EXCLUDES the synthetic lifecycle event
+    (command.rs:567 bumps `events_emitted` for the exit draft — must not
+    count as a suppressed-line offset). For a zero-rule run this equals
+    `frames_total`. Do not block on BACKLOG P1.1.
+  - **A6 Eviction honesty (High #6).** Ring evicts head at 4096 frames /
+    1 MiB; `evicted_frames` already tracked (context.rs:239,265). When
+    `evicted_frames > 0`, receipt sets `tail_incomplete: true` and the
+    rendered string appends `(tail may be incomplete; N frames evicted)`.
+  - **A7 Empty-output case.** `true` / `uname` with no stdout =>
+    `frames_total == 0` => `exited 0; 0 lines suppressed; tail: (empty)`,
+    explicit, never blank.
 - **TCE-ERG-2 Agent-selfish description + routing line.** Rewrite the
   MCP server `instructions` and the command-tool descriptions to lead
   with: (a) the no-output-by-default signal model; (b) the
@@ -138,7 +185,9 @@ Make a zero-rule command return a receipt instead of silence
 agent-selfish pitch in the tool description. One coupled change: the
 description is what makes the agent CHOOSE TC; the receipt is what makes
 it KEEP trusting TC after it does. Kills the documented `uname -a`
-failure with no ring buffer required.
+failure. The ring already retains the frames; the new work is a bounded
+tail READ path (A3) plus the security carve-out (A1) and PTY exclusion
+(A2) -- not a new buffer.
 
 ## Verification discipline
 
@@ -152,3 +201,8 @@ touched per step where practical.
 Council transcript + per-advisor reasoning: this commit's session.
 Bug-fix predecessor commits: 8b2eb21, fc8468d. Adversarial review of
 the bug fix: docs/audits/2026-05-26-draft-poison-fix-review.md.
+Adversarial review of THIS spec (drove the Phase-1 amendments A1-A7):
+docs/audits/2026-05-26-agent-ergonomics-chain-review.md. All review
+code claims independently re-verified against the index before
+amending (window() anchor-only, pty.rs:613 append, VecDeque tail
+feasible, MAX_RESPONSE_BYTES=256 KiB, lifecycle events_emitted bump).
