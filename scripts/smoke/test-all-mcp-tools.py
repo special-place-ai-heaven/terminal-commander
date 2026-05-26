@@ -197,9 +197,10 @@ def main() -> int:
         if probe_id:
             call_tool("probe_status", {"probe_id": probe_id})
 
+        # Param names must match the Mcp* structs in crates/mcp/src/tools.rs.
         call_tool(
             "file_read_window",
-            {"path": str(probe_file), "start_line": 1, "line_count": 5},
+            {"path": str(probe_file), "start_line": 1, "max_lines": 5},
         )
         call_tool(
             "file_search",
@@ -207,7 +208,7 @@ def main() -> int:
         )
         fw = call_tool(
             "file_watch_start",
-            {"path": str(probe_file), "bucket_id": bucket_id or "b-smoke"},
+            {"path": str(probe_file)},
         )
         watch = tool_text(fw)
         watch_id = watch.get("watch_id")
@@ -217,12 +218,12 @@ def main() -> int:
         # PTY — may be unsupported on Windows; record outcome either way
         pty_start = call_tool(
             "pty_command_start",
-            {"argv": argv, "grace_ms": 1000},
+            {"argv": argv},
         )
         pty = tool_text(pty_start)
         pty_job = pty.get("job_id")
         if pty_job:
-            call_tool("pty_command_write_stdin", {"job_id": pty_job, "data": "x\n"})
+            call_tool("pty_command_write_stdin", {"job_id": pty_job, "bytes": "x\n"})
             call_tool("pty_command_stop", {"job_id": pty_job})
 
         call_tool(
