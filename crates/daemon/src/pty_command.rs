@@ -534,17 +534,28 @@ mod runtime {
         active: &[RuleDefinition],
         inline: &[RuleDefinition],
     ) -> Vec<RuleDefinition> {
+        // Defense in depth against the draft-poison footgun: only
+        // runtime-eligible (Active) rules may reach `SifterRuntime::build`.
+        // A non-eligible active entry self-heals (skipped, PTY keeps
+        // running) instead of failing every rebuild with
+        // `SifterError::NotActive`; a non-eligible inline rule is skipped
+        // for this PTY job. Mirrors command.rs / file_watch.rs.
         let mut seen: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
         for r in inline {
             seen.insert((r.id.clone(), r.version));
         }
         let mut out = Vec::with_capacity(active.len() + inline.len());
         for r in active {
-            if !seen.contains(&(r.id.clone(), r.version)) {
+            if r.status.is_runtime_eligible() && !seen.contains(&(r.id.clone(), r.version)) {
                 out.push(r.clone());
             }
         }
-        out.extend(inline.iter().cloned());
+        out.extend(
+            inline
+                .iter()
+                .filter(|r| r.status.is_runtime_eligible())
+                .cloned(),
+        );
         out
     }
 }
