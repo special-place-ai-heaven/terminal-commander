@@ -60,11 +60,12 @@ pub use ipc::{
     PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
     PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
     RegistryActiveEntry, RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams,
-    RegistryGetResponse, RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams,
-    RegistrySearchResponse, RegistryTestMatch, RegistryTestParams, RegistryTestResponse,
-    RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope,
-    ResponseEnvelope, RuntimeActiveRule, RuntimeBucketSummary, RuntimeStateResponse,
-    SelfCheckResponse, SeverityHistogram,
+    RegistryGetResponse, RegistryImportPackParams, RegistryImportPackResponse,
+    RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
+    RegistryTestMatch, RegistryTestParams, RegistryTestResponse, RegistryTestSample,
+    RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope,
+    RuntimeActiveRule, RuntimeBucketSummary, RuntimeStateResponse, SelfCheckResponse,
+    SeverityHistogram,
 };
 #[cfg(unix)]
 pub use ipc::{DaemonClient, IpcServer, PeerCred, ServerHandle};

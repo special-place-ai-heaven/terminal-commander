@@ -60,11 +60,12 @@ pub use protocol::{
     PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
     PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
     RegistryActiveEntry, RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams,
-    RegistryGetResponse, RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams,
-    RegistrySearchResponse, RegistryTestMatch, RegistryTestParams, RegistryTestResponse,
-    RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope,
-    ResponseEnvelope, RuntimeActiveRule, RuntimeBucketSummary, RuntimeStateResponse,
-    SelfCheckResponse, SeverityHistogram,
+    RegistryGetResponse, RegistryImportPackParams, RegistryImportPackResponse,
+    RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
+    RegistryTestMatch, RegistryTestParams, RegistryTestResponse, RegistryTestSample,
+    RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope,
+    RuntimeActiveRule, RuntimeBucketSummary, RuntimeStateResponse, SelfCheckResponse,
+    SeverityHistogram,
 };
 
 // `CommandStartResponse` / `CommandStatusResponse` are re-exported by

@@ -55,11 +55,12 @@ use crate::ipc::protocol::{
     PolicyStatusResponse, ProbeKind, ProbeListEntry, ProbeListResponse, ProbeStatusParams,
     ProbeStatusResponse, PtyCommandStartParams, PtyCommandStopParams, RegistryActivateParams,
     RegistryActivateResponse, RegistryActiveEntry, RegistryDeactivateParams,
-    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryListActiveResponse,
-    RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse, RegistryTestMatch,
-    RegistryTestParams, RegistryTestResponse, RegistryUpsertParams, RegistryUpsertResponse,
-    RequestEnvelope, ResponseEnvelope, RuntimeActiveRule, RuntimeBucketSummary,
-    RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
+    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
+    RegistryImportPackResponse, RegistryListActiveResponse, RegistrySearchHit,
+    RegistrySearchParams, RegistrySearchResponse, RegistryTestMatch, RegistryTestParams,
+    RegistryTestResponse, RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope,
+    ResponseEnvelope, RuntimeActiveRule, RuntimeBucketSummary, RuntimeStateResponse,
+    SelfCheckResponse, SeverityHistogram,
 };
 #[cfg(unix)]
 use crate::ipc::protocol::{
@@ -464,6 +465,10 @@ async fn dispatch(
         IpcRequest::RegistryActivate(p) => match handle_registry_activate(state, p) {
             Ok(r) => ("registry_activate", IpcResult::Ok { response: r }),
             Err(e) => ("registry_activate", IpcResult::Err { error: e }),
+        },
+        IpcRequest::RegistryImportPack(p) => match handle_registry_import_pack(state, p) {
+            Ok(r) => ("registry_import_pack", IpcResult::Ok { response: r }),
+            Err(e) => ("registry_import_pack", IpcResult::Err { error: e }),
         },
         IpcRequest::RegistryDeactivate(p) => match handle_registry_deactivate(state, p) {
             Ok(r) => ("registry_deactivate", IpcResult::Ok { response: r }),
@@ -1154,6 +1159,51 @@ fn handle_registry_activate(
             .saturating_add(watch_report.watches_rebound)
             .saturating_add(pty_rebound),
     }))
+}
+
+fn handle_registry_import_pack(
+    state: &Arc<DaemonState>,
+    params: &RegistryImportPackParams,
+) -> Result<IpcResponse, IpcError> {
+    // If activating, scope is required up front (mirror activate so the
+    // agent gets a clear remedy rather than a silent global widen).
+    if params.activate && params.scope.is_none() {
+        return Err(IpcError::new(
+            IpcErrorCode::ScopeInvalid,
+            "scope is required when activate=true; pass {kind:'global'} \
+             for explicit global activation",
+        ));
+    }
+    // Import the pack (promote rules to Active iff we will activate
+    // them, so the activation eligibility gate below passes honestly).
+    let import = {
+        let mut g = state.store.lock();
+        g.import_rule_pack_by_name(&params.pack, params.activate)
+            .map_err(map_store_error)?
+    };
+    let mut activated = Vec::new();
+    if params.activate {
+        // Reuse the canonical activate path per rule (no fourth copy):
+        // it looks up the now-Active stored def, passes the
+        // eligibility gate, activates, records, and rebinds live jobs.
+        for rule_id in &import.imported {
+            let aparams = RegistryActivateParams {
+                rule_id: rule_id.clone(),
+                version: None, // latest = the just-imported Active version
+                scope: params.scope,
+            };
+            handle_registry_activate(state, &aparams)?;
+            activated.push(rule_id.clone());
+        }
+    }
+    Ok(IpcResponse::RegistryImportPack(
+        RegistryImportPackResponse {
+            pack: import.pack,
+            imported: import.imported,
+            skipped: import.skipped,
+            activated,
+        },
+    ))
 }
 
 fn handle_registry_deactivate(

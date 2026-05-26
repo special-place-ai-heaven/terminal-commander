@@ -138,6 +138,9 @@ pub enum IpcRequest {
     /// Mark `(rule_id, version)` as active in the in-memory
     /// activation registry AND record the persistent activation row.
     RegistryActivate(RegistryActivateParams),
+    /// Import an embedded rule pack by name; optionally promote its
+    /// rules to Active and activate them in one call.
+    RegistryImportPack(RegistryImportPackParams),
     /// Remove `(rule_id, version)` from the active set and close
     /// the persistent activation row.
     RegistryDeactivate(RegistryDeactivateParams),
@@ -214,6 +217,7 @@ pub enum IpcResponse {
     RegistryUpsert(RegistryUpsertResponse),
     RegistryTest(RegistryTestResponse),
     RegistryActivate(RegistryActivateResponse),
+    RegistryImportPack(RegistryImportPackResponse),
     RegistryDeactivate(RegistryDeactivateResponse),
     RegistryListActive(RegistryListActiveResponse),
     FileReadWindow(FileReadWindowResponse),
@@ -735,6 +739,29 @@ pub struct RegistryActivateResponse {
     /// Zero is valid (e.g. no commands running, or no live job
     /// matched the scope).
     pub jobs_rebound: u32,
+}
+
+/// Import a named, embedded rule pack into the registry.
+///
+/// When `activate` is true, `scope` is REQUIRED and every imported
+/// rule is promoted to Active and activated in that scope -- one call
+/// for "give me expert signals for X". When false, rules import at
+/// their on-disk status (the vetting path) and nothing is activated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryImportPackParams {
+    pub pack: String,
+    #[serde(default)]
+    pub activate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ActivationScope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryImportPackResponse {
+    pub pack: String,
+    pub imported: Vec<String>,
+    pub skipped: Vec<String>,
+    pub activated: Vec<String>,
 }
 
 /// `registry_deactivate` parameters. Scope follows the same default

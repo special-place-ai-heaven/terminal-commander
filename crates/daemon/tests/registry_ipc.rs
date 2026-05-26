@@ -20,7 +20,8 @@ use terminal_commander_store::AuditReadRequest;
 use terminal_commanderd::{
     DaemonClient, DaemonConfig, DaemonState, IpcErrorCode, IpcRequest, IpcResponse, IpcServer,
     MAX_REGISTRY_TEST_SAMPLES, RegistryActivateParams, RegistryDeactivateParams, RegistryGetParams,
-    RegistrySearchParams, RegistryTestParams, RegistryTestSample, RegistryUpsertParams,
+    RegistryImportPackParams, RegistrySearchParams, RegistryTestParams, RegistryTestSample,
+    RegistryUpsertParams,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -605,6 +606,118 @@ fn registry_activations_survive_daemon_restart() {
                 "activation must survive restart"
             );
         }
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn import_pack_cargo_activates_and_drives_signal() {
+    // TCE-ERG-PACK: one call imports the cargo pack, promotes its
+    // rules to Active, and activates them globally. The agent gets
+    // expert signal extraction without authoring any rule JSON.
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("importpack");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+
+        let resp = client
+            .call(
+                1,
+                IpcRequest::RegistryImportPack(RegistryImportPackParams {
+                    pack: "cargo".to_owned(),
+                    activate: true,
+                    scope: Some(terminal_commander_core::ActivationScope::Global),
+                }),
+            )
+            .await
+            .expect("import_pack ok");
+        let r = match resp {
+            IpcResponse::RegistryImportPack(r) => r,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert_eq!(r.pack, "cargo");
+        assert!(!r.imported.is_empty(), "cargo pack must import rules");
+        assert!(r.skipped.is_empty(), "no cargo rule should be skipped");
+        assert_eq!(
+            r.activated.len(),
+            r.imported.len(),
+            "every imported rule must be activated when activate=true"
+        );
+        // Each activated rule is genuinely in the active set.
+        for id in &r.activated {
+            let def = {
+                let g = state.store.lock();
+                g.get_latest_rule(id).unwrap().unwrap()
+            };
+            assert!(
+                state.activation.is_active(
+                    id,
+                    def.version,
+                    terminal_commander_core::ActivationScope::Global
+                ),
+                "rule {id} must be active after import_pack"
+            );
+        }
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn import_pack_requires_scope_when_activating() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("importpack-noscope");
+        let (_state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::RegistryImportPack(RegistryImportPackParams {
+                    pack: "cargo".to_owned(),
+                    activate: true,
+                    scope: None,
+                }),
+            )
+            .await
+            .expect_err("activate=true without scope must be refused");
+        assert_eq!(err.code, IpcErrorCode::ScopeInvalid);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn import_pack_unknown_name_is_typed_teaching_error() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("importpack-unknown");
+        let (_state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::RegistryImportPack(RegistryImportPackParams {
+                    pack: "does-not-exist".to_owned(),
+                    activate: false,
+                    scope: None,
+                }),
+            )
+            .await
+            .expect_err("unknown pack must be refused");
+        assert_eq!(err.code, IpcErrorCode::RuleInvalid);
+        assert!(
+            err.message.contains("known packs"),
+            "error must list the known packs so the agent self-corrects; got: {}",
+            err.message
+        );
+
+        handle.shutdown().await;
         cleanup(&data);
     });
 }
