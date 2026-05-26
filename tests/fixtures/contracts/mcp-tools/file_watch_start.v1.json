@@ -7,7 +7,9 @@
       "name": "file_watch_start",
       "arguments": {
         "path": "C:\\work\\app\\build.log",
-        "follow_from_beginning": false
+        "follow_from_beginning": false,
+        "bucket_config_json": "{\"max_events\": 512, \"ttl\": 300}",
+        "rules_json": "[{\"id\":\"inline-watch-error\",\"version\":1,\"kind\":\"keyword\",\"status\":\"active\",\"severity\":\"medium\",\"event_kind\":\"build_failed\",\"keywords\":[\"error\"],\"summary_template\":\"build error\",\"context_hint\":{\"before_lines\":0,\"after_lines\":0}}]"
       }
     }
   },
@@ -19,7 +21,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed file watch creation. MCP accepts only path and optional follow_from_beginning, then returns ids and a cursor; matching output is read through bucket tools."
+    "note": "Daemon-backed file watch creation. MCP accepts path, optional follow_from_beginning, and optional per-job bucket_config_json / rules_json; it returns ids and a cursor, and matching output is read through bucket tools."
   },
   "response_example": {
     "watch_id": "job_018f0000000000000000000000000002",
@@ -52,6 +54,7 @@
     "path is required",
     "follow_from_beginning is optional and defaults to tail-like follow-end behavior",
     "watch_id uses the job id wire prefix because file watches are job-addressable",
-    "success payload contains ids and cursor only, never file content or event bodies"
+    "success payload contains ids and cursor only, never file content or event bodies",
+    "optional bucket_config_json and rules_json bind a per-watch bucket override and inline rules, mapped to daemon IPC without a prior registry_activate"
   ]
 }

@@ -445,7 +445,7 @@ impl TerminalCommanderMcpServer {
                 return Err(daemon_unavailable_error(&s.current()));
             }
         }
-        let ipc = params.into_ipc();
+        let ipc = params.into_ipc()?;
         match self.daemon.call(IpcRequest::CommandStartCombed(ipc)).await {
             Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
                 job_id,
@@ -887,10 +887,12 @@ impl TerminalCommanderMcpServer {
                 return Err(daemon_unavailable_error(&s.current()));
             }
         }
+        let (bucket_config, rules) =
+            parse_bucket_and_rules(params.bucket_config_json, params.rules_json)?;
         let ipc = FileWatchStartParams {
             path: std::path::PathBuf::from(params.path),
-            bucket_config: None,
-            rules: vec![],
+            bucket_config,
+            rules,
             follow_from_beginning: params.follow_from_beginning,
         };
         match self.daemon.call(IpcRequest::FileWatchStart(ipc)).await {
@@ -977,13 +979,15 @@ impl TerminalCommanderMcpServer {
             }
         }
         let env: Vec<(String, String)> = params.env.into_iter().map(|e| (e.key, e.value)).collect();
+        let (bucket_config, rules) =
+            parse_bucket_and_rules(params.bucket_config_json, params.rules_json)?;
         let ipc = PtyCommandStartParams {
             environment: None,
             argv: params.argv,
             cwd: params.cwd.map(std::path::PathBuf::from),
             env,
-            bucket_config: None,
-            rules: vec![],
+            bucket_config,
+            rules,
             rows: params.rows,
             cols: params.cols,
         };
@@ -1275,6 +1279,30 @@ pub struct EnvEntry {
     pub value: String,
 }
 
+/// Parse the optional MCP-supplied `bucket_config_json` / `rules_json`
+/// strings into their daemon-side types. `None`/absent inputs yield
+/// `(None, vec![])`. Malformed JSON is reported as an MCP `invalid_params`
+/// error so the start tools fail fast instead of silently dropping intent.
+fn parse_bucket_and_rules(
+    bucket_config_json: Option<String>,
+    rules_json: Option<String>,
+) -> Result<(Option<BucketConfig>, Vec<RuleDefinition>), McpError> {
+    let bucket_config = bucket_config_json
+        .map(|raw| {
+            serde_json::from_str::<BucketConfig>(&raw)
+                .map_err(|e| invalid_params(format!("bucket_config_json: {e}")))
+        })
+        .transpose()?;
+    let rules = rules_json
+        .map(|raw| {
+            serde_json::from_str::<Vec<RuleDefinition>>(&raw)
+                .map_err(|e| invalid_params(format!("rules_json: {e}")))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok((bucket_config, rules))
+}
+
 /// MCP-facing parameters for `command_start_combed`. Strings + ints
 /// only so the JSON Schema stays consumer-friendly. Translated to the
 /// daemon-side `CommandStartParams` in `into_ipc`.
@@ -1293,21 +1321,31 @@ pub struct McpCommandStartParams {
     /// in milliseconds. Clamped at the daemon.
     #[serde(default)]
     pub grace_ms: Option<u64>,
+    /// Optional per-job bucket override as a JSON object
+    /// `{ "max_events": N, "ttl": <seconds> }`. Omit for daemon defaults.
+    #[serde(default)]
+    pub bucket_config_json: Option<String>,
+    /// Optional JSON array of inline `RuleDefinition`s bound to this job
+    /// only — no prior `registry_activate` required. Omit for none.
+    #[serde(default)]
+    pub rules_json: Option<String>,
 }
 
 impl McpCommandStartParams {
-    fn into_ipc(self) -> CommandStartParams {
+    fn into_ipc(self) -> Result<CommandStartParams, McpError> {
         let cwd = self.cwd.map(std::path::PathBuf::from);
         let env: Vec<(String, String)> = self.env.into_iter().map(|e| (e.key, e.value)).collect();
-        CommandStartParams {
+        let (bucket_config, rules) =
+            parse_bucket_and_rules(self.bucket_config_json, self.rules_json)?;
+        Ok(CommandStartParams {
             environment: None,
             argv: self.argv,
             cwd,
             env,
-            bucket_config: None::<BucketConfig>,
-            rules: Vec::<RuleDefinition>::new(),
+            bucket_config,
+            rules,
             grace_ms: self.grace_ms,
-        }
+        })
     }
 }
 
@@ -1691,6 +1729,14 @@ pub struct McpFileWatchStartParams {
     /// Follow from beginning (default false = follow-end / tail-like).
     #[serde(default)]
     pub follow_from_beginning: Option<bool>,
+    /// Optional per-job bucket override as a JSON object
+    /// `{ "max_events": N, "ttl": <seconds> }`. Omit for daemon defaults.
+    #[serde(default)]
+    pub bucket_config_json: Option<String>,
+    /// Optional JSON array of inline `RuleDefinition`s bound to this watch
+    /// only — no prior `registry_activate` required. Omit for none.
+    #[serde(default)]
+    pub rules_json: Option<String>,
 }
 
 /// MCP-facing parameters for `file_watch_stop`.
@@ -1717,6 +1763,14 @@ pub struct McpPtyCommandStartParams {
     pub rows: Option<u16>,
     #[serde(default)]
     pub cols: Option<u16>,
+    /// Optional per-job bucket override as a JSON object
+    /// `{ "max_events": N, "ttl": <seconds> }`. Omit for daemon defaults.
+    #[serde(default)]
+    pub bucket_config_json: Option<String>,
+    /// Optional JSON array of inline `RuleDefinition`s bound to this job
+    /// only — no prior `registry_activate` required. Omit for none.
+    #[serde(default)]
+    pub rules_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

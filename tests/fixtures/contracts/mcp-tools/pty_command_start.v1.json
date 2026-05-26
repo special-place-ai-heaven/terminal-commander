@@ -20,7 +20,9 @@
           }
         ],
         "rows": 24,
-        "cols": 80
+        "cols": 80,
+        "bucket_config_json": "{\"max_events\": 512, \"ttl\": 300}",
+        "rules_json": "[{\"id\":\"inline-pty-error\",\"version\":1,\"kind\":\"keyword\",\"status\":\"active\",\"severity\":\"medium\",\"event_kind\":\"build_failed\",\"keywords\":[\"error\"],\"summary_template\":\"error\",\"context_hint\":{\"before_lines\":0,\"after_lines\":0}}]"
       }
     }
   },
@@ -32,7 +34,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed PTY start. MCP exposes argv plus optional cwd/env/rows/cols only; success returns bounded identifiers and a bucket cursor, never a screen buffer or raw stream text."
+    "note": "Daemon-backed PTY start. MCP exposes argv plus optional cwd/env/rows/cols and optional per-job bucket_config_json / rules_json; success returns bounded identifiers and a bucket cursor, never a screen buffer or raw stream text."
   },
   "response_example": {
     "job_id": "job_018f0000000000000000000000000003",
@@ -76,7 +78,7 @@
   "invariants": [
     "argv is required and must be non-empty",
     "env is an array of key/value objects, not an object map",
-    "MCP request does not expose daemon-only environment, bucket_config, or rules fields",
+    "MCP request does not expose the daemon-only environment field, but does accept optional bucket_config_json and rules_json that map to daemon IPC without a prior registry_activate",
     "success payload contains only job_id, bucket_id, probe_id, and cursor",
     "pty_command_start is not a shell bridge and rejects shell interpreters"
   ]
