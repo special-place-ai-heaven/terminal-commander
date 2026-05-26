@@ -669,3 +669,17 @@ Track completion in the **Done** column as tasks land.
 | `tests/fixtures/contracts/mcp-tool-fixture-map.v1.json` | Fixture truth table |
 | `crates/mcp/tests/fixture_catalogue_contract.rs` | Drift guard |
 | `scripts/smoke/test-all-mcp-tools.py` | Manual / CI smoke |
+
+---
+
+## Locked decisions + folded-in scope (2026-05-26, operator-confirmed)
+
+- **Task 7 (start-surface param parity) → Option B (Expose).** Add optional `bucket_config` + inline `rules` to `McpCommandStartParams`, `McpFileWatchStartParams`, `McpPtyCommandStartParams`; map through to IPC in the handlers (replacing the hardcoded `bucket_config: None` / `rules: vec![]`). Add one live MCP test per start family proving an inline rule/bucket override takes effect without prior `registry_activate`. Update all three contract fixtures. This is the only `feat:` in the set → earns the version bump.
+- **Cadence → autonomous, all waves.** TDD every task (red → green), one conventional commit per task. Commit types: Tasks 1/2/3 `test:`, Task 4 `test:`/`fix:`, Task 5 `docs:`, Task 6 `refactor:`, Task 7 `feat:`, Task 8 `refactor:`, Tasks 9/10 `ci:`. Only `feat:`/`fix:` publish via the (now-fixed) release loop, so the set yields a single clean patch publish; operator installs + tests live.
+- **Scope folds in CI hygiene** (the release-pipeline work on 2026-05-26 surfaced these):
+
+**Task 9 — Bump CI actions off Node 20 (`ci:`).** GitHub forces Node 24 on 2026-06-02, removes Node 20 on 2026-09-16; every release/build job currently warns. Either pin `actions/checkout`, `actions/setup-node`, `actions/upload-artifact`, `actions/download-artifact`, `googleapis/release-please-action` to Node24-capable refs, or set `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true` workflow-wide (as the symforge pipeline does).
+
+**Task 10 — Fix verify-jobs `workflow_dispatch` gating (`ci:`).** `verify-{platform}` jobs in `release-please.yml` only fire on `push`; their `if:` should also accept `workflow_dispatch` so the `force_publish` recovery path is actually verified instead of skipped.
+
+**Execution note:** the release pipeline is now hands-off (release-please + release-pr-sync, fixed 2026-05-26 — see agentmemory `mem_mpmhijzd`). Each `fix:`/`feat:` commit auto-bumps + auto-publishes all 6 npm packages, so a hardened endpoint is verifiable on the *published* binary, not just CI.
