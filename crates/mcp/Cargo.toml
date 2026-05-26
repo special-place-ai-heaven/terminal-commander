@@ -26,10 +26,10 @@ schemars = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 terminal-commander-core.workspace = true
-terminal-commander-sifters    = { version = "0.1.11", path = "../sifters" } # x-release-please-version
-terminal-commander-store      = { version = "0.1.11", path = "../store" } # x-release-please-version
-terminal-commanderd           = { version = "0.1.11", path = "../daemon" } # x-release-please-version
-terminal-commander-supervisor = { path = "../supervisor", version = "0.1.11" } # x-release-please-version
+terminal-commander-sifters    = { version = "0.1.13", path = "../sifters" } # x-release-please-version
+terminal-commander-store      = { version = "0.1.13", path = "../store" } # x-release-please-version
+terminal-commanderd           = { version = "0.1.13", path = "../daemon" } # x-release-please-version
+terminal-commander-supervisor = { path = "../supervisor", version = "0.1.13" } # x-release-please-version
 thiserror = "2.0.18"
 time = "0.3.47"
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "io-std", "io-util", "net"] }
