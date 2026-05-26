@@ -470,3 +470,83 @@ fn file_watch_denies_default_deny_path() {
         cleanup(&data);
     });
 }
+
+#[test]
+fn file_watch_list_reflects_live_then_stopped_state() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let tmp = data.join("listed.log");
+        write_text(&tmp, "preexisting\n");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(3));
+
+        // Start a watch (no inline rules needed — we only assert listing).
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileWatchStart(FileWatchStartParams {
+                    path: tmp.clone(),
+                    bucket_config: None,
+                    rules: vec![],
+                    follow_from_beginning: Some(false),
+                }),
+            )
+            .await
+            .expect("watch start");
+        let ws = match resp {
+            IpcResponse::FileWatchStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // The live watch must appear in the snapshot.
+        let resp = client
+            .call(2, IpcRequest::FileWatchList)
+            .await
+            .expect("watch list");
+        let listed = match resp {
+            IpcResponse::FileWatchList(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(
+            listed.entries.iter().any(|e| e.watch_id == ws.watch_id),
+            "live watch {} must appear in file_watch_list; got {:?}",
+            ws.watch_id,
+            listed.entries
+        );
+
+        // Stop it.
+        let resp = client
+            .call(
+                3,
+                IpcRequest::FileWatchStop(FileWatchStopParams {
+                    watch_id: ws.watch_id,
+                }),
+            )
+            .await
+            .expect("watch stop");
+        match resp {
+            IpcResponse::FileWatchStop(_) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // After stop the watch must no longer be listed as live.
+        let resp = client
+            .call(4, IpcRequest::FileWatchList)
+            .await
+            .expect("watch list after stop");
+        let listed = match resp {
+            IpcResponse::FileWatchList(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(
+            !listed.entries.iter().any(|e| e.watch_id == ws.watch_id),
+            "stopped watch {} must not appear in file_watch_list; got {:?}",
+            ws.watch_id,
+            listed.entries
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}

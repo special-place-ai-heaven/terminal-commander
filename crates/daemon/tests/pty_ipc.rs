@@ -371,3 +371,95 @@ time.sleep(2)
         cleanup(&data);
     });
 }
+
+#[test]
+fn pty_command_list_reflects_live_then_stopped_state() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(3));
+
+        // Long-lived job so it is reliably live when we list it.
+        let py = "import time\ntime.sleep(2.0)\n";
+        let resp = client
+            .call(
+                1,
+                IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
+                    argv: vec![
+                        "python3".to_owned(),
+                        "-u".to_owned(),
+                        "-c".to_owned(),
+                        py.to_owned(),
+                    ],
+                    cwd: None,
+                    env: vec![],
+                    bucket_config: None,
+                    rules: vec![],
+                    rows: None,
+                    cols: None,
+                }),
+            )
+            .await
+            .expect("pty start");
+        let started = match resp {
+            IpcResponse::PtyCommandStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // The running job must appear in the snapshot.
+        let resp = client
+            .call(2, IpcRequest::PtyCommandList)
+            .await
+            .expect("pty list");
+        let listed = match resp {
+            IpcResponse::PtyCommandList(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(
+            listed.entries.iter().any(|e| e.job_id == started.job_id),
+            "running pty job {} must appear in pty_command_list; got {:?}",
+            started.job_id,
+            listed.entries
+        );
+
+        // Stop it.
+        let resp = client
+            .call(
+                3,
+                IpcRequest::PtyCommandStop(PtyCommandStopParams {
+                    job_id: started.job_id,
+                }),
+            )
+            .await
+            .expect("pty stop");
+        match resp {
+            IpcResponse::PtyCommandStop(_) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // After stop the job must no longer be listed as live.
+        let resp = client
+            .call(4, IpcRequest::PtyCommandList)
+            .await
+            .expect("pty list after stop");
+        let listed = match resp {
+            IpcResponse::PtyCommandList(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(
+            !listed.entries.iter().any(|e| e.job_id == started.job_id),
+            "stopped pty job {} must not appear in pty_command_list; got {:?}",
+            started.job_id,
+            listed.entries
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
