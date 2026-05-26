@@ -1,7 +1,11 @@
 # Spec: Agent-Ergonomics Chain (TCE-ERG)
 
-Status: Design (council-reviewed + adversarial-reviewed 2026-05-26;
-Phase 1 amended per review, ready to plan). Language: ASCII only.
+Status: Phase 1 SHIPPED 2026-05-27 (TCE-ERG-1 no-silence receipt +
+TCE-ERG-2 agent-selfish descriptions; commits 1ffed95, 176b1d9,
+867638f, 836d6d5, e2fd03a). Phases 2-3 + deferred moat remain Design.
+Council-reviewed + adversarial-reviewed 2026-05-26; Phase 1 amended
+per review (A1-A7). Plan: docs/superpowers/plans/2026-05-26-ergonomics-phase1.md.
+Language: ASCII only.
 
 ## Objective
 
