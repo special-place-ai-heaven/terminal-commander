@@ -7,6 +7,11 @@ use std::time::Duration;
 use terminal_commander_core::{BucketReadRequest, JobState};
 use terminal_commanderd::{CommandStartRequest, DaemonConfig, DaemonState};
 
+#[cfg(unix)]
+use terminal_commander_core::{
+    ContextHint, RuleDefinition, RuleStatus, RuleType, Severity, SourceStream,
+};
+
 fn tmp_data_dir(tag: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
     let pid = std::process::id();
@@ -67,6 +72,127 @@ fn command_status_counts_lifecycle_event_when_no_rules_match() {
 
         let status = state.command.status(resp.job_id).expect("status ok");
         assert_eq!(status.events_emitted, 1);
+
+        cleanup(&data);
+    });
+}
+
+/// A stdout rule matching "hello"; status=Active so it is
+/// runtime-eligible (the draft-poison gate would otherwise reject it).
+#[cfg(unix)]
+fn hello_rule() -> RuleDefinition {
+    RuleDefinition {
+        id: "lifecycle-hello".to_owned(),
+        version: 1,
+        kind: RuleType::Keyword,
+        status: RuleStatus::Active,
+        severity: Severity::Medium,
+        event_kind: "hello_seen".to_owned(),
+        stream: Some(SourceStream::Stdout),
+        description: Some("match the hello line".to_owned()),
+        pattern: None,
+        keywords: Some(vec!["hello".to_owned()]),
+        captures: vec![],
+        summary_template: "hello detected".to_owned(),
+        tags: vec!["lifecycle".to_owned()],
+        rate_limit_per_min: None,
+        redact: vec![],
+        context_hint: ContextHint::default(),
+        examples: vec![],
+    }
+}
+
+#[cfg(unix)]
+fn wait_terminal(state: &DaemonState, job_id: terminal_commander_core::JobId) {
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(40));
+        if matches!(
+            state.command.job_record(job_id).map(|r| r.state),
+            Some(JobState::Exited | JobState::Failed | JobState::Cancelled)
+        ) {
+            return;
+        }
+    }
+}
+
+// TCE-ERG-1: a command that finishes with ZERO rule-driven events must
+// return a non-empty, truthful exit receipt instead of silence.
+#[cfg(unix)]
+#[test]
+fn no_rule_command_returns_exit_receipt() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("receipt-norule");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let resp = state
+            .command
+            .start_combed(CommandStartRequest {
+                // argv-only, no shell: printf is not in
+                // SHELL_INTERPRETERS_DENY. Emits two stdout lines.
+                argv: vec!["/usr/bin/printf".to_owned(), "hello\nworld\n".to_owned()],
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                grace: None,
+            })
+            .expect("start ok");
+
+        wait_terminal(&state, resp.job_id);
+
+        let status = state.command.status(resp.job_id).expect("status ok");
+        let receipt = status
+            .receipt
+            .expect("zero-rule run must carry a no-silence receipt");
+        assert_eq!(receipt.exit_code, Some(0));
+        assert_eq!(receipt.lines_suppressed, 2);
+        assert_eq!(receipt.tail, vec!["hello".to_owned(), "world".to_owned()]);
+        assert!(!receipt.tail_incomplete);
+
+        cleanup(&data);
+    });
+}
+
+// TCE-ERG-1 carve-out (A1): when a rule matches, the "never raw output"
+// contract still holds -- no receipt tail is produced.
+#[cfg(unix)]
+#[test]
+fn rule_match_command_has_no_receipt() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("receipt-rule");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let resp = state
+            .command
+            .start_combed(CommandStartRequest {
+                // argv-only, no shell: printf is not in
+                // SHELL_INTERPRETERS_DENY. Emits two stdout lines.
+                argv: vec!["/usr/bin/printf".to_owned(), "hello\nworld\n".to_owned()],
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![hello_rule()],
+                grace: None,
+            })
+            .expect("start ok");
+
+        wait_terminal(&state, resp.job_id);
+
+        let status = state.command.status(resp.job_id).expect("status ok");
+        assert!(
+            status.receipt.is_none(),
+            "a rule match must suppress the receipt tail"
+        );
 
         cleanup(&data);
     });

@@ -8,9 +8,13 @@
 //! drives the existing runtimes through their public IPC surface,
 //! and asserts the LLM-visible contract holds under load:
 //!
-//! - Large noisy stdout never surfaces raw in MCP responses (only
+//! - Large noisy stdout never surfaces raw in the BUCKET (only
 //!   structured EventDrafts produced by sifter rules reach the
 //!   bucket; lifecycle events carry argv metadata, not stdout body).
+//!   The one sanctioned exception is the TCE-ERG-1 no-silence receipt,
+//!   which rides on `command_status` (NOT the bucket) and is populated
+//!   only when ZERO rules matched. The bucket itself never carries raw
+//!   stdout, with or without the receipt.
 //! - Matching signal lines still emit signal events.
 //! - `bucket_events_since` and `bucket_wait` payloads stay under
 //!   `MAX_BUCKET_READ_LIMIT` (10_000) events per call.
