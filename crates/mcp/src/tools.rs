@@ -437,7 +437,7 @@ impl TerminalCommanderMcpServer {
     /// `command_start_combed` — start a non-PTY argv command on the
     /// daemon and return bounded metadata. Never returns raw output.
     #[tool(
-        description = "Start a non-PTY argv command. Returns job_id, bucket_id, probe_id, initial cursor. No stdout/stderr text is returned. Shell interpreters are denied by default."
+        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. Argv only; shell interpreters are denied. Prefer plain shell for tiny one-off commands whose full output you want verbatim."
     )]
     async fn command_start_combed(
         &self,
@@ -464,7 +464,7 @@ impl TerminalCommanderMcpServer {
 
     /// `command_status` — lifecycle counters + exit info for a job.
     #[tool(
-        description = "Lookup lifecycle counters and exit info for a previously started job. Bounded; never returns raw output."
+        description = "Lookup bounded counters and exit info for a previously started job. Never returns raw stream text, with one exception: when the command finished and ZERO rules matched, a bounded exit receipt (exit code, suppressed-line count, short tail) is included so a no-rule command is never silent."
     )]
     async fn command_status(
         &self,
@@ -1076,7 +1076,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
             ))
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "Terminal Commander MCP adapter: a thin facade over the terminal-commander daemon. 29 tools (discovery, status, command/bucket/event, registry, file, PTY, runtime) each forward 1:1 to a daemon IPC method."
+                "Terminal Commander runs commands and returns STRUCTURED SIGNALS, not raw output: you define keyword/regex rules and get back only the matching events plus exit state, so you can run noisy or long-running commands without flooding your context. This saves you tokens and scrolling and lets you run commands too large to read. If no rule matches, command_status gives you a bounded receipt (exit code, suppressed-line count, short tail), never silence. Use plain shell instead for tiny, interactive, or one-off commands where the full output is small and you want it verbatim; reach for Terminal Commander when output is large, noisy, long-running, or you only care about specific signals. The adapter is a thin facade: each tool forwards 1:1 to a daemon IPC method (discovery, status, command/bucket/event, registry, file, PTY, runtime)."
                     .to_owned(),
             )
     }
