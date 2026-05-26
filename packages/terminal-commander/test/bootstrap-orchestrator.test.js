@@ -4,11 +4,15 @@
 
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
+const os = require("node:os");
+const fs = require("node:fs");
+const path = require("node:path");
 const {
   runBootstrap,
   shouldSkipBootstrap,
   isGlobalNpmInstall,
 } = require("../lib/bootstrap/orchestrator.js");
+const { runSetupHarness } = require("../lib/cli/setup_harness.js");
 
 test("shouldSkipBootstrap respects TC_SKIP_BOOTSTRAP", () => {
   assert.equal(shouldSkipBootstrap({ TC_SKIP_BOOTSTRAP: "1" }), true);
@@ -216,4 +220,54 @@ test("runBootstrap linux writes harness without WSL", async () => {
   });
   assert.equal(r.exit_code, 0);
   assert.ok(Array.isArray(r.harness_results));
+});
+
+test("runBootstrap print_config runs harness no-write and does not persist state", async () => {
+  let stateWrites = 0;
+  let harnessDryRun = "unset";
+  const r = await runBootstrap({
+    mode: "cli",
+    platform: "linux",
+    env: {
+      HOME: process.env.HOME || process.env.USERPROFILE || os.tmpdir(),
+      TC_SKIP_DAEMON_AUTOSTART: "1",
+    },
+    print_config: true,
+    acquireLock: false,
+    writeAllHarnesses: (opts) => {
+      harnessDryRun = opts.dry_run;
+      return [
+        { id: "cursor", status: "ok", dry_run: true, stanza: { type: "stdio", command: "node" } },
+      ];
+    },
+    writeState: () => {
+      stateWrites += 1;
+      return { status: "ok" };
+    },
+  });
+  assert.equal(r.exit_code, 0);
+  assert.equal(stateWrites, 0, "print_config must not persist setup.json");
+  assert.equal(harnessDryRun, true, "print_config must run harness writers in no-write mode");
+});
+
+test("setup harness --print-config forwards the flag and does not persist state", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tc-printcfg-"));
+  let stateWrites = 0;
+  try {
+    await runSetupHarness({
+      platform: "linux",
+      env: { HOME: home, USERPROFILE: home, LOCALAPPDATA: home, TC_SKIP_DAEMON_AUTOSTART: "1" },
+      flags: { "print-config": true },
+      writeAllHarnesses: () => [
+        { id: "cursor", status: "ok", dry_run: true, stanza: { type: "stdio" } },
+      ],
+      writeState: () => {
+        stateWrites += 1;
+        return { status: "ok" };
+      },
+    });
+    assert.equal(stateWrites, 0, "setup harness --print-config must not write setup.json");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

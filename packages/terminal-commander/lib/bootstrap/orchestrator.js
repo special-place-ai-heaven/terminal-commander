@@ -62,6 +62,10 @@ async function runBootstrap(opts) {
   const failSoft = mode === "install" || mode === "lazy";
   const emitOutput = o.emitOutput === true;
   const autoConfigure = mode === "install" || mode === "lazy" || o.auto_configure === true;
+  // `--print-config` is a superset of `--dry-run`: print the planned
+  // stanzas and write nothing. Both gate every filesystem write below.
+  const printConfig = o.print_config === true;
+  const noWrite = o.dry_run === true || printConfig;
 
   if (shouldSkipBootstrap(env)) {
     return {
@@ -230,7 +234,7 @@ async function runBootstrap(opts) {
 
       if (
         distro &&
-        o.dry_run !== true &&
+        !noWrite &&
         (mode === "install" || mode === "lazy") &&
         shouldInstallDaemonAutostart(env)
       ) {
@@ -251,7 +255,7 @@ async function runBootstrap(opts) {
       const localDaemon = (o.installDaemonAutostart || installDaemonAutostart)({
         platform,
         env,
-        dry_run: o.dry_run === true,
+        dry_run: noWrite,
       });
       if (localDaemon.status === AUTOSTART_STATUSES.SYSTEMD_ENABLED) {
         lines.push(`terminal-commander: ${localDaemon.hint}`);
@@ -271,7 +275,7 @@ async function runBootstrap(opts) {
       autoConfigure || o.force === true || harnessNeedsConfiguration({ platform, env });
 
     harnessResults =
-      autoConfigure || needsHarness || o.dry_run === true
+      autoConfigure || needsHarness || noWrite
         ? (o.writeAllHarnesses || writeAllHarnesses)({
       platform,
       env,
@@ -280,7 +284,7 @@ async function runBootstrap(opts) {
       requireKnownDistro: platform === "win32" && distro != null,
       force: o.force === true || autoConfigure,
       clobber_backup: o.clobber_backup === true,
-      dry_run: o.dry_run === true,
+      dry_run: noWrite,
       cursor_scope: o.cursor_scope || "global",
       projectRoot: o.projectRoot,
       providerFilter: o.providerFilter,
@@ -303,6 +307,14 @@ async function runBootstrap(opts) {
       }
     }
 
+    if (printConfig) {
+      for (const r of harnessResults) {
+        if (r && r.stanza) {
+          lines.push(`${r.id}: ${JSON.stringify(r.stanza)}`);
+        }
+      }
+    }
+
     if (failedHarnessResults.length > 0 && !failSoft) {
       if (emitOutput) logStderr(lines);
       return {
@@ -315,7 +327,7 @@ async function runBootstrap(opts) {
       };
     }
 
-    if (o.dry_run !== true) {
+    if (!noWrite) {
       const writeState = o.writeState || writeSetupJson;
       writeState({
         platform,
