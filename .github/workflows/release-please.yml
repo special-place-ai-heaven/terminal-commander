@@ -141,6 +141,35 @@ jobs:
             echo "cleared autorelease:pending on PR #${n}"
           done
 
+      # Hands-off release: auto-merge the open release PR that release-please
+      # just opened/updated. The PAT-powered merge re-triggers this workflow
+      # on the merge commit, where release-please creates the tag + GitHub
+      # Release and the publish-* jobs run. Without a PAT the merge would not
+      # trigger a new run (GITHUB_TOKEN merges are recursion-suppressed).
+      - name: Auto-merge release PR
+        if: >-
+          steps.release.outputs.releases_created != 'true' &&
+          github.event_name == 'push' &&
+          inputs.recovery_release_as == ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          PR=""
+          for attempt in 1 2 3 4 5 6; do
+            PR=$(gh pr list --state open --label "autorelease: pending" --json number --jq '.[0].number // empty')
+            if [ -n "$PR" ]; then break; fi
+            echo "attempt ${attempt}: no open release PR yet, retrying in 10s..."
+            sleep 10
+          done
+          if [ -z "$PR" ]; then
+            echo "::notice::no open release PR to auto-merge"
+            exit 0
+          fi
+          echo "auto-merging release PR #${PR}"
+          gh pr merge "$PR" --merge --delete-branch
+
       # Second pass: after merge, release-please often needs another run to
       # create the tag/GitHub Release (googleapis/release-please#2028).
       - name: release-please tag retry (post-merge)
