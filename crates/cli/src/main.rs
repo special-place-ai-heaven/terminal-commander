@@ -188,31 +188,92 @@ fn print_status() -> std::process::ExitCode {
     exit_code
 }
 
-fn run_doctor() -> u8 {
-    let mut warnings = 0_u8;
-    println!("terminal-commanderd doctor:");
-    print_check("rust toolchain present", true);
-    print_check("LICENSE present", std::path::Path::new("LICENSE").exists());
-    print_check(
-        "SECURITY.md present",
-        std::path::Path::new("SECURITY.md").exists(),
-    );
-    print_check(
-        "POLICY.md present",
-        std::path::Path::new("POLICY.md").exists(),
-    );
-    print_check(
-        "PRIVILEGE_MODEL.md present",
-        std::path::Path::new("docs/security/PRIVILEGE_MODEL.md").exists(),
-    );
-    print_check(
-        "rules/ pack directory present",
-        std::path::Path::new("rules").is_dir(),
-    );
-    if !std::path::Path::new("LICENSE").exists() {
-        warnings += 1;
+/// Locate the Terminal Commander source repo root by walking up from the
+/// current directory. Returns `None` when not running inside the repo (for
+/// example an npm- or cargo-installed binary), so the doctor avoids false
+/// `MISSING` reports for governance docs that are intentionally not shipped.
+fn find_repo_root() -> Option<std::path::PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        // The source repo root carries the workspace manifest alongside the
+        // governance docs. Require all three so an unrelated nested crate or
+        // a user's CWD never matches.
+        if dir.join("Cargo.toml").is_file()
+            && dir.join("SECURITY.md").is_file()
+            && dir.join("POLICY.md").is_file()
+        {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
     }
-    warnings
+}
+
+/// Build the doctor checks as `(label, ok)` pairs.
+///
+/// Repo mode (`repo_root` is `Some`) verifies the source-tree governance
+/// docs relative to the repo root. Installed mode (`None`) reports package
+/// readiness instead, because those docs are not part of the shipped package.
+fn doctor_checks(repo_root: Option<&std::path::Path>) -> Vec<(String, bool)> {
+    let mut checks: Vec<(String, bool)> = vec![("rust toolchain present".to_string(), true)];
+    if let Some(root) = repo_root {
+        checks.push((
+            "LICENSE present".to_string(),
+            root.join("LICENSE").is_file(),
+        ));
+        checks.push((
+            "SECURITY.md present".to_string(),
+            root.join("SECURITY.md").is_file(),
+        ));
+        checks.push((
+            "POLICY.md present".to_string(),
+            root.join("POLICY.md").is_file(),
+        ));
+        checks.push((
+            "PRIVILEGE_MODEL.md present".to_string(),
+            root.join("docs/security/PRIVILEGE_MODEL.md").is_file(),
+        ));
+        checks.push((
+            "rules/ pack directory present".to_string(),
+            root.join("rules").is_dir(),
+        ));
+    } else {
+        // Installed/package mode: governance docs ship with the repo, not
+        // the package. Report package readiness instead of false MISSING.
+        checks.push((
+            "installed package mode (repo docs not applicable)".to_string(),
+            true,
+        ));
+        checks.push((
+            "terminal-commander version reported".to_string(),
+            !env!("CARGO_PKG_VERSION").is_empty(),
+        ));
+    }
+    checks
+}
+
+/// Count warning-level failures. Only a missing `LICENSE` in repo mode is a
+/// warning; installed mode never warns on repo docs.
+fn doctor_warnings(repo_root: Option<&std::path::Path>, checks: &[(String, bool)]) -> u8 {
+    // Installed mode never warns on repo docs (they are not shipped).
+    if repo_root.is_none() {
+        return 0;
+    }
+    u8::from(
+        checks
+            .iter()
+            .any(|(label, ok)| label == "LICENSE present" && !*ok),
+    )
+}
+fn run_doctor() -> u8 {
+    let repo_root = find_repo_root();
+    println!("terminal-commanderd doctor:");
+    let checks = doctor_checks(repo_root.as_deref());
+    for (label, ok) in &checks {
+        print_check(label, *ok);
+    }
+    doctor_warnings(repo_root.as_deref(), &checks)
 }
 
 fn print_check(label: &str, ok: bool) {
@@ -267,5 +328,33 @@ mod tests {
         // whether a daemon is live on the probe endpoint.
         let cli = Cli::parse_from(["terminal-commander", "status"]);
         let _code = run(cli);
+    }
+
+    #[test]
+    fn doctor_installed_mode_has_no_repo_doc_checks_and_no_warnings() {
+        // Installed/package mode: repo governance docs are intentionally not
+        // shipped, so the doctor must not assert their presence or warn.
+        let checks = doctor_checks(None);
+        assert!(
+            checks.iter().all(|(label, _)| label != "LICENSE present"
+                && label != "SECURITY.md present"
+                && label != "POLICY.md present"
+                && label != "PRIVILEGE_MODEL.md present"),
+            "installed mode must not assert repo governance docs"
+        );
+        assert_eq!(doctor_warnings(None, &checks), 0);
+    }
+
+    #[test]
+    fn doctor_repo_mode_flags_missing_license_as_warning() {
+        // Repo mode resolves docs against the discovered root, not the CWD.
+        let root = std::path::Path::new("nonexistent-tc-repo-root-xyz");
+        let checks = doctor_checks(Some(root));
+        let license = checks
+            .iter()
+            .find(|(label, _)| label == "LICENSE present")
+            .expect("repo mode must check LICENSE");
+        assert!(!license.1, "LICENSE under a fake root must be MISSING");
+        assert_eq!(doctor_warnings(Some(root), &checks), 1);
     }
 }
