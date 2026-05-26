@@ -50,6 +50,34 @@ pub struct ImportResult {
     pub skipped: Vec<String>,
 }
 
+/// The seven seed packs, embedded so the daemon needs no repo checkout
+/// at runtime. Paths are relative to THIS source file
+/// (`crates/store/src/import.rs`; repo root is `../../../`).
+const SEED_PACKS: &[(&str, &str)] = &[
+    (
+        "generic.terminal",
+        include_str!("../../../rules/generic.terminal.json"),
+    ),
+    ("apt", include_str!("../../../rules/apt.json")),
+    ("cargo", include_str!("../../../rules/cargo.json")),
+    ("npm", include_str!("../../../rules/npm.json")),
+    ("pytest", include_str!("../../../rules/pytest.json")),
+    ("gcc", include_str!("../../../rules/gcc.json")),
+    ("make", include_str!("../../../rules/make.json")),
+];
+
+/// Resolve a pack name to its embedded JSON, or `None` if unknown.
+#[must_use]
+pub fn resolve_pack_json(name: &str) -> Option<&'static str> {
+    SEED_PACKS.iter().find(|(n, _)| *n == name).map(|(_, j)| *j)
+}
+
+/// The list of known pack names (for teaching errors).
+#[must_use]
+pub fn known_pack_names() -> Vec<&'static str> {
+    SEED_PACKS.iter().map(|(n, _)| *n).collect()
+}
+
 impl EventStore {
     /// Import a rule pack from a JSON file at `path`. Returns a
     /// per-pack result summarizing imported and skipped rules.
@@ -65,6 +93,41 @@ impl EventStore {
     /// for tests and admin-driven imports.
     pub fn import_rule_pack_str(&mut self, json: &str) -> Result<ImportResult> {
         let parsed: RulePackFile = sj::from_str(json)?;
+        self.import_parsed_pack(parsed)
+    }
+
+    /// Import an embedded pack by NAME. When `promote_active` is true,
+    /// each rule is stored with `status = Active` (so the caller can
+    /// activate it through the normal eligibility gate). When false,
+    /// rules keep their on-disk status (typically Draft, the vetting
+    /// path).
+    ///
+    /// Returns `InvalidPayload` for an unknown pack name, with the
+    /// known names listed so the caller can self-correct.
+    pub fn import_rule_pack_by_name(
+        &mut self,
+        name: &str,
+        promote_active: bool,
+    ) -> Result<ImportResult> {
+        let json = resolve_pack_json(name).ok_or_else(|| {
+            EventStoreError::InvalidPayload(format!(
+                "unknown rule pack '{name}'; known packs: {}",
+                known_pack_names().join(", ")
+            ))
+        })?;
+        let mut parsed: RulePackFile = sj::from_str(json)?;
+        if promote_active {
+            for rule in &mut parsed.rules {
+                rule.status = terminal_commander_core::RuleStatus::Active;
+            }
+        }
+        self.import_parsed_pack(parsed)
+    }
+
+    /// Shared import loop: validate each rule, bounded-compile regex
+    /// rules, and insert via `create_rule_version`. Skipped rules are
+    /// reported, not fatal.
+    fn import_parsed_pack(&mut self, parsed: RulePackFile) -> Result<ImportResult> {
         let pack = parsed.meta.pack.clone();
         let mut imported = Vec::new();
         let mut skipped = Vec::new();
@@ -105,6 +168,49 @@ impl EventStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_pack_names_resolve_to_json() {
+        assert!(resolve_pack_json("cargo").is_some());
+        assert!(resolve_pack_json("pytest").is_some());
+        assert!(resolve_pack_json("nope").is_none());
+    }
+
+    #[test]
+    fn known_pack_names_lists_all_seven() {
+        let names = known_pack_names();
+        assert_eq!(names.len(), 7);
+        assert!(names.contains(&"cargo"));
+        assert!(names.contains(&"generic.terminal"));
+    }
+
+    #[test]
+    fn import_by_name_active_promotes_status() {
+        let mut s = EventStore::in_memory().unwrap();
+        let res = s.import_rule_pack_by_name("cargo", true).unwrap();
+        assert_eq!(res.pack, "cargo");
+        assert!(!res.imported.is_empty());
+        for id in &res.imported {
+            let got = s.get_latest_rule(id).unwrap().unwrap();
+            assert_eq!(got.status, terminal_commander_core::RuleStatus::Active);
+        }
+    }
+
+    #[test]
+    fn import_by_name_draft_keeps_status() {
+        let mut s = EventStore::in_memory().unwrap();
+        let res = s.import_rule_pack_by_name("cargo", false).unwrap();
+        for id in &res.imported {
+            let got = s.get_latest_rule(id).unwrap().unwrap();
+            assert_eq!(got.status, terminal_commander_core::RuleStatus::Draft);
+        }
+    }
+
+    #[test]
+    fn import_by_unknown_name_is_err() {
+        let mut s = EventStore::in_memory().unwrap();
+        assert!(s.import_rule_pack_by_name("nope", false).is_err());
+    }
 
     fn pack_minimal() -> &'static str {
         r#"{
