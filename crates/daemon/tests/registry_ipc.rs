@@ -401,6 +401,67 @@ fn registry_activate_then_list_then_deactivate() {
 }
 
 #[test]
+fn registry_activate_rejects_draft_rule_with_typed_error() {
+    // Agent-ergonomics regression: a Draft rule must NOT activate.
+    // Before the gate, activate() blindly inserted the draft into the
+    // active set, then every command_start in scope failed at sifter
+    // build with SifterError::NotActive (the draft-poison footgun).
+    // The fix refuses up front with IpcErrorCode::RuleNotActive and a
+    // remedy in the message.
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("draftact");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+
+        // Upsert a rule explicitly in Draft status.
+        let mut def = kw_rule("kw-draft", "needle", "draft_match");
+        def.status = RuleStatus::Draft;
+        client
+            .call(
+                1,
+                IpcRequest::RegistryUpsert(RegistryUpsertParams { definition: def }),
+            )
+            .await
+            .expect("upsert draft");
+
+        // Activation must be refused with the typed code.
+        let err = client
+            .call(
+                2,
+                IpcRequest::RegistryActivate(RegistryActivateParams {
+                    rule_id: "kw-draft".to_owned(),
+                    version: None,
+                    scope: Some(terminal_commander_core::ActivationScope::Global),
+                }),
+            )
+            .await
+            .expect_err("activating a Draft rule must be refused");
+        assert_eq!(err.code, IpcErrorCode::RuleNotActive);
+        // The message must carry the remedy so the LLM self-corrects.
+        assert!(
+            err.message.contains("status") && err.message.contains("active"),
+            "error message must name the status remedy; got: {}",
+            err.message
+        );
+
+        // Critically: the draft must NOT be in the active set. A failed
+        // activation must not poison the scope.
+        assert!(
+            !state.activation.is_active(
+                "kw-draft",
+                1,
+                terminal_commander_core::ActivationScope::Global
+            ),
+            "a refused activation must not bind the rule"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
 fn registry_search_finds_upserted_rule_by_tag() {
     let runtime = rt();
     runtime.block_on(async {
@@ -441,6 +502,57 @@ fn registry_search_finds_upserted_rule_by_tag() {
         );
 
         handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn draft_activation_row_does_not_rehydrate_on_restart() {
+    // Defense-in-depth regression for the draft-poison footgun. The IPC
+    // activate handler refuses Draft rules, but a row persisted by an
+    // older binary (pre-gate) must not silently rehydrate into the live
+    // activation set on restart and re-block every command in scope.
+    // We simulate the legacy state by writing the activation row through
+    // the store directly (bypassing the IPC gate), then boot the daemon
+    // and assert the Draft rule is NOT active.
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("draftrehydrate");
+        let cfg = DaemonConfig::defaults_in(&data);
+
+        // First boot: upsert a Draft rule and force a persistent
+        // activation row for it, mimicking a pre-fix daemon that bound
+        // the draft before the gate existed.
+        {
+            let state = Arc::new(DaemonState::bootstrap(cfg.clone()).unwrap());
+            let mut def = kw_rule("kw-legacy-draft", "needle", "legacy_match");
+            def.status = RuleStatus::Draft;
+            {
+                let mut g = state.store.lock();
+                g.create_rule_version(&def).expect("persist draft rule");
+                g.record_activation_scoped(
+                    "kw-legacy-draft",
+                    1,
+                    terminal_commander_core::ActivationScope::Global,
+                    None,
+                    Some("test-legacy"),
+                )
+                .expect("force legacy activation row");
+            }
+        }
+
+        // Second boot: rehydration must skip the non-eligible draft.
+        {
+            let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+            assert!(
+                !state.activation.is_active(
+                    "kw-legacy-draft",
+                    1,
+                    terminal_commander_core::ActivationScope::Global
+                ),
+                "a persisted Draft activation must NOT rehydrate as active"
+            );
+        }
         cleanup(&data);
     });
 }

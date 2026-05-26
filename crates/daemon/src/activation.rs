@@ -63,6 +63,15 @@ impl ActivationRegistry {
     pub fn from_entries(entries: Vec<ActivationEntry>) -> Self {
         let me = Self::new();
         for e in entries {
+            // Defense in depth against the draft-poison footgun: the IPC
+            // activate handler refuses non-Active rules, but a row
+            // persisted before that gate existed (or written by any
+            // future non-IPC path) must not silently rehydrate into the
+            // live set on restart and re-block every command in scope.
+            // Skip anything not runtime-eligible.
+            if !e.definition.status.is_runtime_eligible() {
+                continue;
+            }
             me.activate(e.definition, e.scope);
         }
         me
@@ -84,6 +93,22 @@ impl ActivationRegistry {
     /// Idempotent: re-activating the same key replaces the stored
     /// definition.
     pub fn activate(&self, def: RuleDefinition, scope: ActivationScope) {
+        // Defense in depth: never let a non-runtime-eligible rule enter
+        // the live activation set, regardless of caller. The IPC handler
+        // already rejects Draft activations up front with a typed error;
+        // this guard means any other present-or-future caller cannot
+        // reintroduce the draft-poison footgun by binding a Draft /
+        // Deprecated / Tombstoned definition. A blocked rule simply is
+        // not stored, so command starts in scope are never poisoned.
+        if !def.status.is_runtime_eligible() {
+            debug_assert!(
+                false,
+                "activate() called with non-eligible rule '{}' v{} (status {:?}); \
+                 callers must gate on is_runtime_eligible first",
+                def.id, def.version, def.status
+            );
+            return;
+        }
         let key = (def.id.clone(), def.version, scope);
         self.by_key.write().insert(key, def);
     }

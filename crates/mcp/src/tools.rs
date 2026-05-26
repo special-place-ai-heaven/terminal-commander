@@ -1111,7 +1111,12 @@ pub fn into_mcp_error(e: &IpcError) -> McpError {
         IpcErrorCode::PolicyDenied
         | IpcErrorCode::UnknownMethod
         | IpcErrorCode::SchemaMismatch
-        | IpcErrorCode::ScopeInvalid => McpError::invalid_params(message, Some(data)),
+        | IpcErrorCode::ScopeInvalid
+        // RuleNotActive is a caller-fixable input error (activate a
+        // Draft rule): surface it as invalid_params with the remedy,
+        // not internal_error, so the LLM self-corrects instead of
+        // treating the tool as broken.
+        | IpcErrorCode::RuleNotActive => McpError::invalid_params(message, Some(data)),
         _ => McpError::internal_error(message, Some(data)),
     }
 }

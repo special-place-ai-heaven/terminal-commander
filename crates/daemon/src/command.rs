@@ -798,17 +798,34 @@ fn merge_active_and_inline(
     active: &[terminal_commander_core::RuleDefinition],
     inline: &[terminal_commander_core::RuleDefinition],
 ) -> Vec<terminal_commander_core::RuleDefinition> {
+    // Defense in depth against the draft-poison footgun. Only
+    // runtime-eligible (Active) rules may reach `SifterRuntime::build`.
+    // Filtering here means:
+    //   * a daemon already holding a Draft entry (bound by a pre-gate
+    //     binary) no longer fails EVERY command_start with a scope-wide
+    //     `SifterError::NotActive` -> the live poison self-heals: the
+    //     bad rule is skipped, the command runs, other rules still fire;
+    //   * a non-eligible INLINE rule on a single command is skipped for
+    //     that command instead of hard-failing the start.
+    // The IPC activate gate still rejects new Draft activations up front
+    // with the clear `RuleNotActive` remedy; this is the last-line guard
+    // so no path can turn a non-Active rule into a blocked command.
     let mut seen: std::collections::HashSet<(String, u32)> = std::collections::HashSet::new();
     for r in inline {
         seen.insert((r.id.clone(), r.version));
     }
     let mut out = Vec::with_capacity(active.len() + inline.len());
     for r in active {
-        if !seen.contains(&(r.id.clone(), r.version)) {
+        if r.status.is_runtime_eligible() && !seen.contains(&(r.id.clone(), r.version)) {
             out.push(r.clone());
         }
     }
-    out.extend(inline.iter().cloned());
+    out.extend(
+        inline
+            .iter()
+            .filter(|r| r.status.is_runtime_eligible())
+            .cloned(),
+    );
     out
 }
 

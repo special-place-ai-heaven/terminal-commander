@@ -1101,6 +1101,25 @@ fn handle_registry_activate(
     })?;
     let def = lookup_rule_def(state, &params.rule_id, params.version)?;
     let version = def.version;
+    // Agent-ergonomics: refuse to bind a rule whose status is not
+    // runtime-eligible. Without this gate a Draft rule activates
+    // "successfully", then the sifter runtime rejects it at every
+    // command_start with SifterError::NotActive, blocking every
+    // newly-started command in scope (the draft-poison footgun).
+    // Fail up front with the remedy in the message so the LLM can
+    // self-correct in one step instead of debugging a global stall.
+    if !def.status.is_runtime_eligible() {
+        return Err(IpcError::new(
+            IpcErrorCode::RuleNotActive,
+            format!(
+                "rule '{}' v{version} has status {:?}, which is not runtime-eligible; \
+                 only Active rules can be activated. Remedy: re-upsert the rule with \
+                 \"status\":\"active\" (then activate), or pass it inline via the \
+                 command's rules_json with \"status\":\"active\".",
+                def.id, def.status
+            ),
+        ));
+    }
     validate_scope_against_live_jobs(state, scope)?;
     let was_already_active = state.activation.is_active(&def.id, version, scope);
     // In-memory authority first so a concurrent command_start picks

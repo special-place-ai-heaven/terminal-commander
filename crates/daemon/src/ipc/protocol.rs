@@ -335,6 +335,15 @@ pub enum IpcErrorCode {
     /// `probe_status` referenced a probe id the daemon does not
     /// know across any of its runtimes.
     UnknownProbe,
+    /// `registry_activate` referenced a rule whose status is not
+    /// runtime-eligible (Draft / Deprecated / Tombstoned). Activating
+    /// a non-Active rule would silently bind a definition the sifter
+    /// runtime then rejects at command-start time with
+    /// `SifterError::NotActive`, blocking every newly-started command
+    /// in scope. The activation is refused up front with the remedy
+    /// in the message (promote the rule to status=Active and re-upsert)
+    /// rather than poisoning the scope. See the agent-ergonomics chain.
+    RuleNotActive,
 }
 
 /// Structured error payload.
