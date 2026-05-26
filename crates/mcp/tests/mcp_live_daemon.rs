@@ -5,10 +5,10 @@
 //!
 //! Stands up a real `terminal-commanderd` UDS IPC server in a temp
 //! directory, mounts the rmcp stdio adapter on a duplex transport
-//! pointed at it, and verifies the live discovery/status round trip:
+//! pointed at it, and verifies the live tool round trip:
 //!
 //! - MCP `initialize` succeeds.
-//! - `list_tools` returns exactly the four TC40 live tools.
+//! - `list_tools` returns the full TC45 tool set (29 live tools).
 //! - `health` forwards through UDS and returns a payload that decodes
 //!   to a real `uptime_secs` field (i.e. the daemon answered).
 //! - `system_discover` forwards through UDS, the `daemon` field is

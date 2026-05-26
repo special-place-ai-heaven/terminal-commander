@@ -8,7 +8,7 @@
 // restructure, per Task 3.5.5 "do not change tool implementations".
 #![allow(clippy::collapsible_if, clippy::items_after_statements)]
 
-//! MCP tool surface served by the rmcp stdio adapter (TC40).
+//! MCP tool surface served by the rmcp stdio adapter.
 //!
 //! This module defines [`TerminalCommanderMcpServer`], the rmcp
 //! `ServerHandler` that the binary mounts on the stdio transport. The
@@ -17,17 +17,15 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! Tool set at TC40 — discovery and status only:
-//! - `system_discover` — version, MCP spec, advertised tool list.
-//! - `health` — daemon liveness ping with uptime.
-//! - `policy_status` — active policy profile + bounded caps.
-//! - `self_check` — re-run the daemon self-check; bounded report.
+//! [`tool_catalogue`] is the single source of truth for the 29 live
+//! tools, spanning discovery (`system_discover`), status (`health`,
+//! `policy_status`, `self_check`), command/bucket/event, registry,
+//! file, PTY, and aggregate runtime views. Each maps 1:1 to a daemon
+//! IPC method. `system_discover` is the only daemon-independent tool;
+//! every other tool returns the structured `daemon_unavailable`
+//! envelope when the daemon is unreachable.
 //!
-//! Bucket / event-context / command tools are deferred to TC41 per
-//! the goal's forbidden list. `system_discover` reports them as
-//! `not_implemented` so MCP clients never see a phantom tool.
-//!
-//! Source-status: live (TC40) for the four enumerated tools.
+//! Source-status: live; all 29 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -1164,7 +1162,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
             ))
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "Terminal Commander MCP adapter. Discovery/status tools only at TC40; bucket and command tools land in TC41."
+                "Terminal Commander MCP adapter: a thin facade over the terminal-commander daemon. 29 tools (discovery, status, command/bucket/event, registry, file, PTY, runtime) each forward 1:1 to a daemon IPC method."
                     .to_owned(),
             )
     }

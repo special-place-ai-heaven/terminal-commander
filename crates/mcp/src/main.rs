@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! `terminal-commander-mcp`: real rmcp stdio MCP adapter (TC40).
+//! `terminal-commander-mcp`: real rmcp stdio MCP adapter.
 //!
 //! Boots an rmcp `ServerHandler` over the stdio transport and forwards
 //! every tool call through the daemon IPC client. This crate:
@@ -9,8 +9,8 @@
 //! - does NOT spawn child commands (`Command::spawn` is forbidden),
 //! - does NOT open network sockets (`TcpListener`/`UdpSocket` forbidden),
 //! - does NOT open files outside its own config / daemon IPC path,
-//! - exposes ONLY discovery / status tools at TC40
-//!   (`system_discover`, `health`, `policy_status`, `self_check`).
+//! - exposes the full daemon tool surface (29 tools), each forwarded
+//!   1:1 to a daemon IPC method.
 //!
 //! Platform: Unix (UDS) and Windows (named pipe). Both transports are
 //! handled by `terminal_commanderd::DaemonClient` and the supervisor
@@ -40,7 +40,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
     version,
     about = "Terminal Commander MCP stdio adapter",
     long_about = "Thin MCP stdio adapter for the Terminal Commander daemon.\n\
-                  Serves a small discovery/status tool surface over MCP and\n\
+                  Serves the daemon tool surface over MCP and\n\
                   forwards every call to the daemon over its local IPC.\n\
                   Does NOT spawn commands, open network sockets, or read\n\
                   arbitrary files."

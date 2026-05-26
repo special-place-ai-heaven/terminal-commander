@@ -96,8 +96,8 @@ pub const DEFAULT_CONTEXT_AFTER: u32 = 5;
 pub const MAX_CONTEXT_BYTES: usize = 64 * 1024;
 
 /// Method-typed request union. Method names are namespaced
-/// `<domain>_<verb>` (matching the MCP tool naming so the eventual
-/// rmcp adapter at TC40 maps 1:1).
+/// `<domain>_<verb>` to match the MCP tool names; the rmcp adapter
+/// maps each tool 1:1 to a method. All 29 methods are live through TC45.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum IpcRequest {
