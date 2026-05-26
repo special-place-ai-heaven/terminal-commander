@@ -527,10 +527,7 @@ async fn dispatch(
             Ok(r) => ("pty_command_stop", IpcResult::Ok { response: r }),
             Err(e) => ("pty_command_stop", IpcResult::Err { error: e }),
         },
-        IpcRequest::PtyCommandList => match handle_pty_command_list(state) {
-            Ok(r) => ("pty_command_list", IpcResult::Ok { response: r }),
-            Err(e) => ("pty_command_list", IpcResult::Err { error: e }),
-        },
+        IpcRequest::PtyCommandList => dispatch_pty_command_list(state),
         IpcRequest::RuntimeState => {
             let r = handle_runtime_state(state);
             ("runtime_state", IpcResult::Ok { response: r })
@@ -1710,6 +1707,14 @@ fn handle_pty_command_list(_state: &Arc<DaemonState>) -> Result<IpcResponse, Ipc
     Err(pty_ipc_unsupported())
 }
 
+#[cfg(not(unix))]
+fn dispatch_pty_command_list(state: &Arc<DaemonState>) -> (&'static str, IpcResult) {
+    match handle_pty_command_list(state) {
+        Ok(r) => ("pty_command_list", IpcResult::Ok { response: r }),
+        Err(e) => ("pty_command_list", IpcResult::Err { error: e }),
+    }
+}
+
 #[cfg(unix)]
 fn handle_pty_command_start(
     state: &Arc<DaemonState>,
@@ -2004,7 +2009,7 @@ fn handle_probe_status(
 }
 
 #[cfg(unix)]
-fn handle_pty_command_list(state: &Arc<DaemonState>) -> Result<IpcResponse, IpcError> {
+fn handle_pty_command_list(state: &Arc<DaemonState>) -> IpcResponse {
     let entries: Vec<PtyCommandListEntry> = state
         .pty
         .list()
@@ -2024,9 +2029,13 @@ fn handle_pty_command_list(state: &Arc<DaemonState>) -> Result<IpcResponse, IpcE
             },
         )
         .collect();
-    Ok(IpcResponse::PtyCommandList(PtyCommandListResponse {
-        entries,
-    }))
+    IpcResponse::PtyCommandList(PtyCommandListResponse { entries })
+}
+
+#[cfg(unix)]
+fn dispatch_pty_command_list(state: &Arc<DaemonState>) -> (&'static str, IpcResult) {
+    let r = handle_pty_command_list(state);
+    ("pty_command_list", IpcResult::Ok { response: r })
 }
 
 fn handle_file_watch_list(state: &Arc<DaemonState>) -> IpcResponse {
