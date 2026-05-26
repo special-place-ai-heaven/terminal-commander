@@ -1,15 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! TC40 integration test: daemon_unavailable envelope (Task 6 / TC40).
+//! Integration test: `daemon_unavailable` envelope coverage.
 //!
 //! Verifies that when the MCP adapter is started with a
-//! `DaemonStatusHandle` that reports `Unavailable`, every daemon-requiring
+//! `DaemonStatusHandle` that reports `Unavailable`, **every** daemon-backed
 //! tool call returns a structured `daemon_unavailable` MCP error envelope
 //! rather than a raw transport-level connection error.
 //!
-//! `system_discover` is the only daemon-independent tool. Other tools may
-//! fail through their own typed IPC paths unless guarded explicitly.
+//! Coverage is table-driven: the test iterates the live `tool_catalogue()`
+//! and exercises all 28 daemon-backed tools (every tool except
+//! `system_discover`). `minimal_tool_args` supplies the minimal required
+//! arguments per tool so rmcp's `Parameters` deserialization succeeds and the
+//! availability guard — which fires before any argument parsing — is the code
+//! path under test. Driving off the catalogue means new tools are covered
+//! automatically and cannot drift out of this guarantee.
+//!
+//! `system_discover` is the only daemon-independent tool; it has its own test
+//! asserting it stays callable and labels daemon-backed tools honestly.
 //!
 //! Uses the same in-process duplex transport as `mcp_stdio.rs` — no
 //! real daemon, no process spawn, no unix socket required.
@@ -26,7 +34,7 @@ use rmcp::model::CallToolRequestParams;
 use rmcp::{ClientHandler, ServiceExt};
 
 use terminal_commander_mcp::daemon_client::{DaemonStatusHandle, McpDaemonClient};
-use terminal_commander_mcp::tools::TerminalCommanderMcpServer;
+use terminal_commander_mcp::tools::{TerminalCommanderMcpServer, tool_catalogue};
 use terminal_commander_supervisor::ensure::{
     DaemonUnavailableReason, Diagnostics, Endpoint, EnsureDaemonStatus,
 };
@@ -104,28 +112,6 @@ async fn initialize_and_list_tools_works_when_daemon_unavailable() {
     let _ = client.cancel().await;
 }
 
-// ---------------------------------------------------------------------------
-// Test: daemon-requiring tool returns daemon_unavailable envelope
-// ---------------------------------------------------------------------------
-
-/// Assert a single daemon-requiring tool call returns the
-/// `daemon_unavailable` structured error envelope (not a panic, not a raw
-/// transport error).
-async fn assert_daemon_unavailable_envelope(
-    client: &rmcp::service::RunningService<rmcp::RoleClient, TestClient>,
-    tool: &str,
-) {
-    let params = CallToolRequestParams::new(tool.to_owned());
-    let err = client.call_tool(params).await.expect_err(&format!(
-        "expected error from {tool} when daemon unavailable"
-    ));
-    let rendered = err.to_string();
-    assert!(
-        rendered.contains("daemon_unavailable"),
-        "tool `{tool}` must return daemon_unavailable envelope, got: {rendered}"
-    );
-}
-
 fn first_text(result: &rmcp::model::CallToolResult) -> String {
     for item in &result.content {
         if let Some(text) = item.as_text() {
@@ -135,61 +121,78 @@ fn first_text(result: &rmcp::model::CallToolResult) -> String {
     panic!("expected text content in call result");
 }
 
+/// Minimal valid arguments for each daemon-backed tool, sufficient to pass
+/// rmcp `Parameters` deserialization so the daemon-status guard — not a
+/// schema-validation error — is what fires. IDs need not be semantically
+/// valid: every handler checks `daemon.status().is_unavailable()` before it
+/// parses any typed id.
+fn minimal_tool_args(tool: &str) -> serde_json::Value {
+    match tool {
+        "command_start_combed" | "pty_command_start" => serde_json::json!({ "argv": ["ls"] }),
+        "command_status" | "pty_command_stop" => serde_json::json!({ "job_id": "job_x" }),
+        "pty_command_write_stdin" => serde_json::json!({ "job_id": "job_x", "bytes": "x" }),
+        "bucket_events_since" | "bucket_wait" => {
+            serde_json::json!({ "bucket_id": "bkt_x", "cursor": 0 })
+        }
+        "bucket_summary" => serde_json::json!({ "bucket_id": "bkt_x" }),
+        "event_context" => serde_json::json!({ "bucket_id": "bkt_x", "event_id": "evt_x" }),
+        "registry_search" => serde_json::json!({ "query": "x" }),
+        "registry_get" | "registry_activate" => serde_json::json!({ "rule_id": "rule_x" }),
+        "registry_upsert" => serde_json::json!({ "definition_json": "{}" }),
+        "registry_test" => serde_json::json!({ "rule_id": "rule_x", "samples": [] }),
+        "registry_deactivate" => serde_json::json!({ "rule_id": "rule_x", "version": 1 }),
+        "file_read_window" | "file_watch_start" => {
+            serde_json::json!({ "path": "/tmp/tc-unavail" })
+        }
+        "file_search" => serde_json::json!({ "path": "/tmp/tc-unavail", "query": "q" }),
+        "file_watch_stop" => serde_json::json!({ "watch_id": "job_x" }),
+        "probe_status" => serde_json::json!({ "probe_id": "prb_x" }),
+        // health, policy_status, self_check, *_list, runtime_state, probe_list,
+        // registry_list_active take no required arguments.
+        _ => serde_json::json!({}),
+    }
+}
+
+/// Table-driven contract: every daemon-backed tool (all catalogue entries
+/// except `system_discover`) must return the structured `daemon_unavailable`
+/// envelope when the adapter starts with an `Unavailable` daemon status —
+/// not a raw transport error and not a schema-validation error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn command_start_combed_returns_daemon_unavailable() {
+async fn all_daemon_backed_tools_return_daemon_unavailable() {
     let (_server, client) = paired_service_unavailable().await;
-    // command_start_combed requires `argv` — supply minimal valid args so that
-    // rmcp's Parameters macro can deserialize them before the guard fires.
-    let args: rmcp::model::JsonObject = serde_json::from_value(serde_json::json!({
-        "argv": ["ls"]
-    }))
-    .expect("json args");
-    let params = rmcp::model::CallToolRequestParams::new("command_start_combed".to_owned())
-        .with_arguments(args);
-    let err = client
-        .call_tool(params)
-        .await
-        .expect_err("expected error from command_start_combed when daemon unavailable");
-    let rendered = err.to_string();
+
+    let mut offenders: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for entry in tool_catalogue() {
+        let tool = entry.name;
+        if tool == "system_discover" {
+            continue;
+        }
+        checked += 1;
+
+        let args: rmcp::model::JsonObject =
+            serde_json::from_value(minimal_tool_args(tool)).expect("minimal args object");
+        let params = CallToolRequestParams::new(tool.to_owned()).with_arguments(args);
+
+        let Err(err) = client.call_tool(params).await else {
+            offenders.push(format!("{tool}: call unexpectedly succeeded"));
+            continue;
+        };
+        let rendered = err.to_string();
+        if !rendered.contains("daemon_unavailable") {
+            offenders.push(format!("{tool}: {rendered}"));
+        }
+    }
+
     assert!(
-        rendered.contains("daemon_unavailable"),
-        "tool `command_start_combed` must return daemon_unavailable envelope, got: {rendered}"
+        offenders.is_empty(),
+        "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
-    let _ = client.cancel().await;
-}
+    assert_eq!(
+        checked, 28,
+        "expected 28 daemon-backed tools (29 catalogue entries minus system_discover)"
+    );
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn runtime_state_returns_daemon_unavailable() {
-    let (_server, client) = paired_service_unavailable().await;
-    assert_daemon_unavailable_envelope(&client, "runtime_state").await;
-    let _ = client.cancel().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn probe_list_returns_daemon_unavailable() {
-    let (_server, client) = paired_service_unavailable().await;
-    assert_daemon_unavailable_envelope(&client, "probe_list").await;
-    let _ = client.cancel().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn registry_list_active_returns_daemon_unavailable() {
-    let (_server, client) = paired_service_unavailable().await;
-    assert_daemon_unavailable_envelope(&client, "registry_list_active").await;
-    let _ = client.cancel().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn file_watch_list_returns_daemon_unavailable() {
-    let (_server, client) = paired_service_unavailable().await;
-    assert_daemon_unavailable_envelope(&client, "file_watch_list").await;
-    let _ = client.cancel().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pty_command_list_returns_daemon_unavailable() {
-    let (_server, client) = paired_service_unavailable().await;
-    assert_daemon_unavailable_envelope(&client, "pty_command_list").await;
     let _ = client.cancel().await;
 }
 
@@ -250,28 +253,5 @@ async fn system_discover_succeeds_when_daemon_unavailable() {
             );
         }
     }
-    let _ = client.cancel().await;
-}
-
-/// Discovery marks `health` as daemon-backed, so call-time behavior must use
-/// the same `daemon_unavailable` envelope.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn health_returns_daemon_unavailable_envelope() {
-    let (_server, client) = paired_service_unavailable().await;
-    assert_daemon_unavailable_envelope(&client, "health").await;
-    let _ = client.cancel().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn policy_status_returns_daemon_unavailable_envelope() {
-    let (_server, client) = paired_service_unavailable().await;
-    assert_daemon_unavailable_envelope(&client, "policy_status").await;
-    let _ = client.cancel().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn self_check_returns_daemon_unavailable_envelope() {
-    let (_server, client) = paired_service_unavailable().await;
-    assert_daemon_unavailable_envelope(&client, "self_check").await;
     let _ = client.cancel().await;
 }
