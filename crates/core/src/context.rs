@@ -194,6 +194,20 @@ pub struct ContextWindowResponse {
     pub evicted_frames: u64,
 }
 
+/// Bounded tail of a probe ring. Used by the no-silence exit receipt
+/// (TCE-ERG-1) when a command finished with zero rule-driven events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RingTail {
+    /// Last N frame texts in chronological order (oldest first).
+    pub lines: Vec<String>,
+    /// Frames evicted from the ring since creation. When > 0 the tail
+    /// may not include the earliest output; callers should flag this.
+    pub evicted_frames: u64,
+    /// True when the byte cap dropped one or more of the requested
+    /// trailing frames.
+    pub truncated: bool,
+}
+
 /// A frame line, shaped for client consumption.
 ///
 /// Mirrors the contract fixture `event-context-response.v1.json`
@@ -269,6 +283,35 @@ impl RingInner {
     /// Find the index of `anchor` in the ring, if present.
     fn index_of(&self, anchor: FrameId) -> Option<usize> {
         self.frames.iter().position(|f| f.frame_id == anchor)
+    }
+
+    /// Return the last `max_lines` frame texts, oldest first, bounded
+    /// by `max_bytes` (newest frames win when the byte budget is
+    /// tight). Pure read; never mutates.
+    fn tail(&self, max_lines: usize, max_bytes: usize) -> RingTail {
+        let mut chosen: VecDeque<String> = VecDeque::new();
+        let mut bytes = 0usize;
+        let mut truncated = false;
+        for f in self.frames.iter().rev().take(max_lines) {
+            let len = f.text.len();
+            if chosen.is_empty() {
+                // Always include at least one line, even if it alone
+                // exceeds the cap; flag the overflow as truncated.
+                if len > max_bytes {
+                    truncated = true;
+                }
+            } else if bytes + len > max_bytes {
+                truncated = true;
+                break;
+            }
+            bytes += len;
+            chosen.push_front(f.text.clone());
+        }
+        RingTail {
+            lines: chosen.into_iter().collect(),
+            evicted_frames: self.evicted_frames,
+            truncated,
+        }
     }
 
     /// Compute the window, returning the response shape. Honors
@@ -436,6 +479,20 @@ impl ContextRingManager {
             max_bytes,
         };
         self.window(&req)
+    }
+
+    /// Read a bounded tail of a probe's ring without an anchor. Pure
+    /// read; never mutates. Returns `NotFound` when the ring is
+    /// absent. Used by the no-silence exit receipt (TCE-ERG-1).
+    pub fn tail_frames(
+        &self,
+        probe_id: ProbeId,
+        max_lines: usize,
+        max_bytes: usize,
+    ) -> Result<RingTail, ContextError> {
+        let cell = self.cell(probe_id)?;
+        let inner = cell.read();
+        Ok(inner.tail(max_lines, max_bytes))
     }
 
     /// Whether a ring exists for the probe.
@@ -700,5 +757,95 @@ mod tests {
     fn context_send_sync() {
         fn assert_ss<T: Send + Sync>() {}
         assert_ss::<ContextRingManager>();
+    }
+
+    #[test]
+    fn tail_frames_returns_last_n_in_order() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        mgr.create_ring(
+            pid,
+            ContextRingConfig {
+                max_frames: 100,
+                max_bytes: 1_000_000,
+            },
+        )
+        .unwrap();
+        for i in 0..10u64 {
+            mgr.append_frame(pid, frame(pid, &format!("line {i}"), i + 1))
+                .unwrap();
+        }
+        let tail = mgr.tail_frames(pid, 3, 1_000_000).unwrap();
+        assert_eq!(tail.lines, vec!["line 7", "line 8", "line 9"]);
+        assert_eq!(tail.evicted_frames, 0);
+        assert!(!tail.truncated);
+    }
+
+    #[test]
+    fn tail_frames_empty_ring_returns_empty() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        mgr.create_ring(
+            pid,
+            ContextRingConfig {
+                max_frames: 100,
+                max_bytes: 1_000_000,
+            },
+        )
+        .unwrap();
+        let tail = mgr.tail_frames(pid, 5, 1_000_000).unwrap();
+        assert!(tail.lines.is_empty());
+        assert_eq!(tail.evicted_frames, 0);
+    }
+
+    #[test]
+    fn tail_frames_reports_eviction() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        mgr.create_ring(
+            pid,
+            ContextRingConfig {
+                max_frames: 3,
+                max_bytes: 1_000_000,
+            },
+        )
+        .unwrap();
+        for i in 0..6u64 {
+            mgr.append_frame(pid, frame(pid, &format!("l{i}"), i + 1))
+                .unwrap();
+        }
+        let tail = mgr.tail_frames(pid, 5, 1_000_000).unwrap();
+        // ring capped at 3 frames; 3 evicted
+        assert_eq!(tail.lines, vec!["l3", "l4", "l5"]);
+        assert_eq!(tail.evicted_frames, 3);
+    }
+
+    #[test]
+    fn tail_frames_byte_cap_truncates_from_front() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        mgr.create_ring(
+            pid,
+            ContextRingConfig {
+                max_frames: 100,
+                max_bytes: 1_000_000,
+            },
+        )
+        .unwrap();
+        for i in 0..5u64 {
+            // each line "xxxx" = 4 bytes
+            mgr.append_frame(pid, frame(pid, "xxxx", i + 1)).unwrap();
+        }
+        // ask for 5 lines but only 9 bytes: fits 2 lines (8 bytes), drops oldest
+        let tail = mgr.tail_frames(pid, 5, 9).unwrap();
+        assert_eq!(tail.lines.len(), 2);
+        assert!(tail.truncated);
+    }
+
+    #[test]
+    fn tail_frames_unknown_probe_is_error() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        assert!(mgr.tail_frames(pid, 5, 1000).is_err());
     }
 }
