@@ -87,6 +87,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # GitHub forces Node 24 on JS actions (2026-06-02) and removes Node 20
+  # (2026-09-16). Run all node20 JS actions on node24 now to clear warnings
+  # and pre-empt the cutover without bumping every action major.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   RUST_TOOLCHAIN: "1.95.0"
   NODE_VERSION: "20"
 

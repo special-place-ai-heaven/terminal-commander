@@ -47,6 +47,10 @@ concurrency:
   group: npm-binary-build-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Run node20 JS actions on node24 ahead of GitHub's 2026-06-02 cutover.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   pre-build-gates:
     name: pre-build-gates (linux-x64)

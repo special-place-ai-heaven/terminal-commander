@@ -12,6 +12,10 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  # Run node20 JS actions on node24 ahead of GitHub's 2026-06-02 cutover.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   sync-optional-dependencies:
     if: github.head_ref == 'release-please--branches--main'
