@@ -249,6 +249,16 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
     ]
 }
 
+/// Flat list of every catalogue tool name.
+///
+/// Sourced from [`tool_catalogue`] and shared so non-rmcp callers
+/// (e.g. the legacy in-process `ToolSurface` test facade) advertise
+/// exactly the same set without re-hardcoding it.
+#[must_use]
+pub fn catalogue_tool_names() -> Vec<&'static str> {
+    tool_catalogue().iter().map(|entry| entry.name).collect()
+}
+
 #[must_use]
 fn tool_requires_daemon(name: &str) -> bool {
     name != "system_discover"

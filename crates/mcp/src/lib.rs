@@ -79,13 +79,10 @@ impl ToolSurface {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             mcp_spec: "2025-11-25".to_owned(),
             policy_profile: format!("{:?}", self.policy.profile),
-            tools: vec![
-                "system_discover".to_owned(),
-                "bucket_events_since".to_owned(),
-                "bucket_wait".to_owned(),
-                "bucket_summary".to_owned(),
-                "event_context".to_owned(),
-            ],
+            tools: crate::tools::catalogue_tool_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
         }
     }
 
@@ -287,6 +284,22 @@ mod tests {
         let d = s.system_discover();
         assert!(d.tools.contains(&"bucket_wait".to_owned()));
         assert_eq!(d.mcp_spec, "2025-11-25");
+    }
+
+    #[test]
+    fn discover_advertises_exactly_the_catalogue_no_drift() {
+        let s = surface();
+        let mut got = s.system_discover().tools;
+        got.sort();
+        let mut want: Vec<String> = crate::tools::catalogue_tool_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        want.sort();
+        assert_eq!(
+            got, want,
+            "ToolSurface::system_discover must advertise exactly tool_catalogue() names (no hand-maintained drift)"
+        );
     }
 
     #[test]
