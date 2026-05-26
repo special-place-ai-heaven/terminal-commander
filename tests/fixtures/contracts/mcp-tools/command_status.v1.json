@@ -32,7 +32,28 @@
     "events_emitted": 2,
     "exit_code": 0,
     "signal": null,
-    "duration_ms": 1372
+    "duration_ms": 1372,
+    "receipt": null
+  },
+  "response_example_no_rule_receipt": {
+    "job_id": "job_018f0000000000000000000000000002",
+    "bucket_id": "bkt_018f0000000000000000000000000002",
+    "probe_id": "prb_018f0000000000000000000000000002",
+    "state": "exited",
+    "frames_total": 2,
+    "frames_stdout": 2,
+    "frames_stderr": 0,
+    "bytes_total": 12,
+    "events_emitted": 1,
+    "exit_code": 0,
+    "signal": null,
+    "duration_ms": 8,
+    "receipt": {
+      "exit_code": 0,
+      "lines_suppressed": 2,
+      "tail": ["hello", "world"],
+      "tail_incomplete": false
+    }
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -58,6 +79,9 @@
   "invariants": [
     "job_id is required",
     "state uses snake_case job lifecycle values",
-    "success payload reports counters and lifecycle only"
+    "success payload reports counters and lifecycle only, EXCEPT the optional no-silence receipt",
+    "receipt is null unless the command finished with zero rule-driven events (TCE-ERG-1)",
+    "when present, receipt carries exit_code, lines_suppressed, a bounded tail, and tail_incomplete",
+    "the receipt tail is the sole sanctioned raw-output path and only ever appears for process probes"
   ]
 }

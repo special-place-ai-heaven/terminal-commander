@@ -1377,6 +1377,9 @@ fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
         "exit_code": s.exit_code,
         "signal": s.signal,
         "duration_ms": s.duration_ms,
+        // No-silence receipt (TCE-ERG-1): null unless the command
+        // finished with zero rule-driven events.
+        "receipt": s.receipt,
     })
 }
 
