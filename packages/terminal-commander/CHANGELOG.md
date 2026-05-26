@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.10...v0.1.11) (2026-05-26)
+
+
+### Bug Fixes
+
+* **setup:** honor --print-config as no-write in harness bootstrap ([c24ab7a](https://github.com/special-place-ai-heaven/terminal-commander/commit/c24ab7af85072043cada3d35605159010bf05936))
+
 ## [0.1.10](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.9...v0.1.10) (2026-05-25)
 
 
