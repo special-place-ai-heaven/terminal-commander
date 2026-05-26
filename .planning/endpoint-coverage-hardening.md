@@ -622,39 +622,39 @@ Track completion in the **Done** column as tasks land.
 
 | # | Tool | IPC test | MCP live | MCP unavail | Fixture | Done |
 |---|------|:--------:|:--------:|:-----------:|:-------:|:----:|
-| 1 | `system_discover` | Y | Y | N/A | Y | |
-| 2 | `health` | Y | Y | Y | Y | |
-| 3 | `policy_status` | Y | | Y | Y | |
-| 4 | `self_check` | Y | | Y | Y | |
-| 5 | `command_start_combed` | Y | Y | Y | Y | |
-| 6 | `command_status` | Y | Y | | Y | |
-| 7 | `bucket_events_since` | Y | Y | | Y | |
-| 8 | `bucket_wait` | Y | Y | | Y | |
-| 9 | `bucket_summary` | Y | Y | | Y | |
-| 10 | `event_context` | Y | Y | | Y | |
-| 11 | `registry_search` | Y | | | Y | |
-| 12 | `registry_get` | Y | | | Y | |
-| 13 | `registry_upsert` | Y | Y | | Y | |
-| 14 | `registry_test` | Y | Y | | Y | |
-| 15 | `registry_activate` | Y | Y | | Y | |
-| 16 | `registry_deactivate` | Y | Y | | Y | |
-| 17 | `registry_list_active` | Y | Y | partial | Y | |
-| 18 | `file_read_window` | Y | Y | | Y | |
-| 19 | `file_search` | Y | Y | | Y | |
-| 20 | `file_watch_start` | Y | Y | | Y | |
-| 21 | `file_watch_stop` | Y | Y | | Y | |
-| 22 | `file_watch_list` | | | Y | Y | |
-| 23 | `pty_command_start` | Y | Y | | Y | |
-| 24 | `pty_command_write_stdin` | Y | Y | | Y | |
-| 25 | `pty_command_stop` | Y | Y | | Y | |
-| 26 | `pty_command_list` | partial | | Y | Y | |
-| 27 | `runtime_state` | Y | Y | Y | Y | |
-| 28 | `probe_list` | Y | Y | Y | Y | |
-| 29 | `probe_status` | Y | Y | | Y | |
+| 1 | `system_discover` | Y | Y | N/A | Y | ✓ |
+| 2 | `health` | Y | Y | Y | Y | ✓ |
+| 3 | `policy_status` | Y | Y | Y | Y | ✓ |
+| 4 | `self_check` | Y | Y | Y | Y | ✓ |
+| 5 | `command_start_combed` | Y | Y | Y | Y | ✓ |
+| 6 | `command_status` | Y | Y | Y | Y | ✓ |
+| 7 | `bucket_events_since` | Y | Y | Y | Y | ✓ |
+| 8 | `bucket_wait` | Y | Y | Y | Y | ✓ |
+| 9 | `bucket_summary` | Y | Y | Y | Y | ✓ |
+| 10 | `event_context` | Y | Y | Y | Y | ✓ |
+| 11 | `registry_search` | Y | Y | Y | Y | ✓ |
+| 12 | `registry_get` | Y | Y | Y | Y | ✓ |
+| 13 | `registry_upsert` | Y | Y | Y | Y | ✓ |
+| 14 | `registry_test` | Y | Y | Y | Y | ✓ |
+| 15 | `registry_activate` | Y | Y | Y | Y | ✓ |
+| 16 | `registry_deactivate` | Y | Y | Y | Y | ✓ |
+| 17 | `registry_list_active` | Y | Y | Y | Y | ✓ |
+| 18 | `file_read_window` | Y | Y | Y | Y | ✓ |
+| 19 | `file_search` | Y | Y | Y | Y | ✓ |
+| 20 | `file_watch_start` | Y | Y | Y | Y | ✓ |
+| 21 | `file_watch_stop` | Y | Y | Y | Y | ✓ |
+| 22 | `file_watch_list` | Y | Y | Y | Y | ✓ |
+| 23 | `pty_command_start` | Y | Y | Y | Y | ✓ |
+| 24 | `pty_command_write_stdin` | Y | Y | Y | Y | ✓ |
+| 25 | `pty_command_stop` | Y | Y | Y | Y | ✓ |
+| 26 | `pty_command_list` | Y | Y | Y | Y | ✓ |
+| 27 | `runtime_state` | Y | Y | Y | Y | ✓ |
+| 28 | `probe_list` | Y | Y | Y | Y | ✓ |
+| 29 | `probe_status` | Y | Y | Y | Y | ✓ |
 
-**Gaps to close:** IPC — `file_watch_list`, `pty_command_list` happy path; MCP live — rows 3–4, 11–12, 22, 26; MCP unavail — **19** tools without explicit envelope test (9 done); Task 6 — `ToolSurface::system_discover` delegate-or-delete; Task 7 — start-surface `bucket_config`/`rules` parity for `command_start_combed` + file + pty; smoke script — optional.
+**Gaps closed:** Tasks 1–10 landed. MCP `daemon_unavailable` is now table-driven over `tool_catalogue()` (28/28 daemon-backed tools); `file_watch_list` + `pty_command_list` have happy-path IPC tests; live MCP `call_tool` tests cover `policy_status`, `self_check`, `registry_get`, `registry_search`, `file_watch_list`, `pty_command_list`; the three `*_start` tools expose `bucket_config` + inline `rules` with passing live proof; `ToolSurface::system_discover` delegates to `tool_catalogue()`; stale TC40 docs removed; smoke-script params aligned; CI off Node 20; verify-jobs fire on `workflow_dispatch`.
 
-**Matrix audit:** Re-verify every Y/— cell before checking **Done**; this table was not independently re-audited.
+**Matrix audit:** Cells reflect the landed Tasks 1–10 (commits `1c1863f`…`dd78a86`); the full workspace gate (`cargo fmt`/`clippy`/`nextest` + `npm test`) is green.
 
 ---
 
