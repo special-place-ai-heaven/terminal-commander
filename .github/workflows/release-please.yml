@@ -1532,7 +1532,7 @@ jobs:
   verify-linux-x64:
     name: verify-linux-x64
     needs: [release-please, publish-root]
-    if: needs.publish-root.result == 'success'
+    if: always() && needs.publish-root.result == 'success'
     runs-on: ubuntu-24.04
     permissions: { contents: read, issues: write }
     steps:
@@ -1561,7 +1561,7 @@ jobs:
   verify-linux-arm64:
     name: verify-linux-arm64
     needs: [release-please, publish-root]
-    if: needs.publish-root.result == 'success'
+    if: always() && needs.publish-root.result == 'success'
     runs-on: ubuntu-24.04-arm
     permissions: { contents: read, issues: write }
     steps:
@@ -1584,7 +1584,7 @@ jobs:
   verify-windows-x64:
     name: verify-windows-x64
     needs: [release-please, publish-root]
-    if: needs.publish-root.result == 'success'
+    if: always() && needs.publish-root.result == 'success'
     runs-on: windows-2022
     permissions: { contents: read, issues: write }
     steps:
@@ -1628,7 +1628,7 @@ jobs:
   verify-mac-x64:
     name: verify-mac-x64
     needs: [release-please, publish-root]
-    if: needs.publish-root.result == 'success'
+    if: always() && needs.publish-root.result == 'success'
     runs-on: macos-15-intel   # Intel — macos-13 retired 2025-12-04; macos-15-intel is the supported Intel image. Keep a runner pinning task in runbook to rotate when GitHub deprecates.
     permissions: { contents: read, issues: write }
     steps:
@@ -1671,7 +1671,7 @@ jobs:
   verify-mac-arm64:
     name: verify-mac-arm64
     needs: [release-please, publish-root]
-    if: needs.publish-root.result == 'success'
+    if: always() && needs.publish-root.result == 'success'
     runs-on: macos-14   # Apple Silicon
     permissions: { contents: read, issues: write }
     steps:
