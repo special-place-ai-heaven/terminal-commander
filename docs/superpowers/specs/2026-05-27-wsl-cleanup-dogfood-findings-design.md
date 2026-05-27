@@ -204,9 +204,17 @@ Rules:
 - `chmod 440` is mandatory -- sudoers ignores group/other-writable drop-ins.
 - Always `visudo -c` before trusting the file; a malformed sudoers can lock
   out sudo entirely.
-- TC then drives privileged cleanup with `sudo -n <binary>` (the `-n` makes it
-  fail loud instead of hanging on a password prompt). Verified: `sudo -n
-  fstrim --version` returned `SUDO_OK` through TC.
+- TC then drives privileged cleanup with `sudo -n <ABSOLUTE-PATH>` (the `-n`
+  makes it fail loud instead of hanging on a password prompt). Verified end to
+  end: `sudo -n /usr/sbin/fstrim -av` reported `/: 259.1 MiB ... trimmed`
+  through TC with no prompt.
+- GOTCHA (verified, must be documented + baked into the doctor fix line and any
+  cleanup helper): sudoers NOPASSWD grants match by the EXACT command path
+  listed. The drop-in lists absolute paths (`/usr/sbin/fstrim`), so TC MUST
+  invoke the absolute path. `sudo -n fstrim` (bare name resolved via PATH) does
+  NOT match the absolute-path rule and fails with a password demand under
+  `-n` -> a false "sudo broken" signal. Always invoke the absolute path that
+  appears in the sudoers line.
 - This must be documented in `docs/` (integration guide) AND surfaced as a
   doctor check (see plan): if a privileged cleanup tool is denied, the doctor
   tells the user exactly which sudoers line to add.
