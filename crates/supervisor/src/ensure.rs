@@ -8,9 +8,36 @@
 // `daemon_unavailable` envelopes, or fail loudly.
 
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use thiserror::Error;
+
+/// Host env vars the supervisor re-reads at spawn and forwards into the
+/// daemon, so a respawn (e.g. `terminal-commander restart`) picks up
+/// freshly-set values without a full client OS-restart.
+///
+/// FIXED allowlist, operational and NON-SECRET only. F6 explicitly
+/// rejects forwarding any credential/password into the daemon
+/// environment (the `WSL_SUDO_CREDENTIAL` route is forbidden; scoped
+/// NOPASSWD sudoers is the sanctioned sudo path). Adding a key here is a
+/// deliberate, reviewed act -- never "forward everything".
+///
+/// - `WSLENV`: tells WSL which Windows env vars to project into the
+///   Linux side; needed for the WSL cleanup bridge to see operator vars.
+/// - `TC_WSL_DISTRO`: operator's chosen WSL distro override.
+pub const FORWARDED_ENV_ALLOWLIST: &[&str] = &["WSLENV", "TC_WSL_DISTRO"];
+
+/// Build the map of allowlisted host env vars currently set, read fresh
+/// from the process environment at call time. Only keys in
+/// [`FORWARDED_ENV_ALLOWLIST`] are ever included.
+#[must_use]
+pub fn build_forward_env() -> BTreeMap<String, String> {
+    FORWARDED_ENV_ALLOWLIST
+        .iter()
+        .filter_map(|k| std::env::var(*k).ok().map(|v| ((*k).to_owned(), v)))
+        .collect()
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -186,6 +213,12 @@ pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
         .arg("--mode")
         .arg("ipc-server")
         .env("TC_SOCKET", &tc_socket_val)
+        // F6: forward a fixed allowlist of operational (non-secret) host
+        // vars, read fresh at spawn, so a `restart` picks up a freshly-set
+        // WSLENV / TC_WSL_DISTRO without a full client OS-restart. The
+        // child still inherits the rest of the parent env; this only
+        // guarantees the allowlisted keys reflect the current process env.
+        .envs(build_forward_env())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_file_err));
@@ -313,6 +346,48 @@ mod tests {
                 );
             }
             other => panic!("expected Unavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_env_allowlist_is_operational_non_secret() {
+        // The allowlist must never contain a secret/password-shaped key.
+        // F6 explicitly rejects forwarding any credential into the daemon
+        // environment (the WSL_SUDO_CREDENTIAL route is forbidden).
+        for k in FORWARDED_ENV_ALLOWLIST {
+            let lk = k.to_ascii_lowercase();
+            assert!(
+                !lk.contains("secret")
+                    && !lk.contains("password")
+                    && !lk.contains("credential")
+                    && !lk.contains("token")
+                    && !lk.contains("key"),
+                "allowlist must be operational-only; '{k}' looks secret"
+            );
+        }
+        assert!(FORWARDED_ENV_ALLOWLIST.contains(&"WSLENV"));
+    }
+
+    #[test]
+    fn build_forward_env_forwards_only_allowlisted_vars() {
+        // Use a key unique to this test to avoid cross-test env races.
+        let secret = "TC_F6_TEST_SECRET_THING";
+        // SAFETY: single-threaded assertion window; we set then read
+        // immediately and never rely on absence of concurrent mutation
+        // for the allowlisted key (WSLENV) beyond our own set.
+        unsafe {
+            std::env::set_var("WSLENV", "TC_F6/u");
+            std::env::set_var(secret, "nope");
+        }
+        let env = build_forward_env();
+        assert_eq!(env.get("WSLENV").map(String::as_str), Some("TC_F6/u"));
+        assert!(
+            !env.contains_key(secret),
+            "non-allowlisted var must not be forwarded"
+        );
+        unsafe {
+            std::env::remove_var("WSLENV");
+            std::env::remove_var(secret);
         }
     }
 }
