@@ -3,9 +3,10 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const cfg = require("../../.github/release-please-config.json");
 
-test("linked-versions includes all 6 components", () => {
+test("linked-versions includes all 7 components (6 npm + root driver)", () => {
   const components = cfg.plugins[0].components;
   assert.deepEqual(new Set(components), new Set([
+    "terminal-commander-root",
     "terminal-commander",
     "@terminal-commander/linux-x64",
     "@terminal-commander/linux-arm64",
@@ -13,6 +14,13 @@ test("linked-versions includes all 6 components", () => {
     "@terminal-commander/mac-x64",
     "@terminal-commander/mac-arm64",
   ]));
+});
+
+test("root '.' component is a simple release-type version driver", () => {
+  const root = cfg.packages["."];
+  assert.ok(root, "missing '.' root component");
+  assert.equal(root["release-type"], "simple");
+  assert.equal(root.component, "terminal-commander-root");
 });
 
 test("root extra-files bumps all 5 platform optionalDependencies", () => {
@@ -45,13 +53,14 @@ test("all 5 platform packages have release-please entries", () => {
   }
 });
 
-test("manifest tracks all 6 packages at same version", () => {
+test("manifest tracks all 7 entries (6 packages + root) at same version", () => {
   const manifest = require("../../.github/.release-please-manifest.json");
   const entries = Object.entries(manifest);
-  assert.equal(entries.length, 6, `manifest has ${entries.length} entries, expected 6`);
+  assert.equal(entries.length, 7, `manifest has ${entries.length} entries, expected 7`);
   const versions = new Set(entries.map(([, v]) => v));
   assert.equal(versions.size, 1, "all manifest entries should share the same version");
   for (const dir of [
+    ".",
     "packages/terminal-commander",
     "packages/terminal-commander-linux-x64",
     "packages/terminal-commander-linux-arm64",
