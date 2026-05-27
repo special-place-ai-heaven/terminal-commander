@@ -132,7 +132,32 @@ fn main() -> ExitCode {
             startup_timeout: STARTUP_TIMEOUT,
             allow_spawn,
         };
-        let status = ensure_daemon(opts).await;
+        let mut status = ensure_daemon(opts.clone()).await;
+
+        // Step 1b: if the running daemon is OLDER than this adapter, it
+        // will reject new IPC methods with "early eof". Replace it with
+        // the current binary, then re-ensure. Gated by allow_spawn (a
+        // read-only adapter must not kill). Best-effort: a failed replace
+        // logs and proceeds against whatever daemon answers.
+        if allow_spawn && matches!(&status, EnsureDaemonStatus::AlreadyRunning { .. }) {
+            match terminal_commander_supervisor::replace::replace_if_stale(
+                &opts,
+                env!("CARGO_PKG_VERSION"),
+            )
+            .await
+            {
+                terminal_commander_supervisor::replace::ReplaceOutcome::Replaced { old, new } => {
+                    eprintln!(
+                        "terminal-commander-mcp: replaced stale daemon {old} -> {new}; respawning"
+                    );
+                    status = ensure_daemon(opts.clone()).await;
+                }
+                terminal_commander_supervisor::replace::ReplaceOutcome::Skipped { reason } => {
+                    eprintln!("terminal-commander-mcp: stale-check skipped: {reason}");
+                }
+                _ => {}
+            }
+        }
 
         // Log availability to stderr (goes to the operator, not to the MCP
         // client which is on stdout).
