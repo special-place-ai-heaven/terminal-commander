@@ -6,3 +6,5 @@
 pub mod ensure;
 pub mod identity;
 pub mod paths;
+pub mod pidfile;
+pub mod replace;

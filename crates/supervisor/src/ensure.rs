@@ -239,7 +239,7 @@ pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
     }
 }
 
-async fn probe_endpoint(endpoint: &Endpoint) -> bool {
+pub(crate) async fn probe_endpoint(endpoint: &Endpoint) -> bool {
     match endpoint {
         #[cfg(unix)]
         Endpoint::UnixSocket { path } => tokio::net::UnixStream::connect(path).await.is_ok(),
