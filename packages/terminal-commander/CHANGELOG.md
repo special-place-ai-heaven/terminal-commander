@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.20](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.19...v0.1.20) (2026-05-27)
+
+
+### Bug Fixes
+
+* advertise command_output_tail in discovery + route restart through bin shim (review) ([6279bf3](https://github.com/special-place-ai-heaven/terminal-commander/commit/6279bf3393063c39d300c062e696ef516b5071b9))
+* release Rust crate changes ([2d69a83](https://github.com/special-place-ai-heaven/terminal-commander/commit/2d69a83ea6319082fc4678d91abb842c130e0b2a))
+
 ## [0.1.19](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.18...v0.1.19) (2026-05-27)
 
 
