@@ -69,19 +69,61 @@ pub fn pid_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        // `tasklist /FI "PID eq N" /NH` prints the row only when the
-        // pid exists; otherwise prints an "INFO: No tasks" line.
+        // `tasklist /FO CSV /NH` emits one quoted-CSV row per matching
+        // process: "Image Name","PID","Session Name","Session#","Mem Usage".
+        // Parse the PID column (index 1) and compare it EXACTLY -- a bare
+        // substring match would falsely match the pid digits appearing in
+        // the memory-usage column, the session id, or a superstring pid.
         std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                csv_row_has_exact_pid(&stdout, pid)
+            })
             .unwrap_or(false)
     }
+}
+
+/// Parse `tasklist /FO CSV /NH` output and return true iff some row's PID
+/// column (the second quoted field) equals `pid` exactly. Tolerant of the
+/// "INFO: No tasks..." line tasklist prints when nothing matches.
+#[cfg(windows)]
+fn csv_row_has_exact_pid(stdout: &str, pid: u32) -> bool {
+    let want = pid.to_string();
+    stdout.lines().any(|line| {
+        // Fields are quoted; the PID is the second field.
+        line.split(',')
+            .nth(1)
+            .map(|f| f.trim().trim_matches('"') == want)
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn csv_pid_match_is_exact_not_substring() {
+        // Real-ish tasklist /FO CSV /NH row. PID column is field index 1.
+        let row = "\"terminal-commanderd.exe\",\"1234\",\"Console\",\"1\",\"12,345 K\"";
+        assert!(csv_row_has_exact_pid(row, 1234), "exact pid must match");
+        // 123 is a substring of the pid 1234 AND of the mem-usage "12,345";
+        // the old substring check matched it -- the column-exact check must not.
+        assert!(
+            !csv_row_has_exact_pid(row, 123),
+            "substring of the pid/mem column must NOT match"
+        );
+        // 12 appears in mem usage "12,345 K" but is not the PID column.
+        assert!(
+            !csv_row_has_exact_pid(row, 12),
+            "digits in the mem-usage column must NOT match"
+        );
+        // The "INFO: No tasks" line tasklist prints on no match.
+        assert!(!csv_row_has_exact_pid("INFO: No tasks are running.", 1234));
+    }
 
     #[test]
     fn write_read_roundtrip() {

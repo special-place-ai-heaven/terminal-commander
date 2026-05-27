@@ -95,6 +95,51 @@ pub fn hard_kill(pid: u32) -> std::io::Result<()> {
     }
 }
 
+/// Re-verify, immediately before a kill, that `pid` is still OUR daemon:
+/// a `terminal-commanderd` process whose command line references
+/// `state_dir`.
+///
+/// Closes the pid-reuse TOCTOU: between reading a pid (from the pidfile or
+/// an OS query) and killing it, the daemon can exit and the OS can recycle
+/// that pid for an unrelated process. Gating `hard_kill` on this check means
+/// a recycled pid is never force-killed. A pidfile-sourced pid is otherwise
+/// trusted blindly; an OS-found pid was matched by cmdline but may still
+/// have changed by kill time.
+#[must_use]
+pub fn pid_belongs_to_daemon(pid: u32, state_dir: &Path) -> bool {
+    let needle = state_dir.to_string_lossy().to_string();
+    #[cfg(windows)]
+    {
+        let pat = needle.replace('[', "`[").replace(']', "`]");
+        let ps = format!(
+            "Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" | \
+             Where-Object {{ $_.Name -eq 'terminal-commanderd.exe' -and \
+             $_.CommandLine -like '*{pat}*' }} | \
+             Select-Object -First 1 -ExpandProperty ProcessId"
+        );
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == pid.to_string())
+            .unwrap_or(false)
+    }
+    #[cfg(unix)]
+    {
+        // `ps -p <pid> -o args=` prints only that pid's command line (empty
+        // if the pid is gone). Require both the daemon name and state_dir.
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "args="])
+            .output()
+            .ok()
+            .map(|o| {
+                let args = String::from_utf8_lossy(&o.stdout);
+                args.contains("terminal-commanderd") && args.contains(&needle)
+            })
+            .unwrap_or(false)
+    }
+}
+
 /// OS-query fallback: find the pid of a terminal-commanderd process
 /// whose command line references `state_dir`, so we only ever target
 /// OUR daemon (the daemon is launched with `--data-dir <state_dir>`),
@@ -181,6 +226,20 @@ pub async fn replace_if_stale(
             }
         }
     };
+
+    // Re-verify at kill time that `pid` is still OUR daemon. Closes the
+    // pid-reuse TOCTOU (F3): the daemon may have exited and the OS recycled
+    // the pid for an unrelated process between the read above and now. Also
+    // covers the find_daemon_pid_os -> kill window (M4).
+    if !pid_belongs_to_daemon(pid, &opts.state_dir) {
+        return ReplaceOutcome::Skipped {
+            reason: format!(
+                "pid {pid} no longer a terminal-commanderd bound to {:?}; \
+                 refusing to kill (pid may have been recycled)",
+                opts.state_dir
+            ),
+        };
+    }
 
     if let Err(e) = hard_kill(pid) {
         return ReplaceOutcome::Skipped {
