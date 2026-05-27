@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.16](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.15...v0.1.16) (2026-05-27)
+
+
+### Bug Fixes
+
+* **cli:** drop postinstall daemon-replace (violated av-safe passive-install invariant) ([58c28d2](https://github.com/special-place-ai-heaven/terminal-commander/commit/58c28d2aa0f336c038869ce62cca4e8fc19970c8))
+
 ## [0.1.15](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.14...v0.1.15) (2026-05-27)
 
 
