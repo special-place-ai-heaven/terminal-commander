@@ -583,6 +583,7 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
             "event_context".to_owned(),
             "command_start_combed".to_owned(),
             "command_status".to_owned(),
+            "command_output_tail".to_owned(),
             "registry_search".to_owned(),
             "registry_get".to_owned(),
             "registry_upsert".to_owned(),

@@ -31,7 +31,7 @@ function isUpdateRequest(argv) {
 
 function isJsCliRequest(argv) {
   const command = argv[0];
-  if (command === "setup" || command === "pair") {
+  if (command === "setup" || command === "pair" || command === "restart") {
     return true;
   }
   if (command === "doctor") {

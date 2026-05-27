@@ -211,6 +211,20 @@ test("shim bin/* files contain no wsl.exe literal invocation in executable code 
   assert.equal(/windowsHide/.test(mcpBody), false);
 });
 
+test("terminal-commander.js routes the `restart` verb into the JS CLI (F3 wiring)", () => {
+  // The `restart` verb is implemented in lib/cli/run.js, NOT the native Rust
+  // binary (whose clap enum has no `restart`). The bin shim's isJsCliRequest
+  // gate MUST include `restart`, or `terminal-commander restart` falls through
+  // to spawn(result.binaryPath, ["restart"]) and the native CLI errors.
+  const src = fs.readFileSync(path.join(BIN_DIR, "terminal-commander.js"), "utf8");
+  // isJsCliRequest must treat `restart` as a JS-CLI command alongside setup/pair.
+  assert.match(
+    src,
+    /command === "setup" \|\| command === "pair" \|\| command === "restart"/,
+    "isJsCliRequest must route `restart` into lib/cli/run.js (F3); otherwise the verb is unreachable from the installed package",
+  );
+});
+
 test("terminal-commander-mcp.js delegates to lib/wsl/spawn.js on bridge_required (WWS04 wiring)", () => {
   // Static guard for the WWS04 wiring: the mcp shim must require()
   // ../lib/wsl/spawn.js and call spawnWslBridge() inside the
