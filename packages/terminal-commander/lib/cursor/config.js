@@ -73,11 +73,21 @@ function defaultMcpScriptPath() {
 
 function buildTerminalCommanderCommandConfig(opts) {
   const o = opts || {};
-  const command = o.nodePath || process.execPath;
-  const scriptPath = o.scriptPath || defaultMcpScriptPath();
+  // Explicit node+script overrides (used by callers that know the exact
+  // installed paths) -> emit the node.exe + JS-shim form.
+  if (o.scriptPath || o.nodePath) {
+    return {
+      command: o.nodePath || process.execPath,
+      args: [o.scriptPath || defaultMcpScriptPath()],
+    };
+  }
+  // Default: emit the PATH-resolved command form. The installed package
+  // puts `terminal-commander-mcp` on PATH, so the generated config is
+  // portable and never leaks this machine's absolute checkout path
+  // (which would embed a private \Users\ path into a shipped config).
   return {
-    command,
-    args: [scriptPath],
+    command: SERVER_COMMAND,
+    args: [],
   };
 }
 

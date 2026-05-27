@@ -40,10 +40,12 @@ function rmScope(p) {
 
 function assertTerminalCommanderStanza(stanza) {
   assert.equal(stanza.type, "stdio");
-  assert.equal(stanza.command, process.execPath);
-  assert.deepEqual(stanza.args, [
-    path.join(__dirname, "..", "bin", "terminal-commander-mcp.js"),
-  ]);
+  // Portable default: the installed `terminal-commander-mcp` bin on
+  // PATH, NOT this machine's absolute node.exe + checkout script path
+  // (which would leak a private \Users\ path into the generated config;
+  // see the no-private-path guard in cursor-config.test.js).
+  assert.equal(stanza.command, "terminal-commander-mcp");
+  assert.deepEqual(stanza.args, []);
 }
 
 test("project scope: creates config when file missing (config_created)", () => {
