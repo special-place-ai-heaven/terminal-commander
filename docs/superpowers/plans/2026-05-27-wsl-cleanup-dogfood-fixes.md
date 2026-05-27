@@ -60,6 +60,55 @@ git add docs/superpowers/plans/2026-05-27-wsl-cleanup-dogfood-fixes.md
 git commit -m "docs(plan): record event_context tail-coverage finding (F1)"
 ```
 
+**FINDING (recorded 2026-05-27, grounded in code):**
+
+`event_context` DOES NOT cover rule-free tail. It requires a matched event:
+- `handle_event_context` (`crates/daemon/src/ipc/server.rs:731-869`) takes
+  `EventContextParams { bucket_id, event_id, .. }`, scans the bucket for that
+  `event_id`, and errors `EventNotFound` if absent. The window anchor is
+  `event.pointer.frame_id`; output with no rule hit carries no pointer
+  (`NoPointer`/`SyntheticEvent`, empty frames). No matched event => no anchor
+  => no tail. **F1 (`command_output_tail`) is REQUIRED. Tasks 1.2-1.5 proceed.**
+
+**IMPLEMENTATION CORRECTION (supersedes Task 1.3 Step 3 "frame store" guidance):**
+
+The raw-line source is NOT the `command_status` store. `Cmd::status`
+(`crates/daemon/src/command.rs:787-813`) returns counters only
+(`frames_stdout: u64`) and is documented "Never returns raw text / No raw
+stream content is ever copied." The actual raw frames live in the
+**per-probe context ring**, which already exposes an anchor-free bounded tail:
+
+```rust
+// crates/core/src/context.rs:485
+ContextRingManager::tail_frames(probe_id, max_lines, max_bytes)
+    -> Result<RingTail, ContextError>
+// RingTail { lines: Vec<String> (oldest-first), evicted_frames: u64, truncated: bool }
+```
+
+This is the same primitive the no-silence `CommandReceipt.tail` already uses
+(TCE-ERG-1). So the daemon handler maps: `job_id -> JobRecord (router.jobs.get)
+-> probe_id -> router.rings.tail_frames(probe_id, max_lines, max_bytes)`.
+Router exposes rings via the `event_context` path (`router.rings`); add a thin
+`Router::command_output_tail(job_id, max_lines, max_bytes)` helper alongside
+`event_context` (`crates/daemon/src/router.rs:162`) that resolves probe_id from
+the job and calls `rings.tail_frames`.
+
+Two response-shape reconciliations vs the Task 1.2 DTO draft:
+1. **No `stream` filter exists.** `RingTail`/`tail()` do not filter by stream.
+   Either (a) drop `stream` from the request for v1 (simplest, matches the ring
+   primitive), or (b) add a stream-filtered tail to the ring. Pick (a): omit
+   `stream`; document "returns both streams interleaved in capture order."
+   Update the Task 1.2 DTO to remove the `stream` field and the Task 1.4 MCP
+   params accordingly.
+2. **Truncation flags.** `RingTail` has one `truncated: bool` (byte cap) +
+   `evicted_frames: u64`. Map: `truncated_bytes = RingTail.truncated`;
+   `truncated_lines = (ring frame_count > max_lines)` computed in the handler
+   (the ring's `frame_count(probe_id)` gives the total); surface
+   `evicted_frames` so the agent knows earlier output was lost. Keep
+   `returned_lines = lines.len()`.
+
+Caps unchanged: clamp `max_lines` to 200, `max_bytes` to 65_536 server-side.
+
 ### Task 1.2: Add `command_output_tail` IPC request/response types
 
 **Files:**
