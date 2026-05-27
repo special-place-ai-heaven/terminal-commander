@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.19](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.18...v0.1.19) (2026-05-27)
+
+
+### Features
+
+* **cli:** add `restart` verb that forces a daemon replace (F3) ([54d70f7](https://github.com/special-place-ai-heaven/terminal-commander/commit/54d70f7d6d3b138a5d7308aee1667ae50b659aca))
+* release Rust crate changes ([3d913e7](https://github.com/special-place-ai-heaven/terminal-commander/commit/3d913e7019fbe2e0224fec98a006a81e92f1a179))
+
 ## [0.1.18](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.17...v0.1.18) (2026-05-27)
 
 
