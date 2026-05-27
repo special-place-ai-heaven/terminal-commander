@@ -163,3 +163,31 @@ test("unknown top-level command is rejected", () => {
   assert.equal(r.ok, false);
   assert.match(r.error, /unknown command/);
 });
+
+test("restart parses with no flags", () => {
+  const r = parseArgv(["restart"]);
+  assert.equal(r.ok, true);
+  assert.equal(r.command, "restart");
+  assert.equal(r.help, false);
+});
+
+test("restart parses --distro and --force", () => {
+  const r = parseArgv(["restart", "--distro", "Ubuntu-24.04", "--force"]);
+  assert.equal(r.ok, true);
+  assert.equal(r.command, "restart");
+  assert.equal(r.flags.distro, "Ubuntu-24.04");
+  assert.equal(r.flags.force, true);
+});
+
+test("restart --help routes to help", () => {
+  const r = parseArgv(["restart", "--help"]);
+  assert.equal(r.ok, true);
+  assert.equal(r.command, "restart");
+  assert.equal(r.help, true);
+});
+
+test("restart rejects flags that belong to other commands", () => {
+  const r = parseArgv(["restart", "--global"]);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /not valid for 'restart'/);
+});

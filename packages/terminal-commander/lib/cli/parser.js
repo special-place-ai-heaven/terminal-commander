@@ -18,6 +18,7 @@
 //   terminal-commander pair --help
 //   terminal-commander pair create [--distro <name>] [--help]
 //   terminal-commander pair accept <code> [--help]
+//   terminal-commander restart [--distro <name>] [--force] [--help]
 //
 // Flags for `setup cursor-wsl`:
 //   --distro <name>        (priority 1 over TC_WSL_DISTRO env)
@@ -219,6 +220,21 @@ function parseArgv(argv) {
         help,
       };
     }
+    case "restart": {
+      for (const f of Object.keys(flags)) {
+        if (!["distro", "force"].includes(f)) {
+          return makeError(`flag --${f} is not valid for 'restart'`);
+        }
+      }
+      return {
+        ok: true,
+        command: "restart",
+        subcommand: null,
+        flags,
+        positional,
+        help,
+      };
+    }
     case "help": {
       return { ok: true, command: "help", flags, positional, help: true };
     }
@@ -243,6 +259,9 @@ COMMANDS
   setup cursor-wsl                    Deprecated; use setup harness.
   pair create                         Generate a 6-digit pairing code (optional).
   pair accept <code>                  Validate a pairing code (deferred handshake).
+  restart                             Replace the running daemon with the
+                                      installed binary (terminal-commanderd
+                                      update --force). Use after an upgrade.
 
 GLOBAL FLAGS
   --help, -h                          Show command help.
@@ -252,6 +271,31 @@ EXAMPLES
   terminal-commander setup cursor-wsl --print-config
   terminal-commander setup cursor-wsl --distro Ubuntu-24.04 --force
   terminal-commander pair create
+  terminal-commander restart
+
+NOTE
+  To UPGRADE the npm package itself, use your package manager
+  (e.g. 'npm update -g terminal-commander'), then run
+  'terminal-commander restart' to swap the running daemon.
+`;
+
+const RESTART_USAGE = `terminal-commander restart [--distro <name>] [--force]
+
+Replace the running terminal-commander daemon with the installed binary by
+invoking 'terminal-commanderd update --force'. On Windows the daemon runs
+inside WSL, so the restart is dispatched through the resolved WSL distro.
+
+This does NOT upgrade the npm package. Upgrade with your package manager
+('npm update -g terminal-commander'), THEN run 'terminal-commander restart'.
+
+FLAGS
+  --distro <name>                     WSL distro to restart the daemon in
+                                      (Windows host). Defaults to TC_WSL_DISTRO
+                                      or the default distro.
+  --force                             Always passed to the daemon; documented
+                                      here for symmetry. A same-version daemon
+                                      is replaced anyway (that is the point).
+  --help, -h                          Show this panel.
 `;
 
 const DOCTOR_USAGE = `terminal-commander doctor [wsl|harness] [--distro <name>] [--probe-runtime]
@@ -343,6 +387,7 @@ module.exports = {
   DOCTOR_USAGE,
   SETUP_USAGE,
   PAIR_USAGE,
+  RESTART_USAGE,
   BOOLEAN_FLAGS,
   STRING_FLAGS,
 };

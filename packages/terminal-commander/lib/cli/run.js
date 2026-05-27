@@ -10,8 +10,16 @@
 
 "use strict";
 
-const { parseArgv, USAGE, DOCTOR_USAGE, SETUP_USAGE, PAIR_USAGE } = require("./parser.js");
+const {
+  parseArgv,
+  USAGE,
+  DOCTOR_USAGE,
+  SETUP_USAGE,
+  PAIR_USAGE,
+  RESTART_USAGE,
+} = require("./parser.js");
 const { runDoctor } = require("./doctor.js");
+const { runRestart } = require("./restart.js");
 const {
   runSetupHarness,
   runSetupDefault,
@@ -57,6 +65,8 @@ async function run(opts) {
         return helpResult(SETUP_USAGE);
       case "pair":
         return helpResult(PAIR_USAGE);
+      case "restart":
+        return helpResult(RESTART_USAGE);
       default:
         return helpResult(USAGE);
     }
@@ -136,6 +146,15 @@ async function run(opts) {
         writePairJson: o.writePairJson,
         stateDir: o.stateDir,
         now: o.now,
+      });
+    case "restart":
+      return runRestart({
+        flags: parsed.flags,
+        platform,
+        env,
+        detect: o.detect,
+        exec: o.restartExec,
+        wslPath: o.wslPath,
       });
     case "help":
       return helpResult(USAGE);
