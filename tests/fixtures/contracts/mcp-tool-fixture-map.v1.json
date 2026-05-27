@@ -32,6 +32,7 @@
     "registry_upsert": "ensure_daemon_status_v1",
     "registry_test": "ensure_daemon_status_v1",
     "registry_activate": "ensure_daemon_status_v1",
+    "registry_import_pack": "ensure_daemon_status_v1",
     "registry_deactivate": "ensure_daemon_status_v1",
     "registry_list_active": "ensure_daemon_status_v1",
     "file_read_window": "ensure_daemon_status_v1",
@@ -124,6 +125,11 @@
       "status": "covered_live"
     },
     {
+      "name": "registry_import_pack",
+      "fixture": "mcp-tools/registry_import_pack.v1.json",
+      "status": "covered_live"
+    },
+    {
       "name": "registry_deactivate",
       "fixture": "mcp-tools/registry_deactivate.v1.json",
       "status": "covered_live"
@@ -196,8 +202,8 @@
   ],
   "obsolete_fixtures": [],
   "counts": {
-    "live_tools": 29,
-    "covered_live": 29,
+    "live_tools": 30,
+    "covered_live": 30,
     "placeholder_for_live_tool": 0,
     "missing_fixture": 0,
     "obsolete_fixture_present": 0

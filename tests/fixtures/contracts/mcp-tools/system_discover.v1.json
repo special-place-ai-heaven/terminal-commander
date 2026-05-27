@@ -146,6 +146,14 @@
         "unavailable_reason": "daemon_unavailable"
       },
       {
+        "name": "registry_import_pack",
+        "status": "live",
+        "description": "Import a curated rule pack by name; optionally activate it in one call.",
+        "requires_daemon": true,
+        "available": false,
+        "unavailable_reason": "daemon_unavailable"
+      },
+      {
         "name": "registry_deactivate",
         "status": "live",
         "description": "Deactivate (rule_id, version); future commands skip the rule.",

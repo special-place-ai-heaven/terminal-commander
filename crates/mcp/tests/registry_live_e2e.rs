@@ -350,3 +350,75 @@ async fn registry_upsert_rejects_invalid_regex_through_mcp() {
     handle.shutdown().await;
     cleanup(&data);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_pack_cargo_through_mcp_activates_rules() {
+    // TCE-ERG-PACK: one MCP call imports the cargo pack and activates
+    // every rule, with no rule JSON authored by the caller.
+    let data = tmp_data_dir("importpack");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        let out = first_text(
+            &call_tool(
+                &client,
+                "registry_import_pack",
+                serde_json::json!({
+                    "pack": "cargo",
+                    "activate": true,
+                    "scope": { "kind": "global" }
+                }),
+            )
+            .await,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).expect("import_pack json");
+        assert_eq!(v["pack"], "cargo");
+        let imported = v["imported"].as_array().expect("imported array");
+        let activated = v["activated"].as_array().expect("activated array");
+        assert!(imported.len() >= 6, "cargo pack must import >= 6 rules");
+        assert_eq!(
+            activated.len(),
+            imported.len(),
+            "every imported rule must be activated"
+        );
+        assert!(
+            v["skipped"].as_array().expect("skipped array").is_empty(),
+            "no cargo rule should be skipped"
+        );
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_pack_unknown_name_is_teaching_error_through_mcp() {
+    let data = tmp_data_dir("importpack-unknown");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        let mut params = CallToolRequestParams::new("registry_import_pack");
+        params.arguments = Some(
+            serde_json::json!({ "pack": "does-not-exist", "activate": false })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let err = client
+            .call_tool(params)
+            .await
+            .expect_err("unknown pack must be rejected through MCP");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("known packs"),
+            "denial must list the known packs so the agent self-corrects; got: {msg}"
+        );
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}

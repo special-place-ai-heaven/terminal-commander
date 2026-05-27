@@ -138,6 +138,7 @@ fn minimal_tool_args(tool: &str) -> serde_json::Value {
         "event_context" => serde_json::json!({ "bucket_id": "bkt_x", "event_id": "evt_x" }),
         "registry_search" => serde_json::json!({ "query": "x" }),
         "registry_get" | "registry_activate" => serde_json::json!({ "rule_id": "rule_x" }),
+        "registry_import_pack" => serde_json::json!({ "pack": "cargo" }),
         "registry_upsert" => serde_json::json!({ "definition_json": "{}" }),
         "registry_test" => serde_json::json!({ "rule_id": "rule_x", "samples": [] }),
         "registry_deactivate" => serde_json::json!({ "rule_id": "rule_x", "version": 1 }),
@@ -189,8 +190,8 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
         "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
     assert_eq!(
-        checked, 28,
-        "expected 28 daemon-backed tools (29 catalogue entries minus system_discover)"
+        checked, 29,
+        "expected 29 daemon-backed tools (30 catalogue entries minus system_discover)"
     );
 
     let _ = client.cancel().await;

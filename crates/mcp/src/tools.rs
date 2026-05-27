@@ -53,9 +53,10 @@ use terminal_commanderd::ipc::protocol::{
     PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
     PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RegistryActivateParams,
     RegistryActivateResponse, RegistryDeactivateParams, RegistryDeactivateResponse,
-    RegistryGetParams, RegistryGetResponse, RegistryListActiveResponse, RegistrySearchParams,
-    RegistrySearchResponse, RegistryTestParams, RegistryTestResponse, RegistryTestSample,
-    RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
+    RegistryGetParams, RegistryGetResponse, RegistryImportPackParams, RegistryImportPackResponse,
+    RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse, RegistryTestParams,
+    RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
+    SelfCheckResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -175,6 +176,11 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "registry_activate",
             status: ToolStatus::Live,
             description: "Activate (rule_id, version?) for every newly-started command.",
+        },
+        ToolCatalogueEntry {
+            name: "registry_import_pack",
+            status: ToolStatus::Live,
+            description: "Import a curated rule pack by name; optionally activate it in one call.",
         },
         ToolCatalogueEntry {
             name: "registry_deactivate",
@@ -698,6 +704,41 @@ impl TerminalCommanderMcpServer {
         }
     }
 
+    /// `registry_import_pack` — one-call expert signal extraction.
+    #[tool(
+        description = "Import a curated rule pack (cargo, pytest, npm, gcc, apt, make, generic.terminal) so you get expert signal extraction without authoring any rule JSON. Pass activate=true + scope {kind:'global'} to make the rules live immediately for your commands; one call replaces ~6 rule-authoring calls. An unknown pack name returns the list of available packs."
+    )]
+    async fn registry_import_pack(
+        &self,
+        Parameters(params): Parameters<McpRegistryImportPackParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available()?;
+        let scope = match params.scope {
+            Some(s) => Some(s.into_ipc_scope()?),
+            None => None,
+        };
+        let ipc = RegistryImportPackParams {
+            pack: params.pack,
+            activate: params.activate,
+            scope,
+        };
+        match self.daemon.call(IpcRequest::RegistryImportPack(ipc)).await {
+            Ok(IpcResponse::RegistryImportPack(RegistryImportPackResponse {
+                pack,
+                imported,
+                skipped,
+                activated,
+            })) => json_tool_result(&serde_json::json!({
+                "pack": pack,
+                "imported": imported,
+                "skipped": skipped,
+                "activated": activated,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
     /// `registry_deactivate` — remove a rule from the active set.
     #[tool(
         description = "Deactivate (rule_id, version). Future commands skip the rule; already-running commands keep the rules they were started with."
@@ -1116,7 +1157,11 @@ pub fn into_mcp_error(e: &IpcError) -> McpError {
         // Draft rule): surface it as invalid_params with the remedy,
         // not internal_error, so the LLM self-corrects instead of
         // treating the tool as broken.
-        | IpcErrorCode::RuleNotActive => McpError::invalid_params(message, Some(data)),
+        | IpcErrorCode::RuleNotActive
+        // RuleInvalid is likewise caller-fixable (bad rule JSON or an
+        // unknown rule-pack name -- the message lists valid packs), so
+        // the agent corrects its input rather than retrying blindly.
+        | IpcErrorCode::RuleInvalid => McpError::invalid_params(message, Some(data)),
         _ => McpError::internal_error(message, Some(data)),
     }
 }
@@ -1522,6 +1567,23 @@ pub struct McpRegistryActivateParams {
     pub scope: Option<McpActivationScope>,
 }
 
+/// MCP-facing parameters for `registry_import_pack`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRegistryImportPackParams {
+    /// Pack name. One of: generic.terminal, apt, cargo, npm, pytest,
+    /// gcc, make.
+    pub pack: String,
+    /// When true, promote the pack's rules to Active and activate them
+    /// in `scope` so they take effect immediately. Requires `scope`.
+    #[serde(default)]
+    pub activate: bool,
+    /// Activation scope (required when activate=true). `{ "kind":
+    /// "global" }` is the usual choice for a single agent watching its
+    /// own commands.
+    #[serde(default)]
+    pub scope: Option<McpActivationScope>,
+}
+
 /// MCP-facing parameters for `registry_deactivate`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryDeactivateParams {
@@ -1733,6 +1795,7 @@ mod tests {
                 "registry_upsert",
                 "registry_test",
                 "registry_activate",
+                "registry_import_pack",
                 "registry_deactivate",
                 "registry_list_active",
                 "file_read_window",
@@ -1794,6 +1857,7 @@ mod tests {
                 "registry_activate".to_owned(),
                 "registry_deactivate".to_owned(),
                 "registry_get".to_owned(),
+                "registry_import_pack".to_owned(),
                 "registry_list_active".to_owned(),
                 "registry_search".to_owned(),
                 "registry_test".to_owned(),

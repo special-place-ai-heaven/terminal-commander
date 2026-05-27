@@ -1,0 +1,75 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "registry_import_pack",
+      "arguments": {
+        "pack": "cargo",
+        "activate": true,
+        "scope": {
+          "kind": "global"
+        }
+      }
+    }
+  },
+  "tool": "registry_import_pack",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/registry_import_pack-v1",
+    "fixture_id": "contracts/mcp-tools/registry_import_pack.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed one-call rule-pack import (TCE-ERG-PACK). Imports an embedded pack by name; with activate=true + scope, promotes its rules to Active and activates them so the agent gets expert signal extraction without authoring rule JSON. An unknown pack name returns an invalid_params error listing the known packs."
+  },
+  "response_example": {
+    "pack": "cargo",
+    "imported": [
+      "cargo.compile-error",
+      "cargo.could-not-compile",
+      "cargo.warning",
+      "cargo.test-failed",
+      "cargo.panic",
+      "cargo.aborting"
+    ],
+    "skipped": [],
+    "activated": [
+      "cargo.compile-error",
+      "cargo.could-not-compile",
+      "cargo.warning",
+      "cargo.test-failed",
+      "cargo.panic",
+      "cargo.aborting"
+    ]
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "pack is required and must be a known pack name",
+    "activate=true requires scope; missing scope is rejected with scope_invalid",
+    "an unknown pack name returns invalid_params listing the known packs",
+    "activated is a subset of imported and empty when activate=false",
+    "no raw stream content is returned; imported/activated are rule ids"
+  ]
+}

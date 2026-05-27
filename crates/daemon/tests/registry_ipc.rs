@@ -14,8 +14,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use terminal_commander_core::{
-    ContextHint, RuleDefinition, RuleStatus, RuleType, Severity, SourceStream,
+    BucketId, ContextHint, RuleDefinition, RuleStatus, RuleType, Severity, SourceFrame,
+    SourceStream,
 };
+use terminal_commander_sifters::SifterRuntime;
 use terminal_commander_store::AuditReadRequest;
 use terminal_commanderd::{
     DaemonClient, DaemonConfig, DaemonState, IpcErrorCode, IpcRequest, IpcResponse, IpcServer,
@@ -659,6 +661,61 @@ fn import_pack_cargo_activates_and_drives_signal() {
                 "rule {id} must be active after import_pack"
             );
         }
+
+        // Truthfulness: the imported cargo regexes actually match
+        // representative real rustc/cargo lines (not just compile +
+        // validate). Build a sifter from the active defs and evaluate
+        // one sample per thickened rule.
+        let defs: Vec<RuleDefinition> = {
+            let g = state.store.lock();
+            r.activated
+                .iter()
+                .map(|id| g.get_latest_rule(id).unwrap().unwrap())
+                .collect()
+        };
+        let sifter = SifterRuntime::build(&defs).expect("sifter builds from cargo pack");
+        let bucket = BucketId::new();
+        let samples: &[(SourceStream, &str)] = &[
+            (
+                SourceStream::Stderr,
+                "error[E0425]: cannot find value `x` in this scope",
+            ),
+            (SourceStream::Stderr, "warning: unused variable: `y`"),
+            (
+                SourceStream::Stdout,
+                "test result: FAILED. 3 passed; 2 failed; 0 ignored",
+            ),
+            (
+                SourceStream::Stderr,
+                "thread 'main' panicked at src/main.rs:10:5:",
+            ),
+            (
+                SourceStream::Stderr,
+                "error: aborting due to 2 previous errors",
+            ),
+        ];
+        for (stream, line) in samples {
+            let frame = SourceFrame::new(
+                terminal_commander_core::ProbeId::new(),
+                stream.clone(),
+                (*line).to_owned(),
+            );
+            let events = sifter.evaluate(&frame, bucket);
+            assert!(
+                !events.is_empty(),
+                "a cargo rule must match the representative line: {line:?}"
+            );
+        }
+        // And it must NOT fire on benign noise.
+        let benign = SourceFrame::new(
+            terminal_commander_core::ProbeId::new(),
+            SourceStream::Stdout,
+            "Compiling serde v1.0.0".to_owned(),
+        );
+        assert!(
+            sifter.evaluate(&benign, bucket).is_empty(),
+            "cargo rules must not fire on benign progress output"
+        );
 
         handle.shutdown().await;
         cleanup(&data);

@@ -8,7 +8,7 @@
 //! pointed at it, and verifies the live tool round trip:
 //!
 //! - MCP `initialize` succeeds.
-//! - `list_tools` returns the full TC45 tool set (29 live tools).
+//! - `list_tools` returns the full tool set (30 live tools: TC45 + registry_import_pack).
 //! - `health` forwards through UDS and returns a payload that decodes
 //!   to a real `uptime_secs` field (i.e. the daemon answered).
 //! - `system_discover` forwards through UDS, the `daemon` field is
@@ -118,6 +118,7 @@ async fn live_health_roundtrip_through_uds() {
                 "registry_activate".to_owned(),
                 "registry_deactivate".to_owned(),
                 "registry_get".to_owned(),
+                "registry_import_pack".to_owned(),
                 "registry_list_active".to_owned(),
                 "registry_search".to_owned(),
                 "registry_test".to_owned(),
@@ -199,8 +200,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             .filter(|t| t["status"].as_str() == Some("live"))
             .count();
         assert_eq!(
-            live_count, 29,
-            "tool catalogue must list exactly 29 live tools at TC45"
+            live_count, 30,
+            "tool catalogue must list exactly 30 live tools (TC45 + registry_import_pack)"
         );
 
         let _ = client.cancel().await;

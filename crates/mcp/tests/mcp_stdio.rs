@@ -94,6 +94,7 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "registry_activate".to_owned(),
             "registry_deactivate".to_owned(),
             "registry_get".to_owned(),
+            "registry_import_pack".to_owned(),
             "registry_list_active".to_owned(),
             "registry_search".to_owned(),
             "registry_test".to_owned(),
