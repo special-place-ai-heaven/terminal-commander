@@ -237,10 +237,15 @@ fn command_output_tail_clamps_to_200_lines() {
 
         let rec = state.jobs.get(resp.job_id).expect("job record present");
         let probe_id = rec.config.probe_id;
-        // Request more than the hard cap; server-side clamp must enforce MAX_TAIL_LINES=200.
+        // The handler clamps a caller's max_lines to MAX_TAIL_LINES=200
+        // (see handle_command_output_tail). This test exercises the ring
+        // at that already-clamped value to prove that asking for 200 of
+        // 250 frames returns at most 200 and flags truncation. The
+        // end-to-end clamp of an over-cap request is covered by the MCP
+        // e2e test command_output_tail_clamps_to_200_lines.
         let tail = state
             .rings
-            .tail_frames(probe_id, 10_000usize.min(200), 65_536)
+            .tail_frames(probe_id, 200, 65_536)
             .expect("tail ok");
         assert!(
             tail.lines.len() <= 200,
