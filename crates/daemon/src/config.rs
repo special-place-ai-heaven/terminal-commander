@@ -333,6 +333,21 @@ pub fn to_toml(cfg: &DaemonConfig) -> String {
     toml::to_string(cfg).unwrap_or_else(|e| format!("# serialization error: {e}\n"))
 }
 
+/// The daemon's default data dir when no `--config`/`--data-dir`/`TC_DATA`
+/// is supplied (F5).
+///
+/// Delegates to `supervisor::paths::resolve_state_dir` so the daemon (the
+/// pidfile WRITER) and the supervisor (the pidfile READER + socket prober)
+/// can never resolve different directories. Before this, the daemon used a
+/// `%USERPROFILE%\.terminal-commanderd` default on Windows while the
+/// supervisor probed `%LOCALAPPDATA%\terminal-commanderd\state`, so a daemon
+/// started without `--data-dir` (manual `start`, or `update`/`restart`) wrote
+/// its pidfile where the reader never looked.
+#[must_use]
+pub fn default_state_dir() -> PathBuf {
+    terminal_commander_supervisor::paths::resolve_state_dir()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +359,19 @@ mod tests {
         let back = DaemonConfig::from_toml(&s).unwrap();
         assert_eq!(back.daemon.data_dir, cfg.daemon.data_dir);
         assert_eq!(back.policy.profile, cfg.policy.profile);
+    }
+
+    #[test]
+    fn default_state_dir_matches_supervisor_resolver() {
+        // F5: the daemon's default data dir MUST equal the path the
+        // supervisor (pidfile reader, socket prober) resolves, or a
+        // daemon started without --data-dir writes its pidfile where the
+        // reader never looks. Single source of truth: delegate.
+        assert_eq!(
+            super::default_state_dir(),
+            terminal_commander_supervisor::paths::resolve_state_dir(),
+            "daemon default data dir must match supervisor::paths::resolve_state_dir"
+        );
     }
 
     #[test]

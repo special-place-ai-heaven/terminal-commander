@@ -236,7 +236,11 @@ fn resolve_config(cli: &Cli) -> Result<DaemonConfig, ExitCode> {
     } else if let Some(dd) = cli.data_dir.as_ref() {
         DaemonConfig::defaults_in(dd)
     } else {
-        DaemonConfig::defaults_in(platform_default_data_dir())
+        // F5: single source of truth -- the daemon's default data dir is
+        // exactly what the supervisor (pidfile reader / socket prober)
+        // resolves, so a daemon started without --data-dir writes its
+        // pidfile where the reader looks.
+        DaemonConfig::defaults_in(terminal_commanderd::config::default_state_dir())
     };
     apply_socket_env_override(&mut cfg);
     Ok(cfg)
@@ -248,16 +252,5 @@ fn apply_socket_env_override(cfg: &mut DaemonConfig) {
         && !socket.is_empty()
     {
         cfg.daemon.socket_path = Some(PathBuf::from(socket));
-    }
-}
-
-#[allow(clippy::option_if_let_else)] // three-arm cascade is clearer as if/else if/else
-fn platform_default_data_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/share/terminal-commanderd")
-    } else if let Ok(up) = std::env::var("USERPROFILE") {
-        PathBuf::from(up).join(".terminal-commanderd")
-    } else {
-        PathBuf::from(".terminal-commanderd")
     }
 }
