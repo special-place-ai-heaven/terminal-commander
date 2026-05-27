@@ -104,25 +104,27 @@ pub fn resolve_socket_path() -> PathBuf {
 /// [`resolve_socket_path`] with an injected env source.
 #[must_use]
 pub fn resolve_socket_path_with(env: &impl EnvSource) -> PathBuf {
-    if let Some(p) = env.get("TC_SOCKET").filter(|s| !s.is_empty()) {
-        return PathBuf::from(p);
+    use crate::session::{SessionEndpoint, resolve_session};
+    if let SessionEndpoint::FullOverride(sock) = resolve_session(env) {
+        return PathBuf::from(sock);
     }
     #[cfg(windows)]
     {
-        // Match DaemonConfig::pipe_name() exactly:
-        //   format!(r"\\.\pipe\terminal-commander-{user}")
-        // where user = USERNAME ?? USER ?? "default".
-        // NO "-default" suffix beyond the fallback user string.
-        let user = env
-            .get("USERNAME")
-            .or_else(|| env.get("USER"))
-            .unwrap_or_else(|| "default".to_owned());
-        return PathBuf::from(format!(r"\\.\pipe\terminal-commander-{user}"));
+        // Default => legacy pipe terminal-commander-{USERNAME} (byte-identical
+        // to pre-F1). Explicit session => terminal-commander-{token}.
+        let label = match resolve_session(env) {
+            SessionEndpoint::Session(token) => token,
+            // Default: USERNAME ?? USER ?? "default" (matches DaemonConfig).
+            _ => env
+                .get("USERNAME")
+                .or_else(|| env.get("USER"))
+                .unwrap_or_else(|| "default".to_owned()),
+        };
+        return PathBuf::from(format!(r"\\.\pipe\terminal-commander-{label}"));
     }
     #[cfg(unix)]
     {
-        // Match DaemonConfig::socket_path():
-        //   self.daemon.data_dir.join("terminal-commanderd.sock")
+        // Unix socket derives from the (now session-aware) state dir.
         return resolve_state_dir_with(env).join("terminal-commanderd.sock");
     }
     #[allow(unreachable_code)]
@@ -309,5 +311,38 @@ mod tests {
         assert_eq!(crate::pidfile::pidfile_path(&state), expected.join("terminal-commanderd.pid"));
         assert_eq!(resolve_log_path_with(&env), expected.join("logs").join("terminal-commanderd.log"));
         assert_eq!(resolve_socket_path_with(&env), expected.join("terminal-commanderd.sock"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_default_pipe_is_byte_identical_to_pre_f1() {
+        let env = FakeEnv::new().with("USERNAME", "alice");
+        assert_eq!(
+            resolve_socket_path_with(&env).to_string_lossy(),
+            r"\\.\pipe\terminal-commander-alice",
+            "unseeded Windows pipe MUST stay the legacy name (no rename)"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_explicit_session_uses_token_pipe() {
+        let env = FakeEnv::new().with("USERNAME", "alice").with("TC_SESSION", "agent-1");
+        assert_eq!(
+            resolve_socket_path_with(&env).to_string_lossy(),
+            r"\\.\pipe\terminal-commander-agent-1",
+            "explicit session uses the token, not the username"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_tc_socket_overrides_everything() {
+        let env = FakeEnv::new().with("USERNAME", "alice").with("TC_SESSION", "agent-1").with("TC_SOCKET", r"\\.\pipe\custom");
+        assert_eq!(
+            resolve_socket_path_with(&env).to_string_lossy(),
+            r"\\.\pipe\custom",
+            "TC_SOCKET full override wins over session + default"
+        );
     }
 }
