@@ -50,7 +50,7 @@ pub struct ImportResult {
     pub skipped: Vec<String>,
 }
 
-/// The seven seed packs, embedded so the daemon needs no repo checkout
+/// The eight seed packs, embedded so the daemon needs no repo checkout
 /// at runtime. Paths are relative to THIS source file
 /// (`crates/store/src/import.rs`; repo root is `../../../`).
 // Rules live INSIDE this crate (crates/store/rules/) so `cargo publish`
@@ -68,6 +68,7 @@ const SEED_PACKS: &[(&str, &str)] = &[
     ("pytest", include_str!("../rules/pytest.json")),
     ("gcc", include_str!("../rules/gcc.json")),
     ("make", include_str!("../rules/make.json")),
+    ("cleanup", include_str!("../rules/cleanup.json")),
 ];
 
 /// Resolve a pack name to its embedded JSON, or `None` if unknown.
@@ -181,11 +182,42 @@ mod tests {
     }
 
     #[test]
-    fn known_pack_names_lists_all_seven() {
+    fn known_pack_names_lists_all_eight() {
         let names = known_pack_names();
-        assert_eq!(names.len(), 7);
+        assert_eq!(names.len(), 8);
         assert!(names.contains(&"cargo"));
         assert!(names.contains(&"generic.terminal"));
+        assert!(names.contains(&"cleanup"));
+    }
+
+    #[test]
+    fn cleanup_pack_resolves_and_has_core_rules() {
+        let json = resolve_pack_json("cleanup").expect("cleanup pack present");
+        let parsed: RulePackFile = sj::from_str(json).unwrap();
+        let ids: Vec<&str> = parsed.rules.iter().map(|r| r.id.as_str()).collect();
+        for want in [
+            "cleanup.disk-usage",
+            "cleanup.dir-size",
+            "cleanup.docker-usage",
+            "cleanup.fstrim",
+            "cleanup.space-reclaimed",
+        ] {
+            assert!(ids.contains(&want), "missing {want}");
+        }
+    }
+
+    #[test]
+    fn cleanup_pack_imports_and_renders_a_summary() {
+        let mut s = EventStore::in_memory().unwrap();
+        let res = s.import_rule_pack_by_name("cleanup", true).unwrap();
+        assert!(res.skipped.is_empty(), "skipped: {:?}", res.skipped);
+        let r = s.get_latest_rule("cleanup.fstrim").unwrap().unwrap();
+        // The rule's template uses ${...} so render substitutes values.
+        let mut caps = indexmap::IndexMap::new();
+        caps.insert("mount".to_owned(), "/".to_owned());
+        caps.insert("human".to_owned(), "2.1 GiB".to_owned());
+        let rendered = r.render_summary(&caps).unwrap();
+        assert_eq!(rendered.0, "trimmed /: 2.1 GiB");
     }
 
     #[test]
