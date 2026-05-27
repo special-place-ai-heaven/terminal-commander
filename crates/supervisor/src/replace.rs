@@ -97,11 +97,14 @@ pub fn find_daemon_pid_os(state_dir: &Path) -> Option<u32> {
     let needle = state_dir.to_string_lossy().to_string();
     #[cfg(windows)]
     {
+        // PowerShell `-like` treats backslash literally, so the path is
+        // passed RAW (no escaping). `[`/`]` are wildcard chars in -like;
+        // escape them so a bracketed path can't break the pattern.
+        let pat = needle.replace('[', "`[").replace(']', "`]");
         let ps = format!(
             "Get-CimInstance Win32_Process -Filter \"Name='terminal-commanderd.exe'\" | \
-             Where-Object {{ $_.CommandLine -like '*{}*' }} | \
-             Select-Object -First 1 -ExpandProperty ProcessId",
-            needle.replace('\\', "\\\\")
+             Where-Object {{ $_.CommandLine -like '*{pat}*' }} | \
+             Select-Object -First 1 -ExpandProperty ProcessId"
         );
         let out = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &ps])

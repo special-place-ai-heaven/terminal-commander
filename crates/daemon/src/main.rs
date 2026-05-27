@@ -153,6 +153,12 @@ async fn run_update(cfg: &DaemonConfig) -> ExitCode {
     let installed = env!("CARGO_PKG_VERSION");
     let daemon_binary = std::env::current_exe().unwrap_or_else(|_| "terminal-commanderd".into());
     let state_dir = cfg.daemon.data_dir.clone();
+    // Resolve the endpoint the daemon actually binds: a named pipe on
+    // Windows, a UDS path on Unix. Using socket_path() on Windows would
+    // yield a bogus .sock UnixSocket endpoint the daemon never binds.
+    #[cfg(windows)]
+    let endpoint = endpoint_from_socket_path(std::path::Path::new(&cfg.pipe_name()));
+    #[cfg(unix)]
     let endpoint = endpoint_from_socket_path(&cfg.socket_path());
     let log_dir = terminal_commander_supervisor::paths::resolve_log_path()
         .parent()
