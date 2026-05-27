@@ -48,11 +48,21 @@ jobs:
     # public `cargo-zigbuild` Docker images bundling it have a murky
     # licence story. GitHub-hosted macOS runners ship the SDK by default.
     #
+    # LINUX GLIBC FLOOR: linux-x64/linux-arm64 pin ubuntu-22.04 (glibc
+    # 2.35) ON PURPOSE. A native cargo build links the host glibc as the
+    # binary's MINIMUM required version; building on ubuntu-24.04 (glibc
+    # 2.39) shipped binaries that fail on Debian 12 bookworm (2.36),
+    # Ubuntu 22.04 (2.35), and older (v0.1.13 verify-linux-* failed with
+    # "GLIBC_2.39 not found"). Do NOT bump linux to 24.04. When 22.04
+    # hosted runners are retired, switch linux to cargo-zigbuild with a
+    # pinned gnu.2.x target rather than a newer native runner. The
+    # post-staging objdump guard below enforces the <=2.35 floor.
+    #
     # Runner labels (verified 2026-05-25):
     #   - macos-13 was retired 2025-12-04. Use macos-15-intel for Intel.
     #   - macos-14 still active for Apple Silicon (M1+).
     # When GitHub deprecates either, see runbook §"macOS runner deprecation".
-    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-24.04","linux-arm64":"ubuntu-24.04-arm","windows-x64":"windows-2022","mac-x64":"macos-15-intel","mac-arm64":"macos-14"}')[inputs.platform] }}
+    runs-on: ${{ fromJSON('{"linux-x64":"ubuntu-22.04","linux-arm64":"ubuntu-22.04-arm","windows-x64":"windows-2022","mac-x64":"macos-15-intel","mac-arm64":"macos-14"}')[inputs.platform] }}
     outputs:
       artifact_name: ${{ steps.meta.outputs.artifact_name }}
     env:
@@ -104,6 +114,40 @@ jobs:
           # Strip the .placeholder + .gitkeep markers committed for empty-dir guarantee.
           rm -f "$bin_dir"/*.placeholder "$bin_dir"/.gitkeep
           ls -la "$bin_dir"
+
+      - name: Enforce glibc floor (linux only, <= 2.35)
+        if: startsWith(inputs.platform, 'linux')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Native cargo build links the host glibc as the binary's
+          # minimum. We build on ubuntu-22.04 (glibc 2.35); assert no
+          # staged binary slipped in a higher requirement (e.g. a runner
+          # image bump). sort -V is a numeric version comparator, so
+          # 2.39 > 2.35 > 2.4 order correctly (NOT a lexical sort).
+          floor="2.35"
+          bin_dir="${PLATFORM_PKG_DIR}/bin"
+          fail=0
+          for bin in terminal-commanderd terminal-commander-mcp terminal-commander; do
+            path="${bin_dir}/${bin}"
+            maxg=$(objdump -T "$path" \
+              | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+              | sed 's/GLIBC_//' \
+              | sort -V | tail -1)
+            if [ -z "$maxg" ]; then
+              echo "::error::no GLIBC version symbols found in $path (unexpected for a glibc-linked binary)"
+              fail=1
+              continue
+            fi
+            highest=$(printf '%s\n%s\n' "$maxg" "$floor" | sort -V | tail -1)
+            if [ "$highest" != "$floor" ]; then
+              echo "::error::$bin requires GLIBC_${maxg}, above the ${floor} floor (build host glibc leaked into the binary; do not build linux on a runner newer than ubuntu-22.04)"
+              fail=1
+            else
+              echo "$bin: max GLIBC_${maxg} <= ${floor} OK"
+            fi
+          done
+          exit "$fail"
 
       - name: Smoke — --version (native runner, so always works)
         shell: bash
