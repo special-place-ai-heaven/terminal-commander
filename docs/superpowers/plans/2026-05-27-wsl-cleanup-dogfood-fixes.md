@@ -743,7 +743,39 @@ git add crates/supervisor/src/replace.rs crates/daemon/src/main.rs
 git commit -m "feat(daemon): update --force replaces a same-version daemon (F4)"
 ```
 
-### Task 4.2: npm verb split -- `restart`, `upgrade`, deprecate `update`
+### Task 4.2: npm `restart` verb (DONE -- deviated from plan after grounding)
+
+**DEVIATION (user-confirmed 2026-05-27): the plan's premise was wrong.** The npm
+CLI (`packages/terminal-commander/lib/cli/parser.js`) has NO `update` verb and
+no `resolveVerb`/`verbs.js`. Supported verbs were doctor/setup/pair/help only;
+`terminal-commander update` simply returned `unknown command: update`. There is
+no "two colliding update commands" -- the only `update` is the daemon binary's
+`terminal-commanderd update`. So there was nothing to "split" or "deprecate".
+
+The honest fix (chosen): add a single new `restart` verb -- the operator's real
+dogfood intent (kill+respawn the daemon). No `upgrade` verb (npm's own
+`npm update terminal-commander` already upgrades the package; duplicating it in
+the CLI would add a child-process/npm dependency for no gain). No `verbs.js`
+abstraction (doesn't fit this parser->run.js->handler architecture).
+
+**Implemented (commit, main):**
+- `lib/cli/parser.js`: new `case "restart"` (accepts only `--distro`/`--force`),
+  `RESTART_USAGE` panel, USAGE line + NOTE that upgrading the package is a
+  separate `npm update` step.
+- `lib/cli/restart.js` (new handler): win32 -> resolve+validate distro ->
+  `wsl.exe -d <distro> -- bash -lc '<LINUX_PATH_PREFIX>terminal-commanderd
+  update --force'` (mirrors `doctor_daemon.js`); linux -> spawn
+  `terminal-commanderd update --force` directly. Injectable `exec`. No sudo, no
+  npm install, env filtered via `buildFilteredEnv`, distro double-validated.
+- `lib/cli/run.js`: help + dispatch wiring (`o.restartExec` injection point).
+- Tests: `test/cli-parser.test.js` (+4 restart cases), `test/cli-restart.test.js`
+  (5 cases: win32 WSL dispatch argv, linux direct, non-zero -> restart_failed,
+  no-distro -> exit 64). Full npm suite 283/283 pass; av-safe-install +
+  static-guard invariants unbroken.
+
+Original (now-void) plan text for Task 4.2 follows for provenance:
+
+### Task 4.2 (VOID -- original): npm verb split -- `restart`, `upgrade`, deprecate `update`
 
 **Files:**
 - Modify: `packages/terminal-commander/bin/terminal-commander.js` (or the lib it calls)
