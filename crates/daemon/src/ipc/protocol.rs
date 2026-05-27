@@ -125,6 +125,8 @@ pub enum IpcRequest {
     CommandStartCombed(CommandStartParams),
     /// Lifecycle + counters lookup for a previously started command.
     CommandStatus(CommandStatusParams),
+    /// Rule-free bounded read of a job's captured output tail (F1).
+    CommandOutputTail(CommandOutputTailParams),
     /// FTS-backed search over persisted rule definitions.
     RegistrySearch(RegistrySearchParams),
     /// Fetch a specific rule definition by id and optional version.
@@ -212,6 +214,7 @@ pub enum IpcResponse {
     EventContext(EventContextResponse),
     CommandStartCombed(CommandStartResponse),
     CommandStatus(CommandStatusResponse),
+    CommandOutputTail(CommandOutputTailResponse),
     RegistrySearch(RegistrySearchResponse),
     RegistryGet(RegistryGetResponse),
     RegistryUpsert(RegistryUpsertResponse),
@@ -601,6 +604,43 @@ impl CommandStartParams {
 pub struct CommandStatusParams {
     pub job_id: JobId,
 }
+
+/// Wire shape for `command_output_tail` (F1). Rule-free bounded read
+/// of a job's captured output. Caps enforced server-side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandOutputTailParams {
+    pub job_id: JobId,
+    #[serde(default = "default_tail_lines")]
+    pub max_lines: u32,
+    #[serde(default = "default_tail_bytes")]
+    pub max_bytes: u32,
+}
+
+fn default_tail_lines() -> u32 {
+    50
+}
+fn default_tail_bytes() -> u32 {
+    65_536
+}
+
+/// Response for `command_output_tail`. Bounded; never returns the full
+/// raw stream. `truncated_lines` is true when the ring held more frames
+/// than `max_lines` (after server-side clamping). `truncated_bytes` is
+/// true when the byte cap was hit before the line cap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandOutputTailResponse {
+    pub job_id: JobId,
+    pub lines: Vec<String>,
+    pub returned_lines: u32,
+    pub truncated_lines: bool,
+    pub truncated_bytes: bool,
+    pub evicted_frames: u64,
+}
+
+/// Maximum number of lines returned by `command_output_tail`.
+pub const MAX_TAIL_LINES: usize = 200;
+/// Maximum bytes returned by `command_output_tail`.
+pub const MAX_TAIL_BYTES: usize = 65_536;
 
 /// Maximum hits returned by `registry_search` in a single call.
 pub const MAX_REGISTRY_SEARCH_LIMIT: usize = 200;
@@ -1259,6 +1299,23 @@ mod tests {
         };
         let err = encode_frame(&env).unwrap_err();
         assert_eq!(err.code, IpcErrorCode::FrameTooLarge);
+    }
+
+    #[test]
+    fn command_output_tail_params_round_trip() {
+        let params = CommandOutputTailParams {
+            job_id: JobId::new(),
+            max_lines: 50,
+            max_bytes: 65_536,
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        let back: CommandOutputTailParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, params);
+        // defaults kick in when fields are absent
+        let minimal = format!(r#"{{"job_id":"{}"}}"#, params.job_id);
+        let def: CommandOutputTailParams = serde_json::from_str(&minimal).unwrap();
+        assert_eq!(def.max_lines, 50);
+        assert_eq!(def.max_bytes, 65_536);
     }
 
     #[test]

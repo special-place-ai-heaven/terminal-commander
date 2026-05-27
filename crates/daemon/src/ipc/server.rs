@@ -40,7 +40,8 @@ use crate::ipc::peer;
 use crate::ipc::protocol::PtyCommandWriteStdinParams;
 use crate::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
-    BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStatusParams,
+    BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
+    CommandStartParams, CommandStatusParams, MAX_TAIL_BYTES, MAX_TAIL_LINES,
     ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT, DEFAULT_CONTEXT_AFTER,
     DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES, DEFAULT_FILE_READ_LINES,
     DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES, DiscoverResponse,
@@ -445,6 +446,10 @@ async fn dispatch(
         IpcRequest::CommandStatus(p) => match handle_command_status(state, p) {
             Ok(r) => ("command_status", IpcResult::Ok { response: r }),
             Err(e) => ("command_status", IpcResult::Err { error: e }),
+        },
+        IpcRequest::CommandOutputTail(p) => match handle_command_output_tail(state, p) {
+            Ok(r) => ("command_output_tail", IpcResult::Ok { response: r }),
+            Err(e) => ("command_output_tail", IpcResult::Err { error: e }),
         },
         IpcRequest::RegistrySearch(p) => match handle_registry_search(state, p) {
             Ok(r) => ("registry_search", IpcResult::Ok { response: r }),
@@ -931,6 +936,43 @@ fn handle_command_status(
         .status(params.job_id)
         .map_err(map_command_error)?;
     Ok(IpcResponse::CommandStatus(resp))
+}
+
+fn handle_command_output_tail(
+    state: &Arc<DaemonState>,
+    params: &CommandOutputTailParams,
+) -> Result<IpcResponse, IpcError> {
+    let rec = state
+        .jobs
+        .get(params.job_id)
+        .ok_or_else(|| IpcError::new(IpcErrorCode::UnknownJob, format!("unknown job: {}", params.job_id)))?;
+    let probe_id = rec.config.probe_id;
+    let max_lines = (params.max_lines as usize).min(MAX_TAIL_LINES);
+    let max_bytes = (params.max_bytes as usize).min(MAX_TAIL_BYTES);
+    // NotFound = ring absent (job had no ring yet); treat as empty tail
+    let tail = match state.rings.tail_frames(probe_id, max_lines, max_bytes) {
+        Ok(t) => t,
+        Err(terminal_commander_core::ContextError::NotFound(_)) => {
+            terminal_commander_core::RingTail {
+                lines: vec![],
+                evicted_frames: 0,
+                truncated: false,
+            }
+        }
+        Err(e) => return Err(IpcError::new(IpcErrorCode::Internal, e.to_string())),
+    };
+    let frame_count = state.rings.frame_count(probe_id);
+    let returned_lines = tail.lines.len() as u32;
+    let truncated_lines = frame_count > tail.lines.len();
+    let truncated_bytes = tail.truncated;
+    Ok(IpcResponse::CommandOutputTail(CommandOutputTailResponse {
+        job_id: params.job_id,
+        lines: tail.lines,
+        returned_lines,
+        truncated_lines,
+        truncated_bytes,
+        evicted_frames: tail.evicted_frames,
+    }))
 }
 
 fn map_store_error(e: terminal_commander_store::EventStoreError) -> IpcError {
