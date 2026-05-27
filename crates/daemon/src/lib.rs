@@ -41,7 +41,8 @@ pub use config::{
 pub use file_watch::{LiveWatchIdentity, WatchError, WatchRebindReport, WatchRuntime};
 pub use ipc::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
-    BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStatusParams,
+    BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
+    CommandStartParams, CommandStatusParams, MAX_TAIL_BYTES, MAX_TAIL_LINES,
     ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT, DEFAULT_BUCKET_WAIT_MS,
     DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES,
     DEFAULT_FILE_READ_LINES, DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES,

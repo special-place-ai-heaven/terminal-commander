@@ -40,8 +40,9 @@ pub mod pipe_client;
 
 pub use protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
-    BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStartResponse,
-    CommandStatusParams, CommandStatusResponse, ContextUnavailableReason,
+    BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
+    CommandStartParams, CommandStartResponse, CommandStatusParams, CommandStatusResponse,
+    ContextUnavailableReason, MAX_TAIL_BYTES, MAX_TAIL_LINES,
     DEFAULT_BUCKET_READ_LIMIT, DEFAULT_BUCKET_WAIT_MS, DEFAULT_CONTEXT_AFTER,
     DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES, DEFAULT_FILE_READ_LINES,
     DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES, DEFAULT_REGISTRY_SEARCH_LIMIT,

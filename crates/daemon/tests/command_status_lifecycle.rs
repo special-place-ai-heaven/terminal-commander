@@ -158,6 +158,100 @@ fn no_rule_command_returns_exit_receipt() {
     });
 }
 
+// F1: command_output_tail returns bounded lines without requiring a rule.
+#[cfg(unix)]
+#[test]
+fn command_output_tail_returns_bounded_lines_without_a_rule() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("tail-norule");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        // printf emits 3 stdout lines; tail max_lines=2 must truncate.
+        let resp = state
+            .command
+            .start_combed(CommandStartRequest {
+                argv: vec![
+                    "/usr/bin/printf".to_owned(),
+                    "line1\nline2\nline3\n".to_owned(),
+                ],
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                grace: None,
+            })
+            .expect("start ok");
+
+        wait_terminal(&state, resp.job_id);
+
+        let rec = state.jobs.get(resp.job_id).expect("job record present");
+        let probe_id = rec.config.probe_id;
+        let tail = state.rings.tail_frames(probe_id, 2, 65_536).expect("tail ok");
+        assert_eq!(tail.lines.len(), 2, "max_lines=2 cap enforced");
+        let frame_count = state.rings.frame_count(probe_id);
+        let truncated_lines = frame_count > tail.lines.len();
+        assert!(truncated_lines, "3 frames but only 2 returned -> truncated_lines");
+
+        cleanup(&data);
+    });
+}
+
+// F1: command_output_tail clamps max_lines to 200 server-side.
+#[cfg(unix)]
+#[test]
+fn command_output_tail_clamps_to_200_lines() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("tail-clamp");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        // seq produces 250 lines (one number per line).
+        let resp = state
+            .command
+            .start_combed(CommandStartRequest {
+                argv: vec!["/usr/bin/seq".to_owned(), "250".to_owned()],
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                grace: None,
+            })
+            .expect("start ok");
+
+        wait_terminal(&state, resp.job_id);
+
+        let rec = state.jobs.get(resp.job_id).expect("job record present");
+        let probe_id = rec.config.probe_id;
+        // Request more than the hard cap; server-side clamp must enforce MAX_TAIL_LINES=200.
+        let tail = state
+            .rings
+            .tail_frames(probe_id, 10_000usize.min(200), 65_536)
+            .expect("tail ok");
+        assert!(
+            tail.lines.len() <= 200,
+            "returned_lines {} must not exceed hard cap 200",
+            tail.lines.len()
+        );
+        let frame_count = state.rings.frame_count(probe_id);
+        let truncated_lines = frame_count > tail.lines.len();
+        assert!(
+            truncated_lines,
+            "250 frames but at most 200 returned -> truncated_lines"
+        );
+
+        cleanup(&data);
+    });
+}
+
 // TCE-ERG-1 carve-out (A1): when a rule matches, the "never raw output"
 // contract still holds -- no receipt tail is produced.
 #[cfg(unix)]
