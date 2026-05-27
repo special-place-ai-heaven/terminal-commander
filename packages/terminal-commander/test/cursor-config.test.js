@@ -141,6 +141,36 @@ test("buildTerminalCommanderServerConfig with safe distro adds env.TC_WSL_DISTRO
   assert.equal(Object.keys(s.env).length, 1, "env must contain exactly TC_WSL_DISTRO");
 });
 
+test("buildTerminalCommanderServerConfig with sessionToken adds env.TC_SESSION", () => {
+  const s = buildTerminalCommanderServerConfig({ sessionToken: "tc-0a1b2c3d4e5f" });
+  assert.equal(s.env.TC_SESSION, "tc-0a1b2c3d4e5f");
+  assert.equal(Object.keys(s.env).length, 1, "env must contain exactly TC_SESSION");
+});
+
+test("buildTerminalCommanderServerConfig merges TC_SESSION and TC_WSL_DISTRO", () => {
+  const s = buildTerminalCommanderServerConfig({
+    sessionToken: "tc-0a1b2c3d4e5f",
+    distro: "Ubuntu-24.04",
+  });
+  assert.deepEqual(s.env, {
+    TC_SESSION: "tc-0a1b2c3d4e5f",
+    TC_WSL_DISTRO: "Ubuntu-24.04",
+  });
+});
+
+test("buildTerminalCommanderServerConfig emits no env when neither session nor distro set", () => {
+  const s = buildTerminalCommanderServerConfig({});
+  assert.equal(s.env, undefined, "no env key when nothing to set (backward-compat)");
+});
+
+test("buildTerminalCommanderServerConfig rejects a malformed sessionToken (no pipe-squat)", () => {
+  assert.throws(
+    () => buildTerminalCommanderServerConfig({ sessionToken: "../evil" }),
+    /TC_SESSION|session token/i,
+    "a malformed token must be refused, never written into a kernel-object name",
+  );
+});
+
 test("buildTerminalCommanderCommandConfig defaults to this package's JS shim", () => {
   const s = buildTerminalCommanderCommandConfig({ nodePath: "C:/node/node.exe" });
   assert.equal(s.command, "C:/node/node.exe");

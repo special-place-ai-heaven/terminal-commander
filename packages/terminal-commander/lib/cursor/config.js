@@ -42,6 +42,10 @@ const {
   assertSafeDistroName,
   UNSAFE_DISTRO_NAME,
 } = require("../wsl/distro-name.js");
+const { isValidSessionToken } = require("../session/mint.js");
+
+/** Error code thrown when a TC_SESSION token fails the safety whitelist. */
+const UNSAFE_SESSION_TOKEN = "UNSAFE_SESSION_TOKEN";
 
 const SERVER_NAME = "terminal-commander";
 const SERVER_COMMAND = "terminal-commander-mcp";
@@ -146,12 +150,17 @@ function getCursorProjectConfigPath(projectRoot) {
  * Build the terminal-commander MCP server stanza for Cursor.
  *
  * @param {Object} [opts]
+ * @param {string} [opts.sessionToken]  Optional per-harness TC_SESSION token.
+ *     When supplied, must satisfy isValidSessionToken (mirror of the Rust
+ *     resolver) or this throws — a malformed token must never be written into
+ *     a kernel-object / socket-path name.
  * @param {string} [opts.distro]   Optional. When supplied, must be safe.
  * @param {ReadonlyArray<{name:string}>} [opts.knownDistros]  Required
  *     iff `opts.requireKnownDistro === true`.
  * @param {boolean} [opts.requireKnownDistro=false]
- * @returns {{ type:string, command:string, env?: { TC_WSL_DISTRO:string } }}
- * @throws {Error} with `.code` `UNSAFE_DISTRO_NAME` or `DISTRO_NOT_FOUND`.
+ * @returns {{ type:string, command:string, args:string[], env?: { TC_SESSION?:string, TC_WSL_DISTRO?:string } }}
+ * @throws {Error} with `.code` `UNSAFE_DISTRO_NAME`, `DISTRO_NOT_FOUND`, or
+ *     `UNSAFE_SESSION_TOKEN`.
  */
 function buildTerminalCommanderServerConfig(opts) {
   const o = opts || {};
@@ -161,6 +170,17 @@ function buildTerminalCommanderServerConfig(opts) {
     command: commandConfig.command,
     args: commandConfig.args,
   };
+  const env = {};
+  if (o.sessionToken != null && o.sessionToken !== "") {
+    if (!isValidSessionToken(o.sessionToken)) {
+      const err = new Error(
+        "terminal-commander: TC_SESSION token failed safety whitelist; only [A-Za-z0-9._-] (1..64, at least one alphanumeric, not dot-only) is allowed",
+      );
+      err.code = UNSAFE_SESSION_TOKEN;
+      throw err;
+    }
+    env.TC_SESSION = o.sessionToken;
+  }
   if (o.distro != null && o.distro !== "") {
     // Distro safety: WWS03 whitelist + optional live whitelist
     // membership.
@@ -177,7 +197,10 @@ function buildTerminalCommanderServerConfig(opts) {
         throw err;
       }
     }
-    stanza.env = { TC_WSL_DISTRO: o.distro };
+    env.TC_WSL_DISTRO = o.distro;
+  }
+  if (Object.keys(env).length > 0) {
+    stanza.env = env;
   }
   return stanza;
 }
@@ -331,4 +354,7 @@ module.exports = {
   isSafeDistroName,
   assertSafeDistroName,
   UNSAFE_DISTRO_NAME,
+  // session token safety
+  isValidSessionToken,
+  UNSAFE_SESSION_TOKEN,
 };

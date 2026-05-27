@@ -19,6 +19,7 @@ const {
 } = require("./paths.js");
 const { detectProvider } = require("./detect.js");
 const { getProvider, listProviders } = require("./registry.js");
+const { mintSessionToken } = require("../session/mint.js");
 
 const HARNESS_WRITE_STATUSES = Object.freeze({
   SKIPPED: "skipped",
@@ -34,8 +35,15 @@ function buildJsonMcpStanza(opts) {
     command: commandConfig.command,
     args: commandConfig.args,
   };
+  const env = {};
+  if (o.sessionToken != null && o.sessionToken !== "") {
+    env.TC_SESSION = o.sessionToken;
+  }
   if (o.distro && o.platform === "win32") {
-    stanza.env = { TC_WSL_DISTRO: o.distro };
+    env.TC_WSL_DISTRO = o.distro;
+  }
+  if (Object.keys(env).length > 0) {
+    stanza.env = env;
   }
   return stanza;
 }
@@ -61,9 +69,18 @@ function writeProvider(id, opts) {
   const clobber_backup = o.clobber_backup === true;
   const dryRun = o.dry_run === true;
 
+  // F1: mint a stable, per-harness session token so each provider gets its
+  // own daemon endpoint. The provider id is the stable harness id; machineKey
+  // defaults to the hostname inside mintSessionToken.
+  const sessionToken = mintSessionToken({
+    harnessId: id,
+    machineKey: o.machineKey,
+  });
+
   if (id === "cursor") {
     if (dryRun) {
       const stanza = buildTerminalCommanderServerConfig({
+        sessionToken,
         distro: o.distro,
         knownDistros: o.knownDistros,
         requireKnownDistro: o.requireKnownDistro === true,
@@ -75,6 +92,7 @@ function writeProvider(id, opts) {
       projectRoot: o.projectRoot,
       platform: o.platform,
       env: o.env,
+      sessionToken,
       distro: o.distro,
       knownDistros: o.knownDistros,
       requireKnownDistro: o.requireKnownDistro === true,
@@ -96,6 +114,8 @@ function writeProvider(id, opts) {
     if (dryRun) {
       return { id, status: HARNESS_WRITE_STATUSES.OK, dry_run: true, path: target };
     }
+    // NOTE: Codex TOML env wiring (TC_SESSION) is a follow-up — writeCodexTomlConfig
+    // currently emits no env block (includeEnv: false). Tracked in B1 Phase 1 TODO.
     const r = writeCodexTomlConfig({
       path: target,
       force,
@@ -117,7 +137,7 @@ function writeProvider(id, opts) {
     const target =
       detection.config_path ||
       (id === "claude-code" ? claudeCodeMcpConfigPath(o) : claudeDesktopConfigPath(o));
-    const stanza = buildJsonMcpStanza(o);
+    const stanza = buildJsonMcpStanza({ ...o, sessionToken });
     if (dryRun) {
       return { id, status: HARNESS_WRITE_STATUSES.OK, dry_run: true, path: target, stanza };
     }
