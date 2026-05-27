@@ -700,7 +700,7 @@ impl TerminalCommanderMcpServer {
     /// `registry_activate` — activate a rule for every newly-started
     /// command.
     #[tool(
-        description = "Activate (rule_id, version?) so every newly-started command uses the rule. Already-running commands are not hot-rebound. Pattern: activate the rule (or import the `cleanup` pack via registry_import_pack), THEN start the command. To read output from a command you already started without a matching rule, use command_output_tail."
+        description = "Activate (rule_id, version?, scope) so every newly-started command uses the rule. scope is REQUIRED -- pass scope {kind:'global'} for the common single-agent case; an omitted scope is rejected (never silently widened to global). Already-running commands are not hot-rebound. Pattern: activate the rule (or import the `cleanup` pack via registry_import_pack), THEN start the command. To read output from a command you already started without a matching rule, use command_output_tail."
     )]
     async fn registry_activate(
         &self,
@@ -772,7 +772,7 @@ impl TerminalCommanderMcpServer {
 
     /// `registry_deactivate` — remove a rule from the active set.
     #[tool(
-        description = "Deactivate (rule_id, version). Future commands skip the rule; already-running commands keep the rules they were started with."
+        description = "Deactivate (rule_id, version, scope). scope is REQUIRED and must match the scope used at activation (e.g. {kind:'global'}); an omitted scope is rejected. Future commands skip the rule; already-running commands keep the rules they were started with."
     )]
     async fn registry_deactivate(
         &self,
@@ -1617,7 +1617,10 @@ pub struct McpRegistryActivateParams {
     /// Omit to activate the latest stored version.
     #[serde(default)]
     pub version: Option<u32>,
-    /// Optional scope (TC42c). Omitted = `global`.
+    /// REQUIRED scope (TC42c/TC42d). There is no default: an omitted
+    /// scope is rejected with a scope-required error so a rule is never
+    /// silently widened to global. Use `{ "kind": "global" }` for the
+    /// common single-agent case (watch every command you start).
     #[serde(default)]
     pub scope: Option<McpActivationScope>,
 }
@@ -1632,9 +1635,10 @@ pub struct McpRegistryImportPackParams {
     /// in `scope` so they take effect immediately. Requires `scope`.
     #[serde(default)]
     pub activate: bool,
-    /// Activation scope (required when activate=true). `{ "kind":
-    /// "global" }` is the usual choice for a single agent watching its
-    /// own commands.
+    /// Activation scope. REQUIRED when activate=true (no default; an
+    /// omitted scope is rejected, never silently widened to global).
+    /// `{ "kind": "global" }` is the usual choice for a single agent
+    /// watching its own commands.
     #[serde(default)]
     pub scope: Option<McpActivationScope>,
 }
@@ -1644,9 +1648,11 @@ pub struct McpRegistryImportPackParams {
 pub struct McpRegistryDeactivateParams {
     pub rule_id: String,
     pub version: u32,
-    /// Optional scope (TC42c). Omitted = `global`. MUST match the
-    /// scope used at activation; deactivating with a different scope
-    /// will not close the previously-opened activation row.
+    /// REQUIRED scope (TC42c/TC42d). No default: an omitted scope is
+    /// rejected with a scope-required error. MUST match the scope used
+    /// at activation; deactivating with a different scope will not close
+    /// the previously-opened activation row. Use `{ "kind": "global" }`
+    /// to close a global activation.
     #[serde(default)]
     pub scope: Option<McpActivationScope>,
 }

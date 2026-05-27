@@ -539,9 +539,36 @@ git commit -m "docs(mcp): registry_activate is future-only; point to cleanup pac
 
 ---
 
-## Phase 3 -- F8: omitted activation scope defaults to global
+## Phase 3 -- F8: omitted activation scope (resolved: scope stays REQUIRED, doc made honest)
 
-### Task 3.1: Decide and lock behavior against the existing test
+**DECISION (locked 2026-05-27, user-confirmed): Option b (doc honesty), NOT
+option a (default-to-global).** Grounding disproved the plan's leaning toward
+option a. Two contradicting truths existed in the code:
+- The MCP DTO doc comments claimed "Omitted = `global`"
+  (`crates/mcp/src/tools.rs` activate/import_pack/deactivate scope fields).
+- A deliberate, named safety contract (TC42d) asserts the OPPOSITE: omitted
+  scope MUST be rejected with `ScopeInvalid`, durably audited. Evidence:
+  `crates/daemon/tests/registry_scope_required.rs` header ("REQUIRE an explicit
+  scope field"); `crates/mcp/tests/registry_scope_required_e2e.rs` comment "The
+  LLM never gets a silent widen-to-Global." Daemon enforces it in
+  `handle_registry_activate`/`_deactivate`/`_import_pack`
+  (`crates/daemon/src/ipc/server.rs`).
+
+Defaulting to global would silently widen a rule's scope and require deleting
+two safety tests + inverting an explicit security decision. Rejected. The real
+F8 bug was the LYING DOC: schema/description promised optional-defaults-global,
+runtime rejects. Fix = make the doc/description HONEST (scope required, show
+`{kind:'global'}`), NO behavior change. The existing 5 TC42d tests are the
+proof the fix preserves behavior (all stay green).
+
+**Tasks 3.2a (default-to-global) is VOID.** Implementation = doc-only edits to
+`crates/mcp/src/tools.rs`: three DTO scope-field comments + the activate and
+deactivate `#[tool(description)]` strings now state scope is REQUIRED and that
+an omitted scope is rejected (never silently widened). No daemon edit, no
+activation.rs edit, no test inversion. Verified: `registry_scope_required`
+(3 tests) + `registry_scope_required_e2e` (2 tests) pass unchanged under WSL.
+
+### Task 3.1 (original): Decide and lock behavior against the existing test
 
 **Files:**
 - Read: `crates/daemon/tests/registry_scope_required.rs`
