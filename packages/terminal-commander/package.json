@@ -41,7 +41,8 @@
     "@terminal-commander/mac-arm64": "0.1.14"
   },
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "postinstall": "node lib/cli/postinstall-daemon-replace.js || exit 0"
   },
   "engines": {
     "node": ">=18",
