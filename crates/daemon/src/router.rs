@@ -9,8 +9,9 @@
 //! CLI (TC25) call.
 //!
 //! Source-status:
-//! - Router itself: live (TC21) for in-process API. UDS / JSON-RPC
-//!   transport remains deferred to TC37.
+//! - Router itself: live (TC21) for the in-process API. The UDS /
+//!   named-pipe transport shipped in TC37 and lives in `ipc/server.rs`
+//!   (this module remains the in-process layer it dispatches into).
 //! - Audit emission: live (TC35). Backed by [`AuditSink`]. By default
 //!   `Router::new` uses an [`InMemoryAudit`] sink for library smoke
 //!   and unit tests; production callers use `Router::with_sink` with

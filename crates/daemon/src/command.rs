@@ -25,8 +25,8 @@
 //!
 //! Source-status: live (TC38) for argv command execution on Unix
 //! and Windows (tokio::process::Command). PTY-backed interactive
-//! commands remain deferred to TC44; this runtime does NOT touch
-//! stdin or pseudo-terminals.
+//! commands are handled SEPARATELY in `pty_command.rs` (TC44, shipped);
+//! this runtime does NOT touch stdin or pseudo-terminals.
 
 use std::path::PathBuf;
 use std::sync::Arc;
