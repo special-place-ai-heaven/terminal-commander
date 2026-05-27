@@ -367,7 +367,10 @@ time.sleep(2)
                 break;
             }
             if std::time::Instant::now() >= deadline {
-                panic!("secret prompt never flagged active within deadline; entries: {:?}", listed.entries);
+                panic!(
+                    "secret prompt never flagged active within deadline; entries: {:?}",
+                    listed.entries
+                );
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

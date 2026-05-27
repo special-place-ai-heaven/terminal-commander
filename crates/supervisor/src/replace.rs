@@ -315,10 +315,7 @@ mod tests {
         // A pid that is almost certainly dead must also be refused (empty ps
         // output => not our daemon).
         assert!(
-            !pid_belongs_to_daemon(
-                0xFFFF_FFF0,
-                std::path::Path::new("/tmp/tc-m4-not-a-daemon")
-            ),
+            !pid_belongs_to_daemon(0xFFFF_FFF0, std::path::Path::new("/tmp/tc-m4-not-a-daemon")),
             "a dead/absent pid must be refused"
         );
     }

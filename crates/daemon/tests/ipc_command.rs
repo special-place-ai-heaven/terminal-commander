@@ -225,7 +225,10 @@ fn command_status_returns_lifecycle_counters_after_exit() {
             let job_id = start.job_id;
             async move {
                 match client
-                    .call(seq, IpcRequest::CommandStatus(CommandStatusParams { job_id }))
+                    .call(
+                        seq,
+                        IpcRequest::CommandStatus(CommandStatusParams { job_id }),
+                    )
                     .await
                     .expect("status")
                 {
