@@ -1,6 +1,6 @@
 {
   "name": "terminal-commander",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "Terminal Commander: local MCP-operated terminal/file signal channel with native Linux, Windows, and macOS packages.",
   "license": "Apache-2.0",
   "author": "special-place-ai-heaven",
@@ -34,11 +34,11 @@
     "LICENSE"
   ],
   "optionalDependencies": {
-    "@terminal-commander/linux-x64": "0.1.20",
-    "@terminal-commander/linux-arm64": "0.1.20",
-    "@terminal-commander/windows-x64": "0.1.20",
-    "@terminal-commander/mac-x64": "0.1.20",
-    "@terminal-commander/mac-arm64": "0.1.20"
+    "@terminal-commander/linux-x64": "0.1.21",
+    "@terminal-commander/linux-arm64": "0.1.21",
+    "@terminal-commander/windows-x64": "0.1.21",
+    "@terminal-commander/mac-x64": "0.1.21",
+    "@terminal-commander/mac-arm64": "0.1.21"
   },
   "scripts": {
     "test": "node --test test/*.test.js"
