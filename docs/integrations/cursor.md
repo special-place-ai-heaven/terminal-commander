@@ -116,6 +116,34 @@ scrollback into the chat.
 | Daemon is unavailable | Run `terminal-commander doctor daemon`; the MCP adapter normally attempts daemon auto-start on connect. |
 | You intentionally use WSL | Set `TC_USE_LEGACY_WSL_BRIDGE=1` and `TC_WSL_DISTRO=<name>` in the server env. |
 
+## Per-Harness Session Isolation
+
+Each harness (Cursor, Codex, Claude Code, ...) gets its own daemon endpoint so
+two agents on one machine do not share a single daemon. This is keyed by an
+opaque `TC_SESSION` token in the server `env`:
+
+```json
+"terminal-commander": {
+  "type": "stdio",
+  "command": "terminal-commander-mcp",
+  "env": { "TC_SESSION": "tc-0a1b2c3d4e5f" }
+}
+```
+
+- `terminal-commander setup harness` mints a stable per-harness token and writes
+  it for you. Re-running setup does not churn the token.
+- Endpoint precedence is `TC_SOCKET` (full path/pipe override) > `TC_SESSION`
+  (token) > per-user default. With neither set, the endpoint is byte-identical
+  to pre-session behavior (a single shared per-user daemon).
+- A malformed token (`[A-Za-z0-9._-]`, 1-64 chars, at least one alphanumeric)
+  is rejected and falls back to the shared default with a warning.
+- **Manual escape hatch:** for a non-`setup` flow, `export TC_SESSION=<token>`
+  before launching the MCP/CLI. On Windows+WSL the bridge forwards `TC_SESSION`
+  into WSL automatically (via `WSLENV`); if you launch the Linux MCP yourself,
+  set `TC_SESSION` inside WSL.
+- `terminal-commander doctor harness` warns "shared daemon mode" when multiple
+  harnesses are detected so you know to re-run setup.
+
 ## Security Notes
 
 - The Cursor config exposes only `terminal-commander-mcp`.

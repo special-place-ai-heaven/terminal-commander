@@ -26,6 +26,13 @@ use thiserror::Error;
 /// - `WSLENV`: tells WSL which Windows env vars to project into the
 ///   Linux side; needed for the WSL cleanup bridge to see operator vars.
 /// - `TC_WSL_DISTRO`: operator's chosen WSL distro override.
+///
+/// NOTE (F1): `TC_SESSION` is intentionally NOT here. The endpoint is resolved
+/// ONCE in the parent (this process), which then sets `TC_SOCKET` on the daemon
+/// child to the computed endpoint (see `ensure_daemon`). Forwarding `TC_SESSION`
+/// too would let the daemon re-resolve and is unnecessary — the single
+/// source-of-truth invariant is "parent computes, child binds the given socket".
+/// Do not add `TC_SESSION` here.
 pub const FORWARDED_ENV_ALLOWLIST: &[&str] = &["WSLENV", "TC_WSL_DISTRO"];
 
 /// Build the map of allowlisted host env vars currently set, read fresh
