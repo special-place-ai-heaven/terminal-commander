@@ -1,7 +1,7 @@
 # Per-Harness Session Endpoint (F1) — Design
 
 Date: 2026-05-27
-Status: Approved (brainstorming)
+Status: Approved (plan-ready)
 Audit ref: `docs/audits/2026-05-27-full-spectrum-flakiness-fragility-audit.md` (F1)
 Builds on: F2 `EnvSource` seam (`crates/supervisor/src/paths.rs`),
 F6 fatal-vs-transient pipe-create classification.
@@ -63,17 +63,23 @@ username-derived path flows through the *same* new code path (one path, not a
 special case), so existing single-harness installs and manual `cli` use are
 unchanged. Per-harness isolation is opt-in via `TC_SESSION`.
 
-The per-user default token:
-- Windows: `u-{USERNAME}` so the pipe is `\\.\pipe\terminal-commander-u-{USERNAME}`.
-  NOTE: this is a one-time endpoint-name change vs the current
-  `terminal-commander-{USERNAME}`. See Migration.
-- Unix: the existing default data dir is preserved by mapping the default token
-  to today's `<base>` directly (no extra `{token}` subdir for the default case),
-  so the socket path is byte-identical to today. Mechanically: `endpoint_for_token`
-  takes a flag (or sentinel) marking the per-user default, and on unix returns the
-  bare `<base>` for the default while appending `/{token}` only for an explicit
-  `TC_SESSION`. The implementer MUST NOT add a `default/` subdir — that would
-  break backward-compat invariant #2.
+The per-user default is **byte-identical to today on BOTH platforms**. The
+`{token}` endpoint shape is used ONLY for an explicit (sanitized) `TC_SESSION`;
+the unseeded default branch emits the exact legacy endpoint. This avoids any
+migration: an old daemon and a new client resolve the same default endpoint, so
+there is no same-version partial-upgrade hazard (a new client never silently
+misses an old daemon bound to a differently-named pipe).
+
+Mechanically, `endpoint_for_token` distinguishes the per-user default from an
+explicit session (via a flag/sentinel) and branches per platform:
+
+- Windows default: legacy pipe `\\.\pipe\terminal-commander-{USERNAME}` (the
+  exact current `config.rs:261-268` shape — `USERNAME ?? USER ?? "default"`).
+  Explicit session: `\\.\pipe\terminal-commander-{sanitized_token}`.
+- Unix default: bare `<base>` data dir (no `{token}` subdir), so the socket is
+  byte-identical to today. Explicit session: `<base>/{sanitized_token}`. The
+  implementer MUST NOT add a `default/` subdir, and MUST NOT rename the default
+  Windows pipe — both would break backward-compat invariant #2.
 
 ### Token sanitization
 
@@ -104,8 +110,10 @@ env → same endpoint, computed by the same code.
 
 1. Daemon bind endpoint == client connect endpoint, for identical env. (The
    whole feature fails if these diverge — enforced by both calling one fn.)
-2. Unseeded (no `TC_SOCKET`, no `TC_SESSION`) Windows pipe and unix socket are
-   deterministic and documented; unix socket is byte-identical to pre-F1.
+2. Unseeded (no `TC_SOCKET`, no `TC_SESSION`) endpoints are **byte-identical to
+   pre-F1 on BOTH platforms** — the Windows pipe stays `terminal-commander-{USERNAME}`
+   and the unix socket stays the legacy `<base>/terminal-commanderd.sock`. No
+   migration, no partial-upgrade hazard.
 3. `TC_SOCKET` (full override) always wins over `TC_SESSION` (token).
 4. A malformed/hostile `TC_SESSION` never produces a path-traversal data dir or
    a squattable pipe name; it falls back to the per-user default with a warning.
@@ -131,20 +139,42 @@ env → same endpoint, computed by the same code.
 - Endpoint determinism: same env → same endpoint string, both the daemon-side
   (`pipe_name`/`socket_path`) and client-side (`resolve_socket_path_with`)
   produce equal results for the same fake env (the cross-side invariant #1).
-- Backward-compat: unseeded unix socket path == the pre-F1 literal.
-- Windows pipe name shape under each tier (cfg(windows) test).
+- Backward-compat: unseeded unix socket path == the pre-F1 literal, AND unseeded
+  Windows pipe name == `terminal-commander-{USERNAME}` (the pre-F1 literal).
+- Windows pipe name shape under each tier (cfg(windows) test): default → legacy
+  name; explicit session → `terminal-commander-{token}`.
 
 ## Migration
 
-The Windows unseeded default pipe name changes from
-`terminal-commander-{USERNAME}` to `terminal-commander-u-{USERNAME}`. A daemon
-from a prior version binds the old name; a new client resolves the new name and
-would report `daemon: unavailable` against an old running daemon. Because the
-daemon-replace path (`replace.rs`) and autostart will both be on the new
-version together (shipped in one release), and a stale daemon is killed +
-respawned on version mismatch, this self-heals on the next `ensure_daemon`.
-Document in the changelog. Unix is unaffected (socket path unchanged for the
-default token).
+None. The unseeded default endpoint is byte-identical to pre-F1 on both
+platforms (see Backward compatibility + invariant #2), so an old daemon and a
+new client always resolve the same default endpoint. Per-harness isolation is
+purely additive via `TC_SESSION`. No changelog migration note needed beyond
+announcing the new `TC_SESSION` capability.
+
+## Resolution detail (for the plan)
+
+These were raised in spec review; pin them so the plan is unambiguous:
+
+1. **`TC_DATA` vs `TC_SESSION`.** `TC_DATA` sets the data-dir base. `TC_SESSION`
+   selects a per-session subdir *under whatever base resolves* (default base or
+   a `TC_DATA` custom root). So with both set on unix:
+   `<TC_DATA>/{sanitized_token}/terminal-commanderd.sock`. `TC_DATA` does not
+   suppress session isolation; it relocates the base the session subdir hangs
+   off. (`TC_SOCKET`, being a full endpoint override, still wins over both.)
+2. **`daemon.socket_path` / Windows custom pipe.** Today a custom
+   `daemon.socket_path` becomes the Windows pipe name verbatim
+   (`config.rs:262-263`) and the unix socket path verbatim. This is folded into
+   the `TC_SOCKET` tier: `TC_SOCKET` sets `daemon.socket_path`, and an
+   explicitly-configured `socket_path` (CLI `--socket` / config file) is treated
+   as the same highest-precedence full override. It is NOT a separate fourth
+   tier — same semantics, same precedence.
+3. **Pidfile + per-session state co-location.** When `TC_SESSION` shifts
+   `resolve_state_dir_with` to a subdir, the pidfile, the SQLite DB, and the
+   logs MUST all resolve to that same per-session dir. `replace.rs`'s endpoint
+   cross-check reads the pidfile from the resolved state dir, so a mismatch here
+   would break version-replace. The plan must verify pidfile/DB/log all key off
+   the one resolved state dir.
 
 ## Non-goals
 
