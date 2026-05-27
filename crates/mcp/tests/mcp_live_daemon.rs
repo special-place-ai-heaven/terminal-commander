@@ -99,6 +99,7 @@ async fn live_health_roundtrip_through_uds() {
                 "bucket_events_since".to_owned(),
                 "bucket_summary".to_owned(),
                 "bucket_wait".to_owned(),
+                "command_output_tail".to_owned(),
                 "command_start_combed".to_owned(),
                 "command_status".to_owned(),
                 "event_context".to_owned(),
@@ -200,8 +201,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             .filter(|t| t["status"].as_str() == Some("live"))
             .count();
         assert_eq!(
-            live_count, 30,
-            "tool catalogue must list exactly 30 live tools (TC45 + registry_import_pack)"
+            live_count, 31,
+            "tool catalogue must list exactly 31 live tools (TC45 + registry_import_pack + command_output_tail)"
         );
 
         let _ = client.cancel().await;

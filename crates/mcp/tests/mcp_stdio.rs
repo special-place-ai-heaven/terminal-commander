@@ -75,6 +75,7 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "bucket_events_since".to_owned(),
             "bucket_summary".to_owned(),
             "bucket_wait".to_owned(),
+            "command_output_tail".to_owned(),
             "command_start_combed".to_owned(),
             "command_status".to_owned(),
             "event_context".to_owned(),

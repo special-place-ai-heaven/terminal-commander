@@ -9,7 +9,7 @@
 //! rather than a raw transport-level connection error.
 //!
 //! Coverage is table-driven: the test iterates the live `tool_catalogue()`
-//! and exercises all 28 daemon-backed tools (every tool except
+//! and exercises all 30 daemon-backed tools (every tool except
 //! `system_discover`). `minimal_tool_args` supplies the minimal required
 //! arguments per tool so rmcp's `Parameters` deserialization succeeds and the
 //! availability guard — which fires before any argument parsing — is the code
@@ -129,7 +129,9 @@ fn first_text(result: &rmcp::model::CallToolResult) -> String {
 fn minimal_tool_args(tool: &str) -> serde_json::Value {
     match tool {
         "command_start_combed" | "pty_command_start" => serde_json::json!({ "argv": ["ls"] }),
-        "command_status" | "pty_command_stop" => serde_json::json!({ "job_id": "job_x" }),
+        "command_status" | "pty_command_stop" | "command_output_tail" => {
+            serde_json::json!({ "job_id": "job_x" })
+        }
         "pty_command_write_stdin" => serde_json::json!({ "job_id": "job_x", "bytes": "x" }),
         "bucket_events_since" | "bucket_wait" => {
             serde_json::json!({ "bucket_id": "bkt_x", "cursor": 0 })
@@ -190,8 +192,8 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
         "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
     assert_eq!(
-        checked, 29,
-        "expected 29 daemon-backed tools (30 catalogue entries minus system_discover)"
+        checked, 30,
+        "expected 30 daemon-backed tools (31 catalogue entries minus system_discover)"
     );
 
     let _ = client.cancel().await;
