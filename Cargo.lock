@@ -1071,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-cli"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "clap",
  "terminal-commander-core",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-core"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "indexmap",
  "parking_lot",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-mcp"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "clap",
  "rmcp",
@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-probes"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "parking_lot",
  "pty-process",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-sifters"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "aho-corasick",
  "indexmap",
@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-store"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "indexmap",
  "regex",
@@ -1157,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commander-supervisor"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "serde",
  "serde_json",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "terminal-commanderd"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "clap",
  "parking_lot",
