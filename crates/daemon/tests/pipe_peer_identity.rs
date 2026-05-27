@@ -43,7 +43,16 @@ fn make_state(tag: &str) -> (Arc<DaemonState>, PathBuf) {
 /// The SID must be non-empty and the PID must match this process.
 #[tokio::test]
 async fn pipe_server_records_windows_peer_identity() {
-    let pipe_name = format!(r"\\.\pipe\tc-test-peer-id-{}", std::process::id());
+    // M1: PID + nanos so a future 2nd test in this file cannot collide on the
+    // shared process PID.
+    let pipe_name = format!(
+        r"\\.\pipe\tc-test-peer-id-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    );
     let (state, data) = make_state("peer_id");
     let server = PipeServer::new(Arc::clone(&state), pipe_name.clone());
     let handle = server.spawn().expect("spawn pipe server");

@@ -6,7 +6,24 @@ use std::process::Command;
 const UNAVAILABLE_EXIT: i32 = 69;
 
 fn terminal_commander() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_terminal-commander"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_terminal-commander"));
+    // M8: isolate the child from any ambient endpoint. Without this, a dev (or
+    // CI agent) with a live daemon reachable via TC_SOCKET/TC_SESSION/TC_DATA
+    // flips the "unavailable" (exit 69) assertions below. Force an endpoint that
+    // can never resolve to a running daemon.
+    cmd.env_remove("TC_SESSION")
+        .env_remove("TC_DATA")
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env(
+            "TC_SOCKET",
+            if cfg!(windows) {
+                r"\\.\pipe\terminal-commander-offline-truth-test-no-daemon"
+            } else {
+                "/nonexistent/terminal-commander-offline-truth-test.sock"
+            },
+        );
+    cmd
 }
 
 #[test]

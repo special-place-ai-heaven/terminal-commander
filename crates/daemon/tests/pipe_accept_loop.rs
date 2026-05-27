@@ -40,7 +40,16 @@ fn make_state(tag: &str) -> (Arc<DaemonState>, PathBuf) {
 
 #[tokio::test]
 async fn first_and_second_client_both_connect() {
-    let pipe_name = format!(r"\\.\pipe\tc-test-accept-{}", std::process::id());
+    // M1: PID + nanos so a future 2nd test in this file cannot collide on the
+    // shared process PID.
+    let pipe_name = format!(
+        r"\\.\pipe\tc-test-accept-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    );
     let (state, data) = make_state("accept");
     let server = PipeServer::new(state, pipe_name.clone());
     let handle = server.spawn().expect("spawn pipe server");

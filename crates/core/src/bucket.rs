@@ -870,8 +870,14 @@ mod tests {
     }
 
     fn rt() -> tokio::runtime::Runtime {
+        // M3: start_paused gives the wait tests virtual time. tokio auto-advances
+        // the clock to the next timer whenever the runtime is otherwise idle, so a
+        // `tokio::time::timeout` inside bucket_wait (and the park `sleep`s in the
+        // wake tests) resolve instantly and deterministically — no wall-clock
+        // dependency, no CI-load flake.
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
+            .start_paused(true)
             .build()
             .unwrap()
     }
