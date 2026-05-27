@@ -110,16 +110,24 @@ fn command_start_combed_happy_path_returns_bounded_ids_and_audits_through_ipc() 
         );
         assert_eq!(start.cursor, 0);
 
-        // Allow the job time to exit before we inspect the audit log.
-        tokio::time::sleep(Duration::from_millis(400)).await;
-
-        // Audit rows we expect:
-        // - ipc_command_start_combed (info)  from the IPC dispatcher
-        // - command_start (allow)            from the command runtime
-        let rows = {
+        // M2: poll the audit log until both expected rows appear (or a generous
+        // deadline), instead of a fixed sleep that races slow job exit under load.
+        let read_rows = || {
             let mut g = state.store.lock();
             g.audit_since(&AuditReadRequest::new(0)).unwrap()
         };
+        fn has_both(rows: &[terminal_commander_store::AuditRow]) -> bool {
+            rows.iter().any(|r| r.action == "ipc_command_start_combed")
+                && rows
+                    .iter()
+                    .any(|r| r.action == "command_start" && r.decision == "allow")
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut rows = read_rows();
+        while !has_both(&rows) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            rows = read_rows();
+        }
         assert!(
             rows.iter().any(|r| r.action == "ipc_command_start_combed"),
             "ipc-side audit row missing; rows: {rows:?}"
@@ -210,22 +218,36 @@ fn command_status_returns_lifecycle_counters_after_exit() {
             other => panic!("unexpected response: {other:?}"),
         };
 
-        // Wait for the job to finish.
-        tokio::time::sleep(Duration::from_millis(400)).await;
-
-        let resp = client
-            .call(
-                22,
-                IpcRequest::CommandStatus(CommandStatusParams {
-                    job_id: start.job_id,
-                }),
-            )
-            .await
-            .expect("status");
-        let status = match resp {
-            IpcResponse::CommandStatus(s) => s,
-            other => panic!("unexpected response: {other:?}"),
+        // M2: poll command_status until the job reaches a terminal state (or a
+        // deadline), instead of a fixed sleep that races slow exit under load.
+        let query_status = |seq: u64| {
+            let client = &client;
+            let job_id = start.job_id;
+            async move {
+                match client
+                    .call(seq, IpcRequest::CommandStatus(CommandStatusParams { job_id }))
+                    .await
+                    .expect("status")
+                {
+                    IpcResponse::CommandStatus(s) => s,
+                    other => panic!("unexpected response: {other:?}"),
+                }
+            }
         };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut status = query_status(22).await;
+        let mut seq = 23;
+        while !matches!(
+            status.state,
+            terminal_commander_core::JobState::Exited
+                | terminal_commander_core::JobState::Cancelled
+                | terminal_commander_core::JobState::Failed
+        ) && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = query_status(seq).await;
+            seq += 1;
+        }
         assert_eq!(status.job_id, start.job_id);
         assert_eq!(status.bucket_id, start.bucket_id);
         assert_eq!(status.probe_id, start.probe_id);

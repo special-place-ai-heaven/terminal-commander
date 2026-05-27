@@ -360,31 +360,64 @@ fn file_watch_start_then_append_emits_events_when_rule_active() {
             other => panic!("unexpected: {other:?}"),
         };
 
+        // M2: poll until the watch is registered live (positioned at EOF for
+        // follow_from_beginning:false) before appending, instead of a fixed
+        // 250ms sleep that races watcher setup.
+        let mut seq = 2u64;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let listed = match client
+                .call(seq, IpcRequest::FileWatchList)
+                .await
+                .expect("watch list")
+            {
+                IpcResponse::FileWatchList(r) => r,
+                other => panic!("unexpected: {other:?}"),
+            };
+            seq += 1;
+            if listed.entries.iter().any(|e| e.watch_id == ws.watch_id) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("watch {} never became live within deadline", ws.watch_id);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
         // Append matching content.
-        tokio::time::sleep(Duration::from_millis(250)).await;
         {
             let mut f = std::fs::OpenOptions::new().append(true).open(&tmp).unwrap();
             writeln!(f, "needle appears here").unwrap();
         }
-        tokio::time::sleep(Duration::from_millis(800)).await;
 
-        // bucket_events_since should see at least one needle_match.
-        let resp = client
-            .call(
-                2,
-                IpcRequest::BucketEventsSince(terminal_commanderd::BucketEventsSinceParams {
-                    bucket_id: ws.bucket_id,
-                    cursor: 0,
-                    severity_min: None,
-                    kind_filter: None,
-                    limit: None,
-                }),
-            )
-            .await
-            .expect("events");
-        let r = match resp {
-            IpcResponse::BucketEventsSince(r) => r,
-            other => panic!("unexpected: {other:?}"),
+        // M2: poll bucket_events_since until the needle_match lands (or deadline),
+        // instead of a fixed 800ms sleep that races watcher pickup under load.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let r = loop {
+            let resp = client
+                .call(
+                    seq,
+                    IpcRequest::BucketEventsSince(terminal_commanderd::BucketEventsSinceParams {
+                        bucket_id: ws.bucket_id,
+                        cursor: 0,
+                        severity_min: None,
+                        kind_filter: None,
+                        limit: None,
+                    }),
+                )
+                .await
+                .expect("events");
+            seq += 1;
+            let r = match resp {
+                IpcResponse::BucketEventsSince(r) => r,
+                other => panic!("unexpected: {other:?}"),
+            };
+            if r.events.iter().any(|e| e.kind == "needle_match")
+                || std::time::Instant::now() >= deadline
+            {
+                break r;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         };
         assert!(
             r.events.iter().any(|e| e.kind == "needle_match"),
@@ -395,7 +428,7 @@ fn file_watch_start_then_append_emits_events_when_rule_active() {
         // Stop the watch.
         let resp = client
             .call(
-                3,
+                seq,
                 IpcRequest::FileWatchStop(FileWatchStopParams {
                     watch_id: ws.watch_id,
                 }),

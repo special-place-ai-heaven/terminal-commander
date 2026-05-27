@@ -1061,7 +1061,18 @@ for i in range(120):
             other => panic!("unexpected: {other:?}"),
         };
 
-        // Give the child time to emit a few non-matching lines first.
+        // M2 N/A here (verified by tracing command.rs::status + drive_to_exit):
+        // there is NO mid-run progress signal to poll. The live JobBinding.metrics
+        // stays ProcessProbeMetrics::default() (zeros) for the whole run — the
+        // probe accumulates frame counts internally and only surfaces them as
+        // final_metrics at exit — so command_status / probe_list / runtime_state
+        // all report frames_total == 0 until the child exits, then the final
+        // total. And the bucket is empty pre-activation (no rule active yet), so
+        // there is nothing to bucket_wait on either. Confirmed empirically: a
+        // frames_total>=1 poll only unblocked at frames_total == 120 (job done),
+        // landing activation AFTER every needle — zero matches.
+        // So "let the stream flow, then activate mid-stream" can only be a
+        // wall-clock delay. The 15s drain deadline below absorbs scheduling slack.
         tokio::time::sleep(Duration::from_millis(400)).await;
 
         // Activate mid-stream (TC42b rebind path).

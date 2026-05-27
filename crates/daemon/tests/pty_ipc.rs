@@ -103,11 +103,31 @@ print("pty bye", flush=True)
             other => panic!("unexpected: {other:?}"),
         };
 
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        // M2: poll until the short-lived script has exited (drops out of the
+        // live list) instead of a fixed 800ms sleep that races slow PTY spawn /
+        // CI load. Once exited, both frames have been emitted and counted.
+        let mut seq = 2u64;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let listed = match client
+                .call(seq, IpcRequest::PtyCommandList)
+                .await
+                .expect("pty list")
+            {
+                IpcResponse::PtyCommandList(r) => r,
+                other => panic!("unexpected: {other:?}"),
+            };
+            seq += 1;
+            let still_live = listed.entries.iter().any(|e| e.job_id == started.job_id);
+            if !still_live || std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         let stop = client
             .call(
-                2,
+                seq,
                 IpcRequest::PtyCommandStop(PtyCommandStopParams {
                     job_id: started.job_id,
                 }),
@@ -322,13 +342,39 @@ time.sleep(2)
             other => panic!("unexpected: {other:?}"),
         };
 
-        // Wait long enough for the prompt line to be consumed by
-        // the PtyProbe + flagged as secret.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // M2: poll the read-only live list until the PtyProbe has consumed the
+        // prompt line and flagged it secret, instead of a fixed 500ms sleep that
+        // races prompt consumption under load. Polling a read-only signal (not
+        // speculative writes) means no stdin is ever sent before the flag is set.
+        let mut seq = 2u64;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let listed = match client
+                .call(seq, IpcRequest::PtyCommandList)
+                .await
+                .expect("pty list")
+            {
+                IpcResponse::PtyCommandList(r) => r,
+                other => panic!("unexpected: {other:?}"),
+            };
+            seq += 1;
+            let flagged = listed
+                .entries
+                .iter()
+                .find(|e| e.job_id == started.job_id)
+                .is_some_and(|e| e.secret_prompt_active);
+            if flagged {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("secret prompt never flagged active within deadline; entries: {:?}", listed.entries);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         let err = client
             .call(
-                2,
+                seq,
                 IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
                     job_id: started.job_id,
                     bytes: "should-not-be-sent\n".to_owned(),
