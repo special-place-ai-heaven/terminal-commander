@@ -55,6 +55,19 @@ pub fn resolve_state_dir() -> PathBuf {
 /// zero-arg wrapper; tests pass a fixed env to avoid process-global mutation.
 #[must_use]
 pub fn resolve_state_dir_with(env: &impl EnvSource) -> PathBuf {
+    let base = state_dir_base(env);
+    match crate::session::resolve_session(env) {
+        // A full TC_SOCKET override does not affect the state dir base.
+        crate::session::SessionEndpoint::Session(token) => base.join(token),
+        _ => base,
+    }
+}
+
+/// The state-dir base before any per-session subdir.
+///
+/// `TC_DATA`, else the platform default. Byte-identical to the pre-F1
+/// `resolve_state_dir_with`.
+fn state_dir_base(env: &impl EnvSource) -> PathBuf {
     if let Some(p) = env.get("TC_DATA").filter(|s| !s.is_empty()) {
         return PathBuf::from(p);
     }
@@ -68,15 +81,10 @@ pub fn resolve_state_dir_with(env: &impl EnvSource) -> PathBuf {
     {
         // Do NOT consult XDG_STATE_HOME — daemon ignores it.
         if let Some(p) = env.get("HOME") {
-            return PathBuf::from(p)
-                .join(".local")
-                .join("share")
-                .join("terminal-commanderd");
+            return PathBuf::from(p).join(".local").join("share").join("terminal-commanderd");
         }
     }
-    std::env::temp_dir()
-        .join("terminal-commanderd")
-        .join("state")
+    std::env::temp_dir().join("terminal-commanderd").join("state")
 }
 
 /// The IPC endpoint path:
@@ -256,5 +264,50 @@ mod tests {
             std::path::PathBuf::from("/test-home/.local/share/terminal-commanderd"),
             "XDG_STATE_HOME must NOT be consulted (daemon ignores it)"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_session_gets_subdir_under_base() {
+        let env = FakeEnv::new().with("HOME", "/test-home").with("TC_SESSION", "agent-1");
+        assert_eq!(
+            resolve_state_dir_with(&env),
+            std::path::PathBuf::from("/test-home/.local/share/terminal-commanderd/agent-1"),
+            "explicit session appends /{{token}} under the default base"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_subdir_hangs_under_tc_data_base() {
+        let env = FakeEnv::new().with("TC_DATA", "/custom/root").with("TC_SESSION", "agent-1");
+        assert_eq!(
+            resolve_state_dir_with(&env),
+            std::path::PathBuf::from("/custom/root/agent-1"),
+            "TC_DATA relocates the base; session subdir hangs under it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unseeded_state_dir_is_byte_identical_to_pre_f1() {
+        let env = FakeEnv::new().with("HOME", "/test-home");
+        assert_eq!(
+            resolve_state_dir_with(&env),
+            std::path::PathBuf::from("/test-home/.local/share/terminal-commanderd"),
+            "default (no TC_SESSION) must NOT add any subdir"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_state_pidfile_log_socket_all_co_locate() {
+        let env = FakeEnv::new().with("HOME", "/test-home").with("TC_SESSION", "agent-1");
+        let state = resolve_state_dir_with(&env);
+        let expected = std::path::PathBuf::from("/test-home/.local/share/terminal-commanderd/agent-1");
+        assert_eq!(state, expected, "state dir is the session subdir");
+        assert_eq!(crate::pidfile::pidfile_path(&state), expected.join("terminal-commanderd.pid"));
+        assert_eq!(resolve_log_path_with(&env), expected.join("logs").join("terminal-commanderd.log"));
+        assert_eq!(resolve_socket_path_with(&env), expected.join("terminal-commanderd.sock"));
     }
 }
