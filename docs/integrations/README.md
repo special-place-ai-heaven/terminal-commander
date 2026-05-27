@@ -19,6 +19,12 @@ Per-provider walk-throughs:
 - [`gemini.md`](gemini.md) - Gemini stub (INSTALL01; path unverified).
 - [`kimi.md`](kimi.md) - Kimi stub (INSTALL01; path unverified).
 
+Operational guides (not provider-specific):
+- [`wsl-cleanup-and-sudo.md`](wsl-cleanup-and-sudo.md) - run WSL disk/cache
+  cleanup through TC; the scoped NOPASSWD sudoers discipline (no password ever
+  leaks); the `cleanup` rule pack; `${name}` template syntax; and why fstrim
+  frees blocks but the `.vhdx` only shrinks via a manual host-side step.
+
 **Install behavior:** `npm install -g terminal-commander` is passive. It installs
 the wrapper plus the matching native platform package. Run
 `terminal-commander setup harness` explicitly to merge MCP config for detected
