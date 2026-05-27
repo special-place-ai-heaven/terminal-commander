@@ -53,17 +53,21 @@ pub struct ImportResult {
 /// The seven seed packs, embedded so the daemon needs no repo checkout
 /// at runtime. Paths are relative to THIS source file
 /// (`crates/store/src/import.rs`; repo root is `../../../`).
+// Rules live INSIDE this crate (crates/store/rules/) so `cargo publish`
+// can package them. include_str! reaching outside the crate root
+// (../../../rules) breaks publish even though it works in a workspace
+// build. Paths are relative to this source file (crates/store/src/).
 const SEED_PACKS: &[(&str, &str)] = &[
     (
         "generic.terminal",
-        include_str!("../../../rules/generic.terminal.json"),
+        include_str!("../rules/generic.terminal.json"),
     ),
-    ("apt", include_str!("../../../rules/apt.json")),
-    ("cargo", include_str!("../../../rules/cargo.json")),
-    ("npm", include_str!("../../../rules/npm.json")),
-    ("pytest", include_str!("../../../rules/pytest.json")),
-    ("gcc", include_str!("../../../rules/gcc.json")),
-    ("make", include_str!("../../../rules/make.json")),
+    ("apt", include_str!("../rules/apt.json")),
+    ("cargo", include_str!("../rules/cargo.json")),
+    ("npm", include_str!("../rules/npm.json")),
+    ("pytest", include_str!("../rules/pytest.json")),
+    ("gcc", include_str!("../rules/gcc.json")),
+    ("make", include_str!("../rules/make.json")),
 ];
 
 /// Resolve a pack name to its embedded JSON, or `None` if unknown.
@@ -298,14 +302,9 @@ mod tests {
     #[test]
     fn import_all_seed_packs_from_repo() {
         let mut s = EventStore::in_memory().unwrap();
-        // Run from the workspace root; CARGO_MANIFEST_DIR points
-        // at the crate (crates/store), so go up two levels.
-        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
+        // Rules ship inside this crate (crates/store/rules/), so they
+        // resolve from CARGO_MANIFEST_DIR directly.
+        let crate_root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
         let packs = [
             "rules/generic.terminal.json",
             "rules/apt.json",
@@ -317,7 +316,7 @@ mod tests {
         ];
         let mut total_imported = 0;
         for p in packs {
-            let path = workspace_root.join(p);
+            let path = crate_root.join(p);
             let r = s.import_rule_pack(&path).unwrap_or_else(|e| {
                 panic!("import {p}: {e}");
             });

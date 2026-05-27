@@ -235,8 +235,8 @@ fn doctor_checks(repo_root: Option<&std::path::Path>) -> Vec<(String, bool)> {
             root.join("docs/security/PRIVILEGE_MODEL.md").is_file(),
         ));
         checks.push((
-            "rules/ pack directory present".to_string(),
-            root.join("rules").is_dir(),
+            "rule packs present (crates/store/rules)".to_string(),
+            root.join("crates/store/rules").is_dir(),
         ));
     } else {
         // Installed/package mode: governance docs ship with the repo, not
