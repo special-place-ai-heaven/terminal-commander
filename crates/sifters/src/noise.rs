@@ -89,7 +89,19 @@ impl Dedupe {
     /// `first_seen`, and `last_seen` and are dropped from the output.
     #[must_use]
     pub fn apply(&mut self, drafts: Vec<EventDraft>, policy: &NoisePolicy) -> Vec<EventDraft> {
-        let now = OffsetDateTime::now_utc();
+        self.apply_at(drafts, policy, OffsetDateTime::now_utc())
+    }
+
+    /// [`apply`](Self::apply) with an injected clock so the GC cutoff is
+    /// deterministic in tests (which build drafts with fixed timestamps).
+    /// Production calls `apply`, which passes `OffsetDateTime::now_utc()`.
+    #[must_use]
+    pub fn apply_at(
+        &mut self,
+        drafts: Vec<EventDraft>,
+        policy: &NoisePolicy,
+        now: OffsetDateTime,
+    ) -> Vec<EventDraft> {
         let window_secs = i64::try_from(policy.dedupe_window.as_secs()).unwrap_or(i64::MAX);
         let cutoff = now - time::Duration::seconds(window_secs);
 

@@ -424,7 +424,12 @@ impl EventStore {
         bucket_id: BucketId,
         request: &StoreReadRequest,
     ) -> Result<StoreReadResponse> {
-        let _ = self.evict_expired(bucket_id).ok();
+        // Eviction is best-effort on the read path (a failed GC must not fail a
+        // read), but do not swallow the error silently — surface it so a
+        // persistent DB problem is visible instead of hidden behind reads.
+        if let Err(e) = self.evict_expired(bucket_id) {
+            eprintln!("terminal-commander: evict_expired({bucket_id:?}) failed on read path: {e}");
+        }
         let limit = request
             .limit
             .unwrap_or(DEFAULT_READ_LIMIT)

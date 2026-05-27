@@ -337,8 +337,10 @@ impl RingInner {
         let after = req.after as usize;
         let want_start = anchor_idx.saturating_sub(before);
         let want_end = anchor_idx.saturating_add(after);
-        let truncated_before =
-            want_start > anchor_idx.saturating_sub(before) || anchor_idx < before; // before requested more than available
+        // before requested more than available. (The former first operand
+        // `want_start > anchor_idx.saturating_sub(before)` was always false
+        // since want_start IS that value; dropped.)
+        let truncated_before = anchor_idx < before;
         let truncated_after_initial = want_end >= self.frames.len();
         let end = want_end.min(self.frames.len().saturating_sub(1));
 

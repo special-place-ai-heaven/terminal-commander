@@ -284,7 +284,7 @@ impl EventStore {
             let severity_s: String = row.get(4)?;
             let definition_s: String = row.get(5)?;
             let def: RuleDefinition = sj::from_str(&definition_s)?;
-            let status = parse_status(&status_s);
+            let status = parse_status(&status_s)?;
             let severity = Severity::parse(&severity_s)
                 .map_err(|e| EventStoreError::InvalidPayload(format!("severity parse: {e}")))?;
             out.push(RuleSearchHit {
@@ -483,13 +483,19 @@ impl EventStore {
     }
 }
 
-fn parse_status(s: &str) -> RuleStatus {
+fn parse_status(s: &str) -> Result<RuleStatus> {
     match s {
-        "active" => RuleStatus::Active,
-        "disabled" => RuleStatus::Disabled,
-        "deprecated" => RuleStatus::Deprecated,
-        "tombstoned" => RuleStatus::Tombstoned,
-        _ => RuleStatus::Draft,
+        "draft" => Ok(RuleStatus::Draft),
+        "active" => Ok(RuleStatus::Active),
+        "disabled" => Ok(RuleStatus::Disabled),
+        "deprecated" => Ok(RuleStatus::Deprecated),
+        "tombstoned" => Ok(RuleStatus::Tombstoned),
+        // Previously an unknown/corrupt status silently became Draft, which
+        // silently deactivates a rule. Error like the sibling parse_scope so a
+        // corrupt column is surfaced, not swallowed.
+        other => Err(EventStoreError::InvalidPayload(format!(
+            "unknown rule status {other:?}"
+        ))),
     }
 }
 

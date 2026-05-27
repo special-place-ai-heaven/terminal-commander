@@ -1970,26 +1970,38 @@ mod tests {
         }
     }
 
-    fn unavailable_status_server() -> TerminalCommanderMcpServer {
-        let status = EnsureDaemonStatus::Unavailable {
-            reason: terminal_commander_supervisor::ensure::DaemonUnavailableReason::BinaryNotFound,
-            diagnostics: terminal_commander_supervisor::ensure::Diagnostics {
-                endpoint: terminal_commander_supervisor::ensure::Endpoint::UnixSocket {
-                    path: std::env::temp_dir().join("tc-mcp-unavailable-unit-test.sock"),
+        fn unavailable_status_server() -> TerminalCommanderMcpServer {
+            // M9: unique per-test socket path (pid + nanos). The socket is never
+            // bound (this is the unavailable-daemon path), so a collision would
+            // still yield "unavailable" — but a shared fixed path under temp_dir is
+            // a latent smell. Compute once so the endpoint and the client agree.
+            let sock = std::env::temp_dir().join(format!(
+                "tc-mcp-unavailable-unit-test-{}-{}.sock",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            let status = EnsureDaemonStatus::Unavailable {
+                reason: terminal_commander_supervisor::ensure::DaemonUnavailableReason::BinaryNotFound,
+                diagnostics: terminal_commander_supervisor::ensure::Diagnostics {
+                    endpoint: terminal_commander_supervisor::ensure::Endpoint::UnixSocket {
+                        path: sock.clone(),
+                    },
+                    log_path: None,
+                    last_error: Some("test daemon unavailable".into()),
+                    startup_attempted: false,
+                    startup_elapsed_ms: 0,
                 },
-                log_path: None,
-                last_error: Some("test daemon unavailable".into()),
-                startup_attempted: false,
-                startup_elapsed_ms: 0,
-            },
-        };
-        let daemon = McpDaemonClient::with_status(
-            std::env::temp_dir().join("tc-mcp-unavailable-unit-test.sock"),
-            crate::daemon_client::DaemonStatusHandle::new(status),
-        )
-        .with_timeout(std::time::Duration::from_millis(10));
-        TerminalCommanderMcpServer::new(daemon)
-    }
+            };
+            let daemon = McpDaemonClient::with_status(
+                sock,
+                crate::daemon_client::DaemonStatusHandle::new(status),
+            )
+            .with_timeout(std::time::Duration::from_millis(10));
+            TerminalCommanderMcpServer::new(daemon)
+        }
 
     fn assert_daemon_unavailable_tool_error(tool: &str, error: &McpError) {
         let rendered = error.to_string();
