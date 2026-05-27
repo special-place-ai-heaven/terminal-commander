@@ -34,7 +34,7 @@ use parking_lot::RwLock;
 use regex::{Regex, RegexSet};
 use terminal_commander_core::{
     BucketId, Captures, EventDraft, EventSource, RuleDefinition, RuleRef, RuleType, Severity,
-    SourceFrame, SourcePointer, SourceStream,
+    SourceFrame, SourcePointer, SourceStream, compile_bounded_regex, compile_bounded_regex_set,
 };
 
 /// Hard cap on per-frame text length passed to the sifter.
@@ -221,7 +221,7 @@ fn build_inner(rules: &[RuleDefinition]) -> Result<SifterRuntimeInner, SifterErr
                     .pattern
                     .as_deref()
                     .ok_or_else(|| SifterError::MissingPattern { id: def.id.clone() })?;
-                let compiled = Regex::new(pat).map_err(|e| SifterError::RegexCompile {
+                let compiled = compile_bounded_regex(pat).map_err(|e| SifterError::RegexCompile {
                     id: def.id.clone(),
                     reason: e.to_string(),
                 })?;
@@ -257,10 +257,12 @@ fn build_inner(rules: &[RuleDefinition]) -> Result<SifterRuntimeInner, SifterErr
             .iter()
             .map(|r| r.def.pattern.as_deref().unwrap_or(""))
             .collect();
-        Some(RegexSet::new(pats).map_err(|e| SifterError::RegexCompile {
-            id: "<set>".to_owned(),
-            reason: e.to_string(),
-        })?)
+        Some(
+            compile_bounded_regex_set(pats).map_err(|e| SifterError::RegexCompile {
+                id: "<set>".to_owned(),
+                reason: e.to_string(),
+            })?,
+        )
     };
 
     Ok(SifterRuntimeInner {

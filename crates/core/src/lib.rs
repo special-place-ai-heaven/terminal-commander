@@ -50,9 +50,10 @@ pub use ids::{
 pub use pointer::SourcePointer;
 pub use rule::{
     ContextHint, MAX_CONTEXT_LINES, MAX_EXAMPLES, MAX_PATTERN_BYTES, MAX_RULE_ID_BYTES,
-    MAX_TAG_BYTES, MAX_TAGS, MAX_TEMPLATE_BYTES, RenderError, RenderedSummary, RuleDefinition,
-    RuleError, RuleExample, RuleExampleExpect, RuleHandle, RuleStatus, RuleTestRequest,
-    RuleTestResult, RuleType,
+    MAX_TAG_BYTES, MAX_TAGS, MAX_TEMPLATE_BYTES, REGEX_DFA_SIZE_LIMIT, REGEX_SIZE_LIMIT,
+    RenderError, RenderedSummary, RuleDefinition, RuleError, RuleExample, RuleExampleExpect,
+    RuleHandle, RuleStatus, RuleTestRequest, RuleTestResult, RuleType, compile_bounded_regex,
+    compile_bounded_regex_set,
 };
 pub use severity::Severity;
 pub use source::{EventSource, SourceStream, SourceType};

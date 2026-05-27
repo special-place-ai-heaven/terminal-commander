@@ -12,16 +12,66 @@
 //! TC15/TC19/TC20) wire them.
 
 use indexmap::IndexMap;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::RuleId;
 use crate::severity::Severity;
 use crate::source::SourceStream;
 
-/// Maximum length of a regex pattern in bytes. Bounds the
-/// `regex_size_limit` / `dfa_size_limit` exposure.
+/// Maximum length of a regex pattern in bytes (source-text cap).
+///
+/// This bounds the input string only; it does NOT bound the compiled state
+/// machine size — a short pattern can still compile to a large DFA. Use
+/// [`REGEX_SIZE_LIMIT`] / [`REGEX_DFA_SIZE_LIMIT`] via [`compile_bounded_regex`]
+/// for the compiled-size bound.
 pub const MAX_PATTERN_BYTES: usize = 4096;
+
+/// Hard cap on a compiled regex program's size in bytes.
+///
+/// Passed to [`regex::RegexBuilder::size_limit`]. Bounds memory from a hostile
+/// or pathological pattern that is short on disk but expands when compiled.
+pub const REGEX_SIZE_LIMIT: usize = 65_536;
+
+/// Hard cap on the lazy-DFA cache size in bytes.
+///
+/// Passed to [`regex::RegexBuilder::dfa_size_limit`].
+pub const REGEX_DFA_SIZE_LIMIT: usize = 65_536;
+
+/// Compile a regex with the canonical compiled-size bounds.
+///
+/// Applies [`REGEX_SIZE_LIMIT`] / [`REGEX_DFA_SIZE_LIMIT`]. All runtime
+/// rule-regex compilation (rule validation, the sifter runtime, rule-pack
+/// import) must go through this so the bound is applied uniformly.
+///
+/// # Errors
+/// Returns the underlying [`regex::Error`] if the pattern is invalid or exceeds
+/// the size limits.
+pub fn compile_bounded_regex(pattern: &str) -> Result<Regex, regex::Error> {
+    RegexBuilder::new(pattern)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
+        .build()
+}
+
+/// Compile a [`regex::RegexSet`] with the canonical compiled-size bounds.
+///
+/// The set-wide [`REGEX_SIZE_LIMIT`] / [`REGEX_DFA_SIZE_LIMIT`] apply to the
+/// combined program, matching [`compile_bounded_regex`] for single patterns.
+///
+/// # Errors
+/// Returns the underlying [`regex::Error`] if any pattern is invalid or the
+/// combined program exceeds the size limits.
+pub fn compile_bounded_regex_set<I, S>(patterns: I) -> Result<regex::RegexSet, regex::Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    regex::RegexSetBuilder::new(patterns)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
+        .build()
+}
 
 /// Maximum length of a single tag string.
 pub const MAX_TAG_BYTES: usize = 64;
@@ -321,7 +371,7 @@ impl RuleDefinition {
                     return Err(RuleError::PatternTooLong(self.id.clone()));
                 }
                 check_forbidden_regex_constructs(&self.id, pat)?;
-                Regex::new(pat).map_err(|e| RuleError::PatternCompileFailed {
+                compile_bounded_regex(pat).map_err(|e| RuleError::PatternCompileFailed {
                     id: self.id.clone(),
                     reason: e.to_string(),
                 })?;
@@ -529,6 +579,29 @@ pub struct RuleTestResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compile_bounded_regex_rejects_dfa_bomb_that_unbounded_accepts() {
+        // A short pattern whose compiled program is large: nested bounded
+        // repetition multiplies the state count well past REGEX_SIZE_LIMIT.
+        // Unbounded `Regex::new` accepts it (default 10MB cap); the bounded
+        // compiler must reject it. This proves the bound actually bites.
+        let bomb = "(a|b|c|d|e|f|g|h){60}{60}";
+        assert!(bomb.len() <= MAX_PATTERN_BYTES, "bomb fits the byte cap");
+        assert!(
+            Regex::new(bomb).is_ok(),
+            "unbounded compile accepts the bomb (sanity)"
+        );
+        assert!(
+            compile_bounded_regex(bomb).is_err(),
+            "bounded compile must reject a pattern exceeding REGEX_SIZE_LIMIT"
+        );
+    }
+
+    #[test]
+    fn compile_bounded_regex_accepts_ordinary_pattern() {
+        assert!(compile_bounded_regex(r"ERROR \d{3}: .*").is_ok());
+    }
 
     fn k(id: &str) -> RuleDefinition {
         RuleDefinition {
