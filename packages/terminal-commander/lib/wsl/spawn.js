@@ -143,6 +143,31 @@ function resolveBridgeDistro(env, detect) {
   return { status: BRIDGE_STATUSES.NO_DEFAULT_DISTRO, distro: null };
 }
 
+/**
+ * Ensure TC_SESSION crosses the Windows->WSL boundary by naming it in WSLENV.
+ *
+ * `wsl.exe` only forwards Windows env vars listed in WSLENV into the Linux
+ * process. When the bridge env carries TC_SESSION, append `TC_SESSION/u` to any
+ * existing WSLENV (preserving operator entries, never duplicating). No-op when
+ * TC_SESSION is absent — we do not invent a WSLENV. Pure: returns a new object.
+ *
+ * @param {NodeJS.ProcessEnv} filteredEnv  Already secret-filtered env.
+ * @returns {NodeJS.ProcessEnv}
+ */
+function ensureSessionInWslEnv(filteredEnv) {
+  const out = { ...filteredEnv };
+  if (out.TC_SESSION == null || out.TC_SESSION === "") {
+    return out;
+  }
+  const existing =
+    typeof out.WSLENV === "string" && out.WSLENV.length > 0 ? out.WSLENV : "";
+  const names = existing.split(":").map((e) => e.split("/")[0]);
+  if (!names.includes("TC_SESSION")) {
+    out.WSLENV = existing.length > 0 ? `${existing}:TC_SESSION/u` : "TC_SESSION/u";
+  }
+  return out;
+}
+
 function defaultBridgeExec({ wslPath, argv, env }) {
   // Production path. Returns a child handle so the shim can wire
   // signal forwarding + exit mirroring on top. `env` is the
@@ -293,7 +318,12 @@ async function spawnWslBridge(opts) {
   }
 
   // (4) Build argv + filtered env, then spawn.
-  const filteredEnv = buildFilteredEnv(env);
+  // wsl.exe does NOT translate a Windows env block into the Linux child; only
+  // vars named in WSLENV cross the boundary. F1 requires TC_SESSION to reach
+  // the WSL-side MCP so it resolves the same per-harness endpoint, so we add it
+  // to WSLENV (flag `/u` = forward Windows->WSL only, no path translation —
+  // TC_SESSION is an opaque token, not a path).
+  const filteredEnv = ensureSessionInWslEnv(buildFilteredEnv(env));
   const argv = [
     "-d",
     distro,
@@ -372,6 +402,7 @@ async function spawnWslBridge(opts) {
 module.exports = {
   spawnWslBridge,
   resolveBridgeDistro,
+  ensureSessionInWslEnv,
   buildFilteredEnv,
   isSecretEnvKey,
   BRIDGE_STATUSES,

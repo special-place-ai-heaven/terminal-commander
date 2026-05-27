@@ -292,6 +292,67 @@ test("happy path passes filtered env (no token-shaped vars) to spawn", async () 
   assert.equal("AWS_SECRET_ACCESS_KEY" in passedEnv, false);
 });
 
+test("TC_SESSION is forwarded across the WSL boundary via WSLENV", async () => {
+  const rec = makeRecorder();
+  await spawnWslBridge({
+    platform: "win32",
+    env: {
+      PATH: "C:\\Windows",
+      TC_SESSION: "tc-0a1b2c3d4e5f",
+    },
+    detect: makeMockDetect(okDetect(["Ubuntu"], "Ubuntu")),
+    doctor: makeMockDoctor(DOCTOR_STATUSES.RUNTIME_PRESENT),
+    exec: rec.exec,
+    returnInsteadOfMirror: true,
+  });
+  const passedEnv = rec.calls[0].env;
+  // The token itself must still be present...
+  assert.equal(passedEnv.TC_SESSION, "tc-0a1b2c3d4e5f");
+  // ...and WSLENV must name it so wsl.exe translates it into the Linux child.
+  assert.ok(passedEnv.WSLENV, "WSLENV must be set so TC_SESSION crosses the boundary");
+  assert.match(
+    passedEnv.WSLENV,
+    /(^|:)TC_SESSION(\/|:|$)/,
+    `WSLENV must list TC_SESSION (got ${passedEnv.WSLENV})`,
+  );
+});
+
+test("WSLENV preserves any pre-existing entries when adding TC_SESSION", async () => {
+  const rec = makeRecorder();
+  await spawnWslBridge({
+    platform: "win32",
+    env: {
+      PATH: "C:\\Windows",
+      TC_SESSION: "tc-abcdef012345",
+      WSLENV: "EXISTING_VAR/u",
+    },
+    detect: makeMockDetect(okDetect(["Ubuntu"], "Ubuntu")),
+    doctor: makeMockDoctor(DOCTOR_STATUSES.RUNTIME_PRESENT),
+    exec: rec.exec,
+    returnInsteadOfMirror: true,
+  });
+  const w = rec.calls[0].env.WSLENV;
+  assert.match(w, /EXISTING_VAR/, "must not drop an operator's existing WSLENV");
+  assert.match(w, /TC_SESSION/, "must add TC_SESSION");
+});
+
+test("no WSLENV pollution when TC_SESSION is absent", async () => {
+  const rec = makeRecorder();
+  await spawnWslBridge({
+    platform: "win32",
+    env: { PATH: "C:\\Windows" },
+    detect: makeMockDetect(okDetect(["Ubuntu"], "Ubuntu")),
+    doctor: makeMockDoctor(DOCTOR_STATUSES.RUNTIME_PRESENT),
+    exec: rec.exec,
+    returnInsteadOfMirror: true,
+  });
+  assert.equal(
+    "WSLENV" in rec.calls[0].env,
+    false,
+    "must not invent a WSLENV when there is no TC_SESSION to forward",
+  );
+});
+
 test("buildFilteredEnv is pure (input env unchanged)", () => {
   const input = { PATH: "x", NPM_TOKEN: "secret", OK: "y" };
   const filtered = buildFilteredEnv(input);

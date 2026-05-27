@@ -170,15 +170,25 @@ function runAutostartOnce(homeDir) {
 /**
  * Install autostart artifacts on the current Linux/WSL host.
  *
+ * NOTE (F1): the autostart daemon serves the LEGACY DEFAULT endpoint, by
+ * design. It is a convenience pre-warm, not a per-harness daemon — each MCP
+ * process spawns its own per-session daemon (TC_SESSION) on demand via
+ * supervisor::ensure_daemon, and ignores this one. So the unit deliberately
+ * carries no TC_SESSION.
+ *
  * @param {Object} [opts]
  * @param {NodeJS.ProcessEnv} [opts.env]
  * @param {string} [opts.homeDir]
  * @param {boolean} [opts.dry_run]
+ * @param {() => boolean} [opts.systemdUserAvailable]  Test seam.
+ * @param {(homeDir:string) => {ok:boolean, exit_code?:number}} [opts.runAutostartOnce]  Test seam.
  */
 function installDaemonAutostart(opts) {
   const o = opts || {};
   const env = o.env || process.env;
   const platform = o.platform || process.platform;
+  const systemdAvailable = o.systemdUserAvailable || systemdUserAvailable;
+  const runOnce = o.runAutostartOnce || runAutostartOnce;
 
   if (platform !== "linux") {
     return {
@@ -206,19 +216,18 @@ function installDaemonAutostart(opts) {
   if (o.dry_run === true) {
     return {
       status: AUTOSTART_STATUSES.OK,
-      mode: systemdUserAvailable(env) ? "systemd" : "profile",
+      mode: systemdAvailable(env) ? "systemd" : "profile",
       hint: "dry-run: would install daemon autostart",
     };
   }
 
-  const cfgDir = expandHome(CONFIG_DIR, homeDir);
   const autostartPath = expandHome(AUTOSTART_SH, homeDir);
   const snippetPath = expandHome(PROFILE_SNIPPET, homeDir);
 
   writeFileAtomic(autostartPath, renderAutostartScript(), 0o755);
   writeFileAtomic(snippetPath, renderProfileSnippet(), 0o644);
 
-  if (systemdUserAvailable(env) && daemonBinary) {
+  if (systemdAvailable(env) && daemonBinary) {
     const systemd = installSystemdUserUnit(daemonBinary, homeDir);
     if (systemd.ok) {
       return {
@@ -240,16 +249,26 @@ function installDaemonAutostart(opts) {
     }
   }
 
-  runAutostartOnce(homeDir);
+  // Run the autostart script once. Do NOT swallow a non-zero exit (was a
+  // silent failure): surface it in the result so operators/doctor can see it.
+  const ran = runOnce(homeDir);
+  const exitCode = typeof ran.exit_code === "number" ? ran.exit_code : null;
+
+  const baseHint =
+    patched.length > 0
+      ? `profile hook installed (${patched.join(", ")})`
+      : "autostart script installed; profile hook already present";
+  const hint =
+    ran.ok === false && exitCode !== 0
+      ? `${baseHint}; WARNING: autostart run exited ${exitCode} (daemon may not have started — check ~/.local/state/terminal-commander/daemon.log)`
+      : baseHint;
 
   return {
     status: AUTOSTART_STATUSES.PROFILE_HOOK,
-    hint:
-      patched.length > 0
-        ? `profile hook installed (${patched.join(", ")})`
-        : "autostart script installed; profile hook already present",
+    hint,
     mode: "profile",
     patched,
+    autostart_run_exit_code: exitCode,
   };
 }
 
