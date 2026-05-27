@@ -44,6 +44,20 @@ confidence in F1-F7.
   (Windows pipe-name collision). Two HIGH production bugs (pid-reuse kill,
   leaked pipe handle).
 
+## Status (2026-05-27): all F1–F7 shipped
+
+| # | Sev | Status | Commit / mechanism |
+|---|-----|--------|--------------------|
+| F1 | CRITICAL | SHIPPED | Per-harness session endpoint (`TC_SESSION` token; `crate::session`). Spec/plan: `docs/superpowers/specs/2026-05-27-per-harness-session-endpoint-design.md`. Note: F1's *symptom* was de-fanged by F6 (fatal `ALREADY_EXISTS`, no spin); the *root* (per-user-only endpoint) is now fixed — each harness gets its own daemon via an opaque session token, unseeded default byte-identical to pre-F1 on both platforms. |
+| F2 | CRITICAL | SHIPPED | `f284c90` EnvSource injection seam |
+| F3 | HIGH | SHIPPED | `a1465b5` pid re-verify at kill |
+| F4 | HIGH | SHIPPED | `a1465b5` exact-column `tasklist` CSV |
+| F5 | HIGH | SHIPPED | `8d4dcc6` CloseHandle on error path |
+| F6 | HIGH | SHIPPED | `f663a62` fatal/transient classify + cap |
+| F7 | HIGH | SHIPPED | `8ae4e81` bounded regex compile |
+
+MEDIUM (M1–M9) + LOW remain open as opportunistic follow-ups.
+
 ## Severity index
 
 | # | Sev | Area | One-line |
