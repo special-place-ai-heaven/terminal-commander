@@ -33,9 +33,16 @@ pub const FORWARDED_ENV_ALLOWLIST: &[&str] = &["WSLENV", "TC_WSL_DISTRO"];
 /// [`FORWARDED_ENV_ALLOWLIST`] are ever included.
 #[must_use]
 pub fn build_forward_env() -> BTreeMap<String, String> {
+    build_forward_env_with(&crate::paths::ProcessEnv)
+}
+
+/// [`build_forward_env`] with an injected env source, so tests can verify
+/// allowlist filtering without mutating the process-global env table.
+#[must_use]
+pub fn build_forward_env_with(env: &impl crate::paths::EnvSource) -> BTreeMap<String, String> {
     FORWARDED_ENV_ALLOWLIST
         .iter()
-        .filter_map(|k| std::env::var(*k).ok().map(|v| ((*k).to_owned(), v)))
+        .filter_map(|k| env.get(k).map(|v| ((*k).to_owned(), v)))
         .collect()
 }
 
@@ -370,24 +377,24 @@ mod tests {
 
     #[test]
     fn build_forward_env_forwards_only_allowlisted_vars() {
-        // Use a key unique to this test to avoid cross-test env races.
-        let secret = "TC_F6_TEST_SECRET_THING";
-        // SAFETY: single-threaded assertion window; we set then read
-        // immediately and never rely on absence of concurrent mutation
-        // for the allowlisted key (WSLENV) beyond our own set.
-        unsafe {
-            std::env::set_var("WSLENV", "TC_F6/u");
-            std::env::set_var(secret, "nope");
+        // In-memory env: no process-global mutation, so this runs race-free
+        // alongside every other test regardless of --test-threads.
+        struct FakeEnv(std::collections::HashMap<String, String>);
+        impl crate::paths::EnvSource for FakeEnv {
+            fn get(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
         }
-        let env = build_forward_env();
+        let secret = "TC_F6_TEST_SECRET_THING";
+        let mut map = std::collections::HashMap::new();
+        map.insert("WSLENV".to_owned(), "TC_F6/u".to_owned());
+        map.insert(secret.to_owned(), "nope".to_owned());
+
+        let env = build_forward_env_with(&FakeEnv(map));
         assert_eq!(env.get("WSLENV").map(String::as_str), Some("TC_F6/u"));
         assert!(
             !env.contains_key(secret),
             "non-allowlisted var must not be forwarded"
         );
-        unsafe {
-            std::env::remove_var("WSLENV");
-            std::env::remove_var(secret);
-        }
     }
 }

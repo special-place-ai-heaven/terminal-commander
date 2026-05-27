@@ -13,6 +13,24 @@ use std::path::PathBuf;
 
 use crate::ensure::Endpoint;
 
+/// Read-only view of the process environment, injected into path
+/// resolution so the logic is testable without mutating the
+/// process-global env table (which races across the parallel test
+/// runner). Production code uses [`ProcessEnv`]; tests use a fixed map.
+pub trait EnvSource {
+    /// Return the value of `key`, or `None` if unset.
+    fn get(&self, key: &str) -> Option<String>;
+}
+
+/// Production [`EnvSource`] backed by `std::env::var`.
+pub struct ProcessEnv;
+
+impl EnvSource for ProcessEnv {
+    fn get(&self, key: &str) -> Option<String> {
+        std::env::var(key).ok()
+    }
+}
+
 /// The directory under which the daemon stores its sqlite DB, the
 /// log file, the IPC endpoint (Unix), and any other per-user state.
 ///
@@ -30,19 +48,26 @@ use crate::ensure::Endpoint;
 /// matching `DaemonConfig`'s startup default exactly.
 #[must_use]
 pub fn resolve_state_dir() -> PathBuf {
-    if let Some(p) = std::env::var("TC_DATA").ok().filter(|s| !s.is_empty()) {
+    resolve_state_dir_with(&ProcessEnv)
+}
+
+/// [`resolve_state_dir`] with an injected env source. Production calls the
+/// zero-arg wrapper; tests pass a fixed env to avoid process-global mutation.
+#[must_use]
+pub fn resolve_state_dir_with(env: &impl EnvSource) -> PathBuf {
+    if let Some(p) = env.get("TC_DATA").filter(|s| !s.is_empty()) {
         return PathBuf::from(p);
     }
     #[cfg(windows)]
     {
-        if let Ok(p) = std::env::var("LOCALAPPDATA") {
+        if let Some(p) = env.get("LOCALAPPDATA") {
             return PathBuf::from(p).join("terminal-commanderd").join("state");
         }
     }
     #[cfg(unix)]
     {
         // Do NOT consult XDG_STATE_HOME — daemon ignores it.
-        if let Ok(p) = std::env::var("HOME") {
+        if let Some(p) = env.get("HOME") {
             return PathBuf::from(p)
                 .join(".local")
                 .join("share")
@@ -65,7 +90,13 @@ pub fn resolve_state_dir() -> PathBuf {
 /// matching `apply_socket_env_override` in the daemon).
 #[must_use]
 pub fn resolve_socket_path() -> PathBuf {
-    if let Some(p) = std::env::var("TC_SOCKET").ok().filter(|s| !s.is_empty()) {
+    resolve_socket_path_with(&ProcessEnv)
+}
+
+/// [`resolve_socket_path`] with an injected env source.
+#[must_use]
+pub fn resolve_socket_path_with(env: &impl EnvSource) -> PathBuf {
+    if let Some(p) = env.get("TC_SOCKET").filter(|s| !s.is_empty()) {
         return PathBuf::from(p);
     }
     #[cfg(windows)]
@@ -74,19 +105,20 @@ pub fn resolve_socket_path() -> PathBuf {
         //   format!(r"\\.\pipe\terminal-commander-{user}")
         // where user = USERNAME ?? USER ?? "default".
         // NO "-default" suffix beyond the fallback user string.
-        let user = std::env::var("USERNAME")
-            .or_else(|_| std::env::var("USER"))
-            .unwrap_or_else(|_| "default".to_owned());
+        let user = env
+            .get("USERNAME")
+            .or_else(|| env.get("USER"))
+            .unwrap_or_else(|| "default".to_owned());
         return PathBuf::from(format!(r"\\.\pipe\terminal-commander-{user}"));
     }
     #[cfg(unix)]
     {
         // Match DaemonConfig::socket_path():
         //   self.daemon.data_dir.join("terminal-commanderd.sock")
-        return resolve_state_dir().join("terminal-commanderd.sock");
+        return resolve_state_dir_with(env).join("terminal-commanderd.sock");
     }
     #[allow(unreachable_code)]
-    resolve_state_dir().join("terminal-commanderd.sock")
+    resolve_state_dir_with(env).join("terminal-commanderd.sock")
 }
 
 /// Wrap a socket-path-shaped PathBuf into an Endpoint enum, choosing
@@ -109,29 +141,47 @@ pub fn endpoint_from_socket_path(p: &std::path::Path) -> Endpoint {
 /// `<state_dir>/logs/terminal-commanderd.log`.
 #[must_use]
 pub fn resolve_log_path() -> PathBuf {
-    resolve_state_dir()
+    resolve_log_path_with(&ProcessEnv)
+}
+
+/// [`resolve_log_path`] with an injected env source.
+#[must_use]
+pub fn resolve_log_path_with(env: &impl EnvSource) -> PathBuf {
+    resolve_state_dir_with(env)
         .join("logs")
         .join("terminal-commanderd.log")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+
+    /// In-memory [`EnvSource`] for tests. No process-global state, so tests
+    /// run race-free under any `--test-threads` value.
+    struct FakeEnv(HashMap<String, String>);
+
+    impl FakeEnv {
+        fn new() -> Self {
+            Self(HashMap::new())
+        }
+        fn with(mut self, key: &str, val: &str) -> Self {
+            self.0.insert(key.to_owned(), val.to_owned());
+            self
+        }
+    }
+
+    impl EnvSource for FakeEnv {
+        fn get(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+    }
 
     #[test]
     fn tc_data_env_overrides_everything() {
-        // SAFETY: env-var mutation is inherently racy in multi-threaded
-        // test runners. This test is intentionally simple and the var is
-        // removed immediately after the assertion. Unsafe required in
-        // Rust 1.80+ where set_var/remove_var became unsafe.
-        unsafe {
-            std::env::set_var("TC_DATA", "/custom/path");
-        }
-        let result = resolve_state_dir();
-        unsafe {
-            std::env::remove_var("TC_DATA");
-        }
-        assert_eq!(result, PathBuf::from("/custom/path"));
+        let env = FakeEnv::new().with("TC_DATA", "/custom/path");
+        assert_eq!(resolve_state_dir_with(&env), PathBuf::from("/custom/path"));
     }
 
     #[test]
@@ -159,9 +209,9 @@ mod tests {
     fn windows_socket_path_has_no_default_suffix() {
         // Bug: prior cli/mcp helpers appended "-default" while daemon
         // did not, so probes missed the daemon's actual pipe.
-        // SAFETY: see tc_data_env_overrides_everything comment.
-        unsafe { std::env::remove_var("TC_SOCKET") };
-        let p = resolve_socket_path();
+        // No TC_SOCKET in the fake env → falls through to the pipe name.
+        let env = FakeEnv::new().with("USERNAME", "poslj");
+        let p = resolve_socket_path_with(&env);
         let s = p.to_string_lossy();
         assert!(s.starts_with(r"\\.\pipe\terminal-commander-"));
         assert!(
@@ -172,16 +222,10 @@ mod tests {
 
     #[test]
     fn empty_tc_data_is_ignored() {
-        // SAFETY: see tc_data_env_overrides_everything comment.
-        let prev = std::env::var("TC_DATA").ok();
-        unsafe { std::env::set_var("TC_DATA", "") };
-        let result = resolve_state_dir();
-        match prev {
-            Some(p) => unsafe { std::env::set_var("TC_DATA", p) },
-            None => unsafe { std::env::remove_var("TC_DATA") },
-        }
         // Empty must NOT produce an empty PathBuf — it must fall through
         // to the platform default.
+        let env = FakeEnv::new().with("TC_DATA", "");
+        let result = resolve_state_dir_with(&env);
         assert!(
             !result.as_os_str().is_empty(),
             "empty TC_DATA must fall through to platform default, got {result:?}"
@@ -190,14 +234,8 @@ mod tests {
 
     #[test]
     fn empty_tc_socket_is_ignored() {
-        // SAFETY: see tc_data_env_overrides_everything comment.
-        let prev = std::env::var("TC_SOCKET").ok();
-        unsafe { std::env::set_var("TC_SOCKET", "") };
-        let result = resolve_socket_path();
-        match prev {
-            Some(p) => unsafe { std::env::set_var("TC_SOCKET", p) },
-            None => unsafe { std::env::remove_var("TC_SOCKET") },
-        }
+        let env = FakeEnv::new().with("TC_SOCKET", "");
+        let result = resolve_socket_path_with(&env);
         assert!(
             !result.as_os_str().is_empty(),
             "empty TC_SOCKET must fall through to platform default, got {result:?}"
@@ -208,30 +246,11 @@ mod tests {
     #[test]
     fn xdg_state_home_is_ignored_on_unix() {
         // Matches daemon's platform_default_data_dir which does NOT consult XDG.
-        // SAFETY: see tc_data_env_overrides_everything comment.
-        let prev_xdg = std::env::var("XDG_STATE_HOME").ok();
-        let prev_tc = std::env::var("TC_DATA").ok();
-        let prev_home = std::env::var("HOME").ok();
-        unsafe {
-            std::env::set_var("XDG_STATE_HOME", "/should-be-ignored");
-            std::env::remove_var("TC_DATA");
-            std::env::set_var("HOME", "/test-home");
-        }
-        let result = resolve_state_dir();
-        unsafe {
-            match prev_xdg {
-                Some(p) => std::env::set_var("XDG_STATE_HOME", p),
-                None => std::env::remove_var("XDG_STATE_HOME"),
-            }
-            match prev_tc {
-                Some(p) => std::env::set_var("TC_DATA", p),
-                None => std::env::remove_var("TC_DATA"),
-            }
-            match prev_home {
-                Some(p) => std::env::set_var("HOME", p),
-                None => std::env::remove_var("HOME"),
-            }
-        }
+        // No TC_DATA in the fake env; HOME set; XDG_STATE_HOME must be ignored.
+        let env = FakeEnv::new()
+            .with("XDG_STATE_HOME", "/should-be-ignored")
+            .with("HOME", "/test-home");
+        let result = resolve_state_dir_with(&env);
         assert_eq!(
             result,
             std::path::PathBuf::from("/test-home/.local/share/terminal-commanderd"),
