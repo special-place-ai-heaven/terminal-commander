@@ -38,6 +38,15 @@ pub fn is_stale(running: &str, installed: &str) -> bool {
     }
 }
 
+/// Replace the running daemon when it is stale OR the caller forces it.
+/// `force` is an explicit operator override (e.g. `update --force`); it
+/// does NOT lie about staleness, it just authorizes a same-version
+/// replacement (the `terminal-commander restart` story).
+#[must_use]
+pub fn should_replace(stale: bool, force: bool) -> bool {
+    stale || force
+}
+
 fn parse3(v: &str) -> Option<(u64, u64, u64)> {
     let core = v.trim().trim_start_matches('v');
     let mut it = core.split('.').map(|s| s.split('-').next().unwrap_or(s));
@@ -128,9 +137,14 @@ pub fn find_daemon_pid_os(state_dir: &Path) -> Option<u32> {
 /// If a reachable daemon is older than `installed_version`, kill it and
 /// wait for the endpoint to clear. The CALLER then spawns the new
 /// daemon (via `ensure_daemon`). Never spawns here.
+/// When `force` is true, a reachable same-version daemon is replaced
+/// anyway (the `restart` path); the endpoint cross-check still applies,
+/// so a forced replace never kills a process bound to a different
+/// endpoint.
 pub async fn replace_if_stale(
     opts: &EnsureDaemonOptions,
     installed_version: &str,
+    force: bool,
 ) -> ReplaceOutcome {
     if !probe_endpoint(&opts.endpoint).await {
         return ReplaceOutcome::NoDaemonRunning;
@@ -140,7 +154,7 @@ pub async fn replace_if_stale(
 
     let (old_version, pid) = match pidfile::read_pidfile(&opts.state_dir) {
         Some(rec) => {
-            if !is_stale(&rec.version, installed_version) {
+            if !should_replace(is_stale(&rec.version, installed_version), force) {
                 return ReplaceOutcome::UpToDate {
                     version: rec.version,
                 };
@@ -206,5 +220,16 @@ mod tests {
             "unparseable running => stale"
         );
         assert!(!is_stale("v0.1.14", "0.1.14"), "v-prefix tolerated");
+    }
+
+    #[test]
+    fn force_replaces_even_when_versions_match() {
+        // is_stale stays version-accurate; force is a separate flag, not
+        // a staleness lie. This documents the replace decision contract.
+        assert!(!is_stale("0.1.18", "0.1.18"));
+        assert!(should_replace(/* stale */ false, /* force */ true));
+        assert!(should_replace(true, false));
+        assert!(should_replace(true, true));
+        assert!(!should_replace(false, false));
     }
 }

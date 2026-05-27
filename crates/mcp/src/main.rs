@@ -143,6 +143,9 @@ fn main() -> ExitCode {
             match terminal_commander_supervisor::replace::replace_if_stale(
                 &opts,
                 env!("CARGO_PKG_VERSION"),
+                // Auto-check on adapter start replaces only a STALE daemon,
+                // never force-kills a current one.
+                false,
             )
             .await
             {

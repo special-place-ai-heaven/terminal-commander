@@ -60,11 +60,18 @@ enum Cmd {
     },
     /// Resolve config and print it back as TOML.
     PrintConfig,
-    /// Replace a stale running daemon with this binary, then ensure a
-    /// current daemon is running. Reads the running daemon version from
-    /// its pidfile; if older than this binary (or no pidfile, meaning a
-    /// pre-feature daemon), kills it and starts this one. Then exits.
-    Update,
+    /// Replace a stale (or, with --force, any) running daemon with this
+    /// binary, then ensure a current daemon is running. Reads the running
+    /// daemon version from its pidfile; if older than this binary (or no
+    /// pidfile, meaning a pre-feature daemon), kills it and starts this
+    /// one. Then exits.
+    Update {
+        /// Replace even when the running daemon version equals this
+        /// binary (a forced restart). The endpoint cross-check still
+        /// applies, so this never kills a process on a different socket.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -126,7 +133,7 @@ fn main() -> ExitCode {
             println!("{}", terminal_commanderd::config::to_toml(&cfg));
             ExitCode::SUCCESS
         }
-        Cmd::Update => {
+        Cmd::Update { force } => {
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -137,7 +144,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            rt.block_on(run_update(&cfg))
+            rt.block_on(run_update(&cfg, force))
         }
     }
 }
@@ -145,7 +152,7 @@ fn main() -> ExitCode {
 /// `update` run-mode: replace a stale running daemon with this binary,
 /// then ensure a current daemon is running. Prints `old -> new` (or
 /// `up-to-date`) and exits 0 on success.
-async fn run_update(cfg: &DaemonConfig) -> ExitCode {
+async fn run_update(cfg: &DaemonConfig, force: bool) -> ExitCode {
     use terminal_commander_supervisor::ensure::{EnsureDaemonOptions, ensure_daemon};
     use terminal_commander_supervisor::paths::endpoint_from_socket_path;
     use terminal_commander_supervisor::replace::{ReplaceOutcome, replace_if_stale};
@@ -173,7 +180,7 @@ async fn run_update(cfg: &DaemonConfig) -> ExitCode {
         allow_spawn: true,
     };
 
-    match replace_if_stale(&opts, installed).await {
+    match replace_if_stale(&opts, installed, force).await {
         ReplaceOutcome::UpToDate { version } => {
             println!("terminal-commanderd: up-to-date (running {version})");
             ExitCode::SUCCESS
