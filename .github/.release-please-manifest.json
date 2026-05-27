@@ -1,5 +1,5 @@
 {
-  ".": "0.1.13",
+  ".": "0.1.14",
   "packages/terminal-commander": "0.1.13",
   "packages/terminal-commander-linux-x64": "0.1.13",
   "packages/terminal-commander-linux-arm64": "0.1.13",
