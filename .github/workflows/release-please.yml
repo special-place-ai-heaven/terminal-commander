@@ -113,9 +113,31 @@ jobs:
       paths_released: ${{ steps.release.outputs.paths_released || steps.release_retry.outputs.paths_released }}
       tag_name: ${{ steps.final.outputs.tag_name }}
       version: ${{ steps.final.outputs.version }}
+      trigger_pushed: ${{ steps.crates_trigger.outputs.trigger_pushed }}
     steps:
+      # crates/** changes are not path-attributed to any packages/ component,
+      # so they never trigger release-please. Detect releasable crate commits
+      # since the last tag and push one sentinel commit under
+      # packages/terminal-commander/ to attribute them to the canonical
+      # version source. When a sentinel is pushed, SKIP release-please this
+      # run; the pushed commit fires a fresh push:main run that handles it.
+      - name: Checkout main (full history for crates trigger)
+        if: github.event_name == 'push' && inputs.recovery_release_as == ''
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
+
+      - name: Synthesize crates release attribution
+        id: crates_trigger
+        if: github.event_name == 'push' && inputs.recovery_release_as == ''
+        shell: bash
+        run: bash scripts/release/synthesize-crates-release-trigger.sh
+
       - name: release-please (manifest mode)
         id: release
+        if: steps.crates_trigger.outputs.trigger_pushed != 'true'
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071
         with:
           # Manifest mode: both files live under .github/ per the
@@ -132,6 +154,7 @@ jobs:
       # title pattern omitted ${version}; that blocks all future releases.
       - name: Clear stale autorelease labels on merged release PRs
         if: >-
+          steps.crates_trigger.outputs.trigger_pushed != 'true' &&
           steps.release.outputs.releases_created != 'true' &&
           github.event_name == 'push' &&
           inputs.recovery_release_as == ''
@@ -150,6 +173,7 @@ jobs:
       - name: release-please tag retry (post-merge)
         id: release_retry
         if: >-
+          steps.crates_trigger.outputs.trigger_pushed != 'true' &&
           steps.release.outputs.releases_created != 'true' &&
           github.event_name == 'push' &&
           inputs.recovery_release_as == ''
@@ -211,7 +235,7 @@ jobs:
   ensure-release:
     name: ensure-release
     needs: release-please
-    if: github.event_name == 'push' && inputs.recovery_release_as == ''
+    if: github.event_name == 'push' && inputs.recovery_release_as == '' && needs.release-please.outputs.trigger_pushed != 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
