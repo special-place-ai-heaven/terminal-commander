@@ -700,7 +700,7 @@ impl TerminalCommanderMcpServer {
     /// `registry_activate` — activate a rule for every newly-started
     /// command.
     #[tool(
-        description = "Activate (rule_id, version?) so every newly-started command uses the rule. Already-running commands are not hot-rebound."
+        description = "Activate (rule_id, version?) so every newly-started command uses the rule. Already-running commands are not hot-rebound. Pattern: activate the rule (or import the `cleanup` pack via registry_import_pack), THEN start the command. To read output from a command you already started without a matching rule, use command_output_tail."
     )]
     async fn registry_activate(
         &self,
