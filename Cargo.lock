@@ -1145,6 +1145,7 @@ dependencies = [
 name = "terminal-commander-store"
 version = "0.1.17"
 dependencies = [
+ "indexmap",
  "regex",
  "rusqlite",
  "serde",
