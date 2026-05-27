@@ -227,16 +227,19 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     use crate::ipc::IpcServer;
 
     let _log_guard = init_file_logging(&config.daemon.data_dir);
+    let state_dir = config.daemon.data_dir.clone();
 
     let (state, rep) = run_self_check(config)?;
     tracing::info!("{}", rep.render());
 
     let socket_path = state.config.socket_path();
-    tracing::info!("binding UDS at {}", socket_path.display());
+    let endpoint = socket_path.display().to_string();
+    tracing::info!("binding UDS at {endpoint}");
     let server = IpcServer::new(Arc::new(state), socket_path);
     let handle = server
         .spawn()
         .map_err(|e| RuntimeError::Signal(format!("UDS bind: {e}")))?;
+    write_daemon_pidfile(&state_dir, &endpoint);
     tracing::info!(
         "IPC server bound. \
          Method set: system_discover, health, policy_status, self_check. \
@@ -246,6 +249,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     wait_for_shutdown_signal().await?;
     tracing::info!("shutdown signal received, draining...");
     handle.shutdown().await;
+    terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
     tracing::info!("IPC server exited cleanly.");
     Ok(())
 }
@@ -258,16 +262,18 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     use crate::ipc::PipeServer;
 
     let _log_guard = init_file_logging(&config.daemon.data_dir);
+    let state_dir = config.daemon.data_dir.clone();
 
     let (state, rep) = run_self_check(config)?;
     tracing::info!("{}", rep.render());
 
     let pipe_name = state.config.pipe_name();
     tracing::info!("binding named pipe at {pipe_name}");
-    let server = PipeServer::new(Arc::new(state), pipe_name);
+    let server = PipeServer::new(Arc::new(state), pipe_name.clone());
     let handle = server
         .spawn()
         .map_err(|e| RuntimeError::Signal(format!("pipe bind: {e}")))?;
+    write_daemon_pidfile(&state_dir, &pipe_name);
     tracing::info!(
         "IPC server bound (Windows named pipe). \
          Send Ctrl-C to shut down."
@@ -276,8 +282,22 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     wait_for_shutdown_signal_windows().await?;
     tracing::info!("shutdown signal received, draining...");
     handle.shutdown().await;
+    terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
     tracing::info!("IPC server exited cleanly.");
     Ok(())
+}
+
+/// Write the daemon pidfile (pid + version + endpoint) so a newer
+/// install can find and replace this daemon. Non-fatal on failure.
+fn write_daemon_pidfile(state_dir: &std::path::Path, endpoint: &str) {
+    let rec = terminal_commander_supervisor::pidfile::RunningDaemon {
+        pid: std::process::id(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        endpoint: endpoint.to_owned(),
+    };
+    if let Err(e) = terminal_commander_supervisor::pidfile::write_pidfile(state_dir, &rec) {
+        tracing::warn!("pidfile write failed (non-fatal): {e}");
+    }
 }
 
 #[cfg(windows)]
