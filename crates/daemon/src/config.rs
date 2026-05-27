@@ -257,15 +257,18 @@ impl DaemonConfig {
     }
 
     /// Windows named-pipe path for parent IPC (`\\.\pipe\...`).
+    ///
+    /// Delegates to `supervisor::paths::resolve_socket_path` for the
+    /// non-custom case so the daemon binds EXACTLY the name the client
+    /// (mcp/cli) resolves: TC_SOCKET > TC_SESSION token > username default.
     #[must_use]
     pub fn pipe_name(&self) -> String {
         if let Some(ref custom) = self.daemon.socket_path {
             return custom.to_string_lossy().into_owned();
         }
-        let user = std::env::var("USERNAME")
-            .or_else(|_| std::env::var("USER"))
-            .unwrap_or_else(|_| "default".to_owned());
-        format!(r"\\.\pipe\terminal-commander-{user}")
+        terminal_commander_supervisor::paths::resolve_socket_path()
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Validate the loaded config. Clamps soft per-call limits down
@@ -498,6 +501,21 @@ mod tests {
         assert_eq!(
             cfg.db_path(),
             PathBuf::from("/tmp/tc-dbp/terminal-commander.db")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pipe_name_matches_supervisor_client_resolution() {
+        // Cross-side invariant: the daemon's bind name must equal what the
+        // client (supervisor::paths) resolves for the same env. With no custom
+        // socket_path and an unseeded env, both must be the legacy username pipe.
+        let cfg = DaemonConfig::defaults_in("C:\\tmp\\tc-pipe-test");
+        let client = terminal_commander_supervisor::paths::resolve_socket_path();
+        assert_eq!(
+            cfg.pipe_name(),
+            client.to_string_lossy(),
+            "daemon pipe_name() must equal client resolve_socket_path()"
         );
     }
 }
