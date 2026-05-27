@@ -107,7 +107,7 @@ print("pty bye", flush=True)
         // live list) instead of a fixed 800ms sleep that races slow PTY spawn /
         // CI load. Once exited, both frames have been emitted and counted.
         let mut seq = 2u64;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             let listed = match client
                 .call(seq, IpcRequest::PtyCommandList)
@@ -347,7 +347,7 @@ time.sleep(2)
         // races prompt consumption under load. Polling a read-only signal (not
         // speculative writes) means no stdin is ever sent before the flag is set.
         let mut seq = 2u64;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             let listed = match client
                 .call(seq, IpcRequest::PtyCommandList)

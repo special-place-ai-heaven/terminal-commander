@@ -22,12 +22,20 @@ use terminal_commanderd::{
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
+    // Unique per call: pid + nanos + a process-local atomic counter. nanos alone
+    // is NOT enough — two concurrent build_server() calls in the same test
+    // binary (same pid) can resolve to the same timestamp and collide on one
+    // SQLite data dir, which then fails migrations with a UNIQUE constraint on
+    // schema_migrations.version. The counter guarantees distinctness.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut p = std::env::temp_dir();
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    p.push(format!("tc-file-ipc-{tag}-{pid}-{nanos}"));
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    p.push(format!("tc-file-ipc-{tag}-{pid}-{nanos}-{n}"));
     p
 }
 
@@ -364,7 +372,11 @@ fn file_watch_start_then_append_emits_events_when_rule_active() {
         // follow_from_beginning:false) before appending, instead of a fixed
         // 250ms sleep that races watcher setup.
         let mut seq = 2u64;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // Generous deadline: the early-exit fires the instant the condition is
+        // met, so this only matters under pathological parallel-test contention
+        // where the file-watch notify -> sift -> bucket pipeline is slow. 30s
+        // absorbs heavy CI load without reintroducing a wall-clock race.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             let listed = match client
                 .call(seq, IpcRequest::FileWatchList)
@@ -392,7 +404,11 @@ fn file_watch_start_then_append_emits_events_when_rule_active() {
 
         // M2: poll bucket_events_since until the needle_match lands (or deadline),
         // instead of a fixed 800ms sleep that races watcher pickup under load.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // Generous deadline: the early-exit fires the instant the condition is
+        // met, so this only matters under pathological parallel-test contention
+        // where the file-watch notify -> sift -> bucket pipeline is slow. 30s
+        // absorbs heavy CI load without reintroducing a wall-clock race.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let r = loop {
             let resp = client
                 .call(

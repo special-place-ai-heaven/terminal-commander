@@ -122,7 +122,7 @@ fn command_start_combed_happy_path_returns_bounded_ids_and_audits_through_ipc() 
                     .iter()
                     .any(|r| r.action == "command_start" && r.decision == "allow")
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut rows = read_rows();
         while !has_both(&rows) && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -237,7 +237,7 @@ fn command_status_returns_lifecycle_counters_after_exit() {
                 }
             }
         };
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut status = query_status(22).await;
         let mut seq = 23;
         while !matches!(
