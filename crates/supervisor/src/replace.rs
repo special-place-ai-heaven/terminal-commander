@@ -227,7 +227,9 @@ mod tests {
         // is_stale stays version-accurate; force is a separate flag, not
         // a staleness lie. This documents the replace decision contract.
         assert!(!is_stale("0.1.18", "0.1.18"));
-        assert!(should_replace(/* stale */ false, /* force */ true));
+        assert!(should_replace(
+            /* stale */ false, /* force */ true
+        ));
         assert!(should_replace(true, false));
         assert!(should_replace(true, true));
         assert!(!should_replace(false, false));
