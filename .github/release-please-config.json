@@ -14,7 +14,6 @@
       "type": "linked-versions",
       "groupName": "terminal-commander",
       "components": [
-        "terminal-commander-root",
         "terminal-commander",
         "@terminal-commander/linux-x64",
         "@terminal-commander/linux-arm64",
@@ -25,12 +24,6 @@
     }
   ],
   "packages": {
-    ".": {
-      "release-type": "simple",
-      "component": "terminal-commander-root",
-      "package-name": "terminal-commander-root",
-      "changelog-path": "CHANGELOG.md"
-    },
     "packages/terminal-commander": {
       "release-type": "node",
       "component": "terminal-commander",
