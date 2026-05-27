@@ -60,6 +60,11 @@ enum Cmd {
     },
     /// Resolve config and print it back as TOML.
     PrintConfig,
+    /// Replace a stale running daemon with this binary, then ensure a
+    /// current daemon is running. Reads the running daemon version from
+    /// its pidfile; if older than this binary (or no pidfile, meaning a
+    /// pre-feature daemon), kills it and starts this one. Then exits.
+    Update,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -120,6 +125,85 @@ fn main() -> ExitCode {
         Cmd::PrintConfig => {
             println!("{}", terminal_commanderd::config::to_toml(&cfg));
             ExitCode::SUCCESS
+        }
+        Cmd::Update => {
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("terminal-commanderd: tokio runtime build failed: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            rt.block_on(run_update(&cfg))
+        }
+    }
+}
+
+/// `update` run-mode: replace a stale running daemon with this binary,
+/// then ensure a current daemon is running. Prints `old -> new` (or
+/// `up-to-date`) and exits 0 on success.
+async fn run_update(cfg: &DaemonConfig) -> ExitCode {
+    use terminal_commander_supervisor::ensure::{EnsureDaemonOptions, ensure_daemon};
+    use terminal_commander_supervisor::paths::endpoint_from_socket_path;
+    use terminal_commander_supervisor::replace::{ReplaceOutcome, replace_if_stale};
+
+    let installed = env!("CARGO_PKG_VERSION");
+    let daemon_binary = std::env::current_exe().unwrap_or_else(|_| "terminal-commanderd".into());
+    let state_dir = cfg.daemon.data_dir.clone();
+    let endpoint = endpoint_from_socket_path(&cfg.socket_path());
+    let log_dir = terminal_commander_supervisor::paths::resolve_log_path()
+        .parent()
+        .map_or_else(|| state_dir.clone(), std::path::Path::to_path_buf);
+
+    let opts = EnsureDaemonOptions {
+        daemon_binary,
+        state_dir,
+        log_dir,
+        endpoint,
+        startup_timeout: std::time::Duration::from_secs(10),
+        allow_spawn: true,
+    };
+
+    match replace_if_stale(&opts, installed).await {
+        ReplaceOutcome::UpToDate { version } => {
+            println!("terminal-commanderd: up-to-date (running {version})");
+            ExitCode::SUCCESS
+        }
+        ReplaceOutcome::Skipped { reason } => {
+            // Not a hard failure (e.g. endpoint mismatch). Still ensure
+            // a daemon is up.
+            eprintln!("terminal-commanderd: update skipped: {reason}");
+            let status = ensure_daemon(opts).await;
+            report_ensure(&status)
+        }
+        ReplaceOutcome::Replaced { old, new } => {
+            println!("terminal-commanderd: replaced {old} -> {new}");
+            let status = ensure_daemon(opts).await;
+            report_ensure(&status)
+        }
+        ReplaceOutcome::NoDaemonRunning => {
+            println!("terminal-commanderd: no daemon running; starting {installed}");
+            let status = ensure_daemon(opts).await;
+            report_ensure(&status)
+        }
+    }
+}
+
+fn report_ensure(
+    status: &terminal_commander_supervisor::ensure::EnsureDaemonStatus,
+) -> ExitCode {
+    use terminal_commander_supervisor::ensure::EnsureDaemonStatus;
+    match status {
+        EnsureDaemonStatus::AlreadyRunning { .. } | EnsureDaemonStatus::Started { .. } => {
+            println!("terminal-commanderd: daemon running");
+            ExitCode::SUCCESS
+        }
+        EnsureDaemonStatus::Unavailable { reason, .. } => {
+            eprintln!("terminal-commanderd: daemon unavailable after update: {reason:?}");
+            ExitCode::from(2)
         }
     }
 }
