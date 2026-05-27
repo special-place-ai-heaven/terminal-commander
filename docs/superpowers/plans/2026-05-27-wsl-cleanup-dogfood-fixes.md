@@ -900,11 +900,48 @@ the daemon writes under `platform_default_data_dir`, while the supervisor's
 two differ (e.g. `.terminal-commanderd` vs `.local/share/terminal-commanderd`
 or an AppData path). Write the confirmed mismatch here. Commit the plan note.
 
+**FINDING (recorded 2026-05-27, grounded in code):**
+
+The mismatch is **Windows-only** and lives in the DAEMON's default data dir,
+not the pidfile join. Exact paths:
+- Reader (supervisor `paths::resolve_state_dir`, paths.rs:32): Windows =>
+  `%LOCALAPPDATA%\terminal-commanderd\state`; Unix => `$HOME/.local/share/
+  terminal-commanderd`. (TC_DATA overrides both.)
+- Writer (daemon `platform_default_data_dir`, main.rs:255): HOME set =>
+  `$HOME/.local/share/terminal-commanderd`; else USERPROFILE =>
+  `%USERPROFILE%\.terminal-commanderd`; else `.terminal-commanderd`.
+- **Unix: the two AGREE.** **Windows: they DIVERGE** --
+  `%LOCALAPPDATA%\terminal-commanderd\state` (reader) vs
+  `%USERPROFILE%\.terminal-commanderd` (daemon default). The daemon never uses
+  LOCALAPPDATA anywhere.
+
+Why it usually "works" anyway: `ensure_daemon` (ensure.rs:183) spawns the
+daemon WITH `--data-dir <opts.state_dir>` (= reader's path), so an
+adapter-spawned daemon writes its pidfile where the reader looks. The bug bites
+the entry points that run the daemon WITHOUT `--data-dir`:
+- `terminal-commanderd start` (manual) => pidfile under `%USERPROFILE%\
+  .terminal-commanderd`, adapter probes `%LOCALAPPDATA%\...\state` => never
+  found by path (only the OS-query fallback in replace.rs saves it).
+- `terminal-commanderd update --force` (the new Phase-4 `restart` path, no
+  `--data-dir`) => resolves `%USERPROFILE%\.terminal-commanderd` for its own
+  replace check, mismatching an adapter-spawned daemon's pidfile.
+
+**FIX (Task 5.2, refined): single source of truth.** Make the daemon's
+`platform_default_data_dir()` return EXACTLY what
+`supervisor::paths::resolve_state_dir()` returns (the daemon already depends on
+the supervisor crate -- it uses `pidfile` + `paths` there). Then every entry
+point (adapter `--data-dir`, manual `start`, `update`) resolves the identical
+Windows path and the pidfile is found by path, not by the brittle OS query.
+`--data-dir`/`--config`/`TC_DATA` overrides keep working unchanged. The pidfile
+JOIN (`pidfile_path`) is already shared and correct -- do NOT touch it.
+
 ### Task 5.2: Make writer and reader share one resolved path
 
 **Files:**
-- Modify: `crates/supervisor/src/paths.rs` (export a single `resolve_state_dir`)
-- Modify: `crates/daemon/src/runtime.rs` (write pidfile under the SAME resolution)
+- Modify: `crates/daemon/src/main.rs` (`platform_default_data_dir` delegates to
+  `supervisor::paths::resolve_state_dir`)
+- (paths.rs already exports the single canonical resolver; runtime.rs pidfile
+  join already correct)
 - Test: `crates/supervisor/tests/` (add `pidfile_path_agrees.rs`) or inline in `paths.rs`
 
 - [ ] **Step 1: Write the failing test**
