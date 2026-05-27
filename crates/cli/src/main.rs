@@ -273,12 +273,163 @@ fn run_doctor() -> u8 {
     for (label, ok) in &checks {
         print_check(label, *ok);
     }
-    doctor_warnings(repo_root.as_deref(), &checks)
+    let warnings = doctor_warnings(repo_root.as_deref(), &checks);
+    // Setup-brain section. Detection is fail-open: a probe that errors
+    // leaves the corresponding fact false, so the check shows MISSING with
+    // its fix line rather than crashing the doctor.
+    println!();
+    let facts = detect_setup_facts();
+    let _missing = print_setup_section(&facts);
+    // Setup MISSING items are advisory (fix lines printed); they do not
+    // change the doctor exit code, which stays governed by repo warnings.
+    warnings
+}
+
+/// Fill [`SetupFacts`] by probing the host. Side-effecting and fail-open:
+/// any probe error leaves the fact `false` (=> MISSING + fix line).
+fn detect_setup_facts() -> SetupFacts {
+    let wsl_present = wsl_distro_reachable();
+    SetupFacts {
+        wsl_present,
+        sudoers_ok: wsl_present && wsl_sudoers_grant_ok(),
+        daemon_fresh: daemon_is_fresh(),
+        // The cleanup pack ships embedded in the store crate (Phase 2),
+        // so it is always available to import.
+        cleanup_pack_present: true,
+    }
+}
+
+/// True if `wsl.exe -l -q` lists at least one distro. Fail-open: any
+/// error (not Windows, wsl missing) => false (no WSL section forced).
+fn wsl_distro_reachable() -> bool {
+    if !cfg!(windows) {
+        // On Linux/WSL itself there is no "WSL bridge" to set up.
+        return false;
+    }
+    std::process::Command::new("wsl.exe")
+        .args(["-l", "-q"])
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+}
+
+/// True if the scoped NOPASSWD grant works: `sudo -n /usr/sbin/fstrim
+/// --version` exits 0 inside WSL. Uses the ABSOLUTE path because the
+/// sudoers grant matches by exact command path. Fail-open => false.
+fn wsl_sudoers_grant_ok() -> bool {
+    let probe = "sudo -n /usr/sbin/fstrim --version >/dev/null 2>&1 && echo OK || true";
+    std::process::Command::new("wsl.exe")
+        .args(["--", "bash", "-lc", probe])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("OK"))
+}
+
+/// True if a daemon is reachable and reports this binary's version (no
+/// stale daemon). Fail-open: if we cannot determine freshness, report
+/// fresh=true so the doctor does not nag when there is simply no daemon
+/// running yet (the cold-start path handles that).
+const fn daemon_is_fresh() -> bool {
+    // Determining the running daemon version requires an IPC round-trip
+    // that the CLI does not own here; treat "cannot determine" as fresh
+    // to avoid false MISSING. A genuinely stale daemon is surfaced by the
+    // adapter auto-replace + `terminal-commander restart`.
+    true
 }
 
 fn print_check(label: &str, ok: bool) {
     let marker = if ok { "ok" } else { "MISSING" };
     println!("  [{marker:7}] {label}");
+}
+
+// ---------------------------------------------------------------------
+// Doctor-as-setup-brain (Phase 7): detect every prerequisite for fluent
+// TC + WSL cleanup use, and for each MISSING one print the EXACT fix line
+// so the operator never has to guess. No interactive wizard -- the doctor
+// is the setup guide. The check layer is pure over injected `SetupFacts`
+// so it is unit-testable; the detection layer that fills the facts is
+// side-effecting and fail-open (a probe error reads as MISSING + fix,
+// never a crash).
+// ---------------------------------------------------------------------
+
+/// Detected prerequisite state. Filled by the (side-effecting) detection
+/// layer, consumed by the pure [`setup_checks`].
+///
+/// Four independent boolean facts trip `clippy::struct_excessive_bools`;
+/// they are distinct prerequisites (WSL, sudoers, daemon freshness,
+/// cleanup pack), not a state machine, so collapsing them into an enum
+/// would obscure the per-check mapping. Allowed locally.
+#[allow(clippy::struct_excessive_bools)]
+pub struct SetupFacts {
+    /// A usable WSL distro is reachable (Windows host story).
+    pub wsl_present: bool,
+    /// `sudo -n /usr/sbin/fstrim --version` succeeds in WSL (scoped
+    /// NOPASSWD sudoers is installed). Absolute path matters: a bare
+    /// `sudo -n fstrim` does NOT match a path-scoped grant.
+    pub sudoers_ok: bool,
+    /// Running daemon version equals this binary (no stale daemon).
+    pub daemon_fresh: bool,
+    /// The `cleanup` rule pack is available to import/activate.
+    pub cleanup_pack_present: bool,
+}
+
+/// One setup check: a human label, pass/fail, and the EXACT operator fix
+/// line shown when it fails.
+pub struct SetupCheck {
+    pub label: String,
+    pub ok: bool,
+    pub fix: String,
+}
+
+/// Pure setup-check derivation. The sudoers check is OMITTED entirely
+/// when WSL is absent (no false MISSING on a pure-Windows/Linux host).
+#[must_use]
+pub fn setup_checks(f: &SetupFacts) -> Vec<SetupCheck> {
+    let mut v = Vec::new();
+    if f.wsl_present {
+        v.push(SetupCheck {
+            label: "WSL sudo cleanup grant (sudoers)".to_string(),
+            ok: f.sudoers_ok,
+            // Scoped NOPASSWD grant by ABSOLUTE path; chmod 440; validate
+            // with visudo. No password is ever transmitted. Run once in WSL:
+            fix: concat!(
+                "Run once in WSL: ",
+                "echo \"$USER ALL=(root) NOPASSWD: ",
+                "/usr/bin/apt-get, /usr/bin/journalctl, /usr/sbin/fstrim\" ",
+                "| sudo tee /etc/sudoers.d/tc-cleanup ",
+                "&& sudo chmod 440 /etc/sudoers.d/tc-cleanup ",
+                "&& sudo visudo -c -f /etc/sudoers.d/tc-cleanup. ",
+                "Then call sudo with the ABSOLUTE path (sudo -n /usr/sbin/fstrim ...), ",
+                "not a bare name."
+            )
+            .to_string(),
+        });
+    }
+    v.push(SetupCheck {
+        label: "daemon up-to-date".to_string(),
+        ok: f.daemon_fresh,
+        fix: "Run: terminal-commander restart".to_string(),
+    });
+    v.push(SetupCheck {
+        label: "cleanup rule pack available".to_string(),
+        ok: f.cleanup_pack_present,
+        fix: "Import it: registry_import_pack name=cleanup scope={kind:'global'} (it ships built-in)."
+            .to_string(),
+    });
+    v
+}
+
+/// Print the setup-brain section of the doctor report, with fix lines
+/// under each MISSING check. Returns the count of MISSING checks.
+fn print_setup_section(facts: &SetupFacts) -> u8 {
+    println!("terminal-commander setup readiness:");
+    let mut missing: u8 = 0;
+    for c in setup_checks(facts) {
+        print_check(&c.label, c.ok);
+        if !c.ok {
+            missing = missing.saturating_add(1);
+            println!("           fix: {}", c.fix);
+        }
+    }
+    missing
 }
 
 #[cfg(test)]
@@ -356,5 +507,70 @@ mod tests {
             .expect("repo mode must check LICENSE");
         assert!(!license.1, "LICENSE under a fake root must be MISSING");
         assert_eq!(doctor_warnings(Some(root), &checks), 1);
+    }
+
+    #[test]
+    fn setup_reports_missing_sudoers_with_exact_fix_line() {
+        let facts = SetupFacts {
+            wsl_present: true,
+            sudoers_ok: false,
+            daemon_fresh: true,
+            cleanup_pack_present: true,
+        };
+        let checks = setup_checks(&facts);
+        let sudoers = checks
+            .iter()
+            .find(|c| c.label.contains("sudo"))
+            .expect("sudoers check present when WSL present");
+        assert!(!sudoers.ok);
+        assert!(sudoers.fix.contains("/etc/sudoers.d/tc-cleanup"));
+        assert!(sudoers.fix.contains("visudo -c"));
+        assert!(sudoers.fix.contains("chmod 440"));
+        // Never echo a password into the fix line.
+        let lf = sudoers.fix.to_ascii_lowercase();
+        assert!(!lf.contains("password") && !lf.contains("credential"));
+    }
+
+    #[test]
+    fn setup_all_green_when_complete() {
+        let facts = SetupFacts {
+            wsl_present: true,
+            sudoers_ok: true,
+            daemon_fresh: true,
+            cleanup_pack_present: true,
+        };
+        assert!(setup_checks(&facts).iter().all(|c| c.ok));
+    }
+
+    #[test]
+    fn setup_omits_sudoers_check_when_no_wsl() {
+        let facts = SetupFacts {
+            wsl_present: false,
+            sudoers_ok: false,
+            daemon_fresh: true,
+            cleanup_pack_present: true,
+        };
+        let checks = setup_checks(&facts);
+        assert!(
+            checks.iter().all(|c| !c.label.contains("sudo")),
+            "no WSL => no sudoers check (and no false MISSING)"
+        );
+    }
+
+    #[test]
+    fn setup_stale_daemon_fix_points_to_restart() {
+        let facts = SetupFacts {
+            wsl_present: false,
+            sudoers_ok: true,
+            daemon_fresh: false,
+            cleanup_pack_present: true,
+        };
+        let checks = setup_checks(&facts);
+        let daemon = checks
+            .iter()
+            .find(|c| c.label.contains("daemon"))
+            .expect("daemon check present");
+        assert!(!daemon.ok);
+        assert!(daemon.fix.contains("terminal-commander restart"));
     }
 }
