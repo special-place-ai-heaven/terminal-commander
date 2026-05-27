@@ -27,14 +27,16 @@ pub enum SessionEndpoint {
 
 /// True iff `token` is a safe session id.
 ///
-/// Allows `[A-Za-z0-9._-]`, length 1..=64, not `..`. Rejects path separators,
-/// pipe prefixes, and traversal so a hostile token cannot squat a pipe or
-/// escape the state dir.
+/// Allows `[A-Za-z0-9._-]`, length 1..=64, and requires at least one
+/// alphanumeric char. Rejects path separators, pipe prefixes, and
+/// dot-only tokens (`.`, `..`) so a hostile or degenerate token cannot squat a
+/// pipe, escape the state dir, or normalize to the per-user default dir
+/// (`base.join(".")` == `base` on unix).
 #[must_use]
 pub fn is_valid_session_token(token: &str) -> bool {
     !token.is_empty()
         && token.len() <= MAX_SESSION_TOKEN_LEN
-        && token != ".."
+        && token.chars().any(|c| c.is_ascii_alphanumeric())
         && token.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
@@ -102,7 +104,10 @@ mod tests {
 
     #[test]
     fn malformed_session_falls_back_to_default() {
-        for bad in ["../evil", r"a\b", "a/b", r"\\.\pipe\x", "has space", &"x".repeat(65)] {
+        for bad in [
+            "../evil", r"a\b", "a/b", r"\\.\pipe\x", "has space", &"x".repeat(65),
+            ".", "..", "...", "-", "_", ".-_",
+        ] {
             let env = FakeEnv::new().with("TC_SESSION", bad);
             assert_eq!(resolve_session(&env), SessionEndpoint::Default,
                 "malformed token {bad:?} must fall back to Default");
