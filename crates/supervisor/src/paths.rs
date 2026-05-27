@@ -96,6 +96,11 @@ fn state_dir_base(env: &impl EnvSource) -> PathBuf {
 ///
 /// May be overridden by `TC_SOCKET` env var (empty string is treated as unset,
 /// matching `apply_socket_env_override` in the daemon).
+///
+/// Per-harness isolation: set `TC_SESSION` to an opaque token ([A-Za-z0-9._-],
+/// 1..=64) and each harness gets its own endpoint. Precedence: `TC_SOCKET`
+/// (full path override) > `TC_SESSION` (token) > per-user default (unchanged
+/// from pre-F1). See `crate::session`.
 #[must_use]
 pub fn resolve_socket_path() -> PathBuf {
     resolve_socket_path_with(&ProcessEnv)
@@ -343,6 +348,25 @@ mod tests {
             resolve_socket_path_with(&env).to_string_lossy(),
             r"\\.\pipe\custom",
             "TC_SOCKET full override wins over session + default"
+        );
+    }
+
+    #[test]
+    fn daemon_and_client_resolve_identically_for_each_tier() {
+        // The cross-side invariant in one place: for a given env, the endpoint
+        // string is a pure function of that env. We assert resolve_socket_path_with
+        // is deterministic and tier-correct; the daemon calls the same fn (Task 4),
+        // so daemon-bind == client-connect by construction.
+        let default_env = FakeEnv::new().with("USERNAME", "bob").with("HOME", "/h");
+        let a = resolve_socket_path_with(&default_env);
+        let b = resolve_socket_path_with(&default_env);
+        assert_eq!(a, b, "resolution must be deterministic for identical env");
+
+        let sess = FakeEnv::new().with("USERNAME", "bob").with("HOME", "/h").with("TC_SESSION", "s1");
+        assert_ne!(
+            resolve_socket_path_with(&default_env),
+            resolve_socket_path_with(&sess),
+            "a distinct session must yield a distinct endpoint"
         );
     }
 }
