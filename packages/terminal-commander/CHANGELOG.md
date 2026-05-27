@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.15](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.14...v0.1.15) (2026-05-27)
+
+
+### Features
+
+* **cli:** npm postinstall daemon-replace (best-effort) ([aee8f94](https://github.com/special-place-ai-heaven/terminal-commander/commit/aee8f94de76d69033d0132a5324fe58cf03ee8c7))
+* release Rust crate changes ([6575cf3](https://github.com/special-place-ai-heaven/terminal-commander/commit/6575cf318730ffa6327fe8d02a86ab909e1022db))
+
 ## [0.1.14](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.13...v0.1.14) (2026-05-27)
 
 
