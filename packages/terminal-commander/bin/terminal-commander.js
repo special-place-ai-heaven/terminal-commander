@@ -267,6 +267,13 @@ if (isVersionRequest(args)) {
     process.stderr.write(formatResolveError(result) + "\n");
     process.exit(64);
   } else {
+    // M7 (decided): this native passthrough runs the local platform binary as
+    // the SAME user on the SAME host with inherited stdio — a normal CLI exec.
+    // Inheriting the full parent env is intentional and correct here: stripping
+    // vars would break commands that legitimately read the operator's env. This
+    // is deliberately UNLIKE the WSL bridge (lib/wsl/spawn.js) and the MCP shim,
+    // which cross a process/trust boundary and therefore filter secret-shaped
+    // vars via buildFilteredEnv. No filtering on the same-host native path.
     const child = spawn(result.binaryPath, args, {
       stdio: "inherit",
       shell: false,

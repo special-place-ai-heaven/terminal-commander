@@ -81,7 +81,9 @@ fn image_is_inside_bin_dir(image: &Path, bin_dir: &Path) -> bool {
 mod windows_impl {
     use super::{UpdateLockResult, image_is_inside_bin_dir, is_owned_binary_name, normalize_path};
     use std::path::{Path, PathBuf};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
+    use windows::Win32::Foundation::{
+        CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
@@ -203,7 +205,22 @@ mod windows_impl {
         let proc = OwnedHandle(handle);
         unsafe { TerminateProcess(proc.0, 0) }.map_err(|e| e.to_string())?;
         let wait = unsafe { WaitForSingleObject(proc.0, 2000) };
-        Ok(wait != WAIT_TIMEOUT)
+        // M5: only WAIT_OBJECT_0 is a confirmed clean exit. Previously any value
+        // other than WAIT_TIMEOUT (including WAIT_FAILED / WAIT_ABANDONED) was
+        // reported as a clean stop. TerminateProcess already succeeded above, so
+        // this is diagnostic accuracy: report whether we actually observed exit.
+        match wait {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            WAIT_FAILED => Err(format!(
+                "WaitForSingleObject failed after TerminateProcess: {}",
+                std::io::Error::last_os_error()
+            )),
+            other => Err(format!(
+                "WaitForSingleObject returned unexpected status 0x{:x} after TerminateProcess",
+                other.0
+            )),
+        }
     }
 }
 

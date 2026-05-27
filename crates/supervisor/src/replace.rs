@@ -293,4 +293,33 @@ mod tests {
         assert!(should_replace(true, true));
         assert!(!should_replace(false, false));
     }
+
+    #[test]
+    fn recycled_or_unrelated_pid_is_refused_at_kill() {
+        // M4 / F3 regression: pid_belongs_to_daemon is the guard that closes
+        // the probe->kill TOCTOU. A pid that is alive but is NOT our daemon
+        // bound to our state_dir must be refused, so a recycled pid (the OS
+        // reusing the number for an unrelated process) is never force-killed.
+        //
+        // This test process itself is a live, real pid that is definitely not
+        // a terminal-commanderd bound to /tmp/tc-m4-not-a-daemon.
+        let unrelated_live_pid = std::process::id();
+        assert!(
+            !pid_belongs_to_daemon(
+                unrelated_live_pid,
+                std::path::Path::new("/tmp/tc-m4-not-a-daemon")
+            ),
+            "a live pid that is not our daemon must be refused (no force-kill of a recycled pid)"
+        );
+
+        // A pid that is almost certainly dead must also be refused (empty ps
+        // output => not our daemon).
+        assert!(
+            !pid_belongs_to_daemon(
+                0xFFFF_FFF0,
+                std::path::Path::new("/tmp/tc-m4-not-a-daemon")
+            ),
+            "a dead/absent pid must be refused"
+        );
+    }
 }

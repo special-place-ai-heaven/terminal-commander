@@ -373,9 +373,13 @@ impl TerminalCommanderMcpServer {
     async fn system_discover(&self) -> Result<CallToolResult, McpError> {
         let (daemon, daemon_error) = match self.daemon.call(IpcRequest::SystemDiscover).await {
             Ok(IpcResponse::SystemDiscover(d)) => (Some(d), None),
-            Ok(other) => (
+            Ok(_other) => (
+                // M6: stable, bounded code. Do not interpolate the response
+                // enum's Debug shape into a user-facing error (it would leak
+                // internal variant layout / payload fields). A wrong variant
+                // here is a daemon protocol violation, not actionable detail.
                 None,
-                Some(format!("unexpected response variant: {other:?}")),
+                Some("unexpected_ipc_response: daemon returned a response that did not match system_discover".to_owned()),
             ),
             Err(e) => (None, Some(format_ipc_error(&e))),
         };
