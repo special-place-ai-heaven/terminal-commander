@@ -40,7 +40,11 @@ agent-ergonomics work. It surfaced because the build runner's glibc
 Change the two linux entries in the `runs-on` platform map to
 `ubuntu-22.04` and `ubuntu-22.04-arm`. Ubuntu 22.04 ships glibc 2.35, so
 the binaries record a 2.35 floor and run on glibc 2.35+ (Ubuntu 22.04,
-Debian 12 bookworm 2.36, RHEL 9, and everything newer). No new tooling.
+Debian 12 bookworm 2.36, and everything newer). No new tooling.
+
+Note on reach: a 2.35 floor does NOT cover RHEL 9 (glibc 2.34) or
+Ubuntu 20.04 (2.31). Reaching those needs cargo-zigbuild with a pinned
+lower target -- deferred unless required (see rejected alternatives).
 
 `ubuntu-22.04-arm` is a generally-available GitHub-hosted runner label
 (arm64 hosted runners went GA 2025-08); the repo already uses
@@ -61,7 +65,8 @@ container/zigbuild path for macOS). This spec touches linux only.
   licensing -- a mac-only concern. Rejected for THIS fix in favor of
   the minimal runner swap; the user accepts CI as the verification
   authority. Keep zigbuild on the table if 22.04 runners are later
-  deprecated or a 2.31 floor becomes required.
+  deprecated, or a floor below 2.35 becomes required (RHEL 9 = 2.34,
+  Ubuntu 20.04 = 2.31).
 - **manylinux container.** Same broader reach as zigbuild, more moving
   parts than a runner-label flip. Not warranted for a 2.35 floor.
 - **musl static.** Runs anywhere incl. alpine, zero glibc dependency,
@@ -118,8 +123,10 @@ container/zigbuild path for macOS). This spec touches linux only.
 
 - Re-cutting / yanking the broken v0.1.13 linux binaries. Once this fix
   lands and a release is cut, v0.1.13's linux artifacts remain
-  glibc-2.39. Decide separately whether to yank/deprecate them or just
-  supersede with the next release.
+  glibc-2.39. Supersede via the next release; full npm yank only if zero
+  installs of the broken tarball are required (not necessary once verify
+  gates the next publish). Add a one-line known-issue to the next
+  release notes: "linux glibc < 2.39: use >= v0.1.14".
 - The release-please versioning gap (crates/ changes do not bump the
   shipped binary version) -- the user's SECOND requested fix, its own
   brainstorm/spec after this one.
