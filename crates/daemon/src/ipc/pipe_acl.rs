@@ -146,6 +146,15 @@ pub fn create_named_pipe_with_sddl(
 
         // SAFETY: handle was created with FILE_FLAG_OVERLAPPED; tokio
         // NamedPipeServer::from_raw_handle requires an OVERLAPPED handle.
-        tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(handle.0.cast())
+        match tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(handle.0.cast()) {
+            Ok(server) => Ok(server),
+            Err(e) => {
+                // from_raw_handle did NOT take ownership of the OS handle on
+                // the error path, so we must close it ourselves or the kernel
+                // pipe handle leaks once per failed accept iteration.
+                let _ = CloseHandle(HANDLE(handle.0));
+                Err(e)
+            }
+        }
     }
 }
