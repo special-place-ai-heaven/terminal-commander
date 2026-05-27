@@ -40,9 +40,7 @@ pub fn is_stale(running: &str, installed: &str) -> bool {
 
 fn parse3(v: &str) -> Option<(u64, u64, u64)> {
     let core = v.trim().trim_start_matches('v');
-    let mut it = core
-        .split('.')
-        .map(|s| s.split('-').next().unwrap_or(s));
+    let mut it = core.split('.').map(|s| s.split('-').next().unwrap_or(s));
     let a = it.next()?.parse().ok()?;
     let b = it.next()?.parse().ok()?;
     let c = it.next().unwrap_or("0").parse().ok()?;
@@ -203,7 +201,10 @@ mod tests {
         assert!(is_stale("0.1.13", "0.2.0"));
         assert!(!is_stale("0.1.14", "0.1.14"));
         assert!(!is_stale("0.2.0", "0.1.14"));
-        assert!(is_stale("garbage", "0.1.14"), "unparseable running => stale");
+        assert!(
+            is_stale("garbage", "0.1.14"),
+            "unparseable running => stale"
+        );
         assert!(!is_stale("v0.1.14", "0.1.14"), "v-prefix tolerated");
     }
 }

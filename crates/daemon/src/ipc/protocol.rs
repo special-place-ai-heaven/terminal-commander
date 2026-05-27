@@ -616,17 +616,19 @@ pub struct CommandOutputTailParams {
     pub max_bytes: u32,
 }
 
-fn default_tail_lines() -> u32 {
+const fn default_tail_lines() -> u32 {
     50
 }
-fn default_tail_bytes() -> u32 {
+const fn default_tail_bytes() -> u32 {
     65_536
 }
 
-/// Response for `command_output_tail`. Bounded; never returns the full
-/// raw stream. `truncated_lines` is true when the ring held more frames
-/// than `max_lines` (after server-side clamping). `truncated_bytes` is
-/// true when the byte cap was hit before the line cap.
+/// Response for `command_output_tail`.
+///
+/// Bounded; never returns the full raw stream. `truncated_lines` is
+/// true when the ring held more frames than `max_lines` (after
+/// server-side clamping). `truncated_bytes` is true when the byte cap
+/// was hit before the line cap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandOutputTailResponse {
     pub job_id: JobId,

@@ -198,9 +198,7 @@ async fn run_update(cfg: &DaemonConfig) -> ExitCode {
     }
 }
 
-fn report_ensure(
-    status: &terminal_commander_supervisor::ensure::EnsureDaemonStatus,
-) -> ExitCode {
+fn report_ensure(status: &terminal_commander_supervisor::ensure::EnsureDaemonStatus) -> ExitCode {
     use terminal_commander_supervisor::ensure::EnsureDaemonStatus;
     match status {
         EnsureDaemonStatus::AlreadyRunning { .. } | EnsureDaemonStatus::Started { .. } => {

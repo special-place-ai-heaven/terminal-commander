@@ -23,6 +23,7 @@
     "self_check": "ensure_daemon_status_v1",
     "command_start_combed": "ensure_daemon_status_v1",
     "command_status": "ensure_daemon_status_v1",
+    "command_output_tail": "ensure_daemon_status_v1",
     "bucket_events_since": "ensure_daemon_status_v1",
     "bucket_wait": "ensure_daemon_status_v1",
     "bucket_summary": "ensure_daemon_status_v1",
@@ -77,6 +78,11 @@
     {
       "name": "command_status",
       "fixture": "mcp-tools/command_status.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "command_output_tail",
+      "fixture": "mcp-tools/command_output_tail.v1.json",
       "status": "covered_live"
     },
     {
@@ -202,8 +208,8 @@
   ],
   "obsolete_fixtures": [],
   "counts": {
-    "live_tools": 30,
-    "covered_live": 30,
+    "live_tools": 31,
+    "covered_live": 31,
     "placeholder_for_live_tool": 0,
     "missing_fixture": 0,
     "obsolete_fixture_present": 0

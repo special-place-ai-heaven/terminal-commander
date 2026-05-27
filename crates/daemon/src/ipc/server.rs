@@ -41,11 +41,10 @@ use crate::ipc::protocol::PtyCommandWriteStdinParams;
 use crate::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
-    CommandStartParams, CommandStatusParams, MAX_TAIL_BYTES, MAX_TAIL_LINES,
-    ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT, DEFAULT_CONTEXT_AFTER,
-    DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES, DEFAULT_FILE_READ_LINES,
-    DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES, DiscoverResponse,
-    EventContextParams, EventContextResponse, FileLine, FileReadWindowParams,
+    CommandStartParams, CommandStatusParams, ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT,
+    DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES,
+    DEFAULT_FILE_READ_LINES, DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES,
+    DiscoverResponse, EventContextParams, EventContextResponse, FileLine, FileReadWindowParams,
     FileReadWindowResponse, FileSearchMatch, FileSearchParams, FileSearchResponse,
     FileWatchListEntry, FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse,
     FileWatchStopParams, FileWatchStopResponse, IpcContextFrame, IpcError, IpcErrorCode,
@@ -53,15 +52,15 @@ use crate::ipc::protocol::{
     MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES, MAX_CONTEXT_FRAMES, MAX_FILE_READ_BYTES,
     MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES, MAX_FILE_SEARCH_SCAN_BYTES,
     MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
-    PolicyStatusResponse, ProbeKind, ProbeListEntry, ProbeListResponse, ProbeStatusParams,
-    ProbeStatusResponse, PtyCommandStartParams, PtyCommandStopParams, RegistryActivateParams,
-    RegistryActivateResponse, RegistryActiveEntry, RegistryDeactivateParams,
-    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
-    RegistryImportPackResponse, RegistryListActiveResponse, RegistrySearchHit,
-    RegistrySearchParams, RegistrySearchResponse, RegistryTestMatch, RegistryTestParams,
-    RegistryTestResponse, RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope,
-    ResponseEnvelope, RuntimeActiveRule, RuntimeBucketSummary, RuntimeStateResponse,
-    SelfCheckResponse, SeverityHistogram,
+    MAX_TAIL_BYTES, MAX_TAIL_LINES, PolicyStatusResponse, ProbeKind, ProbeListEntry,
+    ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandStartParams,
+    PtyCommandStopParams, RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
+    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
+    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
+    RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse, RegistryTestMatch,
+    RegistryTestParams, RegistryTestResponse, RegistryUpsertParams, RegistryUpsertResponse,
+    RequestEnvelope, ResponseEnvelope, RuntimeActiveRule, RuntimeBucketSummary,
+    RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
 };
 #[cfg(unix)]
 use crate::ipc::protocol::{
@@ -942,10 +941,12 @@ fn handle_command_output_tail(
     state: &Arc<DaemonState>,
     params: &CommandOutputTailParams,
 ) -> Result<IpcResponse, IpcError> {
-    let rec = state
-        .jobs
-        .get(params.job_id)
-        .ok_or_else(|| IpcError::new(IpcErrorCode::UnknownJob, format!("unknown job: {}", params.job_id)))?;
+    let rec = state.jobs.get(params.job_id).ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::UnknownJob,
+            format!("unknown job: {}", params.job_id),
+        )
+    })?;
     let probe_id = rec.config.probe_id;
     let max_lines = (params.max_lines as usize).min(MAX_TAIL_LINES);
     let max_bytes = (params.max_bytes as usize).min(MAX_TAIL_BYTES);
@@ -962,6 +963,8 @@ fn handle_command_output_tail(
         Err(e) => return Err(IpcError::new(IpcErrorCode::Internal, e.to_string())),
     };
     let frame_count = state.rings.frame_count(probe_id);
+    // Safe: tail.lines.len() is bounded by MAX_TAIL_LINES (200), fits u32.
+    #[allow(clippy::cast_possible_truncation)]
     let returned_lines = tail.lines.len() as u32;
     let truncated_lines = frame_count > tail.lines.len();
     let truncated_bytes = tail.truncated;

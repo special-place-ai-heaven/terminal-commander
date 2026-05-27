@@ -43,20 +43,20 @@ use serde::{Deserialize, Serialize};
 use terminal_commander_core::{BucketConfig, RuleDefinition, Severity};
 use terminal_commanderd::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
-    BucketWaitParams, BucketWaitResponse, CommandStartParams, CommandStartResponse,
-    CommandStatusParams, CommandStatusResponse, ContextUnavailableReason, DiscoverResponse,
-    EventContextParams, EventContextResponse, FileReadWindowParams, FileReadWindowResponse,
-    FileSearchParams, FileSearchResponse, FileWatchListResponse, FileWatchStartParams,
-    FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, IpcContextFrame, IpcError,
-    IpcErrorCode, IpcRequest, IpcResponse, PolicyStatusResponse, ProbeListResponse,
-    ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams,
-    PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
-    PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RegistryActivateParams,
-    RegistryActivateResponse, RegistryDeactivateParams, RegistryDeactivateResponse,
-    RegistryGetParams, RegistryGetResponse, RegistryImportPackParams, RegistryImportPackResponse,
-    RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse, RegistryTestParams,
-    RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
-    SelfCheckResponse,
+    BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
+    CommandStartParams, CommandStartResponse, CommandStatusParams, CommandStatusResponse,
+    ContextUnavailableReason, DiscoverResponse, EventContextParams, EventContextResponse,
+    FileReadWindowParams, FileReadWindowResponse, FileSearchParams, FileSearchResponse,
+    FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
+    FileWatchStopResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse,
+    PolicyStatusResponse, ProbeListResponse, ProbeStatusParams, ProbeStatusResponse,
+    PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams,
+    PtyCommandStopResponse, PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse,
+    RegistryActivateParams, RegistryActivateResponse, RegistryDeactivateParams,
+    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
+    RegistryImportPackResponse, RegistryListActiveResponse, RegistrySearchParams,
+    RegistrySearchResponse, RegistryTestParams, RegistryTestResponse, RegistryTestSample,
+    RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -131,6 +131,11 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "command_status",
             status: ToolStatus::Live,
             description: "Lifecycle + counters lookup for a previously started job.",
+        },
+        ToolCatalogueEntry {
+            name: "command_output_tail",
+            status: ToolStatus::Live,
+            description: "Read the last N lines of a command's captured output WITHOUT a rule. For one-off/exploratory commands whose format you don't know (df -h, docker system df): start it, then read its tail here. Bounded: 200 lines / 64 KiB, truncation-flagged. For recurring signals, define a rule instead.",
         },
         ToolCatalogueEntry {
             name: "bucket_events_since",
@@ -482,6 +487,32 @@ impl TerminalCommanderMcpServer {
         let ipc = CommandStatusParams { job_id };
         match self.daemon.call(IpcRequest::CommandStatus(ipc)).await {
             Ok(IpcResponse::CommandStatus(s)) => json_tool_result(&command_status_payload(&s)),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `command_output_tail` — rule-free bounded read of a job's
+    /// captured output. Useful for one-off exploratory commands.
+    #[tool(
+        description = "Read the last N lines of a command's captured output WITHOUT a rule. For one-off/exploratory commands whose format you don't know (df -h, docker system df): start it, then read its tail here. Bounded: 200 lines / 64 KiB, truncation-flagged. For recurring signals, define a rule instead."
+    )]
+    async fn command_output_tail(
+        &self,
+        Parameters(params): Parameters<McpCommandOutputTailParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available()?;
+        let job_id = parse_id::<terminal_commander_core::ids::JobIdKind>("job_id", &params.job_id)
+            .map_err(invalid_params)?;
+        let ipc = CommandOutputTailParams {
+            job_id,
+            max_lines: params.max_lines.unwrap_or(50),
+            max_bytes: params.max_bytes.unwrap_or(65_536),
+        };
+        match self.daemon.call(IpcRequest::CommandOutputTail(ipc)).await {
+            Ok(IpcResponse::CommandOutputTail(r)) => {
+                json_tool_result(&command_output_tail_payload(&r))
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
@@ -1306,6 +1337,19 @@ pub struct McpCommandStatusParams {
     pub job_id: String,
 }
 
+/// MCP-facing parameters for `command_output_tail`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpCommandOutputTailParams {
+    /// Job id returned by `command_start_combed`.
+    pub job_id: String,
+    /// Maximum lines to return. Clamped to 200 server-side.
+    #[serde(default)]
+    pub max_lines: Option<u32>,
+    /// Maximum bytes to return. Clamped to 64 KiB server-side.
+    #[serde(default)]
+    pub max_bytes: Option<u32>,
+}
+
 /// MCP-facing parameters for `bucket_events_since`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpBucketEventsSinceParams {
@@ -1425,6 +1469,17 @@ fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
         // No-silence receipt (TCE-ERG-1): null unless the command
         // finished with zero rule-driven events.
         "receipt": s.receipt,
+    })
+}
+
+fn command_output_tail_payload(r: &CommandOutputTailResponse) -> serde_json::Value {
+    serde_json::json!({
+        "job_id": r.job_id,
+        "lines": r.lines,
+        "returned_lines": r.returned_lines,
+        "truncated_lines": r.truncated_lines,
+        "truncated_bytes": r.truncated_bytes,
+        "evicted_frames": r.evicted_frames,
     })
 }
 
@@ -1771,7 +1826,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalogue_lists_twenty_nine_live_tools_at_tc45() {
+    fn catalogue_lists_thirty_one_live_tools_at_tc45() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -1786,6 +1841,7 @@ mod tests {
                 "self_check",
                 "command_start_combed",
                 "command_status",
+                "command_output_tail",
                 "bucket_events_since",
                 "bucket_wait",
                 "bucket_summary",
@@ -1838,6 +1894,7 @@ mod tests {
                 "bucket_events_since".to_owned(),
                 "bucket_summary".to_owned(),
                 "bucket_wait".to_owned(),
+                "command_output_tail".to_owned(),
                 "command_start_combed".to_owned(),
                 "command_status".to_owned(),
                 "event_context".to_owned(),

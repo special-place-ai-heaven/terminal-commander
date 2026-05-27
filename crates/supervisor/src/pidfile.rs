@@ -49,11 +49,7 @@ pub fn remove_pidfile(state_dir: &Path) {
 pub fn read_pidfile(state_dir: &Path) -> Option<RunningDaemon> {
     let bytes = std::fs::read(pidfile_path(state_dir)).ok()?;
     let rec: RunningDaemon = serde_json::from_slice(&bytes).ok()?;
-    if pid_alive(rec.pid) {
-        Some(rec)
-    } else {
-        None
-    }
+    if pid_alive(rec.pid) { Some(rec) } else { None }
 }
 
 /// Cross-platform "is this pid alive" check. Uses OS tools rather than

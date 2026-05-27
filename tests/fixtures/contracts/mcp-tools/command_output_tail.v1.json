@@ -1,0 +1,71 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "command_output_tail",
+      "arguments": {
+        "job_id": "job_018f0000000000000000000000000001",
+        "max_lines": 50,
+        "max_bytes": 65536
+      }
+    }
+  },
+  "tool": "command_output_tail",
+  "_meta": {
+    "schema_anchor": "TC45/mcp-tools/command_output_tail-v1",
+    "fixture_id": "contracts/mcp-tools/command_output_tail.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Rule-free bounded tail read of a job's captured output. Returns last N lines (max 200) and truncation flags. No raw stream lane; all fields are counters or bounded text."
+  },
+  "response_example": {
+    "job_id": "job_018f0000000000000000000000000001",
+    "lines": ["line1", "line2", "line3"],
+    "returned_lines": 3,
+    "truncated_lines": false,
+    "truncated_bytes": false,
+    "evicted_frames": 0
+  },
+  "response_example_truncated": {
+    "job_id": "job_018f0000000000000000000000000002",
+    "lines": ["line249", "line250"],
+    "returned_lines": 2,
+    "truncated_lines": true,
+    "truncated_bytes": false,
+    "evicted_frames": 0
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "job_id is required",
+    "max_lines clamps to 200 server-side regardless of requested value",
+    "max_bytes clamps to 65536 server-side regardless of requested value",
+    "truncated_lines is true when total frame_count exceeds returned lines",
+    "truncated_bytes is true when the byte cap was hit during tail read",
+    "lines is empty (not an error) when the ring has no frames or job has no probe",
+    "no raw stream content is ever forwarded; lines are the captured ring frames"
+  ]
+}

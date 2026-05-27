@@ -191,11 +191,17 @@ fn command_output_tail_returns_bounded_lines_without_a_rule() {
 
         let rec = state.jobs.get(resp.job_id).expect("job record present");
         let probe_id = rec.config.probe_id;
-        let tail = state.rings.tail_frames(probe_id, 2, 65_536).expect("tail ok");
+        let tail = state
+            .rings
+            .tail_frames(probe_id, 2, 65_536)
+            .expect("tail ok");
         assert_eq!(tail.lines.len(), 2, "max_lines=2 cap enforced");
         let frame_count = state.rings.frame_count(probe_id);
         let truncated_lines = frame_count > tail.lines.len();
-        assert!(truncated_lines, "3 frames but only 2 returned -> truncated_lines");
+        assert!(
+            truncated_lines,
+            "3 frames but only 2 returned -> truncated_lines"
+        );
 
         cleanup(&data);
     });

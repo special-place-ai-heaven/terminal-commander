@@ -388,3 +388,87 @@ async fn bucket_events_since_returns_structured_events_only() {
     handle.shutdown().await;
     cleanup(&data);
 }
+
+// F1: rule-free command_output_tail returns bounded lines via MCP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_command_output_tail_reads_unmatched_output() {
+    let data = tmp_data_dir("tail-mcp");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        // printf emits two stdout lines; no rules supplied.
+        let start_payload = first_text(
+            &call_tool(
+                &client,
+                "command_start_combed",
+                serde_json::json!({
+                    "argv": ["/usr/bin/printf", "hello\nworld\n"],
+                }),
+            )
+            .await,
+        );
+        let start: serde_json::Value = serde_json::from_str(&start_payload).expect("start JSON");
+        let job_id = start["job_id"].as_str().expect("job_id present").to_owned();
+        let bucket_id = start["bucket_id"]
+            .as_str()
+            .expect("bucket_id present")
+            .to_owned();
+
+        // Wait for exit via bucket_wait.
+        call_tool(
+            &client,
+            "bucket_wait",
+            serde_json::json!({
+                "bucket_id": bucket_id,
+                "cursor": 0,
+                "timeout_ms": 2000,
+            }),
+        )
+        .await;
+
+        // command_output_tail must return the two captured lines.
+        let tail_payload = first_text(
+            &call_tool(
+                &client,
+                "command_output_tail",
+                serde_json::json!({"job_id": job_id, "max_lines": 50}),
+            )
+            .await,
+        );
+        assert!(
+            tail_payload.len() <= MAX_RESPONSE_BYTES,
+            "tail payload must respect IPC response budget"
+        );
+        let tail: serde_json::Value =
+            serde_json::from_str(&tail_payload).expect("tail payload is JSON");
+        assert_eq!(
+            tail["job_id"].as_str(),
+            Some(job_id.as_str()),
+            "tail job_id echoed"
+        );
+        assert!(
+            tail["lines"].is_array(),
+            "lines field is array; got: {tail_payload}"
+        );
+        assert!(
+            tail["returned_lines"].is_number(),
+            "returned_lines is numeric"
+        );
+        assert!(
+            tail["truncated_lines"].is_boolean(),
+            "truncated_lines is boolean"
+        );
+        assert!(
+            tail["truncated_bytes"].is_boolean(),
+            "truncated_bytes is boolean"
+        );
+        // No raw stream keys may appear on the MCP wire shape.
+        assert!(tail.get("stdout").is_none(), "no stdout field");
+        assert!(tail.get("stderr").is_none(), "no stderr field");
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
