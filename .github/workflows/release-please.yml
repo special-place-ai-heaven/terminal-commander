@@ -314,8 +314,8 @@ jobs:
       platform: linux-x64
       upload_artifact: true
 
-  publish-linux-x64:
-    name: publish-linux-x64
+  presmoke-linux-x64:
+    name: presmoke-linux-x64
     needs:
       - release-please
       - ensure-release
@@ -324,6 +324,59 @@ jobs:
     if: >-
       always() && !cancelled() &&
       needs.build-linux-x64.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-linux-x64
+          path: pkg/
+      - name: Extract bin.tar (preserves +x mode)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd pkg
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
+      - name: Load the BUILT binary on the glibc floor (bookworm, pre-publish)
+        shell: bash
+        run: |
+          # The built artifact must LOAD + run on the floor distro
+          # (Debian 12 bookworm, glibc 2.36) BEFORE we publish it. This
+          # is the gate v0.1.13 lacked (its verify ran post-publish).
+          # Exec the staged binary directly (the platform package has no
+          # `bin` field; the CLI is exposed by the root wrapper, not
+          # needed for a load test). rc 0 or 124 (clean timeout) = pass.
+          set -euo pipefail
+          docker run --rm -v "$PWD/pkg/bin:/tcbin:ro" node:22-bookworm-slim sh -c '
+            set -e
+            /tcbin/terminal-commander-mcp --version
+            echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"presmoke\",\"version\":\"0.0.0\"}}}" \
+              | timeout 10 /tcbin/terminal-commander-mcp; rc=$?
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+              echo "::error::pre-publish stdio probe exited $rc on bookworm" >&2; exit "$rc"
+            fi
+            echo "presmoke-linux-x64: OK (loads + runs on glibc 2.36)"
+          '
+
+  publish-linux-x64:
+    name: publish-linux-x64
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - build-linux-x64
+      - presmoke-linux-x64
+    if: >-
+      always() && !cancelled() &&
+      needs.build-linux-x64.result == 'success' &&
+      needs.presmoke-linux-x64.result == 'success' &&
       (needs.release-please.outputs.releases_created == 'true' ||
       (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true')
@@ -406,8 +459,8 @@ jobs:
       platform: linux-arm64
       upload_artifact: true
 
-  publish-linux-arm64:
-    name: publish-linux-arm64
+  presmoke-linux-arm64:
+    name: presmoke-linux-arm64
     needs:
       - release-please
       - ensure-release
@@ -416,6 +469,53 @@ jobs:
     if: >-
       always() && !cancelled() &&
       needs.build-linux-arm64.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - name: Download bin.tar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tc-bin-linux-arm64
+          path: pkg/
+      - name: Extract bin.tar (preserves +x mode)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd pkg
+          tar -xf bin.tar
+          rm bin.tar
+          ls -la bin/
+      - name: Load the BUILT binary on the glibc floor (bookworm, pre-publish)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/pkg/bin:/tcbin:ro" node:22-bookworm-slim sh -c '
+            set -e
+            /tcbin/terminal-commander-mcp --version
+            echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"presmoke\",\"version\":\"0.0.0\"}}}" \
+              | timeout 10 /tcbin/terminal-commander-mcp; rc=$?
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
+              echo "::error::pre-publish stdio probe exited $rc on bookworm" >&2; exit "$rc"
+            fi
+            echo "presmoke-linux-arm64: OK (loads + runs on glibc 2.36)"
+          '
+
+  publish-linux-arm64:
+    name: publish-linux-arm64
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - build-linux-arm64
+      - presmoke-linux-arm64
+    if: >-
+      always() && !cancelled() &&
+      needs.build-linux-arm64.result == 'success' &&
+      needs.presmoke-linux-arm64.result == 'success' &&
       (needs.release-please.outputs.releases_created == 'true' ||
       (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true')
