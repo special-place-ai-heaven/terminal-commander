@@ -81,6 +81,24 @@ enum Command {
 enum SessionOp {
     /// List sessions (default + seeded) with liveness + idle.
     List,
+    /// Reap sessions (graceful Shutdown-IPC; identity-gated force fallback).
+    ///
+    /// One mode at a time: a token positional reaps one session; `--all`
+    /// reaps every session under the base state-dir; `--idle` selects ALIVE
+    /// sessions whose `idle_secs` is at least `--idle-secs` (default 1800).
+    Reap {
+        /// Session token to reap (mutually exclusive with `--all` / `--idle`).
+        token: Option<String>,
+        /// Reap every session (default + every seeded).
+        #[arg(long)]
+        all: bool,
+        /// Reap sessions idle ≥ `--idle-secs`.
+        #[arg(long)]
+        idle: bool,
+        /// Idle threshold in seconds (only honored with `--idle`).
+        #[arg(long, default_value_t = 1800)]
+        idle_secs: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -122,6 +140,12 @@ fn run(cli: Cli) -> std::process::ExitCode {
         Command::Audit { limit: _ } => daemon_backed_command_unavailable("audit"),
         Command::Session { op } => match op {
             SessionOp::List => run_session_list(),
+            SessionOp::Reap {
+                token,
+                all,
+                idle,
+                idle_secs,
+            } => run_session_reap(token.as_deref(), all, idle, idle_secs),
         },
         Command::UpdateLocks { bin_dir } => {
             let result = update_locks::stop_installed_processes(&bin_dir);
@@ -310,6 +334,248 @@ fn run_session_list() -> std::process::ExitCode {
         );
     }
     std::process::ExitCode::SUCCESS
+}
+
+/// Send a `Shutdown` IPC request to the daemon at `endpoint`, return
+/// `Some(draining)` on `ShutdownAck`, `None` on any I/O / decode / wrong-shape
+/// path. The whole exchange is bounded by `REAP_SHUTDOWN_TIMEOUT`.
+///
+/// CLI does not depend on `terminal-commanderd` (would invert the runtime
+/// dep arrow) or `terminal-commander-mcp` (cli -> mcp is architectural
+/// noise — the cli is not an MCP client). So we inline-frame the request
+/// here using the same wire schema the supervisor's probe handshake uses
+/// (4-byte big-endian length prefix + JSON RequestEnvelope). Wire format
+/// matches `crates/daemon/src/ipc/protocol.rs` exactly.
+async fn shutdown_via_ipc(
+    endpoint: &terminal_commander_supervisor::ensure::Endpoint,
+) -> Option<bool> {
+    // Bound the WHOLE exchange: connect + write + read.
+    const REAP_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    const MAX_RESP_BYTES: usize = 64 * 1024;
+    // Wire payload: same shape probe_endpoint sends for Health.
+    const REQUEST_JSON: &[u8] = br#"{"correlation_id":0,"request":{"method":"shutdown"}}"#;
+
+    let exchange = async {
+        match endpoint {
+            #[cfg(unix)]
+            terminal_commander_supervisor::ensure::Endpoint::UnixSocket { path } => {
+                let mut stream = tokio::net::UnixStream::connect(path).await.ok()?;
+                run_shutdown_exchange(&mut stream, REQUEST_JSON, MAX_RESP_BYTES).await
+            }
+            #[cfg(not(unix))]
+            terminal_commander_supervisor::ensure::Endpoint::UnixSocket { .. } => None,
+            #[cfg(windows)]
+            terminal_commander_supervisor::ensure::Endpoint::WindowsPipe { name } => {
+                use tokio::net::windows::named_pipe::ClientOptions;
+                let mut stream = ClientOptions::new().open(name.as_str()).ok()?;
+                run_shutdown_exchange(&mut stream, REQUEST_JSON, MAX_RESP_BYTES).await
+            }
+            #[cfg(not(windows))]
+            terminal_commander_supervisor::ensure::Endpoint::WindowsPipe { .. } => None,
+        }
+    };
+    tokio::time::timeout(REAP_SHUTDOWN_TIMEOUT, exchange)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Length-prefix the Shutdown request, write it, read one length-prefixed
+/// frame, parse it as the daemon's response envelope, return
+/// `Some(draining)` iff it deserializes as `ShutdownAck { draining }`.
+async fn run_shutdown_exchange<S>(stream: &mut S, request: &[u8], max_resp: usize) -> Option<bool>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let len = u32::try_from(request.len()).ok()?;
+    stream.write_all(&len.to_be_bytes()).await.ok()?;
+    stream.write_all(request).await.ok()?;
+    stream.flush().await.ok()?;
+    let mut len_buf = [0_u8; 4];
+    stream.read_exact(&mut len_buf).await.ok()?;
+    let resp_len = u32::from_be_bytes(len_buf) as usize;
+    if resp_len == 0 || resp_len > max_resp {
+        return None;
+    }
+    let mut payload = vec![0_u8; resp_len];
+    stream.read_exact(&mut payload).await.ok()?;
+    // The response envelope shape is
+    //   { "correlation_id": <u64>,
+    //     "result": { "ok": { "response": { "shutdown_ack": { "draining": bool } } } } }
+    // We only care about the draining bool when present; any other shape -> None.
+    let v: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    let draining = v
+        .get("result")?
+        .get("ok")?
+        .get("response")?
+        .get("shutdown_ack")?
+        .get("draining")?
+        .as_bool()?;
+    Some(draining)
+}
+
+/// Wait up to `deadline` for `endpoint` to become unreachable (the daemon
+/// has finished draining and exited).
+async fn wait_for_endpoint_down(
+    endpoint: &terminal_commander_supervisor::ensure::Endpoint,
+    deadline: std::time::Instant,
+) -> bool {
+    while std::time::Instant::now() < deadline {
+        if !terminal_commander_supervisor::ensure::probe_endpoint(endpoint).await {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    !terminal_commander_supervisor::ensure::probe_endpoint(endpoint).await
+}
+
+/// Outcome of reaping ONE session, surfaced as a one-line operator log.
+#[derive(Debug)]
+enum ReapOutcome {
+    /// Graceful Shutdown-IPC ACK + endpoint observed down within the wait.
+    Graceful,
+    /// No ACK + endpoint still reachable; pid identity-checked and force-killed.
+    Forced,
+    /// No ACK + endpoint reachable + pid does NOT belong to a TC daemon -> refused.
+    RefusedNonDaemon,
+    /// STALE pidfile (dead pid): compare-before-delete removed it.
+    StaleCleaned,
+    /// STALE pidfile that another writer raced us on; left in place.
+    StaleRaced,
+    /// Could not classify (no pidfile / unreadable).
+    Unknown,
+}
+
+/// Reap ONE session by its `SessionEntry`. Identity-gated; never blanket kills.
+async fn reap_one(e: terminal_commander_supervisor::sessions::SessionEntry) -> ReapOutcome {
+    if !e.alive {
+        // STALE: dead pid. Compare-before-delete: only remove the pidfile if
+        // it STILL names this exact pid (race guard against a concurrent
+        // restart writing a fresh pidfile).
+        if terminal_commander_supervisor::sessions::cleanup_stale(&e.state_dir, e.pid) {
+            return ReapOutcome::StaleCleaned;
+        }
+        return ReapOutcome::StaleRaced;
+    }
+
+    let endpoint = endpoint_from_recorded(&e.endpoint);
+    let ack = shutdown_via_ipc(&endpoint).await;
+    // Bounded wait for the endpoint to go dark — covers both ACK+drain and
+    // "ACK was lost but daemon still drained" paths.
+    let down_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let down = wait_for_endpoint_down(&endpoint, down_deadline).await;
+    if down {
+        return ReapOutcome::Graceful;
+    }
+    // Still reachable AFTER the wait. If no ACK was received we treat the
+    // daemon as wedged: identity-gate by pid, then force-kill. NEVER blanket
+    // kill — `pid_belongs_to_daemon` must confirm the pid is a TC daemon
+    // pointing at THIS state_dir before we send a signal.
+    if ack.is_some() {
+        // ACK received but endpoint never went down: the daemon is in a
+        // pathological drain. Refuse to escalate; surface this as Forced=false
+        // would be misleading. Treat as Unknown so the operator can retry.
+        return ReapOutcome::Unknown;
+    }
+    if terminal_commander_supervisor::replace::pid_belongs_to_daemon(e.pid, &e.state_dir) {
+        let _ = terminal_commander_supervisor::replace::hard_kill(e.pid);
+        // After hard_kill the daemon will not remove its own pidfile, so
+        // clean up the now-stale entry (compare-before-delete still applies).
+        let _ = terminal_commander_supervisor::sessions::cleanup_stale(&e.state_dir, e.pid);
+        return ReapOutcome::Forced;
+    }
+    ReapOutcome::RefusedNonDaemon
+}
+
+/// `terminal-commander session reap`: shut down sessions identified by token,
+/// `--all`, or `--idle <SECS>`. Graceful Shutdown-IPC first; identity-gated
+/// `hard_kill` only when the daemon is truly wedged (no ACK + endpoint still
+/// reachable + pid confirmed to belong to a TC daemon for this state_dir).
+/// STALE pidfiles are cleaned via compare-before-delete.
+fn run_session_reap(
+    token: Option<&str>,
+    all: bool,
+    idle: bool,
+    _idle_secs: u64,
+) -> std::process::ExitCode {
+    // Mutual-exclusion + argument validation.
+    let selector_count = usize::from(token.is_some()) + usize::from(all) + usize::from(idle);
+    if selector_count == 0 {
+        eprintln!("terminal-commander: session reap requires <TOKEN> or --all or --idle [SECS]");
+        return std::process::ExitCode::from(2);
+    }
+    if selector_count > 1 {
+        eprintln!(
+            "terminal-commander: session reap: <TOKEN>, --all, and --idle are mutually exclusive"
+        );
+        return std::process::ExitCode::from(2);
+    }
+    if idle {
+        // The Health probe currently does not surface `idle_secs` through
+        // `probe_endpoint`'s bool return (see the `run_session_list` doc
+        // comment). Implementing `--idle` requires a probe variant that
+        // returns the Health payload; out of scope for this task.
+        eprintln!(
+            "terminal-commander: session reap --idle is not yet wired (idle_secs surfacing pending)"
+        );
+        return std::process::ExitCode::from(EX_UNAVAILABLE);
+    }
+
+    let base = terminal_commander_supervisor::paths::resolve_state_dir_base();
+    let mut entries = terminal_commander_supervisor::sessions::enumerate(&base);
+    if let Some(tok) = token {
+        entries.retain(|e| e.label == tok);
+        if entries.is_empty() {
+            eprintln!(
+                "terminal-commander: session reap: no session {tok:?} under {}",
+                base.display()
+            );
+            return std::process::ExitCode::from(1);
+        }
+    }
+    // else: --all keeps every entry.
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("terminal-commander: tokio runtime build failed: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    let mut had_refusal = false;
+    rt.block_on(async {
+        for e in entries {
+            let label = e.label.clone();
+            let outcome = reap_one(e).await;
+            match outcome {
+                ReapOutcome::Graceful => println!("{label}: reaped (graceful shutdown)"),
+                ReapOutcome::Forced => println!("{label}: reaped (force-kill; daemon was wedged)"),
+                ReapOutcome::StaleCleaned => println!("{label}: stale pidfile removed"),
+                ReapOutcome::StaleRaced => println!("{label}: stale pidfile raced (left in place)"),
+                ReapOutcome::RefusedNonDaemon => {
+                    eprintln!(
+                        "{label}: endpoint occupied by a non-daemon process, refusing to kill"
+                    );
+                    had_refusal = true;
+                }
+                ReapOutcome::Unknown => {
+                    eprintln!("{label}: shutdown ACK received but endpoint still reachable; not escalating");
+                    had_refusal = true;
+                }
+            }
+        }
+    });
+
+    if had_refusal {
+        std::process::ExitCode::from(1)
+    } else {
+        std::process::ExitCode::SUCCESS
+    }
 }
 
 /// Locate the Terminal Commander source repo root by walking up from the

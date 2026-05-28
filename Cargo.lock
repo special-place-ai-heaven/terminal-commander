@@ -1074,8 +1074,10 @@ name = "terminal-commander-cli"
 version = "0.1.25"
 dependencies = [
  "clap",
+ "serde_json",
  "terminal-commander-core",
  "terminal-commander-supervisor",
+ "terminal-commanderd",
  "tokio",
  "windows",
 ]
