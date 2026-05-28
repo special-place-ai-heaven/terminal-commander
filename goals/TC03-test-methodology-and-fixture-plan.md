@@ -3,7 +3,7 @@ goal_id: TC03
 title: Test Methodology And Fixture Plan
 chain_id: terminal-commander-mvp
 phase: Wave 0 - Research and discipline
-status: "Pending"
+status: "Live"
 depends_on: ["TC01", "TC02"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -19,9 +19,12 @@ source_refs:
   - "User note: repository is initially empty except the generated README.md already added by user"
   - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
 risk_level: "medium"
+evidence: "TESTING.md"
 ---
 
 # TC03 - Test Methodology And Fixture Plan
+
+> Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
 
 Use this file directly with `/goal`:
 

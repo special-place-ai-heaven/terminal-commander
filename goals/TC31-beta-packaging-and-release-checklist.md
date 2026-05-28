@@ -3,7 +3,7 @@ goal_id: TC31
 title: Beta Packaging And Release Checklist
 chain_id: terminal-commander-mvp
 phase: Wave 10 - Beta readiness
-status: "Pending"
+status: "Superseded-by-TC48"
 depends_on: ["TC26", "TC30"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -19,9 +19,13 @@ source_refs:
   - "User note: repository is initially empty except the generated README.md already added by user"
   - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
 risk_level: "medium"
+evidence: "RELEASE_CHECKLIST.md"
 ---
 
 # TC31 - Beta Packaging And Release Checklist
+
+> Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
+> **Superseded by:** `.agent/goals/terminal-commander-runtime/TC48-beta-gate-evidence-review-and-backlog-rerank.md`.
 
 Use this file directly with `/goal`:
 

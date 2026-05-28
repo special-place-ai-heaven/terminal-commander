@@ -3,7 +3,7 @@ goal_id: TC32
 title: Evidence Review And Backlog Refinement
 chain_id: terminal-commander-mvp
 phase: Wave 10 - Beta readiness
-status: "Pending"
+status: "Live"
 depends_on: ["TC31"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -19,9 +19,12 @@ source_refs:
   - "User note: repository is initially empty except the generated README.md already added by user"
   - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
 risk_level: "low"
+evidence: "docs/release/MVP_EVIDENCE_REVIEW.md"
 ---
 
 # TC32 - Evidence Review And Backlog Refinement
+
+> Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
 
 Use this file directly with `/goal`:
 

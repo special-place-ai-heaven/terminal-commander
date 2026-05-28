@@ -3,7 +3,7 @@ goal_id: TC06
 title: Core Identifiers Events And Source Pointers
 chain_id: terminal-commander-mvp
 phase: Wave 2 - Core model
-status: "Pending"
+status: "Live"
 depends_on: ["TC05"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -19,9 +19,12 @@ source_refs:
   - "User note: repository is initially empty except the generated README.md already added by user"
   - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
 risk_level: "medium"
+evidence: "crates/core/src/lib.rs"
 ---
 
 # TC06 - Core Identifiers Events And Source Pointers
+
+> Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
 
 Use this file directly with `/goal`:
 

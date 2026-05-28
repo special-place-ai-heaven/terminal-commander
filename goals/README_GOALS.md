@@ -1,5 +1,7 @@
 # Terminal Commander Goal Files
 
+Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
+
 Copy the `.agent/` directory from this archive into the root of your repository:
 
 ```bash

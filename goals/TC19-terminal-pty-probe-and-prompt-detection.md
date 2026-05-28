@@ -3,7 +3,7 @@ goal_id: TC19
 title: Terminal Pty Probe And Prompt Detection
 chain_id: terminal-commander-mvp
 phase: Wave 5 - Probes and jobs
-status: "Pending"
+status: "Superseded-by-TC44"
 depends_on: ["TC15", "TC16"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -19,9 +19,13 @@ source_refs:
   - "User note: repository is initially empty except the generated README.md already added by user"
   - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
 risk_level: "high"
+evidence: "TC44-posix-pty-spawn-and-stdin-control.md"
 ---
 
 # TC19 - Terminal Pty Probe And Prompt Detection
+
+> Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
+> **Superseded by:** `.agent/goals/terminal-commander-runtime/TC44-posix-pty-spawn-and-stdin-control.md`.
 
 Use this file directly with `/goal`:
 
