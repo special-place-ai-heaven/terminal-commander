@@ -53,6 +53,21 @@ fn entry_for(state_dir: &Path, label: &str) -> Option<SessionEntry> {
     })
 }
 
+/// Remove a stale pidfile, but ONLY if it STILL names `classified_pid` at
+/// delete time. Closes the race where a daemon restarts (writing a fresh
+/// pidfile with a new pid) between stale classification and cleanup. Returns
+/// true iff a file was removed.
+#[must_use]
+pub fn cleanup_stale(state_dir: &Path, classified_pid: u32) -> bool {
+    match read_pidfile_raw(state_dir) {
+        Some(rec) if rec.pid == classified_pid => {
+            crate::pidfile::remove_pidfile(state_dir);
+            true
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +97,21 @@ mod tests {
         let def = got.iter().find(|e| e.label == "default").unwrap();
         assert!(!def.alive, "default session with dead pid must be stale");
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn cleanup_stale_removes_only_matching_dead_pid() {
+        let base = tmp();
+        write_pidfile(&base, &RunningDaemon { pid: 999_999_999, version: "0".into(), endpoint: "x".into() }).unwrap();
+        // Stale (dead pid) -> removed.
+        assert!(cleanup_stale(&base, 999_999_999), "matching dead pid must be cleaned");
+        assert!(read_pidfile_raw(&base).is_none(), "pidfile must be gone");
+
+        // Race guard: pidfile now names a DIFFERENT pid than the one we classified.
+        write_pidfile(&base, &RunningDaemon { pid: std::process::id(), version: "0".into(), endpoint: "x".into() }).unwrap();
+        assert!(!cleanup_stale(&base, 999_999_999), "must NOT delete when current pid differs from classified");
+        assert!(read_pidfile_raw(&base).is_some(), "live pidfile must survive");
         let _ = std::fs::remove_dir_all(&base);
     }
 }
