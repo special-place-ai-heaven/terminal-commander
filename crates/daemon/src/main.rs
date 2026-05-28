@@ -290,7 +290,9 @@ mod tests {
 
     #[test]
     fn idle_ttl_env_zero_disables_timer() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: serialized by ENV_LOCK above; tests in this module are the
         // only writers of TC_IDLE_TTL_SECS.
         unsafe {
@@ -299,7 +301,10 @@ mod tests {
         let mut cfg = cfg_with_default_idle();
         assert_eq!(cfg.daemon.idle_ttl_secs, DEFAULT_IDLE_TTL_SECS);
         apply_idle_ttl_env_override(&mut cfg);
-        assert_eq!(cfg.daemon.idle_ttl_secs, 0, "TC_IDLE_TTL_SECS=0 must disable");
+        assert_eq!(
+            cfg.daemon.idle_ttl_secs, 0,
+            "TC_IDLE_TTL_SECS=0 must disable"
+        );
         unsafe {
             std::env::remove_var("TC_IDLE_TTL_SECS");
         }
@@ -307,7 +312,9 @@ mod tests {
 
     #[test]
     fn idle_ttl_env_valid_override() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe {
             std::env::set_var("TC_IDLE_TTL_SECS", "42");
         }
@@ -321,7 +328,9 @@ mod tests {
 
     #[test]
     fn idle_ttl_env_invalid_keeps_existing_value() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe {
             std::env::set_var("TC_IDLE_TTL_SECS", "not-a-number");
         }
@@ -339,7 +348,9 @@ mod tests {
 
     #[test]
     fn idle_ttl_env_unset_is_a_noop() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe {
             std::env::remove_var("TC_IDLE_TTL_SECS");
         }

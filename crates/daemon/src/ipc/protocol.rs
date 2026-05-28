@@ -249,7 +249,9 @@ pub enum IpcResponse {
     ProbeStatus(ProbeStatusResponse),
     /// Ack for `Shutdown`. `draining=true` once the daemon has stopped accepting
     /// new connections and begun draining.
-    ShutdownAck { draining: bool },
+    ShutdownAck {
+        draining: bool,
+    },
 }
 
 /// `system_discover` payload. Mirrors the contract laid out in

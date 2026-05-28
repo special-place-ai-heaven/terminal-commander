@@ -251,9 +251,7 @@ async fn drain_connections(conns: &mut tokio::task::JoinSet<()>) {
     if conns.is_empty() {
         return;
     }
-    let drain = async {
-        while conns.join_next().await.is_some() {}
-    };
+    let drain = async { while conns.join_next().await.is_some() {} };
     if tokio::time::timeout(DRAIN_CEILING, drain).await.is_err() {
         // Ceiling hit: a connection did not finish in time. Abort the
         // stragglers and return so the process can exit. JoinSet::abort_all

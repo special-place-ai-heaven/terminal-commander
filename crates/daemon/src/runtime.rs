@@ -333,9 +333,7 @@ fn spawn_idle_reaper(state: &Arc<crate::state::DaemonState>) {
     // busy-poll. `(ttl / 2).clamp(1, 60)` is equivalent to the original
     // `max(1, min(60, ttl/2)).max(1)` because 1 <= 60.
     let tick = (ttl / 2).clamp(1, 60);
-    tracing::info!(
-        "idle self-reap enabled: idle_ttl_secs={ttl} tick={tick}s"
-    );
+    tracing::info!("idle self-reap enabled: idle_ttl_secs={ttl} tick={tick}s");
     let st = Arc::clone(state);
     tokio::spawn(async move {
         let mut iv = tokio::time::interval(std::time::Duration::from_secs(tick));

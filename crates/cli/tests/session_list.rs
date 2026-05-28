@@ -3,7 +3,7 @@
 //! contract on the CLI side. Pure stdout assertions — no real daemon.
 
 use std::process::Command;
-use terminal_commander_supervisor::pidfile::{write_pidfile, RunningDaemon};
+use terminal_commander_supervisor::pidfile::{RunningDaemon, write_pidfile};
 
 fn tmp_dir(tag: &str) -> std::path::PathBuf {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
