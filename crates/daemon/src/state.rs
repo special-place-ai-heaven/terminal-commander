@@ -56,6 +56,11 @@ pub struct DaemonState {
     /// Locked, single-writer event store. Shared between the router's
     /// audit sink and any future store-using subsystems.
     pub store: Arc<Mutex<EventStore>>,
+    /// Timestamp of the last real (non-peek) IPC request served.
+    /// Used by the idle self-reaper to decide when to shut down.
+    /// Bumped on dispatch (wired in a later task) and read via
+    /// [`DaemonState::idle_secs`].
+    last_activity: Arc<Mutex<std::time::Instant>>,
     /// In-memory bucket manager.
     pub buckets: Arc<BucketManager>,
     /// Per-probe context rings.
@@ -209,6 +214,7 @@ impl DaemonState {
         Ok(Self {
             config,
             store,
+            last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
             buckets,
             rings,
             jobs,
@@ -233,6 +239,17 @@ impl DaemonState {
         // PersistentAudit is the only Arc<PersistentAudit> we hand
         // back. By construction, true.
         Arc::strong_count(&self.audit) >= 1
+    }
+
+    /// Record that a real (non-peek) IPC request was served.
+    pub fn bump_activity(&self) {
+        *self.last_activity.lock() = std::time::Instant::now();
+    }
+
+    /// Seconds since the last real IPC request.
+    #[must_use]
+    pub fn idle_secs(&self) -> u64 {
+        self.last_activity.lock().elapsed().as_secs()
     }
 
     /// Record the peer identity observed by the named-pipe server.
@@ -321,6 +338,17 @@ mod tests {
             "bucket_create must surface in persistent audit; rows: {rows:?}"
         );
         drop(g);
+        cleanup(&data);
+    }
+
+    #[test]
+    fn last_activity_bumps_and_reads_idle() {
+        let data = temp_data_dir("idle");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+        assert_eq!(state.idle_secs(), 0, "fresh state is not idle");
+        state.bump_activity();
+        assert_eq!(state.idle_secs(), 0, "bump resets idle to ~0");
         cleanup(&data);
     }
 }
