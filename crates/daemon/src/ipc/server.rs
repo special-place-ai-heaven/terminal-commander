@@ -382,6 +382,12 @@ async fn dispatch(
     req_env: &RequestEnvelope,
     peer: &PeerIdentity,
 ) -> ResponseEnvelope {
+    // Every real (non-peek) request resets the idle timer. Health is a
+    // pure inspection peek: it must NOT bump activity, or `session list`
+    // polling would defeat the daemon's idle self-reap.
+    if !matches!(&req_env.request, IpcRequest::Health) {
+        state.bump_activity();
+    }
     let (method_name, response_result) = match &req_env.request {
         IpcRequest::SystemDiscover => {
             let r = handle_system_discover(state);
@@ -390,6 +396,7 @@ async fn dispatch(
         IpcRequest::Health => {
             let r = IpcResponse::Health {
                 uptime_secs: boot.elapsed().as_secs(),
+                idle_secs: Some(state.idle_secs()),
             };
             ("health", IpcResult::Ok { response: r })
         }
@@ -552,14 +559,17 @@ async fn dispatch(
     };
     // Audit one row per accepted request. The decision label reflects
     // whether the dispatcher produced an `Ok` response or a typed
-    // error.
-    let subject = identity_audit_subject(peer);
-    let decision = if matches!(response_result, IpcResult::Ok { .. }) {
-        "info"
-    } else {
-        "error"
-    };
-    emit_audit(state, method_name, &subject, decision, None, peer);
+    // error. Health is an audit-free peek: skip the persistent row so
+    // `session list` polling does not spam the audit log.
+    if method_name != "health" {
+        let subject = identity_audit_subject(peer);
+        let decision = if matches!(response_result, IpcResult::Ok { .. }) {
+            "info"
+        } else {
+            "error"
+        };
+        emit_audit(state, method_name, &subject, decision, None, peer);
+    }
 
     ResponseEnvelope {
         correlation_id: req_env.correlation_id,

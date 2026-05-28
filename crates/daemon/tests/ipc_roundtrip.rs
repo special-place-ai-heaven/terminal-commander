@@ -90,9 +90,41 @@ fn health_round_trip() {
         let client = DaemonClient::new(handle.socket_path().to_path_buf());
         let resp = client.call(2, IpcRequest::Health).await.unwrap();
         match resp {
-            IpcResponse::Health { uptime_secs: _ } => {}
+            IpcResponse::Health { uptime_secs: _, .. } => {}
             other => panic!("unexpected response: {other:?}"),
         }
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn health_returns_idle_secs_and_does_not_bump_or_audit() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("health-idle");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+
+        let _ = client.call(1, IpcRequest::Health).await.expect("h1");
+        let h2 = client.call(2, IpcRequest::Health).await.expect("h2");
+        match h2 {
+            IpcResponse::Health { idle_secs, .. } => {
+                assert!(idle_secs.is_some(), "Health must report idle_secs");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Health is a peek: it must NOT write a persistent audit row.
+        // emit_audit prefixes the method, so a health row would be
+        // recorded as "ipc_health".
+        let rows = {
+            let mut g = state.store.lock();
+            g.audit_since(&AuditReadRequest::new(0)).unwrap()
+        };
+        assert!(
+            !rows.iter().any(|r| r.action == "ipc_health"),
+            "Health is a peek: it must NOT write an audit row; got {rows:?}"
+        );
         handle.shutdown().await;
         cleanup(&data);
     });
@@ -209,15 +241,18 @@ fn peer_credentials_recorded_in_audit_metadata() {
         let data = tmp_data_dir("peer");
         let (state, handle) = build_server(&data);
         let client = DaemonClient::new(handle.socket_path().to_path_buf());
-        let _ = client.call(5, IpcRequest::Health).await.unwrap();
+        // SystemDiscover (not Health) is used here: Health is now an
+        // audit-free peek, so it writes no audit row. Any audited
+        // method carries the same peer metadata we assert on.
+        let _ = client.call(5, IpcRequest::SystemDiscover).await.unwrap();
         let rows = {
             let mut g = state.store.lock();
             g.audit_since(&AuditReadRequest::new(0)).unwrap()
         };
         let row = rows
             .iter()
-            .find(|r| r.action == "ipc_health")
-            .expect("health audit row must exist");
+            .find(|r| r.action == "ipc_system_discover")
+            .expect("system_discover audit row must exist");
         // metadata_json should look like {"uid":N,"gid":N,"pid":N}
         let meta = row
             .metadata_json

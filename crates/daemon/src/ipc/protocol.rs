@@ -205,7 +205,14 @@ pub enum IpcResult {
 #[serde(rename_all = "snake_case", tag = "method")]
 pub enum IpcResponse {
     SystemDiscover(DiscoverResponse),
-    Health { uptime_secs: u64 },
+    Health {
+        uptime_secs: u64,
+        /// Seconds since the last real IPC request. Optional for
+        /// backward compat: a legacy daemon omits it; clients treat
+        /// absence as unknown.
+        #[serde(default)]
+        idle_secs: Option<u64>,
+    },
     PolicyStatus(PolicyStatusResponse),
     SelfCheck(SelfCheckResponse),
     BucketEventsSince(BucketEventsSinceResponse),
