@@ -308,16 +308,16 @@ test("TC_SESSION is forwarded across the WSL boundary via WSLENV", async () => {
   const passedEnv = rec.calls[0].env;
   // The token itself must still be present...
   assert.equal(passedEnv.TC_SESSION, "tc-0a1b2c3d4e5f");
-  // ...and WSLENV must name it so wsl.exe translates it into the Linux child.
-  assert.ok(passedEnv.WSLENV, "WSLENV must be set so TC_SESSION crosses the boundary");
-  assert.match(
+  // ...and WSLENV must be exactly TC_SESSION/u (TC-only allowlist) so wsl.exe
+  // translates it into the Linux child without forwarding anything else.
+  assert.equal(
     passedEnv.WSLENV,
-    /(^|:)TC_SESSION(\/|:|$)/,
-    `WSLENV must list TC_SESSION (got ${passedEnv.WSLENV})`,
+    "TC_SESSION/u",
+    `WSLENV must be exactly TC_SESSION/u (got ${passedEnv.WSLENV})`,
   );
 });
 
-test("WSLENV preserves any pre-existing entries when adding TC_SESSION", async () => {
+test("WSLENV ambient entries are dropped under the TC-only allowlist", async () => {
   const rec = makeRecorder();
   await spawnWslBridge({
     platform: "win32",
@@ -332,8 +332,8 @@ test("WSLENV preserves any pre-existing entries when adding TC_SESSION", async (
     returnInsteadOfMirror: true,
   });
   const w = rec.calls[0].env.WSLENV;
-  assert.match(w, /EXISTING_VAR/, "must not drop an operator's existing WSLENV");
-  assert.match(w, /TC_SESSION/, "must add TC_SESSION");
+  assert.equal(w, "TC_SESSION/u", `WSLENV must be exactly TC_SESSION/u, got ${w}`);
+  assert.doesNotMatch(w, /EXISTING_VAR/, "ambient operator entry must be dropped");
 });
 
 test("WSLENV with a non-/u TC_SESSION flag is corrected to /u", async () => {
@@ -343,7 +343,9 @@ test("WSLENV with a non-/u TC_SESSION flag is corrected to /u", async () => {
     env: {
       PATH: "C:\\Windows",
       TC_SESSION: "tc-abcdef012345",
-      // A stale entry with the wrong flag (/w does NOT forward Windows->WSL).
+      // A stale entry with the wrong flag (/w does NOT forward Windows->WSL),
+      // plus an unrelated ambient entry. Both must be dropped under the
+      // TC-only allowlist.
       WSLENV: "TC_SESSION/w:OTHER/u",
     },
     detect: makeMockDetect(okDetect(["Ubuntu"], "Ubuntu")),
@@ -352,13 +354,11 @@ test("WSLENV with a non-/u TC_SESSION flag is corrected to /u", async () => {
     returnInsteadOfMirror: true,
   });
   const w = rec.calls[0].env.WSLENV;
-  assert.match(w, /(^|:)TC_SESSION\/u(:|$)/, `must carry TC_SESSION/u, got ${w}`);
+  // Ambient is dropped entirely; result is exactly TC_SESSION/u with no
+  // remnants of the stale /w entry or unrelated OTHER/u entry.
+  assert.equal(w, "TC_SESSION/u", `WSLENV must be exactly TC_SESSION/u, got ${w}`);
   assert.doesNotMatch(w, /TC_SESSION\/w/, "stale /w entry must be removed");
-  assert.match(w, /OTHER\/u/, "unrelated entries preserved");
-  // Exactly one TC_SESSION segment, no empty segments.
-  const segs = w.split(":");
-  assert.equal(segs.filter((s) => s.split("/")[0] === "TC_SESSION").length, 1);
-  assert.equal(segs.filter((s) => s.length === 0).length, 0, "no empty segments");
+  assert.doesNotMatch(w, /OTHER/, "ambient entries must be dropped");
 });
 
 test("no WSLENV pollution when TC_SESSION is absent", async () => {
@@ -376,6 +376,26 @@ test("no WSLENV pollution when TC_SESSION is absent", async () => {
     false,
     "must not invent a WSLENV when there is no TC_SESSION to forward",
   );
+});
+
+test("WSLENV is rebuilt TC-only: ambient entries (incl. credentials) are dropped", async () => {
+  const rec = makeRecorder();
+  await spawnWslBridge({
+    platform: "win32",
+    env: {
+      PATH: "C:\\Windows",
+      TC_SESSION: "tc-abcdef012345",
+      WSLENV: "WSL_SUDO_CREDENTIAL/u:SOME_OTHER/p", // ambient must be dropped
+    },
+    detect: makeMockDetect(okDetect(["Ubuntu"], "Ubuntu")),
+    doctor: makeMockDoctor(DOCTOR_STATUSES.RUNTIME_PRESENT),
+    exec: rec.exec,
+    returnInsteadOfMirror: true,
+  });
+  const w = rec.calls[0].env.WSLENV;
+  assert.equal(w, "TC_SESSION/u", `WSLENV must be exactly TC_SESSION/u, got ${w}`);
+  assert.doesNotMatch(w, /WSL_SUDO_CREDENTIAL/, "credential must NOT cross");
+  assert.doesNotMatch(w, /SOME_OTHER/, "ambient entries must be dropped");
 });
 
 test("buildFilteredEnv is pure (input env unchanged)", () => {

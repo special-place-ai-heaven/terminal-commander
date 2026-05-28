@@ -144,12 +144,23 @@ function resolveBridgeDistro(env, detect) {
 }
 
 /**
- * Ensure TC_SESSION crosses the Windows->WSL boundary by naming it in WSLENV.
+ * Rebuild WSLENV from a TC-only allowlist so the bridge forwards exactly
+ * `TC_SESSION/u` to the WSL child — nothing else.
  *
- * `wsl.exe` only forwards Windows env vars listed in WSLENV into the Linux
- * process. When the bridge env carries TC_SESSION, append `TC_SESSION/u` to any
- * existing WSLENV (preserving operator entries, never duplicating). No-op when
- * TC_SESSION is absent — we do not invent a WSLENV. Pure: returns a new object.
+ * `wsl.exe` forwards every Windows env var listed in WSLENV into the Linux
+ * process. Preserving the operator's ambient WSLENV would leak whatever they
+ * had named there (e.g. `WSL_SUDO_CREDENTIAL/u`) across the boundary. The
+ * bridge does not need any ambient entry: the distro is selected host-side
+ * before this spawn, so the Linux side never reads a WSLENV-forwarded var
+ * other than TC_SESSION. Therefore:
+ *
+ *   - TC_SESSION present -> WSLENV = "TC_SESSION/u" (ambient dropped).
+ *   - TC_SESSION absent  -> WSLENV deleted (ambient dropped to avoid
+ *     forwarding credential-shaped vars even when we have nothing of our own
+ *     to send).
+ *
+ * Flag `/u` = forward Windows->WSL only, no path translation (TC_SESSION is
+ * an opaque token, not a path). Pure: returns a new object.
  *
  * @param {NodeJS.ProcessEnv} filteredEnv  Already secret-filtered env.
  * @returns {NodeJS.ProcessEnv}
@@ -157,20 +168,14 @@ function resolveBridgeDistro(env, detect) {
 function ensureSessionInWslEnv(filteredEnv) {
   const out = { ...filteredEnv };
   if (out.TC_SESSION == null || out.TC_SESSION === "") {
+    // No session token -> drop any ambient WSLENV. The bridge forwards nothing
+    // the WSL runtime needs (distro is host-side), and ambient entries could
+    // forward credentials (e.g. WSL_SUDO_CREDENTIAL).
+    delete out.WSLENV;
     return out;
   }
-  // Rebuild WSLENV from its colon-separated segments: drop empties (no double
-  // colons / trailing-colon artifacts), drop any existing TC_SESSION entry
-  // REGARDLESS of its flag (e.g. a stale `TC_SESSION/w` that would NOT forward
-  // Windows->WSL), then append exactly `TC_SESSION/u`. `u` = forward
-  // Windows->WSL only, no path translation (the token is opaque, not a path).
-  const existing =
-    typeof out.WSLENV === "string" && out.WSLENV.length > 0 ? out.WSLENV : "";
-  const segments = existing
-    .split(":")
-    .filter((seg) => seg.length > 0 && seg.split("/")[0] !== "TC_SESSION");
-  segments.push("TC_SESSION/u");
-  out.WSLENV = segments.join(":");
+  // TC-only allowlist: TC_SESSION/u and nothing else. Ambient WSLENV dropped.
+  out.WSLENV = "TC_SESSION/u";
   return out;
 }
 
