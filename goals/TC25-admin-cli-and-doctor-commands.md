@@ -3,7 +3,7 @@ goal_id: TC25
 title: Admin Cli And Doctor Commands
 chain_id: terminal-commander-mvp
 phase: Wave 8 - Operator tooling
-status: "Pending"
+status: "Live"
 depends_on: ["TC21", "TC22"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -19,9 +19,12 @@ source_refs:
   - "User note: repository is initially empty except the generated README.md already added by user"
   - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
 risk_level: "medium"
+evidence: "crates/cli/src/main.rs:run_doctor"
 ---
 
 # TC25 - Admin Cli And Doctor Commands
+
+> **Historical goal (frozen).** Reconciled status: `docs/release/MVP_EVIDENCE_REVIEW.md`. Active tracking: `.agent/goals/terminal-commander-runtime/`.
 
 Use this file directly with `/goal`:
 

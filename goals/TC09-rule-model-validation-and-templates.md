@@ -3,7 +3,7 @@ goal_id: TC09
 title: Rule Model Validation And Templates
 chain_id: terminal-commander-mvp
 phase: Wave 2 - Core model
-status: "Pending"
+status: "Live"
 depends_on: ["TC06", "TC08"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -19,9 +19,12 @@ source_refs:
   - "User note: repository is initially empty except the generated README.md already added by user"
   - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
 risk_level: "medium"
+evidence: "EVIDENCE_REPORT_RUNTIME.md"
 ---
 
 # TC09 - Rule Model Validation And Templates
+
+> **Historical goal (frozen).** Reconciled status: `docs/release/MVP_EVIDENCE_REVIEW.md`. Active tracking: `.agent/goals/terminal-commander-runtime/`.
 
 Use this file directly with `/goal`:
 

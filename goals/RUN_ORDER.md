@@ -1,8 +1,10 @@
 # Run Order - terminal-commander-mvp
 
+**Historical chain (frozen as of 2026-05-28, [ROB-4](mention://issue/1d99ebb1-c568-48dd-85e5-a0f70e0dfe69)).** Do not `/goal` TC01–TC32 for new implementation. Active tracking: `.agent/goals/terminal-commander-runtime/` + `EVIDENCE_REPORT_RUNTIME.md`. Reconciled statuses: `docs/release/MVP_EVIDENCE_REVIEW.md`.
+
 Target branch: `feature/terminal-commander-mvp`
 
-Run each goal linearly with `/goal` after placing these files in the repository. Do not skip dependencies unless the skipped goal is explicitly marked `Deferred`, `Superseded`, or `Cancelled` with a reason.
+The list below is archival run order only. Do not skip dependencies unless the skipped goal is explicitly marked `Deferred`, `Superseded`, or `Cancelled` with a reason.
 
 TC01. `.agent/goals/terminal-commander-mvp/TC01-research-product-baseline-and-source-map.md` — Research Product Baseline And Source Map — depends_on: none
 TC02. `.agent/goals/terminal-commander-mvp/TC02-security-privilege-and-policy-doctrine.md` — Security Privilege And Policy Doctrine — depends_on: TC01

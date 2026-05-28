@@ -3,7 +3,7 @@ goal_id: TC28
 title: Load Performance And Backpressure Tests
 chain_id: terminal-commander-mvp
 phase: Wave 9 - Hardening and beta
-status: "Pending"
+status: "Superseded-by-TC47"
 depends_on: ["TC11", "TC17", "TC21"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -19,9 +19,13 @@ source_refs:
   - "User note: repository is initially empty except the generated README.md already added by user"
   - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
 risk_level: "high"
+evidence: "TC47-load-noise-and-backpressure-gate.md"
 ---
 
 # TC28 - Load Performance And Backpressure Tests
+
+> **Historical goal (frozen).** Reconciled status: `docs/release/MVP_EVIDENCE_REVIEW.md`. Active tracking: `.agent/goals/terminal-commander-runtime/`.
+> **Superseded by:** `.agent/goals/terminal-commander-runtime/TC47-load-noise-and-backpressure-gate.md`.
 
 Use this file directly with `/goal`:
 

@@ -3,7 +3,7 @@ goal_id: TC26
 title: Installer Service And Wsl Startup Docs
 chain_id: terminal-commander-mvp
 phase: Wave 8 - Operator tooling
-status: "Pending"
+status: "Live"
 depends_on: ["TC22", "TC23", "TC25"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -19,9 +19,12 @@ source_refs:
   - "User note: repository is initially empty except the generated README.md already added by user"
   - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
 risk_level: "high"
+evidence: "docs/install/README.md"
 ---
 
 # TC26 - Installer Service And Wsl Startup Docs
+
+> **Historical goal (frozen).** Reconciled status: `docs/release/MVP_EVIDENCE_REVIEW.md`. Active tracking: `.agent/goals/terminal-commander-runtime/`.
 
 Use this file directly with `/goal`:
 

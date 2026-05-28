@@ -3,7 +3,7 @@ goal_id: TC30
 title: End To End Mvp Demo Scenarios
 chain_id: terminal-commander-mvp
 phase: Wave 9 - Hardening and beta
-status: "Pending"
+status: "Partial"
 depends_on: ["TC24", "TC27", "TC28", "TC29"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -19,9 +19,12 @@ source_refs:
   - "User note: repository is initially empty except the generated README.md already added by user"
   - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
 risk_level: "medium"
+evidence: "crates/mcp/tests/mcp_live_command_e2e.rs"
 ---
 
 # TC30 - End To End Mvp Demo Scenarios
+
+> **Historical goal (frozen).** Reconciled status: `docs/release/MVP_EVIDENCE_REVIEW.md`. Active tracking: `.agent/goals/terminal-commander-runtime/`.
 
 Use this file directly with `/goal`:
 

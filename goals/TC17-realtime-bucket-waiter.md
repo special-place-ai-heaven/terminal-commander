@@ -3,7 +3,7 @@ goal_id: TC17
 title: Realtime Bucket Waiter
 chain_id: terminal-commander-mvp
 phase: Wave 5 - Probes and jobs
-status: "Pending"
+status: "Live"
 depends_on: ["TC07", "TC12", "TC16"]
 target_branch: "feature/terminal-commander-mvp"
 prohibited_branches: ["main", "master"]
@@ -19,9 +19,12 @@ source_refs:
   - "User note: repository is initially empty except the generated README.md already added by user"
   - "Planning source: Terminal Commander product specification v0.1 from ChatGPT session"
 risk_level: "medium"
+evidence: "EVIDENCE_REPORT_RUNTIME.md"
 ---
 
 # TC17 - Realtime Bucket Waiter
+
+> **Historical goal (frozen).** Reconciled status: `docs/release/MVP_EVIDENCE_REVIEW.md`. Active tracking: `.agent/goals/terminal-commander-runtime/`.
 
 Use this file directly with `/goal`:
 
