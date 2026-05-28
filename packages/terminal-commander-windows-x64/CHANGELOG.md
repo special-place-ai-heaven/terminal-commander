@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.36](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.35...v0.1.36) (2026-05-28)
+
+
+### Bug Fixes
+
+* make npm distribution av-safe ([af24679](https://github.com/special-place-ai-heaven/terminal-commander/commit/af246791160b0b84fbf0a2501fb9c780e044d83b))
+* **release:** apply final-codex-review findings — 4 CRITICAL + 6 IMPORTANT ([3769d00](https://github.com/special-place-ai-heaven/terminal-commander/commit/3769d00d27e36666e5f59aab92b5c361e12d37ee))
+
 ## [0.1.13](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.12...v0.1.13) (2026-05-26)
 
 
