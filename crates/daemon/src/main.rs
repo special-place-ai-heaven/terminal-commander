@@ -92,8 +92,9 @@ fn main() -> ExitCode {
 
     match cli.cmd {
         Cmd::Check => match run_self_check(cfg) {
-            Ok((_state, rep)) => {
+            Ok((state, rep)) => {
                 eprintln!("{}", rep.render());
+                let _ = state.store.shutdown();
                 ExitCode::SUCCESS
             }
             Err(e) => {

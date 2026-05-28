@@ -193,12 +193,20 @@ pub fn run_self_check(
     Ok((state, rep))
 }
 
+/// Drain the store actor (queued ops + WAL checkpoint) before process exit.
+fn shutdown_store(state: &DaemonState) {
+    match state.store.shutdown() {
+        Ok(()) => tracing::debug!("store actor shutdown complete"),
+        Err(e) => tracing::warn!("store actor shutdown failed (non-fatal): {e}"),
+    }
+}
+
 /// Bootstrap + foreground idle until shutdown signal. No IPC, no
 /// command exec. Kept for `--mode foreground-idle` callers and as
 /// the safe pre-IPC mode; the `start` subcommand defaults to the
 /// IPC server.
 pub async fn run_foreground_idle(config: DaemonConfig) -> Result<(), RuntimeError> {
-    let (_state, rep) = run_self_check(config)?;
+    let (state, rep) = run_self_check(config)?;
     eprintln!("{}", rep.render());
     eprintln!(
         "terminal-commanderd: foreground idle. \
@@ -206,6 +214,7 @@ pub async fn run_foreground_idle(config: DaemonConfig) -> Result<(), RuntimeErro
          Send SIGINT (Ctrl-C) or SIGTERM to shut down."
     );
     wait_for_shutdown_signal().await?;
+    shutdown_store(&state);
     eprintln!("terminal-commanderd: shutdown signal received, exiting cleanly.");
     Ok(())
 }
@@ -264,6 +273,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
         }
     }
     handle.shutdown().await;
+    shutdown_store(&state);
     terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
     tracing::info!("IPC server exited cleanly.");
     Ok(())
@@ -301,6 +311,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     wait_for_shutdown_signal_windows().await?;
     tracing::info!("shutdown signal received, draining...");
     handle.shutdown().await;
+    shutdown_store(state.as_ref());
     terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
     tracing::info!("IPC server exited cleanly.");
     Ok(())

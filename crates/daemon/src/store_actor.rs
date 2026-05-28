@@ -24,10 +24,9 @@
 //! [`EventStoreError::InvalidPayload`] with the closed-channel
 //! message.
 //!
-//! ## Scope (Story 1)
-//! Skeleton + unit tests only. No production callers yet — the field
-//! type on [`crate::state::DaemonState`] still holds the old
-//! `Arc<Mutex<EventStore>>`. Stories S2-S5 wire callers.
+//! Production callers: [`crate::state::DaemonState::store`],
+//! [`crate::audit::PersistentAudit`], IPC registry handlers, and
+//! [`crate::runtime::run_ipc_server`] shutdown (WAL checkpoint).
 
 use std::path::Path;
 use std::sync::Arc;

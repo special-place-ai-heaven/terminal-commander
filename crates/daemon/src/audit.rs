@@ -19,7 +19,7 @@ use terminal_commander_store::{
     AuditEntry, AuditReadRequest, AuditRow, EventStoreError,
 };
 
-use crate::store_actor::{StoreClient, StoreOp, StoreOpReply};
+use crate::store_actor::{StoreClient, StoreOp, StoreReply};
 
 /// Emission target for runtime audit rows. Implementations must be
 /// thread-safe (`Send + Sync`).
@@ -68,7 +68,7 @@ impl PersistentAudit {
     /// you want migration cost out of the first emit's critical path.
     pub fn ensure_migration(&self) -> Result<(), EventStoreError> {
         match self.store.call(StoreOp::EnsureAudit)? {
-            StoreOpReply::Unit(()) => Ok(()),
+            StoreReply::Unit => Ok(()),
             other => Err(unexpected_reply("EnsureAudit", &other)),
         }
     }
@@ -79,7 +79,7 @@ impl AuditSink for PersistentAudit {
         match self.store.call(StoreOp::RecordAudit {
             entry: entry.clone(),
         })? {
-            StoreOpReply::U64(id) => Ok(id),
+            StoreReply::AuditId(id) => Ok(id),
             other => Err(unexpected_reply("RecordAudit", &other)),
         }
     }
@@ -88,7 +88,7 @@ impl AuditSink for PersistentAudit {
         match self.store.call(StoreOp::AuditSince {
             request: request.clone(),
         })? {
-            StoreOpReply::AuditRows(rows) => Ok(rows),
+            StoreReply::AuditRows(rows) => Ok(rows),
             other => Err(unexpected_reply("AuditSince", &other)),
         }
     }
@@ -98,14 +98,14 @@ impl AuditSink for PersistentAudit {
             .call(StoreOp::AuditCount)
             .ok()
             .and_then(|reply| match reply {
-                StoreOpReply::U64(n) => usize::try_from(n).ok(),
+                StoreReply::AuditCount(n) => usize::try_from(n).ok(),
                 _ => None,
             })
             .unwrap_or(0)
     }
 }
 
-fn unexpected_reply(op: &str, reply: &StoreOpReply) -> EventStoreError {
+fn unexpected_reply(op: &str, reply: &StoreReply) -> EventStoreError {
     EventStoreError::InvalidPayload(format!(
         "store actor {op}: unexpected reply variant {reply:?}"
     ))
