@@ -278,7 +278,10 @@ impl StoreClient {
     }
 
     /// Fetch the latest rule version.
-    pub fn get_latest_rule(&self, rule_id: &str) -> Result<Option<RuleDefinition>, EventStoreError> {
+    pub fn get_latest_rule(
+        &self,
+        rule_id: &str,
+    ) -> Result<Option<RuleDefinition>, EventStoreError> {
         match self.call(StoreOp::GetLatestRule {
             rule_id: rule_id.to_owned(),
         })? {
@@ -288,10 +291,7 @@ impl StoreClient {
     }
 
     /// Persist a new rule version.
-    pub fn create_rule_version(
-        &self,
-        definition: &RuleDefinition,
-    ) -> Result<u32, EventStoreError> {
+    pub fn create_rule_version(&self, definition: &RuleDefinition) -> Result<u32, EventStoreError> {
         match self.call(StoreOp::CreateRuleVersion {
             definition: definition.clone(),
         })? {

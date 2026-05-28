@@ -97,6 +97,47 @@ fn shutdown_request_acks_then_daemon_exits_and_endpoint_unreachable() {
     });
 }
 
+/// After IPC drain, [`StoreClient::shutdown`] (mirroring
+/// `run_ipc_server`'s `shutdown_store`) must join the writer thread
+/// promptly — no hang waiting on WAL checkpoint.
+#[test]
+fn shutdown_drain_then_store_shutdown_completes_promptly() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("store-shutdown");
+        let (state, handle) = build_server(&data);
+        let sock = handle.socket_path().to_path_buf();
+        let client = DaemonClient::new(sock).with_timeout(Duration::from_secs(3));
+
+        let resp = client
+            .call(1, IpcRequest::Shutdown)
+            .await
+            .expect("shutdown call");
+        match resp {
+            IpcResponse::ShutdownAck { draining } => {
+                assert!(draining, "ack must report draining");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        tokio::time::timeout(Duration::from_secs(8), handle.shutdown())
+            .await
+            .expect("IPC drain must complete promptly");
+
+        let store = state.store.clone();
+        tokio::time::timeout(Duration::from_secs(8), async move {
+            tokio::task::spawn_blocking(move || store.shutdown())
+                .await
+                .expect("join spawn_blocking")
+                .expect("store shutdown ok");
+        })
+        .await
+        .expect("store.shutdown() must join writer thread promptly");
+
+        cleanup(&data);
+    });
+}
+
 /// `trigger_shutdown` must satisfy a subsequent `shutdown_notified()` even
 /// when triggered BEFORE anyone awaits (the late-awaiter race). The sticky
 /// watch flag guarantees the late awaiter observes the request.

@@ -15,9 +15,7 @@
 //! metadata caps are enforced there as well.
 
 use parking_lot::Mutex;
-use terminal_commander_store::{
-    AuditEntry, AuditReadRequest, AuditRow, EventStoreError,
-};
+use terminal_commander_store::{AuditEntry, AuditReadRequest, AuditRow, EventStoreError};
 
 use crate::store_actor::{StoreClient, StoreOp, StoreReply};
 
