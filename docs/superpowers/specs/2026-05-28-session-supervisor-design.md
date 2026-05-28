@@ -98,6 +98,15 @@ Pure read. `enumerate(base_dir) -> Vec<SessionEntry>`:
   pids and would hide exactly the stale entries `list` must show.
 - Scopes to TC_SESSION sessions + the default only. Does not attempt to discover
   `TC_SOCKET` (custom-path) daemons (see Reality corrections).
+- **`default` is a reserved label (codex):** the unseeded session is labeled
+  `"default"`, but the F1 validator currently ACCEPTS `default` as a literal
+  `TC_SESSION` token — a seeded `TC_SESSION=default` would collide with the
+  default session's label/selector in `list`/`reap`. Resolve by reserving it:
+  the session module rejects `default` (case-insensitively) as a session token
+  (and the JS `isValidSessionToken` / mint mirror the reservation), OR `list`
+  disambiguates (e.g. `default` for the base, `session:default` for a seeded
+  one). Reservation is preferred — simpler, and a token literally named
+  "default" has no legitimate use.
 
 No connection to daemons here — this layer only reads the filesystem. Idle time
 is layered on top by the CLI via the handshake (Unit 3).
@@ -138,13 +147,19 @@ probe_endpoint(ep):
   → garbage / timeout / closed   → NOT our daemon (treat as not-running)
 ```
 
-- The `health` response struct gains `idle_secs: u64` (additive to the existing
-  `uptime_secs`). **Partial-upgrade tolerance:** a current daemon that answers
-  the LEGACY Health shape (no `idle_secs`) is still "our daemon" — absence of the
-  field means idle is *unknown*, NOT "not ours." The handshake's accept test is
-  "a well-formed terminal-commander Health response," never "has idle_secs." This
-  avoids a new client wrongly rejecting an old daemon and racing into a
-  double-bind.
+- The `health` response struct gains an OPTIONAL `idle_secs` (additive to the
+  existing `uptime_secs`). **Concrete wire shape (codex):** the field is decoded
+  as `Option<u64>` with `#[serde(default)]` (or the probe deserializes into a
+  lenient struct where missing fields are allowed), so a LEGACY Health response
+  (no `idle_secs`) still parses as a well-formed Health — it just yields
+  `idle_secs = None` (unknown). The accept test is "deserializes as a Health
+  response," never "has idle_secs." This avoids a new client rejecting an old
+  daemon and racing into a double-bind.
+- **`session list` data sources (codex — pick one per field):** `version` comes
+  from the PIDFILE (enumeration, Unit 1), NOT the handshake; the handshake only
+  supplies `idle_secs` (and liveness). So a stale/unresponsive daemon still shows
+  its pidfile `version`; only `idle` is blank when the handshake yields no
+  `idle_secs`.
 - **The health request is a non-bumping, AUDIT-FREE peek**: serving it MUST NOT
   update `last_activity` AND MUST NOT emit the per-request persistent audit row
   that ordinary IPC requests write (`server.rs:~553`). Rationale
@@ -199,6 +214,18 @@ for each target ALIVE daemon:
 for each STALE (dead-pid) entry: compare-before-delete the orphan pidfile (no IPC)
 ```
 
+**Shutdown wire shape (codex — net-new, must be specified by the plan):**
+- `IpcRequest::Shutdown` — new request variant (`crates/daemon/src/ipc/protocol.rs`).
+- `IpcResponse::ShutdownAck { draining: bool }` — new response variant: the
+  daemon sends it IMMEDIATELY on receipt (this is the ACK that distinguishes
+  "draining" from "wedged"), then stops accepting new connections and drains.
+- New `IpcErrorCode::ShuttingDown` — returned to any NEW connection that arrives
+  during the drain window, so the client treats it as retryable and cold-spawns
+  a fresh daemon (the cheap F1 path), never a hard failure.
+The dispatcher gets a `Shutdown` arm wired to a runtime shutdown source (new,
+alongside the existing OS-signal path in `crates/daemon/src/runtime.rs`); the
+client (`McpDaemonClient` / CLI) gets a `shutdown()` method.
+
 Reap targets a socket (Shutdown), not a pid — the graceful path has no
 cross-process kill. The force fallback (for a daemon that is WEDGED — never ACKs
 Shutdown, never drains) reuses the already-shipped `pid_belongs_to_daemon`
@@ -245,9 +272,15 @@ autostart.sh` inside WSL. That script reads `TC_DATA` (with a `:-default`
 fallback). A real `wsl.exe` hop with `WSLENV=TC_SESSION/u` confirmed: (a)
 `TC_SESSION` crosses intact; (b) `autostart.sh` was never receiving `TC_DATA`
 via WSLENV anyway (it wasn't forwarded pre-change either), so it already uses its
-default — dropping ambient WSLENV changes nothing for it. So the allowlist closes
-the credential leak with NO behavior regression. This is a deliberate behavior
-change from "preserve ambient + append" → "TC-only"; the changelog notes it.
+default — dropping ambient WSLENV changes nothing for TC's OWN runtime. The
+honest scope of the change (codex): an operator who DELIBERATELY listed extra
+vars in their ambient `WSLENV` (e.g. `WSLENV=TC_DATA/u` to push a custom data
+dir into WSL) would lose that forwarding. That is acceptable and intended — it is
+exactly the unbounded-passthrough the credential leak rode in on — but it is a
+real behavior change, not "zero regression." This is a deliberate switch from
+"preserve ambient + append" → "TC-only"; the changelog calls it out, and an
+operator needing a var in WSL sets it inside the distro rather than via ambient
+`WSLENV`.
 Allowlist > denylist: a credential the operator listed in `WSLENV` (the observed
 `WSL_SUDO_CREDENTIAL`) no longer crosses the trust boundary.
 
@@ -297,7 +330,7 @@ wsl spawn:     buildFilteredEnv → WSLENV := TC allowlist → wsl.exe
   refused when identity does not match → reported, not forced.
 - Self-reap: `TC_IDLE_TTL_SECS=0` → timer task is inert (no idle exit).
 - WSLENV: malformed/absent ambient WSLENV → allowlist still produces a clean
-  `TC_SESSION/u[:TC_WSL_DISTRO/u]`.
+  `TC_SESSION/u` (or unset WSLENV when `TC_SESSION` is unset).
 
 ## Testing
 

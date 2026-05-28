@@ -47,7 +47,8 @@ milestone (they have no home in F1's addressing-only scope):
    requires a well-formed terminal-commander response before treating an
    endpoint as "our daemon."
 4. **WSLENV allowlist** — the Win→WSL bridge rebuilds `WSLENV` from a TC-only
-   allowlist (`TC_SESSION/u`, `TC_WSL_DISTRO/u`), dropping ambient entries.
+   allowlist (`TC_SESSION/u` only — the distro is selected host-side, so
+   `TC_WSL_DISTRO` need not cross), dropping ambient entries.
 
 **Still rejected (F1 non-goals that remain non-goals):**
 
