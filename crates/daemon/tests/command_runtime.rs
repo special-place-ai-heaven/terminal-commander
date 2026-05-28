@@ -167,10 +167,7 @@ fn command_start_emits_matching_signal_into_bucket_no_raw_text() {
         assert!(status.events_emitted >= 1);
 
         // Audit: command_start (allow) and command_exit landed.
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
         assert!(actions.contains(&"command_start"), "actions: {actions:?}");
         assert!(actions.contains(&"command_exit"), "actions: {actions:?}");
@@ -213,10 +210,7 @@ fn command_start_denied_for_sudo_argv() {
         let err = state.command.start_combed(req).unwrap_err();
         assert!(matches!(err, CommandError::PolicyDenied(_)));
 
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
             rows.iter()
                 .any(|r| r.action == "command_rejected" && r.decision == "deny"),
@@ -254,10 +248,7 @@ fn command_start_denied_for_bare_sh_argv() {
         // No process spawned: job manager unchanged.
         assert_eq!(state.jobs.list().len(), job_count_before);
 
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         let reject = rows
             .iter()
             .find(|r| r.action == "command_rejected" && r.decision == "deny")
@@ -307,10 +298,7 @@ fn command_start_denied_for_absolute_sh_argv() {
         );
         assert_eq!(state.jobs.list().len(), job_count_before);
 
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
             rows.iter()
                 .any(|r| r.action == "command_rejected" && r.decision == "deny"),

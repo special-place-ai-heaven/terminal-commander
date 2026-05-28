@@ -126,10 +126,7 @@ fn command_start_combed_happy_path_returns_bounded_ids_and_audits_through_ipc() 
         // deadline), instead of a fixed sleep that races slow job exit under load.
         // (`audit_rows_have_both_start_rows` is hoisted to module scope above to
         // satisfy clippy::items_after_statements on Linux/rust 1.95.)
-        let read_rows = || {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let read_rows = || state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut rows = read_rows();
         while !audit_rows_have_both_start_rows(&rows) && std::time::Instant::now() < deadline {
@@ -173,10 +170,7 @@ fn command_start_combed_denies_shell_interpreter_and_audits() {
             err.message
         );
 
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
             rows.iter()
                 .any(|r| r.action == "command_rejected" && r.decision == "deny"),

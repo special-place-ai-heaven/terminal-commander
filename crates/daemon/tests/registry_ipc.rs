@@ -384,10 +384,7 @@ fn registry_activate_then_list_then_deactivate() {
         ));
 
         // Audit rows must exist for each accepted call.
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         for action in [
             "ipc_registry_upsert",
             "ipc_registry_activate",
@@ -532,10 +529,13 @@ fn draft_activation_row_does_not_rehydrate_on_restart() {
             let state = Arc::new(DaemonState::bootstrap(cfg.clone()).unwrap());
             let mut def = kw_rule("kw-legacy-draft", "needle", "legacy_match");
             def.status = RuleStatus::Draft;
-            {
-                let mut g = state.store.lock();
-                g.create_rule_version(&def).expect("persist draft rule");
-                g.record_activation_scoped(
+            state
+                .store
+                .create_rule_version(&def)
+                .expect("persist draft rule");
+            state
+                .store
+                .record_activation_scoped(
                     "kw-legacy-draft",
                     1,
                     terminal_commander_core::ActivationScope::Global,
@@ -543,7 +543,6 @@ fn draft_activation_row_does_not_rehydrate_on_restart() {
                     Some("test-legacy"),
                 )
                 .expect("force legacy activation row");
-            }
         }
 
         // Second boot: rehydration must skip the non-eligible draft.
@@ -650,10 +649,7 @@ fn import_pack_cargo_activates_and_drives_signal() {
         );
         // Each activated rule is genuinely in the active set.
         for id in &r.activated {
-            let def = {
-                let g = state.store.lock();
-                g.get_latest_rule(id).unwrap().unwrap()
-            };
+            let def = state.store.get_latest_rule(id).unwrap().unwrap();
             assert!(
                 state.activation.is_active(
                     id,
@@ -668,13 +664,11 @@ fn import_pack_cargo_activates_and_drives_signal() {
         // representative real rustc/cargo lines (not just compile +
         // validate). Build a sifter from the active defs and evaluate
         // one sample per thickened rule.
-        let defs: Vec<RuleDefinition> = {
-            let g = state.store.lock();
-            r.activated
-                .iter()
-                .map(|id| g.get_latest_rule(id).unwrap().unwrap())
-                .collect()
-        };
+        let defs: Vec<RuleDefinition> = r
+            .activated
+            .iter()
+            .map(|id| state.store.get_latest_rule(id).unwrap().unwrap())
+            .collect();
         let sifter = SifterRuntime::build(&defs).expect("sifter builds from cargo pack");
         let bucket = BucketId::new();
         let samples: &[(SourceStream, &str)] = &[
