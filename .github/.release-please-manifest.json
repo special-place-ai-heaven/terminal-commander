@@ -1,8 +1,8 @@
 {
-  "packages/terminal-commander": "0.1.26",
-  "packages/terminal-commander-linux-x64": "0.1.26",
-  "packages/terminal-commander-linux-arm64": "0.1.26",
-  "packages/terminal-commander-windows-x64": "0.1.26",
-  "packages/terminal-commander-mac-x64": "0.1.26",
-  "packages/terminal-commander-mac-arm64": "0.1.26"
+  "packages/terminal-commander": "0.1.27",
+  "packages/terminal-commander-linux-x64": "0.1.27",
+  "packages/terminal-commander-linux-arm64": "0.1.27",
+  "packages/terminal-commander-windows-x64": "0.1.27",
+  "packages/terminal-commander-mac-x64": "0.1.27",
+  "packages/terminal-commander-mac-arm64": "0.1.27"
 }
