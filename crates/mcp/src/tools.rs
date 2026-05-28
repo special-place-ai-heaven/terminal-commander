@@ -421,12 +421,14 @@ impl TerminalCommanderMcpServer {
                 default_deny_path_suffix_count,
                 file_window_bytes,
                 bucket_read_limit,
+                governance,
             })) => json_tool_result(&serde_json::json!({
                 "profile": profile,
                 "commands_deny_count": commands_deny_count,
                 "default_deny_path_suffix_count": default_deny_path_suffix_count,
                 "file_window_bytes": file_window_bytes,
                 "bucket_read_limit": bucket_read_limit,
+                "governance": governance,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -1473,6 +1475,8 @@ fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
         // No-silence receipt (TCE-ERG-1): null unless the command
         // finished with zero rule-driven events.
         "receipt": s.receipt,
+        "tail_calls_total": s.tail_calls_total,
+        "tail_bytes_returned_total": s.tail_bytes_returned_total,
     })
 }
 

@@ -164,6 +164,12 @@ fn no_rule_command_returns_exit_receipt() {
 #[cfg(unix)]
 #[test]
 fn command_output_tail_returns_bounded_lines_without_a_rule() {
+    use std::sync::Arc;
+
+    use terminal_commanderd::{
+        CommandOutputTailParams, DaemonClient, IpcRequest, IpcResponse, IpcServer,
+    };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -171,7 +177,10 @@ fn command_output_tail_returns_bounded_lines_without_a_rule() {
     runtime.block_on(async {
         let data = tmp_data_dir("tail-norule");
         let cfg = DaemonConfig::defaults_in(&data);
-        let state = DaemonState::bootstrap(cfg).unwrap();
+        let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+        let server = IpcServer::new(Arc::clone(&state), state.config.socket_path());
+        let handle = server.spawn().unwrap();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
 
         // printf emits 3 stdout lines; tail max_lines=2 must truncate.
         let resp = state
@@ -191,20 +200,34 @@ fn command_output_tail_returns_bounded_lines_without_a_rule() {
 
         wait_terminal(&state, resp.job_id);
 
-        let rec = state.jobs.get(resp.job_id).expect("job record present");
-        let probe_id = rec.config.probe_id;
-        let tail = state
-            .rings
-            .tail_frames(probe_id, 2, 65_536)
-            .expect("tail ok");
+        let tail = match client
+            .call(
+                2,
+                IpcRequest::CommandOutputTail(CommandOutputTailParams {
+                    job_id: resp.job_id,
+                    max_lines: 2,
+                    max_bytes: 65_536,
+                }),
+            )
+            .await
+            .expect("tail ipc")
+        {
+            IpcResponse::CommandOutputTail(t) => t,
+            other => panic!("unexpected response: {other:?}"),
+        };
         assert_eq!(tail.lines.len(), 2, "max_lines=2 cap enforced");
-        let frame_count = state.rings.frame_count(probe_id);
-        let truncated_lines = frame_count > tail.lines.len();
-        assert!(
-            truncated_lines,
-            "3 frames but only 2 returned -> truncated_lines"
-        );
+        assert!(tail.truncated_lines, "3 frames but only 2 returned");
 
+        let status = state.command.status(resp.job_id).expect("status ok");
+        assert_eq!(status.tail_calls_total, 1);
+        let expected_bytes: u64 = tail
+            .lines
+            .iter()
+            .map(|l| u64::try_from(l.as_bytes().len()).unwrap_or(u64::MAX) + 1)
+            .sum();
+        assert_eq!(status.tail_bytes_returned_total, expected_bytes);
+
+        handle.shutdown().await;
         cleanup(&data);
     });
 }
@@ -213,6 +236,12 @@ fn command_output_tail_returns_bounded_lines_without_a_rule() {
 #[cfg(unix)]
 #[test]
 fn command_output_tail_clamps_to_200_lines() {
+    use std::sync::Arc;
+
+    use terminal_commanderd::{
+        CommandOutputTailParams, DaemonClient, IpcRequest, IpcResponse, IpcServer,
+    };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -220,7 +249,10 @@ fn command_output_tail_clamps_to_200_lines() {
     runtime.block_on(async {
         let data = tmp_data_dir("tail-clamp");
         let cfg = DaemonConfig::defaults_in(&data);
-        let state = DaemonState::bootstrap(cfg).unwrap();
+        let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+        let server = IpcServer::new(Arc::clone(&state), state.config.socket_path());
+        let handle = server.spawn().unwrap();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
 
         // seq produces 250 lines (one number per line).
         let resp = state
@@ -237,30 +269,38 @@ fn command_output_tail_clamps_to_200_lines() {
 
         wait_terminal(&state, resp.job_id);
 
-        let rec = state.jobs.get(resp.job_id).expect("job record present");
-        let probe_id = rec.config.probe_id;
-        // The handler clamps a caller's max_lines to MAX_TAIL_LINES=200
-        // (see handle_command_output_tail). This test exercises the ring
-        // at that already-clamped value to prove that asking for 200 of
-        // 250 frames returns at most 200 and flags truncation. The
-        // end-to-end clamp of an over-cap request is covered by the MCP
-        // e2e test command_output_tail_clamps_to_200_lines.
-        let tail = state
-            .rings
-            .tail_frames(probe_id, 200, 65_536)
-            .expect("tail ok");
+        let tail = match client
+            .call(
+                3,
+                IpcRequest::CommandOutputTail(CommandOutputTailParams {
+                    job_id: resp.job_id,
+                    max_lines: 10_000,
+                    max_bytes: 65_536,
+                }),
+            )
+            .await
+            .expect("tail ipc")
+        {
+            IpcResponse::CommandOutputTail(t) => t,
+            other => panic!("unexpected response: {other:?}"),
+        };
         assert!(
             tail.lines.len() <= 200,
             "returned_lines {} must not exceed hard cap 200",
             tail.lines.len()
         );
-        let frame_count = state.rings.frame_count(probe_id);
-        let truncated_lines = frame_count > tail.lines.len();
-        assert!(
-            truncated_lines,
-            "250 frames but at most 200 returned -> truncated_lines"
-        );
+        assert!(tail.truncated_lines, "250 frames but at most 200 returned");
 
+        let status = state.command.status(resp.job_id).expect("status ok");
+        assert_eq!(status.tail_calls_total, 1);
+        let expected_bytes: u64 = tail
+            .lines
+            .iter()
+            .map(|l| u64::try_from(l.as_bytes().len()).unwrap_or(u64::MAX) + 1)
+            .sum();
+        assert_eq!(status.tail_bytes_returned_total, expected_bytes);
+
+        handle.shutdown().await;
         cleanup(&data);
     });
 }

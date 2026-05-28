@@ -144,6 +144,8 @@ fn policy_status_reports_active_caps() {
                 assert_eq!(p.bucket_read_limit, state.config.limits.bucket_read_limit);
                 assert!(p.commands_deny_count > 0);
                 assert!(p.default_deny_path_suffix_count > 0);
+                assert_eq!(p.governance.filter_bypass_tail_calls_total, 0);
+                assert_eq!(p.governance.filter_bypass_tail_bytes_total, 0);
             }
             other => panic!("unexpected response: {other:?}"),
         }

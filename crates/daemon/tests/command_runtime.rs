@@ -483,6 +483,8 @@ fn response_types_have_no_raw_stream_lane() {
         signal: None,
         duration_ms: Some(0),
         receipt: None,
+        tail_calls_total: 0,
+        tail_bytes_returned_total: 0,
     };
     assert_small_response(&s);
 }

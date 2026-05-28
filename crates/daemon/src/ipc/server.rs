@@ -685,12 +685,21 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
 }
 
 fn handle_policy_status(state: &Arc<DaemonState>) -> IpcResponse {
+    use crate::ipc::protocol::PolicyStatusGovernance;
+
+    let jobs = state.jobs.list();
+    let filter_bypass_tail_calls_total = jobs.iter().map(|j| j.tail_calls_total).sum();
+    let filter_bypass_tail_bytes_total = jobs.iter().map(|j| j.tail_bytes_returned_total).sum();
     IpcResponse::PolicyStatus(PolicyStatusResponse {
         profile: format!("{:?}", state.policy.profile),
         commands_deny_count: crate::policy::COMMANDS_DENY.len(),
         default_deny_path_suffix_count: crate::policy::DEFAULT_DENY_PATH_SUFFIXES.len(),
         file_window_bytes: state.config.limits.file_window_bytes,
         bucket_read_limit: state.config.limits.bucket_read_limit,
+        governance: PolicyStatusGovernance {
+            filter_bypass_tail_calls_total,
+            filter_bypass_tail_bytes_total,
+        },
     })
 }
 
@@ -1046,9 +1055,17 @@ fn handle_command_output_tail(
     let returned_lines = tail.lines.len() as u32;
     let truncated_lines = frame_count > tail.lines.len();
     let truncated_bytes = tail.truncated;
+    let lines = tail.lines;
+    let bytes_returned = crate::command::tail_bypass_bytes_returned(&lines);
+    let _ = state
+        .jobs
+        .record_tail_bypass(params.job_id, bytes_returned);
+    state
+        .command
+        .audit_output_tail_bypass(params.job_id, returned_lines, bytes_returned);
     Ok(IpcResponse::CommandOutputTail(CommandOutputTailResponse {
         job_id: params.job_id,
-        lines: tail.lines,
+        lines,
         returned_lines,
         truncated_lines,
         truncated_bytes,

@@ -199,6 +199,19 @@ pub struct CommandStatusResponse {
     /// No-silence receipt; `Some` only for a finished process command
     /// with zero rule-driven events. See [`CommandReceipt`].
     pub receipt: Option<CommandReceipt>,
+    /// Successful `command_output_tail` calls for this job.
+    pub tail_calls_total: u64,
+    /// UTF-8 payload bytes returned across all tail calls.
+    pub tail_bytes_returned_total: u64,
+}
+
+/// Byte accounting for one successful tail response (ROB-7 D1).
+#[must_use]
+pub(crate) fn tail_bypass_bytes_returned(lines: &[String]) -> u64 {
+    lines
+        .iter()
+        .map(|line| u64::try_from(line.len()).unwrap_or(u64::MAX) + 1)
+        .sum()
 }
 
 /// EventSink that forwards drafts to the wired `Router`.
@@ -416,6 +429,27 @@ impl CommandRuntime {
             entry = entry.with_metadata_json(m);
         }
         let _ = self.audit.emit(&entry);
+    }
+
+    /// Governance audit row for a successful `command_output_tail`.
+    pub(crate) fn audit_output_tail_bypass(
+        &self,
+        job_id: JobId,
+        lines_returned: u32,
+        bytes_returned: u64,
+    ) {
+        let metadata = serde_json::json!({
+            "lines_returned": lines_returned,
+            "bytes_returned": bytes_returned,
+        })
+        .to_string();
+        self.audit(
+            "command_output_tail",
+            &job_id.to_wire_string(),
+            "allow",
+            None,
+            Some(metadata),
+        );
     }
 
     /// `command_start_combed` entry point. Validates, gates on
@@ -809,6 +843,8 @@ impl CommandRuntime {
             signal: rec.exit_info.as_ref().and_then(|e| e.signal.clone()),
             duration_ms: rec.exit_info.as_ref().map(|e| e.duration_ms),
             receipt,
+            tail_calls_total: rec.tail_calls_total,
+            tail_bytes_returned_total: rec.tail_bytes_returned_total,
         })
     }
 
@@ -918,4 +954,16 @@ fn format_argv_metadata(argv: &[String]) -> String {
         })
         .collect();
     serde_json::json!({ "argv": v }).to_string()
+}
+
+#[cfg(test)]
+mod tail_bypass_tests {
+    use super::tail_bypass_bytes_returned;
+
+    #[test]
+    fn bytes_include_newline_per_returned_line() {
+        assert_eq!(tail_bypass_bytes_returned(&["a".into(), "bc".into()]), 5);
+        assert_eq!(tail_bypass_bytes_returned(&[]), 0);
+        assert_eq!(tail_bypass_bytes_returned(&[String::new()]), 1);
+    }
 }

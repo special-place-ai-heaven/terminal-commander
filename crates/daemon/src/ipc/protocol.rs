@@ -265,6 +265,13 @@ pub struct DiscoverResponse {
     pub methods: Vec<String>,
 }
 
+/// Filter-bypass aggregates for `policy_status` (ROB-7).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyStatusGovernance {
+    pub filter_bypass_tail_calls_total: u64,
+    pub filter_bypass_tail_bytes_total: u64,
+}
+
 /// `policy_status` payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyStatusResponse {
@@ -276,6 +283,7 @@ pub struct PolicyStatusResponse {
     pub file_window_bytes: usize,
     /// Per-call bucket-read cap.
     pub bucket_read_limit: usize,
+    pub governance: PolicyStatusGovernance,
 }
 
 /// `self_check` payload.

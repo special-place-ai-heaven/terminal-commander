@@ -84,6 +84,11 @@ pub struct JobRecord {
     pub bytes_seen: u64,
     pub frames_seen: u64,
     pub events_emitted: u64,
+    /// Successful `command_output_tail` calls (filter-bypass hatch).
+    pub tail_calls_total: u64,
+    /// UTF-8 payload bytes returned across all tail calls (see
+    /// `tail_bypass_bytes_returned` in the daemon).
+    pub tail_bytes_returned_total: u64,
     pub exit_info: Option<JobExitInfo>,
 }
 
@@ -98,6 +103,8 @@ impl JobRecord {
             bytes_seen: 0,
             frames_seen: 0,
             events_emitted: 0,
+            tail_calls_total: 0,
+            tail_bytes_returned_total: 0,
             exit_info: None,
         }
     }
@@ -144,6 +151,20 @@ impl JobManager {
     pub fn record_event(&self, job_id: JobId) {
         if let Some(rec) = self.inner.write().get_mut(&job_id) {
             rec.events_emitted = rec.events_emitted.saturating_add(1);
+        }
+    }
+
+    /// Record one successful `command_output_tail` bypass for a job.
+    /// Returns `false` when the job is unknown.
+    pub fn record_tail_bypass(&self, job_id: JobId, bytes_returned: u64) -> bool {
+        if let Some(rec) = self.inner.write().get_mut(&job_id) {
+            rec.tail_calls_total = rec.tail_calls_total.saturating_add(1);
+            rec.tail_bytes_returned_total = rec
+                .tail_bytes_returned_total
+                .saturating_add(bytes_returned);
+            true
+        } else {
+            false
         }
     }
 
@@ -416,6 +437,19 @@ mod tests {
             Some("CANCELLED")
         );
         assert_eq!(m.get(id).unwrap().state, JobState::Cancelled);
+    }
+
+    #[test]
+    fn record_tail_bypass_accumulates_and_unknown_job_noops() {
+        let m = JobManager::new();
+        let id = m.start(cfg());
+        assert!(m.record_tail_bypass(id, 5));
+        assert!(m.record_tail_bypass(id, 3));
+        let rec = m.get(id).unwrap();
+        assert_eq!(rec.tail_calls_total, 2);
+        assert_eq!(rec.tail_bytes_returned_total, 8);
+        let missing = JobId::new();
+        assert!(!m.record_tail_bypass(missing, 1));
     }
 
     #[test]

@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use terminal_commander_store::AuditReadRequest;
 use terminal_commanderd::{
-    CommandStartParams, CommandStatusParams, DaemonClient, DaemonConfig, DaemonState, IpcErrorCode,
-    IpcRequest, IpcResponse, IpcServer,
+    CommandOutputTailParams, CommandStartParams, CommandStatusParams, DaemonClient, DaemonConfig,
+    DaemonState, IpcErrorCode, IpcRequest, IpcResponse, IpcServer,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -298,6 +298,166 @@ fn command_status_for_unknown_job_returns_typed_error() {
             .await
             .expect_err("unknown job must be rejected");
         assert_eq!(err.code, IpcErrorCode::UnknownJob);
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn command_output_tail_records_bypass_governance_and_audit() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("tail-gov");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(30));
+
+        let start = match client
+            .call(
+                41,
+                IpcRequest::CommandStartCombed(small_start_params(&[
+                    "/usr/bin/printf",
+                    "a\nbc\n",
+                ])),
+            )
+            .await
+            .expect("start")
+        {
+            IpcResponse::CommandStartCombed(s) => s,
+            other => panic!("unexpected response: {other:?}"),
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let status = match client
+                .call(
+                    42,
+                    IpcRequest::CommandStatus(CommandStatusParams {
+                        job_id: start.job_id,
+                    }),
+                )
+                .await
+                .expect("status")
+            {
+                IpcResponse::CommandStatus(s) => s,
+                other => panic!("unexpected response: {other:?}"),
+            };
+            if matches!(
+                status.state,
+                terminal_commander_core::JobState::Exited
+                    | terminal_commander_core::JobState::Failed
+                    | terminal_commander_core::JobState::Cancelled
+            ) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("job did not reach terminal state");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let tail = match client
+            .call(
+                43,
+                IpcRequest::CommandOutputTail(CommandOutputTailParams {
+                    job_id: start.job_id,
+                    max_lines: 50,
+                    max_bytes: 65_536,
+                }),
+            )
+            .await
+            .expect("tail")
+        {
+            IpcResponse::CommandOutputTail(t) => t,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert_eq!(tail.returned_lines, 2);
+        let expected_bytes: u64 = tail
+            .lines
+            .iter()
+            .map(|l| u64::try_from(l.as_bytes().len()).unwrap_or(u64::MAX) + 1)
+            .sum();
+        assert_eq!(expected_bytes, 5, "D1: a+1 + bc+1");
+
+        let status = match client
+            .call(
+                44,
+                IpcRequest::CommandStatus(CommandStatusParams {
+                    job_id: start.job_id,
+                }),
+            )
+            .await
+            .expect("status after tail")
+        {
+            IpcResponse::CommandStatus(s) => s,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert_eq!(status.tail_calls_total, 1);
+        assert_eq!(status.tail_bytes_returned_total, expected_bytes);
+
+        let policy = match client.call(45, IpcRequest::PolicyStatus).await.unwrap() {
+            IpcResponse::PolicyStatus(p) => p,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert_eq!(
+            policy.governance.filter_bypass_tail_calls_total,
+            status.tail_calls_total
+        );
+        assert_eq!(
+            policy.governance.filter_bypass_tail_bytes_total,
+            status.tail_bytes_returned_total
+        );
+
+        let rows = {
+            let mut g = state.store.lock();
+            g.audit_since(&AuditReadRequest::new(0)).unwrap()
+        };
+        let allow = rows
+            .iter()
+            .find(|r| r.action == "command_output_tail" && r.decision == "allow")
+            .expect("governance allow audit row");
+        assert!(
+            rows.iter()
+                .any(|r| r.action == "ipc_command_output_tail"),
+            "ipc info audit row must coexist"
+        );
+        let meta = allow.metadata_json.as_deref().expect("metadata");
+        assert!(meta.contains("\"lines_returned\":2"));
+        assert!(meta.contains("\"bytes_returned\":5"));
+
+        let bogus = terminal_commander_core::JobId::new();
+        let err = client
+            .call(
+                46,
+                IpcRequest::CommandOutputTail(CommandOutputTailParams {
+                    job_id: bogus,
+                    max_lines: 1,
+                    max_bytes: 1024,
+                }),
+            )
+            .await
+            .expect_err("unknown job");
+        assert_eq!(err.code, IpcErrorCode::UnknownJob);
+        let status_after = match client
+            .call(
+                47,
+                IpcRequest::CommandStatus(CommandStatusParams {
+                    job_id: start.job_id,
+                }),
+            )
+            .await
+            .expect("status")
+        {
+            IpcResponse::CommandStatus(s) => s,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert_eq!(status_after.tail_calls_total, 1);
+        assert!(!rows.iter().any(|r| {
+            r.action == "command_output_tail"
+                && r.decision == "allow"
+                && r.subject == bogus.to_wire_string()
+        }));
+
         handle.shutdown().await;
         cleanup(&data);
     });

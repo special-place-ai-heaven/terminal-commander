@@ -23,7 +23,11 @@
     "commands_deny_count": 8,
     "default_deny_path_suffix_count": 12,
     "file_window_bytes": 65536,
-    "bucket_read_limit": 10000
+    "bucket_read_limit": 10000,
+    "governance": {
+      "filter_bypass_tail_calls_total": 0,
+      "filter_bypass_tail_bytes_total": 0
+    }
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -49,6 +53,7 @@
   "invariants": [
     "requires_daemon=true in system_discover",
     "response is bounded counters and caps only",
-    "does not synthesize default policy data while daemon is unavailable"
+    "does not synthesize default policy data while daemon is unavailable",
+    "governance object holds bounded filter-bypass counters only"
   ]
 }
