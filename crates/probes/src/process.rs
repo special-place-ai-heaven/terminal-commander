@@ -206,7 +206,9 @@ impl ProcessProbe {
         }
         let mut child = cmd.spawn()?;
         #[cfg(windows)]
-        let child_pid = child.id();
+        let child_pid = child
+            .id()
+            .expect("tokio child has pid immediately after spawn");
         let stdout = child.stdout.take().expect("piped stdout configured above");
         let stderr = child.stderr.take().expect("piped stderr configured above");
 

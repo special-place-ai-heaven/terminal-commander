@@ -33,5 +33,24 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
 ] }
 
-[lints]
-workspace = true
+# Replicate workspace lints rather than using `workspace = true` so we
+# can allow `unsafe_code` for the Win32 FFI in
+# tests/windows_no_console_spawn.rs (AttachConsole / GetConsoleWindow /
+# FreeConsole). Production probe code does NOT use unsafe.
+[lints.rust]
+unsafe_code = "allow"          # Win32 FFI in windows_no_console_spawn test only
+unreachable_pub = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"
+significant_drop_tightening = "allow"
