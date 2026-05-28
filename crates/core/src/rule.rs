@@ -54,22 +54,48 @@ pub fn compile_bounded_regex(pattern: &str) -> Result<Regex, regex::Error> {
         .build()
 }
 
-/// Compile a [`regex::RegexSet`] with the canonical compiled-size bounds.
+/// Hard cap on the per-rule contribution to a [`regex::RegexSet`]'s budget.
 ///
-/// The set-wide [`REGEX_SIZE_LIMIT`] / [`REGEX_DFA_SIZE_LIMIT`] apply to the
-/// combined program, matching [`compile_bounded_regex`] for single patterns.
+/// The set-wide budget is `N * REGEX_SET_PER_RULE_LIMIT`, clamped to a
+/// workspace-wide ceiling so one runaway rule cannot drag the whole set above
+/// the safe range.
+pub const REGEX_SET_PER_RULE_LIMIT: usize = 65_536;
+
+/// Workspace-wide ceiling on the combined [`regex::RegexSet`] program size.
+///
+/// 16 MiB is the regex crate's default for `RegexSet`; we cap there so a
+/// pathological caller with thousands of patterns still gets a bounded
+/// program, but the per-rule scaling means a healthy ~50-rule set fits.
+pub const REGEX_SET_TOTAL_CEILING: usize = 16 * 1024 * 1024;
+
+/// Compile a [`regex::RegexSet`] with compiled-size bounds that scale with
+/// the number of patterns.
+///
+/// Each individual pattern still gets [`REGEX_SET_PER_RULE_LIMIT`] of headroom;
+/// the combined program is allowed to grow proportionally, up to
+/// [`REGEX_SET_TOTAL_CEILING`]. A flat per-set cap matching the single-pattern
+/// limit caused legitimate multi-rule sets to fail to compile once enough
+/// rules were active.
 ///
 /// # Errors
 /// Returns the underlying [`regex::Error`] if any pattern is invalid or the
-/// combined program exceeds the size limits.
+/// combined program exceeds the scaled ceiling.
 pub fn compile_bounded_regex_set<I, S>(patterns: I) -> Result<regex::RegexSet, regex::Error>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    regex::RegexSetBuilder::new(patterns)
-        .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
+    let pats: Vec<S> = patterns.into_iter().collect();
+    let scaled = pats
+        .len()
+        .saturating_mul(REGEX_SET_PER_RULE_LIMIT)
+        .min(REGEX_SET_TOTAL_CEILING);
+    // Always leave at least the single-pattern budget so a 0/1-pattern set
+    // behaves identically to compile_bounded_regex.
+    let combined_limit = scaled.max(REGEX_SIZE_LIMIT);
+    regex::RegexSetBuilder::new(pats)
+        .size_limit(combined_limit)
+        .dfa_size_limit(combined_limit)
         .build()
 }
 
@@ -601,6 +627,36 @@ mod tests {
     #[test]
     fn compile_bounded_regex_accepts_ordinary_pattern() {
         assert!(compile_bounded_regex(r"ERROR \d{3}: .*").is_ok());
+    }
+
+    #[test]
+    fn compile_bounded_regex_set_handles_realistic_active_rule_count() {
+        // Regression: a flat per-set 64 KiB cap rejected legitimate sets once
+        // ~10+ active rules combined into one program. The seeded
+        // wsl/cargo rule packs ship 15 active rules out of the box, and the
+        // daemon failed to build any sifter at all because the combined NFA
+        // crossed the per-pattern limit. The fixed limit scales with N so
+        // realistic active-rule counts compile cleanly.
+        let pats: Vec<String> = (0..30)
+            .map(|i| format!(r"^EVENT_{i}\s+code=(?P<code>E[0-9]{{4}})\s+msg=(?P<msg>.+)$"))
+            .collect();
+        let set = compile_bounded_regex_set(&pats).expect(
+            "30 ordinary captured-group patterns must compile inside the scaled RegexSet budget",
+        );
+        assert_eq!(set.len(), 30);
+    }
+
+    #[test]
+    fn compile_bounded_regex_set_still_caps_pathological_growth() {
+        // The scaled limit is bounded by REGEX_SET_TOTAL_CEILING (16 MiB), so a
+        // truly pathological per-pattern DFA bomb must still be rejected when
+        // it would push the combined program past the ceiling.
+        let bomb = "(a|b|c|d|e|f|g|h){60}{60}";
+        let bombs: Vec<&str> = std::iter::repeat_n(bomb, 4).collect();
+        assert!(
+            compile_bounded_regex_set(bombs).is_err(),
+            "bounded RegexSet must still reject patterns whose combined program exceeds the ceiling"
+        );
     }
 
     fn k(id: &str) -> RuleDefinition {
