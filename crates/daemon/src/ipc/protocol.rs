@@ -182,6 +182,11 @@ pub enum IpcRequest {
     /// TC45: bounded lookup for one probe by id. Returns
     /// `UnknownProbe` if no runtime knows the id.
     ProbeStatus(ProbeStatusParams),
+    /// Request a graceful shutdown. The daemon ACKs immediately
+    /// (`ShutdownAck`), stops accepting new connections, drains in-flight
+    /// requests, removes its pidfile, and exits 0. New connections during the
+    /// drain receive `ShuttingDown` (retryable).
+    Shutdown,
 }
 
 /// Success / error union. Success carries a typed payload per method;
@@ -242,6 +247,9 @@ pub enum IpcResponse {
     RuntimeState(RuntimeStateResponse),
     ProbeList(ProbeListResponse),
     ProbeStatus(ProbeStatusResponse),
+    /// Ack for `Shutdown`. `draining=true` once the daemon has stopped accepting
+    /// new connections and begun draining.
+    ShutdownAck { draining: bool },
 }
 
 /// `system_discover` payload. Mirrors the contract laid out in
@@ -358,6 +366,9 @@ pub enum IpcErrorCode {
     /// in the message (promote the rule to status=Active and re-upsert)
     /// rather than poisoning the scope. See the agent-ergonomics chain.
     RuleNotActive,
+    /// Returned to a new request that arrives while the daemon is draining for
+    /// shutdown. Retryable: the client should cold-spawn a fresh daemon.
+    ShuttingDown,
 }
 
 /// Structured error payload.
@@ -1344,5 +1355,26 @@ mod tests {
             }
             IpcResult::Ok { .. } => panic!("expected err variant"),
         }
+    }
+
+    #[test]
+    fn shutdown_variants_serde_roundtrip() {
+        // Request round-trips. `IpcRequest` does not derive `PartialEq`,
+        // so compare the serialized forms instead of the values.
+        let req = IpcRequest::Shutdown;
+        let s = serde_json::to_string(&req).unwrap();
+        let s2 = serde_json::to_string(&serde_json::from_str::<IpcRequest>(&s).unwrap()).unwrap();
+        assert_eq!(s, s2);
+
+        // Response round-trips with the draining flag.
+        let resp = IpcResponse::ShutdownAck { draining: true };
+        let s = serde_json::to_string(&resp).unwrap();
+        match serde_json::from_str::<IpcResponse>(&s).unwrap() {
+            IpcResponse::ShutdownAck { draining } => assert!(draining),
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // The new error code serializes.
+        let _ = serde_json::to_string(&IpcErrorCode::ShuttingDown).unwrap();
     }
 }

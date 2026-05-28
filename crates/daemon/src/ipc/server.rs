@@ -556,6 +556,19 @@ async fn dispatch(
             Ok(r) => ("probe_status", IpcResult::Ok { response: r }),
             Err(e) => ("probe_status", IpcResult::Err { error: e }),
         },
+        // TODO(E2): wire graceful shutdown. This placeholder exists ONLY so the
+        // lib compiles after the protocol variants were added; it fails loudly
+        // (typed Internal error, NO fake `ShutdownAck`) and MUST be replaced by
+        // real ACK-then-drain dispatch in the shutdown wiring task.
+        IpcRequest::Shutdown => (
+            "shutdown",
+            IpcResult::Err {
+                error: IpcError::new(
+                    IpcErrorCode::Internal,
+                    "shutdown dispatch not yet wired (E2)",
+                ),
+            },
+        ),
     };
     // Audit one row per accepted request. The decision label reflects
     // whether the dispatcher produced an `Ok` response or a typed
