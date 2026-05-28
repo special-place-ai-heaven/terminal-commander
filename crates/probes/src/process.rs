@@ -2,6 +2,11 @@
 // Copyright 2026 The Terminal Commander Authors
 
 //! Process probe runtime.
+//!
+//! Windows: `ProcessProbe::spawn` calls `terminal_commander_core::windows_silent`
+//! on the underlying `std::process::Command` so GUI-subsystem daemon children do
+//! not allocate a visible console. The JS bridge (`lib/wsl/spawn.js`) intentionally
+//! does not use this flag — see `docs/release/windows-wsl-bridge-contract.md` §4.4.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -152,6 +157,9 @@ pub struct ProcessProbe {
     metrics: Arc<Mutex<ProcessProbeMetrics>>,
     cancel_tx: Option<oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<Result<std::process::ExitStatus, ProcessProbeError>>>,
+    /// Child PID captured at spawn (Windows console regression tests).
+    #[cfg(windows)]
+    child_pid: u32,
 }
 
 impl ProcessProbe {
@@ -192,7 +200,15 @@ impl ProcessProbe {
                 cmd.env(k, v);
             }
         }
+        #[cfg(windows)]
+        {
+            terminal_commander_core::windows_silent(cmd.as_std_mut());
+        }
         let mut child = cmd.spawn()?;
+        #[cfg(windows)]
+        let child_pid = child
+            .id()
+            .expect("tokio child has pid immediately after spawn");
         let stdout = child.stdout.take().expect("piped stdout configured above");
         let stderr = child.stderr.take().expect("piped stderr configured above");
 
@@ -246,7 +262,16 @@ impl ProcessProbe {
             metrics,
             cancel_tx: Some(cancel_tx),
             join: Some(join),
+            #[cfg(windows)]
+            child_pid,
         })
+    }
+
+    /// Windows child PID for AttachConsole regression tests.
+    #[cfg(windows)]
+    #[must_use]
+    pub const fn child_pid(&self) -> u32 {
+        self.child_pid
     }
 
     /// Probe identifier.
