@@ -107,8 +107,14 @@ terminal-commander session reap --all
 ```
 
 `session reap` sends a graceful `Shutdown` over IPC and waits for the endpoint
-to go unreachable. If a daemon is wedged (no ACK), it falls back to
-force-kill, gated by `pid_belongs_to_daemon` so a recycled PID is never killed.
+to go unreachable. If a daemon is **wedged** (no `ShutdownAck` AND the endpoint
+still answers after the wait), it falls back to force-kill. The force path is
+**identity-gated by `pid_belongs_to_daemon`** (matches daemon image + session
+`state_dir` in the live cmdline) before `hard_kill`, and on Unix is re-checked
+**again immediately before the SIGKILL leg** after the ~800 ms grace
+(`HardKillOutcome::IdentitySkipped` when the PID was recycled mid-grace). The
+force signal is withheld in that case; `reap` exits with the `RefusedNonDaemon`
+message rather than killing an unrelated process.
 
 `doctor harness` prints one line per provider plus a `WARNING: shared daemon
 mode …` line when ≥2 harnesses are detected and ≥1 is not yet configured by
@@ -399,8 +405,14 @@ inspection commands that are not wired to live daemon IPC exit `69` with an
 - **`ensure_daemon` requires a real Health handshake** — a connectable but
   non-Terminal-Commander socket/pipe (squatter, stale bind, wrong process) is
   rejected, not silently accepted.
-- **Force-kill on reap is identity-gated** (`pid_belongs_to_daemon` matches
-  image + state_dir from the running cmdline). A recycled PID is never killed.
+- **Force-kill on reap is identity-gated at both signal legs**
+  (`pid_belongs_to_daemon` matches daemon image + session `state_dir` from the
+  running cmdline). The gate runs before `hard_kill`, and on Unix is re-checked
+  immediately before SIGKILL after the ~800 ms grace. If the PID is recycled
+  mid-grace, the force signal (`SIGKILL` / `taskkill /F`) is withheld and
+  `reap` reports `RefusedNonDaemon` instead of killing an unrelated process.
+  The same identity gate is applied by `replace_if_stale` before any force
+  attempt.
 - **Win→WSL forwarding is a TC-only allowlist** (`TC_SESSION/u`). Ambient
   `WSLENV` is dropped so credential-shaped vars like `WSL_SUDO_CREDENTIAL`
   cannot cross the trust boundary.
