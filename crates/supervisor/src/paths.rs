@@ -99,10 +99,15 @@ fn state_dir_base(env: &impl EnvSource) -> PathBuf {
     {
         // Do NOT consult XDG_STATE_HOME — daemon ignores it.
         if let Some(p) = env.get("HOME") {
-            return PathBuf::from(p).join(".local").join("share").join("terminal-commanderd");
+            return PathBuf::from(p)
+                .join(".local")
+                .join("share")
+                .join("terminal-commanderd");
         }
     }
-    std::env::temp_dir().join("terminal-commanderd").join("state")
+    std::env::temp_dir()
+        .join("terminal-commanderd")
+        .join("state")
 }
 
 /// The IPC endpoint path:
@@ -294,7 +299,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn explicit_session_gets_subdir_under_base() {
-        let env = FakeEnv::new().with("HOME", "/test-home").with("TC_SESSION", "agent-1");
+        let env = FakeEnv::new()
+            .with("HOME", "/test-home")
+            .with("TC_SESSION", "agent-1");
         assert_eq!(
             resolve_state_dir_with(&env),
             std::path::PathBuf::from("/test-home/.local/share/terminal-commanderd/agent-1"),
@@ -305,7 +312,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn session_subdir_hangs_under_tc_data_base() {
-        let env = FakeEnv::new().with("TC_DATA", "/custom/root").with("TC_SESSION", "agent-1");
+        let env = FakeEnv::new()
+            .with("TC_DATA", "/custom/root")
+            .with("TC_SESSION", "agent-1");
         assert_eq!(
             resolve_state_dir_with(&env),
             std::path::PathBuf::from("/custom/root/agent-1"),
@@ -327,13 +336,25 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn session_state_pidfile_log_socket_all_co_locate() {
-        let env = FakeEnv::new().with("HOME", "/test-home").with("TC_SESSION", "agent-1");
+        let env = FakeEnv::new()
+            .with("HOME", "/test-home")
+            .with("TC_SESSION", "agent-1");
         let state = resolve_state_dir_with(&env);
-        let expected = std::path::PathBuf::from("/test-home/.local/share/terminal-commanderd/agent-1");
+        let expected =
+            std::path::PathBuf::from("/test-home/.local/share/terminal-commanderd/agent-1");
         assert_eq!(state, expected, "state dir is the session subdir");
-        assert_eq!(crate::pidfile::pidfile_path(&state), expected.join("terminal-commanderd.pid"));
-        assert_eq!(resolve_log_path_with(&env), expected.join("logs").join("terminal-commanderd.log"));
-        assert_eq!(resolve_socket_path_with(&env), expected.join("terminal-commanderd.sock"));
+        assert_eq!(
+            crate::pidfile::pidfile_path(&state),
+            expected.join("terminal-commanderd.pid")
+        );
+        assert_eq!(
+            resolve_log_path_with(&env),
+            expected.join("logs").join("terminal-commanderd.log")
+        );
+        assert_eq!(
+            resolve_socket_path_with(&env),
+            expected.join("terminal-commanderd.sock")
+        );
     }
 
     #[cfg(windows)]
@@ -350,7 +371,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_explicit_session_uses_token_pipe() {
-        let env = FakeEnv::new().with("USERNAME", "alice").with("TC_SESSION", "agent-1");
+        let env = FakeEnv::new()
+            .with("USERNAME", "alice")
+            .with("TC_SESSION", "agent-1");
         assert_eq!(
             resolve_socket_path_with(&env).to_string_lossy(),
             r"\\.\pipe\terminal-commander-agent-1",
@@ -361,7 +384,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_tc_socket_overrides_everything() {
-        let env = FakeEnv::new().with("USERNAME", "alice").with("TC_SESSION", "agent-1").with("TC_SOCKET", r"\\.\pipe\custom");
+        let env = FakeEnv::new()
+            .with("USERNAME", "alice")
+            .with("TC_SESSION", "agent-1")
+            .with("TC_SOCKET", r"\\.\pipe\custom");
         assert_eq!(
             resolve_socket_path_with(&env).to_string_lossy(),
             r"\\.\pipe\custom",
@@ -380,7 +406,10 @@ mod tests {
         let b = resolve_socket_path_with(&default_env);
         assert_eq!(a, b, "resolution must be deterministic for identical env");
 
-        let sess = FakeEnv::new().with("USERNAME", "bob").with("HOME", "/h").with("TC_SESSION", "s1");
+        let sess = FakeEnv::new()
+            .with("USERNAME", "bob")
+            .with("HOME", "/h")
+            .with("TC_SESSION", "s1");
         assert_ne!(
             resolve_socket_path_with(&default_env),
             resolve_socket_path_with(&sess),

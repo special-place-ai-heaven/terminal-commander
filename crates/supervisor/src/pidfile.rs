@@ -153,10 +153,21 @@ mod tests {
     #[test]
     fn read_pidfile_raw_returns_dead_pid_contents() {
         let dir = std::env::temp_dir().join(format!("tc-raw-{}", std::process::id()));
-        let rec = RunningDaemon { pid: 999_999_999, version: "0.1.0".into(), endpoint: "x".into() };
+        let rec = RunningDaemon {
+            pid: 999_999_999,
+            version: "0.1.0".into(),
+            endpoint: "x".into(),
+        };
         write_pidfile(&dir, &rec).unwrap();
-        assert!(read_pidfile(&dir).is_none(), "read_pidfile still hides dead pids");
-        assert_eq!(read_pidfile_raw(&dir), Some(rec), "raw must return contents regardless of liveness");
+        assert!(
+            read_pidfile(&dir).is_none(),
+            "read_pidfile still hides dead pids"
+        );
+        assert_eq!(
+            read_pidfile_raw(&dir),
+            Some(rec),
+            "raw must return contents regardless of liveness"
+        );
         remove_pidfile(&dir);
         let _ = std::fs::remove_dir_all(&dir);
     }

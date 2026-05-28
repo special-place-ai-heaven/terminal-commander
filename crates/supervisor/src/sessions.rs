@@ -71,22 +71,41 @@ pub fn cleanup_stale(state_dir: &Path, classified_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pidfile::{write_pidfile, RunningDaemon};
+    use crate::pidfile::{RunningDaemon, write_pidfile};
 
     fn tmp() -> PathBuf {
         std::env::temp_dir().join(format!(
             "tc-sessions-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ))
     }
 
     #[test]
     fn enumerate_finds_default_and_seeded_with_stale_classification() {
         let base = tmp();
-        write_pidfile(&base, &RunningDaemon { pid: 999_999_999, version: "0.1.0".into(), endpoint: "base.sock".into() }).unwrap();
+        write_pidfile(
+            &base,
+            &RunningDaemon {
+                pid: 999_999_999,
+                version: "0.1.0".into(),
+                endpoint: "base.sock".into(),
+            },
+        )
+        .unwrap();
         let seeded = base.join("agent-1");
-        write_pidfile(&seeded, &RunningDaemon { pid: std::process::id(), version: "0.1.1".into(), endpoint: "agent.sock".into() }).unwrap();
+        write_pidfile(
+            &seeded,
+            &RunningDaemon {
+                pid: std::process::id(),
+                version: "0.1.1".into(),
+                endpoint: "agent.sock".into(),
+            },
+        )
+        .unwrap();
 
         let mut got = enumerate(&base);
         got.sort_by(|a, b| a.label.cmp(&b.label));
@@ -103,15 +122,40 @@ mod tests {
     #[test]
     fn cleanup_stale_removes_only_matching_dead_pid() {
         let base = tmp();
-        write_pidfile(&base, &RunningDaemon { pid: 999_999_999, version: "0".into(), endpoint: "x".into() }).unwrap();
+        write_pidfile(
+            &base,
+            &RunningDaemon {
+                pid: 999_999_999,
+                version: "0".into(),
+                endpoint: "x".into(),
+            },
+        )
+        .unwrap();
         // Stale (dead pid) -> removed.
-        assert!(cleanup_stale(&base, 999_999_999), "matching dead pid must be cleaned");
+        assert!(
+            cleanup_stale(&base, 999_999_999),
+            "matching dead pid must be cleaned"
+        );
         assert!(read_pidfile_raw(&base).is_none(), "pidfile must be gone");
 
         // Race guard: pidfile now names a DIFFERENT pid than the one we classified.
-        write_pidfile(&base, &RunningDaemon { pid: std::process::id(), version: "0".into(), endpoint: "x".into() }).unwrap();
-        assert!(!cleanup_stale(&base, 999_999_999), "must NOT delete when current pid differs from classified");
-        assert!(read_pidfile_raw(&base).is_some(), "live pidfile must survive");
+        write_pidfile(
+            &base,
+            &RunningDaemon {
+                pid: std::process::id(),
+                version: "0".into(),
+                endpoint: "x".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            !cleanup_stale(&base, 999_999_999),
+            "must NOT delete when current pid differs from classified"
+        );
+        assert!(
+            read_pidfile_raw(&base).is_some(),
+            "live pidfile must survive"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

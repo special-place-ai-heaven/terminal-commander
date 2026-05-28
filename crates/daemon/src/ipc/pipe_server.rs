@@ -69,11 +69,7 @@ fn format_os_error_code(err: &io::Error) -> String {
 
 /// Log a pipe-create failure and decide whether the accept loop should stop.
 #[cfg(windows)]
-fn log_pipe_create_failure(
-    err: &io::Error,
-    first_instance: bool,
-    transient_failures: u32,
-) -> bool {
+fn log_pipe_create_failure(err: &io::Error, first_instance: bool, transient_failures: u32) -> bool {
     let os = format_os_error_code(err);
     if classify_pipe_create_error(err, first_instance) == PipeCreateErrorClass::Fatal {
         eprintln!(
@@ -210,9 +206,7 @@ async fn accept_loop(
                 }
                 #[cfg(not(windows))]
                 {
-                    eprintln!(
-                        "terminal-commanderd: pipe create error: {e}; stopping accept loop"
-                    );
+                    eprintln!("terminal-commanderd: pipe create error: {e}; stopping accept loop");
                     break;
                 }
             }

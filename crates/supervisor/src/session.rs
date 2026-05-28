@@ -80,26 +80,38 @@ mod tests {
 
     struct FakeEnv(HashMap<String, String>);
     impl FakeEnv {
-        fn new() -> Self { Self(HashMap::new()) }
+        fn new() -> Self {
+            Self(HashMap::new())
+        }
         fn with(mut self, k: &str, v: &str) -> Self {
             self.0.insert(k.to_owned(), v.to_owned());
             self
         }
     }
     impl EnvSource for FakeEnv {
-        fn get(&self, key: &str) -> Option<String> { self.0.get(key).cloned() }
+        fn get(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
     }
 
     #[test]
     fn tc_socket_wins_as_full_override() {
-        let env = FakeEnv::new().with("TC_SOCKET", "/custom/x.sock").with("TC_SESSION", "abc");
-        assert_eq!(resolve_session(&env), SessionEndpoint::FullOverride("/custom/x.sock".into()));
+        let env = FakeEnv::new()
+            .with("TC_SOCKET", "/custom/x.sock")
+            .with("TC_SESSION", "abc");
+        assert_eq!(
+            resolve_session(&env),
+            SessionEndpoint::FullOverride("/custom/x.sock".into())
+        );
     }
 
     #[test]
     fn tc_session_selects_token_when_no_socket() {
         let env = FakeEnv::new().with("TC_SESSION", "agent-1");
-        assert_eq!(resolve_session(&env), SessionEndpoint::Session("agent-1".to_owned()));
+        assert_eq!(
+            resolve_session(&env),
+            SessionEndpoint::Session("agent-1".to_owned())
+        );
     }
 
     #[test]
@@ -117,12 +129,25 @@ mod tests {
     #[test]
     fn malformed_session_falls_back_to_default() {
         for bad in [
-            "../evil", r"a\b", "a/b", r"\\.\pipe\x", "has space", &"x".repeat(65),
-            ".", "..", "...", "-", "_", ".-_",
+            "../evil",
+            r"a\b",
+            "a/b",
+            r"\\.\pipe\x",
+            "has space",
+            &"x".repeat(65),
+            ".",
+            "..",
+            "...",
+            "-",
+            "_",
+            ".-_",
         ] {
             let env = FakeEnv::new().with("TC_SESSION", bad);
-            assert_eq!(resolve_session(&env), SessionEndpoint::Default,
-                "malformed token {bad:?} must fall back to Default");
+            assert_eq!(
+                resolve_session(&env),
+                SessionEndpoint::Default,
+                "malformed token {bad:?} must fall back to Default"
+            );
         }
     }
 
@@ -130,8 +155,11 @@ mod tests {
     fn well_formed_session_is_accepted() {
         for ok in ["agent-1", "abc.def", "A_B-9", &"x".repeat(64)] {
             let env = FakeEnv::new().with("TC_SESSION", ok);
-            assert_eq!(resolve_session(&env), SessionEndpoint::Session(ok.to_owned()),
-                "well-formed token {ok:?} must be accepted");
+            assert_eq!(
+                resolve_session(&env),
+                SessionEndpoint::Session(ok.to_owned()),
+                "well-formed token {ok:?} must be accepted"
+            );
         }
     }
 

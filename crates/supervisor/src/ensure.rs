@@ -322,7 +322,9 @@ struct ProbeResponseEnvelope {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ProbeResult {
-    Ok { response: ProbeResponse },
+    Ok {
+        response: ProbeResponse,
+    },
     // Any non-ok envelope (e.g. an `err` reply) is not a daemon we can
     // treat as ready; serde maps unknown/other kinds to a decode error,
     // which the caller turns into `false`.

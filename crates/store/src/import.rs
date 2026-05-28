@@ -20,12 +20,12 @@ use terminal_commander_core::{RuleDefinition, RuleType, compile_bounded_regex};
 
 use crate::{EventStore, EventStoreError, Result};
 
+pub use terminal_commander_core::REGEX_DFA_SIZE_LIMIT as RULE_PACK_DFA_SIZE_LIMIT;
 /// Hard cap on a regex pattern's compiled state machine size.
 ///
 /// Re-exported from [`terminal_commander_core`] so the rule-pack import path,
 /// rule validation, and the sifter runtime all share one canonical bound.
 pub use terminal_commander_core::REGEX_SIZE_LIMIT as RULE_PACK_REGEX_SIZE_LIMIT;
-pub use terminal_commander_core::REGEX_DFA_SIZE_LIMIT as RULE_PACK_DFA_SIZE_LIMIT;
 
 /// JSON shape of a rule pack file. Mirrors the TC14 seed packs in
 /// `/rules/*.json`.

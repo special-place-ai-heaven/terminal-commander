@@ -2,7 +2,7 @@
 //! probe_endpoint must require a well-formed Health response, not just a
 //! connectable socket — a non-daemon listener is NOT "our daemon".
 
-use terminal_commander_supervisor::ensure::{probe_endpoint, Endpoint};
+use terminal_commander_supervisor::ensure::{Endpoint, probe_endpoint};
 
 #[tokio::test]
 async fn connectable_non_daemon_socket_is_not_our_daemon() {
