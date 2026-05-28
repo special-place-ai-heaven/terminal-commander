@@ -117,3 +117,45 @@ fn trigger_shutdown_is_observed_by_a_late_awaiter() {
         cleanup(&data);
     });
 }
+
+#[test]
+fn daemon_self_reaps_after_idle_ttl_via_trigger_shutdown() {
+    // We do NOT run the full `run_ipc_server` here; in-process tests don't
+    // exercise the runtime's select! (that's the binary). Instead we assert
+    // the building block: an idle-timer task observes idle_secs >= ttl and
+    // calls trigger_shutdown, which the late-awaiter-safe shutdown_notified
+    // resolves on.
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("self-reap");
+        let (state, _handle) = build_server(&data);
+
+        // Spawn the idle-timer task exactly as run_ipc_server will, with a
+        // 1-second ttl. The task ticks fast enough that this completes within
+        // a few seconds even on a loaded WSL host.
+        let ttl: u64 = 1;
+        // Equivalent to `max(1, min(60, ttl/2)).max(1)`; clippy prefers
+        // clamp. Production wiring uses the same formula in
+        // `runtime::spawn_idle_reaper`.
+        let tick = (ttl / 2).clamp(1, 60);
+        let st = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_secs(tick));
+            iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                iv.tick().await;
+                if st.idle_secs() >= ttl {
+                    st.trigger_shutdown();
+                    break;
+                }
+            }
+        });
+
+        // No IPC at all -> idle grows -> within a few seconds trigger fires ->
+        // shutdown_notified resolves.
+        tokio::time::timeout(std::time::Duration::from_secs(6), state.shutdown_notified())
+            .await
+            .expect("idle timer did not trigger shutdown within 6s (ttl=1s)");
+        cleanup(&data);
+    });
+}

@@ -243,6 +243,7 @@ fn resolve_config(cli: &Cli) -> Result<DaemonConfig, ExitCode> {
         DaemonConfig::defaults_in(terminal_commanderd::config::default_state_dir())
     };
     apply_socket_env_override(&mut cfg);
+    apply_idle_ttl_env_override(&mut cfg);
     Ok(cfg)
 }
 
@@ -252,5 +253,99 @@ fn apply_socket_env_override(cfg: &mut DaemonConfig) {
         && !socket.is_empty()
     {
         cfg.daemon.socket_path = Some(PathBuf::from(socket));
+    }
+}
+
+/// Operator may set `TC_IDLE_TTL_SECS` to override the idle self-reap TTL
+/// without editing the config file. `0` disables the idle-timer entirely.
+/// On parse failure we warn and keep the existing value (mirrors how other
+/// `TC_*` env handling fails open).
+fn apply_idle_ttl_env_override(cfg: &mut DaemonConfig) {
+    if let Ok(raw) = std::env::var("TC_IDLE_TTL_SECS")
+        && !raw.is_empty()
+    {
+        match raw.parse::<u64>() {
+            Ok(v) => cfg.daemon.idle_ttl_secs = v,
+            Err(e) => eprintln!(
+                "terminal-commanderd: ignoring invalid TC_IDLE_TTL_SECS={raw:?}: {e} \
+                 (keeping idle_ttl_secs={})",
+                cfg.daemon.idle_ttl_secs
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use terminal_commanderd::config::DEFAULT_IDLE_TTL_SECS;
+
+    // Env-var tests must serialize: cargo runs tests in parallel by
+    // default and process-global env can race otherwise.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn cfg_with_default_idle() -> DaemonConfig {
+        DaemonConfig::defaults_in(std::env::temp_dir().join("tc-idle-env-test"))
+    }
+
+    #[test]
+    fn idle_ttl_env_zero_disables_timer() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: serialized by ENV_LOCK above; tests in this module are the
+        // only writers of TC_IDLE_TTL_SECS.
+        unsafe {
+            std::env::set_var("TC_IDLE_TTL_SECS", "0");
+        }
+        let mut cfg = cfg_with_default_idle();
+        assert_eq!(cfg.daemon.idle_ttl_secs, DEFAULT_IDLE_TTL_SECS);
+        apply_idle_ttl_env_override(&mut cfg);
+        assert_eq!(cfg.daemon.idle_ttl_secs, 0, "TC_IDLE_TTL_SECS=0 must disable");
+        unsafe {
+            std::env::remove_var("TC_IDLE_TTL_SECS");
+        }
+    }
+
+    #[test]
+    fn idle_ttl_env_valid_override() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe {
+            std::env::set_var("TC_IDLE_TTL_SECS", "42");
+        }
+        let mut cfg = cfg_with_default_idle();
+        apply_idle_ttl_env_override(&mut cfg);
+        assert_eq!(cfg.daemon.idle_ttl_secs, 42);
+        unsafe {
+            std::env::remove_var("TC_IDLE_TTL_SECS");
+        }
+    }
+
+    #[test]
+    fn idle_ttl_env_invalid_keeps_existing_value() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe {
+            std::env::set_var("TC_IDLE_TTL_SECS", "not-a-number");
+        }
+        let mut cfg = cfg_with_default_idle();
+        let before = cfg.daemon.idle_ttl_secs;
+        apply_idle_ttl_env_override(&mut cfg);
+        assert_eq!(
+            cfg.daemon.idle_ttl_secs, before,
+            "invalid TC_IDLE_TTL_SECS must keep the existing value"
+        );
+        unsafe {
+            std::env::remove_var("TC_IDLE_TTL_SECS");
+        }
+    }
+
+    #[test]
+    fn idle_ttl_env_unset_is_a_noop() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe {
+            std::env::remove_var("TC_IDLE_TTL_SECS");
+        }
+        let mut cfg = cfg_with_default_idle();
+        let before = cfg.daemon.idle_ttl_secs;
+        apply_idle_ttl_env_override(&mut cfg);
+        assert_eq!(cfg.daemon.idle_ttl_secs, before);
     }
 }

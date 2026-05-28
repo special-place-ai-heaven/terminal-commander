@@ -55,6 +55,10 @@ pub const DEFAULT_READ_LIMIT: usize = 200;
 /// not yet evict old audit rows.
 pub const DEFAULT_AUDIT_RETENTION_DAYS: u32 = 30;
 
+/// Default idle TTL in seconds before the daemon self-reaps via
+/// `trigger_shutdown`. `0` disables the idle-timer entirely.
+pub const DEFAULT_IDLE_TTL_SECS: u64 = 1800;
+
 /// Closed set of runtime modes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,6 +109,15 @@ pub struct DaemonSection {
     /// Runtime mode. Defaults to `self_check`.
     #[serde(default)]
     pub runtime_mode: RuntimeMode,
+    /// Idle TTL (seconds) before the daemon self-reaps by calling
+    /// `trigger_shutdown`. `0` disables the idle-timer entirely.
+    /// May be overridden at runtime via the `TC_IDLE_TTL_SECS` env var.
+    #[serde(default = "default_idle_ttl_secs")]
+    pub idle_ttl_secs: u64,
+}
+
+const fn default_idle_ttl_secs() -> u64 {
+    DEFAULT_IDLE_TTL_SECS
 }
 
 /// `[policy]` section.
@@ -210,6 +223,7 @@ impl DaemonConfig {
                 data_dir: data_dir.into(),
                 socket_path: None,
                 runtime_mode: RuntimeMode::default(),
+                idle_ttl_secs: DEFAULT_IDLE_TTL_SECS,
             },
             policy: PolicySection {
                 profile: PolicyProfile::default(),

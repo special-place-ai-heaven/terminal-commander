@@ -250,6 +250,12 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
          Send SIGINT (Ctrl-C) or SIGTERM (or a `Shutdown` IPC request) to shut down."
     );
 
+    // F1 idle self-reap: if configured, spawn a background timer that fires
+    // `trigger_shutdown` once the daemon has been idle (no real IPC) for at
+    // least `idle_ttl_secs`. The select! below picks it up via
+    // `state.shutdown_notified()` and drains cleanly. ttl=0 disables.
+    spawn_idle_reaper(&state);
+
     // Two shutdown sources: an OS signal (SIGINT/SIGTERM) or an
     // internal `Shutdown` IPC request that flipped the state trigger.
     // Whichever fires first wins; the other branch is dropped.
@@ -283,7 +289,8 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
 
     let pipe_name = state.config.pipe_name();
     tracing::info!("binding named pipe at {pipe_name}");
-    let server = PipeServer::new(Arc::new(state), pipe_name.clone());
+    let state = Arc::new(state);
+    let server = PipeServer::new(Arc::clone(&state), pipe_name.clone());
     let handle = server
         .spawn()
         .map_err(|e| RuntimeError::Signal(format!("pipe bind: {e}")))?;
@@ -293,12 +300,58 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
          Send Ctrl-C to shut down."
     );
 
+    // F1 idle self-reap: see the Unix branch for rationale. ttl=0 disables.
+    spawn_idle_reaper(&state);
+
     wait_for_shutdown_signal_windows().await?;
     tracing::info!("shutdown signal received, draining...");
     handle.shutdown().await;
     terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
     tracing::info!("IPC server exited cleanly.");
     Ok(())
+}
+
+/// Spawn the idle self-reap timer (F1).
+///
+/// Reads `state.config.daemon.idle_ttl_secs`. If `> 0`, spawns a background
+/// task that ticks on a small interval and calls
+/// [`DaemonState::trigger_shutdown`] once `state.idle_secs() >= ttl`. The
+/// task exits after firing (the `select!` in `run_ipc_server` picks the
+/// shutdown up via `state.shutdown_notified()`). `0` disables.
+///
+/// The tick interval is `max(1, min(60, ttl/2))` seconds so a tiny TTL
+/// (e.g. `1`) is still observable in tests, while a large TTL (e.g. the
+/// default 1800) doesn't busy-poll.
+fn spawn_idle_reaper(state: &Arc<crate::state::DaemonState>) {
+    let ttl = state.config.daemon.idle_ttl_secs;
+    if ttl == 0 {
+        tracing::info!("idle self-reap disabled (idle_ttl_secs=0)");
+        return;
+    }
+    // u64/2 can't overflow; the explicit clamp keeps the tick in [1, 60]
+    // so a small ttl is still observable in tests and a large ttl doesn't
+    // busy-poll. `(ttl / 2).clamp(1, 60)` is equivalent to the original
+    // `max(1, min(60, ttl/2)).max(1)` because 1 <= 60.
+    let tick = (ttl / 2).clamp(1, 60);
+    tracing::info!(
+        "idle self-reap enabled: idle_ttl_secs={ttl} tick={tick}s"
+    );
+    let st = Arc::clone(state);
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(std::time::Duration::from_secs(tick));
+        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            iv.tick().await;
+            if st.idle_secs() >= ttl {
+                tracing::info!(
+                    "idle TTL exceeded (idle_secs={}, ttl={ttl}); triggering shutdown",
+                    st.idle_secs()
+                );
+                st.trigger_shutdown();
+                break;
+            }
+        }
+    });
 }
 
 /// Write the daemon pidfile (pid + version + endpoint) so a newer
