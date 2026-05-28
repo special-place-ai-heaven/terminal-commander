@@ -299,6 +299,7 @@ fn pty_write_stdin_unknown_job_returns_typed_error() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // cohesive end-to-end secret-prompt flow; the M2 poll added lines
 fn pty_write_stdin_denied_during_secret_prompt() {
     if !python3_available() {
         eprintln!("skipping: python3 not on PATH");
@@ -368,12 +369,11 @@ time.sleep(2)
             if flagged {
                 break;
             }
-            if std::time::Instant::now() >= deadline {
-                panic!(
-                    "secret prompt never flagged active within deadline; entries: {:?}",
-                    listed.entries
-                );
-            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "secret prompt never flagged active within deadline; entries: {:?}",
+                listed.entries
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 

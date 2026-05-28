@@ -114,16 +114,16 @@ fn command_start_combed_happy_path_returns_bounded_ids_and_audits_through_ipc() 
 
         // M2: poll the audit log until both expected rows appear (or a generous
         // deadline), instead of a fixed sleep that races slow job exit under load.
-        let read_rows = || {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
         fn has_both(rows: &[terminal_commander_store::AuditRow]) -> bool {
             rows.iter().any(|r| r.action == "ipc_command_start_combed")
                 && rows
                     .iter()
                     .any(|r| r.action == "command_start" && r.decision == "allow")
         }
+        let read_rows = || {
+            let mut g = state.store.lock();
+            g.audit_since(&AuditReadRequest::new(0)).unwrap()
+        };
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut rows = read_rows();
         while !has_both(&rows) && std::time::Instant::now() < deadline {
