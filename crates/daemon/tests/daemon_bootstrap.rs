@@ -75,10 +75,8 @@ fn run_self_check_lands_self_check_row_in_persistent_store() {
     let (state, rep) = run_self_check(cfg).unwrap();
     assert_eq!(rep.failures, 0, "self-check failures: {}", rep.render());
 
-    let mut g = state.store.lock();
-    let rows = g.audit_since(&AuditReadRequest::new(0)).unwrap();
+    let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
     assert!(rows.iter().any(|r| r.action == "self_check"));
-    drop(g);
 
     cleanup(&data);
 }

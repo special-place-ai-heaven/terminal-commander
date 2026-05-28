@@ -213,10 +213,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
 
         // Two `command_sifter_rebind` audit rows must land — one
         // per running job.
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         let rebind_rows: Vec<_> = rows
             .iter()
             .filter(|r| r.action == "command_sifter_rebind")
@@ -239,10 +236,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
             )
             .await
             .expect("deactivate");
-        let rows2 = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows2 = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         let rebind_rows2: Vec<_> = rows2
             .iter()
             .filter(|r| r.action == "command_sifter_rebind")

@@ -71,10 +71,7 @@ fn system_discover_round_trip() {
             other => panic!("unexpected response: {other:?}"),
         }
         // Audit row should have landed.
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(rows.iter().any(|r| r.action == "ipc_system_discover"));
         handle.shutdown().await;
         cleanup(&data);
@@ -117,10 +114,7 @@ fn health_returns_idle_secs_and_does_not_bump_or_audit() {
         // Health is a peek: it must NOT write a persistent audit row.
         // emit_audit prefixes the method, so a health row would be
         // recorded as "ipc_health".
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
             !rows.iter().any(|r| r.action == "ipc_health"),
             "Health is a peek: it must NOT write an audit row; got {rows:?}"
@@ -245,10 +239,7 @@ fn peer_credentials_recorded_in_audit_metadata() {
         // audit-free peek, so it writes no audit row. Any audited
         // method carries the same peer metadata we assert on.
         let _ = client.call(5, IpcRequest::SystemDiscover).await.unwrap();
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         let row = rows
             .iter()
             .find(|r| r.action == "ipc_system_discover")

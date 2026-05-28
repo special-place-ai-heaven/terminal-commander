@@ -24,10 +24,9 @@
 //! [`EventStoreError::InvalidPayload`] with the closed-channel
 //! message.
 //!
-//! ## Scope (Story 1)
-//! Skeleton + unit tests only. No production callers yet — the field
-//! type on [`crate::state::DaemonState`] still holds the old
-//! `Arc<Mutex<EventStore>>`. Stories S2-S5 wire callers.
+//! Production callers: [`crate::state::DaemonState::store`],
+//! [`crate::audit::PersistentAudit`], IPC registry handlers, and
+//! [`crate::runtime::run_ipc_server`] shutdown (WAL checkpoint).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -210,6 +209,155 @@ impl StoreClient {
         })?;
         Ok(())
     }
+
+    /// Apply the registry migration eagerly (idempotent).
+    pub fn ensure_registry(&self) -> Result<(), EventStoreError> {
+        match self.call(StoreOp::EnsureRegistry)? {
+            StoreReply::Unit => Ok(()),
+            other => Err(unexpected_store_reply("EnsureRegistry", &other)),
+        }
+    }
+
+    /// Count persisted audit rows.
+    pub fn audit_count(&self) -> Result<u64, EventStoreError> {
+        match self.call(StoreOp::AuditCount)? {
+            StoreReply::AuditCount(n) => Ok(n),
+            other => Err(unexpected_store_reply("AuditCount", &other)),
+        }
+    }
+
+    /// Read audit rows since `request.cursor`.
+    pub fn audit_since(
+        &self,
+        request: &AuditReadRequest,
+    ) -> Result<Vec<AuditRow>, EventStoreError> {
+        match self.call(StoreOp::AuditSince {
+            request: request.clone(),
+        })? {
+            StoreReply::AuditRows(rows) => Ok(rows),
+            other => Err(unexpected_store_reply("AuditSince", &other)),
+        }
+    }
+
+    /// Active rule definitions with activation scope.
+    pub fn list_active_rule_defs_scoped(&self) -> Result<Vec<ActiveRuleDef>, EventStoreError> {
+        match self.call(StoreOp::ListActiveRuleDefsScoped)? {
+            StoreReply::ActiveRuleDefs(defs) => Ok(defs),
+            other => Err(unexpected_store_reply("ListActiveRuleDefsScoped", &other)),
+        }
+    }
+
+    /// Full-text rule search.
+    pub fn search_rules(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<RuleSearchHit>, EventStoreError> {
+        match self.call(StoreOp::SearchRules {
+            query: query.to_owned(),
+            limit,
+        })? {
+            StoreReply::RuleSearchHits(hits) => Ok(hits),
+            other => Err(unexpected_store_reply("SearchRules", &other)),
+        }
+    }
+
+    /// Fetch a specific rule version.
+    pub fn get_rule_version(
+        &self,
+        rule_id: &str,
+        version: u32,
+    ) -> Result<Option<RuleDefinition>, EventStoreError> {
+        match self.call(StoreOp::GetRuleVersion {
+            rule_id: rule_id.to_owned(),
+            version,
+        })? {
+            StoreReply::OptionalRuleDef(def) => Ok(def),
+            other => Err(unexpected_store_reply("GetRuleVersion", &other)),
+        }
+    }
+
+    /// Fetch the latest rule version.
+    pub fn get_latest_rule(&self, rule_id: &str) -> Result<Option<RuleDefinition>, EventStoreError> {
+        match self.call(StoreOp::GetLatestRule {
+            rule_id: rule_id.to_owned(),
+        })? {
+            StoreReply::OptionalRuleDef(def) => Ok(def),
+            other => Err(unexpected_store_reply("GetLatestRule", &other)),
+        }
+    }
+
+    /// Persist a new rule version.
+    pub fn create_rule_version(
+        &self,
+        definition: &RuleDefinition,
+    ) -> Result<u32, EventStoreError> {
+        match self.call(StoreOp::CreateRuleVersion {
+            definition: definition.clone(),
+        })? {
+            StoreReply::Version(v) => Ok(v),
+            other => Err(unexpected_store_reply("CreateRuleVersion", &other)),
+        }
+    }
+
+    /// Record a scoped activation row.
+    pub fn record_activation_scoped(
+        &self,
+        rule_id: &str,
+        version: u32,
+        scope: ActivationScope,
+        profile: Option<&str>,
+        actor: Option<&str>,
+    ) -> Result<(), EventStoreError> {
+        match self.call(StoreOp::RecordActivationScoped {
+            rule_id: rule_id.to_owned(),
+            version,
+            scope,
+            profile: profile.map(str::to_owned),
+            actor: actor.map(str::to_owned),
+        })? {
+            StoreReply::Unit => Ok(()),
+            other => Err(unexpected_store_reply("RecordActivationScoped", &other)),
+        }
+    }
+
+    /// Import a named rule pack.
+    pub fn import_rule_pack_by_name(
+        &self,
+        pack: &str,
+        activate: bool,
+    ) -> Result<ImportResult, EventStoreError> {
+        match self.call(StoreOp::ImportRulePackByName {
+            name: pack.to_owned(),
+            promote_active: activate,
+        })? {
+            StoreReply::Import(result) => Ok(result),
+            other => Err(unexpected_store_reply("ImportRulePackByName", &other)),
+        }
+    }
+
+    /// Deactivate a scoped rule; returns whether a row changed.
+    pub fn deactivate_rule_scoped(
+        &self,
+        rule_id: &str,
+        version: u32,
+        scope: ActivationScope,
+    ) -> Result<bool, EventStoreError> {
+        match self.call(StoreOp::DeactivateRuleScoped {
+            rule_id: rule_id.to_owned(),
+            version,
+            scope,
+        })? {
+            StoreReply::Bool(changed) => Ok(changed),
+            other => Err(unexpected_store_reply("DeactivateRuleScoped", &other)),
+        }
+    }
+}
+
+fn unexpected_store_reply(op: &str, reply: &StoreReply) -> EventStoreError {
+    EventStoreError::InvalidPayload(format!(
+        "store actor {op}: unexpected reply variant {reply:?}"
+    ))
 }
 
 /// Owner of the `EventStore`. Runs on a dedicated OS thread.

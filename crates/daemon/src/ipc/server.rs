@@ -703,12 +703,10 @@ fn handle_self_check(state: &Arc<DaemonState>) -> IpcResponse {
         format!("policy_profile: {:?}", state.policy.profile),
         format!("audit: persistent (TC35)"),
     ];
-    let mut g = state.store.lock();
-    match g.audit_count() {
+    match state.store.audit_count() {
         Ok(n) => lines.push(format!("audit_count: {n}")),
         Err(e) => lines.push(format!("audit_count: error: {e}")),
     }
-    drop(g);
     IpcResponse::SelfCheck(SelfCheckResponse {
         report: lines.join("\n"),
         failures: 0,
@@ -1071,11 +1069,10 @@ fn handle_registry_search(
     let limit = params
         .limit
         .map(|n| n.min(crate::ipc::protocol::MAX_REGISTRY_SEARCH_LIMIT));
-    let g = state.store.lock();
-    let hits = g
+    let hits = state
+        .store
         .search_rules(&params.query, limit)
         .map_err(map_store_error)?;
-    drop(g);
     let projected: Vec<RegistrySearchHit> = hits
         .into_iter()
         .map(|h| RegistrySearchHit {
@@ -1098,12 +1095,16 @@ fn lookup_rule_def(
     rule_id: &str,
     version: Option<u32>,
 ) -> Result<terminal_commander_core::RuleDefinition, IpcError> {
-    let g = state.store.lock();
     let opt = match version {
-        Some(v) => g.get_rule_version(rule_id, v).map_err(map_store_error)?,
-        None => g.get_latest_rule(rule_id).map_err(map_store_error)?,
+        Some(v) => state
+            .store
+            .get_rule_version(rule_id, v)
+            .map_err(map_store_error)?,
+        None => state
+            .store
+            .get_latest_rule(rule_id)
+            .map_err(map_store_error)?,
     };
-    drop(g);
     opt.ok_or_else(|| {
         let message = version.map_or_else(
             || format!("rule '{rule_id}' not found"),
@@ -1133,11 +1134,10 @@ fn handle_registry_upsert(
         .definition
         .validate()
         .map_err(|e| IpcError::new(IpcErrorCode::RuleInvalid, e.to_string()))?;
-    let mut g = state.store.lock();
-    let version = g
+    let version = state
+        .store
         .create_rule_version(&params.definition)
         .map_err(map_store_error)?;
-    drop(g);
     Ok(IpcResponse::RegistryUpsert(RegistryUpsertResponse {
         rule_id: params.definition.id.clone(),
         version,
@@ -1256,10 +1256,10 @@ fn handle_registry_activate(
     // Persistent activation row for the audit trail and restart
     // recovery.
     let profile = format!("{:?}", state.policy.profile);
-    let mut g = state.store.lock();
-    g.record_activation_scoped(&def.id, version, scope, Some(&profile), Some("ipc"))
+    state
+        .store
+        .record_activation_scoped(&def.id, version, scope, Some(&profile), Some("ipc"))
         .map_err(map_store_error)?;
-    drop(g);
     // TC42c: push the new rule set into every already-running
     // command's sifter that the scope matches. Global scope rebinds
     // every live job (TC42b behavior preserved). Scoped activations
@@ -1299,11 +1299,10 @@ fn handle_registry_import_pack(
     }
     // Import the pack (promote rules to Active iff we will activate
     // them, so the activation eligibility gate below passes honestly).
-    let import = {
-        let mut g = state.store.lock();
-        g.import_rule_pack_by_name(&params.pack, params.activate)
-            .map_err(map_store_error)?
-    };
+    let import = state
+        .store
+        .import_rule_pack_by_name(&params.pack, params.activate)
+        .map_err(map_store_error)?;
     let mut activated = Vec::new();
     if params.activate {
         // Reuse the canonical activate path per rule (no fourth copy):
@@ -1345,11 +1344,10 @@ fn handle_registry_deactivate(
     let was_in_memory = state
         .activation
         .deactivate(&params.rule_id, params.version, scope);
-    let mut g = state.store.lock();
-    let was_persisted = g
+    let was_persisted = state
+        .store
         .deactivate_rule_scoped(&params.rule_id, params.version, scope)
         .map_err(map_store_error)?;
-    drop(g);
     // TC42c: rebind every running command the scope matches so
     // future frames stop matching against the deactivated rule.
     // In-flight frames finish against the snapshot they captured
