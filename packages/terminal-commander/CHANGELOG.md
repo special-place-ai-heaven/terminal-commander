@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.26](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.25...v0.1.26) (2026-05-28)
+
+
+### Features
+
+* **harness:** mint and export per-harness TC_SESSION (F1 wiring phase 1) ([ee8614f](https://github.com/special-place-ai-heaven/terminal-commander/commit/ee8614feeaf8b5d540d11eaee18539f31c813e41))
+* **harness:** mirror 'default' token reservation in JS validator ([6a6ee9f](https://github.com/special-place-ai-heaven/terminal-commander/commit/6a6ee9fac8790fcc178f81f1540b76510a2827bd))
+* release Rust crate changes ([6178805](https://github.com/special-place-ai-heaven/terminal-commander/commit/617880510dcd8a3b2b64e9759695341d1be3b0c0))
+* **wsl:** forward TC_SESSION across the WSL bridge via WSLENV (F1 phase 2) ([f5da5c4](https://github.com/special-place-ai-heaven/terminal-commander/commit/f5da5c4cdc2a2758fe21b5ba792b8decbcb1424b))
+* **wsl:** rebuild WSLENV from TC-only allowlist (drop ambient; closes WSL_SUDO_CREDENTIAL leak) ([802982c](https://github.com/special-place-ai-heaven/terminal-commander/commit/802982c5ed7322fccf34e0b10fbb57dc9951492e))
+
+
+### Bug Fixes
+
+* address two-reviewer code-review findings (codex + senior reviewer) ([a46629f](https://github.com/special-place-ai-heaven/terminal-commander/commit/a46629ffc97f944c5b890521a7172b2192aa501d))
+* tighten error/diagnostic correctness (M4 M5 M6 M7) ([fc0d38a](https://github.com/special-place-ai-heaven/terminal-commander/commit/fc0d38a19ef0530dc678c48bfac038cd45cd009a))
+
 ## [0.1.25](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.24...v0.1.25) (2026-05-27)
 
 
