@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.28](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.27...v0.1.28) (2026-05-28)
+
+
+### Bug Fixes
+
+* release Rust crate changes ([4665ac2](https://github.com/special-place-ai-heaven/terminal-commander/commit/4665ac2ca6ba303af82a1e70d6a781adcf2386c4))
+* **update:** widen preflight scope to the whole npm package dir ([984fcb3](https://github.com/special-place-ai-heaven/terminal-commander/commit/984fcb303f2106c049fbf945783f3f4c0018cb6b))
+
 ## [0.1.27](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.26...v0.1.27) (2026-05-28)
 
 
