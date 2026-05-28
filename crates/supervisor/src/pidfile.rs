@@ -52,6 +52,15 @@ pub fn read_pidfile(state_dir: &Path) -> Option<RunningDaemon> {
     if pid_alive(rec.pid) { Some(rec) } else { None }
 }
 
+/// Read + parse the pidfile WITHOUT the liveness filter. Returns the recorded
+/// `RunningDaemon` even when its pid is dead, so enumeration can classify stale
+/// entries. Returns `None` only when the file is absent or unparseable.
+#[must_use]
+pub fn read_pidfile_raw(state_dir: &Path) -> Option<RunningDaemon> {
+    let bytes = std::fs::read(pidfile_path(state_dir)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 /// Cross-platform "is this pid alive" check. Uses OS tools rather than
 /// a libc dependency so the supervisor crate stays dep-light and the
 /// same code path works on Windows and Unix.
@@ -138,6 +147,17 @@ mod tests {
         assert_eq!(got, rec);
         remove_pidfile(&dir);
         assert!(read_pidfile(&dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_pidfile_raw_returns_dead_pid_contents() {
+        let dir = std::env::temp_dir().join(format!("tc-raw-{}", std::process::id()));
+        let rec = RunningDaemon { pid: 999_999_999, version: "0.1.0".into(), endpoint: "x".into() };
+        write_pidfile(&dir, &rec).unwrap();
+        assert!(read_pidfile(&dir).is_none(), "read_pidfile still hides dead pids");
+        assert_eq!(read_pidfile_raw(&dir), Some(rec), "raw must return contents regardless of liveness");
+        remove_pidfile(&dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
