@@ -35,8 +35,10 @@ if ! git rev-parse -q --verify "refs/tags/${base_tag}" >/dev/null 2>&1; then
   exit 0
 fi
 
-# Releasable crate commits in (base_tag, HEAD]: conventional type feat/fix
+# Releasable crate commits in (base_tag, HEAD]: conventional type feat/fix/perf
 # or breaking (! or BREAKING CHANGE). Subject form: "type(scope)!: ...".
+# perf is treated as patch-level (same sentinel commit type as fix) because
+# release-please does not bump on perf: alone for packages/** attribution.
 mapfile -t crate_shas < <(git log --format='%H' "${base_tag}..HEAD" -- crates)
 if [ "${#crate_shas[@]}" -eq 0 ]; then
   echo "[synth] no crate commits since ${base_tag}. Skipping."
@@ -55,7 +57,7 @@ while IFS= read -r subject; do
   esac
   base_type="${type_tok%%(*}"; base_type="${base_type%%!*}"
   if [ "$base_type" = "feat" ] && [ "$strongest" != "breaking" ]; then strongest="feat";
-  elif [ "$base_type" = "fix" ] && [ -z "$strongest" ]; then strongest="fix";
+  elif { [ "$base_type" = "fix" ] || [ "$base_type" = "perf" ]; } && [ -z "$strongest" ]; then strongest="fix";
   fi
 done < <(git log --format='%s' "${base_tag}..HEAD" -- crates)
 # Body-level BREAKING CHANGE detection (newline-safe: grep over full log).
