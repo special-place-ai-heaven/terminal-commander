@@ -25,6 +25,10 @@ pub enum SessionEndpoint {
     Default,
 }
 
+/// Reserved session labels that must never be a token (they collide with the
+/// session-supervisor's display/selector labels).
+const RESERVED_SESSION_TOKENS: &[&str] = &["default"];
+
 /// True iff `token` is a safe session id.
 ///
 /// Allows `[A-Za-z0-9._-]`, length 1..=64, and requires at least one
@@ -34,10 +38,18 @@ pub enum SessionEndpoint {
 /// (`base.join(".")` == `base` on unix).
 #[must_use]
 pub fn is_valid_session_token(token: &str) -> bool {
+    if RESERVED_SESSION_TOKENS
+        .iter()
+        .any(|r| token.eq_ignore_ascii_case(r))
+    {
+        return false;
+    }
     !token.is_empty()
         && token.len() <= MAX_SESSION_TOKEN_LEN
         && token.chars().any(|c| c.is_ascii_alphanumeric())
-        && token.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Resolve session intent from the environment.
@@ -121,5 +133,23 @@ mod tests {
             assert_eq!(resolve_session(&env), SessionEndpoint::Session(ok.to_owned()),
                 "well-formed token {ok:?} must be accepted");
         }
+    }
+
+    #[test]
+    fn default_is_reserved_and_rejected() {
+        for reserved in ["default", "Default", "DEFAULT", "deFAULT"] {
+            assert!(
+                !is_valid_session_token(reserved),
+                "{reserved:?} must be reserved (collides with the default session label)"
+            );
+            let env = FakeEnv::new().with("TC_SESSION", reserved);
+            assert_eq!(
+                resolve_session(&env),
+                SessionEndpoint::Default,
+                "reserved token {reserved:?} must soft-fail to the per-user default"
+            );
+        }
+        assert!(is_valid_session_token("default-1"));
+        assert!(is_valid_session_token("my-default"));
     }
 }
