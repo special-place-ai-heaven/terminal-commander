@@ -66,11 +66,20 @@ milestone (they have no home in F1's addressing-only scope):
 
 ## Consequences
 
-- "Per-session pidfiles" — listed as an F1 non-goal — is NOT new work: the
+- "Per-session pidfiles" — listed as an F1 non-goal — needs no new STORAGE: the
   version-replace pidfile is already per-session because F1 made `state_dir`
-  per-session. This milestone reads those pidfiles; it does not invent storage.
+  per-session. But the milestone DOES add new pidfile SEMANTICS (codex): a raw
+  stale-pidfile parser (`read_pidfile` hides dead pids), compare-before-delete
+  cleanup (vs blind unlink), and the explicit decision that `TC_SOCKET` daemons
+  are out of enumeration scope. "Reads existing pidfiles" is accurate; "zero new
+  work" was not.
 - Backward-compat invariants from F1 hold unchanged: unseeded default is
-  byte-identical; `TC_SOCKET > TC_SESSION > default` precedence untouched.
+  byte-identical; `TC_SOCKET > TC_SESSION > default` precedence untouched. NOTE
+  the registry model covers TC_SESSION sessions + the single default ONLY;
+  `TC_SOCKET`-tier (custom full-path) daemons keep `state_dir` at the base and
+  are deliberately OUT of `session list/reap` scope (operator-owned escape
+  hatch). The precedence is preserved; the management surface simply does not
+  claim to enumerate arbitrary custom-socket daemons.
 - Self-reap is default-on (conservative TTL), so existing single-harness installs
   gain automatic idle reclamation; power users / CI set `TC_IDLE_TTL_SECS=0` to
   opt out.

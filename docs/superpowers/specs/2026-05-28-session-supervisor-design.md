@@ -46,6 +46,39 @@ subsystem." Already shipped and reused:
 Consequence: **the filesystem of session dirs + their pidfiles IS the registry.**
 No central registry, no new persisted store, no new always-on process.
 
+## Reality corrections (post-codex-review, 2026-05-28)
+
+A codex spec-review against the actual code corrected several first-draft
+claims. The design SHAPE survives; these are the honest implementation facts the
+plan must carry (so effort is not under-estimated as "reuse"):
+
+- **`IpcRequest::Shutdown` does not exist** (`crates/daemon/src/ipc/protocol.rs`).
+  Self-reap + `session reap` need a NEW protocol variant + dispatcher arm +
+  runtime shutdown source + client method. Net-new, not reuse.
+- **`Health` returns only `uptime_secs`** (`protocol.rs`, `server.rs:~390`); it
+  does NOT carry `idle_secs`/`version`. Adding `idle_secs` is a wire-shape change
+  and the new probe MUST tolerate a daemon that returns the OLD Health shape
+  (partial-upgrade: a current daemon answering the legacy Health is still "ours"
+  — absence of `idle_secs` ⇒ treat idle as unknown, not "not our daemon").
+- **Health is NOT side-effect-free today**: every accepted IPC request emits a
+  persistent audit row (`server.rs:~553` → `audit.rs` → DB insert). The
+  "non-bumping peek" therefore must ALSO skip the audit write, not merely skip
+  `last_activity` — otherwise `session list` polling spams the audit log.
+- **Graceful drain is net-new infra**: accept loops spawn per-connection tasks
+  and do not track/join them; `shutdown()` joins only the accept loop
+  (`server.rs`, `pipe_server.rs`). Draining in-flight work requires new tracking,
+  not a timer detail.
+- **`read_pidfile` returns `None` for dead pids** (`pidfile.rs:46-52`), discarding
+  the contents `session list` needs to show a STALE entry. Enumeration needs a
+  RAW pidfile parse + separate `pid_alive` classification, not `read_pidfile`.
+- **`TC_SOCKET`-tier daemons are OUT OF SCOPE for list/reap** (decision): a
+  custom full-path socket override keeps `state_dir` at the base
+  (`paths.rs:57-63`), so several would overwrite the one base pidfile and all
+  appear as `default`. `TC_SOCKET` is the explicit power-user escape hatch — the
+  operator named the socket and owns its lifecycle. `session list/reap` manage
+  TC_SESSION-keyed sessions + the single default; they do NOT track arbitrary
+  TC_SOCKET daemons. Documented, not worked around with a central index.
+
 ## Decision
 
 Four units with clear boundaries.
@@ -60,9 +93,20 @@ Pure read. `enumerate(base_dir) -> Vec<SessionEntry>`:
   `terminal-commanderd.pid` → a seeded session (label = subdir name = token).
 - Each entry: `{ label, pid, version, endpoint, alive }` where `alive =
   pid_alive(pid)`. A pidfile whose pid is dead is an orphan (label as `stale`).
+- Uses a RAW pidfile parse (read + deserialize the JSON) + a separate
+  `pid_alive` check — NOT `pidfile::read_pidfile`, which returns `None` for dead
+  pids and would hide exactly the stale entries `list` must show.
+- Scopes to TC_SESSION sessions + the default only. Does not attempt to discover
+  `TC_SOCKET` (custom-path) daemons (see Reality corrections).
 
 No connection to daemons here — this layer only reads the filesystem. Idle time
 is layered on top by the CLI via the handshake (Unit 3).
+
+Stale-pidfile cleanup is **compare-before-delete**, never a blind unlink: re-read
+the pidfile immediately before removing it and delete only if it still names the
+same dead pid. This closes the race where a daemon restarts (writing a fresh
+pidfile) between the stale classification and the cleanup — a blind
+`remove_pidfile` would otherwise delete a LIVE daemon's pidfile.
 
 ### Unit 2 — daemon self-reap (in `terminal-commanderd`)
 
@@ -90,25 +134,49 @@ probe_endpoint(ep):
   connect(ep)
   send IpcRequest::Health
   recv (short bounded timeout)
-  → well-formed Health response  → OUR daemon (return idle_secs, version)
+  → well-formed Health response  → OUR daemon (idle_secs if present, else unknown)
   → garbage / timeout / closed   → NOT our daemon (treat as not-running)
 ```
 
-- The `health` response struct gains `idle_secs: u64`.
-- **The health request is a non-bumping peek**: serving it MUST NOT update
-  `last_activity`. Rationale (correctness-critical): the handshake is used by
-  both `ensure_daemon` (cold start) and `session list`; if it bumped activity,
-  any periodic `session list` / monitoring cron would reset every daemon's idle
-  timer and **self-reap would never fire** — the feature would silently defeat
-  itself. Inspection observes without perturbing. Real command IPC still bumps.
+- The `health` response struct gains `idle_secs: u64` (additive to the existing
+  `uptime_secs`). **Partial-upgrade tolerance:** a current daemon that answers
+  the LEGACY Health shape (no `idle_secs`) is still "our daemon" — absence of the
+  field means idle is *unknown*, NOT "not ours." The handshake's accept test is
+  "a well-formed terminal-commander Health response," never "has idle_secs." This
+  avoids a new client wrongly rejecting an old daemon and racing into a
+  double-bind.
+- **The health request is a non-bumping, AUDIT-FREE peek**: serving it MUST NOT
+  update `last_activity` AND MUST NOT emit the per-request persistent audit row
+  that ordinary IPC requests write (`server.rs:~553`). Rationale
+  (correctness-critical): the handshake is used by both `ensure_daemon` (cold
+  start) and `session list`; if it bumped activity, any periodic `session list` /
+  monitoring cron would reset every daemon's idle timer and **self-reap would
+  never fire** (the feature would silently defeat itself); and if it audited, the
+  same polling would spam the audit log. Inspection observes without perturbing
+  lifecycle OR the audit trail. Real command IPC still bumps and audits.
+- **Identity scope (honest):** the handshake proves "a live terminal-commander
+  daemon answered at this endpoint," NOT "the daemon that owns this session /
+  state_dir." That is sufficient for the realistic threat (stale bind, accidental
+  collision, a non-tc process squatting the name) and for `ensure`/`list`. The
+  STRONGER "this exact session's daemon" check exists only on the force-kill path
+  via `pid_belongs_to_daemon` (which matches image + state_dir in the cmdline).
+  The spec does not claim session-binding identity on the list/ensure paths.
 - Reused by `ensure_daemon` (a connectable-but-not-ours endpoint no longer
   suppresses spawn) and by `session list` (idle/version display).
 
 ### Unit 4 — `session list|reap` CLI + WSLENV allowlist
 
-**`terminal-commander session list`:** call `enumerate`, then for each ALIVE
-session run the health handshake (bounded per-daemon timeout, e.g. 500ms;
-pid-alive-but-unresponsive → `unresponsive`). Render:
+**`terminal-commander session list`:** call `enumerate`, then handshake each
+ALIVE session for idle/version. Handshakes run **concurrently** (not serial) with
+a per-daemon timeout (~500ms) so total latency is bounded by the slowest single
+daemon, not `N × 500ms` (codex). Classification after the handshake:
+- well-formed Health → `alive` (+ idle/version)
+- pid alive but handshake times out / garbles → `unresponsive`
+- pidfile pid was alive at enumerate but the daemon EXITED before the handshake
+  (connect refused / pidfile now gone) → `gone` (re-check `pid_alive`; do not
+  mislabel a cleanly-exited daemon as `unresponsive`)
+
+Render:
 
 ```
 SESSION   PID   STATE         IDLE   ENDPOINT
@@ -122,19 +190,30 @@ force-fallback:
 
 ```
 for each target ALIVE daemon:
-  send IpcRequest::Shutdown
-  wait bounded (~3s) for endpoint unreachable
-  if still reachable:
-     if pid_belongs_to_daemon(pid, state_dir):  // existing M4 guard
-        hard_kill(pid)                           // force fallback, identity-confirmed
+  send IpcRequest::Shutdown        // daemon ACKs, then graceful-drains in-flight work
+  wait up to GRACE for endpoint unreachable   // GRACE generous, see below
+  if still reachable after GRACE:
+     if pid_belongs_to_daemon(pid, state_dir): // existing M4 guard
+        hard_kill(pid)                          // force fallback, identity-confirmed
      else: report "endpoint occupied by non-daemon, refusing"
-for each STALE (dead-pid) entry: remove the orphan pidfile (no IPC)
+for each STALE (dead-pid) entry: compare-before-delete the orphan pidfile (no IPC)
 ```
 
 Reap targets a socket (Shutdown), not a pid — the graceful path has no
-cross-process kill. The force fallback (for a wedged daemon that never reads
-Shutdown) reuses the already-shipped `pid_belongs_to_daemon` identity guard, so
-it introduces no new pid-reuse TOCTOU.
+cross-process kill. The force fallback (for a daemon that is WEDGED — never ACKs
+Shutdown, never drains) reuses the already-shipped `pid_belongs_to_daemon`
+identity guard, so it introduces no new pid-reuse TOCTOU.
+
+**GRACE must not race a legitimately-draining long request** (codex): a daemon
+that ACKed Shutdown and is draining a slow in-flight command is NOT wedged.
+Distinguish the two: on Shutdown the daemon (a) immediately ACKs and stops
+accepting new connections, then (b) drains. Reap waits for the endpoint to close;
+if the daemon ACKed, reap keeps waiting (the daemon is making progress) up to a
+generous cap; force-kill fires only when there was NO ACK within a short window
+(truly wedged) or the drain exceeds a hard ceiling. The Shutdown ACK is the
+signal that separates "draining" from "wedged" — without it, a fixed ~3s would
+kill a daemon mid-legitimate-drain. (Note `hard_kill` itself already escalates
+TERM→KILL after 800ms on Unix; the spec's GRACE governs WHEN we resort to it.)
 
 Selectors: `<token>` reaps one named session; `--all` reaps every session;
 `--idle [SECS]` reaps sessions whose `idle_secs` (from the handshake) exceeds an
@@ -149,17 +228,27 @@ for the self-reap-disabled and force-cleanup cases.
 allowlist instead of preserving ambient entries:
 
 ```
-WSLENV = join(":", [
-  "TC_SESSION/u"            (when TC_SESSION set),
-  "TC_WSL_DISTRO/u"         (when TC_WSL_DISTRO set),
-])   // ambient WSLENV entries dropped entirely
+WSLENV = "TC_SESSION/u"     (when TC_SESSION set; else WSLENV unset)
+                            // ambient WSLENV entries dropped entirely
 ```
 
-Verified (2026-05-28): the WSL-side bridge command is the literal constant
-`exec terminal-commander-mcp` (+ literal path/daemon-ensure prefixes) and reads
-no Windows env var by name and needs no `/p` path-translated var, so dropping
-ambient `WSLENV` breaks nothing the runtime depends on. Allowlist > denylist:
-a credential the operator happened to list in `WSLENV` (e.g.
+`TC_WSL_DISTRO/u` is NOT included (codex): the distro is selected HOST-side
+before spawn (`lib/wsl/spawn.js` resolveBridgeDistro → `wsl.exe -d <distro>`);
+the Linux-side command never reads `TC_WSL_DISTRO`, so forwarding it is dead
+weight. Only `TC_SESSION` actually needs to cross.
+
+Verification (2026-05-28, corrected from the first draft): the bridge command is
+NOT a bare literal exec — it is `LINUX_PATH_PREFIX + BRIDGE_DAEMON_ENSURE + exec
+terminal-commander-mcp`, and `BRIDGE_DAEMON_ENSURE`
+(`lib/bootstrap/constants.js:18`) sources `$HOME/.config/terminal-commander/
+autostart.sh` inside WSL. That script reads `TC_DATA` (with a `:-default`
+fallback). A real `wsl.exe` hop with `WSLENV=TC_SESSION/u` confirmed: (a)
+`TC_SESSION` crosses intact; (b) `autostart.sh` was never receiving `TC_DATA`
+via WSLENV anyway (it wasn't forwarded pre-change either), so it already uses its
+default — dropping ambient WSLENV changes nothing for it. So the allowlist closes
+the credential leak with NO behavior regression. This is a deliberate behavior
+change from "preserve ambient + append" → "TC-only"; the changelog notes it.
+Allowlist > denylist: a credential the operator listed in `WSLENV` (the observed
 `WSL_SUDO_CREDENTIAL`) no longer crosses the trust boundary.
 
 ## Data flow summary
@@ -178,22 +267,32 @@ wsl spawn:     buildFilteredEnv → WSLENV := TC allowlist → wsl.exe
    its pidfile location are byte-identical to pre-this-milestone. `session list`
    shows the default session; nothing about the unseeded path changes.
 2. Precedence `TC_SOCKET > TC_SESSION > per-user default` (F1) is untouched.
-3. Every path that acts on a daemon (ensure, list, reap) verifies identity via
-   the handshake (and, for the force-kill fallback, `pid_belongs_to_daemon`)
-   before trusting or killing it. We never act on a squatter or recycled pid.
-4. The health peek never mutates `last_activity`; only real command IPC does.
-   Inspection cannot keep an idle daemon alive.
+   `TC_SOCKET`-tier daemons are out of `session list/reap` scope (operator-owned).
+3. Every path that acts on a daemon goes through the **liveness handshake**,
+   which proves "a live terminal-commander daemon answered" (not "this session's
+   daemon" — see Unit 3 identity scope). The force-KILL path additionally gates
+   on `pid_belongs_to_daemon` (image + state_dir match), so we never force-kill a
+   squatter or recycled pid. (Honest scoping: list/ensure trust liveness, not
+   session-binding; only force-kill verifies session ownership.)
+4. The health peek never mutates `last_activity` AND never writes an audit row;
+   only real command IPC does. Inspection cannot keep an idle daemon alive nor
+   pollute the audit trail.
 5. Self-reap is graceful: no in-flight request is dropped; a request racing the
-   close window gets a retryable error, never a silent loss.
-6. No cross-process kill on the graceful reap path; the force fallback is gated
-   by the existing identity guard.
+   close window gets a retryable error, never a silent loss. (Requires net-new
+   in-flight tracking — see Unit 2 / Reality corrections; the current server does
+   not track per-connection tasks.)
+6. No cross-process kill on the graceful reap path; the force fallback fires only
+   on a wedged daemon (no Shutdown ACK / drain exceeds ceiling) and is gated by
+   the existing identity guard.
 
 ## Error handling
 
 - `enumerate`: unreadable/corrupt pidfile → skip that entry (do not fail the
   whole list); a subdir without a pidfile is not a session.
 - `session list`: a pid-alive daemon that fails the handshake within the timeout
-  → shown as `unresponsive`, not silently dropped.
+  → `unresponsive`. A daemon that EXITED between enumerate and handshake
+  (connect refused / pidfile vanished, `pid_alive` now false) → `gone`, NOT
+  `unresponsive`. Neither is silently dropped.
 - `session reap`: graceful Shutdown failing → force fallback; force fallback
   refused when identity does not match → reported, not forced.
 - Self-reap: `TC_IDLE_TTL_SECS=0` → timer task is inert (no idle exit).
