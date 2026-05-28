@@ -28,6 +28,22 @@ use time::OffsetDateTime;
 
 use terminal_commander_core::{EventDraft, RuleRef, Severity};
 
+/// In-place bucket update when a cross-frame dedupe collapse occurs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupeAggregatePatch {
+    pub seq: u64,
+    pub count: u32,
+    pub first_seen: OffsetDateTime,
+    pub last_seen: OffsetDateTime,
+}
+
+/// Output of [`Dedupe::apply_at`]: drafts to append plus bucket patches.
+#[derive(Debug, Default)]
+pub struct DedupeApplyResult {
+    pub emit: Vec<EventDraft>,
+    pub patches: Vec<DedupeAggregatePatch>,
+}
+
 /// Default dedupe window. Repeated identical events within this
 /// window are collapsed.
 pub const DEFAULT_DEDUPE_WINDOW: Duration = Duration::from_secs(5);
@@ -69,7 +85,10 @@ struct DedupeEntry {
     first_seen: OffsetDateTime,
     last_seen: OffsetDateTime,
     count: u32,
+    /// Index of the representative draft in the current `apply_at` batch.
     representative_index: usize,
+    /// Bucket seq assigned when the representative was first appended.
+    representative_seq: Option<u64>,
 }
 
 impl Dedupe {
@@ -90,6 +109,15 @@ impl Dedupe {
     #[must_use]
     pub fn apply(&mut self, drafts: Vec<EventDraft>, policy: &NoisePolicy) -> Vec<EventDraft> {
         self.apply_at(drafts, policy, OffsetDateTime::now_utc())
+            .emit
+    }
+
+    /// Record the bucket seq of a representative event after append.
+    pub fn register_emitted(&mut self, draft: &EventDraft, seq: u64) {
+        let key = dedupe_key(draft.rule.as_ref(), draft.captures.as_ref(), &draft.kind);
+        if let Some(entry) = self.state.get_mut(&key) {
+            entry.representative_seq = Some(seq);
+        }
     }
 
     /// [`apply`](Self::apply) with an injected clock so the GC cutoff is
@@ -101,36 +129,44 @@ impl Dedupe {
         drafts: Vec<EventDraft>,
         policy: &NoisePolicy,
         now: OffsetDateTime,
-    ) -> Vec<EventDraft> {
+    ) -> DedupeApplyResult {
         let window_secs = i64::try_from(policy.dedupe_window.as_secs()).unwrap_or(i64::MAX);
         let cutoff = now - time::Duration::seconds(window_secs);
 
         // Garbage-collect expired entries.
         self.state.retain(|_, e| e.last_seen >= cutoff);
 
-        let mut kept: Vec<EventDraft> = Vec::with_capacity(drafts.len());
+        let mut emit: Vec<EventDraft> = Vec::with_capacity(drafts.len());
+        let mut patches: Vec<DedupeAggregatePatch> = Vec::new();
         for mut d in drafts {
             if d.severity >= policy.dedupe_severity_max {
                 // High/Critical: never collapse.
-                kept.push(d);
+                emit.push(d);
                 continue;
             }
             let key = dedupe_key(d.rule.as_ref(), d.captures.as_ref(), &d.kind);
             if let Some(entry) = self.state.get_mut(&key) {
                 entry.count = entry.count.saturating_add(1);
                 entry.last_seen = d.timestamp;
-                // Update the representative draft IN-PLACE (it is
-                // already in `kept`).
-                if let Some(rep) = kept.get_mut(entry.representative_index) {
+                // Update the representative draft in the current batch.
+                if let Some(rep) = emit.get_mut(entry.representative_index) {
                     rep.count = entry.count;
                     rep.first_seen = Some(entry.first_seen);
                     rep.last_seen = Some(entry.last_seen);
                 }
-                // Drop the duplicate.
+                // Patch the already-appended bucket row when known.
+                if let Some(seq) = entry.representative_seq {
+                    patches.push(DedupeAggregatePatch {
+                        seq,
+                        count: entry.count,
+                        first_seen: entry.first_seen,
+                        last_seen: entry.last_seen,
+                    });
+                }
                 continue;
             }
             // First occurrence in window.
-            let representative_index = kept.len();
+            let representative_index = emit.len();
             self.state.insert(
                 key,
                 DedupeEntry {
@@ -138,15 +174,22 @@ impl Dedupe {
                     last_seen: d.timestamp,
                     count: 1,
                     representative_index,
+                    representative_seq: None,
                 },
             );
             d.count = 1;
             d.first_seen = Some(d.timestamp);
             d.last_seen = Some(d.timestamp);
-            kept.push(d);
+            emit.push(d);
         }
-        kept
+        DedupeApplyResult { emit, patches }
     }
+}
+
+/// Returns true when a draft must never pass through dedupe collapse.
+#[must_use]
+pub fn dedupe_bypass_kind(kind: &str) -> bool {
+    kind == "password_prompt"
 }
 
 /// Canonical dedupe key: `<rule_id>|<kind>|<sorted captures>`.
@@ -358,6 +401,12 @@ mod tests {
         assert!(ProgressDetector::is_progress_line("17/120"));
         assert!(ProgressDetector::is_progress_line(" 1/3 "));
         assert!(!ProgressDetector::is_progress_line("a/b"));
+    }
+
+    #[test]
+    fn dedupe_bypass_kind_password_prompt() {
+        assert!(super::dedupe_bypass_kind("password_prompt"));
+        assert!(!super::dedupe_bypass_kind("compile_error"));
     }
 
     #[test]

@@ -117,6 +117,30 @@ impl Router {
         Ok(ev)
     }
 
+    /// Patch aggregation fields on an existing bucket event (TC11 dedupe).
+    #[allow(clippy::missing_errors_doc)]
+    pub fn bucket_patch_aggregation(
+        &self,
+        bucket_id: BucketId,
+        patch: &terminal_commander_sifters::DedupeAggregatePatch,
+    ) -> Result<(), terminal_commander_core::BucketError> {
+        self.record(
+            &AuditEntry::new(
+                "bucket_patch_aggregation",
+                bucket_id.to_wire_string(),
+                "info",
+            )
+            .with_actor("router"),
+        );
+        self.buckets.patch_event_aggregation(
+            bucket_id,
+            patch.seq,
+            patch.count,
+            patch.first_seen,
+            patch.last_seen,
+        )
+    }
+
     /// Read events since a cursor.
     #[allow(clippy::missing_errors_doc)]
     pub fn bucket_events_since(

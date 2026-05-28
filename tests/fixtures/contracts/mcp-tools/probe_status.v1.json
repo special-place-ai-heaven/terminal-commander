@@ -18,7 +18,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed lookup for one live probe by probe_id. Unknown probes are typed errors; success returns the same bounded row shape used by probe_list."
+    "note": "Daemon-backed lookup for one live probe by probe_id. Unknown probes are typed errors; success returns the same bounded row shape used by probe_list. v1.1 adds TC11 frames_suppressed* counters (additive)."
   },
   "response_example": {
     "probe": {
@@ -28,6 +28,9 @@
       "probe_id": "prb_018f0000000000000000000000000002",
       "frames_total": 8,
       "events_emitted": 2,
+      "frames_suppressed": 0,
+      "frames_suppressed_progress": 0,
+      "frames_suppressed_dedupe": 0,
       "secret_prompts_total": 0,
       "secret_prompt_active": false,
       "path": "C:\\work\\app\\build.log"

@@ -21,6 +21,7 @@ regex = "1.12.3"
 terminal-commander-core.workspace = true
 thiserror = "2.0.18"
 time = "0.3.47"
+uuid = { version = "1", features = ["v5"] }
 
 [lints]
 workspace = true

@@ -14,6 +14,8 @@ use terminal_commander_core::{
     BucketId, ContextRingManager, EventDraft, ProbeId, SourceFrame, SourceStream,
 };
 use terminal_commander_sifters::SifterRuntime;
+
+use crate::noise_pipeline::{ProbeNoisePipeline, SharedProbeNoisePipeline};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
@@ -61,6 +63,9 @@ pub struct ProcessProbeMetrics {
     pub frames_stderr: u64,
     pub bytes_total: u64,
     pub events_emitted: u64,
+    pub frames_suppressed: u64,
+    pub frames_suppressed_progress: u64,
+    pub frames_suppressed_dedupe: u64,
 }
 
 /// Errors from running a process probe.
@@ -76,7 +81,16 @@ pub enum ProcessProbeError {
 ///
 /// Implementations must be cheap to clone or behind an `Arc`.
 pub trait EventSink: Send + Sync + 'static {
-    fn emit(&self, draft: EventDraft);
+    /// Append a draft. Returns the assigned bucket seq when known.
+    fn emit(&self, draft: EventDraft) -> Option<u64>;
+
+    /// Patch aggregation on an already-appended event (TC11 dedupe).
+    fn patch_dedupe_aggregate(
+        &self,
+        _bucket_id: BucketId,
+        _patch: &terminal_commander_sifters::DedupeAggregatePatch,
+    ) {
+    }
 }
 
 /// Trivial in-memory sink used by tests and the daemon transport
@@ -106,8 +120,27 @@ impl InMemorySink {
 }
 
 impl EventSink for InMemorySink {
-    fn emit(&self, draft: EventDraft) {
-        self.inner.lock().push(draft);
+    fn emit(&self, draft: EventDraft) -> Option<u64> {
+        let mut g = self.inner.lock();
+        g.push(draft);
+        Some(g.len() as u64)
+    }
+
+    fn patch_dedupe_aggregate(
+        &self,
+        _bucket_id: BucketId,
+        patch: &terminal_commander_sifters::DedupeAggregatePatch,
+    ) {
+        let mut g = self.inner.lock();
+        // Test sinks assign seq as 1-based index from emit.
+        let Ok(idx) = usize::try_from(patch.seq.saturating_sub(1)) else {
+            return;
+        };
+        if let Some(ev) = g.get_mut(idx) {
+            ev.count = patch.count;
+            ev.first_seen = Some(patch.first_seen);
+            ev.last_seen = Some(patch.last_seen);
+        }
     }
 }
 
@@ -165,6 +198,8 @@ impl ProcessProbe {
 
         let metrics = Arc::new(Mutex::new(ProcessProbeMetrics::default()));
         let metrics_for_task = Arc::clone(&metrics);
+        let noise_pipeline: SharedProbeNoisePipeline =
+            Arc::new(Mutex::new(ProbeNoisePipeline::with_default_policy()));
         let bucket_id = config.bucket_id;
 
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
@@ -179,6 +214,7 @@ impl ProcessProbe {
                 Arc::clone(&runtime),
                 Arc::clone(&sink),
                 Arc::clone(&metrics_for_task),
+                Arc::clone(&noise_pipeline),
             );
             let stderr_task = read_stream(
                 stderr,
@@ -189,6 +225,7 @@ impl ProcessProbe {
                 runtime,
                 sink,
                 metrics_for_task,
+                noise_pipeline,
             );
             let drain = async {
                 let _ = tokio::join!(stdout_task, stderr_task);
@@ -255,6 +292,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     runtime: Arc<SifterRuntime>,
     sink: Arc<dyn EventSink>,
     metrics: Arc<Mutex<ProcessProbeMetrics>>,
+    noise_pipeline: SharedProbeNoisePipeline,
 ) {
     let mut reader = BufReader::new(stream).lines();
     let mut line_no: u64 = 0;
@@ -284,13 +322,20 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
             m.bytes_total = m.bytes_total.saturating_add(bytes);
         }
 
-        // Run sifter rules.
-        for draft in runtime.evaluate(&frame, bucket_id) {
-            {
-                let mut m = metrics.lock();
-                m.events_emitted = m.events_emitted.saturating_add(1);
-            }
-            sink.emit(draft);
+        let mut events_emitted = metrics.lock().events_emitted;
+        {
+            let mut pipeline = noise_pipeline.lock();
+            let mut m = metrics.lock();
+            pipeline.process_frame(
+                &frame,
+                bucket_id,
+                &runtime,
+                sink.as_ref(),
+                &mut *m,
+                &mut events_emitted,
+                std::iter::empty(),
+            );
+            m.events_emitted = events_emitted;
         }
     }
 }

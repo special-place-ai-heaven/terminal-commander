@@ -20,6 +20,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader, SeekFrom};
 use tokio::sync::oneshot;
 
+use crate::noise_pipeline::ProbeNoisePipeline;
 use crate::process::{EventSink, InMemorySink};
 
 /// Default polling interval.
@@ -79,6 +80,9 @@ pub struct FileProbeMetrics {
     pub events_emitted: u64,
     pub rotations_detected: u64,
     pub truncations_detected: u64,
+    pub frames_suppressed: u64,
+    pub frames_suppressed_progress: u64,
+    pub frames_suppressed_dedupe: u64,
 }
 
 /// Errors.
@@ -171,6 +175,7 @@ async fn run(
     let mut pos: u64 = 0;
     let mut line_no: u64 = 0;
     let mut last_size: Option<u64> = None;
+    let mut noise_pipeline = ProbeNoisePipeline::with_default_policy();
 
     loop {
         if cancel_rx.try_recv().is_ok() {
@@ -229,12 +234,19 @@ async fn run(
                             m.frames_total = m.frames_total.saturating_add(1);
                             m.bytes_total = m.bytes_total.saturating_add(bytes);
                         }
-                        for draft in runtime.evaluate(&frame, config.bucket_id) {
-                            {
-                                let mut m = metrics.lock();
-                                m.events_emitted = m.events_emitted.saturating_add(1);
-                            }
-                            sink.emit(draft);
+                        let mut events_emitted = metrics.lock().events_emitted;
+                        {
+                            let mut m = metrics.lock();
+                            noise_pipeline.process_frame(
+                                &frame,
+                                config.bucket_id,
+                                &runtime,
+                                sink.as_ref(),
+                                &mut *m,
+                                &mut events_emitted,
+                                std::iter::empty(),
+                            );
+                            m.events_emitted = events_emitted;
                         }
                     }
                 }

@@ -102,11 +102,20 @@ mod runtime {
     }
 
     impl EventSink for PtyEventSink {
-        fn emit(&self, draft: EventDraft) {
+        fn emit(&self, draft: EventDraft) -> Option<u64> {
             let bucket_id = draft.bucket_id;
-            let _ = self.router.bucket_append(bucket_id, draft);
+            let ev = self.router.bucket_append(bucket_id, draft).ok()?;
             let mut g = self.metrics.lock();
             g.events_emitted = g.events_emitted.saturating_add(1);
+            Some(ev.seq)
+        }
+
+        fn patch_dedupe_aggregate(
+            &self,
+            bucket_id: BucketId,
+            patch: &terminal_commander_sifters::DedupeAggregatePatch,
+        ) {
+            let _ = self.router.bucket_patch_aggregation(bucket_id, patch);
         }
     }
 

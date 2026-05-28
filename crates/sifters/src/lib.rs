@@ -24,7 +24,10 @@
 //! activation in TC13/TC21.
 
 pub mod noise;
-pub use noise::{DEFAULT_DEDUPE_WINDOW, Dedupe, NoisePolicy, ProgressDetector};
+pub use noise::{
+    DEFAULT_DEDUPE_WINDOW, Dedupe, DedupeAggregatePatch, DedupeApplyResult, NoisePolicy,
+    ProgressDetector, dedupe_bypass_kind,
+};
 
 use std::sync::Arc;
 
@@ -375,6 +378,28 @@ fn match_index_for_pattern(pat_idx: usize, rule_idx: usize, map: &[usize]) -> us
     map[..pat_idx].iter().filter(|&&r| r == rule_idx).count()
 }
 
+/// UUID v5 namespace for [`stable_rule_id`] (registry rule id → [`RuleId`]).
+///
+/// Name input is **only** the registry `id` string; [`RuleRef::version`] remains
+/// in the dedupe key (`rule_id|version|kind|captures`).
+///
+/// **Frozen:** never rotate or replace this UUID, even if registry rule-id format
+/// changes. Doing so would change every derived [`RuleId`] and break persisted
+/// dedupe expectations.
+pub const STABLE_RULE_ID_NAMESPACE: uuid::Uuid =
+    uuid::uuid!("a3b5c7d9-e1f2-4a6b-8c0d-1e2f3a4b5c6d");
+
+/// Deterministic [`RuleId`] from a registry rule id string so TC11
+/// dedupe keys remain stable across frames from the same rule.
+fn stable_rule_id(registry_id: &str) -> terminal_commander_core::RuleId {
+    use terminal_commander_core::RuleId;
+    use uuid::Uuid;
+    RuleId::from_uuid(Uuid::new_v5(
+        &STABLE_RULE_ID_NAMESPACE,
+        registry_id.as_bytes(),
+    ))
+}
+
 /// Build an [`EventDraft`] from a rule match. Returns `None` if the
 /// rendered summary fails (missing capture in template, etc.).
 fn build_draft(
@@ -412,7 +437,7 @@ fn build_draft(
     };
 
     let rule_ref = RuleRef {
-        id: terminal_commander_core::RuleId::new(),
+        id: stable_rule_id(&def.id),
         version: def.version,
     };
 

@@ -19,6 +19,7 @@
 
 pub mod directory;
 pub mod file;
+pub mod noise_pipeline;
 pub mod process;
 pub mod pty;
 
@@ -31,6 +32,10 @@ pub use directory::{
 pub use file::{
     DEFAULT_POLL_INTERVAL, FileProbe, FileProbeConfig, FileProbeError, FileProbeMetrics,
     FileProbeMode, spawn_with_sink as spawn_file_probe_with_sink,
+};
+pub use noise_pipeline::{
+    PASSWORD_PROMPT_KIND, ProbeNoisePipeline, SharedProbeNoisePipeline, SuppressionCounter,
+    SuppressionMetrics, password_prompt_draft,
 };
 pub use process::{
     DEFAULT_GRACE, EventSink, InMemorySink, ProcessProbe, ProcessProbeConfig, ProcessProbeError,
