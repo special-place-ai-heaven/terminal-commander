@@ -63,6 +63,24 @@ pub fn resolve_state_dir_with(env: &impl EnvSource) -> PathBuf {
     }
 }
 
+/// Resolve the base state directory (ignoring `TC_SESSION`).
+///
+/// `session list` needs to enumerate ALL sessions (default + every seeded
+/// subdir), so it must NOT receive the per-session-suffixed path that
+/// `resolve_state_dir` returns. This is the public entry point for
+/// enumeration consumers; production wiring uses [`ProcessEnv`], tests pass
+/// an injected env via [`resolve_state_dir_base_with`].
+#[must_use]
+pub fn resolve_state_dir_base() -> PathBuf {
+    state_dir_base(&ProcessEnv)
+}
+
+/// [`resolve_state_dir_base`] with an injected env source (tests).
+#[must_use]
+pub fn resolve_state_dir_base_with(env: &impl EnvSource) -> PathBuf {
+    state_dir_base(env)
+}
+
 /// The state-dir base before any per-session subdir.
 ///
 /// `TC_DATA`, else the platform default. Byte-identical to the pre-F1

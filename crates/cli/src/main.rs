@@ -63,6 +63,11 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Per-harness session management (list / reap).
+    Session {
+        #[command(subcommand)]
+        op: SessionOp,
+    },
     /// Hidden npm-update preflight: stop TC binaries loaded from one install bin dir.
     #[command(hide = true)]
     UpdateLocks {
@@ -70,6 +75,12 @@ enum Command {
         #[arg(long)]
         bin_dir: std::path::PathBuf,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionOp {
+    /// List sessions (default + seeded) with liveness + idle.
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -109,6 +120,9 @@ fn run(cli: Cli) -> std::process::ExitCode {
         Command::Probes => daemon_backed_command_unavailable("probes"),
         Command::Policy => daemon_backed_command_unavailable("policy"),
         Command::Audit { limit: _ } => daemon_backed_command_unavailable("audit"),
+        Command::Session { op } => match op {
+            SessionOp::List => run_session_list(),
+        },
         Command::UpdateLocks { bin_dir } => {
             let result = update_locks::stop_installed_processes(&bin_dir);
             for line in &result.lines {
@@ -186,6 +200,116 @@ fn print_status() -> std::process::ExitCode {
     println!("  state_dir     : {}", state_dir.display());
 
     exit_code
+}
+
+/// One rendered row of the `session list` table.
+struct SessionRow {
+    label: String,
+    pid: String,
+    state: &'static str,
+    idle: String,
+    endpoint: String,
+}
+
+/// Build an [`Endpoint`] enum from the endpoint string the daemon recorded in
+/// its pidfile. WindowsPipe iff it starts with the named-pipe prefix; else a
+/// Unix socket path.
+fn endpoint_from_recorded(ep: &str) -> terminal_commander_supervisor::ensure::Endpoint {
+    if ep.starts_with(r"\\.\pipe\") {
+        terminal_commander_supervisor::ensure::Endpoint::WindowsPipe {
+            name: ep.to_owned(),
+        }
+    } else {
+        terminal_commander_supervisor::ensure::Endpoint::UnixSocket {
+            path: std::path::PathBuf::from(ep),
+        }
+    }
+}
+
+/// `terminal-commander session list`: enumerate the base state-dir's pidfile
+/// (label `default`) plus every immediate token-named subdir's pidfile, then
+/// for each ALIVE entry run a Health handshake CONCURRENTLY to display state.
+/// STALE entries (dead pid) print `state=stale, idle=-` without any IPC.
+///
+/// Idle is rendered as `-` for now: the existing `probe_endpoint` returns
+/// only a bool, so `idle_secs` from the Health response is not yet surfaced.
+/// Surfacing it through a public probe API is a small follow-up explicitly
+/// out of scope for this task.
+fn run_session_list() -> std::process::ExitCode {
+    let base = terminal_commander_supervisor::paths::resolve_state_dir_base();
+    let entries = terminal_commander_supervisor::sessions::enumerate(&base);
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("terminal-commander: tokio runtime build failed: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    let rows: Vec<SessionRow> = rt.block_on(async {
+        let mut stale: Vec<SessionRow> = Vec::new();
+        let mut joins: Vec<tokio::task::JoinHandle<SessionRow>> = Vec::new();
+        for e in entries {
+            if !e.alive {
+                stale.push(SessionRow {
+                    label: e.label,
+                    pid: e.pid.to_string(),
+                    state: "stale",
+                    idle: "-".into(),
+                    endpoint: e.endpoint,
+                });
+                continue;
+            }
+            // ALIVE candidate: spawn a concurrent Health handshake. The probe
+            // is internally bounded by `PROBE_TIMEOUT` (≈500ms) so no outer
+            // timeout is required here.
+            let ep = endpoint_from_recorded(&e.endpoint);
+            let label = e.label;
+            let pid = e.pid.to_string();
+            let endpoint_s = e.endpoint;
+            joins.push(tokio::spawn(async move {
+                let state_label =
+                    if terminal_commander_supervisor::ensure::probe_endpoint(&ep).await {
+                        "alive"
+                    } else {
+                        "unresponsive"
+                    };
+                SessionRow {
+                    label,
+                    pid,
+                    state: state_label,
+                    idle: "-".into(),
+                    endpoint: endpoint_s,
+                }
+            }));
+        }
+        let mut alive: Vec<SessionRow> = Vec::with_capacity(joins.len());
+        for j in joins {
+            if let Ok(row) = j.await {
+                alive.push(row);
+            }
+        }
+        // Stale first, then alive — order is not load-bearing for the test;
+        // a stable grouping just makes the table easier to scan.
+        stale.extend(alive);
+        stale
+    });
+
+    println!(
+        "{:<18} {:>10} {:<14} {:<6} ENDPOINT",
+        "SESSION", "PID", "STATE", "IDLE"
+    );
+    for r in rows {
+        println!(
+            "{:<18} {:>10} {:<14} {:<6} {}",
+            r.label, r.pid, r.state, r.idle, r.endpoint
+        );
+    }
+    std::process::ExitCode::SUCCESS
 }
 
 /// Locate the Terminal Commander source repo root by walking up from the
