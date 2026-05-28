@@ -1,7 +1,7 @@
 # release-please crates trigger
 # Auto-generated. Forces release-please to attribute crates/** changes
 # to packages/terminal-commander. Do not edit by hand.
-fingerprint: ff569f87a81447a7
-base_tag: v0.1.27
+fingerprint: 77bd1e46c61056e0
+base_tag: v0.1.28
 crate_commits:
-  - 984fcb303f2106c049fbf945783f3f4c0018cb6b
+  - 90a9708a05c0bb350f5f8d4558eacb0b045f4263
