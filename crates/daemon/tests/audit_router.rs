@@ -7,10 +7,8 @@
 //! over a `PersistentAudit` backed by a file-backed `EventStore`
 //! records rows that survive store reopen.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-use parking_lot::Mutex;
 use terminal_commander_core::{
     BucketConfig, BucketId, BucketManager, BucketReadRequest, Captures, ContextRingManager,
     EventDraft, EventSource, FrameId, JobConfig, JobManager, ProbeId, Severity, SourcePointer,
@@ -18,6 +16,7 @@ use terminal_commander_core::{
 };
 use terminal_commander_sifters::SifterRuntime;
 use terminal_commander_store::{AuditReadRequest, EventStore};
+use terminal_commanderd::store_actor::StoreClient;
 use terminal_commanderd::{PersistentAudit, Router};
 
 fn tmp_db_path(suffix: &str) -> PathBuf {
@@ -64,11 +63,12 @@ fn make_draft(bid: BucketId, pid: ProbeId, sev: Severity, kind: &str) -> EventDr
     }
 }
 
-fn build_router_with_persistent_audit(store: Arc<Mutex<EventStore>>) -> Router {
+fn build_router_with_persistent_audit(db_path: &Path) -> Router {
     let buckets = Arc::new(BucketManager::new());
     let rings = Arc::new(ContextRingManager::new());
     let jobs = Arc::new(JobManager::new());
     let sifter = Arc::new(SifterRuntime::build(&[]).unwrap());
+    let store = StoreClient::open_writer(db_path).unwrap();
     let audit = Arc::new(PersistentAudit::new(store));
     audit.ensure_migration().unwrap();
     Router::with_sink(buckets, rings, jobs, sifter, audit)
@@ -80,8 +80,7 @@ fn router_audit_persists_across_store_reopen() {
 
     // First open: drive a few router calls.
     {
-        let store = Arc::new(Mutex::new(EventStore::with_writer(&p).unwrap()));
-        let r = build_router_with_persistent_audit(Arc::clone(&store));
+        let r = build_router_with_persistent_audit(&p);
         let bid = BucketId::new();
         r.bucket_create(bid, BucketConfig::default()).unwrap();
         r.bucket_append(
@@ -126,8 +125,7 @@ fn router_audit_persists_across_store_reopen() {
 fn router_job_lifecycle_persists_audit() {
     let p = tmp_db_path("router-jobs");
     {
-        let store = Arc::new(Mutex::new(EventStore::with_writer(&p).unwrap()));
-        let r = build_router_with_persistent_audit(Arc::clone(&store));
+        let r = build_router_with_persistent_audit(&p);
         let bid = BucketId::new();
         let pid = ProbeId::new();
         let cfg = JobConfig::new(vec!["echo".to_owned()], bid, pid);

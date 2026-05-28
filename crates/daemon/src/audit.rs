@@ -14,12 +14,12 @@
 //! ([`terminal_commander_store::ALLOWED_AUDIT_DECISIONS`]). Bounded
 //! metadata caps are enforced there as well.
 
-use std::sync::Arc;
-
 use parking_lot::Mutex;
 use terminal_commander_store::{
-    AuditEntry, AuditReadRequest, AuditRow, EventStore, EventStoreError,
+    AuditEntry, AuditReadRequest, AuditRow, EventStoreError,
 };
+
+use crate::store_actor::{StoreClient, StoreOp, StoreOpReply};
 
 /// Emission target for runtime audit rows. Implementations must be
 /// thread-safe (`Send + Sync`).
@@ -43,53 +43,72 @@ pub trait AuditSink: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// Persistent audit sink backed by an [`EventStore`].
+/// Persistent audit sink backed by the store actor.
 pub struct PersistentAudit {
-    store: Arc<Mutex<EventStore>>,
+    store: StoreClient,
 }
 
 impl std::fmt::Debug for PersistentAudit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `EventStore` does not implement Debug; surface a stable summary.
         f.debug_struct("PersistentAudit")
-            .field("store", &"Arc<Mutex<EventStore>>")
+            .field("store", &"StoreClient")
             .finish()
     }
 }
 
 impl PersistentAudit {
-    /// Construct over a shared, locked [`EventStore`]. The store
-    /// MUST be writable; reader-only stores will surface an error on
-    /// first emit.
+    /// Construct over a [`StoreClient`] handle. The client MUST be
+    /// writable; reader-only stores will surface an error on first emit.
     #[must_use]
-    pub const fn new(store: Arc<Mutex<EventStore>>) -> Self {
+    pub const fn new(store: StoreClient) -> Self {
         Self { store }
     }
 
     /// Apply the V0003 audit migration eagerly. Call once at boot if
     /// you want migration cost out of the first emit's critical path.
     pub fn ensure_migration(&self) -> Result<(), EventStoreError> {
-        let mut g = self.store.lock();
-        g.ensure_audit()
+        match self.store.call(StoreOp::EnsureAudit)? {
+            StoreOpReply::Unit(()) => Ok(()),
+            other => Err(unexpected_reply("EnsureAudit", &other)),
+        }
     }
 }
 
 impl AuditSink for PersistentAudit {
     fn emit(&self, entry: &AuditEntry) -> Result<u64, EventStoreError> {
-        let mut g = self.store.lock();
-        g.record_audit(entry)
+        match self.store.call(StoreOp::RecordAudit {
+            entry: entry.clone(),
+        })? {
+            StoreOpReply::U64(id) => Ok(id),
+            other => Err(unexpected_reply("RecordAudit", &other)),
+        }
     }
 
     fn read_since(&self, request: &AuditReadRequest) -> Result<Vec<AuditRow>, EventStoreError> {
-        let mut g = self.store.lock();
-        g.audit_since(request)
+        match self.store.call(StoreOp::AuditSince {
+            request: request.clone(),
+        })? {
+            StoreOpReply::AuditRows(rows) => Ok(rows),
+            other => Err(unexpected_reply("AuditSince", &other)),
+        }
     }
 
     fn len(&self) -> usize {
-        let mut g = self.store.lock();
-        g.audit_count()
-            .map_or(0, |n| usize::try_from(n).unwrap_or(0))
+        self.store
+            .call(StoreOp::AuditCount)
+            .ok()
+            .and_then(|reply| match reply {
+                StoreOpReply::U64(n) => usize::try_from(n).ok(),
+                _ => None,
+            })
+            .unwrap_or(0)
     }
+}
+
+fn unexpected_reply(op: &str, reply: &StoreOpReply) -> EventStoreError {
+    EventStoreError::InvalidPayload(format!(
+        "store actor {op}: unexpected reply variant {reply:?}"
+    ))
 }
 
 /// In-memory audit sink. Test-only by default; the router also uses

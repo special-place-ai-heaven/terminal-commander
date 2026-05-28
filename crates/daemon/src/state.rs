@@ -24,6 +24,7 @@ use tokio::sync::watch;
 
 use crate::activation::ActivationRegistry;
 use crate::audit::PersistentAudit;
+use crate::store_actor::StoreClient;
 use crate::command::CommandRuntime;
 use crate::config::DaemonConfig;
 use crate::file_watch::WatchRuntime;
@@ -144,7 +145,8 @@ impl DaemonState {
         let store_handle = EventStore::with_writer(&db_path)?;
         let store = Arc::new(Mutex::new(store_handle));
 
-        let audit = Arc::new(PersistentAudit::new(Arc::clone(&store)));
+        let audit_store = StoreClient::open_writer(&db_path)?;
+        let audit = Arc::new(PersistentAudit::new(audit_store));
         audit.ensure_migration().map_err(BootstrapError::Store)?;
 
         // Apply the TC13 registry migration eagerly so bootstrap can
