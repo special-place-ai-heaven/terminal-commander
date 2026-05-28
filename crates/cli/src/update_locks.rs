@@ -6,8 +6,18 @@
 // The public `terminal-commander update` command runs from the Node
 // wrapper. Before invoking npm it asks the currently installed native
 // helper to stop old Terminal Commander processes whose image path is
-// inside this exact npm platform package bin directory. This prevents
-// Windows file-lock cleanup failures during package replacement without
+// anywhere inside the npm package scope dir passed by the shim. The
+// scope is the `node_modules` directory that contains the
+// `terminal-commander` package, so the preflight reaps owned binaries
+// loaded from:
+//
+//   - the currently installed package
+//   - npm-renamed leftover siblings (`.terminal-commander-RAND`)
+//   - any staged in-progress install under the same scope
+//
+// Binaries from unrelated installs (a different node version, a
+// per-user install elsewhere) are left alone. This prevents Windows
+// file-lock cleanup failures during package replacement without
 // shelling out to taskkill, cmd.exe, PowerShell, or process-name-wide
 // termination.
 
@@ -29,12 +39,12 @@ pub(crate) struct UpdateLockResult {
 }
 
 #[cfg(windows)]
-pub(crate) fn stop_installed_processes(bin_dir: &Path) -> UpdateLockResult {
-    windows_impl::stop_installed_processes(bin_dir)
+pub(crate) fn stop_installed_processes(scope_dir: &Path) -> UpdateLockResult {
+    windows_impl::stop_installed_processes(scope_dir)
 }
 
 #[cfg(not(windows))]
-pub(crate) fn stop_installed_processes(_bin_dir: &Path) -> UpdateLockResult {
+pub(crate) fn stop_installed_processes(_scope_dir: &Path) -> UpdateLockResult {
     UpdateLockResult {
         lines: vec!["terminal-commander: update-lock preflight skipped on non-Windows.".to_owned()],
         errors: 0,
@@ -69,17 +79,18 @@ fn is_owned_binary_name(name: &str) -> bool {
 }
 
 #[cfg(any(windows, test))]
-fn image_is_inside_bin_dir(image: &Path, bin_dir: &Path) -> bool {
-    let Some(parent) = image.parent() else {
-        return false;
-    };
-    normalize_path(&canonical_or_original(parent))
-        == normalize_path(&canonical_or_original(bin_dir))
+fn image_is_inside_scope(image: &Path, scope_dir: &Path) -> bool {
+    let image_norm = normalize_path(&canonical_or_original(image));
+    let mut scope_norm = normalize_path(&canonical_or_original(scope_dir));
+    if !scope_norm.ends_with('\\') {
+        scope_norm.push('\\');
+    }
+    image_norm.starts_with(&scope_norm)
 }
 
 #[cfg(windows)]
 mod windows_impl {
-    use super::{UpdateLockResult, image_is_inside_bin_dir, is_owned_binary_name, normalize_path};
+    use super::{UpdateLockResult, image_is_inside_scope, is_owned_binary_name, normalize_path};
     use std::path::{Path, PathBuf};
     use windows::Win32::Foundation::{
         CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -104,11 +115,11 @@ mod windows_impl {
         }
     }
 
-    pub(super) fn stop_installed_processes(bin_dir: &Path) -> UpdateLockResult {
+    pub(super) fn stop_installed_processes(scope_dir: &Path) -> UpdateLockResult {
         let mut result = UpdateLockResult::default();
-        let bin_dir_norm = normalize_path(bin_dir);
+        let scope_dir_norm = normalize_path(scope_dir);
         result.lines.push(format!(
-            "terminal-commander: update-lock preflight scanning {bin_dir_norm}"
+            "terminal-commander: update-lock preflight scope {scope_dir_norm}"
         ));
 
         let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
@@ -137,7 +148,7 @@ mod windows_impl {
             if pid != current_pid
                 && is_owned_binary_name(&name)
                 && let Some(image) = process_image_path(pid)
-                && image_is_inside_bin_dir(&image, bin_dir)
+                && image_is_inside_scope(&image, scope_dir)
             {
                 match terminate_process(pid) {
                     Ok(waited) => {
@@ -237,13 +248,24 @@ mod tests {
     }
 
     #[test]
-    fn image_scope_requires_same_bin_dir() {
-        let root = PathBuf::from(
-            r"C:\Users\me\.npm-global\node_modules\terminal-commander\node_modules\@terminal-commander\windows-x64\bin",
-        );
-        let image = root.join("terminal-commanderd.exe");
-        let other = PathBuf::from(r"C:\Temp\terminal-commanderd.exe");
-        assert!(image_is_inside_bin_dir(&image, &root));
-        assert!(!image_is_inside_bin_dir(&other, &root));
+    fn image_in_scope_dir_matches() {
+        let scope = PathBuf::from(r"C:\Users\me\.npm-global\node_modules");
+        let active = scope.join(r"terminal-commander\node_modules\@terminal-commander\windows-x64\bin\terminal-commanderd.exe");
+        let staged = scope.join(r".terminal-commander-jZv5xAZ5\node_modules\@terminal-commander\windows-x64\bin\terminal-commander-mcp.exe");
+        let unrelated = PathBuf::from(r"C:\Temp\terminal-commanderd.exe");
+        assert!(image_is_inside_scope(&active, &scope));
+        assert!(image_is_inside_scope(&staged, &scope));
+        assert!(!image_is_inside_scope(&unrelated, &scope));
+    }
+
+    #[test]
+    fn image_in_scope_rejects_sibling_prefix_collision() {
+        // Sibling whose path-string starts with scope's chars but is not actually
+        // under scope. Without the trailing separator on scope, a naive
+        // starts_with would false-positive.
+        let scope = PathBuf::from(r"C:\Users\me\nm\terminal-commander");
+        let sibling =
+            PathBuf::from(r"C:\Users\me\nm\terminal-commander-evil\bin\terminal-commanderd.exe");
+        assert!(!image_is_inside_scope(&sibling, &scope));
     }
 }

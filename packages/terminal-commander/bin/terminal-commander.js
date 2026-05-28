@@ -200,10 +200,25 @@ function runUpdatePreflight(done) {
     return;
   }
 
+  // Scope = the `node_modules/` directory that hosts the `terminal-commander`
+  // package. This is the directory under which npm stages new installs and
+  // parks `.terminal-commander-RAND` renamed leftovers, so the preflight must
+  // reap owned binaries loaded from anywhere within it.
+  //
+  // resolveBinary returns:
+  //   <pkg-root>/node_modules/@terminal-commander/<plat>/bin/<exe>
+  // where <pkg-root> is the `terminal-commander/` package dir, and its
+  // parent is the `node_modules/` we want.
+  //
+  // __dirname here is <pkg-root>/bin, so the parent of the package is
+  // path.dirname(__dirname). Compute scope from __dirname (more stable
+  // than walking the resolved platform binary path).
+  const scopeDir = path.dirname(path.dirname(__dirname));
+
   const child = spawn(result.binaryPath, [
     "update-locks",
-    "--bin-dir",
-    path.dirname(result.binaryPath),
+    "--scope-dir",
+    scopeDir,
   ], {
     stdio: "inherit",
     shell: false,

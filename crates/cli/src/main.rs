@@ -68,12 +68,14 @@ enum Command {
         #[command(subcommand)]
         op: SessionOp,
     },
-    /// Hidden npm-update preflight: stop TC binaries loaded from one install bin dir.
+    /// Hidden npm-update preflight: stop TC binaries loaded from anywhere under
+    /// the npm package scope dir (typically the parent `node_modules`).
     #[command(hide = true)]
     UpdateLocks {
-        /// Platform package bin directory that owns the binaries allowed to stop.
-        #[arg(long)]
-        bin_dir: std::path::PathBuf,
+        /// Scope directory under which owned binaries are eligible for stop.
+        /// Accepts the legacy `--bin-dir` alias from older JS shims.
+        #[arg(long = "scope-dir", alias = "bin-dir")]
+        scope_dir: std::path::PathBuf,
     },
 }
 
@@ -147,8 +149,8 @@ fn run(cli: Cli) -> std::process::ExitCode {
                 idle_secs,
             } => run_session_reap(token.as_deref(), all, idle, idle_secs),
         },
-        Command::UpdateLocks { bin_dir } => {
-            let result = update_locks::stop_installed_processes(&bin_dir);
+        Command::UpdateLocks { scope_dir } => {
+            let result = update_locks::stop_installed_processes(&scope_dir);
             for line in &result.lines {
                 eprintln!("{line}");
             }
@@ -855,9 +857,25 @@ mod tests {
 
     #[test]
     fn cli_parses_hidden_update_locks() {
+        let cli = Cli::parse_from(["terminal-commander", "update-locks", "--scope-dir", "."]);
+        match cli.cmd {
+            Command::UpdateLocks { scope_dir } => {
+                assert_eq!(scope_dir, std::path::PathBuf::from("."));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_hidden_update_locks_legacy_bin_dir_alias() {
+        // Older JS shims still pass `--bin-dir`; the new Rust clap arg accepts
+        // the legacy flag as an alias so a mid-rollout shim/binary mismatch
+        // doesn't skip the preflight.
         let cli = Cli::parse_from(["terminal-commander", "update-locks", "--bin-dir", "."]);
         match cli.cmd {
-            Command::UpdateLocks { bin_dir } => assert_eq!(bin_dir, std::path::PathBuf::from(".")),
+            Command::UpdateLocks { scope_dir } => {
+                assert_eq!(scope_dir, std::path::PathBuf::from("."));
+            }
             _ => panic!("wrong variant"),
         }
     }
