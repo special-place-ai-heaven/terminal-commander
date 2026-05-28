@@ -18,24 +18,31 @@ function runDoctorHarness(opts) {
   const lines = ["terminal-commander harness doctor:", ""];
   lines.push("ID                  DETECTED  CONFIGURED  NOTE");
   let detectedCount = 0;
+  let unconfiguredCount = 0;
   for (const p of listProviders({ includeStubs: true })) {
     const d = detections.find((x) => x.id === p.id) || { detected: false };
-    const configured = d.stub ? "n/a" : configuredFn(p.id) ? "yes" : "no";
+    const isConfigured = !d.stub && configuredFn(p.id);
+    const configured = d.stub ? "n/a" : isConfigured ? "yes" : "no";
     const det = d.detected ? "yes" : "no";
-    if (d.detected && !d.stub) detectedCount += 1;
+    if (d.detected && !d.stub) {
+      detectedCount += 1;
+      if (!isConfigured) unconfiguredCount += 1;
+    }
     const note = d.note || (p.stub ? "stub" : "");
     lines.push(
       `${p.id.padEnd(20)}${det.padEnd(10)}${String(configured).padEnd(12)}${note}`,
     );
   }
-  // F1: when more than one harness is on this machine, each one needs its own
-  // TC_SESSION (minted by `setup harness`) or they share a single daemon.
-  if (detectedCount >= 2) {
+  // F1: warn about shared-daemon mode only when there are >=2 harnesses AND at
+  // least one is NOT yet configured by `setup harness` (which mints TC_SESSION).
+  // A fully-configured multi-harness install already has per-harness tokens, so
+  // it must not get the nag — that was a false positive.
+  if (detectedCount >= 2 && unconfiguredCount >= 1) {
     lines.push("");
     lines.push(
-      "WARNING: shared daemon mode — multiple harnesses detected. Re-run " +
-        "`terminal-commander setup harness` so each agent gets a per-harness " +
-        "TC_SESSION and its own daemon endpoint.",
+      "WARNING: shared daemon mode — multiple harnesses detected and at least " +
+        "one is not configured. Run `terminal-commander setup harness` so each " +
+        "agent gets a per-harness TC_SESSION and its own daemon endpoint.",
     );
   }
   return {

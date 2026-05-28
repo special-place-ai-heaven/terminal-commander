@@ -44,12 +44,24 @@ test("no shared-mode warning when no harness detected", () => {
   assert.doesNotMatch(r.output, SHARED_WARN);
 });
 
-test("runDoctorHarness still returns ok/exit 0 with the warning", () => {
+test("no shared-mode warning when all detected harnesses are configured", () => {
+  // A correctly-configured multi-harness install already has per-harness
+  // TC_SESSION tokens — it must NOT get the nag (false-positive fix).
   const r = runDoctorHarness({
     platform: "linux",
     detections: [det("cursor", true), det("claude-code", true)],
     configuredFn: () => true,
   });
+  assert.doesNotMatch(r.output, SHARED_WARN);
   assert.equal(r.status, "ok");
   assert.equal(r.exit_code, 0);
+});
+
+test("warns when multi-harness but at least one is unconfigured", () => {
+  const r = runDoctorHarness({
+    platform: "linux",
+    detections: [det("cursor", true), det("claude-code", true)],
+    configuredFn: (id) => id === "cursor", // claude-code unconfigured
+  });
+  assert.match(r.output, SHARED_WARN);
 });

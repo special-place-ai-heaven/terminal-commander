@@ -21,12 +21,14 @@ use terminal_commanderd::{
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
+    static TC_DD_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut p = std::env::temp_dir();
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    p.push(format!("tc-pty-ipc-{tag}-{pid}-{nanos}"));
+    let n = TC_DD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    p.push(format!("tc-pty-ipc-{tag}-{pid}-{nanos}-{n}"));
     p
 }
 

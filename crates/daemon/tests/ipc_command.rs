@@ -33,12 +33,14 @@ use terminal_commanderd::{
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
+    static TC_DD_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut p = std::env::temp_dir();
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    p.push(format!("tc-ipc-cmd-{tag}-{pid}-{nanos}"));
+    let n = TC_DD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    p.push(format!("tc-ipc-cmd-{tag}-{pid}-{nanos}-{n}"));
     p
 }
 
@@ -254,15 +256,18 @@ fn command_status_returns_lifecycle_counters_after_exit() {
         assert_eq!(status.job_id, start.job_id);
         assert_eq!(status.bucket_id, start.bucket_id);
         assert_eq!(status.probe_id, start.probe_id);
+        // The test name says "after exit": require a terminal state. The poll
+        // above waits for it; if the deadline lapsed with state still Running,
+        // a `true` command that didn't exit in 30s is a real failure, so do NOT
+        // accept Running here.
         assert!(
             matches!(
                 status.state,
                 terminal_commander_core::JobState::Exited
                     | terminal_commander_core::JobState::Cancelled
                     | terminal_commander_core::JobState::Failed
-                    | terminal_commander_core::JobState::Running
             ),
-            "state must be a known JobState, got {:?}",
+            "command must reach a terminal state after exit, got {:?}",
             status.state
         );
 

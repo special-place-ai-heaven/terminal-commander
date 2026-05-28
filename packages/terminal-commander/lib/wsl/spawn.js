@@ -159,12 +159,18 @@ function ensureSessionInWslEnv(filteredEnv) {
   if (out.TC_SESSION == null || out.TC_SESSION === "") {
     return out;
   }
+  // Rebuild WSLENV from its colon-separated segments: drop empties (no double
+  // colons / trailing-colon artifacts), drop any existing TC_SESSION entry
+  // REGARDLESS of its flag (e.g. a stale `TC_SESSION/w` that would NOT forward
+  // Windows->WSL), then append exactly `TC_SESSION/u`. `u` = forward
+  // Windows->WSL only, no path translation (the token is opaque, not a path).
   const existing =
     typeof out.WSLENV === "string" && out.WSLENV.length > 0 ? out.WSLENV : "";
-  const names = existing.split(":").map((e) => e.split("/")[0]);
-  if (!names.includes("TC_SESSION")) {
-    out.WSLENV = existing.length > 0 ? `${existing}:TC_SESSION/u` : "TC_SESSION/u";
-  }
+  const segments = existing
+    .split(":")
+    .filter((seg) => seg.length > 0 && seg.split("/")[0] !== "TC_SESSION");
+  segments.push("TC_SESSION/u");
+  out.WSLENV = segments.join(":");
   return out;
 }
 

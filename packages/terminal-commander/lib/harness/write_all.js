@@ -19,7 +19,7 @@ const {
 } = require("./paths.js");
 const { detectProvider } = require("./detect.js");
 const { getProvider, listProviders } = require("./registry.js");
-const { mintSessionToken } = require("../session/mint.js");
+const { mintSessionToken, isValidSessionToken } = require("../session/mint.js");
 
 const HARNESS_WRITE_STATUSES = Object.freeze({
   SKIPPED: "skipped",
@@ -37,6 +37,16 @@ function buildJsonMcpStanza(opts) {
   };
   const env = {};
   if (o.sessionToken != null && o.sessionToken !== "") {
+    // Defense in depth: validate before the token can name a kernel object /
+    // socket path, symmetric with the Cursor path (config.js). Today callers
+    // pass minted (valid-by-construction) tokens, but this is an exported fn.
+    if (!isValidSessionToken(o.sessionToken)) {
+      const err = new Error(
+        "terminal-commander: TC_SESSION token failed safety whitelist; only [A-Za-z0-9._-] (1..64, at least one alphanumeric, not dot-only) is allowed",
+      );
+      err.code = "UNSAFE_SESSION_TOKEN";
+      throw err;
+    }
     env.TC_SESSION = o.sessionToken;
   }
   if (o.distro && o.platform === "win32") {

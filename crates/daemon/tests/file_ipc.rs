@@ -368,33 +368,18 @@ fn file_watch_start_then_append_emits_events_when_rule_active() {
             other => panic!("unexpected: {other:?}"),
         };
 
-        // M2: poll until the watch is registered live (positioned at EOF for
-        // follow_from_beginning:false) before appending, instead of a fixed
-        // 250ms sleep that races watcher setup.
+        // Settle before appending. NOTE (review): polling FileWatchList is NOT
+        // a valid readiness signal here — WatchRuntime::start inserts the live
+        // entry right after FileProbe::spawn returns, but the spawned probe task
+        // opens the file and seeks to EOF (follow_from_beginning:false) only
+        // later. If we appended before that seek, the EOF position would already
+        // include our line and it would be skipped as "already at EOF" — a lost
+        // event, not a late one (no deadline can recover it). There is no
+        // daemon-side "probe positioned" signal, so a short fixed settle is the
+        // honest mechanism (the sibling mcp/tests/file_tools_live_e2e.rs does the
+        // same). The post-append wait below IS a real poll. seq starts at 2.
         let mut seq = 2u64;
-        // Generous deadline: the early-exit fires the instant the condition is
-        // met, so this only matters under pathological parallel-test contention
-        // where the file-watch notify -> sift -> bucket pipeline is slow. 30s
-        // absorbs heavy CI load without reintroducing a wall-clock race.
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            let listed = match client
-                .call(seq, IpcRequest::FileWatchList)
-                .await
-                .expect("watch list")
-            {
-                IpcResponse::FileWatchList(r) => r,
-                other => panic!("unexpected: {other:?}"),
-            };
-            seq += 1;
-            if listed.entries.iter().any(|e| e.watch_id == ws.watch_id) {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                panic!("watch {} never became live within deadline", ws.watch_id);
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
 
         // Append matching content.
         {

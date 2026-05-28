@@ -27,12 +27,17 @@ use thiserror::Error;
 ///   Linux side; needed for the WSL cleanup bridge to see operator vars.
 /// - `TC_WSL_DISTRO`: operator's chosen WSL distro override.
 ///
-/// NOTE (F1): `TC_SESSION` is intentionally NOT here. The endpoint is resolved
-/// ONCE in the parent (this process), which then sets `TC_SOCKET` on the daemon
-/// child to the computed endpoint (see `ensure_daemon`). Forwarding `TC_SESSION`
-/// too would let the daemon re-resolve and is unnecessary — the single
-/// source-of-truth invariant is "parent computes, child binds the given socket".
-/// Do not add `TC_SESSION` here.
+/// NOTE (F1): `TC_SESSION` is deliberately absent — but NOT because this
+/// allowlist withholds it. The daemon spawn uses `std::process::Command`, which
+/// inherits the FULL parent env (see the spawn site in `ensure_daemon`), so the
+/// child receives `TC_SESSION` regardless of this list. This allowlist only
+/// controls which keys get a FRESH-READ overlay on top of inheritance. The
+/// actual guard against the daemon re-resolving the token is precedence: the
+/// parent computes the endpoint ONCE and sets `TC_SOCKET` on the child, and
+/// `TC_SOCKET` outranks `TC_SESSION` in `session::resolve_session`. So the
+/// daemon binds the given socket and never re-resolves. Adding `TC_SESSION` to
+/// the overlay would be pointless (it is already inherited) and would muddy that
+/// invariant — do not add it here.
 pub const FORWARDED_ENV_ALLOWLIST: &[&str] = &["WSLENV", "TC_WSL_DISTRO"];
 
 /// Build the map of allowlisted host env vars currently set, read fresh

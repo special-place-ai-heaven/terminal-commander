@@ -336,6 +336,31 @@ test("WSLENV preserves any pre-existing entries when adding TC_SESSION", async (
   assert.match(w, /TC_SESSION/, "must add TC_SESSION");
 });
 
+test("WSLENV with a non-/u TC_SESSION flag is corrected to /u", async () => {
+  const rec = makeRecorder();
+  await spawnWslBridge({
+    platform: "win32",
+    env: {
+      PATH: "C:\\Windows",
+      TC_SESSION: "tc-abcdef012345",
+      // A stale entry with the wrong flag (/w does NOT forward Windows->WSL).
+      WSLENV: "TC_SESSION/w:OTHER/u",
+    },
+    detect: makeMockDetect(okDetect(["Ubuntu"], "Ubuntu")),
+    doctor: makeMockDoctor(DOCTOR_STATUSES.RUNTIME_PRESENT),
+    exec: rec.exec,
+    returnInsteadOfMirror: true,
+  });
+  const w = rec.calls[0].env.WSLENV;
+  assert.match(w, /(^|:)TC_SESSION\/u(:|$)/, `must carry TC_SESSION/u, got ${w}`);
+  assert.doesNotMatch(w, /TC_SESSION\/w/, "stale /w entry must be removed");
+  assert.match(w, /OTHER\/u/, "unrelated entries preserved");
+  // Exactly one TC_SESSION segment, no empty segments.
+  const segs = w.split(":");
+  assert.equal(segs.filter((s) => s.split("/")[0] === "TC_SESSION").length, 1);
+  assert.equal(segs.filter((s) => s.length === 0).length, 0, "no empty segments");
+});
+
 test("no WSLENV pollution when TC_SESSION is absent", async () => {
   const rec = makeRecorder();
   await spawnWslBridge({
