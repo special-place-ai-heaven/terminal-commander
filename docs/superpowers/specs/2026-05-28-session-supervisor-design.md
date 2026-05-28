@@ -101,12 +101,12 @@ Pure read. `enumerate(base_dir) -> Vec<SessionEntry>`:
 - **`default` is a reserved label (codex):** the unseeded session is labeled
   `"default"`, but the F1 validator currently ACCEPTS `default` as a literal
   `TC_SESSION` token — a seeded `TC_SESSION=default` would collide with the
-  default session's label/selector in `list`/`reap`. Resolve by reserving it:
-  the session module rejects `default` (case-insensitively) as a session token
-  (and the JS `isValidSessionToken` / mint mirror the reservation), OR `list`
-  disambiguates (e.g. `default` for the base, `session:default` for a seeded
-  one). Reservation is preferred — simpler, and a token literally named
-  "default" has no legitimate use.
+  default session's label/selector in `list`/`reap`. Resolution (pinned): the
+  session module REJECTS `default` (case-insensitively) as a session token, and
+  the JS `isValidSessionToken` + mint mirror the reservation. A token literally
+  named "default" has no legitimate use; a malformed/reserved token falls through
+  to the per-user default per the existing F1 soft-fail. (Single chosen
+  approach — no `list`-side disambiguation fallback.)
 
 No connection to daemons here — this layer only reads the filesystem. Idle time
 is layered on top by the CLI via the handshake (Unit 3).
@@ -177,15 +177,17 @@ probe_endpoint(ep):
   via `pid_belongs_to_daemon` (which matches image + state_dir in the cmdline).
   The spec does not claim session-binding identity on the list/ensure paths.
 - Reused by `ensure_daemon` (a connectable-but-not-ours endpoint no longer
-  suppresses spawn) and by `session list` (idle/version display).
+  suppresses spawn) and by `session list` (idle display; version comes from the
+  pidfile, not the handshake).
 
 ### Unit 4 — `session list|reap` CLI + WSLENV allowlist
 
-**`terminal-commander session list`:** call `enumerate`, then handshake each
-ALIVE session for idle/version. Handshakes run **concurrently** (not serial) with
-a per-daemon timeout (~500ms) so total latency is bounded by the slowest single
+**`terminal-commander session list`:** call `enumerate` (which yields pid +
+version + endpoint from each pidfile), then handshake each ALIVE session for
+`idle_secs` + liveness only. Handshakes run **concurrently** (not serial) with a
+per-daemon timeout (~500ms) so total latency is bounded by the slowest single
 daemon, not `N × 500ms` (codex). Classification after the handshake:
-- well-formed Health → `alive` (+ idle/version)
+- well-formed Health → `alive` (idle from handshake; version from pidfile)
 - pid alive but handshake times out / garbles → `unresponsive`
 - pidfile pid was alive at enumerate but the daemon EXITED before the handshake
   (connect refused / pidfile now gone) → `gone` (re-check `pid_alive`; do not
