@@ -1188,6 +1188,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "terminal-commander-core",
  "terminal-commander-probes",
  "terminal-commander-sifters",
