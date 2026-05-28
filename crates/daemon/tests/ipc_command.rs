@@ -304,6 +304,7 @@ fn command_status_for_unknown_job_returns_typed_error() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn command_output_tail_records_bypass_governance_and_audit() {
     let runtime = rt();
     runtime.block_on(async {
@@ -350,9 +351,10 @@ fn command_output_tail_records_bypass_governance_and_audit() {
             ) {
                 break;
             }
-            if std::time::Instant::now() >= deadline {
-                panic!("job did not reach terminal state");
-            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "job did not reach terminal state"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
@@ -375,7 +377,7 @@ fn command_output_tail_records_bypass_governance_and_audit() {
         let expected_bytes: u64 = tail
             .lines
             .iter()
-            .map(|l| u64::try_from(l.as_bytes().len()).unwrap_or(u64::MAX) + 1)
+            .map(|l| u64::try_from(l.len()).unwrap_or(u64::MAX) + 1)
             .sum();
         assert_eq!(expected_bytes, 5, "D1: a+1 + bc+1");
 

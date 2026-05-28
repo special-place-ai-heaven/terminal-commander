@@ -223,7 +223,7 @@ fn command_output_tail_returns_bounded_lines_without_a_rule() {
         let expected_bytes: u64 = tail
             .lines
             .iter()
-            .map(|l| u64::try_from(l.as_bytes().len()).unwrap_or(u64::MAX) + 1)
+            .map(|l| u64::try_from(l.len()).unwrap_or(u64::MAX) + 1)
             .sum();
         assert_eq!(status.tail_bytes_returned_total, expected_bytes);
 
@@ -296,7 +296,7 @@ fn command_output_tail_clamps_to_200_lines() {
         let expected_bytes: u64 = tail
             .lines
             .iter()
-            .map(|l| u64::try_from(l.as_bytes().len()).unwrap_or(u64::MAX) + 1)
+            .map(|l| u64::try_from(l.len()).unwrap_or(u64::MAX) + 1)
             .sum();
         assert_eq!(status.tail_bytes_returned_total, expected_bytes);
 
