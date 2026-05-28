@@ -2,6 +2,11 @@
 // Copyright 2026 The Terminal Commander Authors
 
 //! Daemon-owned PTY command runtime (TC44).
+//!
+//! Unix-only implementation today. On Windows the IPC handlers return
+//! `UnsupportedPlatform` (ConPTY pending) — no runtime spawn path to flag.
+//! If a Windows PTY spawn is added later, apply the same `CREATE_NO_WINDOW`
+//! rule as `ProcessProbe::spawn` (see `docs/release/windows-wsl-bridge-contract.md` §4.4).
 
 #[cfg(unix)]
 mod runtime {
