@@ -19,6 +19,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use terminal_commander_core::{BucketManager, ContextRingManager, JobManager};
 use terminal_commander_sifters::SifterRuntime;
+use tokio::sync::watch;
 use terminal_commander_store::EventStore;
 
 use crate::activation::ActivationRegistry;
@@ -61,6 +62,15 @@ pub struct DaemonState {
     /// Bumped on dispatch (wired in a later task) and read via
     /// [`DaemonState::idle_secs`].
     last_activity: Arc<Mutex<std::time::Instant>>,
+    /// Internal graceful-shutdown trigger (E2). The `Shutdown` IPC
+    /// dispatch flips this sticky `watch` flag via
+    /// [`DaemonState::trigger_shutdown`]; the runtime's
+    /// `run_ipc_server` awaits it via [`DaemonState::shutdown_notified`]
+    /// alongside the OS-signal path. `watch` is chosen for its sticky
+    /// semantics: a late awaiter (one that subscribes AFTER the trigger
+    /// already fired) still observes `true` on its first borrow, so the
+    /// shutdown is never lost to a subscribe-vs-send race.
+    shutdown_tx: watch::Sender<bool>,
     /// In-memory bucket manager.
     pub buckets: Arc<BucketManager>,
     /// Per-probe context rings.
@@ -215,6 +225,7 @@ impl DaemonState {
             config,
             store,
             last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
+            shutdown_tx: watch::channel(false).0,
             buckets,
             rings,
             jobs,
@@ -250,6 +261,50 @@ impl DaemonState {
     #[must_use]
     pub fn idle_secs(&self) -> u64 {
         self.last_activity.lock().elapsed().as_secs()
+    }
+
+    /// Request a graceful shutdown (E2). Flips the sticky `watch` flag
+    /// so any current and FUTURE awaiter of [`shutdown_notified`]
+    /// wakes. Idempotent: a second call is a no-op flip to the same
+    /// value. Called from the `Shutdown` IPC dispatch arm; the actual
+    /// drain + exit is driven by `run_ipc_server`, which selects on
+    /// [`shutdown_notified`] alongside the OS-signal path.
+    ///
+    /// [`shutdown_notified`]: DaemonState::shutdown_notified
+    pub fn trigger_shutdown(&self) {
+        // `send_replace` (NOT `send`) is deliberate: `send` returns
+        // early WITHOUT storing the value when there are zero live
+        // receivers, which is exactly the case for a late-awaiter
+        // (`run_ipc_server` subscribes lazily inside `shutdown_notified`).
+        // `send_replace` always stores the new value, so a receiver
+        // that subscribes AFTER this call still observes `true` on its
+        // first `borrow()`. This is what makes the trigger sticky and
+        // race-free against the subscribe-vs-trigger ordering.
+        let _ = self.shutdown_tx.send_replace(true);
+    }
+
+    /// Await a graceful-shutdown request. Returns as soon as
+    /// [`trigger_shutdown`] has been (or is) called.
+    ///
+    /// Race-safety (the late-awaiter problem): `subscribe()` snapshots
+    /// the current value, and the first `borrow()` observes it. If the
+    /// trigger already fired, the initial `*borrow()` is `true` and we
+    /// return immediately WITHOUT awaiting `changed()` -- so a late
+    /// subscriber never deadlocks waiting for an edge that already
+    /// passed.
+    ///
+    /// [`trigger_shutdown`]: DaemonState::trigger_shutdown
+    pub async fn shutdown_notified(&self) {
+        let mut rx = self.shutdown_tx.subscribe();
+        // Sticky fast-path: already triggered before we subscribed.
+        if *rx.borrow() {
+            return;
+        }
+        // Otherwise wait for the flip. `changed()` errors only if the
+        // sender is dropped; the sender lives in `self` for as long as
+        // this borrow is held, so an error here means shutdown is
+        // moot (state being torn down) -- treat it as "notified".
+        let _ = rx.changed().await;
     }
 
     /// Record the peer identity observed by the named-pipe server.

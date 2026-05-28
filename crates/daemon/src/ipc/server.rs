@@ -163,6 +163,15 @@ impl IpcServer {
     }
 }
 
+/// Upper bound on how long the accept loop waits for in-flight
+/// connection tasks to finish during a graceful drain. A wedged
+/// connection (e.g. a client that stopped reading mid-response) must
+/// not be able to hang daemon shutdown forever: once this ceiling is
+/// hit, remaining tasks are aborted and the loop returns so the
+/// process can exit.
+#[cfg(unix)]
+const DRAIN_CEILING: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[cfg(unix)]
 async fn accept_loop(
     listener: UnixListener,
@@ -170,6 +179,16 @@ async fn accept_loop(
     boot: Instant,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    // Per-connection tasks are tracked in a JoinSet (rather than
+    // detached `tokio::spawn`) so a graceful shutdown can DRAIN them:
+    // when the shutdown flag flips, the connection serving the
+    // `Shutdown` request finishes flushing its ACK and every other
+    // in-flight request runs to completion before the loop returns.
+    // The accept loop owns the set; `ServerHandle::shutdown` joins
+    // THIS task, so awaiting the join handle transitively waits for
+    // the drain below.
+    let mut conns: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
     // Sticky shutdown: if the flag is already true (the operator
     // dropped the handle before the loop ran its first poll), exit
     // before issuing an accept.
@@ -181,18 +200,24 @@ async fn accept_loop(
             biased;
             res = shutdown.changed() => {
                 // The sender was dropped, or the value moved to true.
-                // Either way: exit. (We do not distinguish; both mean
-                // "no more requests should be accepted".)
+                // Either way: stop accepting. (We do not distinguish;
+                // both mean "no more requests should be accepted".)
                 if res.is_err() || *shutdown.borrow() {
                     break;
                 }
             }
+            // Reap finished connection tasks as they complete so the
+            // JoinSet does not grow without bound under steady load.
+            // Guarded so `join_next` is only polled when non-empty
+            // (it resolves to `None` immediately on an empty set,
+            // which would otherwise busy-spin this branch).
+            Some(_joined) = conns.join_next(), if !conns.is_empty() => {}
             res = listener.accept() => {
                 match res {
                     Ok((stream, _addr)) => {
                         let state = Arc::clone(&state);
                         let shutdown_for_conn = shutdown.clone();
-                        tokio::spawn(async move {
+                        conns.spawn(async move {
                             handle_connection(stream, state, boot, shutdown_for_conn).await;
                         });
                     }
@@ -208,6 +233,32 @@ async fn accept_loop(
                 }
             }
         }
+    }
+
+    // Drain: we have stopped accepting. The shutdown flag is now
+    // `true`, so each in-flight `handle_connection` will break out of
+    // its own loop at the next request boundary; a connection that is
+    // mid-dispatch finishes the current request (and flushes its
+    // response) first. Wait for all of them, bounded by DRAIN_CEILING.
+    drain_connections(&mut conns).await;
+}
+
+/// Await every remaining connection task, bounded by [`DRAIN_CEILING`].
+/// If the ceiling is reached with tasks still running, abort the
+/// remainder so shutdown cannot hang on a wedged connection.
+#[cfg(unix)]
+async fn drain_connections(conns: &mut tokio::task::JoinSet<()>) {
+    if conns.is_empty() {
+        return;
+    }
+    let drain = async {
+        while conns.join_next().await.is_some() {}
+    };
+    if tokio::time::timeout(DRAIN_CEILING, drain).await.is_err() {
+        // Ceiling hit: a connection did not finish in time. Abort the
+        // stragglers and return so the process can exit. JoinSet::abort_all
+        // is best-effort; we do not re-await aborted handles.
+        conns.abort_all();
     }
 }
 
@@ -556,19 +607,24 @@ async fn dispatch(
             Ok(r) => ("probe_status", IpcResult::Ok { response: r }),
             Err(e) => ("probe_status", IpcResult::Err { error: e }),
         },
-        // TODO(E2): wire graceful shutdown. This placeholder exists ONLY so the
-        // lib compiles after the protocol variants were added; it fails loudly
-        // (typed Internal error, NO fake `ShutdownAck`) and MUST be replaced by
-        // real ACK-then-drain dispatch in the shutdown wiring task.
-        IpcRequest::Shutdown => (
-            "shutdown",
-            IpcResult::Err {
-                error: IpcError::new(
-                    IpcErrorCode::Internal,
-                    "shutdown dispatch not yet wired (E2)",
-                ),
-            },
-        ),
+        // Graceful shutdown (E2). Flip the internal trigger and ACK
+        // immediately. The ACK is written back to THIS connection
+        // before any teardown: `trigger_shutdown` only flips a sticky
+        // `watch` flag (it does not cancel this task), so the caller's
+        // loop returns this envelope and `write_envelope` flushes the
+        // ACK uninterrupted. The runtime's `run_ipc_server` is the one
+        // awaiting `shutdown_notified`; it wakes AFTER this dispatch
+        // returns, then drives `handle.shutdown()` (stop accepting +
+        // drain in-flight) and pidfile removal.
+        IpcRequest::Shutdown => {
+            state.trigger_shutdown();
+            (
+                "shutdown",
+                IpcResult::Ok {
+                    response: IpcResponse::ShutdownAck { draining: true },
+                },
+            )
+        }
     };
     // Audit one row per accepted request. The decision label reflects
     // whether the dispatcher produced an `Ok` response or a typed

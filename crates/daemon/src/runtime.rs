@@ -235,7 +235,11 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     let socket_path = state.config.socket_path();
     let endpoint = socket_path.display().to_string();
     tracing::info!("binding UDS at {endpoint}");
-    let server = IpcServer::new(Arc::new(state), socket_path);
+    // Keep an Arc handle to the state so we can await the internal
+    // shutdown trigger (flipped by the `Shutdown` IPC dispatch arm)
+    // alongside the OS-signal path below.
+    let state = Arc::new(state);
+    let server = IpcServer::new(Arc::clone(&state), socket_path);
     let handle = server
         .spawn()
         .map_err(|e| RuntimeError::Signal(format!("UDS bind: {e}")))?;
@@ -243,11 +247,21 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     tracing::info!(
         "IPC server bound. \
          Method set: system_discover, health, policy_status, self_check. \
-         Send SIGINT (Ctrl-C) or SIGTERM to shut down."
+         Send SIGINT (Ctrl-C) or SIGTERM (or a `Shutdown` IPC request) to shut down."
     );
 
-    wait_for_shutdown_signal().await?;
-    tracing::info!("shutdown signal received, draining...");
+    // Two shutdown sources: an OS signal (SIGINT/SIGTERM) or an
+    // internal `Shutdown` IPC request that flipped the state trigger.
+    // Whichever fires first wins; the other branch is dropped.
+    tokio::select! {
+        r = wait_for_shutdown_signal() => {
+            r?;
+            tracing::info!("OS shutdown signal received, draining...");
+        }
+        () = state.shutdown_notified() => {
+            tracing::info!("internal shutdown (Shutdown IPC), draining...");
+        }
+    }
     handle.shutdown().await;
     terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
     tracing::info!("IPC server exited cleanly.");
