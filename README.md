@@ -184,59 +184,77 @@ operator `WSLENV` is dropped.
 
 ```mermaid
 flowchart LR
-  subgraph harness["MCP harnesses (each with its own TC_SESSION)"]
+  subgraph harness["MCP harnesses (each env.TC_SESSION)"]
     Cursor["Cursor"]
     Codex["Codex CLI"]
     Claude["Claude Code / Desktop"]
     Other["Other MCP clients"]
   end
 
-  subgraph adapter["terminal-commander-mcp"]
-    MCP["MCP stdio server"]
-    Ensure["ensure_daemon\n(probe + spawn-if-absent)"]
+  subgraph mcp["terminal-commander-mcp"]
+    Stdio["rmcp stdio server\n31 live tools"]
   end
 
-  subgraph daemon["terminal-commanderd (one per TC_SESSION)"]
-    IPC["local IPC\nUDS or named pipe\n(per-session endpoint)"]
+  subgraph sup["terminal-commander-supervisor (shared lib)"]
+    Ensure["ensure_daemon\nprobe + spawn-if-absent"]
+    Replace["replace_if_stale\nversion-gated swap"]
+    Session["session tokens\n+ endpoint resolution"]
+  end
+
+  subgraph daemon["terminal-commanderd (one per session)"]
+    IPC["IPC server\nUDS or named pipe"]
     Policy["policy gate"]
+    Dispatch["request dispatch"]
     Router["router"]
-    Buckets["buckets + cursors"]
-    Audit["SQLite audit"]
+    Sift["sifter runtime"]
+    Store["SQLite store\nevents · registry · audit"]
+    Buckets["buckets + context rings"]
     Idle["idle self-reap\nTC_IDLE_TTL_SECS"]
   end
 
-  subgraph runtime["Runtime"]
-    Commands["argv commands"]
-    Files["file windows + search + watches"]
+  subgraph runtimes["Probe runtimes"]
+    Cmd["argv commands"]
+    Files["file read · search · watch"]
     Pty["PTY sessions"]
-    Probes["runtime probes"]
   end
 
-  Cursor --> MCP
-  Codex --> MCP
-  Claude --> MCP
-  Other --> MCP
-  MCP --> Ensure
-  Ensure -. "Health handshake\n(rejects squatters)" .-> IPC
-  MCP <--> IPC
+  Cursor --> Stdio
+  Codex --> Stdio
+  Claude --> Stdio
+  Other --> Stdio
+  Stdio --> Ensure
+  Ensure --> Replace
+  Replace -. "health handshake\n(probe_endpoint)" .-> IPC
+  Replace -. "spawn terminal-commanderd\nif endpoint absent" .-> IPC
+  Stdio <--> IPC
   IPC --> Policy
-  Policy --> Router
-  Router --> Commands
+  Policy --> Dispatch
+  Dispatch --> Router
+  Router --> Cmd
   Router --> Files
   Router --> Pty
-  Router --> Probes
-  Router --> Buckets
-  Router --> Audit
+  Cmd --> Sift
+  Files --> Sift
+  Pty --> Sift
+  Sift --> Buckets
+  Buckets --> Store
+  Dispatch --> Store
   Idle --> IPC
+  Session -. "TC_SESSION / TC_SOCKET" .-> IPC
 ```
 
 The MCP adapter does not spawn arbitrary commands and does not open network
 sockets. It forwards tool calls to the daemon over local IPC. The daemon applies
 policy before starting argv commands or returning bounded file/context data.
 
-`ensure_daemon` does a real `health` handshake before treating any endpoint as
-"our daemon" — a pre-bound or stale socket that does not speak our protocol is
-rejected and a fresh session daemon is spawned.
+Bring-up lives in the shared `terminal-commander-supervisor` crate (used by
+the MCP adapter, admin CLI, and daemon `update` mode). On startup the adapter
+calls `ensure_daemon`, then `replace_if_stale` when spawn is allowed — a running
+daemon older than the installed adapter is swapped before tool calls proceed.
+
+`probe_endpoint` performs a bounded `health` IPC handshake, not a bare connect.
+A pre-bound or stale socket that does not answer with our protocol is rejected;
+`ensure_daemon` may spawn a fresh session daemon instead.
 
 ## How LLMs Should Use It
 
@@ -398,12 +416,13 @@ Actions.
 
 ```mermaid
 flowchart LR
-  Commit["fix: / feat: on main"] --> RP["release-please PR"]
-  RP --> Sync["release sync + auto-merge"]
+  Commit["fix: / feat: on main"] --> RP["release-please PR\n(linked npm + Cargo versions)"]
+  RP --> Sync["release-pr-sync\nauto-merge feat/fix"]
   Sync --> Tag["tag + GitHub Release"]
-  Tag --> Build["build matrix\nlinux x64/arm64, windows x64, mac x64/arm64"]
-  Build --> Publish["publish npm packages\nroot + 5 platform packages"]
-  Build --> Cargo["publish cargo crates"]
+  Tag --> Plat["build + npm publish\n5 platform packages\nlinux · windows · mac"]
+  Plat --> Root["publish root wrapper\nterminal-commander@latest"]
+  Root --> Cargo["cargo publish chain\n7 crates in dep order\ncore → sifters → probes → store\n→ supervisor → daemon → mcp"]
+  Cargo --> Verify["post-publish verify\ncontainer smoke per platform"]
 ```
 
 | Commit type | Release effect |
@@ -457,22 +476,22 @@ Testing doctrine: [`TESTING.md`](TESTING.md).
 ## Repository Layout
 
 ```text
-crates/                                  Rust workspace (8 crates)
-  core/                                  bucket/event/context primitives
-  sifters/                               rule compilation + noise dedupe
-  probes/                                file/PTY/process probe runtimes
-  store/                                 SQLite event/audit/registry store
-  daemon/                                terminal-commanderd
-  mcp/                                   terminal-commander-mcp (rmcp stdio)
-  cli/                                   terminal-commander native CLI
-  supervisor/                            ensure_daemon, session resolution, sessions::enumerate
+crates/                                  Rust workspace (8 crates; 7 published to crates.io)
+  core/                                  ids, buckets, context rings, events, activation
+  sifters/                               rule evaluation + noise dedupe
+  probes/                                process / file / PTY probe runtimes
+  store/                                 SQLite (events, registry, audit) + FTS5
+  supervisor/                            ensure_daemon, replace_if_stale, session tokens, pidfile
+  daemon/                                terminal-commanderd — IPC, policy, router, runtimes
+  mcp/                                   terminal-commander-mcp — rmcp stdio, 31-tool catalogue
+  cli/                                   terminal-commander admin CLI (local only, not on crates.io)
 packages/
-  terminal-commander/                    npm root wrapper
-  terminal-commander-linux-x64/          Linux x64 native package
-  terminal-commander-linux-arm64/        Linux arm64 native package
-  terminal-commander-windows-x64/        Windows x64 native package
-  terminal-commander-mac-x64/            macOS x64 native package
-  terminal-commander-mac-arm64/          macOS arm64 native package
+  terminal-commander/                    npm root wrapper (@latest)
+  terminal-commander-linux-x64/          @terminal-commander/linux-x64
+  terminal-commander-linux-arm64/        @terminal-commander/linux-arm64
+  terminal-commander-windows-x64/        @terminal-commander/windows-x64
+  terminal-commander-mac-x64/            @terminal-commander/mac-x64
+  terminal-commander-mac-arm64/          @terminal-commander/mac-arm64
 docs/                                    architecture, integrations, release docs
 examples/provider-harness/               copy-paste MCP config examples
 scripts/                                 CI, release, and smoke helpers
