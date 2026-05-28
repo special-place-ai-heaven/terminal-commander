@@ -193,10 +193,13 @@ mod windows_impl {
         let proc = OwnedHandle(handle);
         let mut buf16 = vec![0u16; 2048];
         let mut len = u32::try_from(buf16.len()).expect("static path buffer length fits in u32");
+        // PROCESS_NAME_FORMAT(0) = win32 (`C:\...`), (1) = NT-native (`\Device\HarddiskVolumeN\...`).
+        // The scope dir arrives as a win32 path from the JS shim, so we MUST ask for
+        // the same shape here; mismatch makes every in-scope process look out-of-scope.
         let ok = unsafe {
             QueryFullProcessImageNameW(
                 proc.0,
-                PROCESS_NAME_FORMAT(1),
+                PROCESS_NAME_FORMAT(0),
                 windows::core::PWSTR(buf16.as_mut_ptr()),
                 &raw mut len,
             )
@@ -267,5 +270,22 @@ mod tests {
         let sibling =
             PathBuf::from(r"C:\Users\me\nm\terminal-commander-evil\bin\terminal-commanderd.exe");
         assert!(!image_is_inside_scope(&sibling, &scope));
+    }
+
+    #[test]
+    fn nt_device_path_does_not_match_win32_scope() {
+        // Regression: QueryFullProcessImageNameW(PROCESS_NAME_FORMAT=1) returns
+        // an NT-native path like `\Device\HarddiskVolumeN\Users\...`, which can
+        // never satisfy a win32 `C:\Users\...` scope. The earlier preflight
+        // build asked for that format and silently skipped every running
+        // owned binary, so `terminal-commander update` looked successful while
+        // npm hit EBUSY a moment later. This test guards the gate behavior
+        // even if a future refactor reverts to format 1; the win32 callsite
+        // in `process_image_path` is the actual fix.
+        let scope = PathBuf::from(r"C:\Users\me\nm\terminal-commander");
+        let nt_image = PathBuf::from(
+            r"\Device\HarddiskVolume3\Users\me\nm\terminal-commander\bin\terminal-commanderd.exe",
+        );
+        assert!(!image_is_inside_scope(&nt_image, &scope));
     }
 }
