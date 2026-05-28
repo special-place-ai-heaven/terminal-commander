@@ -9,3 +9,4 @@ pub mod paths;
 pub mod pidfile;
 pub mod replace;
 pub mod session;
+pub mod sessions;
