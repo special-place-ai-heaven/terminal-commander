@@ -481,7 +481,7 @@ async fn reap_one(e: terminal_commander_supervisor::sessions::SessionEntry) -> R
         return ReapOutcome::Unknown;
     }
     if terminal_commander_supervisor::replace::pid_belongs_to_daemon(e.pid, &e.state_dir) {
-        let _ = terminal_commander_supervisor::replace::hard_kill(e.pid);
+        let _ = terminal_commander_supervisor::replace::hard_kill(e.pid, &e.state_dir);
         // After hard_kill the daemon will not remove its own pidfile, so
         // clean up the now-stale entry (compare-before-delete still applies).
         let _ = terminal_commander_supervisor::sessions::cleanup_stale(&e.state_dir, e.pid);
