@@ -120,6 +120,13 @@ fn process_probe_spawn_silent_and_captures_stdio() {
         )
         .expect("spawn probe");
 
+        let pid = probe.child_pid();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            child_has_no_console(pid),
+            "ProcessProbe child pid {pid} must not have a console (AttachConsole -> ERROR_INVALID_HANDLE)"
+        );
+
         let _ = probe.wait().await.expect("probe wait");
         let m = probe.metrics();
         assert!(
