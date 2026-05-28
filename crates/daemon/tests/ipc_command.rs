@@ -76,6 +76,16 @@ fn small_start_params(argv: &[&str]) -> CommandStartParams {
     }
 }
 
+/// Audit-row predicate used by the M2 poll in the happy-path test.
+/// Hoisted to module scope so it does not trip `items_after_statements`
+/// when placed inside the async-block body.
+fn audit_rows_have_both_start_rows(rows: &[terminal_commander_store::AuditRow]) -> bool {
+    rows.iter().any(|r| r.action == "ipc_command_start_combed")
+        && rows
+            .iter()
+            .any(|r| r.action == "command_start" && r.decision == "allow")
+}
+
 #[test]
 fn command_start_combed_happy_path_returns_bounded_ids_and_audits_through_ipc() {
     let runtime = rt();
@@ -114,19 +124,15 @@ fn command_start_combed_happy_path_returns_bounded_ids_and_audits_through_ipc() 
 
         // M2: poll the audit log until both expected rows appear (or a generous
         // deadline), instead of a fixed sleep that races slow job exit under load.
-        fn has_both(rows: &[terminal_commander_store::AuditRow]) -> bool {
-            rows.iter().any(|r| r.action == "ipc_command_start_combed")
-                && rows
-                    .iter()
-                    .any(|r| r.action == "command_start" && r.decision == "allow")
-        }
+        // (`audit_rows_have_both_start_rows` is hoisted to module scope above to
+        // satisfy clippy::items_after_statements on Linux/rust 1.95.)
         let read_rows = || {
             let mut g = state.store.lock();
             g.audit_since(&AuditReadRequest::new(0)).unwrap()
         };
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut rows = read_rows();
-        while !has_both(&rows) && std::time::Instant::now() < deadline {
+        while !audit_rows_have_both_start_rows(&rows) && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
             rows = read_rows();
         }
