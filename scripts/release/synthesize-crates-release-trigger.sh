@@ -35,8 +35,10 @@ if ! git rev-parse -q --verify "refs/tags/${base_tag}" >/dev/null 2>&1; then
   exit 0
 fi
 
-# Releasable crate commits in (base_tag, HEAD]: conventional type feat/fix
+# Releasable crate commits in (base_tag, HEAD]: conventional type feat/fix/perf
 # or breaking (! or BREAKING CHANGE). Subject form: "type(scope)!: ...".
+# `perf` is treated as a fix-level bump because user-observable perf changes ship
+# in Rust crates and must produce a release (e.g. PR #47 /proc liveness).
 mapfile -t crate_shas < <(git log --format='%H' "${base_tag}..HEAD" -- crates)
 if [ "${#crate_shas[@]}" -eq 0 ]; then
   echo "[synth] no crate commits since ${base_tag}. Skipping."
@@ -56,6 +58,7 @@ while IFS= read -r subject; do
   base_type="${type_tok%%(*}"; base_type="${base_type%%!*}"
   if [ "$base_type" = "feat" ] && [ "$strongest" != "breaking" ]; then strongest="feat";
   elif [ "$base_type" = "fix" ] && [ -z "$strongest" ]; then strongest="fix";
+  elif [ "$base_type" = "perf" ] && [ -z "$strongest" ]; then strongest="fix";
   fi
 done < <(git log --format='%s' "${base_tag}..HEAD" -- crates)
 # Body-level BREAKING CHANGE detection (newline-safe: grep over full log).
@@ -64,7 +67,7 @@ if git log --format='%b' "${base_tag}..HEAD" -- crates | grep -q "BREAKING CHANG
 fi
 
 if [ -z "$strongest" ]; then
-  echo "[synth] crate commits exist but none are feat/fix/breaking. Skipping."
+  echo "[synth] crate commits exist but none are feat/fix/perf/breaking. Skipping."
   emit trigger_pushed false
   exit 0
 fi
