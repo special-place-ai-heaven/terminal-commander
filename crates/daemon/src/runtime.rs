@@ -108,12 +108,9 @@ pub fn run_self_check(
     let mut rep = SelfCheckReport::default();
 
     // 1. Store reachable + audit migration applied.
-    {
-        let mut g = state.store.lock();
-        match g.audit_count() {
-            Ok(_) => rep.ok("store + V0003 audit migration: reachable"),
-            Err(e) => rep.fail(format!("audit_count failed: {e}")),
-        }
+    match state.store.audit_count() {
+        Ok(_) => rep.ok("store + V0003 audit migration: reachable"),
+        Err(e) => rep.fail(format!("audit_count failed: {e}")),
     }
 
     // 2. Persistent audit insert + read round trip.
@@ -131,8 +128,7 @@ pub fn run_self_check(
             Ok(_id) => rep.ok("persistent audit: emit round trip"),
             Err(e) => rep.fail(format!("persistent audit emit failed: {e}")),
         }
-        let mut g = state.store.lock();
-        match g.audit_since(&AuditReadRequest::new(0)) {
+        match state.store.audit_since(&AuditReadRequest::new(0)) {
             Ok(rows) => {
                 if rows.iter().any(|r| r.action == "self_check") {
                     rep.ok("persistent audit: self_check row visible");
@@ -152,8 +148,7 @@ pub fn run_self_check(
             Ok(()) => rep.ok("router: bucket_create allowed"),
             Err(e) => rep.fail(format!("router.bucket_create failed: {e}")),
         }
-        let mut g = state.store.lock();
-        match g.audit_since(&AuditReadRequest::new(0)) {
+        match state.store.audit_since(&AuditReadRequest::new(0)) {
             Ok(rows) => {
                 if rows.iter().any(|r| r.action == "bucket_create") {
                     rep.ok("router -> persistent audit pipeline: bucket_create row visible");
