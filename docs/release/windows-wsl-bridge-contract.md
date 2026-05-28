@@ -211,6 +211,25 @@ The root `terminal-commander` npm package, when installed on Windows
 | No hidden-window spawn option (`windowsHide`, `CREATE_NO_WINDOW`, `SW_HIDE`). | Avoids stealth-like process behavior that endpoint tools reasonably flag. |
 | Exit code mirroring. | Operator sees the WSL-side exit code. |
 
+#### Daemon runtime spawn rule (Windows)
+
+**Split by site:** The §4.4 “no hidden-window” invariant applies **only** to the
+JS bridge spawn path (`packages/terminal-commander/lib/wsl/spawn.js`, WWS04
+setup-time hosting). Bridge visibility is load-bearing EDR legitimacy — the
+operator sees `wsl.exe` start the MCP session.
+
+**Daemon runtime** children (`command_start_combed` via `ProcessProbe::spawn` in
+`crates/probes/src/process.rs`, and the one-shot `wsl.exe` bootstrap in
+`wsl_username` in `crates/daemon/src/environment/wsl.rs`) **must** use
+`CREATE_NO_WINDOW` (`0x08000000`) through the shared `windows_silent()` helper
+in `crates/core/src/platform.rs`. Those processes are LLM payload children with
+no operator console expectation; allocating a visible console is outward-filter
+leakage (the operator sees UI the LLM did not intend).
+
+EDR still sees the signed GUI-subsystem daemon as parent (single hop, declared
+service). This does not add a hidden bridge spawn or a LOLBin chain — it only
+suppresses console allocation for daemon-initiated payload children.
+
 ## 5. WSL / Linux runtime package responsibilities (unchanged)
 
 The WSL runtime package is the SAME root + platform packages NPM02

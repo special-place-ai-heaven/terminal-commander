@@ -27,5 +27,11 @@ vte = "0.15.0"
 [target.'cfg(unix)'.dependencies]
 pty-process = { version = "=0.5.3", features = ["async"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }
+
 [lints]
 workspace = true

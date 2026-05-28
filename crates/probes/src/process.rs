@@ -2,6 +2,11 @@
 // Copyright 2026 The Terminal Commander Authors
 
 //! Process probe runtime.
+//!
+//! Windows: `ProcessProbe::spawn` calls `terminal_commander_core::windows_silent`
+//! on the underlying `std::process::Command` so GUI-subsystem daemon children do
+//! not allocate a visible console. The JS bridge (`lib/wsl/spawn.js`) intentionally
+//! does not use this flag — see `docs/release/windows-wsl-bridge-contract.md` §4.4.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -191,6 +196,10 @@ impl ProcessProbe {
             for (k, v) in &config.env {
                 cmd.env(k, v);
             }
+        }
+        #[cfg(windows)]
+        {
+            terminal_commander_core::windows_silent(cmd.as_std_mut());
         }
         let mut child = cmd.spawn()?;
         let stdout = child.stdout.take().expect("piped stdout configured above");

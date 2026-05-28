@@ -27,6 +27,10 @@
 //! and Windows (tokio::process::Command). PTY-backed interactive
 //! commands are handled SEPARATELY in `pty_command.rs` (TC44, shipped);
 //! this runtime does NOT touch stdin or pseudo-terminals.
+//!
+//! Windows: `ProcessProbe::spawn` applies `CREATE_NO_WINDOW` for combed runtime
+//! spawns. JS bridge (`lib/wsl/spawn.js`) intentionally does NOT — WWS04 EDR
+//! legitimacy ritual. See `docs/release/windows-wsl-bridge-contract.md` §4.4.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -533,6 +537,9 @@ impl CommandRuntime {
 
         // Spawn the probe. If this fails, we audit and bail without
         // creating a job record.
+        // Windows: ProcessProbe::spawn applies CREATE_NO_WINDOW for combed runtime
+        // spawns. JS bridge (lib/wsl/spawn.js) intentionally does NOT — WWS04 EDR
+        // legitimacy ritual. See docs/release/windows-wsl-bridge-contract.md §4.4.
         let probe =
             match ProcessProbe::spawn(&req.argv, &probe_cfg, Arc::clone(&self.rings), sifter, sink)
             {
