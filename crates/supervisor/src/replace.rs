@@ -64,35 +64,100 @@ fn endpoint_string(ep: &Endpoint) -> String {
     }
 }
 
+/// Outcome of a [`hard_kill`], surfaced so callers and tests can confirm the
+/// kill-leg identity gate fired instead of a blind force-kill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardKillOutcome {
+    /// The process was gone after the graceful signal; no force was needed.
+    Reaped,
+    /// A force signal (SIGKILL / `taskkill /F`) was sent: the pid was still
+    /// alive AND still our daemon.
+    Forced,
+    /// After the grace window the pid was alive but NO LONGER our daemon --
+    /// the OS recycled the number for an unrelated process during the grace.
+    /// The force signal was WITHHELD. Closes the kill-leg pid-reuse window
+    /// (review finding #2): the pre-SIGTERM identity check alone left the
+    /// SIGKILL leg ungated, so a recycled pid could be force-killed.
+    IdentitySkipped,
+}
+
 /// Hard-kill a pid (SIGTERM then SIGKILL on unix; taskkill /F on
 /// windows). Uses OS tools, no libc dependency.
-pub fn hard_kill(pid: u32) -> std::io::Result<()> {
+///
+/// Both the graceful and the forced leg are identity-gated: the forced leg
+/// re-verifies, after the grace window, that the pid is still our daemon
+/// bound to `state_dir`, mirroring the caller's pre-kill check so a pid
+/// recycled mid-grace is never force-killed.
+pub fn hard_kill(pid: u32, state_dir: &Path) -> std::io::Result<HardKillOutcome> {
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
-        std::thread::sleep(Duration::from_millis(800));
-        if pidfile::pid_alive(pid) {
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
-                .status();
-        }
-        Ok(())
+        Ok(hard_kill_unix(
+            pid,
+            Duration::from_millis(800),
+            pidfile::pid_alive,
+            |p| pid_belongs_to_daemon(p, state_dir),
+            |p| {
+                let _ = std::process::Command::new("kill")
+                    .args(["-TERM", &p.to_string()])
+                    .status();
+            },
+            |p| {
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", &p.to_string()])
+                    .status();
+            },
+        ))
     }
     #[cfg(windows)]
     {
+        // Windows has no graceful -> grace -> force window: `taskkill /F` is a
+        // single forced terminate with no intervening sleep, so the SIGKILL-leg
+        // recycle window the unix path closes does not exist here. Re-verify
+        // identity once more anyway, for defense in depth and parity with the
+        // unix kill-leg gate.
+        if !pid_belongs_to_daemon(pid, state_dir) {
+            return Ok(HardKillOutcome::IdentitySkipped);
+        }
         let out = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/F"])
             .output()?;
         if out.status.success() {
-            Ok(())
+            Ok(HardKillOutcome::Forced)
         } else {
             Err(std::io::Error::other(
                 String::from_utf8_lossy(&out.stderr).to_string(),
             ))
         }
     }
+}
+
+/// Graceful-then-forced kill core with the liveness, identity, and signal
+/// effects injected so the kill-leg identity gate is unit-testable without
+/// real processes or pid recycling. Sends `term`, waits `grace`, and sends
+/// `kill` only if the pid is still alive AND still our daemon.
+#[cfg(unix)]
+fn hard_kill_unix(
+    pid: u32,
+    grace: Duration,
+    is_alive: impl Fn(u32) -> bool,
+    still_ours: impl Fn(u32) -> bool,
+    term: impl Fn(u32),
+    kill: impl Fn(u32),
+) -> HardKillOutcome {
+    term(pid);
+    std::thread::sleep(grace);
+    if !is_alive(pid) {
+        return HardKillOutcome::Reaped;
+    }
+    // Kill-leg identity gate (review finding #2): the daemon may have exited
+    // during the grace window and the OS recycled the pid for an unrelated
+    // process. Mirror the pre-SIGTERM check before escalating to SIGKILL so a
+    // recycled pid is never force-killed.
+    if !still_ours(pid) {
+        return HardKillOutcome::IdentitySkipped;
+    }
+    kill(pid);
+    HardKillOutcome::Forced
 }
 
 /// Re-verify, immediately before a kill, that `pid` is still OUR daemon:
@@ -107,9 +172,9 @@ pub fn hard_kill(pid: u32) -> std::io::Result<()> {
 /// have changed by kill time.
 #[must_use]
 pub fn pid_belongs_to_daemon(pid: u32, state_dir: &Path) -> bool {
-    let needle = state_dir.to_string_lossy().to_string();
     #[cfg(windows)]
     {
+        let needle = state_dir.to_string_lossy().to_string();
         let pat = needle.replace('[', "`[").replace(']', "`]");
         let ps = format!(
             "Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" | \
@@ -127,17 +192,27 @@ pub fn pid_belongs_to_daemon(pid: u32, state_dir: &Path) -> bool {
     #[cfg(unix)]
     {
         // `ps -p <pid> -o args=` prints only that pid's command line (empty
-        // if the pid is gone). Require both the daemon name and state_dir.
+        // if the pid is gone). Confirm both the daemon name and state_dir via
+        // the shared literal matcher.
         std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "args="])
             .output()
             .ok()
-            .map(|o| {
-                let args = String::from_utf8_lossy(&o.stdout);
-                args.contains("terminal-commanderd") && args.contains(&needle)
-            })
+            .map(|o| cmdline_is_our_daemon(&String::from_utf8_lossy(&o.stdout), state_dir))
             .unwrap_or(false)
     }
+}
+
+/// Literal (non-regex) test that a process command line `args` identifies our
+/// daemon bound to `state_dir`: it must reference both the daemon binary name
+/// and the exact state-dir path. Substring match, so a state_dir containing
+/// regex metacharacters (`+ ( ) [ ]` ...) is matched verbatim. The shared
+/// matcher for both `pid_belongs_to_daemon` and `find_daemon_pid_os`, so the
+/// two callers agree by construction (review finding #3).
+#[cfg(unix)]
+fn cmdline_is_our_daemon(args: &str, state_dir: &Path) -> bool {
+    let needle = state_dir.to_string_lossy();
+    args.contains("terminal-commanderd") && args.contains(needle.as_ref())
 }
 
 /// OS-query fallback: find the pid of a terminal-commanderd process
@@ -146,9 +221,9 @@ pub fn pid_belongs_to_daemon(pid: u32, state_dir: &Path) -> bool {
 /// never a bare name match.
 #[must_use]
 pub fn find_daemon_pid_os(state_dir: &Path) -> Option<u32> {
-    let needle = state_dir.to_string_lossy().to_string();
     #[cfg(windows)]
     {
+        let needle = state_dir.to_string_lossy().to_string();
         // PowerShell `-like` treats backslash literally, so the path is
         // passed RAW (no escaping). `[`/`]` are wildcard chars in -like;
         // escape them so a bracketed path can't break the pattern.
@@ -166,16 +241,21 @@ pub fn find_daemon_pid_os(state_dir: &Path) -> Option<u32> {
     }
     #[cfg(unix)]
     {
+        // Enumerate candidate daemons by the FIXED binary name -- a literal
+        // with no regex metacharacters -- then confirm each through the SAME
+        // literal matcher `pid_belongs_to_daemon` uses. Both callers now agree
+        // by construction, and a state_dir containing regex metacharacters can
+        // no longer break the search or make pgrep error (review finding #3).
+        // The previous `pgrep -f "terminal-commanderd.*{state_dir}"`
+        // interpolated the unescaped path straight into a regex.
         let out = std::process::Command::new("pgrep")
-            .args(["-f", &format!("terminal-commanderd.*{needle}")])
+            .args(["-f", "terminal-commanderd"])
             .output()
             .ok()?;
         String::from_utf8_lossy(&out.stdout)
             .lines()
-            .next()?
-            .trim()
-            .parse()
-            .ok()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .find(|&pid| pid_belongs_to_daemon(pid, state_dir))
     }
 }
 
@@ -241,7 +321,7 @@ pub async fn replace_if_stale(
         };
     }
 
-    if let Err(e) = hard_kill(pid) {
+    if let Err(e) = hard_kill(pid, &opts.state_dir) {
         return ReplaceOutcome::Skipped {
             reason: format!("hard-kill pid {pid} failed: {e}"),
         };
@@ -317,6 +397,102 @@ mod tests {
         assert!(
             !pid_belongs_to_daemon(0xFFFF_FFF0, std::path::Path::new("/tmp/tc-m4-not-a-daemon")),
             "a dead/absent pid must be refused"
+        );
+    }
+
+    // --- Finding #2: the SIGKILL leg must be identity-gated too ---
+    //
+    // Before the fix, `hard_kill` re-checked identity before SIGTERM but the
+    // SIGKILL leg fired on liveness alone. If the daemon exited during the
+    // 800ms grace and the OS recycled the pid, SIGKILL hit an unrelated
+    // process. These drive the kill core with injected liveness/identity so
+    // the recycle race is deterministic -- no real processes, no flaky pid
+    // reuse. The assertion is that the force signal is WITHHELD.
+    #[cfg(unix)]
+    #[test]
+    fn sigkill_withheld_when_pid_recycled_during_grace() {
+        use std::cell::Cell;
+        let killed = Cell::new(false);
+        let outcome = hard_kill_unix(
+            4242,
+            Duration::from_millis(0),
+            |_| true,  // still alive after the grace window...
+            |_| false, // ...but NO LONGER our daemon (pid recycled)
+            |_| {},    // term: no-op
+            |_| killed.set(true),
+        );
+        assert_eq!(outcome, HardKillOutcome::IdentitySkipped);
+        assert!(
+            !killed.get(),
+            "SIGKILL must NOT be sent to a recycled pid (kill-leg identity gate)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigkill_sent_when_still_our_daemon_after_grace() {
+        use std::cell::Cell;
+        let killed = Cell::new(false);
+        let outcome = hard_kill_unix(
+            4242,
+            Duration::from_millis(0),
+            |_| true, // still alive
+            |_| true, // and still our daemon
+            |_| {},
+            |_| killed.set(true),
+        );
+        assert_eq!(outcome, HardKillOutcome::Forced);
+        assert!(
+            killed.get(),
+            "a live, still-ours daemon must be force-killed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_force_signal_when_graceful_reaped_it() {
+        use std::cell::Cell;
+        let killed = Cell::new(false);
+        let outcome = hard_kill_unix(
+            4242,
+            Duration::from_millis(0),
+            |_| false, // gone after SIGTERM
+            |_| panic!("identity must not be probed once the pid is already gone"),
+            |_| {},
+            |_| killed.set(true),
+        );
+        assert_eq!(outcome, HardKillOutcome::Reaped);
+        assert!(!killed.get());
+    }
+
+    // --- Finding #3: cmdline match is literal, not a regex ---
+    //
+    // `find_daemon_pid_os` used to interpolate the raw state_dir into a
+    // `pgrep -f` regex; a path with regex metacharacters mis-matched or made
+    // pgrep error. The shared literal matcher must match such a path verbatim.
+    #[cfg(unix)]
+    #[test]
+    fn cmdline_match_is_literal_not_regex() {
+        let dir = std::path::Path::new("/tmp/tc (run)+[v1]/state.d");
+        let cmd = format!("terminal-commanderd --data-dir {}", dir.display());
+        assert!(
+            cmdline_is_our_daemon(&cmd, dir),
+            "a state_dir with regex metacharacters must match the cmdline verbatim"
+        );
+        // A different state_dir must not match.
+        assert!(!cmdline_is_our_daemon(
+            &cmd,
+            std::path::Path::new("/tmp/other")
+        ));
+        // Must require the daemon binary, not just the path.
+        assert!(
+            !cmdline_is_our_daemon(&format!("cat {}", dir.display()), dir),
+            "the daemon binary name is required, not just the path"
+        );
+        // Must require the path, not just the binary name.
+        assert!(
+            !cmdline_is_our_daemon("terminal-commanderd --data-dir /tmp/elsewhere", dir),
+            "the exact state_dir is required, not just the binary name"
         );
     }
 }
