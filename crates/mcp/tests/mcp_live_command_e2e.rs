@@ -474,3 +474,79 @@ async fn mcp_command_output_tail_reads_unmatched_output() {
     handle.shutdown().await;
     cleanup(&data);
 }
+
+/// TC11: progress pre-sift surfaces on `command_status` through live MCP + daemon.
+///
+/// Fixture: synthetic stdout only (no cargo build) — `python3 -c`:
+/// ```text
+/// import time
+/// for _ in range(25):
+///     print('45%')
+///     time.sleep(0.05)
+/// ```
+/// Asserts `frames_suppressed_progress` on `command_status`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_command_status_reports_progress_suppression() {
+    let data = tmp_data_dir("tc11-progress");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        let start_payload = first_text(
+            &call_tool(
+                &client,
+                "command_start_combed",
+                serde_json::json!({
+                    "argv": [
+                        "python3",
+                        "-c",
+                        "import time\nfor _ in range(25):\n print('45%')\n time.sleep(0.05)\n"
+                    ],
+                }),
+            )
+            .await,
+        );
+        let start: serde_json::Value = serde_json::from_str(&start_payload).expect("start JSON");
+        let job_id = start["job_id"].as_str().expect("job_id").to_owned();
+        let bucket_id = start["bucket_id"].as_str().expect("bucket_id").to_owned();
+
+        call_tool(
+            &client,
+            "bucket_wait",
+            serde_json::json!({
+                "bucket_id": bucket_id,
+                "cursor": 0,
+                "timeout_ms": 5000,
+            }),
+        )
+        .await;
+
+        let status_payload = first_text(
+            &call_tool(
+                &client,
+                "command_status",
+                serde_json::json!({"job_id": job_id}),
+            )
+            .await,
+        );
+        let status: serde_json::Value =
+            serde_json::from_str(&status_payload).expect("command_status JSON");
+        assert!(
+            status["frames_suppressed_progress"]
+                .as_u64()
+                .is_some_and(|n| n > 0),
+            "progress suppression must be visible on command_status; got: {status_payload}"
+        );
+        assert_eq!(
+            status["frames_suppressed"].as_u64(),
+            Some(
+                status["frames_suppressed_progress"].as_u64().unwrap_or(0)
+                    + status["frames_suppressed_dedupe"].as_u64().unwrap_or(0)
+            )
+        );
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}

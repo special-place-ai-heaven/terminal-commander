@@ -208,12 +208,15 @@ mod runtime {
 
     use parking_lot::Mutex;
     use terminal_commander_core::{
-        BucketId, ContextRingManager, EventDraft, ProbeId, SourceFrame, SourceStream,
+        BucketId, ContextRingManager, ProbeId, SourceFrame, SourceStream,
     };
     use terminal_commander_sifters::SifterRuntime;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
 
+    use crate::noise_pipeline::{
+        ProbeNoisePipeline, SharedProbeNoisePipeline, password_prompt_draft,
+    };
     use crate::process::EventSink;
 
     /// Default grace window between graceful and forced terminate.
@@ -262,6 +265,9 @@ mod runtime {
         pub secret_prompts_total: u64,
         pub stdin_bytes_written: u64,
         pub stdin_writes_denied_secret: u64,
+        pub frames_suppressed: u64,
+        pub frames_suppressed_progress: u64,
+        pub frames_suppressed_dedupe: u64,
     }
 
     /// Errors raised while spawning / driving a PTY probe.
@@ -456,6 +462,8 @@ mod runtime {
             let secret_for_task = Arc::clone(&secret_prompt_active);
             let secret_gen_for_task = Arc::clone(&secret_prompt_gen);
             let rings_for_task = Arc::clone(&rings);
+            let noise_pipeline: SharedProbeNoisePipeline =
+                Arc::new(Mutex::new(ProbeNoisePipeline::with_default_policy()));
 
             let join = tokio::spawn(async move {
                 // The streaming task owns the pty exclusively. Each
@@ -509,6 +517,7 @@ mod runtime {
                                     Arc::clone(&metrics_for_task),
                                     Arc::clone(&secret_for_task),
                                     Arc::clone(&secret_gen_for_task),
+                                    Arc::clone(&noise_pipeline),
                                 );
                             }
                             // TC44: a partial line (no trailing
@@ -556,6 +565,7 @@ mod runtime {
                         Arc::clone(&metrics_for_task),
                         secret_for_task,
                         secret_gen_for_task,
+                        noise_pipeline,
                     );
                 }
                 let _ = child.wait().await;
@@ -589,6 +599,7 @@ mod runtime {
         metrics: Arc<Mutex<PtyProbeMetrics>>,
         secret_prompt_active: Arc<AtomicBool>,
         secret_prompt_gen: Arc<AtomicU64>,
+        noise_pipeline: SharedProbeNoisePipeline,
     ) {
         let kind = PromptDetector::classify(line);
         let is_secret = PromptDetector::is_secret(kind);
@@ -621,17 +632,27 @@ mod runtime {
                 }
             }
         }
-        for draft in runtime.evaluate(&frame, bucket_id) {
-            {
-                let mut m = metrics.lock();
-                m.events_emitted = m.events_emitted.saturating_add(1);
-            }
-            sink.emit(draft);
+        let extra = if is_secret {
+            vec![password_prompt_draft(&frame, bucket_id)]
+        } else {
+            Vec::new()
+        };
+        let mut events_emitted = metrics.lock().events_emitted;
+        {
+            let mut pipeline = noise_pipeline.lock();
+            let mut m = metrics.lock();
+            pipeline.process_frame(
+                &frame,
+                bucket_id,
+                &runtime,
+                sink.as_ref(),
+                &mut *m,
+                &mut events_emitted,
+                extra,
+            );
+            m.events_emitted = events_emitted;
         }
-        let _ = (frame, bucket_id, secret_prompt_gen);
-        // Silence the `EventDraft` import warning when no rule
-        // matches; the variable is consumed inside the loop.
-        let _: Option<EventDraft> = None;
+        let _ = secret_prompt_gen;
     }
 }
 

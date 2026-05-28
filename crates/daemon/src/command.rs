@@ -193,6 +193,12 @@ pub struct CommandStatusResponse {
     pub frames_stderr: u64,
     pub bytes_total: u64,
     pub events_emitted: u64,
+    #[serde(default)]
+    pub frames_suppressed: u64,
+    #[serde(default)]
+    pub frames_suppressed_progress: u64,
+    #[serde(default)]
+    pub frames_suppressed_dedupe: u64,
     pub exit_code: Option<i32>,
     pub signal: Option<String>,
     pub duration_ms: Option<u64>,
@@ -222,11 +228,20 @@ impl std::fmt::Debug for DaemonEventSink {
 }
 
 impl EventSink for DaemonEventSink {
-    fn emit(&self, draft: EventDraft) {
+    fn emit(&self, draft: EventDraft) -> Option<u64> {
         let bucket_id = draft.bucket_id;
         // Append through the router so the audit row lands.
-        let _ = self.router.bucket_append(bucket_id, draft);
+        let ev = self.router.bucket_append(bucket_id, draft).ok()?;
         self.jobs.record_event(self.job_id);
+        Some(ev.seq)
+    }
+
+    fn patch_dedupe_aggregate(
+        &self,
+        bucket_id: BucketId,
+        patch: &terminal_commander_sifters::DedupeAggregatePatch,
+    ) {
+        let _ = self.router.bucket_patch_aggregation(bucket_id, patch);
     }
 }
 
@@ -805,6 +820,9 @@ impl CommandRuntime {
             frames_stderr: metrics.frames_stderr,
             bytes_total: metrics.bytes_total,
             events_emitted: metrics.events_emitted,
+            frames_suppressed: metrics.frames_suppressed,
+            frames_suppressed_progress: metrics.frames_suppressed_progress,
+            frames_suppressed_dedupe: metrics.frames_suppressed_dedupe,
             exit_code: rec.exit_info.as_ref().and_then(|e| e.exit_code),
             signal: rec.exit_info.as_ref().and_then(|e| e.signal.clone()),
             duration_ms: rec.exit_info.as_ref().map(|e| e.duration_ms),

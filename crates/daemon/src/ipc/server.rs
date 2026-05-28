@@ -2059,17 +2059,17 @@ fn collect_probes(state: &Arc<DaemonState>) -> Vec<ProbeListEntry> {
 
     // CommandRuntime: live_jobs + per-job status for counters.
     for j in state.command.live_jobs() {
-        let (frames_total, events_emitted) = state
-            .command
-            .status(j.job_id)
-            .map_or((0u64, 0u64), |s| (s.frames_total, s.events_emitted));
+        let status = state.command.status(j.job_id).ok();
         out.push(ProbeListEntry {
             kind: ProbeKind::Command,
             job_id: j.job_id,
             bucket_id: j.bucket_id,
             probe_id: j.probe_id,
-            frames_total,
-            events_emitted,
+            frames_total: status.as_ref().map_or(0, |s| s.frames_total),
+            events_emitted: status.as_ref().map_or(0, |s| s.events_emitted),
+            frames_suppressed: status.as_ref().map_or(0, |s| s.frames_suppressed),
+            frames_suppressed_progress: status.as_ref().map_or(0, |s| s.frames_suppressed_progress),
+            frames_suppressed_dedupe: status.as_ref().map_or(0, |s| s.frames_suppressed_dedupe),
             secret_prompts_total: 0,
             secret_prompt_active: false,
             path: None,
@@ -2085,6 +2085,9 @@ fn collect_probes(state: &Arc<DaemonState>) -> Vec<ProbeListEntry> {
             probe_id: pid,
             frames_total: m.frames_total,
             events_emitted: m.events_emitted,
+            frames_suppressed: m.frames_suppressed,
+            frames_suppressed_progress: m.frames_suppressed_progress,
+            frames_suppressed_dedupe: m.frames_suppressed_dedupe,
             secret_prompts_total: 0,
             secret_prompt_active: false,
             path: Some(path),
@@ -2101,6 +2104,9 @@ fn collect_probes(state: &Arc<DaemonState>) -> Vec<ProbeListEntry> {
             probe_id: pid,
             frames_total: m.frames_total,
             events_emitted: m.events_emitted,
+            frames_suppressed: m.frames_suppressed,
+            frames_suppressed_progress: m.frames_suppressed_progress,
+            frames_suppressed_dedupe: m.frames_suppressed_dedupe,
             secret_prompts_total: m.secret_prompts_total,
             secret_prompt_active: secret,
             path: None,

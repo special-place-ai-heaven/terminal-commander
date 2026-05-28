@@ -251,6 +251,8 @@ pub enum BucketError {
         "event seq {seq} is not greater than the bucket tail seq {tail} (manager assigns seq monotonically; do not pre-set)"
     )]
     NonMonotonicSeq { seq: u64, tail: u64 },
+    #[error("event seq {seq} not found in bucket '{bucket}'")]
+    EventSeqNotFound { bucket: BucketId, seq: u64 },
     #[error("core error: {0}")]
     Core(#[from] CoreError),
 }
@@ -456,6 +458,31 @@ impl BucketManager {
         // Wake any waiters.
         inner.notify.notify_waiters();
         Ok(assigned_seq)
+    }
+
+    /// Update aggregation fields on an existing event (TC11 cross-frame dedupe).
+    pub fn patch_event_aggregation(
+        &self,
+        bucket_id: BucketId,
+        seq: u64,
+        count: u32,
+        first_seen: OffsetDateTime,
+        last_seen: OffsetDateTime,
+    ) -> Result<(), BucketError> {
+        let cell = self.bucket(bucket_id)?;
+        let mut inner = cell.write();
+        let Some(ev) = inner.events.iter_mut().find(|e| e.seq == seq) else {
+            return Err(BucketError::EventSeqNotFound {
+                bucket: bucket_id,
+                seq,
+            });
+        };
+        ev.count = count;
+        ev.first_seen = Some(first_seen);
+        ev.last_seen = Some(last_seen);
+        inner.dedupe_collapsed_count = inner.dedupe_collapsed_count.saturating_add(1);
+        inner.notify.notify_waiters();
+        Ok(())
     }
 
     /// Wait for matching events to arrive in the bucket. Returns

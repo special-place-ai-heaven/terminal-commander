@@ -1171,6 +1171,12 @@ pub struct ProbeListEntry {
     pub probe_id: terminal_commander_core::ProbeId,
     pub frames_total: u64,
     pub events_emitted: u64,
+    #[serde(default)]
+    pub frames_suppressed: u64,
+    #[serde(default)]
+    pub frames_suppressed_progress: u64,
+    #[serde(default)]
+    pub frames_suppressed_dedupe: u64,
     /// PTY only — surfaces `PtyProbeMetrics::secret_prompts_total`.
     /// Other kinds return 0.
     pub secret_prompts_total: u64,

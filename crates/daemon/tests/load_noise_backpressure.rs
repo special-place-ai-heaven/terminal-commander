@@ -122,6 +122,30 @@ fn needle_rule() -> RuleDefinition {
     }
 }
 
+/// Regex needle whose `line` capture varies per emit so TC11 dedupe
+/// does not collapse volume under a tiny bucket cap (Variant B).
+fn needle_rule_distinct_dedupe() -> RuleDefinition {
+    RuleDefinition {
+        id: "tc47-needle".to_owned(),
+        version: 1,
+        kind: RuleType::Regex,
+        status: RuleStatus::Active,
+        severity: Severity::Medium,
+        event_kind: "needle_match".to_owned(),
+        stream: None,
+        description: None,
+        pattern: Some(r"TC47-NEEDLE line (?P<line>\d+)".to_owned()),
+        keywords: None,
+        captures: vec!["line".to_owned()],
+        summary_template: "needle at line ${line}".to_owned(),
+        tags: vec!["tc47".to_owned()],
+        rate_limit_per_min: None,
+        redact: vec![],
+        context_hint: ContextHint::default(),
+        examples: vec![],
+    }
+}
+
 /// Megabyte-scale noisy emitter. Prints `total_lines` lines of
 /// noise, sprinkling exactly `needle_count` matching lines evenly.
 /// Uses `python3 -u -c` so the output is line-buffered.
@@ -897,12 +921,13 @@ fn bucket_dropped_count_visible_when_retention_evicts() {
             .with_timeout(Duration::from_secs(10));
 
         // Activate needle rule + create a TINY bucket so retention
-        // evicts.
+        // evicts. Regex `line` capture varies per emit (Variant B)
+        // so TC11 dedupe does not collapse 100 needles to one event.
         let _ = client
             .call(
                 1,
                 IpcRequest::RegistryUpsert(RegistryUpsertParams {
-                    definition: needle_rule(),
+                    definition: needle_rule_distinct_dedupe(),
                 }),
             )
             .await
