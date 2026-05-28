@@ -7,7 +7,7 @@
 // return value tells the caller whether to forward tool calls, return
 // `daemon_unavailable` envelopes, or fail loudly.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -291,24 +291,155 @@ pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
     }
 }
 
-pub(crate) async fn probe_endpoint(endpoint: &Endpoint) -> bool {
-    match endpoint {
-        #[cfg(unix)]
-        Endpoint::UnixSocket { path } => tokio::net::UnixStream::connect(path).await.is_ok(),
-        #[cfg(not(unix))]
-        Endpoint::UnixSocket { .. } => false,
-        #[cfg(windows)]
-        Endpoint::WindowsPipe { name } => {
-            // ClientOptions::new().open is synchronous; same tokio
-            // contract caveat as the blocking I/O in ensure_daemon
-            // step 2 (acceptable for Phase 3, revisit if probed in a
-            // hot path).
-            use tokio::net::windows::named_pipe::ClientOptions;
-            ClientOptions::new().open(name.as_str()).is_ok()
-        }
-        #[cfg(not(windows))]
-        Endpoint::WindowsPipe { .. } => false,
+/// Whole-handshake budget for [`probe_endpoint`]. The probe connects,
+/// sends one `health` frame, and reads one response frame. A legitimate
+/// daemon answers in microseconds; this generous bound only exists so a
+/// hung/silent peer (a connectable socket that never replies) makes the
+/// probe return `false` instead of blocking the ensure path forever.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Upper bound on a response frame the probe will read. Mirrors the
+/// daemon's `MAX_FRAME_BYTES` (256 KiB, see `docs/runtime/UDS_IPC.md`):
+/// a length prefix above this is a non-conforming peer, not our daemon.
+const PROBE_MAX_FRAME_BYTES: usize = 256 * 1024;
+
+/// Minimal mirror of the daemon's `ResponseEnvelope` (TC37 wire format)
+/// sufficient to recognise a well-formed `health` reply WITHOUT taking a
+/// dependency on the daemon crate (which would create a supervisor<->daemon
+/// cycle: `terminal-commanderd` already depends on this crate).
+///
+/// We deliberately decode only what the accept rule needs: the result must
+/// be `kind = "ok"` and the inner response must be the `health` variant.
+/// `uptime_secs` is required by the variant; `idle_secs` is optional with
+/// `#[serde(default)]` so a legacy daemon that omits the field still
+/// deserialises as Health — the accept test is "deserialises as Health",
+/// never "carries idle_secs".
+#[derive(Deserialize)]
+struct ProbeResponseEnvelope {
+    result: ProbeResult,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ProbeResult {
+    Ok { response: ProbeResponse },
+    // Any non-ok envelope (e.g. an `err` reply) is not a daemon we can
+    // treat as ready; serde maps unknown/other kinds to a decode error,
+    // which the caller turns into `false`.
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
+enum ProbeResponse {
+    Health {
+        #[allow(dead_code)]
+        uptime_secs: u64,
+        #[serde(default)]
+        #[allow(dead_code)]
+        idle_secs: Option<u64>,
+    },
+    // A well-formed envelope carrying some other method is a daemon
+    // answering the wrong question — still "not our health handshake".
+    #[serde(other)]
+    Other,
+}
+
+/// Run the one-shot `health` handshake over an already-connected stream:
+/// write a length-prefixed `RequestEnvelope { correlation_id: 0,
+/// request: Health }`, read one length-prefixed response frame, and
+/// return `true` only if it deserialises as a well-formed `Health`
+/// response. Any I/O error, oversize/short frame, or non-Health payload
+/// yields `false`. The whole call is the caller's responsibility to bound
+/// with [`PROBE_TIMEOUT`].
+async fn health_handshake<S>(mut stream: S) -> bool
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Request frame. correlation_id 0 is fine: the probe is one-shot and
+    // does not multiplex. Payload matches the TC37 wire schema exactly:
+    // {"correlation_id":0,"request":{"method":"health"}}.
+    const REQUEST_JSON: &[u8] = br#"{"correlation_id":0,"request":{"method":"health"}}"#;
+    let Ok(len) = u32::try_from(REQUEST_JSON.len()) else {
+        return false;
+    };
+    if stream.write_all(&len.to_be_bytes()).await.is_err() {
+        return false;
     }
+    if stream.write_all(REQUEST_JSON).await.is_err() {
+        return false;
+    }
+    if stream.flush().await.is_err() {
+        return false;
+    }
+
+    // Response frame: 4-byte big-endian length prefix, then the payload.
+    let mut len_buf = [0_u8; 4];
+    if stream.read_exact(&mut len_buf).await.is_err() {
+        return false;
+    }
+    let resp_len = u32::from_be_bytes(len_buf) as usize;
+    if resp_len == 0 || resp_len > PROBE_MAX_FRAME_BYTES {
+        return false;
+    }
+    let mut payload = vec![0_u8; resp_len];
+    if stream.read_exact(&mut payload).await.is_err() {
+        return false;
+    }
+
+    matches!(
+        serde_json::from_slice::<ProbeResponseEnvelope>(&payload),
+        Ok(ProbeResponseEnvelope {
+            result: ProbeResult::Ok {
+                response: ProbeResponse::Health { .. },
+            },
+        })
+    )
+}
+
+/// Probe an endpoint by performing a real `health` handshake, not a bare
+/// connect. Returns `true` only when a connectable peer answers with a
+/// well-formed `IpcResponse::Health` (legacy daemons without `idle_secs`
+/// still count). A pre-bound/stale/non-tc listener that connects but does
+/// not speak our protocol returns `false` — closing the impersonation gap
+/// where any connectable socket was wrongly accepted as "our daemon".
+///
+/// The entire handshake is bounded by [`PROBE_TIMEOUT`]; a hung or silent
+/// peer returns `false` and never hangs the ensure path.
+pub async fn probe_endpoint(endpoint: &Endpoint) -> bool {
+    let handshake = async {
+        match endpoint {
+            #[cfg(unix)]
+            Endpoint::UnixSocket { path } => match tokio::net::UnixStream::connect(path).await {
+                Ok(stream) => health_handshake(stream).await,
+                Err(_) => false,
+            },
+            #[cfg(not(unix))]
+            Endpoint::UnixSocket { .. } => false,
+            #[cfg(windows)]
+            Endpoint::WindowsPipe { name } => {
+                // ClientOptions::new().open is synchronous; same tokio
+                // contract caveat as the blocking I/O in ensure_daemon
+                // step 2 (acceptable for Phase 3, revisit if probed in a
+                // hot path). The returned NamedPipeClient implements the
+                // tokio async I/O traits, so the same handshake applies.
+                use tokio::net::windows::named_pipe::ClientOptions;
+                match ClientOptions::new().open(name.as_str()) {
+                    Ok(stream) => health_handshake(stream).await,
+                    Err(_) => false,
+                }
+            }
+            #[cfg(not(windows))]
+            Endpoint::WindowsPipe { .. } => false,
+        }
+    };
+
+    // Bound EVERYTHING: connect + write + read. A silent peer that never
+    // answers must make the probe return false, never hang.
+    (tokio::time::timeout(PROBE_TIMEOUT, handshake).await).unwrap_or(false)
 }
 
 #[cfg(test)]
