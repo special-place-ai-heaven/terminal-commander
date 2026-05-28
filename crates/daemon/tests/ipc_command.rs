@@ -464,3 +464,109 @@ fn command_output_tail_records_bypass_governance_and_audit() {
         cleanup(&data);
     });
 }
+
+#[test]
+fn command_output_tail_empty_ring_records_calls_one_bytes_zero() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("tail-empty");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(30));
+
+        let start = match client
+            .call(51, IpcRequest::CommandStartCombed(small_start_params(&["/usr/bin/true"])))
+            .await
+            .expect("start")
+        {
+            IpcResponse::CommandStartCombed(s) => s,
+            other => panic!("unexpected response: {other:?}"),
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let status = match client
+                .call(
+                    52,
+                    IpcRequest::CommandStatus(CommandStatusParams {
+                        job_id: start.job_id,
+                    }),
+                )
+                .await
+                .expect("status")
+            {
+                IpcResponse::CommandStatus(s) => s,
+                other => panic!("unexpected response: {other:?}"),
+            };
+            if matches!(
+                status.state,
+                terminal_commander_core::JobState::Exited
+                    | terminal_commander_core::JobState::Failed
+                    | terminal_commander_core::JobState::Cancelled
+            ) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "job did not reach terminal state"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let tail = match client
+            .call(
+                53,
+                IpcRequest::CommandOutputTail(CommandOutputTailParams {
+                    job_id: start.job_id,
+                    max_lines: 50,
+                    max_bytes: 65_536,
+                }),
+            )
+            .await
+            .expect("tail")
+        {
+            IpcResponse::CommandOutputTail(t) => t,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert!(tail.lines.is_empty(), "no-output job must return empty tail");
+        assert_eq!(tail.returned_lines, 0);
+
+        let status = match client
+            .call(
+                54,
+                IpcRequest::CommandStatus(CommandStatusParams {
+                    job_id: start.job_id,
+                }),
+            )
+            .await
+            .expect("status after tail")
+        {
+            IpcResponse::CommandStatus(s) => s,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert_eq!(status.tail_calls_total, 1);
+        assert_eq!(status.tail_bytes_returned_total, 0);
+
+        let policy = match client.call(55, IpcRequest::PolicyStatus).await.unwrap() {
+            IpcResponse::PolicyStatus(p) => p,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert_eq!(policy.governance.filter_bypass_tail_calls_total, 1);
+        assert_eq!(policy.governance.filter_bypass_tail_bytes_total, 0);
+
+        let rows = {
+            let mut g = state.store.lock();
+            g.audit_since(&AuditReadRequest::new(0)).unwrap()
+        };
+        let allow = rows
+            .iter()
+            .find(|r| r.action == "command_output_tail" && r.decision == "allow")
+            .expect("governance allow audit row");
+        let meta = allow.metadata_json.as_deref().expect("metadata");
+        assert!(meta.contains("\"lines_returned\":0"));
+        assert!(meta.contains("\"bytes_returned\":0"));
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
