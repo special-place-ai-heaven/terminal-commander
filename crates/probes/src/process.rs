@@ -124,6 +124,9 @@ pub struct ProcessProbe {
     metrics: Arc<Mutex<ProcessProbeMetrics>>,
     cancel_tx: Option<oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<Result<std::process::ExitStatus, ProcessProbeError>>>,
+    /// Child PID captured at spawn (Windows console regression tests).
+    #[cfg(windows)]
+    child_pid: u32,
 }
 
 impl ProcessProbe {
@@ -169,6 +172,8 @@ impl ProcessProbe {
             terminal_commander_core::windows_silent(cmd.as_std_mut());
         }
         let mut child = cmd.spawn()?;
+        #[cfg(windows)]
+        let child_pid = child.id();
         let stdout = child.stdout.take().expect("piped stdout configured above");
         let stderr = child.stderr.take().expect("piped stderr configured above");
 
@@ -218,7 +223,16 @@ impl ProcessProbe {
             metrics,
             cancel_tx: Some(cancel_tx),
             join: Some(join),
+            #[cfg(windows)]
+            child_pid,
         })
+    }
+
+    /// Windows child PID for AttachConsole regression tests.
+    #[cfg(windows)]
+    #[must_use]
+    pub const fn child_pid(&self) -> u32 {
+        self.child_pid
     }
 
     /// Probe identifier.
