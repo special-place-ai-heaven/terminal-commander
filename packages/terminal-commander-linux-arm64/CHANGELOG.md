@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.36](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.35...v0.1.36) (2026-05-28)
+
+
+### Features
+
+* **release:** prepare first npm beta publish ([ab4b87e](https://github.com/special-place-ai-heaven/terminal-commander/commit/ab4b87ee952f208391f101cf8cc1f536f0df6106))
+
+
+### Bug Fixes
+
+* make npm distribution av-safe ([af24679](https://github.com/special-place-ai-heaven/terminal-commander/commit/af246791160b0b84fbf0a2501fb9c780e044d83b))
+* **release:** sync linux-x64 + linux-arm64 + manifest to 0.1.5 ([e6e37e7](https://github.com/special-place-ai-heaven/terminal-commander/commit/e6e37e72cf50905faf92b4948758c9a0d33eefc9))
+
 ## [0.1.13](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.12...v0.1.13) (2026-05-26)
 
 
