@@ -24,7 +24,7 @@ evidence: "Cargo.toml"
 
 # TC04 - Rust Workspace And Toolchain Scaffold
 
-> **Historical goal (frozen).** Reconciled status: `docs/release/MVP_EVIDENCE_REVIEW.md`. Active tracking: `.agent/goals/terminal-commander-runtime/`.
+> Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
 
 Use this file directly with `/goal`:
 

@@ -1,6 +1,6 @@
 # Run Order - terminal-commander-mvp
 
-**Historical chain (frozen as of 2026-05-28, [ROB-4](mention://issue/1d99ebb1-c568-48dd-85e5-a0f70e0dfe69)).** Do not `/goal` TC01–TC32 for new implementation. Active tracking: `.agent/goals/terminal-commander-runtime/` + `EVIDENCE_REPORT_RUNTIME.md`. Reconciled statuses: `docs/release/MVP_EVIDENCE_REVIEW.md`.
+Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
 
 Target branch: `feature/terminal-commander-mvp`
 

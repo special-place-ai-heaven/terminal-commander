@@ -97,10 +97,8 @@
 
 ## Historical chain (frozen)
 
-As of [ROB-4](mention://issue/1d99ebb1-c568-48dd-85e5-a0f70e0dfe69) (2026-05-28), **TC01–TC32 are frozen**.
+Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
 
-- **Active tracking:** `.agent/goals/terminal-commander-runtime/` + `EVIDENCE_REPORT_RUNTIME.md`
-- **Reconciled status:** `docs/release/MVP_EVIDENCE_REVIEW.md`
 - **Do not** set TC01–TC32 to `In progress` for new implementation without a new audit issue.
 - **Do not** use `/goal` on `goals/TC*.md` for net-new product work; runtime chain only.
 

@@ -1,6 +1,6 @@
 # Terminal Commander Goal Files
 
-**Historical MVP chain (frozen).** `goals/TC01–TC32` statuses were reconciled in `docs/release/MVP_EVIDENCE_REVIEW.md` ([ROB-4](mention://issue/1d99ebb1-c568-48dd-85e5-a0f70e0dfe69)). New work is tracked only under `.agent/goals/terminal-commander-runtime/`.
+Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
 
 Copy the `.agent/` directory from this archive into the root of your repository:
 

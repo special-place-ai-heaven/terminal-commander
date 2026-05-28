@@ -24,7 +24,7 @@ evidence: "TC37-daemon-uds-ipc-and-peer-identity.md"
 
 # TC21 - Daemon Local Api And Router
 
-> **Historical goal (frozen).** Reconciled status: `docs/release/MVP_EVIDENCE_REVIEW.md`. Active tracking: `.agent/goals/terminal-commander-runtime/`.
+> Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
 > **Superseded by:** `.agent/goals/terminal-commander-runtime/TC37-daemon-uds-ipc-and-peer-identity.md`.
 
 Use this file directly with `/goal`:

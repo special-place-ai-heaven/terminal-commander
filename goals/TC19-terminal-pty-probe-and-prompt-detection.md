@@ -24,7 +24,7 @@ evidence: "TC44-posix-pty-spawn-and-stdin-control.md"
 
 # TC19 - Terminal Pty Probe And Prompt Detection
 
-> **Historical goal (frozen).** Reconciled status: `docs/release/MVP_EVIDENCE_REVIEW.md`. Active tracking: `.agent/goals/terminal-commander-runtime/`.
+> Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
 > **Superseded by:** `.agent/goals/terminal-commander-runtime/TC44-posix-pty-spawn-and-stdin-control.md`.
 
 Use this file directly with `/goal`:

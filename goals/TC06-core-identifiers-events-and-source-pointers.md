@@ -24,7 +24,7 @@ evidence: "crates/core/src/lib.rs"
 
 # TC06 - Core Identifiers Events And Source Pointers
 
-> **Historical goal (frozen).** Reconciled status: `docs/release/MVP_EVIDENCE_REVIEW.md`. Active tracking: `.agent/goals/terminal-commander-runtime/`.
+> Frozen 2026-05-28 as historical record. Live status tracked in `.agent/goals/terminal-commander-runtime/` and `docs/release/MVP_EVIDENCE_REVIEW.md`. Do not edit.
 
 Use this file directly with `/goal`:
 
