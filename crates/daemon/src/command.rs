@@ -638,6 +638,21 @@ impl CommandRuntime {
                 None
             };
 
+            // Publish the receipt into the live binding BEFORE the job
+            // state flips terminal. `status()` reads the state from
+            // `jobs` (set by `finish`/`cancel` below) and the receipt
+            // from `live`; if `finish` ran first, a `command_status` /
+            // `run_and_watch` poll landing in the gap would observe a
+            // terminal state with a still-`None` receipt and wrongly
+            // conclude the quiet command produced no receipt. Writing
+            // the receipt first makes "terminal" imply "receipt present"
+            // for the no-rule path. Metrics are refreshed after the
+            // lifecycle append below (they depend on its `events_emitted`
+            // bump), so only the receipt is published here.
+            if let Some(b) = waiter_live.write().get_mut(&job_id) {
+                b.receipt = receipt;
+            }
+
             // Lifecycle draft.
             let draft = match outcome {
                 ProbeOutcome::Exited { code, signal } => waiter_jobs.finish(job_id, code, signal),
@@ -654,13 +669,12 @@ impl CommandRuntime {
             }
 
             // Update the stored metrics for command_status callers.
-            // The binding's `sifter` and `inline_rules` are
-            // preserved so a deactivation racing with the exit
-            // still has a sifter handle to swap (the no-op rebuild
-            // is harmless on a finished probe).
+            // The binding's `sifter`, `inline_rules`, and the receipt
+            // published above are preserved so a deactivation racing
+            // with the exit still has a sifter handle to swap (the no-op
+            // rebuild is harmless on a finished probe).
             if let Some(b) = waiter_live.write().get_mut(&job_id) {
                 b.metrics = final_metrics;
-                b.receipt = receipt;
             }
 
             // Emit our own structured audit row for the exit.
