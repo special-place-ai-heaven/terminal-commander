@@ -1005,6 +1005,40 @@ mod tests {
     }
 
     #[test]
+    fn committed_rule_fixture_parses_validates_and_renders() {
+        // The canonical wire example MUST be real: deserialize the
+        // ACTUAL committed fixture (not a Rust reconstruction), validate
+        // it, and prove its summary_template substitutes a capture. This
+        // guards the three divergences that previously made the shipped
+        // example un-parseable (missing event_kind; context_hint
+        // before/after vs before_lines/after_lines; {x} vs ${x}).
+        let raw = std::fs::read_to_string("../../tests/fixtures/contracts/rule-definition.v1.json")
+            .expect("read rule-definition fixture");
+        let mut value: serde_json::Value = serde_json::from_str(&raw).expect("fixture is JSON");
+        // The fixture carries a documentation-only _meta envelope; the
+        // production payload is the object minus that key.
+        value
+            .as_object_mut()
+            .expect("fixture is an object")
+            .remove("_meta");
+        let def: RuleDefinition =
+            serde_json::from_value(value).expect("fixture must deserialize as RuleDefinition");
+        def.validate().expect("fixture rule must validate");
+        assert!(!def.event_kind.is_empty(), "event_kind must be present");
+        assert_eq!(def.context_hint.before_lines, 3);
+        assert_eq!(def.context_hint.after_lines, 1);
+
+        // The summary_template must actually substitute (uses ${package}).
+        let mut caps = IndexMap::new();
+        caps.insert("package".to_owned(), "libssl-dev".to_owned());
+        let rendered = def.render_summary(&caps).expect("render").0;
+        assert!(
+            rendered.contains("libssl-dev") && !rendered.contains("${"),
+            "summary must substitute the capture, got: {rendered}"
+        );
+    }
+
+    #[test]
     fn rule_status_runtime_eligible_only_for_active() {
         assert!(RuleStatus::Active.is_runtime_eligible());
         for s in [
