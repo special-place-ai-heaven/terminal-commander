@@ -117,11 +117,24 @@ I4. `admin_debug` denies registry mutations. Oracle:
     `admin_debug_denies_registry_mutations`.
 I5. NEW: `repo_only` denies FileRead/FileWatch/CommandStart whose path/cwd
     is outside the canonicalized `$REPO_ROOT`. (No oracle yet; this spec
-    adds it.)
-I6. NEW: within `developer_local` and `repo_only`, CommandStart whose
-    argv[0] basename is not in `commands.allow_roots` is denied
-    (`no_allow_rule`), UNLESS allow_roots is empty/unset, in which case
-    behavior degrades to the documented default (see open question Q1).
+    adds it.) MVP enforcement is `std::fs::canonicalize` + `starts_with(
+    repo_root)` IN `policy.rs` (the DECISION). The acting cap-std `Dir`
+    sandbox is OUT OF SCOPE and deferred to `crates/probes` / `crates/store`
+    (roadmap), since those crates own the actual fs opens (`ProcessProbe::
+    spawn` does `Command::new().current_dir(cwd)` at probes/process.rs:189-
+    196; policy.rs never opens an fd). Document the residual TOCTOU /
+    symlink-escape gap between decide and act in the threat note; closing it
+    is the deferred act-site cap-std layer, NOT this spec.
+I6. NEW: command allow-list, per-profile asymmetry (see Q1, resolved):
+    - `developer_local`: CommandStart whose argv[0] basename is not in
+      `commands.allow_roots` is denied (`no_allow_rule`). When `[commands]`
+      is absent/empty, fall back to a compiled-in BASELINE allow-list (a NEW
+      const in `policy.rs`, authored from POLICY.md:167 = cargo/npm/pytest/
+      make/ls/git). NOTE: this is NOT the TC14 seed packs — those are regex
+      output-combing rules (`crates/store/rules/*.json`), not command
+      allow-lists.
+    - `repo_only`: same allow-list check, but an absent/empty `allow_roots`
+      means DENY-ALL (the sandbox profile must never allow-any).
 I7. NEW: `allow_override` entries each require path + justification +
     `i_understand_risk = true`; loading a profile with overrides emits a
     startup audit record naming each path (POLICY.md section 5).
@@ -154,6 +167,9 @@ AC8. `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test -p
 AC9. POLICY.md section status line no longer says "No policy code ...
      exists yet"; policy.rs:8 no longer says bare "live" — it states what
      IS enforced and cites this spec.
+AC10. `DaemonConfig::from_toml` with `profile = repo_only` and no
+     `repo_root` returns `ConfigError::Validate` (repo_only cannot boot
+     without its confinement root). (covers Q3 verdict)
 
 ## evidence_required
 
@@ -193,16 +209,19 @@ cargo clean   # per CLAUDE.md, at task boundary
 
 ## plan (phased; each phase <=5 files, verify, then approval)
 
-Ordering rationale: do the TYPE change and containment (the CRITICAL,
-highest-blast-radius item) behind tests first; schema loading second;
-override + audit last. Honesty edit to docs lands with Phase 1 so the
-false-safety claim dies on the first commit even if later phases slip.
+Ordering rationale: ship the honesty edit FIRST as its own commit (the
+false "live" claim is already released in v0.1.36, so it must die
+immediately and independently of the unresolved type/containment work);
+then the TYPE change and containment (the CRITICAL, highest-blast-radius
+item) behind tests; schema loading; override + audit last.
 
-**Phase 0 (optional, separate commit) — dead-weight + honesty.**
+**Phase 0 (SHIP FIRST, standalone commit, ahead of Phase 1) — honesty.**
 Files: `policy.rs` (doc-comment only), `POLICY.md` (status note only).
 No behavior change. Flip policy.rs:8 to PARTIAL + warn repo_only does not
-yet confine. This is handover direction B folded in as a safety floor, so
-even if A stalls the lie is gone. Verify: `cargo check`.
+yet confine. The misleading "live (TC22)" label is in users' hands now
+(v0.1.36 released to crates.io/npm); a false "this is enforced" security
+claim is strictly worse than an honest "partial" one. Has no dependency on
+Q1-Q3. Verify: `cargo check`.
 
 **Phase 1 — repo_only containment + Copy->Clone.**
 Files: `policy.rs`, `state.rs`, `command.rs`, `pty_command.rs`,
@@ -218,7 +237,11 @@ Files: `config.rs`, `policy.rs`, `config/terminal-commanderd.example.toml`,
 `tests/security.rs` (+ policy.rs tests). Add `[paths]`/`[commands]`/
 `[probes]` to `PolicySection` (mind the existing `LimitsSection` name
 collision — POLICY.md `[limits]` is a DIFFERENT block; rename or nest).
-Implement I6 + default-deny. Add AC3/AC4. Verify: full command.
+The baseline command allow-list (Q1 verdict) lands as a NEW const in
+`policy.rs` (cargo/npm/pytest/make/ls/git from POLICY.md:167), NOT sourced
+from TC14 packs. Implement I6 per-profile asymmetry + default-deny. Add
+AC3/AC4. No `crates/probes` / `crates/store` files are touched here
+(act-site containment is a separate future goal). Verify: full command.
 
 **Phase 3 — allow_override + startup audit.**
 Files: `config.rs`, `policy.rs`, `state.rs` (audit emit), example TOML,
@@ -231,29 +254,40 @@ command + the contract fixture test.
 
 ---
 
-## open questions for owner (answer before Phase 2)
+## resolved decisions (was: open questions; resolved 2026-05-29 via tech-researcher pass, code-verified)
 
-Q1. `developer_local` with NO `commands.allow_roots` configured (e.g. the
-    current minimal config that has no `[commands]` block at all): should
-    the engine
-    (a) deny all commands (strict default-deny; safest but breaks every
-        existing zero-config user instantly), or
-    (b) fall back to the seed allow-list from TC14 (cargo/npm/pytest/make/
-        ls/git per POLICY.md section 4 example), or
-    (c) keep today's allow-any-except-deny-set until an allow_roots is
-        explicitly set (most backward-compatible; weakest)?
-    This is a security-posture call, not an implementation detail.
+Q1 — `developer_local` with NO `commands.allow_roots`. RESOLVED: hybrid,
+    per-profile split (see I6). `developer_local` falls back to a compiled-in
+    BASELINE allow-list (NEW const in `policy.rs` from POLICY.md:167 =
+    cargo/npm/pytest/make/ls/git); `repo_only` empty -> DENY-ALL. Pre-1.0
+    (v0.1.36, Cargo.toml:30) justifies secure-by-default. CORRECTION: the
+    original option (b) "seed allow-list from TC14" was a FALSE premise —
+    TC14 packs (`crates/store/rules/*.json`) are regex output-combing rules,
+    not command allow-lists. The baseline list is authored fresh in
+    `policy.rs`.
 
-Q2. Containment primitive for I5: POLICY.md section 1 names cap-std `Dir`,
-    but cap-std is NOT a current dependency (verified: zero matches). Use
-    (a) add the `cap-std` dep now (matches doctrine, +deps), or
-    (b) `Path::canonicalize` + prefix check for MVP (no new dep, but
-        TOCTOU/symlink caveats to document)?
+Q2 — Containment primitive for I5. RESOLVED: (b) `std::fs::canonicalize` +
+    `starts_with` prefix check in `policy.rs`. NO cap-std dependency added.
+    Rationale: cap-std `Dir` is a held fd handle for fs *opens*;
+    `policy.rs::evaluate` is a pure `&Path -> verdict` that never opens an
+    fd, so cap-std is the wrong tool there. The acting cap-std sandbox, if
+    ever added, belongs at the act sites in `crates/probes` /
+    `crates/store` (`ProcessProbe::spawn`, probes/process.rs:189-196) — a
+    deferred roadmap goal, not this spec. Keeps `deny.toml`
+    `advisories.ignore = []` (deny.toml:38) RUSTSEC burden flat. Residual
+    TOCTOU/symlink gap documented under I5.
 
-Q3. Where does `repo_root` come from at daemon start? `state.rs:160` only
-    has the profile enum. Options: a new `[policy] repo_root = "..."` TOML
-    key, or derive from `daemon.data_dir`'s git ancestor, or require it
-    only when `profile = repo_only`. Owner preference?
+Q3 — `repo_root` source at daemon start. RESOLVED: (a) new `[policy]
+    repo_root = "..."` TOML key, typed `Option<PathBuf>`, validated as
+    required ONLY when `profile = repo_only` (in
+    `config::validate_and_clamp`, config.rs:290-341; new AC10). Canonicalize
+    once at engine construction. REJECTED (b) git-ancestor walk of
+    `data_dir`: `data_dir` is `~/.local/share/...` (example.toml:15) and
+    config.rs:301-307 rejects `/mnt/c` — it is outside the repo by design,
+    so the walk finds nothing or a coincidental `.git`. The daemon has no
+    repo concept today; `find_repo_root` is CLI-only / doctor-only
+    (cli/main.rs:587) and CWD-relative, unsafe as a daemon security boundary.
 
-Q4. Scope confirm: is the 4-phase sequence acceptable, or should Phase 0
-    (honesty) ship NOW as its own PR while the rest is specced/reviewed?
+Q4 — Phase 0 sequencing. RESOLVED: ship Phase 0 (honesty) FIRST as a
+    standalone commit, ahead of Phase 1 (see plan). The false "live" label
+    is already released in v0.1.36; it dies now, independent of Q1-Q3.
