@@ -23,7 +23,6 @@ use tokio::sync::watch;
 
 use crate::activation::ActivationRegistry;
 use crate::audit::PersistentAudit;
-use crate::store_actor::StoreClient;
 use crate::command::CommandRuntime;
 use crate::config::DaemonConfig;
 use crate::file_watch::WatchRuntime;
@@ -31,6 +30,7 @@ use crate::policy::PolicyEngine;
 #[cfg(unix)]
 use crate::pty_command::PtyRuntime;
 use crate::router::Router;
+use crate::store_actor::StoreClient;
 
 /// Errors raised during daemon bootstrap.
 #[derive(Debug, thiserror::Error)]
