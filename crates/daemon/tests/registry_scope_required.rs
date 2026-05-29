@@ -111,10 +111,7 @@ fn activate_without_scope_is_rejected_and_audited() {
         assert!(!state.activation.is_active("kw-no-scope", 1, ActivationScope::Global));
 
         // Audit row landed via the dispatcher (decision = error).
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
             rows.iter()
                 .any(|r| r.action == "ipc_registry_activate" && r.decision == "error"),
@@ -151,10 +148,7 @@ fn deactivate_without_scope_is_rejected_and_audited() {
             .expect_err("missing scope must be rejected");
         assert_eq!(err.code, IpcErrorCode::ScopeInvalid);
 
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
             rows.iter()
                 .any(|r| r.action == "ipc_registry_deactivate" && r.decision == "error"),

@@ -5,7 +5,8 @@
     "method": "tools/call",
     "params": {
       "name": "system_discover",
-      "arguments": {}
+      "arguments": {
+      }
     }
   },
   "tool": "system_discover",
@@ -25,254 +26,37 @@
     "daemon": null,
     "daemon_error": "daemon ipc error [Internal]: daemon unavailable at startup",
     "tools": [
-      {
-        "name": "system_discover",
-        "status": "live",
-        "description": "Return adapter version, MCP spec, policy profile, tool catalogue.",
-        "requires_daemon": false,
-        "available": true,
-        "unavailable_reason": null
-      },
-      {
-        "name": "health",
-        "status": "live",
-        "description": "Daemon liveness ping; returns uptime seconds.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "policy_status",
-        "status": "live",
-        "description": "Active policy profile and bounded per-call caps.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "self_check",
-        "status": "live",
-        "description": "Re-run the daemon self-check; bounded text report.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "command_start_combed",
-        "status": "live",
-        "description": "Start a non-PTY argv command; bounded metadata response. No raw stdout/stderr.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "command_status",
-        "status": "live",
-        "description": "Lifecycle + counters lookup for a previously started job.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "command_output_tail",
-        "status": "live",
-        "description": "Read the last N lines of a command's captured output WITHOUT a rule. For one-off/exploratory commands whose format you don't know (df -h, docker system df): start it, then read its tail here. Bounded: 200 lines / 64 KiB, truncation-flagged. For recurring signals, define a rule instead.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "bucket_events_since",
-        "status": "live",
-        "description": "Cursor read of a bucket. Bounded; severity / kind filters supported.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "bucket_wait",
-        "status": "live",
-        "description": "Realtime wait on a bucket. Heartbeat returned on timeout.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "bucket_summary",
-        "status": "live",
-        "description": "Bucket counters + severity histogram. No raw stream content.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "event_context",
-        "status": "live",
-        "description": "Bounded context window around an event. Pointer-based.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "registry_search",
-        "status": "live",
-        "description": "FTS search over persisted rule definitions. Bounded.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "registry_get",
-        "status": "live",
-        "description": "Fetch a rule definition by id and optional version.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "registry_upsert",
-        "status": "live",
-        "description": "Insert a new immutable (rule_id, version+1) row from a JSON definition.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "registry_test",
-        "status": "live",
-        "description": "Dry-run a rule against bounded samples; never persists, no raw stream lane.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "registry_activate",
-        "status": "live",
-        "description": "Activate (rule_id, version?) for every newly-started command.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "registry_import_pack",
-        "status": "live",
-        "description": "Import a curated rule pack by name; optionally activate it in one call.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "registry_deactivate",
-        "status": "live",
-        "description": "Deactivate (rule_id, version); future commands skip the rule.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "registry_list_active",
-        "status": "live",
-        "description": "Snapshot of every currently-active rule (id + version + severity).",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "file_read_window",
-        "status": "live",
-        "description": "Bounded line/byte window read of one file. Never returns the whole file.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "file_search",
-        "status": "live",
-        "description": "Bounded substring search over one file. Returns structured match pointers + capped snippets.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "file_watch_start",
-        "status": "live",
-        "description": "Start a daemon-owned file watch bound to a bucket; emits signal only when scoped rules match.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "file_watch_stop",
-        "status": "live",
-        "description": "Stop a previously started file watch by watch_id.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "file_watch_list",
-        "status": "live",
-        "description": "Snapshot of every currently-live file watch.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "pty_command_start",
-        "status": "live",
-        "description": "Start an interactive non-shell argv command attached to a PTY. Bounded metadata only.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "pty_command_write_stdin",
-        "status": "live",
-        "description": "Write bounded stdin bytes to a running PTY job. Denied while a secret prompt is active.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "pty_command_stop",
-        "status": "live",
-        "description": "Stop a previously started PTY job by job_id. Returns final counters.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "pty_command_list",
-        "status": "live",
-        "description": "Snapshot of every currently-live PTY job (including secret_prompt_active).",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "runtime_state",
-        "status": "live",
-        "description": "Bounded aggregate runtime snapshot: probes, buckets, active rule scopes.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "probe_list",
-        "status": "live",
-        "description": "Flat list of every live probe across all runtimes (command / pty / file watch).",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      },
-      {
-        "name": "probe_status",
-        "status": "live",
-        "description": "Bounded per-probe lookup by probe_id. Returns UnknownProbe if not live.",
-        "requires_daemon": true,
-        "available": false,
-        "unavailable_reason": "daemon_unavailable"
-      }
+      {"name": "system_discover", "status": "live", "description": "Return adapter version, MCP spec, policy profile, tool catalogue.", "requires_daemon": false, "available": true, "unavailable_reason": null},
+      {"name": "health", "status": "live", "description": "Daemon liveness ping; returns uptime seconds.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "policy_status", "status": "live", "description": "Active policy profile and bounded per-call caps.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "self_check", "status": "live", "description": "Re-run the daemon self-check; bounded text report.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "command_start_combed", "status": "live", "description": "Start a non-PTY argv command; bounded metadata response. No raw stdout/stderr.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "command_status", "status": "live", "description": "Lifecycle + counters lookup for a previously started job.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "command_output_tail", "status": "live", "description": "Read the last N lines of a command's captured output WITHOUT a rule. For one-off/exploratory commands whose format you don't know (df -h, docker system df): start it, then read its tail here. Bounded: 200 lines / 64 KiB, truncation-flagged. For recurring signals, define a rule instead.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "bucket_events_since", "status": "live", "description": "Cursor read of a bucket. Bounded; severity / kind filters supported.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "bucket_wait", "status": "live", "description": "Realtime wait on a bucket. Heartbeat returned on timeout.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "bucket_summary", "status": "live", "description": "Bucket counters + severity histogram. No raw stream content.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "event_context", "status": "live", "description": "Bounded context window around an event. Pointer-based.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "registry_search", "status": "live", "description": "FTS search over persisted rule definitions. Bounded.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "registry_get", "status": "live", "description": "Fetch a rule definition by id and optional version.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "registry_upsert", "status": "live", "description": "Insert a new immutable (rule_id, version+1) row from a JSON definition.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "registry_test", "status": "live", "description": "Dry-run a rule against bounded samples; never persists, no raw stream lane.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "registry_activate", "status": "live", "description": "Activate (rule_id, version?) for every newly-started command.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "registry_import_pack", "status": "live", "description": "Import a curated rule pack by name; optionally activate it in one call.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "registry_deactivate", "status": "live", "description": "Deactivate (rule_id, version); future commands skip the rule.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "registry_list_active", "status": "live", "description": "Snapshot of every currently-active rule (id + version + severity).", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "file_read_window", "status": "live", "description": "Bounded line/byte window read of one file. Never returns the whole file.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "file_search", "status": "live", "description": "Bounded substring search over one file. Returns structured match pointers + capped snippets.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "file_watch_start", "status": "live", "description": "Start a daemon-owned file watch bound to a bucket; emits signal only when scoped rules match.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "file_watch_stop", "status": "live", "description": "Stop a previously started file watch by watch_id.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "file_watch_list", "status": "live", "description": "Snapshot of every currently-live file watch.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "pty_command_start", "status": "live", "description": "Start an interactive non-shell argv command attached to a PTY. Bounded metadata only.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "pty_command_write_stdin", "status": "live", "description": "Write bounded stdin bytes to a running PTY job. Denied while a secret prompt is active.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "pty_command_stop", "status": "live", "description": "Stop a previously started PTY job by job_id. Returns final counters.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "pty_command_list", "status": "live", "description": "Snapshot of every currently-live PTY job (including secret_prompt_active).", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "runtime_state", "status": "live", "description": "Bounded aggregate runtime snapshot: probes, buckets, active rule scopes.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "probe_list", "status": "live", "description": "Flat list of every live probe across all runtimes (command / pty / file watch).", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "probe_status", "status": "live", "description": "Bounded per-probe lookup by probe_id. Returns UnknownProbe if not live.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"}
     ]
   },
   "availability_invariants": {

@@ -19,7 +19,6 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use terminal_commander_core::{BucketManager, ContextRingManager, JobManager};
 use terminal_commander_sifters::SifterRuntime;
-use terminal_commander_store::EventStore;
 use tokio::sync::watch;
 
 use crate::activation::ActivationRegistry;
@@ -31,6 +30,7 @@ use crate::policy::PolicyEngine;
 #[cfg(unix)]
 use crate::pty_command::PtyRuntime;
 use crate::router::Router;
+use crate::store_actor::StoreClient;
 
 /// Errors raised during daemon bootstrap.
 #[derive(Debug, thiserror::Error)]
@@ -54,9 +54,9 @@ pub type Result<T> = core::result::Result<T, BootstrapError>;
 pub struct DaemonState {
     /// Original config (kept so callers can inspect / re-render).
     pub config: DaemonConfig,
-    /// Locked, single-writer event store. Shared between the router's
-    /// audit sink and any future store-using subsystems.
-    pub store: Arc<Mutex<EventStore>>,
+    /// Store actor client (single writer thread). Shared between IPC
+    /// registry handlers, bootstrap, and the persistent audit sink.
+    pub store: StoreClient,
     /// Timestamp of the last real (non-peek) IPC request served.
     /// Used by the idle self-reaper to decide when to shut down.
     /// Bumped on dispatch (wired in a later task) and read via
@@ -141,20 +141,15 @@ impl DaemonState {
     pub fn bootstrap(config: DaemonConfig) -> Result<Self> {
         ensure_dir(&config.daemon.data_dir)?;
         let db_path = config.db_path();
-        let store_handle = EventStore::with_writer(&db_path)?;
-        let store = Arc::new(Mutex::new(store_handle));
-
-        let audit = Arc::new(PersistentAudit::new(Arc::clone(&store)));
+        let store = StoreClient::open_writer(&db_path)?;
+        let audit = Arc::new(PersistentAudit::new(store.clone()));
         audit.ensure_migration().map_err(BootstrapError::Store)?;
 
         // Apply the TC13 registry migration eagerly so bootstrap can
         // safely call `list_active_rule_defs` and the IPC layer can
         // accept `registry_*` calls without a first-call latency
         // spike. The migration is idempotent.
-        {
-            let mut g = store.lock();
-            g.ensure_registry().map_err(BootstrapError::Store)?;
-        }
+        store.ensure_registry().map_err(BootstrapError::Store)?;
 
         let buckets = Arc::new(BucketManager::new());
         let rings = Arc::new(ContextRingManager::new());
@@ -162,7 +157,15 @@ impl DaemonState {
         let sifter =
             Arc::new(SifterRuntime::build(&[]).map_err(|e| BootstrapError::Sifter(e.to_string()))?);
 
-        let policy = PolicyEngine::new(config.policy.profile);
+        let policy = PolicyEngine::with_config(
+            config.policy.profile,
+            config.policy.repo_root.clone(),
+            config
+                .policy
+                .commands
+                .as_ref()
+                .map(|c| c.allow_roots.clone()),
+        );
 
         // Restore active rule definitions from the persistent
         // registry. The in-memory ActivationRegistry is the runtime
@@ -171,11 +174,9 @@ impl DaemonState {
         // row with its scope so a bucket/job/probe-scoped activation
         // survives a daemon restart and reattaches to the matching
         // identity when that bucket/job/probe is re-encountered.
-        let active_rows = {
-            let g = store.lock();
-            g.list_active_rule_defs_scoped()
-                .map_err(BootstrapError::Store)?
-        };
+        let active_rows = store
+            .list_active_rule_defs_scoped()
+            .map_err(BootstrapError::Store)?;
         let entries: Vec<crate::activation::ActivationEntry> = active_rows
             .into_iter()
             .map(
@@ -195,12 +196,15 @@ impl DaemonState {
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
         ));
 
+        // `PolicyEngine` is no longer `Copy` (TC22 Phase 1: it carries an
+        // owned `repo_root`). Clone it into each runtime; the original
+        // moves into the `DaemonState.policy` field below.
         let command = Arc::new(CommandRuntime::new(
             Arc::clone(&router),
             Arc::clone(&rings),
             Arc::clone(&jobs),
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
-            policy,
+            policy.clone(),
             Arc::clone(&activation),
         ));
         let watch = Arc::new(WatchRuntime::new(
@@ -208,7 +212,7 @@ impl DaemonState {
             Arc::clone(&rings),
             Arc::clone(&jobs),
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
-            policy,
+            policy.clone(),
             Arc::clone(&activation),
         ));
         #[cfg(unix)]
@@ -217,7 +221,7 @@ impl DaemonState {
             Arc::clone(&rings),
             Arc::clone(&jobs),
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
-            policy,
+            policy.clone(),
             Arc::clone(&activation),
         ));
 
@@ -386,13 +390,11 @@ mod tests {
 
         // The audit row must be visible in the persistent store
         // (not just in some in-memory shadow copy).
-        let mut g = state.store.lock();
-        let rows = g.audit_since(&AuditReadRequest::new(0)).unwrap();
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
             rows.iter().any(|r| r.action == "bucket_create"),
             "bucket_create must surface in persistent audit; rows: {rows:?}"
         );
-        drop(g);
         cleanup(&data);
     }
 

@@ -16,7 +16,7 @@ publish.workspace = true
 [dependencies]
 parking_lot = "0.12.5"
 terminal-commander-core.workspace = true
-terminal-commander-sifters = { version = "0.1.31", path = "../sifters" } # x-release-please-version
+terminal-commander-sifters = { version = "0.1.36", path = "../sifters" } # x-release-please-version
 thiserror = "2.0.18"
 time = "0.3.47"
 tokio = { workspace = true, features = ["process", "macros", "rt-multi-thread", "io-util", "sync", "time", "fs"] }
@@ -27,5 +27,30 @@ vte = "0.15.0"
 [target.'cfg(unix)'.dependencies]
 pty-process = { version = "=0.5.3", features = ["async"] }
 
-[lints]
-workspace = true
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }
+
+# Replicate workspace lints rather than using `workspace = true` so we
+# can allow `unsafe_code` for the Win32 FFI in
+# tests/windows_no_console_spawn.rs (AttachConsole / GetConsoleWindow /
+# FreeConsole). Production probe code does NOT use unsafe.
+[lints.rust]
+unsafe_code = "allow"          # Win32 FFI in windows_no_console_spawn test only
+unreachable_pub = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"
+significant_drop_tightening = "allow"

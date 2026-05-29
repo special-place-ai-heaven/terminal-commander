@@ -70,8 +70,10 @@ fn runner_socket_path(distro: &str) -> Result<PathBuf, RouteError> {
 #[cfg(windows)]
 fn wsl_username(distro: &str) -> Result<String, RouteError> {
     use std::process::Command;
-    let out = Command::new("wsl.exe")
-        .args(["-d", distro, "--", "bash", "-lc", "whoami"])
+    use terminal_commander_core::windows_silent;
+    let mut cmd = Command::new("wsl.exe");
+    windows_silent(&mut cmd).args(["-d", distro, "--", "bash", "-lc", "whoami"]);
+    let out = cmd
         .output()
         .map_err(|e| RouteError::Bootstrap(format!("wsl whoami: {e}")))?;
     if !out.status.success() {

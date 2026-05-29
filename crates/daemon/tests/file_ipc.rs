@@ -444,10 +444,7 @@ fn file_watch_start_then_append_emits_events_when_rule_active() {
         assert!(stopped.events_emitted >= 1);
 
         // Audit row landed for the start.
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
             rows.iter().any(|r| r.action == "file_watch_start"),
             "expected file_watch_start audit row"

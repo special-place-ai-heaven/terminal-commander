@@ -61,15 +61,38 @@ pub fn read_pidfile_raw(state_dir: &Path) -> Option<RunningDaemon> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Cross-platform "is this pid alive" check. Uses OS tools rather than
-/// a libc dependency so the supervisor crate stays dep-light and the
-/// same code path works on Windows and Unix.
+/// Cross-platform "is this pid alive" check. Uses OS facilities rather
+/// than a libc dependency so the supervisor crate stays dep-light.
+///
+/// On Linux this reads `/proc/<pid>` existence -- fork-free, so the
+/// liveness checks on the daemon bring-up and reap paths no longer pay a
+/// `fork`+`exec` per call (review finding #5).
+///
+/// Cross-user semantics (Linux). `/proc/<pid>` exists for a live process
+/// (and for a not-yet-reaped zombie) regardless of its owner, so unlike the
+/// previous `kill -0` probe this never reports another user's live process
+/// as dead via `EPERM`. The one environment where the two diverge in the
+/// other direction is `hidepid=2`, under which another user's `/proc/<pid>`
+/// is hidden and this reports dead -- matching `kill -0`'s `EPERM` result.
+/// In every case the supervisor's own daemon is the same user, so the
+/// existence answer is identical to the old one for the pids we actually
+/// act on; the kill paths are independently identity-gated, so a cross-user
+/// pid reported alive is never killed.
 #[must_use]
 pub fn pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
-        // `kill -0 <pid>` exits 0 iff the process exists and is
-        // signalable; non-zero otherwise. No signal is delivered.
+        // A live process or unreaped zombie always has a /proc/<pid> dir.
+        // `exists()` returns false on any stat error, preserving the old
+        // "treat as dead on failure" default.
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // macOS / *BSD have no /proc; keep the portable, fork-based probe.
+        // `kill -0 <pid>` exits 0 iff the process exists and is signalable;
+        // non-zero otherwise. No signal is delivered. (Out of scope for the
+        // /proc optimization, which is Linux-only.)
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .status()
@@ -91,6 +114,46 @@ pub fn pid_alive(pid: u32) -> bool {
                 csv_row_has_exact_pid(&stdout, pid)
             })
             .unwrap_or(false)
+    }
+}
+
+/// Read `/proc/<pid>/cmdline` (Linux) as a space-joined command line, or
+/// `None` if the process is gone or exposes no argv.
+///
+/// Fork-free identity read: callers that already know a pid is alive can
+/// confirm *which* process it is from the same `/proc` entry instead of
+/// forking `ps`/`pgrep`, so the supervisor never spawns twice for one pid
+/// (review finding #5, the identity-read piggyback).
+///
+/// Cross-user / hardening note: on a default Linux mount `/proc/<pid>/cmdline`
+/// is world-readable, so this resolves another user's process too. For kernel
+/// threads, not-yet-reaped zombies, and processes hidden by `hidepid`, the
+/// blob is empty and this returns `None`. Callers MUST treat `None` as
+/// "cannot confirm identity" and fail closed -- never as a match.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn proc_cmdline(pid: u32) -> Option<String> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    join_proc_cmdline(&raw)
+}
+
+/// Join a raw `/proc/<pid>/cmdline` blob (NUL-separated argv, usually with a
+/// trailing NUL) into a space-separated string. Returns `None` for an empty
+/// or all-NUL blob so identity callers fail closed. Pure, so the parsing is
+/// unit-testable without a live process (the cross-user/hidepid empty case is
+/// covered by asserting the empty-blob branch).
+#[cfg(target_os = "linux")]
+fn join_proc_cmdline(raw: &[u8]) -> Option<String> {
+    let joined = raw
+        .split(|&b| b == 0)
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| String::from_utf8_lossy(seg).into_owned())
+        .collect::<Vec<String>>()
+        .join(" ");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
     }
 }
 
@@ -187,5 +250,51 @@ mod tests {
         );
         remove_pidfile(&dir);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Finding #5: /proc liveness + fork-free identity read (Linux) ---
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pid_alive_true_for_self_false_for_absent() {
+        assert!(
+            pid_alive(std::process::id()),
+            "the running test process must read as alive"
+        );
+        assert!(
+            !pid_alive(0xFFFF_FFF0),
+            "an absent high pid must read as dead (no /proc entry)"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_cmdline_reads_self_and_handles_absent() {
+        let mine = proc_cmdline(std::process::id());
+        assert!(mine.is_some(), "self cmdline must be readable on Linux");
+        assert!(!mine.unwrap().is_empty(), "self cmdline must be non-empty");
+        assert!(
+            proc_cmdline(0xFFFF_FFF0).is_none(),
+            "an absent pid yields no cmdline"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn join_proc_cmdline_parses_nul_separated_argv() {
+        // argv as the kernel exposes it: NUL-separated, trailing NUL. A path
+        // with regex/glob metacharacters must survive verbatim (no escaping).
+        let raw = b"terminal-commanderd\x00--data-dir\x00/tmp/tc (run)+[v1]\x00";
+        assert_eq!(
+            join_proc_cmdline(raw).as_deref(),
+            Some("terminal-commanderd --data-dir /tmp/tc (run)+[v1]")
+        );
+        // Empty / all-NUL blob == kernel thread, zombie, or hidepid-hidden
+        // process => None, so identity callers fail closed (the cross-user
+        // case we cannot spawn in CI is covered here at the parser).
+        assert_eq!(join_proc_cmdline(b""), None);
+        assert_eq!(join_proc_cmdline(b"\x00\x00"), None);
+        // Single arg, no trailing NUL.
+        assert_eq!(join_proc_cmdline(b"solo").as_deref(), Some("solo"));
     }
 }

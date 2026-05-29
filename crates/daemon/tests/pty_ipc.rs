@@ -391,10 +391,7 @@ time.sleep(2)
 
         // Audit row exists, decision=deny, metadata does NOT carry
         // the typed payload.
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         let deny_row = rows
             .iter()
             .find(|r| r.action == "pty_command_write_stdin" && r.decision == "deny")

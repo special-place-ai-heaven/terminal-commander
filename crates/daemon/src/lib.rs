@@ -27,6 +27,7 @@ pub mod pty_command;
 pub mod router;
 pub mod runtime;
 pub mod state;
+pub mod store_actor;
 
 pub use activation::{ActivationRegistry, ActivationRegistryHandle};
 pub use audit::{AuditSink, InMemoryAudit, PersistentAudit};

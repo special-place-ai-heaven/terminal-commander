@@ -556,6 +556,19 @@ impl EventStore {
         Ok(())
     }
 
+    /// Run a full WAL checkpoint, flushing the WAL into the main DB
+    /// file. Intended for clean-shutdown discipline by the store
+    /// actor (ROB-11): drain queue, checkpoint, exit. SQLite returns
+    /// `(busy, log_pages, checkpointed_pages)` from PRAGMA
+    /// `wal_checkpoint(FULL)` — we surface success/error only because
+    /// callers do not act on the counters.
+    pub fn wal_checkpoint_full(&self) -> Result<()> {
+        // `query_row` because the PRAGMA returns a single row.
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(FULL);", [], |_| Ok(()))?;
+        Ok(())
+    }
+
     /// Test helper: asserts no BLOB column type appears in the
     /// events table. Used by the schema test and is also a useful
     /// public sanity check.

@@ -1,5 +1,90 @@
 # Changelog
 
+## [0.1.36](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.35...v0.1.36) (2026-05-28)
+
+
+### Features
+
+* **bootstrap:** zero-touch npm install with lazy MCP repair ([b7b2e9f](https://github.com/special-place-ai-heaven/terminal-commander/commit/b7b2e9fb093274dfe8d6f6a9205b1dd13a6736e1))
+* **cli:** add `restart` verb that forces a daemon replace (F3) ([54d70f7](https://github.com/special-place-ai-heaven/terminal-commander/commit/54d70f7d6d3b138a5d7308aee1667ae50b659aca))
+* **cli:** npm postinstall daemon-replace (best-effort) ([aee8f94](https://github.com/special-place-ai-heaven/terminal-commander/commit/aee8f94de76d69033d0132a5324fe58cf03ee8c7))
+* **daemon:** autostart on WSL boot and before MCP bridge ([499c093](https://github.com/special-place-ai-heaven/terminal-commander/commit/499c093ccdb72b8a23f01b305f430946213042de))
+* **harness:** mint and export per-harness TC_SESSION (F1 wiring phase 1) ([ee8614f](https://github.com/special-place-ai-heaven/terminal-commander/commit/ee8614feeaf8b5d540d11eaee18539f31c813e41))
+* **harness:** mirror 'default' token reservation in JS validator ([6a6ee9f](https://github.com/special-place-ai-heaven/terminal-commander/commit/6a6ee9fac8790fcc178f81f1540b76510a2827bd))
+* **install:** zero-touch Windows bootstrap and harness auto-config ([4eba830](https://github.com/special-place-ai-heaven/terminal-commander/commit/4eba83014c2c4faf25f42705d1b3ba92de34e5d4))
+* release Rust crate changes ([dc66969](https://github.com/special-place-ai-heaven/terminal-commander/commit/dc669696c4c09e54c5af312e6448ac489f97143e))
+* release Rust crate changes ([efdb79d](https://github.com/special-place-ai-heaven/terminal-commander/commit/efdb79d01370a4b651d25efedb576aa51f12dcdb))
+* release Rust crate changes ([6178805](https://github.com/special-place-ai-heaven/terminal-commander/commit/617880510dcd8a3b2b64e9759695341d1be3b0c0))
+* release Rust crate changes ([c092260](https://github.com/special-place-ai-heaven/terminal-commander/commit/c09226055ba06dfdf85e29f2f71843923ecf7879))
+* release Rust crate changes ([3d913e7](https://github.com/special-place-ai-heaven/terminal-commander/commit/3d913e7019fbe2e0224fec98a006a81e92f1a179))
+* release Rust crate changes ([6575cf3](https://github.com/special-place-ai-heaven/terminal-commander/commit/6575cf318730ffa6327fe8d02a86ab909e1022db))
+* release Rust crate changes ([59d6753](https://github.com/special-place-ai-heaven/terminal-commander/commit/59d6753baa99a9cbdb72cf3d66a7e8da094684e8))
+* **release:** prepare first npm beta publish ([ab4b87e](https://github.com/special-place-ai-heaven/terminal-commander/commit/ab4b87ee952f208391f101cf8cc1f536f0df6106))
+* **resolver:** support darwin/x64 + darwin/arm64 platform targets ([44eadd6](https://github.com/special-place-ai-heaven/terminal-commander/commit/44eadd6be09de599efe2c1b32a32efa0fb774634))
+* **wsl:** forward TC_SESSION across the WSL bridge via WSLENV (F1 phase 2) ([f5da5c4](https://github.com/special-place-ai-heaven/terminal-commander/commit/f5da5c4cdc2a2758fe21b5ba792b8decbcb1424b))
+* **wsl:** rebuild WSLENV from TC-only allowlist (drop ambient; closes WSL_SUDO_CREDENTIAL leak) ([802982c](https://github.com/special-place-ai-heaven/terminal-commander/commit/802982c5ed7322fccf34e0b10fbb57dc9951492e))
+
+
+### Bug Fixes
+
+* address two-reviewer code-review findings (codex + senior reviewer) ([a46629f](https://github.com/special-place-ai-heaven/terminal-commander/commit/a46629ffc97f944c5b890521a7172b2192aa501d))
+* advertise command_output_tail in discovery + route restart through bin shim (review) ([6279bf3](https://github.com/special-place-ai-heaven/terminal-commander/commit/6279bf3393063c39d300c062e696ef516b5071b9))
+* **cli:** drop postinstall daemon-replace (violated av-safe passive-install invariant) ([58c28d2](https://github.com/special-place-ai-heaven/terminal-commander/commit/58c28d2aa0f336c038869ce62cca4e8fc19970c8))
+* **cursor:** generate portable MCP command, no leaked \Users path ([9c8392c](https://github.com/special-place-ai-heaven/terminal-commander/commit/9c8392c7e36580849f80e588abcb2ee7be1c31a2))
+* make npm distribution av-safe ([af24679](https://github.com/special-place-ai-heaven/terminal-commander/commit/af246791160b0b84fbf0a2501fb9c780e044d83b))
+* make terminal commander setup and update native-first ([35f0ac9](https://github.com/special-place-ai-heaven/terminal-commander/commit/35f0ac9a372a00b5b7a7d1cb1941660791485da0))
+* **mcp+supervisor.js:** close 3 codex follow-up issues from ae2de3c ([d64bb88](https://github.com/special-place-ai-heaven/terminal-commander/commit/d64bb883f140401fc296caa7d27c4108e55d91b0))
+* **packages:** pin windows-x64 + mac-x64 + mac-arm64 optionalDependencies by version ([25860e3](https://github.com/special-place-ai-heaven/terminal-commander/commit/25860e34a795e52edaada43eb2be95e0bfb394fe))
+* release Rust crate changes ([9bfd092](https://github.com/special-place-ai-heaven/terminal-commander/commit/9bfd0929047e62b36df5b4abb4544921880c0916))
+* release Rust crate changes ([501448b](https://github.com/special-place-ai-heaven/terminal-commander/commit/501448bf69580897ebebe19f28a9985a3e47308a))
+* release Rust crate changes ([dfe73ad](https://github.com/special-place-ai-heaven/terminal-commander/commit/dfe73adef84e3b9e2236725108f2070a04c0cedc))
+* release Rust crate changes ([af26888](https://github.com/special-place-ai-heaven/terminal-commander/commit/af268880185b1c1bb18efdb78ec144c4102375e8))
+* release Rust crate changes ([949c322](https://github.com/special-place-ai-heaven/terminal-commander/commit/949c322779f59404fc724bb79cce6b73c10b03b6))
+* release Rust crate changes ([4665ac2](https://github.com/special-place-ai-heaven/terminal-commander/commit/4665ac2ca6ba303af82a1e70d6a781adcf2386c4))
+* release Rust crate changes ([98a45b7](https://github.com/special-place-ai-heaven/terminal-commander/commit/98a45b7058fa25525a9c25e3365aac70e891c44a))
+* release Rust crate changes ([74ba620](https://github.com/special-place-ai-heaven/terminal-commander/commit/74ba620ae82accfc5243b9cb76e4165a5f9bc440))
+* release Rust crate changes ([371f33b](https://github.com/special-place-ai-heaven/terminal-commander/commit/371f33bbc1ec2a649d72f945ec8449aac359795c))
+* release Rust crate changes ([0b22480](https://github.com/special-place-ai-heaven/terminal-commander/commit/0b224802733f03c4398f4f73bbcd01aff729dfeb))
+* release Rust crate changes ([fdf60a3](https://github.com/special-place-ai-heaven/terminal-commander/commit/fdf60a3bcc83a9b807eb2ccde31174fb304ae27b))
+* release Rust crate changes ([2d69a83](https://github.com/special-place-ai-heaven/terminal-commander/commit/2d69a83ea6319082fc4678d91abb842c130e0b2a))
+* release Rust crate changes ([55e5ae8](https://github.com/special-place-ai-heaven/terminal-commander/commit/55e5ae8194aed4d8e5f6b174d93075602b77af51))
+* **setup:** honor --print-config as no-write in harness bootstrap ([c24ab7a](https://github.com/special-place-ai-heaven/terminal-commander/commit/c24ab7af85072043cada3d35605159010bf05936))
+* **supervisor.js:** await daemon readiness before spawning MCP (cold-start race) ([f436f48](https://github.com/special-place-ai-heaven/terminal-commander/commit/f436f48ae5a57c609303c24ecec452c0692081f3))
+* **supervisor.js:** close parent fd copy after daemon spawn ([1c29109](https://github.com/special-place-ai-heaven/terminal-commander/commit/1c29109d67a397bed2c3d036a67650121b160474))
+* **supervisor.js:** early-return on signal during cold-start wait ([62ce224](https://github.com/special-place-ai-heaven/terminal-commander/commit/62ce224237379de70e736005a3e76a55d62defd0))
+* **supervisor.js:** stop deleting session state on MCP exit ([56fb0cb](https://github.com/special-place-ai-heaven/terminal-commander/commit/56fb0cb27de0ebe6ed1ac6eb13feced8f4eb44dc))
+* tighten error/diagnostic correctness (M4 M5 M6 M7) ([fc0d38a](https://github.com/special-place-ai-heaven/terminal-commander/commit/fc0d38a19ef0530dc678c48bfac038cd45cd009a))
+* **update:** widen preflight scope to the whole npm package dir ([984fcb3](https://github.com/special-place-ai-heaven/terminal-commander/commit/984fcb303f2106c049fbf945783f3f4c0018cb6b))
+* **windows:** reliable WSL MCP bridge and harness config paths ([13cae8e](https://github.com/special-place-ai-heaven/terminal-commander/commit/13cae8e194eedae06f26f21c798cc298dbd57fbf))
+
+## [0.1.35](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.34...v0.1.35) (2026-05-28)
+
+
+### Features
+
+* release Rust crate changes ([dc66969](https://github.com/special-place-ai-heaven/terminal-commander/commit/dc669696c4c09e54c5af312e6448ac489f97143e))
+
+## [0.1.34](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.33...v0.1.34) (2026-05-28)
+
+
+### Bug Fixes
+
+* release Rust crate changes ([9bfd092](https://github.com/special-place-ai-heaven/terminal-commander/commit/9bfd0929047e62b36df5b4abb4544921880c0916))
+
+## [0.1.33](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.32...v0.1.33) (2026-05-28)
+
+
+### Bug Fixes
+
+* release Rust crate changes ([501448b](https://github.com/special-place-ai-heaven/terminal-commander/commit/501448bf69580897ebebe19f28a9985a3e47308a))
+
+## [0.1.32](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.31...v0.1.32) (2026-05-28)
+
+
+### Bug Fixes
+
+* release Rust crate changes ([dfe73ad](https://github.com/special-place-ai-heaven/terminal-commander/commit/dfe73adef84e3b9e2236725108f2070a04c0cedc))
+
 ## [0.1.31](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.30...v0.1.31) (2026-05-28)
 
 

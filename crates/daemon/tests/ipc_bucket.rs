@@ -653,10 +653,7 @@ fn ipc_bucket_methods_emit_persistent_audit_rows() {
             .await
             .unwrap();
 
-        let rows = {
-            let mut g = state.store.lock();
-            g.audit_since(&AuditReadRequest::new(0)).unwrap()
-        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
         assert!(actions.contains(&"ipc_bucket_events_since"));
         assert!(actions.contains(&"ipc_bucket_summary"));

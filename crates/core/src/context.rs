@@ -64,8 +64,16 @@ pub struct SourceFrame {
     pub line: Option<u64>,
     /// Byte offset into the probe's spool, if known.
     pub byte_offset: Option<u64>,
-    /// Number of bytes dropped when the frame was capped at
-    /// [`MAX_FRAME_BYTES`]. Zero when the frame fits.
+    /// Number of bytes dropped from this frame's logical input,
+    /// summed across every truncation layer that touched it:
+    /// the upstream read layer's per-line cap (e.g. `MAX_LINE_BYTES`
+    /// in `crates/probes/src/process.rs`, 64 KiB on stdout/stderr),
+    /// PLUS the frame layer's [`MAX_FRAME_BYTES`] cap (8 KiB) applied
+    /// here by [`SourceFrame::new`]. Zero when the input fits everywhere.
+    /// Upstream layers MUST add their dropped count to this field
+    /// (saturating) before constructing the frame so the counter is
+    /// the operator's single source of truth for "bytes lost in
+    /// capture."
     pub truncated_bytes: u32,
 }
 
@@ -74,7 +82,12 @@ impl SourceFrame {
     ///
     /// If `text` exceeds [`MAX_FRAME_BYTES`] it is truncated at the
     /// last UTF-8 character boundary that fits, and `truncated_bytes`
-    /// reflects the difference.
+    /// reflects the frame-layer drop. Upstream callers that already
+    /// dropped bytes at a higher layer (e.g. a 64 KiB per-line cap
+    /// in `crates/probes/src/process.rs`) MUST add their drop count
+    /// via `truncated_bytes.saturating_add(upstream_dropped)` after
+    /// construction so the combined counter reflects every truncation
+    /// the input encountered.
     #[must_use]
     pub fn new(probe_id: ProbeId, stream: SourceStream, text: String) -> Self {
         let (text, truncated_bytes) = cap_text(text);
