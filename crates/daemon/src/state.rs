@@ -188,12 +188,15 @@ impl DaemonState {
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
         ));
 
+        // `PolicyEngine` is no longer `Copy` (TC22 Phase 1: it carries an
+        // owned `repo_root`). Clone it into each runtime; the original
+        // moves into the `DaemonState.policy` field below.
         let command = Arc::new(CommandRuntime::new(
             Arc::clone(&router),
             Arc::clone(&rings),
             Arc::clone(&jobs),
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
-            policy,
+            policy.clone(),
             Arc::clone(&activation),
         ));
         let watch = Arc::new(WatchRuntime::new(
@@ -201,7 +204,7 @@ impl DaemonState {
             Arc::clone(&rings),
             Arc::clone(&jobs),
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
-            policy,
+            policy.clone(),
             Arc::clone(&activation),
         ));
         #[cfg(unix)]
@@ -210,7 +213,7 @@ impl DaemonState {
             Arc::clone(&rings),
             Arc::clone(&jobs),
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
-            policy,
+            policy.clone(),
             Arc::clone(&activation),
         ));
 
