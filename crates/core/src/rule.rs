@@ -118,6 +118,46 @@ pub const MAX_TEMPLATE_BYTES: usize = 512;
 /// Hard cap on context-hint frame counts.
 pub const MAX_CONTEXT_LINES: u32 = 1024;
 
+/// Reserved `summary_template` keys resolving to the whole matched text.
+///
+/// The three are synonyms: `${line}`, `${match}`, `${0}`. They are
+/// accepted by template validation without appearing in a rule's
+/// `captures` list; the sifter runtime injects the (bounded,
+/// redaction-scrubbed) matched text under these keys at render time.
+pub const RESERVED_MATCH_KEYS: &[&str] = &["line", "match", "0"];
+
+/// Render-time byte clamp on a substituted reserved full-match value.
+///
+/// The matched frame text is bounded upstream at `MAX_SIFT_BYTES`
+/// (~8 KiB); without this clamp a `${line}` template would let a single
+/// rule-match summary balloon to that size. 256 bytes is enough to
+/// identify the matched line while keeping the per-event budget tight.
+pub const MAX_FULL_MATCH_SUMMARY_BYTES: usize = 256;
+
+/// Whether `name` is a reserved full-match placeholder (see
+/// [`RESERVED_MATCH_KEYS`]).
+#[must_use]
+pub fn is_reserved_match_key(name: &str) -> bool {
+    RESERVED_MATCH_KEYS.contains(&name)
+}
+
+/// Clamp a full-match value to [`MAX_FULL_MATCH_SUMMARY_BYTES`].
+///
+/// Truncates at a UTF-8 boundary. Used by the sifter runtime before
+/// injecting matched text under a reserved key so `${line}` can never
+/// widen the per-event summary budget.
+#[must_use]
+pub fn clamp_full_match(text: &str) -> String {
+    if text.len() <= MAX_FULL_MATCH_SUMMARY_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_FULL_MATCH_SUMMARY_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
 /// The 11 canonical sifter discriminators. Eight of these are
 /// reserved-not-implemented at MVP; rules referencing them MUST
 /// remain in [`RuleStatus::Draft`] until their implementing goal
@@ -538,7 +578,10 @@ fn validate_template_against_captures(
                 });
             };
             let name = &template[start..start + rel_end];
-            if !captures.iter().any(|c| c == name) {
+            // Reserved full-match keys (${line}/${match}/${0}) are
+            // always valid: the sifter runtime injects the matched text
+            // for them, so they need not appear in `captures`.
+            if !is_reserved_match_key(name) && !captures.iter().any(|c| c == name) {
                 return Err(RuleError::SummaryTemplateUnknownCapture {
                     id: id.to_owned(),
                     name: name.to_owned(),
@@ -882,6 +925,68 @@ mod tests {
         caps.insert("package".to_owned(), "x".to_owned());
         let out = def.render_summary(&caps).unwrap();
         assert_eq!(out.0, "pkg=x \u{1F680}");
+    }
+
+    // --- TC ergonomics Phase 2 (P-ZERO): reserved full-match keys ---
+
+    #[test]
+    fn template_accepts_reserved_match_keys_without_captures() {
+        // ${line}/${match}/${0} validate even with an empty captures
+        // list — the sifter injects them at render time.
+        for tok in ["line", "match", "0"] {
+            let mut def = k("kw");
+            def.summary_template = format!("saw ${{{tok}}}");
+            def.captures = vec![];
+            def.validate()
+                .unwrap_or_else(|e| panic!("${{{tok}}} must validate: {e}"));
+        }
+    }
+
+    #[test]
+    fn template_still_rejects_unknown_non_reserved_capture() {
+        let mut def = k("kw");
+        def.summary_template = "saw ${ghost}".to_owned();
+        def.captures = vec![];
+        assert!(matches!(
+            def.validate().unwrap_err(),
+            RuleError::SummaryTemplateUnknownCapture { .. }
+        ));
+    }
+
+    #[test]
+    fn is_reserved_match_key_matches_synonyms_only() {
+        assert!(is_reserved_match_key("line"));
+        assert!(is_reserved_match_key("match"));
+        assert!(is_reserved_match_key("0"));
+        assert!(!is_reserved_match_key("package"));
+        assert!(!is_reserved_match_key("1"));
+    }
+
+    #[test]
+    fn clamp_full_match_bounds_and_respects_utf8() {
+        let short = "abc";
+        assert_eq!(clamp_full_match(short), "abc");
+
+        let long = "x".repeat(MAX_FULL_MATCH_SUMMARY_BYTES + 50);
+        assert_eq!(clamp_full_match(&long).len(), MAX_FULL_MATCH_SUMMARY_BYTES);
+
+        // Multi-byte char straddling the boundary must not be split.
+        let mut s = "a".repeat(MAX_FULL_MATCH_SUMMARY_BYTES - 1);
+        s.push('\u{1F680}'); // 4 bytes, crosses the cap
+        let out = clamp_full_match(&s);
+        assert!(out.len() <= MAX_FULL_MATCH_SUMMARY_BYTES);
+        assert!(out.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn render_summary_resolves_reserved_key_from_injected_value() {
+        // The runtime injects the matched text under the reserved key;
+        // render_summary then resolves ${line} like any capture.
+        let mut def = k("kw");
+        def.summary_template = "line: ${line}".to_owned();
+        let mut caps = IndexMap::new();
+        caps.insert("line".to_owned(), "error: boom".to_owned());
+        assert_eq!(def.render_summary(&caps).unwrap().0, "line: error: boom");
     }
 
     #[test]
