@@ -40,7 +40,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use terminal_commander_core::{BucketConfig, RuleDefinition, Severity};
+use terminal_commander_core::{BucketConfig, RuleDefinition, RuleType, Severity};
 use terminal_commanderd::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
@@ -903,7 +903,7 @@ impl TerminalCommanderMcpServer {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available()?;
         let (bucket_config, rules) =
-            parse_bucket_and_rules(params.bucket_config_json, params.rules_json)?;
+            parse_bucket_and_rules(params.bucket_config_json, params.rules, params.rules_json)?;
         let ipc = FileWatchStartParams {
             path: std::path::PathBuf::from(params.path),
             bucket_config,
@@ -983,7 +983,7 @@ impl TerminalCommanderMcpServer {
         self.ensure_daemon_available()?;
         let env: Vec<(String, String)> = params.env.into_iter().map(|e| (e.key, e.value)).collect();
         let (bucket_config, rules) =
-            parse_bucket_and_rules(params.bucket_config_json, params.rules_json)?;
+            parse_bucket_and_rules(params.bucket_config_json, params.rules, params.rules_json)?;
         let ipc = PtyCommandStartParams {
             environment: None,
             argv: params.argv,
@@ -1264,12 +1264,159 @@ pub struct EnvEntry {
     pub value: String,
 }
 
-/// Parse the optional MCP-supplied `bucket_config_json` / `rules_json`
-/// strings into their daemon-side types. `None`/absent inputs yield
-/// `(None, vec![])`. Malformed JSON is reported as an MCP `invalid_params`
-/// error so the start tools fail fast instead of silently dropping intent.
+/// Lenient, LLM-friendly shorthand for an inline rule (TC erg2 P1).
+///
+/// Every field is optional except that a rule needs SOME matcher
+/// (`pattern` or `keywords`); the rest get sane, overridable defaults via
+/// [`RuleInput::finalize`]. `kind`/`severity` are typed as `String` (not
+/// the core enums) so this struct can derive `JsonSchema` without
+/// `crates/core` taking a schemars dependency; both are parsed in
+/// `finalize` with a teaching error that names the legal set.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuleInput {
+    /// Regex pattern. Presence (without `keywords`) infers `kind=regex`.
+    #[serde(default)]
+    pub pattern: Option<String>,
+    /// Keyword set. Presence (without `pattern`) infers `kind=keyword`.
+    #[serde(default)]
+    pub keywords: Option<Vec<String>>,
+    /// Override the inferred kind. Live kinds: `keyword`, `regex`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Severity. Default `info`. One of trace/debug/info/low/medium/
+    /// high/critical.
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// Summary shown per match. Default `${line}` (the matched line).
+    /// Use `${name}` to interpolate a named capture.
+    #[serde(default)]
+    pub summary_template: Option<String>,
+    /// Event kind label. Default `match`.
+    #[serde(default)]
+    pub event_kind: Option<String>,
+    /// Human id. Default auto-minted `inline-<n>`.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Rule version. Default 1.
+    #[serde(default)]
+    pub version: Option<u32>,
+    /// Named captures referenced by `summary_template`.
+    #[serde(default)]
+    pub captures: Vec<String>,
+    /// Stream filter (`stdout`/`stderr`); omit for any.
+    #[serde(default)]
+    pub stream: Option<String>,
+    /// Capture names to redact from emitted events.
+    #[serde(default)]
+    pub redact: Vec<String>,
+    /// Free-text tags (lowercase).
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+impl RuleInput {
+    /// Resolve this shorthand into a full, validated-ready
+    /// [`RuleDefinition`], applying defaults only where a field is
+    /// absent and inferring `kind` from the matcher. `index` seeds the
+    /// auto-minted id. Returns a one-line teaching error (never serde's
+    /// field-by-field text) on any unresolvable input.
+    fn finalize(self, index: usize) -> Result<RuleDefinition, String> {
+        let has_pattern = self.pattern.as_ref().is_some_and(|p| !p.is_empty());
+        let has_keywords = self.keywords.as_ref().is_some_and(|k| !k.is_empty());
+
+        // Infer or validate kind.
+        let kind = match self.kind.as_deref() {
+            Some("keyword") => RuleType::Keyword,
+            Some("regex") => RuleType::Regex,
+            Some(other) => {
+                return Err(format!(
+                    "kind '{other}' is not a live rule kind; live kinds: keyword, regex \
+                     (example: {{\"pattern\": \"ERROR\"}})"
+                ));
+            }
+            None => {
+                if has_pattern && has_keywords {
+                    return Err(
+                        "rule has both `pattern` and `keywords`; set `kind` to disambiguate \
+                         (example: {\"pattern\": \"ERROR\"})"
+                            .to_owned(),
+                    );
+                } else if has_pattern {
+                    RuleType::Regex
+                } else if has_keywords {
+                    RuleType::Keyword
+                } else {
+                    return Err(
+                        "rule needs a matcher: provide `pattern` (regex) or `keywords` \
+                         (example: {\"pattern\": \"ERROR\"})"
+                            .to_owned(),
+                    );
+                }
+            }
+        };
+
+        let severity = match self.severity.as_deref() {
+            None => Severity::Info,
+            Some(s) => parse_severity_filter(s).map_err(|_| {
+                format!(
+                    "severity '{s}' is not valid; one of: trace, debug, info, low, medium, \
+                     high, critical"
+                )
+            })?,
+        };
+
+        let stream = match self.stream.as_deref() {
+            None => None,
+            Some("stdout") => Some(terminal_commander_core::SourceStream::Stdout),
+            Some("stderr") => Some(terminal_commander_core::SourceStream::Stderr),
+            Some(other) => {
+                return Err(format!(
+                    "stream '{other}' is not valid; one of: stdout, stderr (or omit for any)"
+                ));
+            }
+        };
+
+        Ok(RuleDefinition {
+            id: self.id.unwrap_or_else(|| format!("inline-{index}")),
+            version: self.version.unwrap_or(1),
+            kind,
+            // Inline rules are bound directly to a job/watch and must run
+            // immediately, so they ship Active (not the Draft default).
+            status: terminal_commander_core::RuleStatus::Active,
+            severity,
+            event_kind: self.event_kind.unwrap_or_else(|| "match".to_owned()),
+            stream,
+            description: None,
+            pattern: self.pattern,
+            keywords: self.keywords,
+            captures: self.captures,
+            summary_template: self
+                .summary_template
+                .unwrap_or_else(|| "${line}".to_owned()),
+            tags: self.tags,
+            rate_limit_per_min: None,
+            redact: self.redact,
+            context_hint: terminal_commander_core::ContextHint::default(),
+            examples: vec![],
+        })
+    }
+}
+
+/// Parse the optional MCP-supplied bucket config + inline rules into
+/// their daemon-side types. Rules may arrive two ways (both accepted;
+/// they are mutually exclusive per call):
+/// - `rules`: typed shorthand objects (TC erg2 P1) — the preferred,
+///   schema-visible path. `{"pattern":"ERROR"}` is a complete rule.
+/// - `rules_json`: a JSON-string array of full `RuleDefinition`s — the
+///   original wire form, retained for backward compatibility.
+///
+/// `None`/absent inputs yield `(None, vec![])`. Errors are reported as a
+/// single MCP `invalid_params` so the start tools fail fast with one
+/// teaching message instead of silently dropping intent.
 fn parse_bucket_and_rules(
     bucket_config_json: Option<String>,
+    rules: Option<Vec<RuleInput>>,
     rules_json: Option<String>,
 ) -> Result<(Option<BucketConfig>, Vec<RuleDefinition>), McpError> {
     let bucket_config = bucket_config_json
@@ -1278,14 +1425,35 @@ fn parse_bucket_and_rules(
                 .map_err(|e| invalid_params(format!("bucket_config_json: {e}")))
         })
         .transpose()?;
-    let rules = rules_json
-        .map(|raw| {
-            serde_json::from_str::<Vec<RuleDefinition>>(&raw)
-                .map_err(|e| invalid_params(format!("rules_json: {e}")))
-        })
-        .transpose()?
-        .unwrap_or_default();
-    Ok((bucket_config, rules))
+
+    let has_typed = rules.as_ref().is_some_and(|v| !v.is_empty());
+    let has_json = rules_json.as_ref().is_some_and(|s| !s.is_empty());
+    if has_typed && has_json {
+        return Err(invalid_params(
+            "provide rules via `rules` (typed) OR `rules_json` (string), not both".to_owned(),
+        ));
+    }
+
+    let resolved = if has_typed {
+        rules
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| {
+                r.finalize(i)
+                    .map_err(|e| invalid_params(format!("rules[{i}]: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        rules_json
+            .map(|raw| {
+                serde_json::from_str::<Vec<RuleDefinition>>(&raw)
+                    .map_err(|e| invalid_params(format!("rules_json: {e}")))
+            })
+            .transpose()?
+            .unwrap_or_default()
+    };
+    Ok((bucket_config, resolved))
 }
 
 /// MCP-facing parameters for `command_start_combed`. Strings + ints
@@ -1310,8 +1478,18 @@ pub struct McpCommandStartParams {
     /// `{ "max_events": N, "ttl": <seconds> }`. Omit for daemon defaults.
     #[serde(default)]
     pub bucket_config_json: Option<String>,
-    /// Optional JSON array of inline `RuleDefinition`s bound to this job
-    /// only — no prior `registry_activate` required. Omit for none.
+    /// Inline rules bound to this job only — no prior `registry_activate`
+    /// required. Each rule is a small object; the only required field is a
+    /// matcher. Minimal example: `[{"pattern": "ERROR"}]` (a live regex
+    /// rule whose summary echoes the matched line). Optional per rule:
+    /// `keywords`, `kind` (keyword|regex, inferred from the matcher),
+    /// `severity` (default info), `summary_template` (default `${line}`),
+    /// `event_kind`, `captures`, `stream`, `redact`, `tags`, `id`,
+    /// `version`. Omit for none.
+    #[serde(default)]
+    pub rules: Option<Vec<RuleInput>>,
+    /// Deprecated string form of `rules`: a JSON-array string of full
+    /// `RuleDefinition`s. Prefer the typed `rules` field. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
 }
@@ -1321,7 +1499,7 @@ impl McpCommandStartParams {
         let cwd = self.cwd.map(std::path::PathBuf::from);
         let env: Vec<(String, String)> = self.env.into_iter().map(|e| (e.key, e.value)).collect();
         let (bucket_config, rules) =
-            parse_bucket_and_rules(self.bucket_config_json, self.rules_json)?;
+            parse_bucket_and_rules(self.bucket_config_json, self.rules, self.rules_json)?;
         Ok(CommandStartParams {
             environment: None,
             argv: self.argv,
@@ -1771,8 +1949,13 @@ pub struct McpFileWatchStartParams {
     /// `{ "max_events": N, "ttl": <seconds> }`. Omit for daemon defaults.
     #[serde(default)]
     pub bucket_config_json: Option<String>,
-    /// Optional JSON array of inline `RuleDefinition`s bound to this watch
-    /// only — no prior `registry_activate` required. Omit for none.
+    /// Inline rules bound to this watch only. Minimal example:
+    /// `[{"pattern": "ERROR"}]`. See `command_start_combed` for the full
+    /// field list. Omit for none.
+    #[serde(default)]
+    pub rules: Option<Vec<RuleInput>>,
+    /// Deprecated string form of `rules` (JSON-array string of full
+    /// `RuleDefinition`s). Prefer `rules`. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
 }
@@ -1805,8 +1988,13 @@ pub struct McpPtyCommandStartParams {
     /// `{ "max_events": N, "ttl": <seconds> }`. Omit for daemon defaults.
     #[serde(default)]
     pub bucket_config_json: Option<String>,
-    /// Optional JSON array of inline `RuleDefinition`s bound to this job
-    /// only — no prior `registry_activate` required. Omit for none.
+    /// Inline rules bound to this PTY job only. Minimal example:
+    /// `[{"pattern": "ERROR"}]`. See `command_start_combed` for the full
+    /// field list. Omit for none.
+    #[serde(default)]
+    pub rules: Option<Vec<RuleInput>>,
+    /// Deprecated string form of `rules` (JSON-array string of full
+    /// `RuleDefinition`s). Prefer `rules`. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
 }
@@ -1837,6 +2025,139 @@ pub struct McpProbeStatusParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- TC ergonomics Phase 2 (P1): de-stringed rule input ---
+
+    fn finalize_one(json: &str) -> Result<RuleDefinition, String> {
+        let input: RuleInput = serde_json::from_str(json).expect("RuleInput must deserialize");
+        input.finalize(0)
+    }
+
+    #[test]
+    fn shorthand_pattern_only_is_a_live_regex_rule() {
+        let def = finalize_one(r#"{"pattern": "ERROR"}"#).unwrap();
+        assert_eq!(def.kind, RuleType::Regex);
+        assert_eq!(def.status, terminal_commander_core::RuleStatus::Active);
+        assert_eq!(def.severity, Severity::Info);
+        assert_eq!(def.event_kind, "match");
+        assert_eq!(def.summary_template, "${line}");
+        assert_eq!(def.version, 1);
+        assert_eq!(def.id, "inline-0");
+        // The whole point: it validates AND is runtime-eligible.
+        def.validate().expect("shorthand rule must validate");
+        assert!(def.status.is_runtime_eligible());
+    }
+
+    #[test]
+    fn shorthand_keywords_only_infers_keyword_kind() {
+        let def = finalize_one(r#"{"keywords": ["panic", "FAILED"]}"#).unwrap();
+        assert_eq!(def.kind, RuleType::Keyword);
+        def.validate().unwrap();
+    }
+
+    #[test]
+    fn shorthand_no_matcher_is_a_teaching_error() {
+        let err = finalize_one(r#"{"severity": "high"}"#).unwrap_err();
+        assert!(err.contains("matcher"), "{err}");
+        assert!(err.contains("{\"pattern\": \"ERROR\"}"), "{err}");
+    }
+
+    #[test]
+    fn shorthand_both_matchers_requires_explicit_kind() {
+        let err = finalize_one(r#"{"pattern": "a", "keywords": ["b"]}"#).unwrap_err();
+        assert!(err.contains("kind"), "{err}");
+        // ...but explicit kind disambiguates.
+        let def = finalize_one(r#"{"pattern": "a", "keywords": ["b"], "kind": "regex"}"#).unwrap();
+        assert_eq!(def.kind, RuleType::Regex);
+    }
+
+    #[test]
+    fn shorthand_reserved_kind_teaches_live_set() {
+        let err = finalize_one(r#"{"keywords": ["x"], "kind": "exit_code"}"#).unwrap_err();
+        assert!(err.contains("keyword, regex"), "{err}");
+    }
+
+    #[test]
+    fn shorthand_bad_severity_teaches() {
+        let err = finalize_one(r#"{"pattern": "x", "severity": "spicy"}"#).unwrap_err();
+        assert!(err.contains("trace") && err.contains("critical"), "{err}");
+    }
+
+    #[test]
+    fn shorthand_overrides_are_honored() {
+        let def = finalize_one(
+            r#"{"pattern":"E(?P<code>[0-9]+)","kind":"regex","severity":"high",
+                "summary_template":"err ${code}","event_kind":"compile_error",
+                "captures":["code"],"stream":"stderr","id":"my-rule","version":3,
+                "tags":["build"]}"#,
+        )
+        .unwrap();
+        assert_eq!(def.severity, Severity::High);
+        assert_eq!(def.summary_template, "err ${code}");
+        assert_eq!(def.event_kind, "compile_error");
+        assert_eq!(def.id, "my-rule");
+        assert_eq!(def.version, 3);
+        assert_eq!(
+            def.stream,
+            Some(terminal_commander_core::SourceStream::Stderr)
+        );
+        def.validate().unwrap();
+    }
+
+    #[test]
+    fn full_rule_definition_json_still_parses_as_rule_input() {
+        // TC05 wire-compat: a full RuleDefinition payload (superset) must
+        // deserialize through RuleInput and finalize to an equivalent rule.
+        let full = r#"{
+            "id": "apt-missing", "version": 2, "kind": "regex", "severity": "high",
+            "event_kind": "missing_package", "stream": "stderr",
+            "pattern": "Unable to locate package (?P<package>[a-z0-9-]+)",
+            "captures": ["package"], "summary_template": "missing ${package}",
+            "tags": ["apt"], "redact": []
+        }"#;
+        let def = finalize_one(full).unwrap();
+        assert_eq!(def.id, "apt-missing");
+        assert_eq!(def.version, 2);
+        assert_eq!(def.kind, RuleType::Regex);
+        assert_eq!(def.severity, Severity::High);
+        assert_eq!(def.event_kind, "missing_package");
+        assert_eq!(def.summary_template, "missing ${package}");
+        def.validate().unwrap();
+    }
+
+    #[test]
+    fn parse_rejects_both_typed_and_string_rules() {
+        let typed = vec![RuleInput {
+            pattern: Some("x".to_owned()),
+            ..RuleInput::default()
+        }];
+        let err = parse_bucket_and_rules(None, Some(typed), Some(r#"[{"id":"a"}]"#.to_owned()))
+            .unwrap_err();
+        // McpError Display contains the message.
+        assert!(format!("{err:?}").contains("not both"), "{err:?}");
+    }
+
+    #[test]
+    fn parse_typed_rules_finalize_end_to_end() {
+        let typed = vec![RuleInput {
+            pattern: Some("ERROR".to_owned()),
+            ..RuleInput::default()
+        }];
+        let (_, rules) = parse_bucket_and_rules(None, Some(typed), None).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].kind, RuleType::Regex);
+        assert!(rules[0].status.is_runtime_eligible());
+    }
+
+    #[test]
+    fn parse_legacy_rules_json_string_still_works() {
+        // Back-compat: the old stringified full-RuleDefinition array path.
+        let raw = r#"[{"id":"k","version":1,"kind":"keyword","severity":"medium",
+            "event_kind":"kw","keywords":["needle"],"summary_template":"hit"}]"#;
+        let (_, rules) = parse_bucket_and_rules(None, None, Some(raw.to_owned())).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].kind, RuleType::Keyword);
+    }
 
     #[test]
     fn catalogue_lists_thirty_one_live_tools_at_tc45() {
