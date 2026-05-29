@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.37](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.36...v0.1.37) (2026-05-29)
+
+
+### Features
+
+* release Rust crate changes ([2033188](https://github.com/special-place-ai-heaven/terminal-commander/commit/2033188234ff938004806caced2ed50b1927ec6a))
+* release Rust crate changes ([e2b40ae](https://github.com/special-place-ai-heaven/terminal-commander/commit/e2b40aeab79712cdff96fce6bf546cda6ecb5f70))
+* release Rust crate changes ([ffb82ea](https://github.com/special-place-ai-heaven/terminal-commander/commit/ffb82ea740acc92e4f52f5622f83bebec7ebfc7d))
+* release Rust crate changes ([fc022b7](https://github.com/special-place-ai-heaven/terminal-commander/commit/fc022b7421962147aed14cbb12bc1f71da6dd294))
+* release Rust crate changes ([fdaa615](https://github.com/special-place-ai-heaven/terminal-commander/commit/fdaa615ee9ec56718fec3ebb5505ea44e2f44508))
+* release Rust crate changes ([b3e5a9f](https://github.com/special-place-ai-heaven/terminal-commander/commit/b3e5a9f00d0f25d0cc7b1558f42b4ebcefc0fb76))
+* release Rust crate changes ([22ec50a](https://github.com/special-place-ai-heaven/terminal-commander/commit/22ec50a521788831f34e8b33b1b5a17fe5ca7d52))
+
 ## [0.1.36](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.35...v0.1.36) (2026-05-28)
 
 
