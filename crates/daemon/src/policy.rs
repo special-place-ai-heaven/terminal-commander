@@ -5,8 +5,28 @@
 //! the gated actions defined in `SECURITY.md` section 4. The default
 //! shipping profile is `developer_local` per `POLICY.md` section 2.1.
 //!
-//! Source-status: live (TC22) for the four locked profiles and the
-//! default-deny path list anchored on README.md:294-297.
+//! Source-status: PARTIAL implementation of the `POLICY.md` doctrine.
+//!
+//! ENFORCED today:
+//! - cross-profile command deny set (sudo/doas/su/pkexec/kexec/polkit),
+//!   by basename and absolute path;
+//! - default-deny on the sensitive path SUFFIX list (anchored on
+//!   README.md:294-297) for FileRead / FileWatch in every profile;
+//! - per-profile mutation gates (`read_only_observer` denies command_*
+//!   and registry_*; `admin_debug` denies registry mutations;
+//!   `registry_activate` is AllowWithAudit for dev_local / repo_only).
+//!
+//! NOT YET enforced (see `docs/specs/2026-05-29-tc22-policy-engine-
+//! implementation.md`; doctrine in `POLICY.md` sections 2, 4, 5, 6):
+//! - command allow-lists / default-deny posture (today it is allow-by-
+//!   default within a profile, NOT the documented default-deny);
+//! - `$REPO_ROOT` containment. WARNING: `repo_only` shares the
+//!   `developer_local` arm below and therefore does NOT yet confine
+//!   reads / watches / exec to the repo tree. Do not rely on
+//!   `repo_only` as a sandbox until Phase 1 of the spec lands.
+//! - the declarative `[paths]` / `[commands]` / `[probes]` / `[limits]`
+//!   profile schema, the limits checks, and the `allow_override`
+//!   mechanism.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;

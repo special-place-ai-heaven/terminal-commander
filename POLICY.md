@@ -1,10 +1,22 @@
 # Policy Doctrine - Terminal Commander
 
 Status: Baseline (TC02 wave 0 deliverable).
-Scope: documentation only. No policy code, profile loader, or
-enforcement runtime exists yet. This document defines the policy
-shape that TC22 (policy engine) MUST implement, and that TC23, TC24,
-TC25, TC26, TC29 MUST honor.
+Scope: documentation only. This document defines the policy shape that
+TC22 (policy engine) MUST implement, and that TC23, TC24, TC25, TC26,
+TC29 MUST honor.
+
+Implementation status (as of 2026-05-29): PARTIALLY implemented in
+`crates/daemon/src/policy.rs`. SHIPPED: the cross-profile command deny
+set, the default-deny sensitive-path suffix list, and the per-profile
+mutation gates (sections relating to read_only_observer / admin_debug /
+registry_activate). NOT YET SHIPPED: command allow-lists, the
+default-deny posture of section 6, $REPO_ROOT containment, the
+declarative profile schema of section 4, the limits of section 4, and
+the allow_override mechanism of section 5. WARNING: `repo_only`
+(section 2.2) does NOT yet confine to $REPO_ROOT — it currently behaves
+identically to `developer_local`. Do not rely on it as a sandbox. The
+implementation plan is `docs/specs/2026-05-29-tc22-policy-engine-
+implementation.md`.
 
 Language: ASCII only.
 
