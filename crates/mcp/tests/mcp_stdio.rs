@@ -100,6 +100,7 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "registry_search".to_owned(),
             "registry_test".to_owned(),
             "registry_upsert".to_owned(),
+            "run_and_watch".to_owned(),
             "runtime_state".to_owned(),
             "self_check".to_owned(),
             "system_discover".to_owned(),

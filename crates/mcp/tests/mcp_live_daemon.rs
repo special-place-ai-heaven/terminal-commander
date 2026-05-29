@@ -126,6 +126,7 @@ async fn live_health_roundtrip_through_uds() {
                 "registry_search".to_owned(),
                 "registry_test".to_owned(),
                 "registry_upsert".to_owned(),
+                "run_and_watch".to_owned(),
                 "runtime_state".to_owned(),
                 "self_check".to_owned(),
                 "system_discover".to_owned(),
@@ -203,8 +204,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             .filter(|t| t["status"].as_str() == Some("live"))
             .count();
         assert_eq!(
-            live_count, 31,
-            "tool catalogue must list exactly 31 live tools (TC45 + registry_import_pack + command_output_tail)"
+            live_count, 32,
+            "tool catalogue must list exactly 32 live tools (TC45 + registry_import_pack + command_output_tail + run_and_watch)"
         );
 
         let _ = client.cancel().await;

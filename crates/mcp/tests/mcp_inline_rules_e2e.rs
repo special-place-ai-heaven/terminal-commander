@@ -286,3 +286,90 @@ async fn pty_command_start_accepts_inline_rules_and_bucket_config() {
     handle.shutdown().await;
     cleanup(&data);
 }
+
+// --- TC ergonomics Phase 2 (P4): run_and_watch one-shot ---
+
+/// One call: typed shorthand `rules` + a noisy command returns the
+/// matching signal AND the exit code, with no separate wait/status call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_and_watch_returns_signal_and_exit_in_one_call() {
+    let data = tmp_data_dir("raw-signal");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+        let out = json(
+            &call_tool(
+                &client,
+                "run_and_watch",
+                serde_json::json!({
+                    "argv": ["echo", "found needle in haystack"],
+                    "grace_ms": 2000,
+                    "wait_ms": 3000,
+                    "rules": [{ "keywords": ["needle"], "event_kind": "needle_match" }]
+                }),
+            )
+            .await,
+        );
+        let signals = out["signals"].as_array().expect("signals array");
+        assert!(
+            signals
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("needle_match")),
+            "run_and_watch must return the needle_match signal in one call; got {out}"
+        );
+        assert_eq!(
+            out["exit_code"].as_i64(),
+            Some(0),
+            "run_and_watch must report the exit code; got {out}"
+        );
+        assert!(
+            out["receipt"].is_null(),
+            "matched run must omit receipt; got {out}"
+        );
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
+/// Council HARD constraint: a quiet command (no rule matches) must NOT
+/// error — run_and_watch returns the bounded exit receipt instead, so TC
+/// never bounces the agent to the shell for running a small command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_and_watch_quiet_command_returns_receipt_not_error() {
+    let data = tmp_data_dir("raw-quiet");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+        let out = json(
+            &call_tool(
+                &client,
+                "run_and_watch",
+                serde_json::json!({
+                    "argv": ["echo", "nothing interesting here"],
+                    "grace_ms": 2000,
+                    "wait_ms": 3000,
+                    "rules": [{ "keywords": ["zzz-no-match-zzz"], "event_kind": "never" }]
+                }),
+            )
+            .await,
+        );
+        let signals = out["signals"].as_array().expect("signals array");
+        assert!(
+            signals.is_empty(),
+            "quiet command must have no signals; got {out}"
+        );
+        assert_eq!(
+            out["exit_code"].as_i64(),
+            Some(0),
+            "exit code present; got {out}"
+        );
+        assert!(
+            !out["receipt"].is_null(),
+            "quiet command must return a receipt (no-silence rule), not an error; got {out}"
+        );
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
