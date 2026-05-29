@@ -125,16 +125,25 @@ I5. NEW: `repo_only` denies FileRead/FileWatch/CommandStart whose path/cwd
     196; policy.rs never opens an fd). Document the residual TOCTOU /
     symlink-escape gap between decide and act in the threat note; closing it
     is the deferred act-site cap-std layer, NOT this spec.
-I6. NEW: command allow-list, per-profile asymmetry (see Q1, resolved):
-    - `developer_local`: CommandStart whose argv[0] basename is not in
-      `commands.allow_roots` is denied (`no_allow_rule`). When `[commands]`
-      is absent/empty, fall back to a compiled-in BASELINE allow-list (a NEW
-      const in `policy.rs`, authored from POLICY.md:167 = cargo/npm/pytest/
-      make/ls/git). NOTE: this is NOT the TC14 seed packs — those are regex
-      output-combing rules (`crates/store/rules/*.json`), not command
-      allow-lists.
-    - `repo_only`: same allow-list check, but an absent/empty `allow_roots`
-      means DENY-ALL (the sandbox profile must never allow-any).
+I6. NEW: command allow-list, default-deny is OPT-IN (Q1 re-resolved
+    2026-05-29 during Phase 2 implementation — supersedes the earlier
+    baseline-fallback plan):
+    - When `[policy.commands] allow_roots` is NON-EMPTY it is authoritative
+      for BOTH `developer_local` and `repo_only`: a CommandStart whose
+      argv[0] basename is not listed is denied (`no_allow_rule`). Matched by
+      basename, so `/usr/bin/cargo` matches `cargo`.
+    - When `allow_roots` is ABSENT/EMPTY, BOTH exec profiles allow any
+      command surviving the cross-profile structural deny set. NO
+      compiled-in baseline list. Rationale: TC's core job is running and
+      combing arbitrary dev commands; a 6-entry baseline would deny
+      echo/python/node/go/cat/bash out of the box and break zero-config use.
+      Default-deny is therefore an explicit operator opt-in.
+    - `repo_only` shares this command posture (POLICY.md 2.2: "the same
+      allow-list as developer_local"); its distinct safety property is
+      `$REPO_ROOT` containment (I5), NOT command denial. The earlier
+      "repo_only empty -> deny-all" idea is dropped as over-tightening.
+    - NOTE retained: the TC14 seed packs (`crates/store/rules/*.json`) are
+      regex output-combing rules, not command allow-lists.
 I7. NEW: `allow_override` entries each require path + justification +
     `i_understand_risk = true`; loading a profile with overrides emits a
     startup audit record naming each path (POLICY.md section 5).
@@ -150,11 +159,16 @@ AC1. New oracle test: `repo_only` denies a FileRead outside repo_root and
      allows one inside it. (covers I5)
 AC2. New oracle test: `repo_only` denies CommandStart with cwd outside
      repo_root. (covers I5)
-AC3. New oracle test: `developer_local` denies an off-allow-list command
-     (e.g. `rm`) with reason `no_allow_rule`, and allows `cargo`. (covers I6)
-AC4. New oracle test: a profile loaded from TOML with `[commands]
-     allow_roots = [...]` produces an engine that honors that list (proves
-     section-4 schema loads end to end). (covers objective 4)
+AC3. New oracle tests (covers I6): (a) `developer_local` with NO list
+     allows any non-structural-deny command (echo/python/rm/cargo); (b)
+     `developer_local` WITH `allow_roots=[cargo,git]` denies `rm`
+     (`no_allow_rule`) and allows `cargo`; (c) basename match
+     (`/usr/local/bin/cargo` matches `cargo`).
+AC4. New oracle tests: (a) a profile loaded from TOML with
+     `[policy.commands] allow_roots = [...]` produces an engine that honors
+     that list (proves section-4 schema loads end to end); (b) `repo_only`
+     with a list enforces both containment AND the allow-list. AC10 below
+     covers repo_root validation. (covers objective 4)
 AC5. New oracle test: `allow_override` for a default-deny path flips it to
      `AllowWithAudit` (not plain Allow), and the override is rejected if
      `i_understand_risk` is false/absent. (covers I7)

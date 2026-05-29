@@ -36,6 +36,30 @@ runtime_mode = "self_check"
 profile = "developer_local"
 profile_version = "1"
 
+# $REPO_ROOT for repo_only containment (POLICY.md section 2.2). REQUIRED
+# when profile = "repo_only"; the daemon refuses to start without it.
+# Ignored for other profiles. repo_only denies any file read/watch or
+# command whose path/cwd resolves outside this tree.
+# repo_root = "/home/me/projects/my-repo"
+
+# [policy.commands] — command allow-list (POLICY.md section 4).
+# Matched by argv[0] basename. When OMITTED (or empty), Terminal Commander
+# allows any command that is not in the cross-profile structural deny set
+# (sudo/doas/su/pkexec/kexec/polkit) — this keeps zero-config usage
+# working for arbitrary dev commands. Setting a non-empty list OPTS IN to
+# default-deny: only the listed commands run; everything else is denied
+# with reason `no_allow_rule`. Applies to developer_local and repo_only.
+# [policy.commands]
+# allow_roots = ["cargo", "npm", "pytest", "make", "ls", "git"]
+
+# [policy.paths] and [policy.probes] (POLICY.md section 4) are parsed and
+# reserved; allow/deny-list enforcement beyond repo_only containment and
+# the default-deny sensitive-suffix list is a later phase.
+# [policy.paths]
+# read_allow  = ["/home/me/projects/**"]
+# [policy.probes]
+# allow_kinds = ["process", "terminal", "pty", "file", "directory"]
+
 [retention]
 # Per-bucket retention; matches the TC07/TC12 in-memory and
 # persistent defaults.

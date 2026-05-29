@@ -120,12 +120,70 @@ const fn default_idle_ttl_secs() -> u64 {
     DEFAULT_IDLE_TTL_SECS
 }
 
-/// `[policy]` section.
+/// `[policy]` section (declarative profile schema, POLICY.md section 4).
+///
+/// The `profile` + `profile_version` keys are TC36-era; the `repo_root`,
+/// `[policy.paths]`, `[policy.commands]`, and `[policy.probes]` blocks are
+/// TC22.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicySection {
     pub profile: PolicyProfile,
     #[serde(default = "default_profile_version")]
     pub profile_version: String,
+    /// `$REPO_ROOT` for `repo_only` containment (POLICY.md section 2.2).
+    /// REQUIRED when `profile = repo_only`; ignored for other profiles.
+    /// Validated in `validate_and_clamp`.
+    #[serde(default)]
+    pub repo_root: Option<PathBuf>,
+    /// `[policy.commands]` block (POLICY.md section 4).
+    #[serde(default)]
+    pub commands: Option<PolicyCommandsSection>,
+    /// `[policy.paths]` block (POLICY.md section 4). Parsed and retained
+    /// for forward-compat; path allow-list enforcement beyond repo_only
+    /// containment is a later phase.
+    #[serde(default)]
+    pub paths: Option<PolicyPathsSection>,
+    /// `[policy.probes]` block (POLICY.md section 4). Parsed and retained;
+    /// probe-kind gating is a later phase.
+    #[serde(default)]
+    pub probes: Option<PolicyProbesSection>,
+}
+
+/// `[policy.commands]` (POLICY.md section 4). `allow_roots` is the
+/// per-profile command allow-list (matched by argv[0] basename).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PolicyCommandsSection {
+    /// Allowed command basenames. When absent/empty, default-deny is NOT
+    /// applied: both exec profiles allow any command surviving the
+    /// structural deny set (and, for repo_only, path containment). A
+    /// non-empty list opts in to default-deny and is enforced verbatim
+    /// for both developer_local and repo_only.
+    #[serde(default)]
+    pub allow_roots: Vec<String>,
+}
+
+/// `[policy.paths]` (POLICY.md section 4). Forward-compat only at this
+/// phase; the engine does not yet enforce these allow/deny lists beyond
+/// repo_only containment and the default-deny suffix list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PolicyPathsSection {
+    #[serde(default)]
+    pub read_allow: Vec<String>,
+    #[serde(default)]
+    pub write_allow: Vec<String>,
+    #[serde(default)]
+    pub watch_allow: Vec<String>,
+    #[serde(default)]
+    pub deny_extra: Vec<String>,
+}
+
+/// `[policy.probes]` (POLICY.md section 4). Forward-compat only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PolicyProbesSection {
+    #[serde(default)]
+    pub allow_kinds: Vec<String>,
+    #[serde(default)]
+    pub deny_kinds: Vec<String>,
 }
 
 fn default_profile_version() -> String {
@@ -228,6 +286,10 @@ impl DaemonConfig {
             policy: PolicySection {
                 profile: PolicyProfile::default(),
                 profile_version: "1".to_owned(),
+                repo_root: None,
+                commands: None,
+                paths: None,
+                probes: None,
             },
             retention: default_retention(),
             audit: default_audit(),
@@ -328,6 +390,21 @@ impl DaemonConfig {
         if self.limits.bucket_read_limit == 0 {
             return Err(ConfigError::Validate(
                 "limits.bucket_read_limit must be > 0".to_owned(),
+            ));
+        }
+        // TC22: `repo_only` cannot boot without a confinement root. An
+        // unrooted repo_only engine fail-safe denies every path/cwd
+        // action, which is safe but useless; reject it at config load so
+        // the operator gets a clear error instead of a dead daemon.
+        if matches!(self.policy.profile, PolicyProfile::RepoOnly)
+            && self
+                .policy
+                .repo_root
+                .as_ref()
+                .is_none_or(|p| p.as_os_str().is_empty())
+        {
+            return Err(ConfigError::Validate(
+                "policy.repo_root is required when profile = repo_only".to_owned(),
             ));
         }
         // Clamp per-call limits down to hard caps.
@@ -516,6 +593,50 @@ mod tests {
             cfg.db_path(),
             PathBuf::from("/tmp/tc-dbp/terminal-commander.db")
         );
+    }
+
+    // --- TC22 Phase 2: profile schema + repo_root validation (AC10) ---
+
+    #[test]
+    fn repo_only_without_repo_root_is_rejected() {
+        let toml = "[daemon]\ndata_dir = \"/tmp/tc-ro\"\n[policy]\nprofile = \"repo_only\"\n";
+        let err = DaemonConfig::from_toml(toml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Validate(_)),
+            "expected Validate error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn repo_only_with_repo_root_loads() {
+        let toml = "[daemon]\ndata_dir = \"/tmp/tc-ro\"\n[policy]\nprofile = \"repo_only\"\nrepo_root = \"/tmp/tc-ro/repo\"\n";
+        let cfg = DaemonConfig::from_toml(toml).expect("repo_only + repo_root must load");
+        assert_eq!(cfg.policy.profile, PolicyProfile::RepoOnly);
+        assert!(cfg.policy.repo_root.is_some());
+    }
+
+    #[test]
+    fn policy_commands_section_parses() {
+        let toml = "[daemon]\ndata_dir = \"/tmp/tc-c\"\n[policy]\nprofile = \"developer_local\"\n[policy.commands]\nallow_roots = [\"cargo\", \"git\", \"npm\"]\n";
+        let cfg = DaemonConfig::from_toml(toml).expect("must parse [policy.commands]");
+        let roots = cfg.policy.commands.expect("commands present").allow_roots;
+        assert_eq!(roots, vec!["cargo", "git", "npm"]);
+    }
+
+    #[test]
+    fn developer_local_without_repo_root_still_loads() {
+        let mut cfg = DaemonConfig::defaults_in("/tmp/tc-dev");
+        cfg.validate_and_clamp().expect("dev_local must validate");
+    }
+
+    #[test]
+    fn committed_example_toml_parses() {
+        // AC7: the shipped example config must always load. Path is
+        // relative to the daemon crate root (where tests run).
+        let raw = std::fs::read_to_string("../../config/terminal-commanderd.example.toml")
+            .expect("read example toml");
+        let cfg = DaemonConfig::from_toml(&raw).expect("example toml must parse + validate");
+        assert_eq!(cfg.policy.profile, PolicyProfile::DeveloperLocal);
     }
 
     #[cfg(windows)]

@@ -6,27 +6,29 @@
 //! shipping profile is `developer_local` per `POLICY.md` section 2.1.
 //!
 //! Source-status: PARTIAL implementation of the `POLICY.md` doctrine.
+//! See `docs/specs/2026-05-29-tc22-policy-engine-implementation.md`.
 //!
-//! ENFORCED today:
+//! ENFORCED today (TC22 Phase 1 + Phase 2):
 //! - cross-profile command deny set (sudo/doas/su/pkexec/kexec/polkit),
 //!   by basename and absolute path;
 //! - default-deny on the sensitive path SUFFIX list (anchored on
 //!   README.md:294-297) for FileRead / FileWatch in every profile;
 //! - per-profile mutation gates (`read_only_observer` denies command_*
 //!   and registry_*; `admin_debug` denies registry mutations;
-//!   `registry_activate` is AllowWithAudit for dev_local / repo_only).
+//!   `registry_activate` is AllowWithAudit for dev_local / repo_only);
+//! - `repo_only` `$REPO_ROOT` containment: FileRead / FileWatch /
+//!   CommandStart whose path/cwd resolves outside the configured root are
+//!   denied (Phase 1);
+//! - command allow-list (`[policy.commands] allow_roots`): when an
+//!   operator configures a non-empty list, off-list commands are denied
+//!   (`no_allow_rule`) for both exec profiles. Default-deny is OPT-IN; an
+//!   unconfigured list allows any command surviving the structural deny
+//!   set (Phase 2). The `[policy.paths]` / `[policy.probes]` blocks load
+//!   but their allow/deny lists are not yet enforced beyond the above.
 //!
-//! NOT YET enforced (see `docs/specs/2026-05-29-tc22-policy-engine-
-//! implementation.md`; doctrine in `POLICY.md` sections 2, 4, 5, 6):
-//! - command allow-lists / default-deny posture (today it is allow-by-
-//!   default within a profile, NOT the documented default-deny);
-//! - `$REPO_ROOT` containment. WARNING: `repo_only` shares the
-//!   `developer_local` arm below and therefore does NOT yet confine
-//!   reads / watches / exec to the repo tree. Do not rely on
-//!   `repo_only` as a sandbox until Phase 1 of the spec lands.
-//! - the declarative `[paths]` / `[commands]` / `[probes]` / `[limits]`
-//!   profile schema, the limits checks, and the `allow_override`
-//!   mechanism.
+//! NOT YET enforced (later phases): the `[limits]` checks (max jobs,
+//! rates, sizes) and the `allow_override` mechanism (POLICY.md sections
+//! 4, 5, 6 step 3).
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -117,10 +119,16 @@ pub struct PolicyEngine {
     pub profile: PolicyProfile,
     /// Canonicalized `$REPO_ROOT` for `repo_only` containment (POLICY.md
     /// section 2.2). `None` for every other profile, and for `repo_only`
-    /// engines built before TC22 Phase 2 wires the config key — in which
-    /// case containment denies all path/cwd-bearing actions fail-safe
-    /// (see `repo_only_contained`).
+    /// engines built without the config key — in which case containment
+    /// denies all path/cwd-bearing actions fail-safe.
     repo_root: Option<PathBuf>,
+    /// Configured command allow-list (argv[0] basenames) from
+    /// `[policy.commands] allow_roots`. `None` (or empty) means "not
+    /// configured": both exec profiles then allow any command surviving
+    /// the structural deny set (default-deny is opt-in). A non-empty list
+    /// is authoritative and enforced for both `developer_local` and
+    /// `repo_only`.
+    command_allow_roots: Option<Vec<String>>,
 }
 
 impl PolicyEngine {
@@ -134,6 +142,7 @@ impl PolicyEngine {
         Self {
             profile,
             repo_root: None,
+            command_allow_roots: None,
         }
     }
 
@@ -148,6 +157,28 @@ impl PolicyEngine {
         Self {
             profile,
             repo_root: Some(canonical),
+            command_allow_roots: None,
+        }
+    }
+
+    /// Construct an engine from the full loaded profile schema (POLICY.md
+    /// section 4): the active profile, the optional `$REPO_ROOT`, and the
+    /// optional command allow-list. This is the ctor the daemon uses at
+    /// bootstrap; the narrower `new` / `with_repo_root` remain for tests
+    /// and for non-exec profiles.
+    #[must_use]
+    pub fn with_config(
+        profile: PolicyProfile,
+        repo_root: Option<PathBuf>,
+        command_allow_roots: Option<Vec<String>>,
+    ) -> Self {
+        let repo_root = repo_root.map(|r| std::fs::canonicalize(&r).unwrap_or(r));
+        // Normalize an empty list to None so fallback logic has one case.
+        let command_allow_roots = command_allow_roots.filter(|v| !v.is_empty());
+        Self {
+            profile,
+            repo_root,
+            command_allow_roots,
         }
     }
 
@@ -260,21 +291,37 @@ impl PolicyEngine {
                         reason,
                     };
                 }
-                Self::dev_local_repo_only_verdict(action, self.profile)
+                self.dev_local_repo_only_verdict(action)
             }
-            PolicyProfile::DeveloperLocal => {
-                Self::dev_local_repo_only_verdict(action, self.profile)
-            }
+            PolicyProfile::DeveloperLocal => self.dev_local_repo_only_verdict(action),
         }
     }
 
     /// Shared allow/audit verdict for the two exec-capable profiles,
-    /// applied AFTER repo_only's containment gate. TC22 Phase 2 adds the
-    /// command allow-list / default-deny posture here.
-    fn dev_local_repo_only_verdict(
-        action: &PolicyAction<'_>,
-        profile: PolicyProfile,
-    ) -> PolicyVerdict {
+    /// applied AFTER repo_only's containment gate. TC22 Phase 2: enforces
+    /// the command allow-list (default-deny posture) for `CommandStart`.
+    fn dev_local_repo_only_verdict(&self, action: &PolicyAction<'_>) -> PolicyVerdict {
+        if let PolicyAction::CommandStart { argv, .. } = action {
+            let basename = argv
+                .first()
+                .map(|a0| {
+                    Path::new(a0.as_str())
+                        .file_name()
+                        .and_then(|os| os.to_str())
+                        .unwrap_or(a0.as_str())
+                        .to_owned()
+                })
+                .unwrap_or_default();
+            if !self.command_allowed(&basename) {
+                return PolicyVerdict {
+                    decision: PolicyDecision::Deny,
+                    reason: format!(
+                        "command '{basename}' is not in the {:?} allow-list (no_allow_rule)",
+                        self.profile
+                    ),
+                };
+            }
+        }
         if matches!(action, PolicyAction::RegistryActivate) {
             PolicyVerdict {
                 decision: PolicyDecision::AllowWithAudit,
@@ -283,9 +330,29 @@ impl PolicyEngine {
         } else {
             PolicyVerdict {
                 decision: PolicyDecision::Allow,
-                reason: format!("{profile:?} allows the action"),
+                reason: format!("{:?} allows the action", self.profile),
             }
         }
+    }
+
+    /// Is `basename` permitted to execute under the active exec profile?
+    ///
+    /// Default-deny is OPT-IN: when the operator configures a non-empty
+    /// `command_allow_roots`, it is authoritative and anything off it is
+    /// denied (`no_allow_rule`) — for BOTH `developer_local` and
+    /// `repo_only`. With NO configured list, both profiles allow any
+    /// command that survives the cross-profile structural deny set (and,
+    /// for `repo_only`, the path/cwd containment gate). This keeps
+    /// zero-config Terminal Commander usable for its core job (running
+    /// and combing arbitrary dev commands); tightening to an allow-list
+    /// is an explicit operator choice. POLICY.md section 2.2 specifies
+    /// `repo_only` uses "the same allow-list as developer_local", so the
+    /// two share this command posture; `repo_only`'s distinct safety
+    /// property is containment, not command denial.
+    fn command_allowed(&self, basename: &str) -> bool {
+        self.command_allow_roots
+            .as_ref()
+            .is_none_or(|roots| roots.iter().any(|r| r == basename))
     }
 
     /// True if `candidate` is inside the configured repo-root. Returns
@@ -542,6 +609,141 @@ mod tests {
         assert_eq!(
             e.evaluate(&PolicyAction::RegistryActivate).decision,
             PolicyDecision::AllowWithAudit
+        );
+    }
+
+    // --- TC22 Phase 2: command allow-list (AC3/AC4) ---
+
+    #[test]
+    fn developer_local_no_list_allows_any_non_deny_command() {
+        // Zero-config developer_local: default-deny is opt-in, so any
+        // command surviving the structural deny set is allowed.
+        let e = PolicyEngine::default_engine();
+        let cwd = PathBuf::from(".");
+        for cmd in ["echo", "python", "node", "rm", "cargo", "some-obscure-tool"] {
+            let argv = vec![cmd.to_owned()];
+            let v = e.evaluate(&PolicyAction::CommandStart {
+                argv: &argv,
+                cwd: &cwd,
+            });
+            assert_eq!(v.decision, PolicyDecision::Allow, "{cmd} should be allowed");
+        }
+    }
+
+    #[test]
+    fn developer_local_with_list_denies_off_list_allows_on_list() {
+        // Operator opts in to default-deny via allow_roots.
+        let e = PolicyEngine::with_config(
+            PolicyProfile::DeveloperLocal,
+            None,
+            Some(vec!["cargo".to_owned(), "git".to_owned()]),
+        );
+        let cwd = PathBuf::from(".");
+
+        let on = vec!["cargo".to_owned(), "build".to_owned()];
+        assert_eq!(
+            e.evaluate(&PolicyAction::CommandStart {
+                argv: &on,
+                cwd: &cwd
+            })
+            .decision,
+            PolicyDecision::Allow
+        );
+
+        let off = vec!["rm".to_owned(), "-rf".to_owned()];
+        let v = e.evaluate(&PolicyAction::CommandStart {
+            argv: &off,
+            cwd: &cwd,
+        });
+        assert_eq!(v.decision, PolicyDecision::Deny, "rm off-list must deny");
+        assert!(
+            v.reason.contains("no_allow_rule"),
+            "deny reason should carry no_allow_rule: {}",
+            v.reason
+        );
+    }
+
+    #[test]
+    fn allow_list_matches_by_basename_not_full_path() {
+        let e = PolicyEngine::with_config(
+            PolicyProfile::DeveloperLocal,
+            None,
+            Some(vec!["cargo".to_owned()]),
+        );
+        let cwd = PathBuf::from(".");
+        let argv = vec!["/usr/local/bin/cargo".to_owned(), "test".to_owned()];
+        assert_eq!(
+            e.evaluate(&PolicyAction::CommandStart {
+                argv: &argv,
+                cwd: &cwd
+            })
+            .decision,
+            PolicyDecision::Allow,
+            "absolute-path cargo should match the 'cargo' basename allow entry"
+        );
+    }
+
+    #[test]
+    fn repo_only_with_list_enforces_both_containment_and_allow_list() {
+        // AC4-adjacent: repo_only honors the same allow-list as
+        // developer_local AND adds containment.
+        let repo = tempfile::tempdir().unwrap();
+        let e = PolicyEngine::with_config(
+            PolicyProfile::RepoOnly,
+            Some(repo.path().to_path_buf()),
+            Some(vec!["cargo".to_owned()]),
+        );
+
+        // on-list + in-repo -> allow
+        let on = vec!["cargo".to_owned()];
+        assert_eq!(
+            e.evaluate(&PolicyAction::CommandStart {
+                argv: &on,
+                cwd: repo.path()
+            })
+            .decision,
+            PolicyDecision::Allow
+        );
+        // off-list + in-repo -> deny (allow-list)
+        let off = vec!["rm".to_owned()];
+        assert_eq!(
+            e.evaluate(&PolicyAction::CommandStart {
+                argv: &off,
+                cwd: repo.path()
+            })
+            .decision,
+            PolicyDecision::Deny
+        );
+        // on-list + outside-repo -> deny (containment wins first)
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(
+            e.evaluate(&PolicyAction::CommandStart {
+                argv: &on,
+                cwd: outside.path()
+            })
+            .decision,
+            PolicyDecision::Deny
+        );
+    }
+
+    #[test]
+    fn repo_only_no_list_allows_in_repo_command() {
+        // Confirms the resolved posture: repo_only with no allow_roots
+        // behaves like developer_local (allow-any) but contained.
+        let repo = tempfile::tempdir().unwrap();
+        let e = PolicyEngine::with_config(
+            PolicyProfile::RepoOnly,
+            Some(repo.path().to_path_buf()),
+            None,
+        );
+        let argv = vec!["echo".to_owned()];
+        assert_eq!(
+            e.evaluate(&PolicyAction::CommandStart {
+                argv: &argv,
+                cwd: repo.path()
+            })
+            .decision,
+            PolicyDecision::Allow
         );
     }
 }
