@@ -157,7 +157,15 @@ impl DaemonState {
         let sifter =
             Arc::new(SifterRuntime::build(&[]).map_err(|e| BootstrapError::Sifter(e.to_string()))?);
 
-        let policy = PolicyEngine::new(config.policy.profile);
+        let policy = PolicyEngine::with_config(
+            config.policy.profile,
+            config.policy.repo_root.clone(),
+            config
+                .policy
+                .commands
+                .as_ref()
+                .map(|c| c.allow_roots.clone()),
+        );
 
         // Restore active rule definitions from the persistent
         // registry. The in-memory ActivationRegistry is the runtime
