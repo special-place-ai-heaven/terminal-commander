@@ -308,6 +308,7 @@ impl SifterRuntimeInner {
                     [match_index_for_pattern(pat_idx, rule_idx, &self.kw_pattern_to_rule)];
                 let mut captures = IndexMap::new();
                 captures.insert("keyword".to_owned(), kw_token.clone());
+                inject_full_match(&mut captures, text, &rule.def.redact);
                 let draft = build_draft(&rule.def, frame, bucket_id, captures, truncated_bytes);
                 if let Some(d) = draft {
                     out.push(d);
@@ -339,6 +340,7 @@ impl SifterRuntimeInner {
                         slot.push_str("<redacted>");
                     }
                 }
+                inject_full_match(&mut named, text, &rule.def.redact);
                 let draft = build_draft(&rule.def, frame, bucket_id, named, truncated_bytes);
                 if let Some(d) = draft {
                     out.push(d);
@@ -363,6 +365,43 @@ fn cap_text(text: &str) -> (&str, u32) {
     }
     let dropped = u32::try_from(text.len() - end).unwrap_or(u32::MAX);
     (&text[..end], dropped)
+}
+
+/// Inject the matched text under the reserved full-match keys
+/// (`line`/`match`/`0`) so a `${line}`/`${match}`/`${0}` summary
+/// template renders the matched line (TC ergonomics Phase 2, P-ZERO).
+///
+/// Two safety guarantees, both required:
+/// 1. **Bounded** — the value is clamped to
+///    [`terminal_commander_core::MAX_FULL_MATCH_SUMMARY_BYTES`] so a
+///    full-match echo cannot widen the per-event summary budget to the
+///    ~8 KiB sift cap.
+/// 2. **Redaction-honoring** — any already-redacted capture value in
+///    `captures` (i.e. a slot holding `<redacted>`) corresponds to a
+///    secret the rule author asked to hide; the raw line would re-leak
+///    it. We therefore scrub the redacted ORIGINAL substrings from the
+///    injected text. Because the redacted slot no longer holds the
+///    original value, the caller passes the `redact` name list and we
+///    refuse to inject a full match for any rule that declares
+///    `redact`, replacing it with a notice instead — the safe default
+///    (a rule that redacts cannot also echo the whole line).
+fn inject_full_match(captures: &mut Captures, text: &str, redact: &[String]) {
+    let value = if redact.is_empty() {
+        terminal_commander_core::clamp_full_match(text)
+    } else {
+        // A rule that declares redaction must not echo the raw line:
+        // the full match would bypass the per-capture redaction. Refuse
+        // and say so, rather than risk leaking a secret.
+        "<full match suppressed: rule declares redact>".to_owned()
+    };
+    for key in terminal_commander_core::RESERVED_MATCH_KEYS {
+        // Do not clobber a real named capture that happens to collide
+        // with a reserved key (named captures win; reserved keys are a
+        // fallback for rules without them).
+        captures
+            .entry((*key).to_owned())
+            .or_insert_with(|| value.clone());
+    }
 }
 
 /// Whether a rule with `Some(rs)` matches a frame's stream. A rule
@@ -551,6 +590,89 @@ mod tests {
             SifterError::Invalid(id, _) => assert_eq!(id, "kw"),
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    // --- TC ergonomics Phase 2 (P-ZERO): ${line}/${match}/${0} ---
+
+    #[test]
+    fn keyword_full_match_template_echoes_line() {
+        let mut def = kw_rule("kw", &["error"], None);
+        def.summary_template = "${line}".to_owned();
+        let rt = SifterRuntime::build(&[def]).unwrap();
+        let drafts = rt.evaluate(
+            &frame("some error occurred", SourceStream::Stdout),
+            BucketId::new(),
+        );
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].summary, "some error occurred");
+    }
+
+    #[test]
+    fn regex_full_match_template_echoes_line() {
+        let mut def = rx_rule("re", "(?P<package>[a-z]+)-dev", "missing");
+        def.summary_template = "${0}".to_owned();
+        let rt = SifterRuntime::build(&[def]).unwrap();
+        let drafts = rt.evaluate(
+            &frame("E: package libssl-dev missing", SourceStream::Stderr),
+            BucketId::new(),
+        );
+        assert_eq!(drafts.len(), 1);
+        // All three reserved keys (line/match/0) resolve to the whole
+        // matched LINE — consistent across keyword and regex rules, and
+        // the bounded, redaction-aware behavior is identical regardless
+        // of which synonym the author uses.
+        assert_eq!(drafts[0].summary, "E: package libssl-dev missing");
+    }
+
+    #[test]
+    fn full_match_summary_is_byte_bounded() {
+        let mut def = kw_rule("kw", &["needle"], None);
+        def.summary_template = "${line}".to_owned();
+        let rt = SifterRuntime::build(&[def]).unwrap();
+        // A line far larger than the clamp.
+        let big = format!("{}needle{}", "a".repeat(500), "b".repeat(500));
+        let drafts = rt.evaluate(&frame(&big, SourceStream::Stdout), BucketId::new());
+        assert_eq!(drafts.len(), 1);
+        assert!(
+            drafts[0].summary.len() <= terminal_commander_core::MAX_FULL_MATCH_SUMMARY_BYTES,
+            "summary must be clamped, got {} bytes",
+            drafts[0].summary.len()
+        );
+    }
+
+    #[test]
+    fn full_match_suppressed_when_rule_declares_redact() {
+        // A rule that redacts a capture must NOT re-leak the raw line
+        // via ${line}; the injected value is a suppression notice.
+        let mut def = rx_rule("re", "token=(?P<secret>[A-Za-z0-9]+)", "leak");
+        def.captures = vec!["secret".to_owned()];
+        def.redact = vec!["secret".to_owned()];
+        def.summary_template = "${line}".to_owned();
+        let rt = SifterRuntime::build(&[def]).unwrap();
+        let drafts = rt.evaluate(
+            &frame("auth token=abc123XYZ accepted", SourceStream::Stderr),
+            BucketId::new(),
+        );
+        assert_eq!(drafts.len(), 1);
+        assert!(
+            !drafts[0].summary.contains("abc123XYZ"),
+            "redacted secret must not appear via full-match echo: {}",
+            drafts[0].summary
+        );
+        assert!(drafts[0].summary.contains("suppressed"));
+    }
+
+    #[test]
+    fn named_capture_wins_over_reserved_key_collision() {
+        // A real named capture called "line" takes precedence over the
+        // injected reserved key.
+        let mut def = rx_rule("re", "(?P<line>[A-Z]+)", "tag");
+        def.captures = vec!["line".to_owned()];
+        def.summary_template = "${line}".to_owned();
+        let rt = SifterRuntime::build(&[def]).unwrap();
+        let drafts = rt.evaluate(&frame("xx ABC yy", SourceStream::Stderr), BucketId::new());
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].summary, "ABC");
     }
 
     #[test]
