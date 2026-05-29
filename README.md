@@ -518,7 +518,7 @@ scripts/                                 CI, release, and smoke helpers
 | Explicit `terminal-commander setup harness` (mints + emits `env.TC_SESSION`) | Live for Cursor, Codex CLI (TOML env block: follow-up), Claude Code, Claude Desktop |
 | Per-harness daemon isolation (per-`TC_SESSION` endpoint) | Live |
 | Idle daemon self-reap (`TC_IDLE_TTL_SECS`, default 1800, 0=off) | Live |
-| `terminal-commander session list` / `session reap` | Live (`session reap --idle <SECS>` selector pending probe-side idle_secs surfacing) |
+| `terminal-commander session list` / `session reap` | Live (`session list` shows per-session idle; `session reap` selectors: `<TOKEN>` / `--all` / `--idle <SECS>`) |
 | Liveness handshake on probe (rejects squatters) | Live |
 | WSL `WSLENV` TC-only allowlist (drops ambient) | Live |
 | `doctor harness` shared-daemon-mode warning | Live |

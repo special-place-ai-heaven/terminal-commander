@@ -332,14 +332,24 @@ enum ProbeResult {
     Other,
 }
 
+/// Health payload surfaced by a successful probe handshake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeHealth {
+    /// Seconds since the daemon's last real (non-peek) IPC request.
+    /// `None` when the daemon answered the LEGACY Health shape (no
+    /// idle_secs) — idle is UNKNOWN, NOT "not our daemon".
+    pub idle_secs: Option<u64>,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 enum ProbeResponse {
     Health {
+        // uptime_secs is required by the wire variant but the probe does
+        // not surface it; keep it parsed so a Health reply still decodes.
         #[allow(dead_code)]
         uptime_secs: u64,
         #[serde(default)]
-        #[allow(dead_code)]
         idle_secs: Option<u64>,
     },
     // A well-formed envelope carrying some other method is a daemon
@@ -351,11 +361,12 @@ enum ProbeResponse {
 /// Run the one-shot `health` handshake over an already-connected stream:
 /// write a length-prefixed `RequestEnvelope { correlation_id: 0,
 /// request: Health }`, read one length-prefixed response frame, and
-/// return `true` only if it deserialises as a well-formed `Health`
-/// response. Any I/O error, oversize/short frame, or non-Health payload
-/// yields `false`. The whole call is the caller's responsibility to bound
-/// with [`PROBE_TIMEOUT`].
-async fn health_handshake<S>(mut stream: S) -> bool
+/// return `Some(ProbeHealth)` only if it deserialises as a well-formed
+/// `Health` response (carrying `idle_secs` when present, `None` for the
+/// legacy shape). Any I/O error, oversize/short frame, or non-Health
+/// payload yields `None`. The whole call is the caller's responsibility to
+/// bound with [`PROBE_TIMEOUT`].
+async fn health_handshake<S>(mut stream: S) -> Option<ProbeHealth>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -365,41 +376,30 @@ where
     // does not multiplex. Payload matches the TC37 wire schema exactly:
     // {"correlation_id":0,"request":{"method":"health"}}.
     const REQUEST_JSON: &[u8] = br#"{"correlation_id":0,"request":{"method":"health"}}"#;
-    let Ok(len) = u32::try_from(REQUEST_JSON.len()) else {
-        return false;
-    };
-    if stream.write_all(&len.to_be_bytes()).await.is_err() {
-        return false;
-    }
-    if stream.write_all(REQUEST_JSON).await.is_err() {
-        return false;
-    }
-    if stream.flush().await.is_err() {
-        return false;
-    }
+    let len = u32::try_from(REQUEST_JSON.len()).ok()?;
+    stream.write_all(&len.to_be_bytes()).await.ok()?;
+    stream.write_all(REQUEST_JSON).await.ok()?;
+    stream.flush().await.ok()?;
 
     // Response frame: 4-byte big-endian length prefix, then the payload.
     let mut len_buf = [0_u8; 4];
-    if stream.read_exact(&mut len_buf).await.is_err() {
-        return false;
-    }
+    stream.read_exact(&mut len_buf).await.ok()?;
     let resp_len = u32::from_be_bytes(len_buf) as usize;
     if resp_len == 0 || resp_len > PROBE_MAX_FRAME_BYTES {
-        return false;
+        return None;
     }
     let mut payload = vec![0_u8; resp_len];
-    if stream.read_exact(&mut payload).await.is_err() {
-        return false;
-    }
+    stream.read_exact(&mut payload).await.ok()?;
 
-    matches!(
-        serde_json::from_slice::<ProbeResponseEnvelope>(&payload),
+    match serde_json::from_slice::<ProbeResponseEnvelope>(&payload) {
         Ok(ProbeResponseEnvelope {
-            result: ProbeResult::Ok {
-                response: ProbeResponse::Health { .. },
-            },
-        })
-    )
+            result:
+                ProbeResult::Ok {
+                    response: ProbeResponse::Health { idle_secs, .. },
+                },
+        }) => Some(ProbeHealth { idle_secs }),
+        _ => None,
+    }
 }
 
 /// Probe an endpoint by performing a real `health` handshake, not a bare
@@ -411,16 +411,35 @@ where
 ///
 /// The entire handshake is bounded by [`PROBE_TIMEOUT`]; a hung or silent
 /// peer returns `false` and never hangs the ensure path.
+///
+/// This is a thin wrapper over [`probe_endpoint_health`]: a peer "is our
+/// daemon" iff the handshake yields a [`ProbeHealth`] payload. Callers that
+/// need the parsed `idle_secs` should call [`probe_endpoint_health`] directly.
 pub async fn probe_endpoint(endpoint: &Endpoint) -> bool {
+    probe_endpoint_health(endpoint).await.is_some()
+}
+
+/// Probe an endpoint like [`probe_endpoint`], but surface the parsed Health
+/// payload instead of collapsing it to a bool.
+///
+/// Returns `Some(ProbeHealth)` when a connectable peer answers with a
+/// well-formed `IpcResponse::Health` — including the LEGACY shape, in which
+/// case `idle_secs` is `None` (alive, idle UNKNOWN). Returns `None` on any
+/// I/O error, oversize/short frame, non-Health payload, or timeout — i.e.
+/// "not our daemon" or unreachable.
+///
+/// The entire handshake is bounded by [`PROBE_TIMEOUT`]; a hung or silent
+/// peer returns `None` and never hangs the caller.
+pub async fn probe_endpoint_health(endpoint: &Endpoint) -> Option<ProbeHealth> {
     let handshake = async {
         match endpoint {
             #[cfg(unix)]
             Endpoint::UnixSocket { path } => match tokio::net::UnixStream::connect(path).await {
                 Ok(stream) => health_handshake(stream).await,
-                Err(_) => false,
+                Err(_) => None,
             },
             #[cfg(not(unix))]
-            Endpoint::UnixSocket { .. } => false,
+            Endpoint::UnixSocket { .. } => None,
             #[cfg(windows)]
             Endpoint::WindowsPipe { name } => {
                 // ClientOptions::new().open is synchronous; same tokio
@@ -431,17 +450,17 @@ pub async fn probe_endpoint(endpoint: &Endpoint) -> bool {
                 use tokio::net::windows::named_pipe::ClientOptions;
                 match ClientOptions::new().open(name.as_str()) {
                     Ok(stream) => health_handshake(stream).await,
-                    Err(_) => false,
+                    Err(_) => None,
                 }
             }
             #[cfg(not(windows))]
-            Endpoint::WindowsPipe { .. } => false,
+            Endpoint::WindowsPipe { .. } => None,
         }
     };
 
     // Bound EVERYTHING: connect + write + read. A silent peer that never
-    // answers must make the probe return false, never hang.
-    (tokio::time::timeout(PROBE_TIMEOUT, handshake).await).unwrap_or(false)
+    // answers must make the probe return None, never hang.
+    (tokio::time::timeout(PROBE_TIMEOUT, handshake).await).unwrap_or(None)
 }
 
 #[cfg(test)]

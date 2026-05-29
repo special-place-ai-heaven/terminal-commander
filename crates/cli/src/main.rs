@@ -257,10 +257,52 @@ fn endpoint_from_recorded(ep: &str) -> terminal_commander_supervisor::ensure::En
 /// for each ALIVE entry run a Health handshake CONCURRENTLY to display state.
 /// STALE entries (dead pid) print `state=stale, idle=-` without any IPC.
 ///
-/// Idle is rendered as `-` for now: the existing `probe_endpoint` returns
-/// only a bool, so `idle_secs` from the Health response is not yet surfaced.
-/// Surfacing it through a public probe API is a small follow-up explicitly
-/// out of scope for this task.
+/// Idle is surfaced from the Health handshake via `probe_endpoint_health`:
+/// a modern daemon reports `<secs>s`; a legacy daemon that omits `idle_secs`
+/// is alive with idle `?` (unknown, NOT unresponsive); an unresponsive peer
+/// is `state=unresponsive, idle=-`.
+/// Map a probe result to the `(state, idle)` columns shown by `session list`:
+///   - `Some(idle_secs = Some(s))` -> alive, `"<s>s"` (modern daemon).
+///   - `Some(idle_secs = None)`    -> alive, `"?"` (legacy daemon: idle UNKNOWN).
+///   - `None`                      -> unresponsive, `"-"` (no Health reply).
+fn classify_health(
+    health: Option<&terminal_commander_supervisor::ensure::ProbeHealth>,
+) -> (&'static str, String) {
+    match health.map(|h| h.idle_secs) {
+        Some(Some(s)) => ("alive", format!("{s}s")),
+        Some(None) => ("alive", "?".to_string()),
+        None => ("unresponsive", "-".to_string()),
+    }
+}
+
+/// Decision for ONE alive entry under `session reap --idle`. Pure, so the
+/// idle predicate is unit-testable without spawning a daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleReapDecision {
+    /// Modern daemon, idle >= threshold: select for reap.
+    Reap,
+    /// Modern daemon, idle below threshold: recently active, skip.
+    TooRecent(u64),
+    /// Legacy daemon (no idle_secs): alive & ours but predicate inapplicable.
+    IdleUnknown,
+    /// No Health reply (unresponsive/gone): not force-killed on the soft path.
+    Unresponsive,
+}
+
+/// Decide what `--idle` should do with one alive entry given its probe result
+/// and the CLI threshold. Reap IFF idle_secs is known AND `>= threshold`.
+fn idle_reap_decision(
+    health: Option<&terminal_commander_supervisor::ensure::ProbeHealth>,
+    threshold: u64,
+) -> IdleReapDecision {
+    match health.map(|h| h.idle_secs) {
+        Some(Some(s)) if s >= threshold => IdleReapDecision::Reap,
+        Some(Some(s)) => IdleReapDecision::TooRecent(s),
+        Some(None) => IdleReapDecision::IdleUnknown,
+        None => IdleReapDecision::Unresponsive,
+    }
+}
+
 fn run_session_list() -> std::process::ExitCode {
     let base = terminal_commander_supervisor::paths::resolve_state_dir_base();
     let entries = terminal_commander_supervisor::sessions::enumerate(&base);
@@ -298,17 +340,14 @@ fn run_session_list() -> std::process::ExitCode {
             let pid = e.pid.to_string();
             let endpoint_s = e.endpoint;
             joins.push(tokio::spawn(async move {
-                let state_label =
-                    if terminal_commander_supervisor::ensure::probe_endpoint(&ep).await {
-                        "alive"
-                    } else {
-                        "unresponsive"
-                    };
+                let health =
+                    terminal_commander_supervisor::ensure::probe_endpoint_health(&ep).await;
+                let (state_label, idle) = classify_health(health.as_ref());
                 SessionRow {
                     label,
                     pid,
                     state: state_label,
-                    idle: "-".into(),
+                    idle,
                     endpoint: endpoint_s,
                 }
             }));
@@ -433,7 +472,7 @@ async fn wait_for_endpoint_down(
 }
 
 /// Outcome of reaping ONE session, surfaced as a one-line operator log.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum ReapOutcome {
     /// Graceful Shutdown-IPC ACK + endpoint observed down within the wait.
     Graceful,
@@ -499,7 +538,7 @@ fn run_session_reap(
     token: Option<&str>,
     all: bool,
     idle: bool,
-    _idle_secs: u64,
+    idle_secs: u64,
 ) -> std::process::ExitCode {
     // Mutual-exclusion + argument validation.
     let selector_count = usize::from(token.is_some()) + usize::from(all) + usize::from(idle);
@@ -513,18 +552,67 @@ fn run_session_reap(
         );
         return std::process::ExitCode::from(2);
     }
+    let base = terminal_commander_supervisor::paths::resolve_state_dir_base();
+
     if idle {
-        // The Health probe currently does not surface `idle_secs` through
-        // `probe_endpoint`'s bool return (see the `run_session_list` doc
-        // comment). Implementing `--idle` requires a probe variant that
-        // returns the Health payload; out of scope for this task.
-        eprintln!(
-            "terminal-commander: session reap --idle is not yet wired (idle_secs surfacing pending)"
-        );
-        return std::process::ExitCode::from(EX_UNAVAILABLE);
+        // --idle is a SOFT selector: enumerate, probe each ALIVE entry, and
+        // reap only those we can PROVE are idle past the threshold. This is
+        // deliberately partial-upgrade tolerant:
+        //   - idle_secs Some(s), s >= threshold -> reap (graceful+force).
+        //   - idle_secs Some(s), s <  threshold -> skip (recently active).
+        //   - idle_secs None (legacy daemon)    -> skip: alive & ours, but
+        //     we cannot apply the idle predicate. NOT force-killed.
+        //   - probe None (unresponsive/gone)    -> skip: don't force-kill on
+        //     the soft idle path. STALE entries are likewise left alone here.
+        let entries = terminal_commander_supervisor::sessions::enumerate(&base);
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("terminal-commander: tokio runtime build failed: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        };
+        let mut had_refusal = false;
+        rt.block_on(async {
+            for e in entries {
+                let label = e.label.clone();
+                if !e.alive {
+                    // Stale pidfile: not part of the idle predicate.
+                    continue;
+                }
+                let ep = endpoint_from_recorded(&e.endpoint);
+                let health =
+                    terminal_commander_supervisor::ensure::probe_endpoint_health(&ep).await;
+                // Flatten the probe + idle predicate into one decision so the
+                // side-effecting arms below are a plain match, not nested
+                // Option matching (which clippy's option_if_let_else flags).
+                match idle_reap_decision(health.as_ref(), idle_secs) {
+                    IdleReapDecision::Reap => {
+                        let outcome = reap_one(e).await;
+                        report_reap_outcome(&label, outcome, &mut had_refusal);
+                    }
+                    IdleReapDecision::TooRecent(s) => {
+                        println!("{label}: idle {s}s < {idle_secs}s threshold, skipped");
+                    }
+                    IdleReapDecision::IdleUnknown => {
+                        println!("{label}: idle unknown (legacy daemon), skipped under --idle");
+                    }
+                    IdleReapDecision::Unresponsive => {
+                        println!("{label}: unresponsive, skipped under --idle");
+                    }
+                }
+            }
+        });
+        return if had_refusal {
+            std::process::ExitCode::from(1)
+        } else {
+            std::process::ExitCode::SUCCESS
+        };
     }
 
-    let base = terminal_commander_supervisor::paths::resolve_state_dir_base();
     let mut entries = terminal_commander_supervisor::sessions::enumerate(&base);
     if let Some(tok) = token {
         entries.retain(|e| e.label == tok);
@@ -554,22 +642,7 @@ fn run_session_reap(
         for e in entries {
             let label = e.label.clone();
             let outcome = reap_one(e).await;
-            match outcome {
-                ReapOutcome::Graceful => println!("{label}: reaped (graceful shutdown)"),
-                ReapOutcome::Forced => println!("{label}: reaped (force-kill; daemon was wedged)"),
-                ReapOutcome::StaleCleaned => println!("{label}: stale pidfile removed"),
-                ReapOutcome::StaleRaced => println!("{label}: stale pidfile raced (left in place)"),
-                ReapOutcome::RefusedNonDaemon => {
-                    eprintln!(
-                        "{label}: endpoint occupied by a non-daemon process, refusing to kill"
-                    );
-                    had_refusal = true;
-                }
-                ReapOutcome::Unknown => {
-                    eprintln!("{label}: shutdown ACK received but endpoint still reachable; not escalating");
-                    had_refusal = true;
-                }
-            }
+            report_reap_outcome(&label, outcome, &mut had_refusal);
         }
     });
 
@@ -577,6 +650,28 @@ fn run_session_reap(
         std::process::ExitCode::from(1)
     } else {
         std::process::ExitCode::SUCCESS
+    }
+}
+
+/// Print the user-facing line for a single reap outcome and flag refusals.
+/// Shared by the token/--all path and the `--idle` selector so the outcome
+/// reporting (and its exit-code contribution) stays in one place.
+fn report_reap_outcome(label: &str, outcome: ReapOutcome, had_refusal: &mut bool) {
+    match outcome {
+        ReapOutcome::Graceful => println!("{label}: reaped (graceful shutdown)"),
+        ReapOutcome::Forced => println!("{label}: reaped (force-kill; daemon was wedged)"),
+        ReapOutcome::StaleCleaned => println!("{label}: stale pidfile removed"),
+        ReapOutcome::StaleRaced => println!("{label}: stale pidfile raced (left in place)"),
+        ReapOutcome::RefusedNonDaemon => {
+            eprintln!("{label}: endpoint occupied by a non-daemon process, refusing to kill");
+            *had_refusal = true;
+        }
+        ReapOutcome::Unknown => {
+            eprintln!(
+                "{label}: shutdown ACK received but endpoint still reachable; not escalating"
+            );
+            *had_refusal = true;
+        }
     }
 }
 
@@ -833,6 +928,50 @@ mod tests {
     fn cli_parses_status() {
         let cli = Cli::parse_from(["terminal-commander", "status"]);
         assert!(matches!(cli.cmd, Command::Status));
+    }
+
+    use terminal_commander_supervisor::ensure::ProbeHealth;
+
+    #[test]
+    fn classify_health_maps_state_and_idle_columns() {
+        // Modern daemon: real seconds.
+        assert_eq!(
+            classify_health(Some(&ProbeHealth { idle_secs: Some(7) })),
+            ("alive", "7s".to_string())
+        );
+        // Legacy daemon: alive, idle unknown.
+        assert_eq!(
+            classify_health(Some(&ProbeHealth { idle_secs: None })),
+            ("alive", "?".to_string())
+        );
+        // No Health reply: unresponsive.
+        assert_eq!(classify_health(None), ("unresponsive", "-".to_string()));
+    }
+
+    #[test]
+    fn idle_reap_decision_is_partial_upgrade_tolerant() {
+        let modern = |s| Some(ProbeHealth { idle_secs: Some(s) });
+        let legacy = ProbeHealth { idle_secs: None };
+        // At/over threshold -> reap; under -> skip with the observed idle.
+        assert_eq!(
+            idle_reap_decision(modern(100).as_ref(), 60),
+            IdleReapDecision::Reap
+        );
+        assert_eq!(
+            idle_reap_decision(modern(60).as_ref(), 60),
+            IdleReapDecision::Reap
+        );
+        assert_eq!(
+            idle_reap_decision(modern(30).as_ref(), 60),
+            IdleReapDecision::TooRecent(30)
+        );
+        // Legacy daemon: never reaped under --idle (predicate inapplicable).
+        assert_eq!(
+            idle_reap_decision(Some(&legacy), 60),
+            IdleReapDecision::IdleUnknown
+        );
+        // Unresponsive: skipped, not force-killed on the soft idle path.
+        assert_eq!(idle_reap_decision(None, 60), IdleReapDecision::Unresponsive);
     }
 
     #[test]
