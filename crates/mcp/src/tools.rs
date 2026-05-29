@@ -128,6 +128,11 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             description: "Start a non-PTY argv command; bounded metadata response. No raw stdout/stderr.",
         },
         ToolCatalogueEntry {
+            name: "run_and_watch",
+            status: ToolStatus::Live,
+            description: "One-shot: start a command, wait (bounded) for its rule signals + exit, return both. Quiet command returns a receipt, not an error.",
+        },
+        ToolCatalogueEntry {
             name: "command_status",
             status: ToolStatus::Live,
             description: "Lifecycle + counters lookup for a previously started job.",
@@ -475,6 +480,120 @@ impl TerminalCommanderMcpServer {
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
+    }
+
+    /// `run_and_watch` — one-shot: start a command, wait for its rule
+    /// signals + exit, return both. Composes command_start_combed ->
+    /// bucket_wait (bounded) -> command_status so the agent needs ONE
+    /// call instead of four.
+    #[tool(
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt}. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) and returns up to max_signals (default 50). Argv only; shell interpreters denied. Prefer plain shell for tiny one-off commands whose full verbatim output you want."
+    )]
+    async fn run_and_watch(
+        &self,
+        Parameters(params): Parameters<McpRunAndWatchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use terminal_commander_core::JobState;
+
+        self.ensure_daemon_available()?;
+        let (start_params, wait_ms, max_signals) = params.into_parts();
+        let start_ipc = start_params.into_ipc()?;
+
+        // 1. Start.
+        let (job_id, bucket_id, mut cursor) = match self
+            .daemon
+            .call(IpcRequest::CommandStartCombed(start_ipc))
+            .await
+        {
+            Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
+                job_id,
+                bucket_id,
+                cursor,
+                ..
+            })) => (job_id, bucket_id, cursor),
+            Ok(other) => return Err(unexpected_variant(&other)),
+            Err(e) => return Err(into_mcp_error(&e)),
+        };
+
+        // 2. Wait loop: drain signals until the job is terminal, the
+        //    signal cap is hit, or the wait budget is spent. Each
+        //    bucket_wait blocks up to a per-iteration slice; we stop as
+        //    soon as the command exits so a fast command returns fast.
+        let mut signals: Vec<terminal_commander_core::SignalEvent> = Vec::new();
+        let deadline_slices = wait_ms.div_ceil(MAX_WAIT_SLICE_MS).max(1);
+        let mut final_state = JobState::Running;
+        let mut exit_code: Option<i32> = None;
+        let mut receipt: Option<serde_json::Value> = None;
+
+        for _ in 0..deadline_slices {
+            // Poll status first so a command that already exited short-
+            // circuits without burning a full wait slice.
+            let status = match self
+                .daemon
+                .call(IpcRequest::CommandStatus(CommandStatusParams { job_id }))
+                .await
+            {
+                Ok(IpcResponse::CommandStatus(s)) => s,
+                Ok(other) => return Err(unexpected_variant(&other)),
+                Err(e) => return Err(into_mcp_error(&e)),
+            };
+            final_state = status.state;
+            exit_code = status.exit_code;
+            receipt = status.receipt.as_ref().map(|r| serde_json::json!(r));
+
+            let terminal = matches!(
+                status.state,
+                JobState::Exited | JobState::Cancelled | JobState::Failed
+            );
+
+            // Drain any signals available since the last cursor.
+            let wait = BucketWaitParams {
+                bucket_id,
+                cursor,
+                severity_min: None,
+                kind_filter: None,
+                limit: Some(max_signals.saturating_sub(signals.len()).max(1)),
+                timeout_ms: Some(if terminal { 0 } else { MAX_WAIT_SLICE_MS }),
+            };
+            match self.daemon.call(IpcRequest::BucketWait(wait)).await {
+                Ok(IpcResponse::BucketWait(r)) => {
+                    cursor = r.next_cursor;
+                    for ev in r.events {
+                        // Only rule-driven events count as "signals". The
+                        // bucket also carries probe-lifecycle markers (e.g.
+                        // the `command_exited` meta event, which has no
+                        // `rule`); those are the exit indicator, surfaced
+                        // via exit_code/state and the receipt, not as a
+                        // matched signal. Counting them would defeat the
+                        // zero-signal receipt path (a quiet command would
+                        // look like it matched something).
+                        if ev.rule.is_some() && signals.len() < max_signals {
+                            signals.push(ev);
+                        }
+                    }
+                }
+                Ok(other) => return Err(unexpected_variant(&other)),
+                Err(e) => return Err(into_mcp_error(&e)),
+            }
+
+            if terminal || signals.len() >= max_signals {
+                break;
+            }
+        }
+
+        // 3. Compose the response. The receipt is included only when the
+        //    command finished with zero rule signals (no-silence rule):
+        //    a quiet command yields a receipt, never an error.
+        let include_receipt = signals.is_empty();
+        json_tool_result(&serde_json::json!({
+            "job_id": job_id,
+            "bucket_id": bucket_id,
+            "state": final_state,
+            "exit_code": exit_code,
+            "signals": signals,
+            "signal_count": signals.len(),
+            "receipt": if include_receipt { receipt } else { None },
+        }))
     }
 
     /// `command_status` — lifecycle counters + exit info for a job.
@@ -1519,6 +1638,74 @@ pub struct McpCommandStatusParams {
     pub job_id: String,
 }
 
+/// Default wait budget for `run_and_watch`, in milliseconds.
+const RUN_AND_WATCH_DEFAULT_WAIT_MS: u64 = 5_000;
+/// Hard cap on the `run_and_watch` wait budget, in milliseconds.
+const RUN_AND_WATCH_MAX_WAIT_MS: u64 = 60_000;
+/// Default cap on signals returned by `run_and_watch`.
+const RUN_AND_WATCH_DEFAULT_MAX_SIGNALS: usize = 50;
+/// Hard cap on signals returned by `run_and_watch`.
+const RUN_AND_WATCH_MAX_SIGNALS: usize = 500;
+/// Per-iteration `bucket_wait` slice for the `run_and_watch` loop, in ms.
+/// The loop runs `ceil(wait_ms / slice)` iterations; a smaller slice
+/// makes the loop exit sooner after the command becomes terminal.
+const MAX_WAIT_SLICE_MS: u64 = 1_000;
+
+/// MCP-facing parameters for `run_and_watch`. A superset of
+/// `command_start_combed`'s params plus the bounded wait controls.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRunAndWatchParams {
+    /// Non-empty argv. argv[0] is the program; rest are args.
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: Vec<EnvEntry>,
+    #[serde(default)]
+    pub grace_ms: Option<u64>,
+    #[serde(default)]
+    pub bucket_config_json: Option<String>,
+    /// Inline rules; see `command_start_combed`. Minimal:
+    /// `[{"pattern": "ERROR"}]`. Omit to collect no rule signals (you
+    /// still get the exit receipt).
+    #[serde(default)]
+    pub rules: Option<Vec<RuleInput>>,
+    /// Deprecated string form of `rules`. Prefer `rules`.
+    #[serde(default)]
+    pub rules_json: Option<String>,
+    /// Max time to wait for signals + exit, in ms. Default 5000, capped
+    /// at 60000.
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
+    /// Max signals to return. Default 50, capped at 500.
+    #[serde(default)]
+    pub max_signals: Option<usize>,
+}
+
+impl McpRunAndWatchParams {
+    /// Split into the start params and the (clamped) wait controls.
+    fn into_parts(self) -> (McpCommandStartParams, u64, usize) {
+        let wait_ms = self
+            .wait_ms
+            .unwrap_or(RUN_AND_WATCH_DEFAULT_WAIT_MS)
+            .min(RUN_AND_WATCH_MAX_WAIT_MS);
+        let max_signals = self
+            .max_signals
+            .unwrap_or(RUN_AND_WATCH_DEFAULT_MAX_SIGNALS)
+            .min(RUN_AND_WATCH_MAX_SIGNALS);
+        let start = McpCommandStartParams {
+            argv: self.argv,
+            cwd: self.cwd,
+            env: self.env,
+            grace_ms: self.grace_ms,
+            bucket_config_json: self.bucket_config_json,
+            rules: self.rules,
+            rules_json: self.rules_json,
+        };
+        (start, wait_ms, max_signals)
+    }
+}
+
 /// MCP-facing parameters for `command_output_tail`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpCommandOutputTailParams {
@@ -2160,7 +2347,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_thirty_one_live_tools_at_tc45() {
+    fn catalogue_lists_thirty_two_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -2174,6 +2361,7 @@ mod tests {
                 "policy_status",
                 "self_check",
                 "command_start_combed",
+                "run_and_watch",
                 "command_status",
                 "command_output_tail",
                 "bucket_events_since",
@@ -2253,6 +2441,7 @@ mod tests {
                 "registry_search".to_owned(),
                 "registry_test".to_owned(),
                 "registry_upsert".to_owned(),
+                "run_and_watch".to_owned(),
                 "runtime_state".to_owned(),
                 "self_check".to_owned(),
                 "system_discover".to_owned(),

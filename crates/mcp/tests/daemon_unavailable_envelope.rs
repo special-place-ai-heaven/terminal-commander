@@ -128,7 +128,9 @@ fn first_text(result: &rmcp::model::CallToolResult) -> String {
 /// parses any typed id.
 fn minimal_tool_args(tool: &str) -> serde_json::Value {
     match tool {
-        "command_start_combed" | "pty_command_start" => serde_json::json!({ "argv": ["ls"] }),
+        "command_start_combed" | "pty_command_start" | "run_and_watch" => {
+            serde_json::json!({ "argv": ["ls"] })
+        }
         "command_status" | "pty_command_stop" | "command_output_tail" => {
             serde_json::json!({ "job_id": "job_x" })
         }
@@ -192,8 +194,8 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
         "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
     assert_eq!(
-        checked, 30,
-        "expected 30 daemon-backed tools (31 catalogue entries minus system_discover)"
+        checked, 31,
+        "expected 31 daemon-backed tools (32 catalogue entries minus system_discover)"
     );
 
     let _ = client.cancel().await;
