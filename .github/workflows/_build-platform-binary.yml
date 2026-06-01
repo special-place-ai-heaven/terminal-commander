@@ -79,10 +79,37 @@ jobs:
           toolchain: ${{ inputs.rust_toolchain }}
           targets: ${{ env.TARGET_TRIPLE }}
 
+      # Capture the GitHub runner image revision (e.g. "20260525.156"). It is
+      # baked into the cache key below so a target/ populated under one image
+      # can NEVER be restored under another. This closes the glibc-floor
+      # poisoning footgun: a native build writes host-glibc-linked
+      # build-script-build binaries into target/release/build/. rust-cache's
+      # default key segments on OS family + arch but NOT the image revision,
+      # so when GitHub rolls the ubuntu-22.04 image forward (and an older
+      # revision had transiently shipped a higher glibc), cargo restored a
+      # stale build-script-build linked to GLIBC_2.39 and re-EXECUTED it on a
+      # genuine glibc-2.35 (ubuntu-22.04.5) runner -> "GLIBC_2.39 not found"
+      # for rmcp / thiserror build scripts. PR #69's linux jobs died on this.
+      - name: Capture runner image version for cache key
+        id: imgver
+        shell: bash
+        run: echo "image=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: build-platform-${{ inputs.platform }}
+          # `key` is appended to the cache key AND to the restore-key prefixes,
+          # so a cache from image revision X is invisible to a run on image Y.
+          # Pinning it to the runner image revision means a rebuild on a fresh
+          # image always starts from a clean target/ for the host build-script
+          # artifacts (no host-glibc-tainted build-script-build can be reused).
+          key: img-${{ steps.imgver.outputs.image }}
+          # One-time prefix bump to evict the already-poisoned v0 caches
+          # (b8cf8d0c) that still carry GLIBC_2.39 build-script-build binaries.
+          # Without this the bad cache could be restored once more before the
+          # repartitioned key takes over. Bump again only to force a hard reset.
+          prefix-key: v1-rust
 
       - name: cargo build --release (native on every platform)
         shell: bash
