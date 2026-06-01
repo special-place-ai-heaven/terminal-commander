@@ -22,7 +22,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed one-call rule-pack import (TCE-ERG-PACK). Imports an embedded pack by name; with activate=true + scope, promotes its rules to Active and activates them so the agent gets expert signal extraction without authoring rule JSON. An unknown pack name returns an invalid_params error listing the known packs."
+    "note": "Daemon-backed one-call rule-pack import (TCE-ERG-PACK). Imports an embedded pack by name; with activate=true + scope, promotes its rules to Active and activates them so the agent gets expert signal extraction without authoring rule JSON. TB-5: the scope requirement is CONDITIONAL (required only when activate=true), so scope stays optional in the MCP input schema required[]; the conditional is documented in the tool/param descriptions and enforced by the daemon scope-required teaching error (ScopeInvalid) rather than a JSON-Schema if/then. An unknown pack name returns an invalid_params error listing the known packs."
   },
   "response_example": {
     "pack": "cargo",

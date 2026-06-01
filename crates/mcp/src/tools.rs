@@ -801,7 +801,7 @@ impl TerminalCommanderMcpServer {
     /// `registry_upsert` — create a new immutable version from a JSON
     /// rule definition.
     #[tool(
-        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string. Validates regex/keywords; existing versions are never mutated."
+        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword). `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords; existing versions are never mutated."
     )]
     async fn registry_upsert(
         &self,
@@ -871,10 +871,11 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpRegistryActivateParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available()?;
-        let scope = match params.scope {
-            Some(s) => Some(s.into_ipc_scope()?),
-            None => None,
-        };
+        // `scope` is schema-required (TB-5): rmcp rejects an omitted
+        // scope before this handler runs, so it is always present here.
+        // We still pass it as `Some(..)` because the wire IPC type keeps
+        // `scope: Option` for backward compatibility.
+        let scope = Some(params.scope.into_ipc_scope()?);
         let ipc = RegistryActivateParams {
             rule_id: params.rule_id,
             version: params.version,
@@ -901,7 +902,7 @@ impl TerminalCommanderMcpServer {
 
     /// `registry_import_pack` — one-call expert signal extraction.
     #[tool(
-        description = "Import a curated rule pack (cargo, pytest, npm, gcc, apt, make, generic.terminal) so you get expert signal extraction without authoring any rule JSON. Pass activate=true + scope {kind:'global'} to make the rules live immediately for your commands; one call replaces ~6 rule-authoring calls. An unknown pack name returns the list of available packs."
+        description = "Import a curated rule pack (cargo, pytest, npm, gcc, apt, make, generic.terminal) so you get expert signal extraction without authoring any rule JSON. CONDITIONAL scope contract: pass activate=true + scope {kind:'global'} together to make the rules live immediately for your commands (one call replaces ~6 rule-authoring calls); activate=true WITHOUT scope is rejected with a scope-required error, never silently widened to global. With activate=false (default) the pack is imported but not activated and scope is ignored. An unknown pack name returns the list of available packs."
     )]
     async fn registry_import_pack(
         &self,
@@ -943,10 +944,10 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpRegistryDeactivateParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available()?;
-        let scope = match params.scope {
-            Some(s) => Some(s.into_ipc_scope()?),
-            None => None,
-        };
+        // `scope` is schema-required (TB-5): rmcp rejects an omitted
+        // scope before this handler runs. The wire IPC type keeps
+        // `scope: Option` for backward compatibility, so wrap in `Some`.
+        let scope = Some(params.scope.into_ipc_scope()?);
         let ipc = RegistryDeactivateParams {
             rule_id: params.rule_id,
             version: params.version,
@@ -2094,8 +2095,36 @@ pub struct McpRegistryGetParams {
 /// not need to mirror every field of the core schema.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryUpsertParams {
-    /// JSON-encoded `RuleDefinition`. Daemon validates regex /
-    /// keywords / kind before persisting.
+    /// JSON-encoded `RuleDefinition` (a STRING, not a nested object).
+    ///
+    /// REQUIRED fields: `id` (string), `version` (int, e.g. 1), `kind`,
+    /// `severity`, `event_kind` (string; the event label emitted on
+    /// match, e.g. `"compile_error"`), `summary_template` (string; use
+    /// `${line}` to echo the matched line). When `kind` is `regex` you
+    /// MUST also supply `pattern`; when `kind` is `keyword` supply
+    /// `keywords` (array).
+    ///
+    /// `kind` enum: keyword | regex | prompt | exit_code | stream_marker
+    /// | progress_collapse | dedupe | threshold | sequence | anchor |
+    /// custom. Only `keyword` and `regex` are live at MVP; the rest
+    /// validate only to Draft.
+    ///
+    /// `severity` enum: trace | debug | info | low | medium | high |
+    /// critical.
+    ///
+    /// New rules default to `status=Draft` (test-only); set
+    /// `"status":"active"` in the definition to make the rule eligible
+    /// for `registry_activate`.
+    ///
+    /// Complete kind:regex example that succeeds on the first call:
+    /// `definition_json = "{\"id\":\"rust-compile-error\",\"version\":1,\
+    /// \"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\
+    /// \"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\
+    /// \"summary_template\":\"${line}\"}"`.
+    ///
+    /// Call `registry_get` for the canonical full shape of any stored
+    /// rule. The daemon validates regex / keywords / kind before
+    /// persisting.
     pub definition_json: String,
 }
 
@@ -2124,12 +2153,11 @@ pub struct McpRegistryActivateParams {
     /// Omit to activate the latest stored version.
     #[serde(default)]
     pub version: Option<u32>,
-    /// REQUIRED scope (TC42c/TC42d). There is no default: an omitted
-    /// scope is rejected with a scope-required error so a rule is never
-    /// silently widened to global. Use `{ "kind": "global" }` for the
-    /// common single-agent case (watch every command you start).
-    #[serde(default)]
-    pub scope: Option<McpActivationScope>,
+    /// REQUIRED scope (TC42c/TC42d). There is no default and it is in the
+    /// schema `required[]`: an omitted scope is rejected so a rule is
+    /// never silently widened to global. Use `{ "kind": "global" }` for
+    /// the common single-agent case (watch every command you start).
+    pub scope: McpActivationScope,
 }
 
 /// MCP-facing parameters for `registry_import_pack`.
@@ -2139,13 +2167,16 @@ pub struct McpRegistryImportPackParams {
     /// gcc, make.
     pub pack: String,
     /// When true, promote the pack's rules to Active and activate them
-    /// in `scope` so they take effect immediately. Requires `scope`.
+    /// in `scope` so they take effect immediately. CONDITIONAL contract:
+    /// activate=true REQUIRES `scope`; activate=false (the default)
+    /// ignores `scope`.
     #[serde(default)]
     pub activate: bool,
     /// Activation scope. REQUIRED when activate=true (no default; an
-    /// omitted scope is rejected, never silently widened to global).
-    /// `{ "kind": "global" }` is the usual choice for a single agent
-    /// watching its own commands.
+    /// omitted scope with activate=true is rejected with a scope-required
+    /// error, never silently widened to global). Leave it out when
+    /// activate=false. `{ "kind": "global" }` is the usual choice for a
+    /// single agent watching its own commands.
     #[serde(default)]
     pub scope: Option<McpActivationScope>,
 }
@@ -2155,13 +2186,12 @@ pub struct McpRegistryImportPackParams {
 pub struct McpRegistryDeactivateParams {
     pub rule_id: String,
     pub version: u32,
-    /// REQUIRED scope (TC42c/TC42d). No default: an omitted scope is
-    /// rejected with a scope-required error. MUST match the scope used
-    /// at activation; deactivating with a different scope will not close
-    /// the previously-opened activation row. Use `{ "kind": "global" }`
-    /// to close a global activation.
-    #[serde(default)]
-    pub scope: Option<McpActivationScope>,
+    /// REQUIRED scope (TC42c/TC42d). No default and it is in the schema
+    /// `required[]`: an omitted scope is rejected. MUST match the scope
+    /// used at activation; deactivating with a different scope will not
+    /// close the previously-opened activation row. Use
+    /// `{ "kind": "global" }` to close a global activation.
+    pub scope: McpActivationScope,
 }
 
 /// MCP-facing scope DTO. Flat string fields so the generated JSON
@@ -2749,6 +2779,178 @@ mod tests {
             assert!(tool.available, "{name} should be available on unix");
             assert_eq!(tool.unavailable_reason, None);
         }
+    }
+
+    // --- TB-5: scope is machine-readable REQUIRED on activate/deactivate ---
+
+    /// Collect the `required[]` names from a generated JSON schema.
+    fn schema_required(schema: &schemars::Schema) -> Vec<String> {
+        schema
+            .as_value()
+            .pointer("/required")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn activate_schema_lists_scope_as_required() {
+        // TB-5: the prose says scope is REQUIRED; the machine-readable
+        // schema must agree so a naive LLM is told up front, not after a
+        // ScopeInvalid round-trip.
+        let schema = schemars::schema_for!(McpRegistryActivateParams);
+        let required = schema_required(&schema);
+        assert!(
+            required.iter().any(|f| f == "scope"),
+            "registry_activate schema must list scope in required[]; got {required:?}"
+        );
+        assert!(
+            required.iter().any(|f| f == "rule_id"),
+            "rule_id must remain required; got {required:?}"
+        );
+        // version stays optional (latest-version sugar).
+        assert!(
+            !required.iter().any(|f| f == "version"),
+            "version must stay optional; got {required:?}"
+        );
+    }
+
+    #[test]
+    fn deactivate_schema_lists_scope_as_required() {
+        let schema = schemars::schema_for!(McpRegistryDeactivateParams);
+        let required = schema_required(&schema);
+        for field in ["rule_id", "version", "scope"] {
+            assert!(
+                required.iter().any(|f| f == field),
+                "registry_deactivate schema must list {field} in required[]; got {required:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn activate_without_scope_fails_deserialization() {
+        // TB-5: dropping the Option means an omitted scope is rejected at
+        // the wire-form boundary (no silent widen to global).
+        let err = serde_json::from_str::<McpRegistryActivateParams>(r#"{"rule_id":"r"}"#)
+            .expect_err("activate without scope must fail");
+        assert!(
+            err.to_string().contains("scope"),
+            "missing-scope error must name the scope field; got: {err}"
+        );
+    }
+
+    #[test]
+    fn deactivate_without_scope_fails_deserialization() {
+        let err =
+            serde_json::from_str::<McpRegistryDeactivateParams>(r#"{"rule_id":"r","version":1}"#)
+                .expect_err("deactivate without scope must fail");
+        assert!(
+            err.to_string().contains("scope"),
+            "missing-scope error must name the scope field; got: {err}"
+        );
+    }
+
+    #[test]
+    fn activate_with_global_scope_deserializes() {
+        // The happy path the schema teaches must still parse.
+        let params = serde_json::from_str::<McpRegistryActivateParams>(
+            r#"{"rule_id":"r","scope":{"kind":"global"}}"#,
+        )
+        .expect("activate with global scope must deserialize");
+        assert_eq!(params.rule_id, "r");
+        assert_eq!(params.scope.kind, "global");
+    }
+
+    #[test]
+    fn import_pack_scope_stays_optional_in_schema() {
+        // TB-5: import_pack scope is CONDITIONAL (required only when
+        // activate=true), so it must NOT be in the unconditional
+        // required[]; the conditional is documented + enforced by the
+        // daemon teaching error.
+        let schema = schemars::schema_for!(McpRegistryImportPackParams);
+        let required = schema_required(&schema);
+        assert!(
+            required.iter().any(|f| f == "pack"),
+            "import_pack must require pack; got {required:?}"
+        );
+        assert!(
+            !required.iter().any(|f| f == "scope"),
+            "import_pack scope is conditional and must not be unconditionally required; got {required:?}"
+        );
+        // activate=false (default) with no scope must still parse.
+        serde_json::from_str::<McpRegistryImportPackParams>(r#"{"pack":"cargo"}"#)
+            .expect("import_pack without activate/scope must deserialize");
+    }
+
+    /// Read a string field from a generated JSON schema by JSON pointer.
+    fn schema_str<'a>(schema: &'a schemars::Schema, pointer: &str) -> &'a str {
+        schema
+            .as_value()
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("schema pointer {pointer} is not a string"))
+    }
+
+    /// T2 regression: `event_kind` is a hard-REQUIRED RuleDefinition field
+    /// (no serde default; `validate()` rejects an empty value), so it MUST
+    /// appear in the authoritative REQUIRED-fields enumeration the client
+    /// builds from. If it drifts out of the description again, a naive
+    /// first `registry_upsert` call fails with `missing field event_kind`
+    /// -- exactly the teaching-error-first failure this work eliminates.
+    #[test]
+    fn upsert_required_fields_list_includes_event_kind() {
+        // 1. Live tool-level description (the surface system_discover shows
+        //    and the router advertises).
+        let router = TerminalCommanderMcpServer::tool_router();
+        let upsert = router
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "registry_upsert")
+            .expect("registry_upsert must be a live tool");
+        let tool_desc = upsert
+            .description
+            .as_deref()
+            .expect("registry_upsert must carry a description");
+        assert!(
+            tool_desc.contains("event_kind"),
+            "registry_upsert tool description must list event_kind in its REQUIRED set; got: {tool_desc}"
+        );
+
+        // 2. schemars-derived definition_json param doc (the schema surface).
+        let schema = schemars::schema_for!(McpRegistryUpsertParams);
+        let param_desc = schema_str(&schema, "/properties/definition_json/description");
+        assert!(
+            param_desc.contains("event_kind"),
+            "definition_json schema description must list event_kind; got: {param_desc}"
+        );
+    }
+
+    /// T2 regression: pin the exact serde failure mode. Omitting
+    /// `event_kind` (as a client would if it trusted a list that lacked it)
+    /// fails deserialization, while the documented worked example -- which
+    /// includes event_kind -- both deserializes AND validates. This proves
+    /// the REQUIRED list is the load-bearing surface.
+    #[test]
+    fn upsert_definition_without_event_kind_fails_but_example_succeeds() {
+        let missing = r#"{"id":"r","version":1,"kind":"regex","status":"active","severity":"high","pattern":"x","summary_template":"${line}"}"#;
+        let err = serde_json::from_str::<RuleDefinition>(missing)
+            .expect_err("definition without event_kind must fail deserialization");
+        assert!(
+            err.to_string().contains("event_kind"),
+            "missing-event_kind error must name the field; got: {err}"
+        );
+
+        // The exact shape embedded in the tool description as the
+        // first-try example.
+        let example = r#"{"id":"rust-compile-error","version":1,"kind":"regex","status":"active","severity":"high","event_kind":"compile_error","pattern":"error\\[E[0-9]+\\]","summary_template":"${line}"}"#;
+        let def = serde_json::from_str::<RuleDefinition>(example)
+            .expect("documented example must deserialize");
+        def.validate()
+            .expect("documented example must pass validate()");
     }
 
     fn unavailable_status_server() -> TerminalCommanderMcpServer {
