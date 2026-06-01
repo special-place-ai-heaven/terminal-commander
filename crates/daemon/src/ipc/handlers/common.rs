@@ -124,6 +124,12 @@ pub(in crate::ipc::server) fn map_store_error(
     use terminal_commander_store::EventStoreError;
     match e {
         EventStoreError::InvalidPayload(msg) => IpcError::new(IpcErrorCode::RuleInvalid, msg),
+        // A backend/actor fault (dead writer thread, dropped reply
+        // channel, unexpected reply, or an isolated op panic) is NOT
+        // caller-fixable: surface it as a server-fault Internal, never
+        // RuleInvalid, so an agent whose rule is valid is not told to
+        // "fix" it while the store is actually down.
+        EventStoreError::Unavailable(msg) => IpcError::new(IpcErrorCode::Internal, msg),
         other => IpcError::new(IpcErrorCode::Internal, other.to_string()),
     }
 }

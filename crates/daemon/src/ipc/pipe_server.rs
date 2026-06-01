@@ -153,10 +153,27 @@ async fn accept_loop(
     // build once before the loop instead of on every accept iteration.
     #[cfg(windows)]
     let sddl = match crate::ipc::pipe_acl::build_sddl_for_current_user() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("terminal-commanderd: SDDL build failed: {e}; falling back to default ACL");
-            String::new()
+        Ok(s) if !s.is_empty() => s,
+        other => {
+            // Fail closed: never fall back to the default named-pipe DACL.
+            // That default grants broader access than the intended
+            // LocalSystem + Administrators + current-user restriction and
+            // would let a lower-privileged local process connect. The Unix
+            // transport fails closed on peer-credential failure; on Windows
+            // the pipe ACL is the equivalent (and only) access gate, so a
+            // failure to build it must refuse to listen rather than bind an
+            // unrestricted pipe. `build_sddl_for_current_user` only fails on
+            // rare token-API errors; the supervisor will then report the
+            // daemon unreachable and a cold respawn retries.
+            match other {
+                Ok(_) => eprintln!(
+                    "terminal-commanderd: SDDL build produced an empty descriptor; refusing to bind named pipe (fail-closed)"
+                ),
+                Err(e) => eprintln!(
+                    "terminal-commanderd: SDDL build failed: {e}; refusing to bind named pipe (fail-closed)"
+                ),
+            }
+            return;
         }
     };
     let mut first = true;

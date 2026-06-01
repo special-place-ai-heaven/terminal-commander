@@ -174,26 +174,33 @@ fn hard_kill_unix(
 pub fn pid_belongs_to_daemon(pid: u32, state_dir: &Path) -> bool {
     #[cfg(windows)]
     {
-        let needle = state_dir.to_string_lossy().to_string();
-        let pat = needle.replace('[', "`[").replace(']', "`]");
+        // Fetch the candidate's name + command line and match in Rust. The
+        // state_dir path is deliberately NOT interpolated into the
+        // PowerShell query: doing so via `-like '*<path>*'` (a) confused a
+        // path PREFIX of a sibling session's dir for ours and (b) broke on a
+        // `'` in the path (which closed the single-quoted literal). Only the
+        // numeric pid enters the command.
         let ps = format!(
-            "Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" | \
-             Where-Object {{ $_.Name -eq 'terminal-commanderd.exe' -and \
-             $_.CommandLine -like '*{pat}*' }} | \
-             Select-Object -First 1 -ExpandProperty ProcessId"
+            "Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" | ForEach-Object {{ \"$($_.Name)`t$($_.CommandLine)\" }}"
         );
         std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &ps])
             .output()
             .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == pid.to_string())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout).lines().any(|line| {
+                    let (name, cmdline) = line.split_once('\t').unwrap_or(("", line));
+                    name.trim() == "terminal-commanderd.exe"
+                        && cmdline_is_our_daemon(cmdline, state_dir)
+                })
+            })
             .unwrap_or(false)
     }
     #[cfg(unix)]
     {
         // `ps -p <pid> -o args=` prints only that pid's command line (empty
-        // if the pid is gone). Confirm both the daemon name and state_dir via
-        // the shared literal matcher.
+        // if the pid is gone). Confirm both the daemon name and state_dir
+        // via the shared whole-argument matcher.
         std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "args="])
             .output()
@@ -203,16 +210,61 @@ pub fn pid_belongs_to_daemon(pid: u32, state_dir: &Path) -> bool {
     }
 }
 
-/// Literal (non-regex) test that a process command line `args` identifies our
-/// daemon bound to `state_dir`: it must reference both the daemon binary name
-/// and the exact state-dir path. Substring match, so a state_dir containing
-/// regex metacharacters (`+ ( ) [ ]` ...) is matched verbatim. The shared
-/// matcher for both `pid_belongs_to_daemon` and `find_daemon_pid_os`, so the
-/// two callers agree by construction (review finding #3).
-#[cfg(unix)]
+/// Whole-argument test that a process command line `args` identifies our
+/// daemon bound to `state_dir`: it must reference the daemon binary name and
+/// carry `state_dir` as a COMPLETE `--data-dir` path argument (see
+/// [`contains_path_arg`]), so a sibling session whose dir merely PREFIXES
+/// ours is never mistaken for it. The shared matcher for both
+/// `pid_belongs_to_daemon` and `find_daemon_pid_os` on every platform, so the
+/// callers agree by construction (review finding #3 + cross-session-kill).
 fn cmdline_is_our_daemon(args: &str, state_dir: &Path) -> bool {
+    if !args.contains("terminal-commanderd") {
+        return false;
+    }
     let needle = state_dir.to_string_lossy();
-    args.contains("terminal-commanderd") && args.contains(needle.as_ref())
+    contains_path_arg(args, needle.as_ref())
+}
+
+/// True when `needle` (a state-dir path) appears in `haystack` (a process
+/// command line) as a COMPLETE path argument rather than a path PREFIX of
+/// a longer one.
+///
+/// Sessions co-locate under one base: the default session's dir `<base>`
+/// is a string prefix of a seeded session's dir `<base>/agent-1`. A bare
+/// substring test would therefore confirm a seeded session's daemon as the
+/// base session's and authorize a cross-session force-kill. Requiring a
+/// token boundary on both sides of the match -- where a path separator is
+/// explicitly NOT a boundary -- rejects the prefix while still matching a
+/// real `--data-dir <state_dir>` argument, including paths that contain
+/// spaces, brackets, or apostrophes (matched verbatim, never interpolated
+/// into a shell pattern).
+fn contains_path_arg(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let nlen = needle.len();
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let i = from + rel;
+        let end = i + nlen;
+        let before_ok = i == 0 || is_arg_boundary(bytes[i - 1]);
+        let after_ok = end == bytes.len() || is_arg_boundary(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = i + 1;
+    }
+    false
+}
+
+/// A byte that legitimately bounds a path argument on a command line:
+/// whitespace separates arguments, `=` precedes a `--flag=value` path, and
+/// a quote wraps a path containing spaces. A path separator (`/` or `\`)
+/// is deliberately NOT a boundary -- that is exactly the prefix case the
+/// whole-argument match must reject.
+fn is_arg_boundary(b: u8) -> bool {
+    b.is_ascii_whitespace() || b == b'=' || b == b'"' || b == b'\''
 }
 
 /// OS-query fallback: find the pid of a terminal-commanderd process
@@ -223,31 +275,31 @@ fn cmdline_is_our_daemon(args: &str, state_dir: &Path) -> bool {
 pub fn find_daemon_pid_os(state_dir: &Path) -> Option<u32> {
     #[cfg(windows)]
     {
-        let needle = state_dir.to_string_lossy().to_string();
-        // PowerShell `-like` treats backslash literally, so the path is
-        // passed RAW (no escaping). `[`/`]` are wildcard chars in -like;
-        // escape them so a bracketed path can't break the pattern.
-        let pat = needle.replace('[', "`[").replace(']', "`]");
-        let ps = format!(
-            "Get-CimInstance Win32_Process -Filter \"Name='terminal-commanderd.exe'\" | \
-             Where-Object {{ $_.CommandLine -like '*{pat}*' }} | \
-             Select-Object -First 1 -ExpandProperty ProcessId"
-        );
+        // Filter by the FIXED binary name (a literal, no path), then match
+        // the command line to state_dir in Rust via the whole-argument
+        // matcher. The path is never interpolated into the PowerShell query,
+        // so neither a path separator (prefix-confusion) nor an apostrophe in
+        // it can break the search.
+        let ps = "Get-CimInstance Win32_Process -Filter \"Name='terminal-commanderd.exe'\" | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }";
         let out = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &ps])
+            .args(["-NoProfile", "-Command", ps])
             .output()
             .ok()?;
-        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|line| {
+                let (pid_s, cmdline) = line.split_once('\t')?;
+                let pid: u32 = pid_s.trim().parse().ok()?;
+                cmdline_is_our_daemon(cmdline, state_dir).then_some(pid)
+            })
     }
     #[cfg(unix)]
     {
         // Enumerate candidate daemons by the FIXED binary name -- a literal
         // with no regex metacharacters -- then confirm each through the SAME
-        // literal matcher `pid_belongs_to_daemon` uses. Both callers now agree
-        // by construction, and a state_dir containing regex metacharacters can
+        // whole-argument matcher `pid_belongs_to_daemon` uses. Both callers
+        // agree by construction, and a state_dir containing metacharacters can
         // no longer break the search or make pgrep error (review finding #3).
-        // The previous `pgrep -f "terminal-commanderd.*{state_dir}"`
-        // interpolated the unescaped path straight into a regex.
         let out = std::process::Command::new("pgrep")
             .args(["-f", "terminal-commanderd"])
             .output()
@@ -494,5 +546,47 @@ mod tests {
             !cmdline_is_our_daemon("terminal-commanderd --data-dir /tmp/elsewhere", dir),
             "the exact state_dir is required, not just the binary name"
         );
+    }
+
+    #[test]
+    fn cmdline_match_rejects_path_prefix_of_another_session() {
+        // The default session's daemon lives at <base>; a seeded session at
+        // <base>/agent-1. A bare substring match would confirm the seeded
+        // daemon as the base session's and authorize a cross-session
+        // force-kill. The whole-argument matcher must reject the prefix.
+        let base = std::path::Path::new("/home/u/.local/share/terminal-commanderd/state");
+        let seeded_cmd = "terminal-commanderd --data-dir /home/u/.local/share/terminal-commanderd/state/agent-1 start";
+        assert!(
+            !cmdline_is_our_daemon(seeded_cmd, base),
+            "a seeded session's daemon (state/agent-1) must not match the base session (state)"
+        );
+        let base_cmd =
+            "terminal-commanderd --data-dir /home/u/.local/share/terminal-commanderd/state start";
+        assert!(cmdline_is_our_daemon(base_cmd, base));
+        // ...and the base daemon must not be confused for the seeded session.
+        let seeded = base.join("agent-1");
+        assert!(!cmdline_is_our_daemon(base_cmd, &seeded));
+    }
+
+    #[test]
+    fn cmdline_match_handles_apostrophe_and_equals_forms() {
+        // A path with an apostrophe is matched verbatim: the Windows path
+        // no longer interpolates it into a PowerShell -like literal (where
+        // a ' used to terminate the string early). The --data-dir=<path>
+        // form is also accepted.
+        let dir = std::path::Path::new("/home/OBrien'X/state");
+        assert!(cmdline_is_our_daemon(
+            "terminal-commanderd --data-dir /home/OBrien'X/state start",
+            dir
+        ));
+        assert!(cmdline_is_our_daemon(
+            "terminal-commanderd --data-dir=/home/OBrien'X/state",
+            dir
+        ));
+        // A sibling whose name merely extends the path must not match.
+        assert!(!cmdline_is_our_daemon(
+            "terminal-commanderd --data-dir /home/OBrien'X/state-2 start",
+            dir
+        ));
     }
 }

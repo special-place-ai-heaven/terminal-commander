@@ -24,6 +24,7 @@ const { resolveDistro } = require("./setup_cursor_wsl.js");
 const { detectWsl } = require("../wsl/detect.js");
 const { LINUX_PATH_PREFIX } = require("../bootstrap/constants.js");
 const { buildFilteredEnv } = require("../wsl/filtered_env.js");
+const { ensureSessionInWslEnv } = require("../wsl/spawn.js");
 
 // The daemon-side command. `--force` is always passed: restart's whole
 // purpose is to replace even a same-version daemon.
@@ -91,7 +92,18 @@ async function runRestart(opts) {
       "-lc",
       `${LINUX_PATH_PREFIX}${DAEMON_RESTART_CMD}`,
     ];
-    const child = exec({ file: wslPath, argv, env: buildFilteredEnv(env) });
+    // Apply the same WSLENV defense the bridge spawn uses: reduce
+    // WSLENV to a TC-only allowlist (or drop it) so wsl.exe cannot
+    // forward an operator's ambient credential-shaped vars (e.g.
+    // WSL_SUDO_CREDENTIAL) across the Windows->Linux boundary on
+    // restart. buildFilteredEnv only strips by variable *name*; WSLENV
+    // forwarding is keyed on names listed in WSLENV, so it needs this
+    // separate, explicit allowlist step.
+    const child = exec({
+      file: wslPath,
+      argv,
+      env: ensureSessionInWslEnv(buildFilteredEnv(env)),
+    });
     const { code, out, err } = await collectChild(child);
     const tail = `${out}${err}`.trim();
     return {

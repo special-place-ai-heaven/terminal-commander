@@ -61,6 +61,48 @@ test("restart on Windows dispatches daemon update --force through WSL", async ()
   assert.match(r.output, /restarted in 'Ubuntu-24\.04'/);
 });
 
+test("restart on Windows neutralizes ambient WSLENV (no credential crosses into WSL)", async () => {
+  // With a session token, WSLENV must be reduced to the TC-only
+  // allowlist so wsl.exe forwards ONLY TC_SESSION -- never an operator's
+  // ambient WSL_SUDO_CREDENTIAL carried by an ambient WSLENV entry.
+  let withSession = null;
+  await runRestart({
+    platform: "win32",
+    env: {
+      TC_WSL_DISTRO: "Ubuntu-24.04",
+      TC_SESSION: "sess-abc",
+      WSLENV: "WSL_SUDO_CREDENTIAL/u",
+      WSL_SUDO_CREDENTIAL: "super-secret",
+    },
+    flags: {},
+    detect: async () => okDetect("Ubuntu-24.04"),
+    exec: ({ env }) => {
+      withSession = env;
+      return fakeChild(0, "ok");
+    },
+  });
+  assert.equal(withSession.WSLENV, "TC_SESSION/u");
+
+  // Without a session token, the ambient WSLENV is dropped entirely so
+  // nothing crosses the boundary.
+  let noSession = null;
+  await runRestart({
+    platform: "win32",
+    env: {
+      TC_WSL_DISTRO: "Ubuntu-24.04",
+      WSLENV: "WSL_SUDO_CREDENTIAL/u",
+      WSL_SUDO_CREDENTIAL: "super-secret",
+    },
+    flags: {},
+    detect: async () => okDetect("Ubuntu-24.04"),
+    exec: ({ env }) => {
+      noSession = env;
+      return fakeChild(0, "ok");
+    },
+  });
+  assert.equal(noSession.WSLENV, undefined);
+});
+
 test("restart on Linux invokes the daemon binary directly", async () => {
   let seenArgv = null;
   const r = await runRestart({
