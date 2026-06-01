@@ -280,16 +280,57 @@ fn tool_requires_daemon(name: &str) -> bool {
     name != "system_discover"
 }
 
+/// Whether a tool name belongs to the PTY command family.
+///
+/// The PTY runtime is `#[cfg(unix)]`-only; on every other platform the
+/// daemon answers every `pty_*` IPC with `UnsupportedPlatform`. TB-1:
+/// `system_discover` must surface that platform truth so a naive client
+/// never calls a PTY tool that can only fail.
+#[must_use]
+const fn is_pty_tool(name: &str) -> bool {
+    matches!(
+        name.as_bytes(),
+        b"pty_command_start"
+            | b"pty_command_write_stdin"
+            | b"pty_command_stop"
+            | b"pty_command_list"
+    )
+}
+
+/// Whether the PTY runtime is actually available on this host.
+///
+/// TC44's PTY runtime is gated on `#[cfg(unix)]`; ConPTY support for
+/// Windows is still pending. On a non-unix host the four `pty_*` tools
+/// can only return `UnsupportedPlatform`, so discovery must report them
+/// `available: false` rather than implying a live PTY surface.
+#[must_use]
+const fn pty_runtime_available() -> bool {
+    cfg!(unix)
+}
+
+/// Reason string surfaced for PTY tools on a host without a PTY runtime.
+const PTY_UNAVAILABLE_REASON: &str = "PTY runtime unavailable on this platform (ConPTY pending)";
+
 #[must_use]
 fn discovered_tools(daemon_available: bool) -> Vec<DiscoveredToolEntry> {
+    let pty_available = pty_runtime_available();
     tool_catalogue()
         .iter()
         .map(|tool| {
             let requires_daemon = tool_requires_daemon(tool.name);
             let implemented = matches!(tool.status, ToolStatus::Live);
-            let available = implemented && (!requires_daemon || daemon_available);
+            // TB-1: a PTY tool is only available when the host actually
+            // has a PTY runtime. This is platform truth, evaluated even
+            // when the daemon is reachable, so the four pty_* tools never
+            // advertise `available: true` on a host that can only answer
+            // them with `UnsupportedPlatform`.
+            let platform_blocked = is_pty_tool(tool.name) && !pty_available;
+            let available =
+                implemented && !platform_blocked && (!requires_daemon || daemon_available);
             let unavailable_reason = if !implemented {
                 Some("not_implemented")
+            } else if platform_blocked {
+                Some(PTY_UNAVAILABLE_REASON)
             } else if requires_daemon && !daemon_available {
                 Some("daemon_unavailable")
             } else {
@@ -1405,12 +1446,65 @@ fn parse_severity_filter(s: &str) -> Result<Severity, String> {
     }
 }
 
-/// Env entry pair for the MCP wire form. Avoids relying on
-/// `JsonSchema` for a tuple struct.
+/// One environment variable as an object.
+///
+/// The `env` parameter is an ARRAY of these (NOT a JSON map), e.g.
+/// `[{"key":"FOO","value":"bar"}]`. A tuple/map form is intentionally
+/// not accepted: the explicit `{key,value}` shape is what the schema
+/// teaches so the first call from a naive client succeeds.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct EnvEntry {
+    /// Variable name, e.g. `"PATH"`.
     pub key: String,
+    /// Variable value, e.g. `"/usr/bin"`.
     pub value: String,
+}
+
+/// Deserialize the `env` parameter as an array of [`EnvEntry`] objects,
+/// mapping serde's bare `invalid type: map, expected a sequence` into a
+/// teaching error that names the exact `{key,value}` array shape.
+///
+/// TB-2c: a naive client often sends `env` as a JSON map
+/// (`{"FOO":"bar"}`). serde's default message ("invalid type: map,
+/// expected a sequence") does not tell the client what shape to use.
+/// We intercept the map case here and return the remedy inline so the
+/// client can self-correct in one step. Every other shape error still
+/// falls through to serde's own message.
+fn deserialize_env<'de, D>(deserializer: D) -> Result<Vec<EnvEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    // Buffer into an untyped value first so we can detect the map shape
+    // before attempting the typed conversion. The payload is already
+    // bounded by the transport frame cap, so this does not introduce an
+    // unbounded allocation.
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Array(_) => serde_json::from_value(value).map_err(D::Error::custom),
+        serde_json::Value::Object(_) => Err(D::Error::custom(
+            "env must be an ARRAY of {\"key\":\"NAME\",\"value\":\"VAL\"} objects, not a map; \
+             e.g. [{\"key\":\"FOO\",\"value\":\"bar\"}]",
+        )),
+        other => Err(D::Error::custom(format!(
+            "env must be an ARRAY of {{\"key\":\"NAME\",\"value\":\"VAL\"}} objects; \
+             got {}; e.g. [{{\"key\":\"FOO\",\"value\":\"bar\"}}]",
+            json_type_name(&other)
+        ))),
+    }
+}
+
+/// Human-readable JSON type name for teaching errors.
+const fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "a map",
+    }
 }
 
 /// Lenient, LLM-friendly shorthand for an inline rule (TC erg2 P1).
@@ -1616,8 +1710,13 @@ pub struct McpCommandStartParams {
     /// Optional working directory.
     #[serde(default)]
     pub cwd: Option<String>,
-    /// Optional explicit environment. Empty = inherit.
-    #[serde(default)]
+    /// Environment as an ARRAY of {"key":"NAME","value":"VAL"} objects
+    /// (NOT a map), e.g. `[{"key":"FOO","value":"bar"}]`.
+    /// Empty/omitted = inherit the daemon's full environment; a
+    /// NON-EMPTY list REPLACES the entire environment (not merged) --
+    /// so include PATH etc. yourself when you set this.
+    #[serde(default, deserialize_with = "deserialize_env")]
+    #[schemars(with = "Vec<EnvEntry>")]
     pub env: Vec<EnvEntry>,
     /// Optional grace window between graceful and forced terminate,
     /// in milliseconds. Clamped at the daemon.
@@ -1689,7 +1788,13 @@ pub struct McpRunAndWatchParams {
     pub argv: Vec<String>,
     #[serde(default)]
     pub cwd: Option<String>,
-    #[serde(default)]
+    /// Environment as an ARRAY of {"key":"NAME","value":"VAL"} objects
+    /// (NOT a map), e.g. `[{"key":"FOO","value":"bar"}]`.
+    /// Empty/omitted = inherit the daemon's full environment; a
+    /// NON-EMPTY list REPLACES the entire environment (not merged) --
+    /// so include PATH etc. yourself when you set this.
+    #[serde(default, deserialize_with = "deserialize_env")]
+    #[schemars(with = "Vec<EnvEntry>")]
     pub env: Vec<EnvEntry>,
     #[serde(default)]
     pub grace_ms: Option<u64>,
@@ -2195,7 +2300,13 @@ pub struct McpPtyCommandStartParams {
     pub argv: Vec<String>,
     #[serde(default)]
     pub cwd: Option<String>,
-    #[serde(default)]
+    /// Environment as an ARRAY of {"key":"NAME","value":"VAL"} objects
+    /// (NOT a map), e.g. `[{"key":"FOO","value":"bar"}]`.
+    /// Empty/omitted = inherit the daemon's full environment; a
+    /// NON-EMPTY list REPLACES the entire environment (not merged) --
+    /// so include PATH etc. yourself when you set this.
+    #[serde(default, deserialize_with = "deserialize_env")]
+    #[schemars(with = "Vec<EnvEntry>")]
     pub env: Vec<EnvEntry>,
     #[serde(default)]
     pub rows: Option<u16>,
@@ -2319,6 +2430,64 @@ mod tests {
             Some(terminal_commander_core::SourceStream::Stderr)
         );
         def.validate().unwrap();
+    }
+
+    #[test]
+    fn env_array_of_objects_deserializes() {
+        // TB-2: the documented array-of-{key,value} shape must parse.
+        let params: McpCommandStartParams = serde_json::from_str(
+            r#"{"argv":["echo"],"env":[{"key":"FOO","value":"bar"},{"key":"BAZ","value":"qux"}]}"#,
+        )
+        .expect("array-of-objects env should deserialize");
+        assert_eq!(params.env.len(), 2);
+        assert_eq!(params.env[0].key, "FOO");
+        assert_eq!(params.env[0].value, "bar");
+    }
+
+    #[test]
+    fn env_omitted_defaults_to_empty() {
+        // TB-2: omitted env stays empty (inherit semantics downstream).
+        let params: McpCommandStartParams =
+            serde_json::from_str(r#"{"argv":["echo"]}"#).expect("omitted env should default");
+        assert!(params.env.is_empty());
+    }
+
+    #[test]
+    fn env_as_map_teaches_key_value_array_shape() {
+        // TB-2c: the common map mistake must surface the remedy, not
+        // serde's bare "invalid type: map, expected a sequence".
+        let err = serde_json::from_str::<McpCommandStartParams>(
+            r#"{"argv":["echo"],"env":{"FOO":"bar"}}"#,
+        )
+        .expect_err("map-form env must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ARRAY") && msg.contains("\"key\"") && msg.contains("\"value\""),
+            "env map error must name the {{key,value}} array shape: {msg}"
+        );
+        assert!(
+            msg.contains("not a map"),
+            "env map error must call out the map mistake: {msg}"
+        );
+    }
+
+    #[test]
+    fn env_teaching_error_applies_to_run_and_watch_and_pty() {
+        // TB-2: the same teaching error covers every env-bearing tool.
+        let raw = r#"{"argv":["echo"],"env":{"FOO":"bar"}}"#;
+        let raw_pty = r#"{"argv":["bash"],"env":{"FOO":"bar"}}"#;
+        let e1 = serde_json::from_str::<McpRunAndWatchParams>(raw)
+            .expect_err("run_and_watch map env must be rejected")
+            .to_string();
+        let e2 = serde_json::from_str::<McpPtyCommandStartParams>(raw_pty)
+            .expect_err("pty_command_start map env must be rejected")
+            .to_string();
+        for msg in [&e1, &e2] {
+            assert!(
+                msg.contains("ARRAY") && msg.contains("not a map"),
+                "env teaching error missing in: {msg}"
+            );
+        }
     }
 
     #[test]
@@ -2492,9 +2661,22 @@ mod tests {
                 tool.name
             );
 
+            // TB-1: a PTY tool on a host without a PTY runtime is
+            // platform-blocked; that reason takes precedence over
+            // daemon reachability since the tool can only ever return
+            // UnsupportedPlatform on this host.
+            let platform_blocked = is_pty_tool(tool.name) && !pty_runtime_available();
+
             if !expected_requires_daemon {
                 assert!(tool.available, "{} should remain callable", tool.name);
                 assert_eq!(tool.unavailable_reason, None);
+            } else if platform_blocked {
+                assert!(
+                    !tool.available,
+                    "{} should be unavailable without a PTY runtime",
+                    tool.name
+                );
+                assert_eq!(tool.unavailable_reason, Some(PTY_UNAVAILABLE_REASON));
             } else if matches!(tool.status, ToolStatus::Live) {
                 assert!(
                     !tool.available,
@@ -2510,6 +2692,62 @@ mod tests {
                 );
                 assert_eq!(tool.unavailable_reason, Some("not_implemented"));
             }
+        }
+    }
+
+    /// TB-1 regression: on a host without a PTY runtime (non-unix; ConPTY
+    /// pending) the four `pty_*` tools MUST be reported `available: false`
+    /// with the platform reason -- even when the daemon is reachable. They
+    /// must never advertise a live PTY surface the daemon can only reject
+    /// with `UnsupportedPlatform`.
+    #[cfg(not(unix))]
+    #[test]
+    fn pty_tools_unavailable_on_unsupported_platform() {
+        // daemon_available = true on purpose: the platform block must
+        // fire regardless of daemon reachability.
+        let tools = discovered_tools(true);
+        let pty_names = [
+            "pty_command_start",
+            "pty_command_write_stdin",
+            "pty_command_stop",
+            "pty_command_list",
+        ];
+        for name in pty_names {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from discovered tools"));
+            assert!(
+                !tool.available,
+                "{name} must be unavailable without a PTY runtime"
+            );
+            assert_eq!(
+                tool.unavailable_reason,
+                Some(PTY_UNAVAILABLE_REASON),
+                "{name} must surface the PTY platform reason"
+            );
+        }
+    }
+
+    /// TB-1 companion: on a unix host with the daemon reachable the PTY
+    /// tools ARE available (the platform block does not fire). This keeps
+    /// the fix narrow -- it never suppresses a real PTY surface.
+    #[cfg(unix)]
+    #[test]
+    fn pty_tools_available_on_supported_platform_with_daemon() {
+        let tools = discovered_tools(true);
+        for name in [
+            "pty_command_start",
+            "pty_command_write_stdin",
+            "pty_command_stop",
+            "pty_command_list",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from discovered tools"));
+            assert!(tool.available, "{name} should be available on unix");
+            assert_eq!(tool.unavailable_reason, None);
         }
     }
 

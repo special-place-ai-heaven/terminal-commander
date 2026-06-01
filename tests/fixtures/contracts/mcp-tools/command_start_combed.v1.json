@@ -59,6 +59,8 @@
     "argv is explicit and shell interpreters are daemon-denied",
     "success payload contains job_id, bucket_id, probe_id, and cursor only",
     "stdout and stderr are observed through bucket tools, not returned here",
-    "optional bucket_config_json and rules_json bind a per-job bucket override and inline rules, mapped to daemon IPC without a prior registry_activate"
+    "optional bucket_config_json and rules_json bind a per-job bucket override and inline rules, mapped to daemon IPC without a prior registry_activate",
+    "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list REPLACES it entirely (include PATH yourself)",
+    "an env map (e.g. {\"FOO\":\"bar\"}) is rejected with a teaching error naming the {key,value} array shape"
   ]
 }

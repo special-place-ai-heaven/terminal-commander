@@ -464,6 +464,93 @@ fn registry_activate_rejects_draft_rule_with_typed_error() {
 }
 
 #[test]
+fn registry_deactivate_no_active_row_returns_teaching_error() {
+    // TB-6 regression: a deactivate that matches no active row used to
+    // be a silent ok:true / was_deactivated:false no-op, hiding the
+    // operator's mistake. It must now return a teaching RuleNotActive
+    // that echoes the version(s) actually active under the scope.
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("deact-teach");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+
+        // Upsert + activate v1 globally so there IS an active row to
+        // mismatch against.
+        let def = kw_rule("kw-deact", "needle", "deact_match");
+        client
+            .call(
+                1,
+                IpcRequest::RegistryUpsert(RegistryUpsertParams { definition: def }),
+            )
+            .await
+            .expect("upsert");
+        client
+            .call(
+                2,
+                IpcRequest::RegistryActivate(RegistryActivateParams {
+                    rule_id: "kw-deact".to_owned(),
+                    version: None,
+                    scope: Some(terminal_commander_core::ActivationScope::Global),
+                }),
+            )
+            .await
+            .expect("activate v1");
+
+        // Deactivate a version that is NOT active (v99). Must be a typed
+        // teaching error, not a silent success, and must echo v1.
+        let err = client
+            .call(
+                3,
+                IpcRequest::RegistryDeactivate(RegistryDeactivateParams {
+                    rule_id: "kw-deact".to_owned(),
+                    version: 99,
+                    scope: Some(terminal_commander_core::ActivationScope::Global),
+                }),
+            )
+            .await
+            .expect_err("deactivating a non-active version must be refused");
+        assert_eq!(err.code, IpcErrorCode::RuleNotActive);
+        assert!(
+            err.message.contains("kw-deact")
+                && err.message.contains("v99")
+                && err.message.contains("active version is 1"),
+            "teaching error must echo the active version; got: {}",
+            err.message
+        );
+        // v1 must still be active: a refused deactivate must not mutate
+        // the active set.
+        assert!(state.activation.is_active(
+            "kw-deact",
+            1,
+            terminal_commander_core::ActivationScope::Global
+        ));
+
+        // Deactivating a rule that was never active at all also teaches.
+        let err = client
+            .call(
+                4,
+                IpcRequest::RegistryDeactivate(RegistryDeactivateParams {
+                    rule_id: "kw-never".to_owned(),
+                    version: 1,
+                    scope: Some(terminal_commander_core::ActivationScope::Global),
+                }),
+            )
+            .await
+            .expect_err("deactivating a never-active rule must be refused");
+        assert_eq!(err.code, IpcErrorCode::RuleNotActive);
+        assert!(
+            err.message.contains("kw-never") && err.message.contains("no active version"),
+            "teaching error must explain there is no active version; got: {}",
+            err.message
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
 fn registry_search_finds_upserted_rule_by_tag() {
     let runtime = rt();
     runtime.block_on(async {

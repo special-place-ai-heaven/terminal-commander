@@ -280,6 +280,28 @@ pub(in crate::ipc::server) fn handle_registry_import_pack(
     ))
 }
 
+/// Versions of `rule_id` currently active under `scope`, sorted
+/// ascending. Used by `handle_registry_deactivate` to echo the
+/// actually-active version(s) in its teaching error. Reads the
+/// in-memory activation authority (the same set `registry_list_active`
+/// reports), so the hint matches what the operator can observe.
+fn active_versions_for_scope(
+    state: &Arc<DaemonState>,
+    rule_id: &str,
+    scope: terminal_commander_core::ActivationScope,
+) -> Vec<u32> {
+    let mut versions: Vec<u32> = state
+        .activation
+        .snapshot_entries()
+        .into_iter()
+        .filter(|e| e.definition.id == rule_id && e.scope == scope)
+        .map(|e| e.definition.version)
+        .collect();
+    versions.sort_unstable();
+    versions.dedup();
+    versions
+}
+
 pub(in crate::ipc::server) fn handle_registry_deactivate(
     state: &Arc<DaemonState>,
     params: &RegistryDeactivateParams,
@@ -300,6 +322,43 @@ pub(in crate::ipc::server) fn handle_registry_deactivate(
         .store
         .deactivate_rule_scoped(&params.rule_id, params.version, scope)
         .map_err(map_store_error)?;
+    // TB-6: a deactivate that closed NOTHING was previously a silent
+    // ok:true / was_deactivated:false no-op. That hides the operator's
+    // mistake (wrong version or wrong scope) behind a success envelope.
+    // Surface a teaching RuleNotActive instead, echoing the version(s)
+    // that ARE active under this scope so the caller can self-correct in
+    // one step. (Closed error set: RuleNotActive already exists and fits
+    // -- no new code minted.)
+    if !was_in_memory && !was_persisted {
+        let active_versions = active_versions_for_scope(state, &params.rule_id, scope);
+        let active_hint = if active_versions.is_empty() {
+            "no active version under this scope (it may be active under a different \
+             scope; check registry_list_active)"
+                .to_owned()
+        } else if active_versions.len() == 1 {
+            format!("active version is {}", active_versions[0])
+        } else {
+            let list = active_versions
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("active versions are [{list}]")
+        };
+        // Render the scope as "<kind>" or "<kind>=<value>" so the bucket /
+        // job / probe id is visible when the scope is not Global.
+        let scope_desc = scope.value_wire().map_or_else(
+            || scope.kind_label().to_owned(),
+            |v| format!("{}={v}", scope.kind_label()),
+        );
+        return Err(IpcError::new(
+            IpcErrorCode::RuleNotActive,
+            format!(
+                "no active row for rule '{}' v{} scope {scope_desc}; {active_hint}",
+                params.rule_id, params.version,
+            ),
+        ));
+    }
     // TC42c: rebind every running command the scope matches so
     // future frames stop matching against the deactivated rule.
     // In-flight frames finish against the snapshot they captured
