@@ -22,7 +22,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed bounded file search. Success returns capped snippets and never streams whole files."
+    "note": "Daemon-backed bounded file search. Success returns capped snippets and never streams whole files. TB-10: path is a single regular file (not a directory walk) and query is a plain SUBSTRING (literal, not regex); both params carry descriptions naming this behavior so the first call matches as the caller expects."
   },
   "response_example": {
     "path": "README.md",
@@ -59,6 +59,8 @@
   },
   "invariants": [
     "path and query are required",
+    "query is a literal substring match, not a regex (TB-10)",
+    "path targets a single regular file, not a directory (TB-10)",
     "max_matches and max_snippet_bytes are optional and daemon-clamped",
     "success returns bounded snippets, not whole files"
   ]

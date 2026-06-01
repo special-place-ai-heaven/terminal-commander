@@ -63,6 +63,7 @@
   "invariants": [
     "rule_id and version are required",
     "scope is required and present in the MCP input schema required[] (TB-5)",
+    "scope.kind is a JSON-Schema enum [global,bucket,job,probe] (TB-7)",
     "an omitted scope is rejected, never silently widened to global",
     "jobs_rebound is a count, not job output",
     "success payload reports whether an active binding was closed",

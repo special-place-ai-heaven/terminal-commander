@@ -6,7 +6,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed wait tool. Response carries either non-empty events or heartbeat=true with empty events. Raw stdout/stderr text is never a success shape."
+    "note": "Daemon-backed wait tool. Response carries either non-empty events or heartbeat=true with empty events. Raw stdout/stderr text is never a success shape. TB-8: the cursor param description teaches the pagination protocol (pass 0 on the first call, then the next_cursor from the previous response) and bucket_id carries a bkt_<32hex> format note so the first call succeeds."
   },
   "tool": "bucket_wait",
   "request_example": {
@@ -91,6 +91,8 @@
   },
   "invariants": [
     "bucket_id and cursor are required",
+    "cursor description teaches pass-0-then-next_cursor pagination (TB-8)",
+    "bucket_id description carries the bkt_ opaque-id format note (TB-8)",
     "heartbeat=true implies events=[]",
     "heartbeat=false implies events is non-empty",
     "success payload never contains raw stdout or stderr dumps"

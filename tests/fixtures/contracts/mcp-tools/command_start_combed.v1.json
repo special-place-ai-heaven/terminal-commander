@@ -26,7 +26,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed command starter. Success returns identifiers and a cursor only; stdout/stderr are never returned as success payload text."
+    "note": "Daemon-backed command starter. Success returns identifiers and a cursor only; stdout/stderr are never returned as success payload text. TB-11: a non-array argv (e.g. a single shell-style string) is rejected with a field-prefixed teaching error -- 'argv must be an array of strings, e.g. [\"node\",\"-e\",\"...\"]' -- so a naive client self-corrects in one step."
   },
   "response_example": {
     "job_id": "job_018f0000000000000000000000000001",
@@ -61,6 +61,7 @@
     "stdout and stderr are observed through bucket tools, not returned here",
     "optional bucket_config_json and rules_json bind a per-job bucket override and inline rules, mapped to daemon IPC without a prior registry_activate",
     "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list REPLACES it entirely (include PATH yourself)",
-    "an env map (e.g. {\"FOO\":\"bar\"}) is rejected with a teaching error naming the {key,value} array shape"
+    "an env map (e.g. {\"FOO\":\"bar\"}) is rejected with a teaching error naming the {key,value} array shape",
+    "a non-array argv is rejected with a field-prefixed teaching error naming the array-of-strings shape with an example (TB-11)"
   ]
 }

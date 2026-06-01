@@ -18,7 +18,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed PTY stop. Success returns final bounded counters only; PTY output remains available through bucket/event tools, not this response."
+    "note": "Daemon-backed PTY stop. Success returns final bounded counters only; PTY output remains available through bucket/event tools, not this response. TB-7: job_id carries an opaque-id format note (copy verbatim, e.g. job_<32hex>; from pty_command_start) so the first call uses the right id."
   },
   "response_example": {
     "job_id": "job_018f0000000000000000000000000003",

@@ -18,7 +18,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed bucket aggregate. Success returns counters and a wire-stable severity histogram only; raw stdout/stderr and event bodies are not part of this contract."
+    "note": "Daemon-backed bucket aggregate. Success returns counters and a wire-stable severity histogram only; raw stdout/stderr and event bodies are not part of this contract. TB-8: bucket_id carries a bkt_<32hex> opaque-id format note (copy verbatim) so the first call uses the right id."
   },
   "response_example": {
     "bucket_id": "bkt_018f0000000000000000000000000001",

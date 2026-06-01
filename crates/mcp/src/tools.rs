@@ -260,7 +260,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "probe_status",
             status: ToolStatus::Live,
-            description: "Bounded per-probe lookup by probe_id. Returns UnknownProbe if not live.",
+            description: "Bounded per-probe lookup by probe_id. An id no runtime knows fails with an UnknownProbe error, not a success body.",
         },
     ]
 }
@@ -739,7 +739,7 @@ impl TerminalCommanderMcpServer {
 
     /// `event_context` — pointer-bounded context around an event.
     #[tool(
-        description = "Bounded context window around an event. Returns frames or a typed unavailable_reason when no pointer exists. Pointer-based; never streams."
+        description = "Bounded context window around an event. The success body carries frames, or an empty frames list with a typed unavailable_reason when no pointer exists (NoPointer/SyntheticEvent/AnchorEvicted) -- not an error. Pointer-based; never streams."
     )]
     async fn event_context(
         &self,
@@ -902,7 +902,7 @@ impl TerminalCommanderMcpServer {
 
     /// `registry_import_pack` — one-call expert signal extraction.
     #[tool(
-        description = "Import a curated rule pack (cargo, pytest, npm, gcc, apt, make, generic.terminal) so you get expert signal extraction without authoring any rule JSON. CONDITIONAL scope contract: pass activate=true + scope {kind:'global'} together to make the rules live immediately for your commands (one call replaces ~6 rule-authoring calls); activate=true WITHOUT scope is rejected with a scope-required error, never silently widened to global. With activate=false (default) the pack is imported but not activated and scope is ignored. An unknown pack name returns the list of available packs."
+        description = "Import a curated rule pack (cargo, pytest, npm, gcc, apt, make, generic.terminal, cleanup) so you get expert signal extraction without authoring any rule JSON. CONDITIONAL scope contract: pass activate=true + scope {kind:'global'} together to make the rules live immediately for your commands (one call replaces ~6 rule-authoring calls); activate=true WITHOUT scope is rejected with a scope-required error, never silently widened to global. With activate=false (default) the pack is imported but not activated and scope is ignored. An unknown pack name returns the list of available packs."
     )]
     async fn registry_import_pack(
         &self,
@@ -1282,7 +1282,7 @@ impl TerminalCommanderMcpServer {
 
     /// `probe_status` — bounded lookup for one probe by id.
     #[tool(
-        description = "Bounded per-probe lookup by probe_id. Returns UnknownProbe if no runtime knows the id."
+        description = "Bounded per-probe lookup by probe_id. On success returns the probe descriptor; an id no runtime knows fails with an UnknownProbe error (not a success body)."
     )]
     async fn probe_status(
         &self,
@@ -1508,6 +1508,39 @@ const fn json_type_name(v: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Deserialize the `argv` parameter as an array of strings, mapping
+/// serde's bare `invalid type: ...` into a field-prefixed teaching
+/// error that names the exact array-of-strings shape with an example.
+///
+/// TB-11: a naive client often sends `argv` as a single shell-style
+/// string (`"node -e ..."`) or a map. serde's default message
+/// ("invalid type: string, expected a sequence") does not name the
+/// field or the remedy. We intercept the non-array cases here and
+/// return the example inline so the client self-corrects in one step.
+/// A genuine array still falls through to serde's element-level error.
+fn deserialize_argv<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    // Buffer into an untyped value first so we can detect the non-array
+    // shape before the typed conversion. The payload is already bounded
+    // by the transport frame cap, so this adds no unbounded allocation.
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Array(_) => serde_json::from_value(value).map_err(|e| {
+            D::Error::custom(format!(
+                "argv must be an array of strings, e.g. [\"node\",\"-e\",\"...\"]; {e}"
+            ))
+        }),
+        other => Err(D::Error::custom(format!(
+            "argv must be an array of strings, e.g. [\"node\",\"-e\",\"...\"]; got {}",
+            json_type_name(&other)
+        ))),
+    }
+}
+
 /// Lenient, LLM-friendly shorthand for an inline rule (TC erg2 P1).
 ///
 /// Every field is optional except that a rule needs SOME matcher
@@ -1705,8 +1738,11 @@ fn parse_bucket_and_rules(
 /// daemon-side `CommandStartParams` in `into_ipc`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpCommandStartParams {
-    /// Non-empty argv. argv[0] is the program; rest are args.
+    /// Non-empty argv as an array of strings, e.g.
+    /// `["node","-e","..."]`. argv[0] is the program; the rest are args.
     /// Shell interpreters are rejected by the daemon.
+    #[serde(deserialize_with = "deserialize_argv")]
+    #[schemars(with = "Vec<String>")]
     pub argv: Vec<String>,
     /// Optional working directory.
     #[serde(default)]
@@ -1764,7 +1800,9 @@ impl McpCommandStartParams {
 /// MCP-facing parameters for `command_status`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpCommandStatusParams {
-    /// Job id returned by `command_start_combed`.
+    /// Opaque job id returned by `command_start_combed` /
+    /// `run_and_watch` (e.g. `job_<32hex>`); copy it verbatim, not
+    /// free-form.
     pub job_id: String,
 }
 
@@ -1785,7 +1823,10 @@ const MAX_WAIT_SLICE_MS: u64 = 1_000;
 /// `command_start_combed`'s params plus the bounded wait controls.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRunAndWatchParams {
-    /// Non-empty argv. argv[0] is the program; rest are args.
+    /// Non-empty argv as an array of strings, e.g.
+    /// `["node","-e","..."]`. argv[0] is the program; the rest are args.
+    #[serde(deserialize_with = "deserialize_argv")]
+    #[schemars(with = "Vec<String>")]
     pub argv: Vec<String>,
     #[serde(default)]
     pub cwd: Option<String>,
@@ -1845,7 +1886,9 @@ impl McpRunAndWatchParams {
 /// MCP-facing parameters for `command_output_tail`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpCommandOutputTailParams {
-    /// Job id returned by `command_start_combed`.
+    /// Opaque job id returned by `command_start_combed` /
+    /// `run_and_watch` (e.g. `job_<32hex>`); copy it verbatim, not
+    /// free-form.
     pub job_id: String,
     /// Maximum lines to return. Clamped to 200 server-side.
     #[serde(default)]
@@ -1858,7 +1901,11 @@ pub struct McpCommandOutputTailParams {
 /// MCP-facing parameters for `bucket_events_since`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpBucketEventsSinceParams {
+    /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
+    /// verbatim, not free-form.
     pub bucket_id: String,
+    /// Pagination cursor; pass `0` on the first call, then the
+    /// `next_cursor` from the previous response.
     pub cursor: u64,
     /// Lowercase severity name: trace|debug|info|low|medium|high|critical.
     #[serde(default)]
@@ -1890,7 +1937,11 @@ impl McpBucketEventsSinceParams {
 /// MCP-facing parameters for `bucket_wait`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpBucketWaitParams {
+    /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
+    /// verbatim, not free-form.
     pub bucket_id: String,
+    /// Pagination cursor; pass `0` on the first call, then the
+    /// `next_cursor` from the previous response.
     pub cursor: u64,
     #[serde(default)]
     pub severity_min: Option<String>,
@@ -1925,13 +1976,19 @@ impl McpBucketWaitParams {
 /// MCP-facing parameters for `bucket_summary`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpBucketSummaryParams {
+    /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
+    /// verbatim, not free-form.
     pub bucket_id: String,
 }
 
 /// MCP-facing parameters for `event_context`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpEventContextParams {
+    /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
+    /// verbatim, not free-form.
     pub bucket_id: String,
+    /// Opaque event id from a bucket read (e.g. `evt_<32hex>`); copy it
+    /// verbatim, not free-form.
     pub event_id: String,
     #[serde(default)]
     pub before: Option<u32>,
@@ -2164,7 +2221,10 @@ pub struct McpRegistryActivateParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryImportPackParams {
     /// Pack name. One of: generic.terminal, apt, cargo, npm, pytest,
-    /// gcc, make.
+    /// gcc, make, cleanup.
+    #[schemars(extend("enum" = [
+        "generic.terminal", "apt", "cargo", "npm", "pytest", "gcc", "make", "cleanup"
+    ]))]
     pub pack: String,
     /// When true, promote the pack's rules to Active and activate them
     /// in `scope` so they take effect immediately. CONDITIONAL contract:
@@ -2205,12 +2265,23 @@ pub struct McpRegistryDeactivateParams {
 /// - `{ "kind": "probe", "probe_id": "prb_..." }`
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpActivationScope {
-    /// One of: `global`, `bucket`, `job`, `probe`.
+    /// Scope discriminant. One of: `global`, `bucket`, `job`, `probe`.
+    /// `global` watches every command you start; the other three bind
+    /// the rule to a single opaque id (provide the matching `*_id`).
+    #[schemars(extend("enum" = ["global", "bucket", "job", "probe"]))]
     pub kind: String,
+    /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
+    /// verbatim, not free-form. Required when `kind` is `bucket`.
     #[serde(default)]
     pub bucket_id: Option<String>,
+    /// Opaque job id from `command_start_combed` / `run_and_watch`
+    /// (e.g. `job_<32hex>`); copy it verbatim, not free-form. Required
+    /// when `kind` is `job`.
     #[serde(default)]
     pub job_id: Option<String>,
+    /// Opaque probe id from `probe_list` / `runtime_state` (e.g.
+    /// `prb_<32hex>`); copy it verbatim, not free-form. Required when
+    /// `kind` is `probe`.
     #[serde(default)]
     pub probe_id: Option<String>,
 }
@@ -2266,8 +2337,10 @@ impl McpActivationScope {
 pub struct McpFileReadWindowParams {
     /// Absolute or repo-relative path to a regular file.
     pub path: String,
-    /// 1-based start line. Omit to read from line 1.
+    /// 1-based start line. Omit to read from line 1. A value of `0` is
+    /// clamped up to `1` by the daemon (there is no line 0).
     #[serde(default)]
+    #[schemars(extend("minimum" = 1))]
     pub start_line: Option<u64>,
     /// Max lines returned. Clamped by the daemon.
     #[serde(default)]
@@ -2280,7 +2353,12 @@ pub struct McpFileReadWindowParams {
 /// MCP-facing parameters for `file_search`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileSearchParams {
+    /// Absolute or repo-relative path to the single regular file to
+    /// search. (This is a per-file search, not a directory walk.)
     pub path: String,
+    /// The match expression: a plain SUBSTRING (literal), NOT a regex.
+    /// Regex metacharacters are matched literally. Use `case_insensitive`
+    /// to fold ASCII case.
     pub query: String,
     #[serde(default)]
     pub case_insensitive: Option<bool>,
@@ -2315,7 +2393,8 @@ pub struct McpFileWatchStartParams {
 /// MCP-facing parameters for `file_watch_stop`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileWatchStopParams {
-    /// Wire-form JobId returned by `file_watch_start`.
+    /// Opaque watch id (a job id) returned by `file_watch_start` (e.g.
+    /// `job_<32hex>`); copy it verbatim, not free-form.
     pub watch_id: String,
 }
 
@@ -2325,8 +2404,11 @@ pub struct McpFileWatchStopParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpPtyCommandStartParams {
-    /// Non-empty argv. argv[0] is the program; rest are args. Shell
-    /// interpreters denied.
+    /// Non-empty argv as an array of strings, e.g.
+    /// `["node","-e","..."]`. argv[0] is the program; the rest are args.
+    /// Shell interpreters denied.
+    #[serde(deserialize_with = "deserialize_argv")]
+    #[schemars(with = "Vec<String>")]
     pub argv: Vec<String>,
     #[serde(default)]
     pub cwd: Option<String>,
@@ -2359,7 +2441,8 @@ pub struct McpPtyCommandStartParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpPtyCommandWriteStdinParams {
-    /// Wire-form JobId returned by `pty_command_start`.
+    /// Opaque job id returned by `pty_command_start` (e.g.
+    /// `job_<32hex>`); copy it verbatim, not free-form.
     pub job_id: String,
     /// UTF-8 stdin payload. Capped at 4096 bytes by the daemon.
     pub bytes: String,
@@ -2367,6 +2450,8 @@ pub struct McpPtyCommandWriteStdinParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpPtyCommandStopParams {
+    /// Opaque job id returned by `pty_command_start` (e.g.
+    /// `job_<32hex>`); copy it verbatim, not free-form.
     pub job_id: String,
 }
 
@@ -2376,7 +2461,8 @@ pub struct McpPtyCommandStopParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpProbeStatusParams {
-    /// Wire-form ProbeId.
+    /// Opaque probe id from `probe_list` / `runtime_state` (e.g.
+    /// `prb_<32hex>`); copy it verbatim, not free-form.
     pub probe_id: String,
 }
 
@@ -3083,5 +3169,206 @@ mod tests {
                 "{code:?} is not caller-fixable and must stay internal_error"
             );
         }
+    }
+
+    // --- T3 (TB-7/8/9/10/11): clarity polish regressions ---
+
+    /// Collect a JSON-Schema `enum` array at `pointer` as owned strings.
+    fn schema_enum(schema: &schemars::Schema, pointer: &str) -> Vec<String> {
+        schema
+            .as_value()
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn tb7_scope_kind_is_a_schema_enum() {
+        // TB-7: scope.kind must carry a machine-readable enum so a naive
+        // LLM picks a legal discriminant on the first call, not after a
+        // ScopeInvalid round-trip.
+        let schema = schemars::schema_for!(McpActivationScope);
+        let kinds = schema_enum(&schema, "/properties/kind/enum");
+        assert_eq!(
+            kinds,
+            vec!["global", "bucket", "job", "probe"],
+            "scope.kind must enumerate the four legal discriminants; got {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn tb7_scope_id_descriptions_teach_verbatim_copy() {
+        let schema = schemars::schema_for!(McpActivationScope);
+        for (field, prefix) in [
+            ("bucket_id", "bkt_"),
+            ("job_id", "job_"),
+            ("probe_id", "prb_"),
+        ] {
+            let desc = schema_str(&schema, &format!("/properties/{field}/description"));
+            assert!(
+                desc.contains(prefix) && desc.contains("verbatim"),
+                "scope.{field} description must teach the {prefix} prefix and verbatim copy; got: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn tb8_cursor_descriptions_teach_pagination() {
+        for schema in [
+            schemars::schema_for!(McpBucketEventsSinceParams),
+            schemars::schema_for!(McpBucketWaitParams),
+        ] {
+            let desc = schema_str(&schema, "/properties/cursor/description");
+            assert!(
+                desc.contains("first call") && desc.contains("next_cursor"),
+                "cursor description must teach the 0-then-next_cursor protocol; got: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn tb8_bucket_and_event_id_descriptions_carry_format_notes() {
+        let summary = schemars::schema_for!(McpBucketSummaryParams);
+        let bkt = schema_str(&summary, "/properties/bucket_id/description");
+        assert!(
+            bkt.contains("bkt_"),
+            "bucket_id must teach the bkt_ prefix; got: {bkt}"
+        );
+
+        let ctx = schemars::schema_for!(McpEventContextParams);
+        let evt = schema_str(&ctx, "/properties/event_id/description");
+        assert!(
+            evt.contains("evt_"),
+            "event_id must teach the evt_ prefix; got: {evt}"
+        );
+    }
+
+    #[test]
+    fn tb9_import_pack_schema_enumerates_all_eight_seed_packs() {
+        // TB-9: the schema's pack enum must match the daemon's seed-pack
+        // set exactly (8 packs incl. cleanup), so the schema can never
+        // again list fewer packs than the daemon accepts.
+        let schema = schemars::schema_for!(McpRegistryImportPackParams);
+        let packs = schema_enum(&schema, "/properties/pack/enum");
+        assert_eq!(
+            packs,
+            vec![
+                "generic.terminal",
+                "apt",
+                "cargo",
+                "npm",
+                "pytest",
+                "gcc",
+                "make",
+                "cleanup",
+            ],
+            "import_pack schema must enumerate all eight seed packs; got {packs:?}"
+        );
+        assert!(
+            packs.iter().any(|p| p == "cleanup"),
+            "TB-9: cleanup must be present in the pack enum"
+        );
+    }
+
+    #[test]
+    fn tb10_file_search_params_carry_descriptions() {
+        let schema = schemars::schema_for!(McpFileSearchParams);
+        let path = schema_str(&schema, "/properties/path/description");
+        assert!(
+            !path.is_empty(),
+            "file_search.path must carry a description"
+        );
+        let query = schema_str(&schema, "/properties/query/description");
+        assert!(
+            query.contains("SUBSTRING") && query.contains("NOT a regex"),
+            "file_search.query must teach literal-substring (not regex) behavior; got: {query}"
+        );
+    }
+
+    #[test]
+    fn tb11_argv_string_form_teaches_array_shape() {
+        // TB-11: a single shell-style string for argv must surface the
+        // field-prefixed array example, not serde's bare "invalid type".
+        for raw in [
+            r#"{"argv":"node -e x"}"#,
+            r#"{"argv":{"0":"node"}}"#,
+            r#"{"argv":42}"#,
+        ] {
+            let err = serde_json::from_str::<McpCommandStartParams>(raw)
+                .expect_err("non-array argv must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("argv must be an array of strings")
+                    && msg.contains("[\"node\",\"-e\""),
+                "argv teaching error must name the field and example; got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn tb11_argv_teaching_error_covers_run_and_watch_and_pty() {
+        let e1 = serde_json::from_str::<McpRunAndWatchParams>(r#"{"argv":"node -e x"}"#)
+            .expect_err("run_and_watch string argv must be rejected")
+            .to_string();
+        let e2 = serde_json::from_str::<McpPtyCommandStartParams>(r#"{"argv":"node -e x"}"#)
+            .expect_err("pty_command_start string argv must be rejected")
+            .to_string();
+        for msg in [&e1, &e2] {
+            assert!(
+                msg.contains("argv must be an array of strings"),
+                "argv teaching error missing in: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn tb11_valid_argv_array_still_parses() {
+        let params: McpCommandStartParams =
+            serde_json::from_str(r#"{"argv":["node","-e","1"]}"#).expect("array argv must parse");
+        assert_eq!(params.argv, vec!["node", "-e", "1"]);
+    }
+
+    #[test]
+    fn tb11_file_read_window_start_line_schema_has_minimum_one() {
+        // TB-11: the "1-based" prose must agree with the schema; a 0 is
+        // clamped to 1 by the daemon, so the schema documents minimum 1.
+        let schema = schemars::schema_for!(McpFileReadWindowParams);
+        let min = schema
+            .as_value()
+            .pointer("/properties/start_line/minimum")
+            .and_then(serde_json::Value::as_u64);
+        assert_eq!(
+            min,
+            Some(1),
+            "start_line schema must declare minimum 1 to match the 1-based prose"
+        );
+        let desc = schema_str(&schema, "/properties/start_line/description");
+        assert!(
+            desc.contains("clamped"),
+            "start_line description must document the 0->1 clamp; got: {desc}"
+        );
+    }
+
+    #[test]
+    fn tb11_probe_status_description_does_not_mislabel_error_as_return() {
+        let router = TerminalCommanderMcpServer::tool_router();
+        let probe = router
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "probe_status")
+            .expect("probe_status must be a live tool");
+        let desc = probe
+            .description
+            .as_deref()
+            .expect("probe_status must carry a description");
+        assert!(
+            desc.contains("UnknownProbe error") && desc.contains("not a success body"),
+            "probe_status must describe UnknownProbe as an error path, not a returned body; got: {desc}"
+        );
     }
 }

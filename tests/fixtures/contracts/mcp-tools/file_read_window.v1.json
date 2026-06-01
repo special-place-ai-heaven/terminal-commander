@@ -21,7 +21,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed bounded file read. It returns line windows, not whole files."
+    "note": "Daemon-backed bounded file read. It returns line windows, not whole files. TB-11: start_line is 1-based; the input schema declares minimum 1 and the description documents that a 0 is clamped up to 1 by the daemon (there is no line 0), so the 1-based prose and the schema agree."
   },
   "response_example": {
     "path": "README.md",
@@ -64,6 +64,7 @@
   },
   "invariants": [
     "path is required",
+    "start_line is 1-based; the schema declares minimum 1 and a 0 is clamped to 1 (TB-11)",
     "start_line, max_lines, and max_bytes are optional and daemon-clamped",
     "success returns bounded lines and continuation offset, never a whole-file dump"
   ]
