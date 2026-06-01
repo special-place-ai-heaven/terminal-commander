@@ -24,7 +24,11 @@ use terminal_commander_supervisor::paths::{
 // entry points carry a scoped `dead_code` allow inside the module rather than a
 // blanket crate allow. The unit tests exercise the error->exit mapping today.
 pub(crate) mod ipc;
+pub(crate) mod render;
 pub(crate) mod update_locks;
+
+use ipc::{CliIpcError, connect_or_unavailable};
+use terminal_commander_ipc::{IpcRequest, IpcResponse};
 
 const EX_UNAVAILABLE: u8 = 69;
 
@@ -136,16 +140,18 @@ fn run(cli: Cli) -> std::process::ExitCode {
         Command::Status => print_status(),
         Command::Doctor => std::process::ExitCode::from(run_doctor()),
         Command::Rules { op } => match op {
-            RulesOp::List => daemon_backed_command_unavailable("rules list"),
-            RulesOp::Show { rule_id: _ } => daemon_backed_command_unavailable("rules show"),
+            RulesOp::List => run_rules_list(),
+            RulesOp::Show { rule_id } => run_rules_show(&rule_id),
         },
         Command::Buckets { op } => match op {
-            BucketsOp::List => daemon_backed_command_unavailable("buckets list"),
-            BucketsOp::Show { bucket_id: _ } => daemon_backed_command_unavailable("buckets show"),
+            BucketsOp::List => run_buckets_list(),
+            BucketsOp::Show { bucket_id } => run_buckets_show(&bucket_id),
         },
-        Command::Jobs => daemon_backed_command_unavailable("jobs"),
-        Command::Probes => daemon_backed_command_unavailable("probes"),
-        Command::Policy => daemon_backed_command_unavailable("policy"),
+        Command::Jobs => run_jobs(),
+        Command::Probes => run_probes(),
+        Command::Policy => run_policy(),
+        // `audit` has no daemon handler yet (no `IpcRequest::Audit` method),
+        // so it stays on the honest unavailable path until its handler lands.
         Command::Audit { limit: _ } => daemon_backed_command_unavailable("audit"),
         Command::Session { op } => match op {
             SessionOp::List => run_session_list(),
@@ -175,6 +181,158 @@ fn daemon_backed_command_unavailable(command: &str) -> std::process::ExitCode {
         "terminal-commander: {command} unavailable: requires live daemon IPC; refusing to synthesize empty or not-found data."
     );
     std::process::ExitCode::from(EX_UNAVAILABLE)
+}
+
+/// Run ONE daemon-backed read subcommand end to end: build a single-shot
+/// runtime, probe + issue the IPC `request` via [`connect_or_unavailable`], and
+/// hand the typed [`IpcResponse`] to `render` on success.
+///
+/// Honesty contract: REAL data on success (an honestly-empty response renders an
+/// empty table + exit 0), a typed [`CliIpcError`] mapped to its non-zero exit on
+/// failure. Never fabricates a response. `command` is the human label used in
+/// the error line; `request` is the typed method to dispatch.
+///
+/// `render` returns `Ok(())` after printing, or an [`IpcError`] when the daemon
+/// answered with the WRONG response variant for this method (a daemon/client
+/// contract violation, mapped to exit 1 — never a fabricated row).
+fn run_daemon_command<F>(command: &str, request: IpcRequest, render: F) -> std::process::ExitCode
+where
+    F: FnOnce(IpcResponse) -> Result<(), terminal_commander_ipc::IpcError>,
+{
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("terminal-commander: tokio runtime build failed: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let result = rt.block_on(connect_or_unavailable(1, request));
+    match result.and_then(|resp| render(resp).map_err(CliIpcError::Ipc)) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            err.report(command);
+            std::process::ExitCode::from(err.exit_code())
+        }
+    }
+}
+
+/// Map an unexpected response variant to a typed `Internal` error so the caller
+/// surfaces exit 1 instead of fabricating data. The daemon should always answer
+/// with the variant matching the request method; this is the defensive arm.
+fn unexpected_variant(method: &str) -> terminal_commander_ipc::IpcError {
+    terminal_commander_ipc::IpcError::new(
+        terminal_commander_ipc::IpcErrorCode::Internal,
+        format!("daemon returned an unexpected response variant for {method}"),
+    )
+}
+
+/// `rules list` -> `registry_list_active` -> active-rule table.
+fn run_rules_list() -> std::process::ExitCode {
+    run_daemon_command(
+        "rules list",
+        IpcRequest::RegistryListActive,
+        |resp| match resp {
+            IpcResponse::RegistryListActive(r) => {
+                render::rules_list(&r);
+                Ok(())
+            }
+            _ => Err(unexpected_variant("registry_list_active")),
+        },
+    )
+}
+
+/// `rules show <id>` -> `registry_get` (latest version) -> rule definition.
+/// `RuleNotFound` flows back as a typed `Ipc` error -> non-zero exit.
+fn run_rules_show(rule_id: &str) -> std::process::ExitCode {
+    let request = IpcRequest::RegistryGet(terminal_commander_ipc::RegistryGetParams {
+        rule_id: rule_id.to_string(),
+        version: None,
+    });
+    run_daemon_command("rules show", request, |resp| match resp {
+        IpcResponse::RegistryGet(r) => {
+            render::rule_show(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("registry_get")),
+    })
+}
+
+/// `jobs` -> `runtime_state` -> counts + probe/bucket tables.
+fn run_jobs() -> std::process::ExitCode {
+    run_daemon_command("jobs", IpcRequest::RuntimeState, |resp| match resp {
+        IpcResponse::RuntimeState(r) => {
+            render::jobs(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("runtime_state")),
+    })
+}
+
+/// `probes` -> `probe_list` -> one row per live probe.
+fn run_probes() -> std::process::ExitCode {
+    run_daemon_command("probes", IpcRequest::ProbeList, |resp| match resp {
+        IpcResponse::ProbeList(r) => {
+            render::probes(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("probe_list")),
+    })
+}
+
+/// `policy` -> `policy_status` -> profile + deny counts + caps.
+fn run_policy() -> std::process::ExitCode {
+    run_daemon_command("policy", IpcRequest::PolicyStatus, |resp| match resp {
+        IpcResponse::PolicyStatus(r) => {
+            render::policy(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("policy_status")),
+    })
+}
+
+/// `buckets list` -> `runtime_state` -> bucket rows.
+///
+/// There is NO daemon `list-buckets` method; `runtime_state` carries the only
+/// live bucket set, so this reuses it and renders `RuntimeStateResponse.buckets`
+/// (see [`render::buckets_list`]).
+fn run_buckets_list() -> std::process::ExitCode {
+    run_daemon_command(
+        "buckets list",
+        IpcRequest::RuntimeState,
+        |resp| match resp {
+            IpcResponse::RuntimeState(r) => {
+                render::buckets_list(&r);
+                Ok(())
+            }
+            _ => Err(unexpected_variant("runtime_state")),
+        },
+    )
+}
+
+/// `buckets show <id>` -> `bucket_summary` -> counters + severity histogram.
+/// A malformed bucket id is rejected BEFORE any IPC (the daemon never sees an
+/// id it could not parse). `BucketNotFound` flows back as a typed `Ipc` error.
+fn run_buckets_show(bucket_id: &str) -> std::process::ExitCode {
+    let parsed = match terminal_commander_core::BucketId::parse_wire(bucket_id) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("terminal-commander: buckets show: invalid bucket id {bucket_id:?}: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let request = IpcRequest::BucketSummary(terminal_commander_ipc::BucketSummaryParams {
+        bucket_id: parsed,
+    });
+    run_daemon_command("buckets show", request, |resp| match resp {
+        IpcResponse::BucketSummary(r) => {
+            render::bucket_summary(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("bucket_summary")),
+    })
 }
 
 fn print_status() -> std::process::ExitCode {

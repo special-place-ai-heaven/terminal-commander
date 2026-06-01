@@ -28,11 +28,15 @@ fn terminal_commander() -> Command {
 
 #[test]
 fn daemon_backed_inspection_commands_do_not_fake_empty_success() {
+    // `buckets show` uses a WELL-FORMED wire id (`bkt_<32-hex>`) so the command
+    // reaches the probe-before-IPC path and returns the offline/unavailable
+    // contract (exit 69). A malformed id is a usage error (exit 2) handled
+    // before any IPC, which is a different, honest failure not under test here.
     for args in [
         &["rules", "list"][..],
         &["rules", "show", "missing.rule"],
         &["buckets", "list"],
-        &["buckets", "show", "bucket-123"],
+        &["buckets", "show", "bkt_00000000000000000000000000000000"],
         &["jobs"],
         &["probes"],
         &["policy"],

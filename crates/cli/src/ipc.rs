@@ -36,11 +36,7 @@ use terminal_commander_supervisor::paths::{
 
 /// Exit code surfaced when a daemon-backed command cannot reach a live daemon.
 /// Matches `EX_UNAVAILABLE` (sysexits.h 69) used elsewhere in the CLI.
-///
-/// Staged for Phase 3 (consumed by [`CliIpcError::exit_code`] when the
-/// subcommands route through [`connect_or_unavailable`]); the unit tests
-/// exercise it today.
-#[allow(dead_code)]
+/// Consumed by [`CliIpcError::exit_code`] on the `Unavailable` path.
 pub(crate) const EX_UNAVAILABLE: u8 = 69;
 
 /// Probe budget for the pre-IPC health handshake. The CLI is a one-shot
@@ -66,9 +62,6 @@ pub(crate) enum CliIpcError {
 
 impl CliIpcError {
     /// The non-zero process exit code this error maps to.
-    ///
-    /// Staged for Phase 3: the subcommands map this onto their `ExitCode`.
-    #[allow(dead_code)]
     pub(crate) const fn exit_code(&self) -> u8 {
         match self {
             Self::Unavailable { .. } => EX_UNAVAILABLE,
@@ -78,10 +71,6 @@ impl CliIpcError {
 
     /// Render the operator-facing diagnostic line(s) for this error to stderr.
     /// `command` is the human label (e.g. `"rules list"`).
-    ///
-    /// Staged for Phase 3: the subcommands that consume it (replacing the
-    /// `daemon_backed_command_unavailable` stubs) land next phase.
-    #[allow(dead_code)]
     pub(crate) fn report(&self, command: &str) {
         match self {
             Self::Unavailable {
@@ -116,12 +105,6 @@ impl CliIpcError {
 ///
 /// `correlation_id` is the per-call id echoed back by the daemon; the CLI is
 /// single-shot so any stable value (e.g. 1) is fine.
-///
-/// Staged for Phase 3: the daemon-backed subcommands call this in place of the
-/// `daemon_backed_command_unavailable` stubs next phase. The unit tests cover
-/// the error->exit mapping today; the live round trip is covered by the
-/// integration harness once a subcommand is wired.
-#[allow(dead_code)]
 pub(crate) async fn connect_or_unavailable(
     correlation_id: u64,
     request: IpcRequest,
