@@ -17,20 +17,17 @@ use terminal_commander_supervisor::paths::{
     endpoint_from_socket_path, resolve_socket_path, resolve_state_dir,
 };
 
-// P2: the single live-IPC call site. Staged here so Phase 3 can swap each
-// `daemon_backed_command_unavailable` stub for a real `connect_or_unavailable`
-// call without re-touching the transport. Items are `pub(crate)` but not yet
-// consumed by a subcommand (the stubs stay until Phase 3), so the not-yet-wired
-// entry points carry a scoped `dead_code` allow inside the module rather than a
-// blanket crate allow. The unit tests exercise the error->exit mapping today.
+// The single live-IPC call site. Every daemon-backed read subcommand
+// routes through `run_daemon_command` -> `connect_or_unavailable`, which
+// probes the daemon first and only constructs a `DaemonClient` once the
+// health handshake confirms it is live. The honest "unavailable; refusing
+// to synthesize" exit-69 path lives in `ipc::CliIpcError::Unavailable`.
 pub(crate) mod ipc;
 pub(crate) mod render;
 pub(crate) mod update_locks;
 
 use ipc::{CliIpcError, connect_or_unavailable};
 use terminal_commander_ipc::{IpcRequest, IpcResponse};
-
-const EX_UNAVAILABLE: u8 = 69;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -150,9 +147,7 @@ fn run(cli: Cli) -> std::process::ExitCode {
         Command::Jobs => run_jobs(),
         Command::Probes => run_probes(),
         Command::Policy => run_policy(),
-        // `audit` has no daemon handler yet (no `IpcRequest::Audit` method),
-        // so it stays on the honest unavailable path until its handler lands.
-        Command::Audit { limit: _ } => daemon_backed_command_unavailable("audit"),
+        Command::Audit { limit } => run_audit(limit),
         Command::Session { op } => match op {
             SessionOp::List => run_session_list(),
             SessionOp::Reap {
@@ -174,13 +169,6 @@ fn run(cli: Cli) -> std::process::ExitCode {
             }
         }
     }
-}
-
-fn daemon_backed_command_unavailable(command: &str) -> std::process::ExitCode {
-    eprintln!(
-        "terminal-commander: {command} unavailable: requires live daemon IPC; refusing to synthesize empty or not-found data."
-    );
-    std::process::ExitCode::from(EX_UNAVAILABLE)
 }
 
 /// Run ONE daemon-backed read subcommand end to end: build a single-shot
@@ -332,6 +320,28 @@ fn run_buckets_show(bucket_id: &str) -> std::process::ExitCode {
             Ok(())
         }
         _ => Err(unexpected_variant("bucket_summary")),
+    })
+}
+
+/// `audit [--limit N]` -> `audit_since` (cursor 0) -> one row per audit record.
+///
+/// Reads the persistent audit log from the start (`cursor: 0`) up to `limit`
+/// rows. An honestly-empty log renders just the header and exits 0. A store
+/// read failure surfaces a typed daemon `Internal` error -> non-zero exit; the
+/// CLI never fabricates rows.
+fn run_audit(limit: usize) -> std::process::ExitCode {
+    let request = IpcRequest::AuditSince(terminal_commander_ipc::AuditSinceParams {
+        cursor: 0,
+        action_filter: None,
+        decision_filter: None,
+        limit: Some(limit),
+    });
+    run_daemon_command("audit", request, |resp| match resp {
+        IpcResponse::AuditSince(r) => {
+            render::audit(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("audit_since")),
     })
 }
 

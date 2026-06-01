@@ -16,8 +16,8 @@
 #![allow(clippy::redundant_pub_crate)]
 
 use terminal_commander_ipc::{
-    BucketSummaryResponse, PolicyStatusResponse, ProbeListResponse, RegistryGetResponse,
-    RegistryListActiveResponse, RuntimeStateResponse,
+    AuditSinceResponse, BucketSummaryResponse, PolicyStatusResponse, ProbeListResponse,
+    RegistryGetResponse, RegistryListActiveResponse, RuntimeStateResponse,
 };
 
 /// `rules list`: one row per active `(rule_id, version, severity, event_kind,
@@ -137,6 +137,27 @@ pub(crate) fn bucket_summary(resp: &BucketSummaryResponse) {
 /// shape with the `jobs` bucket section.
 pub(crate) fn buckets_list(resp: &RuntimeStateResponse) {
     bucket_rows(&resp.buckets);
+}
+
+/// `audit`: one row per audit record. Zero rows prints just the header
+/// (honestly-empty -> exit 0). Columns: audit_id, timestamp, action,
+/// subject, decision, profile. `profile` renders `-` when absent.
+pub(crate) fn audit(resp: &AuditSinceResponse) {
+    println!(
+        "{:>8} {:<25} {:<28} {:<24} {:<10} PROFILE",
+        "AUDIT_ID", "TIMESTAMP", "ACTION", "SUBJECT", "DECISION"
+    );
+    for r in &resp.rows {
+        println!(
+            "{:>8} {:<25} {:<28} {:<24} {:<10} {}",
+            r.audit_id,
+            r.timestamp,
+            r.action,
+            r.subject,
+            r.decision,
+            r.profile.as_deref().unwrap_or("-"),
+        );
+    }
 }
 
 /// Shared probe table. Empty list prints just the header (honestly-empty).

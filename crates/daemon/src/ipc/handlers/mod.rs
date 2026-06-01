@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 
+pub(in crate::ipc::server) mod audit;
 pub(in crate::ipc::server) mod bucket;
 pub(in crate::ipc::server) mod command;
 pub(in crate::ipc::server) mod common;
