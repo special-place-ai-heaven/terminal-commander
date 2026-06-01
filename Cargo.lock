@@ -1082,6 +1082,7 @@ dependencies = [
  "clap",
  "serde_json",
  "terminal-commander-core",
+ "terminal-commander-ipc",
  "terminal-commander-supervisor",
  "terminal-commanderd",
  "tokio",

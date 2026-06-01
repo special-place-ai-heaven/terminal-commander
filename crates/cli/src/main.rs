@@ -17,6 +17,13 @@ use terminal_commander_supervisor::paths::{
     endpoint_from_socket_path, resolve_socket_path, resolve_state_dir,
 };
 
+// P2: the single live-IPC call site. Staged here so Phase 3 can swap each
+// `daemon_backed_command_unavailable` stub for a real `connect_or_unavailable`
+// call without re-touching the transport. Items are `pub(crate)` but not yet
+// consumed by a subcommand (the stubs stay until Phase 3), so the not-yet-wired
+// entry points carry a scoped `dead_code` allow inside the module rather than a
+// blanket crate allow. The unit tests exercise the error->exit mapping today.
+pub(crate) mod ipc;
 pub(crate) mod update_locks;
 
 const EX_UNAVAILABLE: u8 = 69;
@@ -199,20 +206,34 @@ fn print_status() -> std::process::ExitCode {
         terminal_commander_supervisor::ensure::ensure_daemon(opts).await
     });
 
-    let (daemon_text, pid_text, exit_code) = match &status {
-        EnsureDaemonStatus::AlreadyRunning { pid, .. } => (
-            "running",
-            pid.map_or_else(|| "-".into(), |p| p.to_string()),
-            std::process::ExitCode::SUCCESS,
-        ),
-        EnsureDaemonStatus::Started { pid, .. } => (
-            "running",
-            pid.map_or_else(|| "-".into(), |p| p.to_string()),
-            std::process::ExitCode::SUCCESS,
-        ),
+    // The probed endpoint as the daemon records it in its pidfile: on Unix the
+    // socket path's display string, on Windows the `\\.\pipe\...` name. Both
+    // sides resolve via the same supervisor helpers, so this string is the key
+    // we cross-check the pidfile against (see `resolved_pid`).
+    let endpoint_string = endpoint_path.display().to_string();
+
+    let (daemon_text, pid_text, version_text, exit_code) = match &status {
+        // AlreadyRunning / Started: the Health handshake carries NO pid (the
+        // wire `IpcResponse::Health` has none), so `pid` is `None` on the
+        // AlreadyRunning path. The pidfile is the correct pid source: it
+        // records pid + version + the endpoint the daemon bound. We render its
+        // pid ONLY when its recorded endpoint matches the endpoint we probed,
+        // so a stale pidfile from a different socket never mislabels this one.
+        // "-" then means a genuine PRE-pidfile daemon (predates the feature).
+        EnsureDaemonStatus::AlreadyRunning { pid, .. }
+        | EnsureDaemonStatus::Started { pid, .. } => {
+            let (pid_text, version_text) = resolved_pid(*pid, &state_dir, &endpoint_string);
+            (
+                "running",
+                pid_text,
+                version_text,
+                std::process::ExitCode::SUCCESS,
+            )
+        }
         EnsureDaemonStatus::Unavailable { .. } => (
             "unavailable",
             "-".to_string(),
+            None,
             std::process::ExitCode::from(1),
         ),
     };
@@ -222,10 +243,34 @@ fn print_status() -> std::process::ExitCode {
     println!("  endpoint      : {}", endpoint_path.display());
     println!("  daemon        : {daemon_text}");
     println!("  pid           : {pid_text}");
+    if let Some(v) = version_text {
+        println!("  daemon_version: {v}");
+    }
     println!("  log_path      : {}", log_path.display());
     println!("  state_dir     : {}", state_dir.display());
 
     exit_code
+}
+
+/// Resolve the pid (and optional daemon version) to display for a reachable
+/// daemon. `ensure`'s `pid` is preferred when the supervisor knows it (the
+/// `Started` spawn path). Otherwise — the `AlreadyRunning` path, where the
+/// Health response carries no pid — fall back to the pidfile, but ONLY when its
+/// recorded endpoint matches the endpoint we probed. A mismatch (or absent /
+/// dead pidfile) yields `("-", None)`: a genuine pre-pidfile daemon, never a
+/// fabricated pid.
+fn resolved_pid(
+    ensure_pid: Option<u32>,
+    state_dir: &std::path::Path,
+    probed_endpoint: &str,
+) -> (String, Option<String>) {
+    if let Some(p) = ensure_pid {
+        return (p.to_string(), None);
+    }
+    match terminal_commander_supervisor::pidfile::read_pidfile(state_dir) {
+        Some(rec) if rec.endpoint == probed_endpoint => (rec.pid.to_string(), Some(rec.version)),
+        _ => ("-".to_string(), None),
+    }
 }
 
 /// One rendered row of the `session list` table.
@@ -972,6 +1017,70 @@ mod tests {
         );
         // Unresponsive: skipped, not force-killed on the soft idle path.
         assert_eq!(idle_reap_decision(None, 60), IdleReapDecision::Unresponsive);
+    }
+
+    #[test]
+    fn resolved_pid_prefers_ensure_pid() {
+        // When the supervisor already knows the pid (the spawn path), use it
+        // directly and do not touch the pidfile. No version is surfaced.
+        let dir = std::env::temp_dir().join(format!("tc-cli-rpid-prefer-{}", std::process::id()));
+        let (pid, version) = resolved_pid(Some(4321), &dir, "ignored-endpoint");
+        assert_eq!(pid, "4321");
+        assert_eq!(version, None);
+    }
+
+    #[test]
+    fn resolved_pid_reads_pidfile_on_endpoint_match() {
+        // AlreadyRunning path: ensure_pid is None, Health carries no pid, so we
+        // fall back to the pidfile WHEN its recorded endpoint matches.
+        let dir = std::env::temp_dir().join(format!("tc-cli-rpid-match-{}", std::process::id()));
+        let endpoint = r"\\.\pipe\terminal-commander-rpidtest";
+        terminal_commander_supervisor::pidfile::write_pidfile(
+            &dir,
+            &terminal_commander_supervisor::pidfile::RunningDaemon {
+                // Use this process's pid so read_pidfile's liveness filter keeps it.
+                pid: std::process::id(),
+                version: "9.9.9".into(),
+                endpoint: endpoint.into(),
+            },
+        )
+        .expect("write pidfile");
+        let (pid, version) = resolved_pid(None, &dir, endpoint);
+        assert_eq!(pid, std::process::id().to_string());
+        assert_eq!(version.as_deref(), Some("9.9.9"));
+        terminal_commander_supervisor::pidfile::remove_pidfile(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolved_pid_is_dash_on_endpoint_mismatch() {
+        // A pidfile recorded for a DIFFERENT endpoint must never mislabel the
+        // probed daemon's pid: "-" means a genuine pre-pidfile daemon.
+        let dir = std::env::temp_dir().join(format!("tc-cli-rpid-mismatch-{}", std::process::id()));
+        terminal_commander_supervisor::pidfile::write_pidfile(
+            &dir,
+            &terminal_commander_supervisor::pidfile::RunningDaemon {
+                pid: std::process::id(),
+                version: "9.9.9".into(),
+                endpoint: r"\\.\pipe\terminal-commander-OTHER".into(),
+            },
+        )
+        .expect("write pidfile");
+        let (pid, version) = resolved_pid(None, &dir, r"\\.\pipe\terminal-commander-PROBED");
+        assert_eq!(pid, "-");
+        assert_eq!(version, None);
+        terminal_commander_supervisor::pidfile::remove_pidfile(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolved_pid_is_dash_when_no_pidfile() {
+        // No pidfile at all (pre-pidfile daemon): "-" and no version.
+        let dir = std::env::temp_dir().join(format!("tc-cli-rpid-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (pid, version) = resolved_pid(None, &dir, "any-endpoint");
+        assert_eq!(pid, "-");
+        assert_eq!(version, None);
     }
 
     #[test]
