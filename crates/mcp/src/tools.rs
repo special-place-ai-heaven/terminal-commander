@@ -1302,27 +1302,57 @@ pub fn into_mcp_error(e: &IpcError) -> McpError {
     let data = serde_json::json!({
         "ipc_code": format!("{:?}", e.code),
     });
+    // Trust contract: a caller-fixable error MUST surface as
+    // `invalid_params` (JSON-RPC -32602) so the agent corrects its
+    // input and keeps routing through Terminal Commander. Mapping such
+    // an error to `internal_error` (-32603) signals "the server is
+    // broken", which trains agents to abandon TC and fall back to raw
+    // shell -- the exact behavior TC exists to prevent. Reserve
+    // `internal_error` for the few codes the caller genuinely cannot
+    // act on (a real server fault, a transport/credential failure, an
+    // unsupported host, or the daemon draining for shutdown). The match
+    // is exhaustive on purpose: adding an `IpcErrorCode` variant forces
+    // a deliberate classification here rather than silently defaulting
+    // to "broken".
     match e.code {
-        IpcErrorCode::PolicyDenied
-        | IpcErrorCode::UnknownMethod
+        IpcErrorCode::Internal
+        | IpcErrorCode::PeerCredentialFailure
+        | IpcErrorCode::UnsupportedPlatform
+        | IpcErrorCode::ShuttingDown => McpError::internal_error(message, Some(data)),
+        IpcErrorCode::FrameTooLarge
+        | IpcErrorCode::MalformedJson
         | IpcErrorCode::SchemaMismatch
+        | IpcErrorCode::UnknownMethod
+        | IpcErrorCode::PolicyDenied
+        | IpcErrorCode::BucketNotFound
+        | IpcErrorCode::EventNotFound
+        | IpcErrorCode::InvalidCursor
+        | IpcErrorCode::ShellInterpreterDenied
+        | IpcErrorCode::ArgvInvalid
+        | IpcErrorCode::UnknownJob
+        | IpcErrorCode::RuleNotFound
+        | IpcErrorCode::RuleInvalid
         | IpcErrorCode::ScopeInvalid
-        // RuleNotActive is a caller-fixable input error (activate a
-        // Draft rule): surface it as invalid_params with the remedy,
-        // not internal_error, so the LLM self-corrects instead of
-        // treating the tool as broken.
-        | IpcErrorCode::RuleNotActive
-        // RuleInvalid is likewise caller-fixable (bad rule JSON or an
-        // unknown rule-pack name -- the message lists valid packs), so
-        // the agent corrects its input rather than retrying blindly.
-        | IpcErrorCode::RuleInvalid => McpError::invalid_params(message, Some(data)),
-        _ => McpError::internal_error(message, Some(data)),
+        | IpcErrorCode::PathDenied
+        | IpcErrorCode::FileNotFound
+        | IpcErrorCode::FileBinary
+        | IpcErrorCode::OversizedRequest
+        | IpcErrorCode::UnknownWatch
+        | IpcErrorCode::SecretInputDenied
+        | IpcErrorCode::UnknownProbe
+        | IpcErrorCode::RuleNotActive => McpError::invalid_params(message, Some(data)),
     }
 }
 
-fn unexpected_variant(resp: &IpcResponse) -> McpError {
+fn unexpected_variant(_resp: &IpcResponse) -> McpError {
+    // Do NOT interpolate the response's Debug shape ({resp:?}): IpcResponse
+    // variants carry payloads (captured stream text, file-window content,
+    // rule definitions) that would leak into the client-facing error and
+    // bloat it with unbounded tokens. A wrong variant is a daemon-side
+    // protocol fault the caller cannot fix, so return a bounded,
+    // payload-free message (mirrors the system_discover precedent).
     McpError::internal_error(
-        Cow::Owned(format!("unexpected daemon response: {resp:?}")),
+        Cow::Borrowed("daemon returned a response that did not match the request method"),
         None,
     )
 }
@@ -2557,5 +2587,61 @@ mod tests {
         let e = IpcError::new(IpcErrorCode::PolicyDenied, "nope");
         let mcp = into_mcp_error(&e);
         assert!(mcp.message.contains("policy_denied") || mcp.message.contains("PolicyDenied"));
+    }
+
+    #[test]
+    fn caller_fixable_ipc_errors_map_to_invalid_params_server_faults_stay_internal() {
+        // -32602 invalid_params => the agent fixes its input and retries.
+        // -32603 internal_error => "TC is broken", agent abandons the tool
+        // and falls back to raw shell. Only genuine server faults may use
+        // -32603; everything an agent can act on must stay invalid_params
+        // so trust in Terminal Commander holds. This pins the classification
+        // so a future edit to `into_mcp_error` cannot silently regress a
+        // caller-fixable code back to internal_error.
+        let caller_fixable = [
+            IpcErrorCode::FrameTooLarge,
+            IpcErrorCode::MalformedJson,
+            IpcErrorCode::SchemaMismatch,
+            IpcErrorCode::UnknownMethod,
+            IpcErrorCode::PolicyDenied,
+            IpcErrorCode::BucketNotFound,
+            IpcErrorCode::EventNotFound,
+            IpcErrorCode::InvalidCursor,
+            IpcErrorCode::ShellInterpreterDenied,
+            IpcErrorCode::ArgvInvalid,
+            IpcErrorCode::UnknownJob,
+            IpcErrorCode::RuleNotFound,
+            IpcErrorCode::RuleInvalid,
+            IpcErrorCode::ScopeInvalid,
+            IpcErrorCode::PathDenied,
+            IpcErrorCode::FileNotFound,
+            IpcErrorCode::FileBinary,
+            IpcErrorCode::OversizedRequest,
+            IpcErrorCode::UnknownWatch,
+            IpcErrorCode::SecretInputDenied,
+            IpcErrorCode::UnknownProbe,
+            IpcErrorCode::RuleNotActive,
+        ];
+        for code in caller_fixable {
+            let mcp = into_mcp_error(&IpcError::new(code, "x"));
+            assert_eq!(
+                mcp.code.0, -32602,
+                "{code:?} must map to invalid_params so the agent self-corrects"
+            );
+        }
+
+        let server_fault = [
+            IpcErrorCode::Internal,
+            IpcErrorCode::PeerCredentialFailure,
+            IpcErrorCode::UnsupportedPlatform,
+            IpcErrorCode::ShuttingDown,
+        ];
+        for code in server_fault {
+            let mcp = into_mcp_error(&IpcError::new(code, "x"));
+            assert_eq!(
+                mcp.code.0, -32603,
+                "{code:?} is not caller-fixable and must stay internal_error"
+            );
+        }
     }
 }

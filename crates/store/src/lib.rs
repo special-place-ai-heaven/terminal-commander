@@ -158,6 +158,14 @@ pub enum EventStoreError {
     MountInfo(String),
     #[error("invalid stored payload: {0}")]
     InvalidPayload(String),
+    /// The store backend is unavailable or faulted in a way the caller
+    /// cannot act on: the single-writer actor thread is gone, dropped
+    /// its reply channel, returned an unexpected reply, or an op panicked
+    /// and was isolated. Distinct from `InvalidPayload` (a caller-fixable
+    /// bad input) so it can map to a server-fault IPC code, never to a
+    /// "fix your input" code.
+    #[error("store unavailable: {0}")]
+    Unavailable(String),
 }
 
 /// Per-mod result alias.

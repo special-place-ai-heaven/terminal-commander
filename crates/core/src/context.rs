@@ -362,24 +362,61 @@ impl RingInner {
             .unwrap_or(MAX_WINDOW_BYTES)
             .min(MAX_WINDOW_BYTES);
 
-        let mut out: Vec<ContextLine> = Vec::new();
-        let mut bytes_used: usize = 0;
+        // Build the window OUTWARD from the anchor so the matched line
+        // is always present, even when `cap_bytes` is tight. The old
+        // implementation accumulated linearly from `want_start`, so a
+        // small byte budget could be exhausted before reaching the
+        // anchor -- returning context that omitted the very event the
+        // caller asked about, with `anchor_missing=false` and no flag.
+        // The anchor is always included (like `tail`, even if it alone
+        // exceeds the cap); neighbors are then added alternately toward
+        // `after` and `before` within the byte and frame budgets, and
+        // the contiguous [lo, hi] window is emitted oldest-first.
         let mut truncated_bytes = false;
         let mut truncated_frames = false;
-        for i in want_start..=end {
-            let frame = &self.frames[i];
-            if out.len() >= MAX_WINDOW_FRAMES {
-                truncated_frames = true;
+        let mut lo = anchor_idx;
+        let mut hi = anchor_idx;
+        let mut bytes_used = self.frames[anchor_idx].text.len();
+        let mut frame_count = 1usize;
+        loop {
+            let mut progressed = false;
+            if hi < end {
+                if frame_count >= MAX_WINDOW_FRAMES {
+                    truncated_frames = true;
+                } else {
+                    let b = self.frames[hi + 1].text.len();
+                    if bytes_used.saturating_add(b) > cap_bytes {
+                        truncated_bytes = true;
+                    } else {
+                        hi += 1;
+                        bytes_used = bytes_used.saturating_add(b);
+                        frame_count += 1;
+                        progressed = true;
+                    }
+                }
+            }
+            if lo > want_start {
+                if frame_count >= MAX_WINDOW_FRAMES {
+                    truncated_frames = true;
+                } else {
+                    let b = self.frames[lo - 1].text.len();
+                    if bytes_used.saturating_add(b) > cap_bytes {
+                        truncated_bytes = true;
+                    } else {
+                        lo -= 1;
+                        bytes_used = bytes_used.saturating_add(b);
+                        frame_count += 1;
+                        progressed = true;
+                    }
+                }
+            }
+            if !progressed {
                 break;
             }
-            let frame_bytes = frame.text.len();
-            if bytes_used.saturating_add(frame_bytes) > cap_bytes && !out.is_empty() {
-                truncated_bytes = true;
-                break;
-            }
-            bytes_used = bytes_used.saturating_add(frame_bytes);
-            out.push(ContextLine::from(frame));
         }
+        let out: Vec<ContextLine> = (lo..=hi)
+            .map(|i| ContextLine::from(&self.frames[i]))
+            .collect();
 
         ContextWindowResponse {
             probe_id: req.probe_id,
@@ -717,6 +754,37 @@ mod tests {
         // ones are truncated when bytes_used would exceed cap.
         assert!(resp.truncated_bytes);
         assert!(!resp.frames.is_empty());
+    }
+
+    #[test]
+    fn context_byte_cap_still_includes_anchor() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        mgr.create_ring_default(pid).unwrap();
+        let texts = ["aaaa", "bbbb", "cccc", "dddd", "eeee"];
+        let mut ids = Vec::new();
+        for t in texts {
+            let f = frame(pid, t, 1);
+            ids.push(f.frame_id);
+            mgr.append_frame(pid, f).unwrap();
+        }
+        // Cap fits only ~1 frame. The anchor (middle frame) MUST still be
+        // present: returning context that omits the matched event would
+        // mislead the agent and break the event_context contract.
+        let req = ContextWindowRequest {
+            probe_id: pid,
+            anchor: ids[2],
+            before: 2,
+            after: 2,
+            max_bytes: Some(5),
+        };
+        let resp = mgr.window(&req).unwrap();
+        assert!(!resp.anchor_missing);
+        assert!(resp.truncated_bytes);
+        assert!(
+            resp.frames.iter().any(|f| f.frame_id == ids[2]),
+            "anchor frame must always be in the window, even under a tight byte cap"
+        );
     }
 
     #[test]

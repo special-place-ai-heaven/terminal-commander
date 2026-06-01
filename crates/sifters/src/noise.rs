@@ -85,8 +85,6 @@ struct DedupeEntry {
     first_seen: OffsetDateTime,
     last_seen: OffsetDateTime,
     count: u32,
-    /// Index of the representative draft in the current `apply_at` batch.
-    representative_index: usize,
     /// Bucket seq assigned when the representative was first appended.
     representative_seq: Option<u64>,
 }
@@ -138,6 +136,16 @@ impl Dedupe {
 
         let mut emit: Vec<EventDraft> = Vec::with_capacity(drafts.len());
         let mut patches: Vec<DedupeAggregatePatch> = Vec::new();
+        // Key -> index of its representative draft IN THIS BATCH's `emit`
+        // vec. A `DedupeEntry` persists across `apply_at` calls, so an index
+        // captured in a prior batch would address an unrelated draft in this
+        // batch's fresh `emit` vec -- the source of a cross-batch corruption
+        // where one event was emitted with another's count/timestamps.
+        // Tracking the index per batch confines the in-`emit` collapse patch
+        // to same-batch representatives; a cross-batch recurrence is
+        // reflected only through the persisted `representative_seq` bucket
+        // patch below.
+        let mut batch_index: HashMap<String, usize> = HashMap::new();
         for mut d in drafts {
             if d.severity >= policy.dedupe_severity_max {
                 // High/Critical: never collapse.
@@ -148,13 +156,18 @@ impl Dedupe {
             if let Some(entry) = self.state.get_mut(&key) {
                 entry.count = entry.count.saturating_add(1);
                 entry.last_seen = d.timestamp;
-                // Update the representative draft in the current batch.
-                if let Some(rep) = emit.get_mut(entry.representative_index) {
+                // Same-batch collapse only: patch the representative draft if
+                // it was emitted in THIS batch. A carried-over entry has no
+                // batch_index entry, so its prior-batch index is never used
+                // to index this batch's emit vec.
+                if let Some(&idx) = batch_index.get(&key)
+                    && let Some(rep) = emit.get_mut(idx)
+                {
                     rep.count = entry.count;
                     rep.first_seen = Some(entry.first_seen);
                     rep.last_seen = Some(entry.last_seen);
                 }
-                // Patch the already-appended bucket row when known.
+                // Patch the already-appended bucket row when its seq is known.
                 if let Some(seq) = entry.representative_seq {
                     patches.push(DedupeAggregatePatch {
                         seq,
@@ -167,13 +180,13 @@ impl Dedupe {
             }
             // First occurrence in window.
             let representative_index = emit.len();
+            batch_index.insert(key.clone(), representative_index);
             self.state.insert(
                 key,
                 DedupeEntry {
                     first_seen: d.timestamp,
                     last_seen: d.timestamp,
                     count: 1,
-                    representative_index,
                     representative_seq: None,
                 },
             );
@@ -192,7 +205,13 @@ pub fn dedupe_bypass_kind(kind: &str) -> bool {
     kind == "password_prompt"
 }
 
-/// Canonical dedupe key: `<rule_id>|<kind>|<sorted captures>`.
+/// Canonical dedupe key:
+/// `<rule_id>|<version>|<kind>|<sorted captures>` (or
+/// `<no-rule>|<kind>|<sorted captures>` when no rule matched).
+///
+/// The `version` segment is load-bearing: a rule version bump
+/// intentionally splits dedupe buckets so a redefined rule never
+/// collapses against events from its prior version. Do not drop it.
 fn dedupe_key(
     rule: Option<&RuleRef>,
     captures: Option<&terminal_commander_core::Captures>,
@@ -336,6 +355,55 @@ mod tests {
         assert_eq!(out[0].count, 3);
         assert!(out[0].first_seen.is_some());
         assert!(out[0].last_seen.is_some());
+    }
+
+    #[test]
+    fn cross_batch_repeat_does_not_corrupt_an_unrelated_draft() {
+        // Regression: a DedupeEntry carried across apply_at calls used to
+        // index THIS batch's emit vec with a PRIOR batch's representative
+        // index, overwriting an unrelated draft's count/timestamps. Here K1
+        // (pkg=a) is the representative from batch A; in batch B a fresh key
+        // K2 (pkg=b) lands at emit index 0 and a K1 repeat follows. K1's
+        // repeat must NOT touch K2.
+        let mut d = Dedupe::new();
+        let pol = NoisePolicy::default();
+        let rid = RuleId::new();
+        let ts = OffsetDateTime::now_utc();
+
+        // Batch A: K1 becomes the representative; register its bucket seq so
+        // a cross-batch patch has a target.
+        let a = d.apply_at(
+            vec![draft(rid, Severity::Low, &[("pkg", "a")], ts)],
+            &pol,
+            ts,
+        );
+        assert_eq!(a.emit.len(), 1);
+        d.register_emitted(&a.emit[0], 4242);
+
+        // Batch B: a NEW key K2 is the first occurrence (emit index 0),
+        // followed by a repeat of K1. With the old stale-index bug, K1's
+        // repeat wrote K1's aggregate onto emit[0] == the K2 draft.
+        let b = d.apply_at(
+            vec![
+                draft(rid, Severity::Low, &[("pkg", "b")], ts),
+                draft(rid, Severity::Low, &[("pkg", "a")], ts),
+            ],
+            &pol,
+            ts,
+        );
+
+        // Only the fresh K2 draft is emitted, and it is UNCORRUPTED: count 1
+        // (it must not inherit K1's aggregated count of 2).
+        assert_eq!(b.emit.len(), 1, "only the fresh K2 draft is emitted");
+        assert_eq!(
+            b.emit[0].count, 1,
+            "K2 must not inherit K1's aggregated count"
+        );
+        // K1's cross-batch recurrence is reflected as a patch on K1's own seq.
+        assert!(
+            b.patches.iter().any(|p| p.seq == 4242 && p.count == 2),
+            "K1 recurrence must patch its own bucket row (seq 4242) to count 2"
+        );
     }
 
     #[test]

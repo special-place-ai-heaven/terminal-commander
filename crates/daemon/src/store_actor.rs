@@ -21,7 +21,7 @@
 //! thread drains all queued ops, runs `PRAGMA wal_checkpoint(FULL)`
 //! via [`EventStore::wal_checkpoint_full`], and exits. After join,
 //! every subsequent `call` returns
-//! [`EventStoreError::InvalidPayload`] with the closed-channel
+//! [`EventStoreError::Unavailable`] with the closed-channel
 //! message.
 //!
 //! Production callers: [`crate::state::DaemonState::store`],
@@ -160,9 +160,7 @@ impl StoreClient {
         let join = thread::Builder::new()
             .name("tc-store-actor".to_owned())
             .spawn(move || actor_loop(store, rx))
-            .map_err(|e| {
-                EventStoreError::InvalidPayload(format!("spawn store-actor thread: {e}"))
-            })?;
+            .map_err(|e| EventStoreError::Unavailable(format!("spawn store-actor thread: {e}")))?;
         Ok(Self {
             inner: Arc::new(Inner {
                 tx,
@@ -173,18 +171,18 @@ impl StoreClient {
 
     /// Blocking RPC: send the op, wait for the ack. Returns the
     /// typed reply or the per-op error. Channel-closed surfaces as
-    /// `EventStoreError::InvalidPayload`.
+    /// `EventStoreError::Unavailable`.
     pub fn call(&self, op: StoreOp) -> Result<StoreReply, EventStoreError> {
         let (ack_tx, ack_rx) = sync_channel::<Result<StoreReply, EventStoreError>>(1);
         self.inner
             .tx
             .send(StoreMsg { op, ack: ack_tx })
             .map_err(|_| {
-                EventStoreError::InvalidPayload("store actor thread is no longer running".into())
+                EventStoreError::Unavailable("store actor thread is no longer running".into())
             })?;
-        ack_rx.recv().map_err(|_| {
-            EventStoreError::InvalidPayload("store actor dropped reply channel".into())
-        })?
+        ack_rx
+            .recv()
+            .map_err(|_| EventStoreError::Unavailable("store actor dropped reply channel".into()))?
     }
 
     /// Idempotent shutdown. Sends `Shutdown` (best-effort — the
@@ -205,7 +203,7 @@ impl StoreClient {
             ack: ack_tx,
         });
         handle.join().map_err(|_| {
-            EventStoreError::InvalidPayload("store actor thread panicked during shutdown".into())
+            EventStoreError::Unavailable("store actor thread panicked during shutdown".into())
         })?;
         Ok(())
     }
@@ -355,7 +353,7 @@ impl StoreClient {
 }
 
 fn unexpected_store_reply(op: &str, reply: &StoreReply) -> EventStoreError {
-    EventStoreError::InvalidPayload(format!(
+    EventStoreError::Unavailable(format!(
         "store actor {op}: unexpected reply variant {reply:?}"
     ))
 }
@@ -377,7 +375,7 @@ fn actor_loop(mut store: EventStore, rx: Receiver<StoreMsg>) {
             let _ = msg.ack.send(Ok(StoreReply::Unit));
             return;
         }
-        let reply = execute(&mut store, msg.op);
+        let reply = execute_guarded(&mut store, msg.op);
         let _ = msg.ack.send(reply);
     }
     // Channel closed without explicit shutdown (every client
@@ -393,7 +391,7 @@ fn drain_remaining(store: &mut EventStore, rx: &Receiver<StoreMsg>) {
             let _ = msg.ack.send(Ok(StoreReply::Unit));
             continue;
         }
-        let reply = execute(store, msg.op);
+        let reply = execute_guarded(store, msg.op);
         let _ = msg.ack.send(reply);
     }
 }
@@ -450,6 +448,49 @@ fn execute(store: &mut EventStore, op: StoreOp) -> Result<StoreReply, EventStore
             .map(StoreReply::Bool),
         StoreOp::Shutdown => Ok(StoreReply::Unit),
     }
+}
+
+/// Panic-isolated wrapper around [`execute`]. A panic inside any
+/// `EventStore` method would otherwise unwind out of [`actor_loop`] and
+/// kill the single store-writer thread, turning every subsequent
+/// [`StoreClient::call`] into an `Unavailable` error -- silently
+/// disabling ALL persistence and audit for the daemon's life. Catching
+/// the unwind converts one bad op into a typed error for that one caller
+/// while the loop keeps serving. Any in-flight rusqlite transaction
+/// borrows `&mut conn` and rolls back on Drop during the unwind, so the
+/// connection remains usable.
+fn execute_guarded(store: &mut EventStore, op: StoreOp) -> Result<StoreReply, EventStoreError> {
+    guard_panic(|| execute(store, op))
+}
+
+/// Run a store closure with `catch_unwind`, converting a panic into a
+/// typed [`EventStoreError::Unavailable`] (and logging it so the
+/// otherwise-silent degradation is observable). Factored out from
+/// [`execute_guarded`] so the isolation contract is unit-testable
+/// without a real panicking store op.
+fn guard_panic<F>(f: F) -> Result<StoreReply, EventStoreError>
+where
+    F: FnOnce() -> Result<StoreReply, EventStoreError>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(reply) => reply,
+        Err(panic) => {
+            let detail = panic_message(&*panic);
+            eprintln!("terminal-commanderd: store op panicked, store actor survived: {detail}");
+            Err(EventStoreError::Unavailable(format!(
+                "store operation panicked: {detail}"
+            )))
+        }
+    }
+}
+
+/// Best-effort extraction of a panic payload's message string.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic payload".to_owned())
 }
 
 #[cfg(test)]
@@ -538,7 +579,10 @@ mod tests {
             .call(StoreOp::AuditCount)
             .expect_err("call after shutdown must error");
         match err {
-            EventStoreError::InvalidPayload(msg) => {
+            // A closed channel after shutdown is a backend-unavailable
+            // fault, not a caller-fixable InvalidPayload (so the IPC layer
+            // reports Internal, not RuleInvalid).
+            EventStoreError::Unavailable(msg) => {
                 assert!(
                     msg.contains("store actor") || msg.contains("no longer running"),
                     "unexpected error message: {msg}"
@@ -611,5 +655,30 @@ mod tests {
         }
 
         client.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn panicking_op_is_isolated_as_unavailable_not_thread_death() {
+        // A panic inside a store op must be caught and surfaced as a
+        // typed `Unavailable` error so the single-writer actor thread
+        // survives instead of dying and disabling all persistence for
+        // the daemon's life. Silence the default panic hook so the
+        // deliberate panic does not spam test output.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let boom = guard_panic(|| panic!("boom-42"));
+        let pass = guard_panic(|| Ok(StoreReply::Unit));
+        std::panic::set_hook(prev);
+
+        match boom {
+            Err(EventStoreError::Unavailable(m)) => {
+                assert!(m.contains("boom-42"), "panic detail must propagate: {m}");
+            }
+            other => panic!("a panicking op must yield Unavailable, got {other:?}"),
+        }
+        assert!(
+            matches!(pass, Ok(StoreReply::Unit)),
+            "a non-panicking op must pass through unchanged"
+        );
     }
 }

@@ -104,7 +104,7 @@ impl AuditSink for PersistentAudit {
 }
 
 fn unexpected_reply(op: &str, reply: &StoreReply) -> EventStoreError {
-    EventStoreError::InvalidPayload(format!(
+    EventStoreError::Unavailable(format!(
         "store actor {op}: unexpected reply variant {reply:?}"
     ))
 }

@@ -219,20 +219,31 @@ async fn run(
 
                 if pos < size {
                     f.seek(SeekFrom::Start(pos)).await?;
-                    let mut reader = BufReader::new(f).lines();
-                    while let Some(line) = reader.next_line().await? {
+                    let mut reader = BufReader::new(f);
+                    let scan_once = matches!(config.mode, FileProbeMode::ScanOnce);
+                    // Read whole, newline-terminated lines and advance
+                    // `pos` by the exact raw on-disk byte count
+                    // (terminator included) so byte offsets stay aligned
+                    // across CRLF lines and re-opens. A trailing line
+                    // with no `\n` is emitted only in ScanOnce; in follow
+                    // mode it is left unconsumed (pos not advanced) so a
+                    // still-growing final line is read exactly once, when
+                    // complete -- never mis-split or re-emitted, and a
+                    // stray non-UTF-8 byte never aborts the probe.
+                    while let Some(line) = read_file_line(&mut reader).await? {
+                        if !line.terminated && !scan_once {
+                            break;
+                        }
                         line_no = line_no.saturating_add(1);
-                        let bytes = line.len() as u64;
-                        let normalized = line.trim_end_matches('\r').to_owned();
-                        let frame = SourceFrame::new(probe_id, SourceStream::File, normalized)
+                        let frame = SourceFrame::new(probe_id, SourceStream::File, line.text)
                             .with_line(line_no)
                             .with_byte_offset(pos);
-                        pos = pos.saturating_add(bytes).saturating_add(1);
+                        pos = pos.saturating_add(line.raw_len);
                         let _ = rings.append_frame(probe_id, frame.clone());
                         {
                             let mut m = metrics.lock();
                             m.frames_total = m.frames_total.saturating_add(1);
-                            m.bytes_total = m.bytes_total.saturating_add(bytes);
+                            m.bytes_total = m.bytes_total.saturating_add(line.raw_len);
                         }
                         let mut events_emitted = metrics.lock().events_emitted;
                         {
@@ -261,6 +272,85 @@ async fn run(
             _ = &mut cancel_rx => return Err(FileProbeError::Cancelled),
         }
     }
+}
+
+/// Maximum bytes retained for a single file line's decoded text. A
+/// pathological newline-less file cannot grow the per-line buffer past
+/// this; excess text bytes are dropped, but `raw_len` still reflects the
+/// true on-disk byte count so `pos` stays aligned.
+const MAX_FILE_LINE_BYTES: usize = 64 * 1024;
+
+/// One line read from a followed file.
+struct FileLineRead {
+    /// Lossily-decoded line text with any trailing `\r` (CRLF) removed.
+    text: String,
+    /// Exact raw on-disk bytes this line occupied, terminator included.
+    /// `pos` advances by this so byte offsets stay aligned regardless of
+    /// CRLF endings or capped/lossy text.
+    raw_len: u64,
+    /// Whether a `\n` terminator was seen. `false` = a still-growing
+    /// final line; follow mode leaves it for the next poll.
+    terminated: bool,
+}
+
+/// Read one line from `reader`, splitting on `\n`. Decodes with
+/// `from_utf8_lossy` so a stray non-UTF-8 byte never aborts the probe
+/// (the prior `lines()`/`next_line()` path returned `Err` and silently
+/// stopped following). Returns `None` only at EOF with nothing buffered.
+async fn read_file_line<R>(reader: &mut R) -> std::io::Result<Option<FileLineRead>>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut text: Vec<u8> = Vec::new();
+    let mut raw_len: u64 = 0;
+    let mut saw_input = false;
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            // EOF. Surface a buffered, newline-less tail as unterminated.
+            if saw_input {
+                return Ok(Some(FileLineRead {
+                    text: decode_file_line(&text),
+                    raw_len,
+                    terminated: false,
+                }));
+            }
+            return Ok(None);
+        }
+        saw_input = true;
+        if let Some(idx) = chunk.iter().position(|&b| b == b'\n') {
+            push_capped(&mut text, &chunk[..idx]);
+            // raw_len counts the line bytes plus the `\n` itself.
+            raw_len = raw_len.saturating_add(idx as u64).saturating_add(1);
+            reader.consume(idx + 1);
+            return Ok(Some(FileLineRead {
+                text: decode_file_line(&text),
+                raw_len,
+                terminated: true,
+            }));
+        }
+        let take = chunk.len();
+        push_capped(&mut text, chunk);
+        raw_len = raw_len.saturating_add(take as u64);
+        reader.consume(take);
+    }
+}
+
+/// Append `more` to `buf`, retaining at most [`MAX_FILE_LINE_BYTES`].
+/// Excess text is dropped (the raw byte count is tracked separately by
+/// the caller so `pos` accounting is unaffected by the cap).
+fn push_capped(buf: &mut Vec<u8>, more: &[u8]) {
+    let room = MAX_FILE_LINE_BYTES.saturating_sub(buf.len());
+    let take = room.min(more.len());
+    buf.extend_from_slice(&more[..take]);
+}
+
+/// Decode raw line bytes as lossy UTF-8 and strip a single trailing
+/// `\r` so a CRLF-terminated line yields the same text as an LF line.
+fn decode_file_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim_end_matches('\r')
+        .to_owned()
 }
 
 /// Test-friendly factory that returns an InMemorySink alongside the
@@ -313,6 +403,69 @@ mod tests {
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("tc-file-probe-{}-{}", std::process::id(), name))
+    }
+
+    #[test]
+    fn read_file_line_splits_lf_and_reports_raw_len() {
+        rt().block_on(async {
+            let mut src: &[u8] = b"abc\ndef\n";
+            let l1 = read_file_line(&mut src).await.unwrap().unwrap();
+            assert_eq!(l1.text, "abc");
+            assert_eq!(l1.raw_len, 4); // "abc\n"
+            assert!(l1.terminated);
+            let l2 = read_file_line(&mut src).await.unwrap().unwrap();
+            assert_eq!(l2.text, "def");
+            assert_eq!(l2.raw_len, 4);
+            assert!(l2.terminated);
+            assert!(read_file_line(&mut src).await.unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn read_file_line_crlf_offset_counts_cr_byte() {
+        rt().block_on(async {
+            // CRLF: the `\r` is stripped from the text but MUST be counted
+            // in raw_len, else `pos` drifts one byte per line and the next
+            // poll re-reads/duplicates content.
+            let mut src: &[u8] = b"win\r\nnext\r\n";
+            let l1 = read_file_line(&mut src).await.unwrap().unwrap();
+            assert_eq!(l1.text, "win");
+            assert_eq!(l1.raw_len, 5); // "win\r\n" == 5 on-disk bytes
+            assert!(l1.terminated);
+        });
+    }
+
+    #[test]
+    fn read_file_line_unterminated_tail_is_flagged() {
+        rt().block_on(async {
+            let mut src: &[u8] = b"done\npartial";
+            let l1 = read_file_line(&mut src).await.unwrap().unwrap();
+            assert!(l1.terminated);
+            let l2 = read_file_line(&mut src).await.unwrap().unwrap();
+            assert_eq!(l2.text, "partial");
+            assert_eq!(l2.raw_len, 7);
+            assert!(
+                !l2.terminated,
+                "a newline-less tail must be flagged so follow mode holds it back"
+            );
+        });
+    }
+
+    #[test]
+    fn read_file_line_non_utf8_does_not_abort() {
+        rt().block_on(async {
+            // 0xFF is invalid UTF-8. The old next_line() path returned Err
+            // and silently stopped the probe; lossy decode must keep going.
+            let mut src: &[u8] = b"ab\xffcd\n";
+            let l1 = read_file_line(&mut src).await.unwrap().unwrap();
+            assert!(l1.terminated);
+            assert_eq!(l1.raw_len, 6); // 5 line bytes + '\n'
+            assert!(
+                l1.text.contains('\u{FFFD}'),
+                "invalid byte replaced with U+FFFD, not fatal: {:?}",
+                l1.text
+            );
+        });
     }
 
     #[test]

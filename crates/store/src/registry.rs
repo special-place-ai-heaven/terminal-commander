@@ -67,6 +67,29 @@ pub struct ActiveRuleDef {
     pub scope: ActivationScope,
 }
 
+/// Quote each whitespace-delimited term of an agent-supplied search
+/// string as an FTS5 string literal, joined by spaces (implicit AND).
+///
+/// The FTS5 `MATCH` right-hand side is a query *language*: passing raw
+/// agent text in lets a stray `"`, `*`, `:`, `(`, or a bare
+/// `AND`/`OR`/`NOT`/`NEAR` token either raise `SQLITE_ERROR: fts5:
+/// syntax error` (which surfaces to the agent as "registry_search is
+/// broken") or silently change semantics (`tags_text:` would become a
+/// column filter). Wrapping every token as a double-quoted FTS5 string
+/// literal (escaping embedded quotes by doubling) neutralizes every
+/// metacharacter, yielding a plain term-AND search that can never raise
+/// a syntax error regardless of input.
+///
+/// Returns an empty string for an all-whitespace/empty query; the
+/// caller treats that as "no results" rather than binding an empty
+/// MATCH expression (which itself errors).
+fn fts5_quote_terms(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|tok| format!("\"{}\"", tok.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 impl EventStore {
     /// Run the V0002 + V0004 registry migrations. Idempotent.
     pub fn ensure_registry(&mut self) -> Result<()> {
@@ -189,6 +212,11 @@ impl EventStore {
             ],
         )?;
 
+        // Capture the rule_versions rowid NOW, before the rule_tags
+        // inserts below advance last_insert_rowid(), so the FTS row can
+        // be keyed to the exact content rowid it indexes.
+        let rv_rowid = tx.last_insert_rowid();
+
         // Tags.
         for tag in &def.tags {
             tx.execute(
@@ -197,12 +225,23 @@ impl EventStore {
             )?;
         }
 
-        // FTS5 row.
+        // FTS5 row. Supply the rowid explicitly so it equals the
+        // rule_versions rowid this row indexes. rule_search is an
+        // external-content FTS5 (content='rule_versions',
+        // content_rowid='rowid'); without an explicit rowid FTS5 assigns
+        // its own sequence, leaving the `rv.rowid = rs.rowid` join in
+        // search_rules correct only by coincidental 1:1 insert order.
         let tags_text = def.tags.join(" ");
         tx.execute(
-            "INSERT INTO rule_search (rule_id, event_kind, summary_template, tags_text)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![&def.id, &def.event_kind, &def.summary_template, &tags_text],
+            "INSERT INTO rule_search (rowid, rule_id, event_kind, summary_template, tags_text)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                rv_rowid,
+                &def.id,
+                &def.event_kind,
+                &def.summary_template,
+                &tags_text
+            ],
         )?;
 
         tx.commit()?;
@@ -261,20 +300,41 @@ impl EventStore {
     }
 
     /// Bounded text search over rule_versions FTS5.
+    ///
+    /// The agent-supplied `query` is sanitized into a safe FTS5 `MATCH`
+    /// expression by [`fts5_quote_terms`] before binding, so stray
+    /// query-language metacharacters (`"`, `*`, `:`, `(`, bare
+    /// `AND`/`OR`/`NOT`) can never raise an FTS5 syntax error that would
+    /// make `registry_search` look broken to the agent.
     pub fn search_rules(&self, query: &str, limit: Option<usize>) -> Result<Vec<RuleSearchHit>> {
         let lim = limit
             .unwrap_or(DEFAULT_SEARCH_LIMIT)
             .clamp(1, MAX_SEARCH_LIMIT);
         let lim_i = i64::try_from(lim).unwrap_or(i64::MAX);
+
+        // An all-whitespace/empty query has no terms to match: return no
+        // results rather than binding an empty MATCH (which errors).
+        let match_query = fts5_quote_terms(query);
+        if match_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Return only each rule's LATEST version. rule_search retains an
+        // FTS row per historical version (they are never deleted), so an
+        // unrestricted match yields N duplicate hits for a rule edited N
+        // times, crowding distinct rules out of the LIMIT/rank budget.
+        // Joining rules.latest_version collapses those to one current hit
+        // per rule and makes search reflect the live definition.
         let mut stmt = self.conn.prepare(
             "SELECT rv.rule_id, rv.version, rv.event_kind, rv.status, rv.severity, rv.definition
-             FROM rule_search rs
-             JOIN rule_versions rv ON rv.rowid = rs.rowid
-             WHERE rule_search MATCH ?1
-             ORDER BY rank
-             LIMIT ?2",
+                 FROM rule_search rs
+                 JOIN rule_versions rv ON rv.rowid = rs.rowid
+                 JOIN rules ru ON ru.rule_id = rv.rule_id AND ru.latest_version = rv.version
+                 WHERE rule_search MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
         )?;
-        let mut rows = stmt.query(params![query, lim_i])?;
+        let mut rows = stmt.query(params![match_query, lim_i])?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             let rule_id: String = row.get(0)?;
@@ -677,6 +737,94 @@ mod tests {
         s.create_rule_version(&r("b", &["apt"])).unwrap();
         let hits = s.search_rules("apt", Some(1)).unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn registry_search_handles_fts5_metacharacters_without_error() {
+        let mut s = EventStore::in_memory().unwrap();
+        s.create_rule_version(&r("apt-missing", &["apt", "packaging"]))
+            .unwrap();
+        // None of these may raise an FTS5 syntax error; each must return
+        // Ok (possibly empty) so registry_search never looks "broken" to
+        // an agent that searched with ordinary punctuation.
+        for q in [
+            "\"",           // lone double quote
+            "size:",        // trailing column-filter colon
+            "ENOENT (open", // unbalanced paren
+            "a AND b",      // bare boolean operator
+            "npm ERR!",     // punctuation
+            "error[E0277]", // brackets
+            "*",            // bare prefix star
+            "   ",          // all whitespace
+            "",             // empty
+        ] {
+            let hits = s
+                .search_rules(q, None)
+                .unwrap_or_else(|e| panic!("query {q:?} must not error, got {e:?}"));
+            let _ = hits;
+        }
+        // Sanitization is transparent for an ordinary token: the rule is
+        // still found.
+        let hits = s.search_rules("apt", None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "apt-missing");
+    }
+
+    #[test]
+    fn fts5_quote_terms_escapes_metacharacters() {
+        assert_eq!(fts5_quote_terms("apt"), "\"apt\"");
+        assert_eq!(fts5_quote_terms("npm ERR!"), "\"npm\" \"ERR!\"");
+        assert_eq!(fts5_quote_terms("a\"b"), "\"a\"\"b\"");
+        assert_eq!(fts5_quote_terms("   "), "");
+        assert_eq!(fts5_quote_terms(""), "");
+    }
+
+    #[test]
+    fn registry_search_returns_only_latest_version_no_duplicate_hits() {
+        let mut s = EventStore::in_memory().unwrap();
+        // Three versions of one rule. Every version carries the shared
+        // tag "common"; only v1 carries "stale", only the latest (v3)
+        // carries "fresh".
+        s.create_rule_version(&r("dup-rule", &["common", "stale"]))
+            .unwrap();
+        s.create_rule_version(&r("dup-rule", &["common", "midver"]))
+            .unwrap();
+        s.create_rule_version(&r("dup-rule", &["common", "fresh"]))
+            .unwrap();
+        // A second, distinct rule that must not be crowded out of a small
+        // LIMIT by the first rule's stale version rows.
+        s.create_rule_version(&r("other-rule", &["common"]))
+            .unwrap();
+
+        // A tag shared by every version yields ONE hit per rule (the
+        // latest), not one per version -- otherwise N edits crowd the
+        // LIMIT and starve other rules.
+        let hits = s.search_rules("common", None).unwrap();
+        let dup: Vec<_> = hits.iter().filter(|h| h.rule_id == "dup-rule").collect();
+        assert_eq!(
+            dup.len(),
+            1,
+            "exactly one (latest) hit per rule, not one per version"
+        );
+        assert_eq!(dup[0].version, 3, "the surfaced version is the latest");
+        assert!(
+            hits.iter().any(|h| h.rule_id == "other-rule"),
+            "a distinct rule must not be crowded out by stale version rows"
+        );
+
+        // A tag present only on a superseded version must NOT surface the
+        // rule: search reflects the current (latest) definition.
+        let stale = s.search_rules("stale", None).unwrap();
+        assert!(
+            stale.iter().all(|h| h.rule_id != "dup-rule"),
+            "a tag only on an old version must not surface the rule"
+        );
+
+        // A tag only on the latest version matches and reports v3.
+        let fresh = s.search_rules("fresh", None).unwrap();
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].rule_id, "dup-rule");
+        assert_eq!(fresh[0].version, 3);
     }
 
     #[test]
