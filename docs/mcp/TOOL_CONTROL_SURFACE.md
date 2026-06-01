@@ -58,13 +58,13 @@ Machine-readable fixture:
 
 ## 2. Live tool catalogue
 
-The current rmcp stdio adapter exposes 29 live tools.
+The current rmcp stdio adapter exposes 32 live tools.
 
 | Group | Tools |
 |---|---|
 | Discovery and health | `system_discover`, `health`, `policy_status`, `self_check` |
-| Commands and buckets | `command_start_combed`, `command_status`, `bucket_events_since`, `bucket_wait`, `bucket_summary`, `event_context` |
-| Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_deactivate`, `registry_list_active` |
+| Commands and buckets | `command_start_combed`, `run_and_watch`, `command_status`, `command_output_tail`, `bucket_events_since`, `bucket_wait`, `bucket_summary`, `event_context` |
+| Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_import_pack`, `registry_deactivate`, `registry_list_active` |
 | Files | `file_read_window`, `file_search`, `file_watch_start`, `file_watch_stop`, `file_watch_list` |
 | PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` |
 | Runtime | `runtime_state`, `probe_list`, `probe_status` |

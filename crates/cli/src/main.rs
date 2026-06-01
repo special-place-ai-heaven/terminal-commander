@@ -4,12 +4,14 @@
 //! `terminal-commander`: operator admin CLI (TC25).
 //!
 //! Subcommands per the TC25 mini-spec: status, doctor, rules, buckets,
-//! jobs, probes, policy, audit. The CLI talks to the daemon Router
-//! (in-process at MVP; UDS adapter deferred per TC21 lock).
+//! jobs, probes, policy, audit. The CLI talks to the daemon over IPC
+//! as a first-class [`terminal_commander_ipc::DaemonClient`] client.
 //!
-//! Source-status: live (TC25) — CLI parses + renders. Subcommand
-//! bodies print structured summaries; the live IPC connection lands
-//! when TC21's transport swap happens.
+//! Source-status: live — CLI parses, probes the daemon, and renders
+//! real daemon data. The TC21 transport swap has landed: each
+//! daemon-backed subcommand opens a `DaemonClient` (Unix socket on
+//! Unix, named pipe on Windows) once the health handshake confirms
+//! the daemon is live, and renders the typed IPC response.
 
 use clap::{Parser, Subcommand};
 use terminal_commander_supervisor::ensure::{EnsureDaemonOptions, EnsureDaemonStatus};
