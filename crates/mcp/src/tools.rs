@@ -801,7 +801,7 @@ impl TerminalCommanderMcpServer {
     /// `registry_upsert` — create a new immutable version from a JSON
     /// rule definition.
     #[tool(
-        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword). `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords; existing versions are never mutated."
+        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword). NOTE: `version` is ASSIGNED by the store (monotonic, latest+1); any value you send is ignored and overwritten, and the assigned version (returned in the response) is the one registry_activate/registry_deactivate operate on. `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords; existing versions are never mutated."
     )]
     async fn registry_upsert(
         &self,
@@ -2160,6 +2160,11 @@ pub struct McpRegistryUpsertParams {
     /// `${line}` to echo the matched line). When `kind` is `regex` you
     /// MUST also supply `pattern`; when `kind` is `keyword` supply
     /// `keywords` (array).
+    ///
+    /// NOTE: `version` is ASSIGNED by the store (monotonic, latest+1);
+    /// any value you send is ignored and overwritten. The assigned
+    /// version is what the response returns and what
+    /// `registry_activate` / `registry_deactivate` operate on.
     ///
     /// `kind` enum: keyword | regex | prompt | exit_code | stream_marker
     /// | progress_collapse | dedupe | threshold | sequence | anchor |

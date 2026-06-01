@@ -18,7 +18,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed immutable registry write. MCP accepts definition_json as a JSON-encoded RuleDefinition string; success returns only the assigned rule id and version. TB-3/TB-4: the tool and definition_json descriptions embed a complete kind:regex example, the REQUIRED fields {id, version, kind, severity, event_kind, summary_template, +pattern when kind=regex}, the kind and severity enums, the Draft default disclosure, and a pointer to registry_get for the canonical shape, so authoring a rule succeeds on the first try. event_kind has no serde default in RuleDefinition and must be listed in the REQUIRED set or the first call fails deserialization."
+    "note": "Daemon-backed immutable registry write. MCP accepts definition_json as a JSON-encoded RuleDefinition string; success returns only the assigned rule id and version. TB-3/TB-4: the tool and definition_json descriptions embed a complete kind:regex example, the REQUIRED fields {id, version, kind, severity, event_kind, summary_template, +pattern when kind=regex}, the kind and severity enums, the Draft default disclosure, and a pointer to registry_get for the canonical shape, so authoring a rule succeeds on the first try. event_kind has no serde default in RuleDefinition and must be listed in the REQUIRED set or the first call fails deserialization. Version is store-assigned: the submitted version is ignored, the store assigns version=latest+1, stamps it into the persisted definition, and returns it, so the returned version round-trips through activate/deactivate/list_active (no row-vs-definition version divergence)."
   },
   "response_example": {
     "rule_id": "rust-compile-error",
@@ -54,6 +54,7 @@
     "the description discloses that new rules default to status=Draft and that status:active is needed for registry_activate eligibility (TB-4)",
     "the description points to registry_get as the canonical RuleDefinition shape",
     "success payload does not echo the rule definition",
-    "invalid definitions fail instead of being silently accepted"
+    "invalid definitions fail instead of being silently accepted",
+    "the submitted version is ignored; the store assigns version=latest+1, stamps it into the persisted definition, and returns it, so the returned version is the one activate/deactivate/list_active accept (no row-vs-definition version divergence)"
   ]
 }
