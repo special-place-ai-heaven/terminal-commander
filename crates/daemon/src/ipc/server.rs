@@ -600,6 +600,10 @@ async fn dispatch(
             Ok(r) => ("probe_status", IpcResult::Ok { response: r }),
             Err(e) => ("probe_status", IpcResult::Err { error: e }),
         },
+        IpcRequest::AuditSince(p) => match handlers::audit::handle_audit_since(state, p) {
+            Ok(r) => ("audit_since", IpcResult::Ok { response: r }),
+            Err(e) => ("audit_since", IpcResult::Err { error: e }),
+        },
         // Graceful shutdown (E2). Flip the internal trigger and ACK
         // immediately. The ACK is written back to THIS connection
         // before any teardown: `trigger_shutdown` only flips a sticky
@@ -675,6 +679,7 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
             "runtime_state".to_owned(),
             "probe_list".to_owned(),
             "probe_status".to_owned(),
+            "audit_since".to_owned(),
         ],
     })
 }

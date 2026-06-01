@@ -9,7 +9,7 @@
 //! - does NOT spawn child commands (`Command::spawn` is forbidden),
 //! - does NOT open network sockets (`TcpListener`/`UdpSocket` forbidden),
 //! - does NOT open files outside its own config / daemon IPC path,
-//! - exposes the full daemon tool surface (29 tools), each forwarded
+//! - exposes the full daemon tool surface (32 tools), each forwarded
 //!   1:1 to a daemon IPC method.
 //!
 //! Platform: Unix (UDS) and Windows (named pipe). Both transports are

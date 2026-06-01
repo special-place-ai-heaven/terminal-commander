@@ -15,9 +15,14 @@
 //!   workspace builds), but `Server::bind` returns
 //!   `IpcError::UnsupportedPlatform`. WSL2 is the Windows story.
 
-pub mod protocol;
-
-pub mod framing;
+// The wire protocol, framing, and the cross-platform `DaemonClient`
+// transport moved to the `terminal-commander-ipc` crate (Phase P1).
+// They are re-exported here as modules so every existing call site
+// (`crate::ipc::protocol::*`, `crate::ipc::framing::*`,
+// `crate::ipc::DaemonClient`) keeps resolving unchanged. The daemon
+// keeps the SERVER side (dispatch, peer identity, listeners) local.
+pub use terminal_commander_ipc::framing;
+pub use terminal_commander_ipc::protocol;
 
 pub mod peer;
 
@@ -32,24 +37,19 @@ pub mod peer_windows;
 #[cfg(windows)]
 pub mod pipe_acl;
 
-#[cfg(unix)]
-pub mod client;
-
-#[cfg(windows)]
-pub mod pipe_client;
-
 pub use protocol::{
-    BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
-    BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
-    CommandStartParams, CommandStartResponse, CommandStatusParams, CommandStatusResponse,
-    ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT, DEFAULT_BUCKET_WAIT_MS,
-    DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES,
-    DEFAULT_FILE_READ_LINES, DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES,
-    DEFAULT_REGISTRY_SEARCH_LIMIT, DiscoverResponse, EventContextParams, EventContextResponse,
-    FileLine, FileReadWindowParams, FileReadWindowResponse, FileSearchMatch, FileSearchParams,
-    FileSearchResponse, FileWatchListEntry, FileWatchListResponse, FileWatchStartParams,
-    FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, IpcContextFrame, IpcError,
-    IpcErrorCode, IpcRequest, IpcResponse, IpcResult, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS,
+    AuditRowWire, AuditSinceParams, AuditSinceResponse, BucketEventsSinceParams,
+    BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse, BucketWaitParams,
+    BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse, CommandStartParams,
+    CommandStartResponse, CommandStatusParams, CommandStatusResponse, ContextUnavailableReason,
+    DEFAULT_BUCKET_READ_LIMIT, DEFAULT_BUCKET_WAIT_MS, DEFAULT_CONTEXT_AFTER,
+    DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES, DEFAULT_FILE_READ_LINES,
+    DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES, DEFAULT_REGISTRY_SEARCH_LIMIT,
+    DiscoverResponse, EventContextParams, EventContextResponse, FileLine, FileReadWindowParams,
+    FileReadWindowResponse, FileSearchMatch, FileSearchParams, FileSearchResponse,
+    FileWatchListEntry, FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse,
+    FileWatchStopParams, FileWatchStopResponse, IpcContextFrame, IpcError, IpcErrorCode,
+    IpcRequest, IpcResponse, IpcResult, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS,
     MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_GRACE_MS, MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES,
     MAX_CONTEXT_FRAMES, MAX_FILE_READ_BYTES, MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES,
     MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS,
@@ -68,10 +68,11 @@ pub use protocol::{
     RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
 };
 
-// `CommandStartResponse` / `CommandStatusResponse` are re-exported by
-// `protocol` via `pub use crate::command::...` and they are already
-// re-exported at the crate root via `pub use command::{...}`, so we
-// deliberately leave them out of this list to avoid an E0252 clash.
+// `CommandStartResponse` / `CommandStatusResponse` now live in
+// `terminal_commander_ipc::protocol` and are re-exported at the crate
+// root via `pub use command::{...}` (command.rs re-imports them from
+// the ipc crate). We deliberately leave them out of the flat list
+// above to avoid an E0252 clash with that crate-root re-export.
 
 pub use peer::PeerCred;
 
@@ -83,8 +84,7 @@ pub use server::{IpcServer, ServerHandle};
 #[cfg(windows)]
 pub use pipe_server::{PipeServer, PipeServerHandle};
 
-#[cfg(unix)]
-pub use client::DaemonClient;
-
-#[cfg(windows)]
-pub use pipe_client::DaemonClient;
+// Cross-platform client transport: UDS on Unix, named pipe on Windows.
+// `DaemonClient` is the platform-dispatched alias resolved inside the
+// `terminal-commander-ipc` crate.
+pub use terminal_commander_ipc::DaemonClient;

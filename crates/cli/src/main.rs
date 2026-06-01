@@ -4,12 +4,14 @@
 //! `terminal-commander`: operator admin CLI (TC25).
 //!
 //! Subcommands per the TC25 mini-spec: status, doctor, rules, buckets,
-//! jobs, probes, policy, audit. The CLI talks to the daemon Router
-//! (in-process at MVP; UDS adapter deferred per TC21 lock).
+//! jobs, probes, policy, audit. The CLI talks to the daemon over IPC
+//! as a first-class [`terminal_commander_ipc::DaemonClient`] client.
 //!
-//! Source-status: live (TC25) — CLI parses + renders. Subcommand
-//! bodies print structured summaries; the live IPC connection lands
-//! when TC21's transport swap happens.
+//! Source-status: live — CLI parses, probes the daemon, and renders
+//! real daemon data. The TC21 transport swap has landed: each
+//! daemon-backed subcommand opens a `DaemonClient` (Unix socket on
+//! Unix, named pipe on Windows) once the health handshake confirms
+//! the daemon is live, and renders the typed IPC response.
 
 use clap::{Parser, Subcommand};
 use terminal_commander_supervisor::ensure::{EnsureDaemonOptions, EnsureDaemonStatus};
@@ -17,9 +19,17 @@ use terminal_commander_supervisor::paths::{
     endpoint_from_socket_path, resolve_socket_path, resolve_state_dir,
 };
 
+// The single live-IPC call site. Every daemon-backed read subcommand
+// routes through `run_daemon_command` -> `connect_or_unavailable`, which
+// probes the daemon first and only constructs a `DaemonClient` once the
+// health handshake confirms it is live. The honest "unavailable; refusing
+// to synthesize" exit-69 path lives in `ipc::CliIpcError::Unavailable`.
+pub(crate) mod ipc;
+pub(crate) mod render;
 pub(crate) mod update_locks;
 
-const EX_UNAVAILABLE: u8 = 69;
+use ipc::{CliIpcError, connect_or_unavailable};
+use terminal_commander_ipc::{IpcRequest, IpcResponse};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -129,17 +139,17 @@ fn run(cli: Cli) -> std::process::ExitCode {
         Command::Status => print_status(),
         Command::Doctor => std::process::ExitCode::from(run_doctor()),
         Command::Rules { op } => match op {
-            RulesOp::List => daemon_backed_command_unavailable("rules list"),
-            RulesOp::Show { rule_id: _ } => daemon_backed_command_unavailable("rules show"),
+            RulesOp::List => run_rules_list(),
+            RulesOp::Show { rule_id } => run_rules_show(&rule_id),
         },
         Command::Buckets { op } => match op {
-            BucketsOp::List => daemon_backed_command_unavailable("buckets list"),
-            BucketsOp::Show { bucket_id: _ } => daemon_backed_command_unavailable("buckets show"),
+            BucketsOp::List => run_buckets_list(),
+            BucketsOp::Show { bucket_id } => run_buckets_show(&bucket_id),
         },
-        Command::Jobs => daemon_backed_command_unavailable("jobs"),
-        Command::Probes => daemon_backed_command_unavailable("probes"),
-        Command::Policy => daemon_backed_command_unavailable("policy"),
-        Command::Audit { limit: _ } => daemon_backed_command_unavailable("audit"),
+        Command::Jobs => run_jobs(),
+        Command::Probes => run_probes(),
+        Command::Policy => run_policy(),
+        Command::Audit { limit } => run_audit(limit),
         Command::Session { op } => match op {
             SessionOp::List => run_session_list(),
             SessionOp::Reap {
@@ -163,11 +173,178 @@ fn run(cli: Cli) -> std::process::ExitCode {
     }
 }
 
-fn daemon_backed_command_unavailable(command: &str) -> std::process::ExitCode {
-    eprintln!(
-        "terminal-commander: {command} unavailable: requires live daemon IPC; refusing to synthesize empty or not-found data."
-    );
-    std::process::ExitCode::from(EX_UNAVAILABLE)
+/// Run ONE daemon-backed read subcommand end to end: build a single-shot
+/// runtime, probe + issue the IPC `request` via [`connect_or_unavailable`], and
+/// hand the typed [`IpcResponse`] to `render` on success.
+///
+/// Honesty contract: REAL data on success (an honestly-empty response renders an
+/// empty table + exit 0), a typed [`CliIpcError`] mapped to its non-zero exit on
+/// failure. Never fabricates a response. `command` is the human label used in
+/// the error line; `request` is the typed method to dispatch.
+///
+/// `render` returns `Ok(())` after printing, or an [`IpcError`] when the daemon
+/// answered with the WRONG response variant for this method (a daemon/client
+/// contract violation, mapped to exit 1 — never a fabricated row).
+fn run_daemon_command<F>(command: &str, request: IpcRequest, render: F) -> std::process::ExitCode
+where
+    F: FnOnce(IpcResponse) -> Result<(), terminal_commander_ipc::IpcError>,
+{
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("terminal-commander: tokio runtime build failed: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let result = rt.block_on(connect_or_unavailable(1, request));
+    match result.and_then(|resp| render(resp).map_err(CliIpcError::Ipc)) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            err.report(command);
+            std::process::ExitCode::from(err.exit_code())
+        }
+    }
+}
+
+/// Map an unexpected response variant to a typed `Internal` error so the caller
+/// surfaces exit 1 instead of fabricating data. The daemon should always answer
+/// with the variant matching the request method; this is the defensive arm.
+fn unexpected_variant(method: &str) -> terminal_commander_ipc::IpcError {
+    terminal_commander_ipc::IpcError::new(
+        terminal_commander_ipc::IpcErrorCode::Internal,
+        format!("daemon returned an unexpected response variant for {method}"),
+    )
+}
+
+/// `rules list` -> `registry_list_active` -> active-rule table.
+fn run_rules_list() -> std::process::ExitCode {
+    run_daemon_command(
+        "rules list",
+        IpcRequest::RegistryListActive,
+        |resp| match resp {
+            IpcResponse::RegistryListActive(r) => {
+                render::rules_list(&r);
+                Ok(())
+            }
+            _ => Err(unexpected_variant("registry_list_active")),
+        },
+    )
+}
+
+/// `rules show <id>` -> `registry_get` (latest version) -> rule definition.
+/// `RuleNotFound` flows back as a typed `Ipc` error -> non-zero exit.
+fn run_rules_show(rule_id: &str) -> std::process::ExitCode {
+    let request = IpcRequest::RegistryGet(terminal_commander_ipc::RegistryGetParams {
+        rule_id: rule_id.to_string(),
+        version: None,
+    });
+    run_daemon_command("rules show", request, |resp| match resp {
+        IpcResponse::RegistryGet(r) => {
+            render::rule_show(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("registry_get")),
+    })
+}
+
+/// `jobs` -> `runtime_state` -> counts + probe/bucket tables.
+fn run_jobs() -> std::process::ExitCode {
+    run_daemon_command("jobs", IpcRequest::RuntimeState, |resp| match resp {
+        IpcResponse::RuntimeState(r) => {
+            render::jobs(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("runtime_state")),
+    })
+}
+
+/// `probes` -> `probe_list` -> one row per live probe.
+fn run_probes() -> std::process::ExitCode {
+    run_daemon_command("probes", IpcRequest::ProbeList, |resp| match resp {
+        IpcResponse::ProbeList(r) => {
+            render::probes(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("probe_list")),
+    })
+}
+
+/// `policy` -> `policy_status` -> profile + deny counts + caps.
+fn run_policy() -> std::process::ExitCode {
+    run_daemon_command("policy", IpcRequest::PolicyStatus, |resp| match resp {
+        IpcResponse::PolicyStatus(r) => {
+            render::policy(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("policy_status")),
+    })
+}
+
+/// `buckets list` -> `runtime_state` -> bucket rows.
+///
+/// There is NO daemon `list-buckets` method; `runtime_state` carries the only
+/// live bucket set, so this reuses it and renders `RuntimeStateResponse.buckets`
+/// (see [`render::buckets_list`]).
+fn run_buckets_list() -> std::process::ExitCode {
+    run_daemon_command(
+        "buckets list",
+        IpcRequest::RuntimeState,
+        |resp| match resp {
+            IpcResponse::RuntimeState(r) => {
+                render::buckets_list(&r);
+                Ok(())
+            }
+            _ => Err(unexpected_variant("runtime_state")),
+        },
+    )
+}
+
+/// `buckets show <id>` -> `bucket_summary` -> counters + severity histogram.
+/// A malformed bucket id is rejected BEFORE any IPC (the daemon never sees an
+/// id it could not parse). `BucketNotFound` flows back as a typed `Ipc` error.
+fn run_buckets_show(bucket_id: &str) -> std::process::ExitCode {
+    let parsed = match terminal_commander_core::BucketId::parse_wire(bucket_id) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("terminal-commander: buckets show: invalid bucket id {bucket_id:?}: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let request = IpcRequest::BucketSummary(terminal_commander_ipc::BucketSummaryParams {
+        bucket_id: parsed,
+    });
+    run_daemon_command("buckets show", request, |resp| match resp {
+        IpcResponse::BucketSummary(r) => {
+            render::bucket_summary(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("bucket_summary")),
+    })
+}
+
+/// `audit [--limit N]` -> `audit_since` (cursor 0) -> one row per audit record.
+///
+/// Reads the persistent audit log from the start (`cursor: 0`) up to `limit`
+/// rows. An honestly-empty log renders just the header and exits 0. A store
+/// read failure surfaces a typed daemon `Internal` error -> non-zero exit; the
+/// CLI never fabricates rows.
+fn run_audit(limit: usize) -> std::process::ExitCode {
+    let request = IpcRequest::AuditSince(terminal_commander_ipc::AuditSinceParams {
+        cursor: 0,
+        action_filter: None,
+        decision_filter: None,
+        limit: Some(limit),
+    });
+    run_daemon_command("audit", request, |resp| match resp {
+        IpcResponse::AuditSince(r) => {
+            render::audit(&r);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("audit_since")),
+    })
 }
 
 fn print_status() -> std::process::ExitCode {
@@ -199,20 +376,34 @@ fn print_status() -> std::process::ExitCode {
         terminal_commander_supervisor::ensure::ensure_daemon(opts).await
     });
 
-    let (daemon_text, pid_text, exit_code) = match &status {
-        EnsureDaemonStatus::AlreadyRunning { pid, .. } => (
-            "running",
-            pid.map_or_else(|| "-".into(), |p| p.to_string()),
-            std::process::ExitCode::SUCCESS,
-        ),
-        EnsureDaemonStatus::Started { pid, .. } => (
-            "running",
-            pid.map_or_else(|| "-".into(), |p| p.to_string()),
-            std::process::ExitCode::SUCCESS,
-        ),
+    // The probed endpoint as the daemon records it in its pidfile: on Unix the
+    // socket path's display string, on Windows the `\\.\pipe\...` name. Both
+    // sides resolve via the same supervisor helpers, so this string is the key
+    // we cross-check the pidfile against (see `resolved_pid`).
+    let endpoint_string = endpoint_path.display().to_string();
+
+    let (daemon_text, pid_text, version_text, exit_code) = match &status {
+        // AlreadyRunning / Started: the Health handshake carries NO pid (the
+        // wire `IpcResponse::Health` has none), so `pid` is `None` on the
+        // AlreadyRunning path. The pidfile is the correct pid source: it
+        // records pid + version + the endpoint the daemon bound. We render its
+        // pid ONLY when its recorded endpoint matches the endpoint we probed,
+        // so a stale pidfile from a different socket never mislabels this one.
+        // "-" then means a genuine PRE-pidfile daemon (predates the feature).
+        EnsureDaemonStatus::AlreadyRunning { pid, .. }
+        | EnsureDaemonStatus::Started { pid, .. } => {
+            let (pid_text, version_text) = resolved_pid(*pid, &state_dir, &endpoint_string);
+            (
+                "running",
+                pid_text,
+                version_text,
+                std::process::ExitCode::SUCCESS,
+            )
+        }
         EnsureDaemonStatus::Unavailable { .. } => (
             "unavailable",
             "-".to_string(),
+            None,
             std::process::ExitCode::from(1),
         ),
     };
@@ -222,10 +413,34 @@ fn print_status() -> std::process::ExitCode {
     println!("  endpoint      : {}", endpoint_path.display());
     println!("  daemon        : {daemon_text}");
     println!("  pid           : {pid_text}");
+    if let Some(v) = version_text {
+        println!("  daemon_version: {v}");
+    }
     println!("  log_path      : {}", log_path.display());
     println!("  state_dir     : {}", state_dir.display());
 
     exit_code
+}
+
+/// Resolve the pid (and optional daemon version) to display for a reachable
+/// daemon. `ensure`'s `pid` is preferred when the supervisor knows it (the
+/// `Started` spawn path). Otherwise — the `AlreadyRunning` path, where the
+/// Health response carries no pid — fall back to the pidfile, but ONLY when its
+/// recorded endpoint matches the endpoint we probed. A mismatch (or absent /
+/// dead pidfile) yields `("-", None)`: a genuine pre-pidfile daemon, never a
+/// fabricated pid.
+fn resolved_pid(
+    ensure_pid: Option<u32>,
+    state_dir: &std::path::Path,
+    probed_endpoint: &str,
+) -> (String, Option<String>) {
+    if let Some(p) = ensure_pid {
+        return (p.to_string(), None);
+    }
+    match terminal_commander_supervisor::pidfile::read_pidfile(state_dir) {
+        Some(rec) if rec.endpoint == probed_endpoint => (rec.pid.to_string(), Some(rec.version)),
+        _ => ("-".to_string(), None),
+    }
 }
 
 /// One rendered row of the `session list` table.
@@ -972,6 +1187,70 @@ mod tests {
         );
         // Unresponsive: skipped, not force-killed on the soft idle path.
         assert_eq!(idle_reap_decision(None, 60), IdleReapDecision::Unresponsive);
+    }
+
+    #[test]
+    fn resolved_pid_prefers_ensure_pid() {
+        // When the supervisor already knows the pid (the spawn path), use it
+        // directly and do not touch the pidfile. No version is surfaced.
+        let dir = std::env::temp_dir().join(format!("tc-cli-rpid-prefer-{}", std::process::id()));
+        let (pid, version) = resolved_pid(Some(4321), &dir, "ignored-endpoint");
+        assert_eq!(pid, "4321");
+        assert_eq!(version, None);
+    }
+
+    #[test]
+    fn resolved_pid_reads_pidfile_on_endpoint_match() {
+        // AlreadyRunning path: ensure_pid is None, Health carries no pid, so we
+        // fall back to the pidfile WHEN its recorded endpoint matches.
+        let dir = std::env::temp_dir().join(format!("tc-cli-rpid-match-{}", std::process::id()));
+        let endpoint = r"\\.\pipe\terminal-commander-rpidtest";
+        terminal_commander_supervisor::pidfile::write_pidfile(
+            &dir,
+            &terminal_commander_supervisor::pidfile::RunningDaemon {
+                // Use this process's pid so read_pidfile's liveness filter keeps it.
+                pid: std::process::id(),
+                version: "9.9.9".into(),
+                endpoint: endpoint.into(),
+            },
+        )
+        .expect("write pidfile");
+        let (pid, version) = resolved_pid(None, &dir, endpoint);
+        assert_eq!(pid, std::process::id().to_string());
+        assert_eq!(version.as_deref(), Some("9.9.9"));
+        terminal_commander_supervisor::pidfile::remove_pidfile(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolved_pid_is_dash_on_endpoint_mismatch() {
+        // A pidfile recorded for a DIFFERENT endpoint must never mislabel the
+        // probed daemon's pid: "-" means a genuine pre-pidfile daemon.
+        let dir = std::env::temp_dir().join(format!("tc-cli-rpid-mismatch-{}", std::process::id()));
+        terminal_commander_supervisor::pidfile::write_pidfile(
+            &dir,
+            &terminal_commander_supervisor::pidfile::RunningDaemon {
+                pid: std::process::id(),
+                version: "9.9.9".into(),
+                endpoint: r"\\.\pipe\terminal-commander-OTHER".into(),
+            },
+        )
+        .expect("write pidfile");
+        let (pid, version) = resolved_pid(None, &dir, r"\\.\pipe\terminal-commander-PROBED");
+        assert_eq!(pid, "-");
+        assert_eq!(version, None);
+        terminal_commander_supervisor::pidfile::remove_pidfile(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolved_pid_is_dash_when_no_pidfile() {
+        // No pidfile at all (pre-pidfile daemon): "-" and no version.
+        let dir = std::env::temp_dir().join(format!("tc-cli-rpid-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (pid, version) = resolved_pid(None, &dir, "any-endpoint");
+        assert_eq!(pid, "-");
+        assert_eq!(version, None);
     }
 
     #[test]

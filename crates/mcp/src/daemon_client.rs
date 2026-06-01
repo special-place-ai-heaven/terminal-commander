@@ -3,14 +3,14 @@
 
 //! Daemon IPC client wrapper for the MCP stdio adapter (TC40).
 //!
-//! Wraps `terminal_commanderd::DaemonClient` and adds:
+//! Wraps `terminal_commander_ipc::DaemonClient` and adds:
 //! - correlation-id generation,
 //! - structured error mapping to MCP tool errors,
 //! - bounded, audit-friendly call sites for every MCP tool to call into.
 //!
 //! Transport: UDS on Unix, Windows named pipe on Windows. The
-//! underlying `terminal_commanderd::DaemonClient` is already
-//! platform-dispatched (see `crates/daemon/src/ipc/`).
+//! underlying `terminal_commander_ipc::DaemonClient` is already
+//! platform-dispatched (see `crates/ipc/src/`).
 //!
 //! Source-status: live (TC40).
 
@@ -18,9 +18,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use terminal_commander_ipc::{IpcError, IpcRequest, IpcResponse};
 use terminal_commander_supervisor::ensure::EnsureDaemonStatus;
 use terminal_commander_supervisor::paths;
-use terminal_commanderd::ipc::protocol::{IpcError, IpcRequest, IpcResponse};
 
 /// Resolve the socket path the MCP adapter should connect to.
 ///
@@ -63,7 +63,7 @@ impl DaemonStatusHandle {
 /// monotonic correlation id per call so the IPC envelope is unique.
 #[derive(Debug, Clone)]
 pub struct McpDaemonClient {
-    inner: terminal_commanderd::DaemonClient,
+    inner: terminal_commander_ipc::DaemonClient,
     next_id: Arc<AtomicU64>,
     status: Option<DaemonStatusHandle>,
 }
@@ -74,7 +74,7 @@ impl McpDaemonClient {
     #[must_use]
     pub fn new(socket_path: impl Into<std::path::PathBuf>) -> Self {
         Self {
-            inner: terminal_commanderd::DaemonClient::new(socket_path),
+            inner: terminal_commander_ipc::DaemonClient::new(socket_path),
             next_id: Arc::new(AtomicU64::new(1)),
             status: None,
         }
@@ -88,7 +88,7 @@ impl McpDaemonClient {
         status: DaemonStatusHandle,
     ) -> Self {
         Self {
-            inner: terminal_commanderd::DaemonClient::new(socket_path),
+            inner: terminal_commander_ipc::DaemonClient::new(socket_path),
             next_id: Arc::new(AtomicU64::new(1)),
             status: Some(status),
         }

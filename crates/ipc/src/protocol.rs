@@ -31,7 +31,66 @@ use terminal_commander_core::{
     SignalEvent, SourceStream,
 };
 
-pub use crate::command::{CommandStartResponse, CommandStatusResponse};
+/// Bounded response shape. Carries identifiers and counters, never
+/// raw stdout/stderr.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandStartResponse {
+    pub job_id: JobId,
+    pub bucket_id: BucketId,
+    pub probe_id: terminal_commander_core::ProbeId,
+    /// Initial bucket cursor: clients pass this to `bucket_events_since`.
+    pub cursor: u64,
+}
+
+/// No-silence exit receipt (TCE-ERG-1).
+///
+/// Present ONLY when a finished process command produced ZERO
+/// rule-driven events. This is the one sanctioned exception to "TC
+/// never returns raw output": a bounded, truthful tail so a zero-rule
+/// command does not read as breakage.
+///
+/// PTY/file-watch jobs never reach this path (`CommandService` holds
+/// process probes only; `handle_command_status` routes PTY job ids to
+/// `UnknownJob`), so a tail cannot include secret-prompt input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandReceipt {
+    pub exit_code: Option<i32>,
+    /// Frames the command produced that no rule matched, i.e. lines
+    /// the agent would otherwise have scrolled. `frames_total` for a
+    /// zero-rule run.
+    pub lines_suppressed: u64,
+    /// Last N frame texts (oldest first), byte-capped.
+    pub tail: Vec<String>,
+    /// True when the ring evicted earlier frames; the tail may omit
+    /// the start of output.
+    pub tail_incomplete: bool,
+}
+
+/// Bounded status shape. Counters + final exit state only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandStatusResponse {
+    pub job_id: JobId,
+    pub bucket_id: BucketId,
+    pub probe_id: terminal_commander_core::ProbeId,
+    pub state: terminal_commander_core::JobState,
+    pub frames_total: u64,
+    pub frames_stdout: u64,
+    pub frames_stderr: u64,
+    pub bytes_total: u64,
+    pub events_emitted: u64,
+    #[serde(default)]
+    pub frames_suppressed: u64,
+    #[serde(default)]
+    pub frames_suppressed_progress: u64,
+    #[serde(default)]
+    pub frames_suppressed_dedupe: u64,
+    pub exit_code: Option<i32>,
+    pub signal: Option<String>,
+    pub duration_ms: Option<u64>,
+    /// No-silence receipt; `Some` only for a finished process command
+    /// with zero rule-driven events. See [`CommandReceipt`].
+    pub receipt: Option<CommandReceipt>,
+}
 
 /// Hard cap on a complete frame (length prefix + payload). Anything
 /// above this is rejected without payload parse.
@@ -95,9 +154,15 @@ pub const DEFAULT_CONTEXT_AFTER: u32 = 5;
 /// `max_bytes` cap; the dispatcher clamps oversize values.
 pub const MAX_CONTEXT_BYTES: usize = 64 * 1024;
 
-/// Method-typed request union. Method names are namespaced
-/// `<domain>_<verb>` to match the MCP tool names; the rmcp adapter
-/// maps each tool 1:1 to a method. All 29 methods are live through TC45.
+/// Method-typed request union.
+///
+/// Method names are namespaced `<domain>_<verb>` to match the MCP tool
+/// names; the rmcp adapter maps each tool 1:1 to a method. All 33
+/// methods are live: the 32-method TC45 set carried via IPC plus the
+/// P4 `audit_since` read surface. `audit_since` is the one CLI-only
+/// read method with no rmcp tool, so the MCP tool catalogue stays at
+/// 32 live tools (see `docs/mcp/TOOL_CONTROL_SURFACE.md` §2) while the
+/// IPC method set carries the extra audit-log reader.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum IpcRequest {
@@ -182,6 +247,11 @@ pub enum IpcRequest {
     /// TC45: bounded lookup for one probe by id. Returns
     /// `UnknownProbe` if no runtime knows the id.
     ProbeStatus(ProbeStatusParams),
+    /// Cursor-based read of the persistent audit log. Read-only;
+    /// bounded by [`MAX_AUDIT_READ_LIMIT`]. Read failure surfaces
+    /// [`IpcErrorCode::Internal`] (the closed error set is not widened
+    /// for this method).
+    AuditSince(AuditSinceParams),
     /// Request a graceful shutdown. The daemon ACKs immediately
     /// (`ShutdownAck`), stops accepting new connections, drains in-flight
     /// requests, removes its pidfile, and exits 0. New connections during the
@@ -247,6 +317,7 @@ pub enum IpcResponse {
     RuntimeState(RuntimeStateResponse),
     ProbeList(ProbeListResponse),
     ProbeStatus(ProbeStatusResponse),
+    AuditSince(AuditSinceResponse),
     /// Ack for `Shutdown`. `draining=true` once the daemon has stopped accepting
     /// new connections and begun draining.
     ShutdownAck {
@@ -577,9 +648,9 @@ pub const MAX_COMMAND_INLINE_RULES: usize = 64;
 /// dispatcher.
 pub const MAX_COMMAND_GRACE_MS: u64 = 60_000;
 
-/// Wire shape for `command_start_combed`. Mirrors
-/// [`crate::command::CommandStartRequest`] but uses millis instead of
-/// `Duration` so the JSON form stays human-readable.
+/// Wire shape for `command_start_combed`. Mirrors the daemon's
+/// `CommandStartRequest` but uses millis instead of `Duration` so the
+/// JSON form stays human-readable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandStartParams {
     /// Target environment (default local parent).
@@ -1238,6 +1309,81 @@ pub struct ProbeStatusResponse {
     pub probe: ProbeListEntry,
 }
 
+// =====================================================================
+// P4: audit-log read surface (read-only).
+//
+// `audit_since` exposes a cursor-paged, bounded view of the persistent
+// audit log. The protocol owns its serde surface: [`AuditRowWire`]
+// MIRRORS `terminal_commander_store::AuditRow` the same way
+// [`SeverityHistogram`] mirrors its in-memory type. The wire form does
+// NOT couple to store internals — `timestamp` is carried as an RFC3339
+// string so the protocol crate needs no `time` dependency.
+// =====================================================================
+
+/// Hard cap on rows returned by `audit_since` in a single call.
+/// Mirrors `terminal_commander_store::MAX_AUDIT_READ_LIMIT`. The daemon
+/// dispatcher clamps oversize / omitted limits to this value.
+pub const MAX_AUDIT_READ_LIMIT: usize = 10_000;
+/// Default rows returned when the caller omits a limit. Mirrors
+/// `terminal_commander_store::DEFAULT_AUDIT_READ_LIMIT`.
+pub const DEFAULT_AUDIT_READ_LIMIT: usize = 200;
+
+/// Parameters for `audit_since`. Reads rows strictly after `cursor`
+/// (i.e. `audit_id > cursor`), ordered ascending by `audit_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditSinceParams {
+    /// Return rows with `audit_id > cursor`. `0` reads from the start.
+    pub cursor: u64,
+    /// Optional exact-match action filter (e.g. `"registry_activate"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_filter: Option<String>,
+    /// Optional exact-match decision filter (e.g. `"info"`, `"error"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_filter: Option<String>,
+    /// Result count cap. Clamped to [`MAX_AUDIT_READ_LIMIT`] at the
+    /// dispatcher. Omitted = [`DEFAULT_AUDIT_READ_LIMIT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// One audit row on the wire.
+///
+/// MIRRORS `terminal_commander_store::AuditRow` field-for-field; the
+/// daemon maps the in-memory row to this shape (a unit test guards the
+/// mapping against drift). `timestamp` is the row's RFC3339 string —
+/// the same encoding the store persists — so the protocol owns its
+/// serde surface without a `time` dependency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditRowWire {
+    pub audit_id: u64,
+    /// RFC3339 timestamp string.
+    pub timestamp: String,
+    pub action: String,
+    pub subject: String,
+    pub decision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_json: Option<String>,
+}
+
+/// Response shape for `audit_since`. Bounded by
+/// [`MAX_AUDIT_READ_LIMIT`]; carries the next cursor so a client can
+/// page forward without re-reading.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditSinceResponse {
+    /// Echo of the requested cursor.
+    pub cursor_in: u64,
+    /// `audit_id` of the last returned row, or `cursor_in` when empty.
+    /// Pass as the next call's `cursor` to page forward.
+    pub next_cursor: u64,
+    pub rows: Vec<AuditRowWire>,
+}
+
 /// Serialize an envelope to a length-prefixed wire frame. Returns
 /// the bytes ready to write to the socket. Rejects payloads larger
 /// than [`MAX_FRAME_BYTES`].
@@ -1384,5 +1530,98 @@ mod tests {
 
         // The new error code serializes.
         let _ = serde_json::to_string(&IpcErrorCode::ShuttingDown).unwrap();
+    }
+
+    #[test]
+    fn audit_since_params_round_trip() {
+        let full = AuditSinceParams {
+            cursor: 7,
+            action_filter: Some("registry_activate".to_owned()),
+            decision_filter: Some("info".to_owned()),
+            limit: Some(50),
+        };
+        let json = serde_json::to_string(&full).unwrap();
+        let back: AuditSinceParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, full);
+
+        // Optional fields default to None and are omitted on the wire.
+        let minimal = AuditSinceParams {
+            cursor: 0,
+            action_filter: None,
+            decision_filter: None,
+            limit: None,
+        };
+        let json = serde_json::to_string(&minimal).unwrap();
+        assert_eq!(json, r#"{"cursor":0}"#);
+        let back: AuditSinceParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, minimal);
+    }
+
+    #[test]
+    fn audit_since_response_round_trips_through_envelope() {
+        let resp = AuditSinceResponse {
+            cursor_in: 0,
+            next_cursor: 2,
+            rows: vec![
+                AuditRowWire {
+                    audit_id: 1,
+                    timestamp: "2026-06-01T00:00:00Z".to_owned(),
+                    action: "registry_activate".to_owned(),
+                    subject: "peer".to_owned(),
+                    decision: "info".to_owned(),
+                    profile: Some("developer_local".to_owned()),
+                    reason: None,
+                    actor: Some("cli".to_owned()),
+                    metadata_json: None,
+                },
+                AuditRowWire {
+                    audit_id: 2,
+                    timestamp: "2026-06-01T00:00:01Z".to_owned(),
+                    action: "system_discover".to_owned(),
+                    subject: "peer".to_owned(),
+                    decision: "info".to_owned(),
+                    profile: None,
+                    reason: None,
+                    actor: None,
+                    metadata_json: None,
+                },
+            ],
+        };
+        let env = ResponseEnvelope {
+            correlation_id: 9,
+            result: IpcResult::Ok {
+                response: IpcResponse::AuditSince(resp.clone()),
+            },
+        };
+        let frame = encode_frame(&env).unwrap();
+        let back: ResponseEnvelope = decode_payload(&frame[4..]).unwrap();
+        match back.result {
+            IpcResult::Ok {
+                response: IpcResponse::AuditSince(r),
+            } => assert_eq!(r, resp),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn audit_since_request_round_trips_through_envelope() {
+        let req = RequestEnvelope {
+            correlation_id: 3,
+            request: IpcRequest::AuditSince(AuditSinceParams {
+                cursor: 0,
+                action_filter: None,
+                decision_filter: None,
+                limit: Some(50),
+            }),
+        };
+        let frame = encode_frame(&req).unwrap();
+        let back: RequestEnvelope = decode_payload(&frame[4..]).unwrap();
+        match back.request {
+            IpcRequest::AuditSince(p) => {
+                assert_eq!(p.cursor, 0);
+                assert_eq!(p.limit, Some(50));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

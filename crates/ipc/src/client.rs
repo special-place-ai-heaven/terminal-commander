@@ -22,7 +22,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use crate::ipc::protocol::{
+use crate::protocol::{
     IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, MAX_FRAME_BYTES, RequestEnvelope,
     ResponseEnvelope, decode_payload, encode_frame,
 };

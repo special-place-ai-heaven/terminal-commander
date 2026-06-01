@@ -17,7 +17,7 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 29 live
+//! [`tool_catalogue`] is the single source of truth for the 32 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry,
 //! file, PTY, and aggregate runtime views. Each maps 1:1 to a daemon
@@ -25,7 +25,7 @@
 //! every other tool returns the structured `daemon_unavailable`
 //! envelope when the daemon is unreachable.
 //!
-//! Source-status: live; all 29 tools forward through daemon IPC.
+//! Source-status: live; all 32 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 

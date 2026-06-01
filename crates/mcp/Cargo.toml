@@ -28,6 +28,7 @@ serde_json = "1"
 terminal-commander-core.workspace = true
 terminal-commander-sifters    = { version = "0.1.37", path = "../sifters" } # x-release-please-version
 terminal-commander-store      = { version = "0.1.37", path = "../store" } # x-release-please-version
+terminal-commander-ipc.workspace = true
 terminal-commanderd           = { version = "0.1.37", path = "../daemon" } # x-release-please-version
 terminal-commander-supervisor = { path = "../supervisor", version = "0.1.37" } # x-release-please-version
 thiserror = "2.0.18"

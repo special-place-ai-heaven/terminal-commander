@@ -9,8 +9,8 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::windows::named_pipe::ClientOptions;
 
-use crate::ipc::framing::read_frame;
-use crate::ipc::protocol::{
+use crate::framing::read_frame;
+use crate::protocol::{
     IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, RequestEnvelope, ResponseEnvelope,
     decode_payload,
 };
@@ -118,7 +118,7 @@ impl DaemonClient {
                 }
             }
         };
-        let frame = super::protocol::encode_frame(env)?;
+        let frame = crate::protocol::encode_frame(env)?;
         client
             .write_all(&frame)
             .await
