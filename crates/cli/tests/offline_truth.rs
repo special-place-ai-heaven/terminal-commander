@@ -28,6 +28,15 @@ fn terminal_commander() -> Command {
 
 #[test]
 fn daemon_backed_inspection_commands_do_not_fake_empty_success() {
+    // Post-wiring regression guard (P5): every subcommand below is now a LIVE
+    // daemon-backed read. `terminal_commander()` points `TC_SOCKET` at a path
+    // that can never resolve to a running daemon, so each command runs the real
+    // probe-before-IPC handshake, the probe FAILS, and it takes the genuine
+    // `CliIpcError::Unavailable` branch -> exit 69, empty stdout, "unavailable"
+    // on stderr. This is the proof that wiring the CLI to real IPC preserved the
+    // no-fake-success axis: a dead endpoint REFUSES to synthesize data rather
+    // than fabricating an empty/not-found result.
+    //
     // `buckets show` uses a WELL-FORMED wire id (`bkt_<32-hex>`) so the command
     // reaches the probe-before-IPC path and returns the offline/unavailable
     // contract (exit 69). A malformed id is a usage error (exit 2) handled
