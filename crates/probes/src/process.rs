@@ -825,4 +825,82 @@ mod tests {
             assert_eq!(second.bytes, b"ok");
         });
     }
+
+    /// Spawn `/bin/sh -c <script>` with the given env and count how many
+    /// events the keyword rule fired. Absolute argv[0] so the env-replace
+    /// branch (PATH dropped) still resolves the program; `echo` is a shell
+    /// builtin so it needs no PATH either.
+    #[cfg(unix)]
+    fn run_env_probe(
+        env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+        script: &str,
+        keyword: &str,
+    ) -> u64 {
+        let runtime = rt();
+        runtime.block_on(async move {
+            let rings = Arc::new(ContextRingManager::new());
+            let bucket = BucketId::new();
+            let mut rule = rule_warning();
+            rule.id = "test.envcase".to_owned();
+            rule.keywords = Some(vec![keyword.to_owned()]);
+            let sifter = Arc::new(SifterRuntime::build(&[rule]).unwrap());
+            let sink: Arc<dyn EventSink> = Arc::new(InMemorySink::new());
+            let cfg = ProcessProbeConfig {
+                env,
+                ..ProcessProbeConfig::for_bucket(bucket)
+            };
+            let mut probe = ProcessProbe::spawn(
+                &["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
+                &cfg,
+                rings,
+                sifter,
+                Arc::clone(&sink),
+            )
+            .expect("spawn ok");
+            let _ = probe.wait().await.expect("wait ok");
+            probe.metrics().events_emitted
+        })
+    }
+
+    /// (a) Empty env => child INHERITS the parent environment (PATH present).
+    #[cfg(unix)]
+    #[test]
+    fn env_empty_inherits_parent_path() {
+        let n = run_env_probe(vec![], "echo MARK:${PATH:+HASPATH}", "HASPATH");
+        assert!(
+            n >= 1,
+            "empty env must inherit parent PATH (expected HASPATH match); events={n}"
+        );
+    }
+
+    /// (b) Non-empty env => the supplied {key,value} REACHES the child
+    /// (proves the [{key,value}] -> child round-trip).
+    #[cfg(unix)]
+    #[test]
+    fn env_nonempty_key_reaches_child() {
+        let env = vec![(
+            std::ffi::OsString::from("TCENV"),
+            std::ffi::OsString::from("tcvalue"),
+        )];
+        let n = run_env_probe(env, "echo MARK:$TCENV", "tcvalue");
+        assert!(
+            n >= 1,
+            "supplied env var must reach the child (expected tcvalue match); events={n}"
+        );
+    }
+
+    /// (c) Non-empty env REPLACES (env_clear): PATH is dropped, not merged.
+    #[cfg(unix)]
+    #[test]
+    fn env_nonempty_replaces_and_drops_path() {
+        let env = vec![(
+            std::ffi::OsString::from("TCENV"),
+            std::ffi::OsString::from("tcvalue"),
+        )];
+        let n = run_env_probe(env, "echo MARK:${PATH:+HASPATH}", "HASPATH");
+        assert_eq!(
+            n, 0,
+            "non-empty env must REPLACE (env_clear) so PATH is absent; events={n}"
+        );
+    }
 }
