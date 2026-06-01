@@ -150,66 +150,16 @@ pub struct CommandStartRequest {
     pub grace: Option<Duration>,
 }
 
-/// Bounded response shape. Carries identifiers and counters, never
-/// raw stdout/stderr.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandStartResponse {
-    pub job_id: JobId,
-    pub bucket_id: BucketId,
-    pub probe_id: ProbeId,
-    /// Initial bucket cursor: clients pass this to `bucket_events_since`.
-    pub cursor: u64,
-}
-
-/// No-silence exit receipt (TCE-ERG-1).
-///
-/// Present ONLY when a finished process command produced ZERO
-/// rule-driven events. This is the one sanctioned exception to "TC
-/// never returns raw output": a bounded, truthful tail so a zero-rule
-/// command does not read as breakage.
-///
-/// PTY/file-watch jobs never reach this path (`CommandService` holds
-/// process probes only; `handle_command_status` routes PTY job ids to
-/// `UnknownJob`), so a tail cannot include secret-prompt input.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandReceipt {
-    pub exit_code: Option<i32>,
-    /// Frames the command produced that no rule matched, i.e. lines
-    /// the agent would otherwise have scrolled. `frames_total` for a
-    /// zero-rule run.
-    pub lines_suppressed: u64,
-    /// Last N frame texts (oldest first), byte-capped.
-    pub tail: Vec<String>,
-    /// True when the ring evicted earlier frames; the tail may omit
-    /// the start of output.
-    pub tail_incomplete: bool,
-}
-
-/// Bounded status shape. Counters + final exit state only.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandStatusResponse {
-    pub job_id: JobId,
-    pub bucket_id: BucketId,
-    pub probe_id: ProbeId,
-    pub state: terminal_commander_core::JobState,
-    pub frames_total: u64,
-    pub frames_stdout: u64,
-    pub frames_stderr: u64,
-    pub bytes_total: u64,
-    pub events_emitted: u64,
-    #[serde(default)]
-    pub frames_suppressed: u64,
-    #[serde(default)]
-    pub frames_suppressed_progress: u64,
-    #[serde(default)]
-    pub frames_suppressed_dedupe: u64,
-    pub exit_code: Option<i32>,
-    pub signal: Option<String>,
-    pub duration_ms: Option<u64>,
-    /// No-silence receipt; `Some` only for a finished process command
-    /// with zero rule-driven events. See [`CommandReceipt`].
-    pub receipt: Option<CommandReceipt>,
-}
+// `CommandStartResponse`, `CommandReceipt`, and `CommandStatusResponse`
+// are plain serde data over core types (`JobId`/`BucketId`/`ProbeId`/
+// `JobState`). They moved into `terminal_commander_ipc::protocol`
+// (Phase P1) so every IPC client shares the wire shape. The daemon
+// runtime that builds these responses keeps using them via this
+// re-import, and the crate-root `pub use command::{...}` surface stays
+// stable.
+pub use terminal_commander_ipc::protocol::{
+    CommandReceipt, CommandStartResponse, CommandStatusResponse,
+};
 
 /// EventSink that forwards drafts to the wired `Router`.
 ///

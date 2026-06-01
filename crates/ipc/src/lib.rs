@@ -1,48 +1,42 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! Local IPC for terminal-commanderd (TC37).
+//! Terminal Commander shared IPC crate (TC37).
 //!
-//! Unix domain socket transport. NO network listener. NO command
-//! execution. NO raw stream lane. Every request is bounded by frame
-//! size, every response is bounded, every accepted request is
-//! audited through the TC35 PersistentAudit sink.
+//! Houses the wire protocol, the length-prefixed JSON framing, and the
+//! cross-platform `DaemonClient` transport that every IPC client (MCP
+//! adapter, admin CLI) and the daemon server share. Splitting these out
+//! of the daemon keeps the dependency arrow pointing at a small,
+//! protocol-only crate: `core <- ipc <- {daemon, mcp, cli}`.
 //!
-//! Platform support:
-//! - Linux / WSL2 / macOS / BSD: live via tokio `UnixListener` +
-//!   SO_PEERCRED (Linux) for peer uid/gid/pid.
-//! - Windows native: NOT SUPPORTED. The IPC modules compile (so the
-//!   workspace builds), but `Server::bind` returns
-//!   `IpcError::UnsupportedPlatform`. WSL2 is the Windows story.
+//! Platform support for the client transport:
+//! - Linux / WSL2 / macOS / BSD: live via tokio `UnixStream` (see
+//!   [`client`]).
+//! - Windows native: live via tokio named pipe `ClientOptions` (see
+//!   [`pipe_client`]).
+//!
+//! The server side (dispatch, peer identity, `IpcServer` / `PipeServer`)
+//! stays in the daemon crate; this crate is wire types + framing +
+//! client transport only.
+//!
+//! Source-status: live (TC37).
 
-// The wire protocol, framing, and the cross-platform `DaemonClient`
-// transport moved to the `terminal-commander-ipc` crate (Phase P1).
-// They are re-exported here as modules so every existing call site
-// (`crate::ipc::protocol::*`, `crate::ipc::framing::*`,
-// `crate::ipc::DaemonClient`) keeps resolving unchanged. The daemon
-// keeps the SERVER side (dispatch, peer identity, listeners) local.
-pub use terminal_commander_ipc::framing;
-pub use terminal_commander_ipc::protocol;
+pub mod protocol;
 
-pub mod peer;
+pub mod framing;
 
-pub mod server;
-
-#[cfg(windows)]
-pub mod pipe_server;
+#[cfg(unix)]
+pub mod client;
 
 #[cfg(windows)]
-pub mod peer_windows;
-
-#[cfg(windows)]
-pub mod pipe_acl;
+pub mod pipe_client;
 
 pub use protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
-    CommandStartParams, CommandStartResponse, CommandStatusParams, CommandStatusResponse,
-    ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT, DEFAULT_BUCKET_WAIT_MS,
-    DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES,
+    CommandReceipt, CommandStartParams, CommandStartResponse, CommandStatusParams,
+    CommandStatusResponse, ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT,
+    DEFAULT_BUCKET_WAIT_MS, DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES,
     DEFAULT_FILE_READ_LINES, DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES,
     DEFAULT_REGISTRY_SEARCH_LIMIT, DiscoverResponse, EventContextParams, EventContextResponse,
     FileLine, FileReadWindowParams, FileReadWindowResponse, FileSearchMatch, FileSearchParams,
@@ -64,26 +58,13 @@ pub use protocol::{
     RegistrySearchParams, RegistrySearchResponse, RegistryTestMatch, RegistryTestParams,
     RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
     RequestEnvelope, ResponseEnvelope, RuntimeActiveRule, RuntimeBucketSummary,
-    RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
+    RuntimeStateResponse, SelfCheckResponse, SeverityHistogram, decode_payload, encode_frame,
 };
 
-// `CommandStartResponse` / `CommandStatusResponse` now live in
-// `terminal_commander_ipc::protocol` and are re-exported at the crate
-// root via `pub use command::{...}` (command.rs re-imports them from
-// the ipc crate). We deliberately leave them out of the flat list
-// above to avoid an E0252 clash with that crate-root re-export.
-
-pub use peer::PeerCred;
-
-pub use server::dispatch_envelope;
+pub use framing::{read_frame, read_request, write_response};
 
 #[cfg(unix)]
-pub use server::{IpcServer, ServerHandle};
+pub use client::DaemonClient;
 
 #[cfg(windows)]
-pub use pipe_server::{PipeServer, PipeServerHandle};
-
-// Cross-platform client transport: UDS on Unix, named pipe on Windows.
-// `DaemonClient` is the platform-dispatched alias resolved inside the
-// `terminal-commander-ipc` crate.
-pub use terminal_commander_ipc::DaemonClient;
+pub use pipe_client::DaemonClient;

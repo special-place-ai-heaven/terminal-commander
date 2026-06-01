@@ -1104,6 +1104,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminal-commander-ipc"
+version = "0.1.37"
+dependencies = [
+ "serde",
+ "serde_json",
+ "terminal-commander-core",
+ "tokio",
+ "windows",
+]
+
+[[package]]
 name = "terminal-commander-mcp"
 version = "0.1.37"
 dependencies = [
@@ -1114,6 +1125,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "terminal-commander-core",
+ "terminal-commander-ipc",
  "terminal-commander-sifters",
  "terminal-commander-store",
  "terminal-commander-supervisor",
@@ -1190,6 +1202,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "terminal-commander-core",
+ "terminal-commander-ipc",
  "terminal-commander-probes",
  "terminal-commander-sifters",
  "terminal-commander-store",

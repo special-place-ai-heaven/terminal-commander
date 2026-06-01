@@ -5,7 +5,7 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use super::protocol::{
+use crate::protocol::{
     IpcError, IpcErrorCode, MAX_FRAME_BYTES, RequestEnvelope, ResponseEnvelope, decode_payload,
     encode_frame,
 };
@@ -50,7 +50,7 @@ pub async fn write_response<W: AsyncWrite + Unpin>(
         Err(err) => {
             let small = ResponseEnvelope {
                 correlation_id: env.correlation_id,
-                result: super::protocol::IpcResult::Err {
+                result: crate::protocol::IpcResult::Err {
                     error: IpcError::new(err.code, err.message),
                 },
             };

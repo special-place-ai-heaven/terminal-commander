@@ -8,6 +8,7 @@ members = [
     "crates/sifters",
     "crates/probes",
     "crates/store",
+    "crates/ipc",
     "crates/daemon",
     "crates/mcp",
     "crates/cli",
@@ -39,6 +40,7 @@ terminal-commander-core    = { path = "crates/core",    version = "0.1.37" } # x
 terminal-commander-sifters = { path = "crates/sifters", version = "0.1.37" } # x-release-please-version
 terminal-commander-probes  = { path = "crates/probes",  version = "0.1.37" } # x-release-please-version
 terminal-commander-store   = { path = "crates/store",   version = "0.1.37" } # x-release-please-version
+terminal-commander-ipc     = { path = "crates/ipc",     version = "0.1.37" } # x-release-please-version
 
 # Third-party crates referenced by SPEC / TC04 contract. Each is
 # declared here so member crates pick the same version. Concrete
