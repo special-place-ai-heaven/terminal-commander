@@ -1,7 +1,7 @@
 # Spec: Predicate-Routed Subscriptions + Real-Time-Active Bridge
 
 - Date: 2026-06-02
-- Status: design approved (direction); REVISED round 1 (18 blockers) then round 2 (7 fix clusters: tokio enroll idiom, off-by-one clamp, fairness cap, shutdown contract, MCP pull timeout, boot_id, runtime_state vecs) — pending focused correctness re-verify + user sign-off. One open governance decision: the IpcErrorCode amendment.
+- Status: design approved (direction); REVISED round 1 (18 blockers) → round 2 (7 fix clusters: tokio enroll idiom, off-by-one clamp, fairness cap, shutdown contract, MCP pull timeout, boot_id, runtime_state vecs) → round 3 (dropped-delta off-by-one). Focused correctness re-verify: 6/7 airtight, 1 residual fixed. IpcErrorCode amendment APPROVED (2026-06-02). Pending user sign-off → writing-plans.
 - Scope: Terminal Commander Rust workspace (daemon + core + ipc + cli + mcp), plus a documented harness-loop pattern
 - Author: special-place-administrator (via Claude)
 
@@ -92,14 +92,13 @@ over-claim again.
    pipe is single-pending-instance with a short `ERROR_PIPE_BUSY` retry budget
    (pipe_client.rs:18-26; pipe_server.rs:232-250), so a long-lived persistent
    connection contends with other clients — PREFER reconnect-per-pull on Windows.
-5. **Two new `IpcErrorCode` variants — REQUIRES A GOAL-FILE AMENDMENT** (the set is
-   closed by governance, protocol.rs:359-360, and the MCP match is exhaustive):
-   `UnknownSubscription` (→ `invalid_params`/-32602, matching the
-   `UnknownJob/UnknownWatch/UnknownProbe` pattern) and `SubscriptionLimitExceeded`
+5. **Two new `IpcErrorCode` variants — APPROVED goal-file amendment (user sign-off
+   2026-06-02)** (the set is closed by governance, protocol.rs:359-360, and the MCP
+   match is exhaustive): `UnknownSubscription` (→ `invalid_params`/-32602, matching
+   the `UnknownJob/UnknownWatch/UnknownProbe` pattern) and `SubscriptionLimitExceeded`
    (→ `invalid_params`/-32602; caller can free a slot). No existing variant fits
    (`UnknownJob`/`OversizedRequest` are semantic mismatches). Both force an edit to
-   the exhaustive `into_mcp_error` match (tools.rs:1389-1416). **This is a decision
-   for the user** — flagged in Open Decisions.
+   the exhaustive `into_mcp_error` match (tools.rs:1389-1416).
 6. **`boot_id` on `DaemonState` + `SubscriptionOpenResponse`** — net-new wire state.
    DaemonState holds only a `std::time::Instant` (state.rs:54-114), not a stable
    serializable ID, and no `boot_id` is on any IpcResponse today. Mint a `Uuid` (or
@@ -168,7 +167,8 @@ Code, Codex, Cursor, Agent SDK, ...) and every OS, because:
 - The daemon is **cross-platform Rust**; the UDS-vs-named-pipe transport fork is
   internal. NOTE: the Windows `pipe_server` is a SEPARATE impl from the unix
   `server.rs` quoted above — the request loop, persistent-connection, and
-  shutdown-race behavior MUST be verified on the pipe path too (dual-OS AC).
+  shutdown CHECK / drain behavior MUST be verified on the pipe path too (dual-OS AC;
+  Windows shutdown is best-effort-abort per §3, not drain-parity).
 
 Everything in "Real-Time-Active" BEYOND "agent loops `subscription_pull`" — the CLI
 `subscription-stream`, `Monitor`/Stop-hook wakes, MCP `notifications/message` — is an
@@ -218,9 +218,11 @@ last_pull_at, rr_start: usize }` (`rr_start` = round-robin rotation cursor, §3)
   `head_seq.saturating_sub(1)` — NOT `head_seq` — because `events_since` reads
   strictly `e.seq > cursor` (bucket.rs:582) and `head_seq` is the oldest SURVIVING
   event's own seq (bucket.rs:339-340); clamping to `head_seq` would skip that
-  survivor. Surface `lagged` + dropped delta = `head_seq - stored_offset` (correct
-  log-semantics loss, never silent). If a fixed-source bucket is `drop_bucket`'d,
-  emit a final `exited/gone` liveness entry and remove it from the offsets map.
+  survivor. Surface `lagged` + dropped delta = `head_seq.saturating_sub(1) -
+  stored_offset` — NOT `head_seq - stored_offset` — because the survivor AT
+  `head_seq` IS delivered, so only `stored_offset < seq < head_seq` are truly lost
+  (never silent). If a fixed-source bucket is `drop_bucket`'d, emit a final
+  `exited/gone` liveness entry and remove it from the offsets map.
 - **Routing scan is bounded**: a hard cap of max buckets-per-subscription
   (default 200) with a `truncated` flag; the `list_bucket_ids()` ∩ side-table scan
   per pull is O(live buckets), acceptable under the cap.
@@ -425,8 +427,10 @@ TC's stream. Documented patterns (also captured in CONTRIBUTING/AGENTS):
   `liveness[]` array bounded; combined pull response asserted under `MAX_FRAME_BYTES`.
 - AC12 (eviction off-by-one): after FIFO eviction past a subscription's offset, the
   next pull clamps to `head_seq.saturating_sub(1)` and delivers the event AT the
-  post-eviction head EXACTLY ONCE, with `lagged` + dropped delta set (no skipped
-  survivor, no silent loss).
+  post-eviction head EXACTLY ONCE, with `lagged` + dropped delta =
+  `head_seq.saturating_sub(1) - stored_offset` (NOT `head_seq - stored_offset`,
+  which over-counts the delivered survivor by 1) — no skipped survivor, no silent
+  loss, no over-count.
 - AC13 (MCP trust path): an idle `subscription_pull` over the MCP facade returns
   SUCCESS `events:[]`+liveness within `timeout_ms`, NEVER a -32603 (the MCP client
   uses `with_timeout(> pull cap)`).
@@ -436,11 +440,9 @@ TC's stream. Documented patterns (also captured in CONTRIBUTING/AGENTS):
   timeout-below-ceiling behavior, not a graceful-drain signal.
 
 ## Open decisions for review / user sign-off
-- **IpcErrorCode amendment (REQUIRES USER APPROVAL)**: add `UnknownSubscription` +
-  `SubscriptionLimitExceeded` to the closed set + exhaustive match? (Recommended —
-  no existing variant fits; alternative is a strained reuse of `OversizedRequest`
-  for full + a generic not-found, which the codebase's per-entity pattern argues
-  against.)
+- **IpcErrorCode amendment — APPROVED (2026-06-02)**: add `UnknownSubscription` +
+  `SubscriptionLimitExceeded` to the closed set + exhaustive match, both
+  → `invalid_params`/-32602. (Resolved; no longer open.)
 - Tags (§1, Phase 3) — confirm deferral (`sources: all` + severity/kind covers
   "monitor all errors").
 - Stream bridge: reconnect-per-pull (a) vs persistent client (b) for Phase 2 —
@@ -457,8 +459,9 @@ TC's stream. Documented patterns (also captured in CONTRIBUTING/AGENTS):
   per-kind derivation (MUST-ADD #3); SubscriptionRegistry; predicate
   (severity/kind/sources); multiplexed pull with enroll-before-recheck (`enable()`)
   + capped round-robin fairness + timeout-below-ceiling (no server-side
-  shutdown-race); the 2 IpcErrorCode variants (MUST-ADD #5, pending approval);
-  `boot_id` (MUST-ADD #6); MCP pull timeout override (MUST-ADD #7);
+  shutdown-race); the 2 IpcErrorCode variants (MUST-ADD #5, APPROVED);
+  `boot_id` (MUST-ADD #6); MCP pull timeout override (MUST-ADD #7, per-CLIENT — use
+  a pull-scoped client, not the shared 5s default);
   `subscription_open/pull/list/close`; bounded ledger surface (§6); dual-OS tests
   (Windows shutdown = best-effort-abort, documented). (No tags, no seek, no stream
   bridge.)
