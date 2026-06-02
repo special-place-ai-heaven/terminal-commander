@@ -61,10 +61,14 @@ form and stay consistent within a file. Generated files
 
 ## 3. Toolchain
 
-- Rust 1.92.0 (MSRV floor set by rmcp 1.7.0). Edition 2024.
-- The exact toolchain will be pinned in `rust-toolchain.toml` by
-  TC04. Until TC04 lands, install via rustup with `1.92.0` as the
-  default channel for this repo.
+- MSRV floor: Rust 1.92.0 (set by rmcp 1.7.0). Edition 2024. This is
+  the *documented* minimum-supported version, NOT a CI-enforced gate:
+  no workflow runs `cargo hack --rust-version`, so the 1.92.0 claim is
+  a promise, not an automated check (see section 6).
+- Active dev/CI pin: Rust 1.95.0, pinned in `rust-toolchain.toml`
+  (`channel = "1.95.0"`). This is the toolchain the gate scripts and CI
+  actually run. Install it via rustup; the repo's `rust-toolchain.toml`
+  selects it automatically.
 - Required components: `rustfmt`, `clippy`.
 - All package names in this workspace use hyphens; in-code module
   names use underscores (e.g. crate `terminal-commander-core` is
@@ -77,12 +81,18 @@ in TC04. Summary:
 
 | Tool | Purpose | Status |
 |---|---|---|
-| `rustfmt` | format Rust source | required |
-| `clippy` | lint Rust source (warnings = errors) | required |
-| `cargo-deny` 0.19+ | license / advisories / bans / sources policy | required (CI only at pre-commit) |
-| `cargo-machete` 0.9+ | detect unused dependencies | required (CI) |
-| `cargo-hack` 0.6+ | feature matrix + MSRV gate | required (CI) |
-| `cargo-nextest` 0.9+ | faster test runner | required |
+| `rustfmt` | format Rust source | required (gate) |
+| `clippy` | lint Rust source (warnings = errors) | required (gate) |
+| `cargo-nextest` 0.9+ | faster test runner | required (gate) |
+| `cargo-deny` 0.19+ | license / advisories / bans / sources policy | recommended (not yet in CI) |
+| `cargo-machete` 0.9+ | detect unused dependencies | recommended (not yet in CI) |
+| `cargo-hack` 0.6+ | feature matrix + MSRV gate | recommended (not yet in CI) |
+
+`required (gate)` = enforced by the PR gate scripts that CI runs
+(`scripts/linux-gate.sh` / `scripts/windows-gate.ps1`; see section 6).
+`recommended (not yet in CI)` = part of the aspirational baseline in
+`docs/research/tooling-baseline.md` but NOT wired into any workflow
+today; run them locally if you wish, but they do not gate merges.
 
 Coverage tooling and `cargo-vet` are not part of the MVP baseline.
 
@@ -95,8 +105,18 @@ build time. See `docs/research/tooling-baseline.md` section 3.
 
 ## 5. Pre-commit subset
 
-Pre-commit hooks run locally and should finish in seconds. The
-required pre-commit subset is:
+The authoritative pre-push check is the PR gate itself. CI invokes
+`scripts/linux-gate.sh` (and `scripts/windows-gate.ps1`) directly, so
+running them locally is the same check that gates your PR — there is no
+drift to second-guess:
+
+```bash
+bash scripts/linux-gate.sh        # linux/mac
+pwsh scripts/linux-gate.ps1       # Windows (runs the linux gate via WSL)
+pwsh scripts/windows-gate.ps1     # Windows-only regression gate
+```
+
+For a fast inner loop you can run the gate's hot subset by hand:
 
 ```bash
 cargo fmt --all
@@ -104,13 +124,25 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace --profile default --no-fail-fast
 ```
 
-`cargo deny`, `cargo hack`, and `cargo machete` are deferred to CI;
-they take tens of seconds each and would slow local iteration.
+`cargo deny`, `cargo hack`, and `cargo machete` are NOT part of the PR
+gate (they are not wired into any workflow; see section 4). Run them
+locally only if you want the extra coverage.
 
 ## 6. CI sequence
 
-The canonical CI sequence is the seven-step pipeline locked in
-`docs/research/tooling-baseline.md`:
+The PR gate CI actually runs is `scripts/linux-gate.sh` (linux) plus
+`scripts/windows-gate.ps1` (windows). Those scripts are the single
+source of truth: `npm-binary-build.yml`'s `pre-build-gates*` jobs invoke
+them, so the commands in the scripts ARE the gate. Read the scripts for
+the exact, current command list.
+
+The seven-step pipeline below is the ASPIRATIONAL baseline recorded in
+`docs/research/tooling-baseline.md`. It is NOT the PR gate today: steps
+3, 4, 5, and 7 (`cargo deny` / `cargo hack` / `cargo machete`) are not
+wired into any workflow, and step 2's clippy here uses `--all-features`
+whereas the real gate (`scripts/linux-gate.sh`) runs clippy WITHOUT
+`--all-features`. Treat this block as the target state, not the
+authoritative gate:
 
 ```bash
 # 1. Format check.
@@ -140,6 +172,39 @@ Rationale: format and lint fail in seconds and catch most style
 issues; cargo-deny gates the supply chain before the long compile;
 cargo-hack gates feature combinations before the slow test phase;
 machete runs last because it needs a green compile.
+
+### 6.1 OS-specific code
+
+When a change touches `cfg(unix)` / `cfg(windows)` / `target_os` code
+or ANY test, run both gates before pushing:
+
+```bash
+# Windows
+pwsh scripts/linux-gate.ps1     # runs the linux gate inside WSL
+pwsh scripts/windows-gate.ps1   # runs the windows-only regression gate
+
+# linux / mac
+bash scripts/linux-gate.sh
+```
+
+A single-OS `cargo test` / `cargo clippy` does NOT compile the other
+OS's `cfg` paths, so an OS-gated change can pass locally and still break
+the other platform's gate in CI. Running both gates is the only way to
+exercise both `cfg` worlds before you push.
+
+`scripts/linux-gate.sh` IS the linux PR gate that CI runs (the single
+source of truth — `npm-binary-build.yml` invokes it directly).
+`scripts/dev/verify-baseline.sh` remains a separate fixture / doctrine
+check and is NOT the PR gate; do not conflate the two.
+
+One-time WSL provisioning (Windows devs, so `scripts/linux-gate.ps1`
+can run the linux gate):
+
+- rustup, plus the pinned `1.95.0` toolchain (matches
+  `rust-toolchain.toml`)
+- `cargo-nextest`
+- `node`
+- `python3` (the TC47 load gate self-skips to a false pass without it)
 
 ## 7. Goal-driven workflow
 
