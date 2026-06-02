@@ -11,6 +11,7 @@
 // Each call has a per-op SAFETY comment.
 #![allow(unsafe_code)]
 
+use std::ffi::OsString;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -166,6 +167,69 @@ fn process_probe_spawn_silent_and_captures_stdio() {
             m.frames_stdout >= 1,
             "stdout frames captured with CREATE_NO_WINDOW: {}",
             m.frames_stdout
+        );
+    });
+}
+
+/// Regression (the env-overlay bug): a NON-EMPTY env must NOT strip the
+/// OS-essential environment from the child. Before the overlay fix the spawn
+/// did `env_clear()` then set only the supplied vars, so the child lost
+/// `SystemRoot` (and `PATH`); a Windows binary like `node` then aborted at
+/// startup (exit 134, crypto/AES init) or, with `SystemRoot` gone, exited 1.
+///
+/// We spawn `node -e "process.exit(process.env.SystemRoot ? 0 : 1)"` with a
+/// supplied `TCENV` entry. Under overlay the child's environment block inherits
+/// the parent env, so `SystemRoot` is present -> exit 0. Under the old REPLACE
+/// the child env block held only `TCENV`, so `SystemRoot` was gone -> exit 1
+/// (or a 134 crash in Node's crypto init). (argv[0] program resolution uses the
+/// parent process PATH either way; the bug was the stripped child env BLOCK.)
+///
+/// Skips (does not fail) when `node` is not on PATH, so a box or CI runner
+/// without Node degrades gracefully instead of red-failing.
+#[test]
+fn env_overlay_preserves_windows_system_env() {
+    if std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping env_overlay_preserves_windows_system_env: `node` not on PATH");
+        return;
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let rings = Arc::new(ContextRingManager::new());
+        let bucket = BucketId::new();
+        let sifter = Arc::new(SifterRuntime::build(&[]).unwrap());
+        let sink: Arc<dyn terminal_commander_probes::EventSink> = Arc::new(InMemorySink::new());
+        let argv = vec![
+            "node".to_owned(),
+            "-e".to_owned(),
+            "process.exit(process.env.SystemRoot ? 0 : 1)".to_owned(),
+        ];
+        let mut probe = ProcessProbe::spawn(
+            &argv,
+            &ProcessProbeConfig {
+                probe_id: None,
+                bucket_id: bucket,
+                cwd: None,
+                env: vec![(OsString::from("TCENV"), OsString::from("bar"))],
+                grace: DEFAULT_GRACE,
+            },
+            rings,
+            sifter,
+            sink,
+        )
+        .expect("spawn node probe");
+
+        let status = probe.wait().await.expect("probe wait");
+        assert!(
+            status.success(),
+            "non-empty env must OVERLAY (inherit parent env): child should see \
+             SystemRoot and exit 0, got {status:?} (REPLACE would give exit 1 or a 134 crash)"
         );
     });
 }

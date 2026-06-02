@@ -64,7 +64,7 @@
     "a quiet command (zero rule matches) returns a bounded receipt, never an error",
     "wait_ms is bounded (default 5000, max 60000) and max_signals is bounded (default 50, max 500)",
     "inline rules use the typed shorthand; the minimal rule is {\"pattern\": \"...\"}",
-    "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list REPLACES it entirely (include PATH yourself)",
+    "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list is OVERLAID onto (added to or overrides) the inherited environment (merged, not replaced; PATH/SystemRoot are kept)",
     "an env map (e.g. {\"FOO\":\"bar\"}) is rejected with a teaching error naming the {key,value} array shape",
     "a non-array argv is rejected with a field-prefixed teaching error naming the array-of-strings shape with an example (TB-11)"
   ]

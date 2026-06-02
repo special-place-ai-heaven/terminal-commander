@@ -38,8 +38,9 @@ pub struct ProcessProbeConfig {
     /// Working directory for the child process. Passed through to
     /// the child; the advisory-policy seam in TC22 will gate this.
     pub cwd: Option<PathBuf>,
-    /// Environment passthrough. Each `(key, value)` is set on the
-    /// child. Empty Vec keeps the parent env.
+    /// Environment OVERLAY. The child always inherits the daemon's
+    /// parent environment; each `(key, value)` here is ADDED to it
+    /// (or overrides an existing entry). Empty Vec = inherit unchanged.
     pub env: Vec<(OsString, OsString)>,
     /// Grace window between graceful and forced termination.
     /// Currently advisory; cancellation in MVP is forced kill only.
@@ -194,11 +195,15 @@ impl ProcessProbe {
         if let Some(cwd) = &config.cwd {
             cmd.current_dir(cwd);
         }
-        if !config.env.is_empty() {
-            cmd.env_clear();
-            for (k, v) in &config.env {
-                cmd.env(k, v);
-            }
+        // OVERLAY semantics: the child inherits the daemon's full parent
+        // environment; each supplied `(key, value)` is ADDED to it (or
+        // overrides an existing entry). We deliberately do NOT `env_clear`:
+        // clearing it stripped OS-essential vars (e.g. `SystemRoot`, `PATH`
+        // on Windows) and crashed Windows children at startup whenever a
+        // non-empty env was supplied. An empty `config.env` leaves the
+        // loop a no-op, which is exactly "inherit the parent env".
+        for (k, v) in &config.env {
+            cmd.env(k, v);
         }
         #[cfg(windows)]
         {
@@ -827,9 +832,9 @@ mod tests {
     }
 
     /// Spawn `/bin/sh -c <script>` with the given env and count how many
-    /// events the keyword rule fired. Absolute argv[0] so the env-replace
-    /// branch (PATH dropped) still resolves the program; `echo` is a shell
-    /// builtin so it needs no PATH either.
+    /// events the keyword rule fired. Absolute argv[0] so the program
+    /// resolves regardless of PATH; `echo` is a shell builtin so it needs
+    /// no PATH either.
     #[cfg(unix)]
     fn run_env_probe(
         env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
@@ -901,29 +906,32 @@ mod tests {
         );
     }
 
-    /// (c) Non-empty env REPLACES (env_clear): PATH is dropped, not merged.
+    /// (c) Non-empty env OVERLAYS (no env_clear): the supplied vars merge
+    /// onto the inherited parent env, so PATH SURVIVES alongside TCENV.
     #[cfg(unix)]
     #[test]
-    fn env_nonempty_replaces_and_drops_path() {
+    fn env_nonempty_overlays_and_keeps_path() {
         let env = vec![(
             std::ffi::OsString::from("TCENV"),
             std::ffi::OsString::from("tcvalue"),
         )];
-        // `printenv PATH` reads the child's ACTUAL environment. With env_clear
-        // the supplied env contains only TCENV, so PATH is genuinely absent and
-        // `printenv` exits non-zero -> no MARK:HASPATH -> 0 events. We must NOT
-        // probe the shell `$PATH` variable here: a POSIX `sh` repopulates it
-        // with a compiled-in default when launched without PATH, which would
-        // mask the env_clear and make this test always see PATH (the false
-        // positive that surfaced when the detector used `case "$PATH"`).
+        // `printenv PATH` reads the child's ACTUAL environment. Under overlay
+        // semantics the child inherits the parent env and TCENV is layered on
+        // top, so the real PATH is present -> `printenv` exits zero -> we see
+        // MARK:HASPATH -> events >= 1. We probe `printenv PATH` (not the shell
+        // `$PATH` variable): a POSIX `sh` repopulates `$PATH` with a compiled-in
+        // default when launched without PATH, so `$PATH` cannot distinguish an
+        // inherited PATH from a shell-invented one. The form is brace-free so it
+        // dodges clippy::literal_string_with_formatting_args (rust 1.95), which
+        // mistakes `${...}` for a Rust format placeholder.
         let n = run_env_probe(
             env,
             r"if printenv PATH > /dev/null 2>&1; then echo MARK:HASPATH; fi",
             "HASPATH",
         );
-        assert_eq!(
-            n, 0,
-            "non-empty env must REPLACE (env_clear) so PATH is absent; events={n}"
+        assert!(
+            n >= 1,
+            "non-empty env must OVERLAY (no env_clear) so inherited PATH survives; events={n}"
         );
     }
 }
