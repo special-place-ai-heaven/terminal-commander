@@ -28,6 +28,12 @@ exp="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rus
 [ -n "$exp" ] || { echo "tc-gate: could not read channel from rust-toolchain.toml" >&2; exit 1; }
 rustc --version | grep -q "$exp" || { echo "tc-gate: rustc != pinned $exp (is rustup the active cargo?)" >&2; exit 1; }
 
+# Pin-consistency (AC8): CI pins the toolchain via the npm-binary-build.yml
+# RUST_TOOLCHAIN env (NOT from this toml), so the two pins can silently drift.
+# Assert they agree so a bump to one without the other fails fast here.
+wf_pin="$(grep -E 'RUST_TOOLCHAIN:' .github/workflows/npm-binary-build.yml | head -1 | sed -E 's/.*"([0-9.]+)".*/\1/' | tr -d '\r')"
+[ "$wf_pin" = "$exp" ] || { echo "tc-gate: workflow RUST_TOOLCHAIN ($wf_pin) != rust-toolchain.toml channel ($exp)" >&2; exit 1; }
+
 echo "== verify-optional-dependencies =="; node scripts/release/verify-optional-dependencies.js
 echo "== fmt ==";    cargo fmt --all --check
 echo "== clippy =="; cargo clippy --workspace --all-targets -- -D warnings
