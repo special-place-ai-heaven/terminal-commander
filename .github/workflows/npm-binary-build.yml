@@ -24,6 +24,9 @@ on:
       - "packages/**"
       - "scripts/release/**"
       - "scripts/smoke/**"
+      - "scripts/linux-gate.sh"
+      - "scripts/windows-gate.ps1"
+      - "scripts/linux-gate.ps1"
       - ".github/workflows/npm-binary-build.yml"
       - ".github/workflows/_build-platform-binary.yml"
   pull_request:
@@ -36,6 +39,9 @@ on:
       - "packages/**"
       - "scripts/release/**"
       - "scripts/smoke/**"
+      - "scripts/linux-gate.sh"
+      - "scripts/windows-gate.ps1"
+      - "scripts/linux-gate.ps1"
       - ".github/workflows/npm-binary-build.yml"
       - ".github/workflows/_build-platform-binary.yml"
   workflow_dispatch:
@@ -62,8 +68,6 @@ jobs:
       NODE_VERSION: "20"
     steps:
       - uses: actions/checkout@v4
-      - name: Verify root optionalDependencies pin
-        run: node scripts/release/verify-optional-dependencies.js
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -75,30 +79,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace
-      - name: TC47 load gate (8 stress tests)
-        run: cargo test -p terminal-commanderd --test load_noise_backpressure -- --nocapture
-      - name: MCP grep guard 1 — no spawn / no socket in crates/mcp source
-        shell: bash
-        run: |
-          set -e
-          out=$(grep -RE "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp/src || true)
-          echo "$out"
-          if echo "$out" | grep -E "^crates/mcp/src/[^:]+:[ \t]*(let|use|fn|pub|impl|let mut)" >/dev/null; then
-            echo "::error::MCP guard 1 caught a non-doc match in production source"
-            exit 1
-          fi
-      - name: MCP grep guard 2 — no direct fs in crates/mcp/src
-        shell: bash
-        run: |
-          set -e
-          if grep -RE "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src; then
-            echo "::error::MCP guard 2 caught a direct-fs path"
-            exit 1
-          fi
+      - name: pre-build gates (scripts/linux-gate.sh)
+        run: bash scripts/linux-gate.sh
 
   pre-build-gates-windows:
     name: pre-build-gates (windows-x64)
@@ -116,10 +99,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: npm-binary-build-pre-gates-windows
-      - name: ROB-6 Windows spawn regression (AttachConsole)
-        run: |
-          cargo test -p terminal-commander-probes windows_no_console -- --nocapture
-          cargo test -p terminal-commanderd windows_spawn_site_coverage -- --nocapture
+      - name: pre-build gates (scripts/windows-gate.ps1)
+        shell: pwsh
+        run: ./scripts/windows-gate.ps1
 
   build-linux-x64:
     needs: pre-build-gates
@@ -136,7 +118,7 @@ jobs:
       upload_artifact: true
 
   build-windows-x64:
-    needs: pre-build-gates
+    needs: [pre-build-gates, pre-build-gates-windows]
     uses: ./.github/workflows/_build-platform-binary.yml
     with:
       platform: windows-x64
