@@ -87,7 +87,9 @@ const LONG_LIVED_CMD: &[&str] = &["/c", "ping", "-n", "2", "127.0.0.1"];
 ///
 /// Serialized via `CONSOLE_LOCK` because attach/detach is process-wide state.
 fn child_has_console_window(pid: u32) -> Option<bool> {
-    let _guard = CONSOLE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = CONSOLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: AttachConsole takes an OS pid; failure is reported via zero return
     // and we bail before touching console state.
     let attached = unsafe { AttachConsole(pid) };
