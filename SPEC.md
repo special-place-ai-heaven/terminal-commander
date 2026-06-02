@@ -171,7 +171,7 @@ update.
 - PTY (MVP): pty-process 0.5.3 with `async` feature. POSIX only;
   portable-pty bridge deferred for Windows native. See
   `docs/research/pty-crate.md`.
-- License: Apache-2.0 (SPDX `Apache-2.0`). See
+- License: PolyForm-Noncommercial-1.0.0 (SPDX `PolyForm-Noncommercial-1.0.0`). See
   `docs/research/license-decision.md`.
 - Process model: two-process (thin MCP + persistent daemon). IPC
   transport between the two is deferred to TC21 (local Unix domain

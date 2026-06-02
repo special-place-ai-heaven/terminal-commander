@@ -37,21 +37,23 @@ The output of `git branch --show-current` MUST match the goal file's
 
 ## 2. License and per-file header
 
-Terminal Commander is licensed under the Apache License, Version 2.0.
+Terminal Commander is licensed under the PolyForm Noncommercial
+License 1.0.0. You may inspect, study, and use the source for
+noncommercial purposes; commercial use requires a separate license.
 
-- SPDX identifier: `Apache-2.0`
-- Repo root: `LICENSE` (full Apache-2.0 text) and `NOTICE` file.
-  Added by TC01a (see `.agent/goals/terminal-commander-mvp/TC01a-readme-license-contributing-reconcile.md`).
+- SPDX identifier: `PolyForm-Noncommercial-1.0.0`
+- Repo root: `LICENSE` (full PolyForm Noncommercial 1.0.0 text) and
+  `NOTICE` file (project notice + third-party dependency notices).
 - Cargo manifest field on every member crate:
   `license.workspace = true` with the workspace setting being
-  `license = "Apache-2.0"`.
+  `license = "PolyForm-Noncommercial-1.0.0"`.
+- By contributing, you agree your contributions are licensed under the
+  same PolyForm Noncommercial License 1.0.0.
 
-Every source file MUST carry the short SPDX header. This is the form
-accepted by the ASF FAQ and adopted by most modern Rust projects per
-`docs/research/license-decision.md`:
+Every source file MUST carry the short SPDX header:
 
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 ```
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Verifies that the daemon writes its startup line to
 // `<data_dir>/logs/terminal-commanderd.log` even when stdio is
 // redirected.

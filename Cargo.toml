@@ -18,7 +18,7 @@ members = [
 [workspace.package]
 edition = "2024"
 rust-version = "1.92"
-license = "Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 authors = ["The Terminal Commander Authors"]
 repository = "https://github.com/special-place-ai-heaven/terminal-commander"
 homepage = "https://github.com/special-place-ai-heaven/terminal-commander"

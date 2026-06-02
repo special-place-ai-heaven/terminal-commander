@@ -701,7 +701,7 @@ Expected: 2 new failures.
 Create `scripts/release/platform-packages.js`:
 
 ```javascript
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Single source of truth for the list of platform packages whose
 // versions are pinned in root's optionalDependencies.
 "use strict";
@@ -859,7 +859,7 @@ git commit -m "refactor(release): extract PLATFORM_PACKAGES constant + extend to
 - [ ] **Step 1: Write the reusable workflow**
 
 ```yaml
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright 2026 The Terminal Commander Authors
 #
 # Reusable workflow: build the 3 Terminal Commander release binaries
@@ -1008,7 +1008,7 @@ git commit -m "feat(ci): add reusable _build-platform-binary.yml for tier-1 + ma
 - [ ] **Step 1: Replace whole file**
 
 ```yaml
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright 2026 The Terminal Commander Authors
 #
 # NPM05 — npm binary build matrix (post-collapse).
@@ -2016,7 +2016,7 @@ git commit -m "feat(release): post-publish containerized verify jobs (5 platform
 - [ ] **Step 1: Write workflow**
 
 ```yaml
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright 2026 The Terminal Commander Authors
 #
 # Weekly probe of the 3 release-critical secrets. Opens a P1 issue
@@ -2120,7 +2120,7 @@ git commit -m "feat(ops): weekly secret-health.yml probes 3 release tokens"
 
 ```bash
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright 2026 The Terminal Commander Authors
 #
 # Usage: ./scripts/release/recover-partial-publish.sh <version>
@@ -2240,7 +2240,7 @@ git commit -m "feat(ops): recover-partial-publish.sh script for partial-release 
 - [ ] **Step 1: Write the workflow**
 
 ```yaml
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright 2026 The Terminal Commander Authors
 #
 # Operator panic-button: deprecate a broken published version across

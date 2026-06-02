@@ -66,7 +66,7 @@ file. Both forms are acceptable:
 ### Short SPDX form (ASF-accepted shorter variant)
 
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 ```
 

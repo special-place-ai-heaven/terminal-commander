@@ -7,4 +7,4 @@ See the [main repository README](https://github.com/special-place-ai-heaven/term
 
 ## License
 
-Apache-2.0
+PolyForm-Noncommercial-1.0.0

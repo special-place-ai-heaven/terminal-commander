@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // End-to-end: launch the daemon, launch MCP pointing at it, close
 // MCP stdin, verify MCP exits 0 AND the daemon is still alive.
 //

@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: Apache-2.0
+-- SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 -- Persistent audit log (TC35). Replaces the in-memory
 -- AuditPlaceholder seam with durable rows.
 -- See docs/storage/AUDIT_LOG.md for the design.

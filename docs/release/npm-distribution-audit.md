@@ -144,7 +144,7 @@ the boundaries — the divergences are intentional, not accidental:
 - Versions for all packages stay in lockstep (single line in the
   release-please manifest).
 - `engines.node`: `">=18"` (Symforge precedent; matches `actions/setup-node@v4` default).
-- License: Apache-2.0 (matches the Rust crate license).
+- License: PolyForm-Noncommercial-1.0.0 (matches the Rust crate license).
 - `files` field on each package limits the tarball to `bin/` +
   `package.json` + `LICENSE` (+ `README.md` on the root).
 

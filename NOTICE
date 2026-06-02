@@ -1,31 +1,31 @@
 Terminal Commander
-Copyright 2026 The Terminal Commander Authors
+Copyright 2026 special-place-ai-heaven (The Terminal Commander Authors)
 
-This product includes software developed by The Terminal Commander Authors.
+This product is licensed under the PolyForm Noncommercial License 1.0.0.
+SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+You may inspect, study, and use the source code for noncommercial purposes.
+Commercial use requires a separate license. See the LICENSE file at the
+repository root for the full license text and terms.
 
-    https://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+Required Notice: Copyright (c) 2026 special-place-ai-heaven
+(https://github.com/special-place-ai-heaven/terminal-commander)
 
 ------------------------------------------------------------------------
 
-Upstream dependency notice (rmcp relicensing transition)
+Third-party dependency notices
 
-The Rust MCP SDK crate `rmcp` is undergoing a relicensing transition.
-Legacy releases were published under `MIT OR Apache-2.0`; current and
-future releases are published under `Apache-2.0`. The repository
-`cargo-deny` license allowlist therefore covers BOTH expressions:
+The Terminal Commander project license above does NOT change the licenses
+of its third-party dependencies, which remain under their own terms
+(predominantly MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Zlib,
+Unicode-3.0, and CC0-1.0). The `cargo-deny` license allowlist in
+`deny.toml` enumerates the dependency license expressions in use.
 
-  - `MIT OR Apache-2.0`  (legacy rmcp and ecosystem crates still on it)
-  - `Apache-2.0`         (current rmcp and the Terminal Commander crates)
+Notable dependencies:
 
-See `docs/research/license-decision.md` and
-`docs/research/tooling-baseline.md` for full rationale.
+  - rmcp (Rust MCP SDK): legacy releases `MIT OR Apache-2.0`, current and
+    future releases `Apache-2.0`.
+  - notify (core): CC0-1.0.
+  - notify-debouncer-full, file-id: MIT OR Apache-2.0.
+
+See `docs/research/license-decision.md` and `deny.toml` for full rationale.

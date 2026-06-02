@@ -38,7 +38,7 @@ The token has three states the callers care about: a full-socket override (`TC_S
 Create `crates/supervisor/src/session.rs` with ONLY the tests first (the types they reference come in Step 3):
 
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 //
 // Per-harness session identity. Resolves an opaque session token from the

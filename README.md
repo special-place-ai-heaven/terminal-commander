@@ -530,4 +530,7 @@ scripts/                                 CI, release, and smoke helpers
 
 ## License
 
-Apache-2.0. See [`LICENSE`](LICENSE).
+Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE)
+(`SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0`). You may inspect,
+study, and use the source code for noncommercial purposes. Commercial use
+requires a separate license — contact the licensor for commercial terms.
