@@ -528,7 +528,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt}. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) and returns up to max_signals (default 50). Argv only; shell interpreters denied. Prefer plain shell for tiny one-off commands whose full verbatim output you want."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted}. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; poll command_status with the returned job_id for the final exit_code/signals — do not treat it as finished. Argv only; shell interpreters denied. Prefer plain shell for tiny one-off commands whose full verbatim output you want."
     )]
     async fn run_and_watch(
         &self,
@@ -625,6 +625,17 @@ impl TerminalCommanderMcpServer {
         // 3. Compose the response. The receipt is included only when the
         //    command finished with zero rule signals (no-silence rule):
         //    a quiet command yields a receipt, never an error.
+        //
+        // Completion markers (trust contract): the wait budget is bounded,
+        // so the loop can return while the job is still `Running`. The
+        // success-shaped payload (isError:false) is then ambiguous to a
+        // naive reader. `complete`/`wait_exhausted` make it unambiguous:
+        //   - `complete` is true iff the job reached a terminal state.
+        //   - `wait_exhausted` is true iff the loop returned non-terminal
+        //     (the wait budget was spent while the command was still
+        //     running). The caller MUST poll `command_status` for the
+        //     final exit_code/signals in that case.
+        let (complete, wait_exhausted) = run_and_watch_completion(final_state);
         let include_receipt = signals.is_empty();
         json_tool_result(&serde_json::json!({
             "job_id": job_id,
@@ -634,6 +645,8 @@ impl TerminalCommanderMcpServer {
             "signals": signals,
             "signal_count": signals.len(),
             "receipt": if include_receipt { receipt } else { None },
+            "complete": complete,
+            "wait_exhausted": wait_exhausted,
         }))
     }
 
@@ -1402,6 +1415,28 @@ fn unexpected_variant(_resp: &IpcResponse) -> McpError {
 #[must_use]
 pub fn format_ipc_error(e: &IpcError) -> String {
     format!("daemon ipc error [{:?}]: {}", e.code, e.message)
+}
+
+/// Completion markers for the `run_and_watch` response.
+///
+/// `run_and_watch` waits only up to a bounded budget, so the loop can
+/// return while the job is still non-terminal. Returns
+/// `(complete, wait_exhausted)`:
+/// - `complete` is true iff `state` is terminal (`Exited`, `Cancelled`,
+///   or `Failed`).
+/// - `wait_exhausted` is the negation: true when the bounded wait budget
+///   was spent while the job was still `Starting`/`Running`. A caller that
+///   sees `wait_exhausted` MUST poll `command_status` for the final
+///   exit_code/signals rather than treat the success-shaped payload as
+///   finished.
+#[must_use]
+const fn run_and_watch_completion(state: terminal_commander_core::JobState) -> (bool, bool) {
+    use terminal_commander_core::JobState;
+    let complete = matches!(
+        state,
+        JobState::Exited | JobState::Cancelled | JobState::Failed
+    );
+    (complete, !complete)
 }
 
 /// Build a structured `daemon_unavailable` MCP error envelope.
@@ -3111,6 +3146,38 @@ mod tests {
             .await
             .expect_err("self_check should fail");
         assert_daemon_unavailable_tool_error("self_check", &self_check);
+    }
+
+    // --- FIX A: run_and_watch completion markers ---
+
+    #[test]
+    fn run_and_watch_completion_marks_terminal_states_complete() {
+        use terminal_commander_core::JobState;
+        // A terminal job is complete and NOT wait-exhausted.
+        for state in [JobState::Exited, JobState::Cancelled, JobState::Failed] {
+            let (complete, wait_exhausted) = run_and_watch_completion(state);
+            assert!(complete, "{state:?} must be complete");
+            assert!(
+                !wait_exhausted,
+                "{state:?} is terminal, must not be wait_exhausted"
+            );
+        }
+    }
+
+    #[test]
+    fn run_and_watch_completion_marks_running_wait_exhausted() {
+        use terminal_commander_core::JobState;
+        // A still-running (or still-starting) job that returns because the
+        // wait budget was spent is NOT complete; it is wait_exhausted, so
+        // the caller knows to poll command_status for the real exit.
+        for state in [JobState::Running, JobState::Starting] {
+            let (complete, wait_exhausted) = run_and_watch_completion(state);
+            assert!(!complete, "{state:?} is non-terminal, must not be complete");
+            assert!(
+                wait_exhausted,
+                "{state:?} returned non-terminal -> wait_exhausted"
+            );
+        }
     }
 
     #[test]

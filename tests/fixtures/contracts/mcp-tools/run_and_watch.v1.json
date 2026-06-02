@@ -35,7 +35,20 @@
       "exit_code": 0,
       "frames_suppressed": 0,
       "tail": []
-    }
+    },
+    "complete": true,
+    "wait_exhausted": false
+  },
+  "response_example_wait_exhausted": {
+    "job_id": "job_018f0000000000000000000000000001",
+    "bucket_id": "bkt_018f0000000000000000000000000001",
+    "state": "running",
+    "exit_code": null,
+    "signals": [],
+    "signal_count": 0,
+    "receipt": null,
+    "complete": false,
+    "wait_exhausted": true
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -62,6 +75,7 @@
     "argv is explicit and shell interpreters are daemon-denied",
     "signals contains only rule-driven events; the probe-lifecycle exit marker is reported via state/exit_code, not as a signal",
     "a quiet command (zero rule matches) returns a bounded receipt, never an error",
+    "complete is true iff state is terminal (exited|cancelled|failed); wait_exhausted is its negation: true when the bounded wait budget was spent while the job was still running. wait_exhausted=true means STILL RUNNING -> poll command_status for the final exit_code/signals, do not treat as finished",
     "wait_ms is bounded (default 5000, max 60000) and max_signals is bounded (default 50, max 500)",
     "inline rules use the typed shorthand; the minimal rule is {\"pattern\": \"...\"}",
     "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list is OVERLAID onto (added to or overrides) the inherited environment (merged, not replaced; PATH/SystemRoot are kept)",
