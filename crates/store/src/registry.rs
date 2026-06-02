@@ -382,6 +382,22 @@ impl EventStore {
     }
 
     /// Record a scoped activation (TC42c). Advisory at MVP.
+    ///
+    /// Idempotent against the in-memory activation model: at most ONE
+    /// open row may exist per `(rule_id, version, scope)`. If an open
+    /// row already exists for the same scope, this is a no-op (returns
+    /// `Ok(())`) rather than inserting a duplicate. Mirrors
+    /// `ActivationRegistry::activate`, which is a single-entry upsert
+    /// keyed on `(rule_id, version, scope)`.
+    ///
+    /// Why this matters: without the open-row guard, two activates of
+    /// the same key leave two open rows; a single deactivate closes one
+    /// (see `deactivate_rule_scoped`), and bootstrap re-hydrates the
+    /// surviving open row -- resurrecting a rule the operator
+    /// deactivated. The guard keeps the durable store in lockstep with
+    /// the runtime authority. Re-activation AFTER a deactivate (the
+    /// prior open row is now closed) correctly inserts a fresh open row,
+    /// so the history trail is preserved.
     pub fn record_activation_scoped(
         &mut self,
         rule_id: &str,
@@ -391,13 +407,33 @@ impl EventStore {
         actor: Option<&str>,
     ) -> Result<()> {
         self.ensure_registry()?;
-        let now_s = OffsetDateTime::now_utc().format(&Rfc3339)?;
         let scope_kind = scope.kind_label();
         let scope_value = scope.value_wire();
+        // Open-row idempotency: if an activation for this exact
+        // (rule_id, version, scope) is already open, do not insert a
+        // duplicate. NULL-safe scope_value comparison so Global rows
+        // (scope_value IS NULL) are matched.
+        let already_open: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM rule_activations
+                  WHERE rule_id = ?1
+                    AND version = ?2
+                    AND scope_kind = ?3
+                    AND (
+                        (?4 IS NULL AND scope_value IS NULL)
+                        OR scope_value = ?4
+                    )
+                    AND deactivated_at IS NULL",
+            params![rule_id, i64::from(version), scope_kind, scope_value],
+            |row| row.get(0),
+        )?;
+        if already_open > 0 {
+            return Ok(());
+        }
+        let now_s = OffsetDateTime::now_utc().format(&Rfc3339)?;
         self.conn.execute(
             "INSERT INTO rule_activations
-                (rule_id, version, activated_at, profile, actor, scope_kind, scope_value)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    (rule_id, version, activated_at, profile, actor, scope_kind, scope_value)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 rule_id,
                 i64::from(version),
@@ -455,11 +491,22 @@ impl EventStore {
         self.deactivate_rule_scoped(rule_id, version, ActivationScope::Global)
     }
 
-    /// Close the most recent open activation for
-    /// `(rule_id, version, scope)`. "Open" means
-    /// `deactivated_at IS NULL`. Returns whether a row was actually
-    /// closed (so the caller can distinguish "wasn't active" from a
-    /// real deactivation).
+    /// Close EVERY open activation for `(rule_id, version, scope)`.
+    /// "Open" means `deactivated_at IS NULL`. Returns whether at least
+    /// one row was actually closed (so the caller can distinguish
+    /// "wasn't active" from a real deactivation).
+    ///
+    /// Closes ALL matching open rows, not just the most recent one. In
+    /// the normal path `record_activation_scoped`'s open-row guard keeps
+    /// at most one open row per key, so this closes exactly one. The
+    /// "close all" semantics are a defensive backstop: a database
+    /// written by a pre-fix binary may already hold multiple open rows
+    /// for one key; closing only one (the old `LIMIT 1` behavior) would
+    /// leave a stale open row that bootstrap re-hydrates, resurrecting a
+    /// deactivated rule. Closing all guarantees "activate(s) then one
+    /// deactivate then restart" leaves the rule INACTIVE. The history
+    /// trail is preserved -- rows are closed (deactivated_at stamped),
+    /// never deleted.
     pub fn deactivate_rule_scoped(
         &mut self,
         rule_id: &str,
@@ -475,20 +522,15 @@ impl EventStore {
         // still close.
         let changed = self.conn.execute(
             "UPDATE rule_activations
-                SET deactivated_at = ?1
-              WHERE rowid IN (
-                  SELECT rowid FROM rule_activations
-                   WHERE rule_id = ?2
-                     AND version = ?3
-                     AND scope_kind = ?4
-                     AND (
-                         (?5 IS NULL AND scope_value IS NULL)
-                         OR scope_value = ?5
-                     )
-                     AND deactivated_at IS NULL
-                   ORDER BY activated_at DESC, rowid DESC
-                   LIMIT 1
-              )",
+                    SET deactivated_at = ?1
+                  WHERE rule_id = ?2
+                    AND version = ?3
+                    AND scope_kind = ?4
+                    AND (
+                        (?5 IS NULL AND scope_value IS NULL)
+                        OR scope_value = ?5
+                    )
+                    AND deactivated_at IS NULL",
             params![now_s, rule_id, i64::from(version), scope_kind, scope_value],
         )?;
         Ok(changed > 0)
