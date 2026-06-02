@@ -29,13 +29,19 @@ async function runDoctorDaemon(opts) {
     }
     const probeCmd = `${LINUX_PATH_PREFIX}test -S "$HOME/.local/share/terminal-commanderd/terminal-commanderd.sock" && echo running || echo stopped`;
     const { spawn } = require("node:child_process");
-    const { buildFilteredEnv } = require("../wsl/filtered_env.js");
+    const {
+      buildFilteredEnv,
+      ensureSessionInWslEnv,
+    } = require("../wsl/filtered_env.js");
     const running = await new Promise((resolve) => {
       const argv = ["-d", resolved.distro, "--", "bash", "-lc", probeCmd];
       const child = spawn(o.wslPath || "wsl.exe", argv, {
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
-        env: buildFilteredEnv(env),
+        // Rebuild WSLENV to a TC-only allowlist after name-based filtering:
+        // this spawn launches a Linux process (`bash -lc`), so an ambient
+        // WSLENV=SOME_SECRET/u would otherwise forward SOME_SECRET into WSL.
+        env: ensureSessionInWslEnv(buildFilteredEnv(env)),
       });
       let out = "";
       if (child.stdout) child.stdout.on("data", (b) => { out += b.toString("utf8"); });

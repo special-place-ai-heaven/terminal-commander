@@ -308,23 +308,50 @@ test("spawn.js does not invoke lazy bootstrap or runtime install helpers", () =>
   }
 });
 
-test("detect.js + doctor.js do not forward any env var to the spawn call", () => {
-  // detect/doctor spawn() options must NOT include an `env:` key.
-  // Default behaviour inherits PATH only; explicit env passthrough is
-  // forbidden at WWS03. spawn.js (WWS04) IS allowed to set
-  // `env: filteredEnv`, but only after passing through buildFilteredEnv;
-  // that is enforced by the spawn.js-specific test below.
-  for (const file of ["detect.js", "doctor.js"]) {
-    const src = readSource(file);
-    const spawnIdx = [...src.matchAll(/\bspawn\s*\(/g)].map((m) => m.index);
-    for (const idx of spawnIdx) {
-      const window = src.slice(idx, idx + 400);
-      assert.equal(
-        /\benv\s*:/.test(window),
-        false,
-        `${file} spawn at index ${idx} must not set env:`,
-      );
-    }
+test("detect.js does not forward any env var to the spawn call", () => {
+  // detect.js spawn() options must NOT include an `env:` key. Its only
+  // spawn is `wsl.exe -l -v`, a host-side WSL management command that
+  // launches NO Linux process, so WSLENV forwarding is moot there and
+  // the default (inherit) env is acceptable. We strip comments + strings
+  // first so doc examples don't trip the guard.
+  const src = stripCommentsAndStrings(readSource("detect.js"));
+  const spawnIdx = [...src.matchAll(/\bspawn\s*\(/g)].map((m) => m.index);
+  for (const idx of spawnIdx) {
+    const window = src.slice(idx, idx + 400);
+    assert.equal(
+      /\benv\s*:/.test(window),
+      false,
+      `detect.js spawn at index ${idx} must not set env:`,
+    );
+  }
+});
+
+test("doctor.js runtime-probe spawn sanitizes WSLENV (no raw process.env leak)", () => {
+  // SECURITY: doctor.js's runtime probe runs `wsl -d <distro> -- bash -lc
+  // ...`, which DOES launch a Linux process. Without an explicit env the
+  // child inherits the full process.env, so an ambient WSLENV=SECRET/u
+  // would forward SECRET across the boundary. doctor.js MUST therefore set
+  // env on its spawn, and that env MUST flow through
+  // `ensureSessionInWslEnv(buildFilteredEnv(...))` and NEVER pass a raw,
+  // unsanitized process.env. We strip comments + strings first so doc
+  // examples don't trip the guard.
+  const code = stripCommentsAndStrings(readSource("doctor.js"));
+  const spawnIdx = [...code.matchAll(/\bspawn\s*\(/g)].map((m) => m.index);
+  assert.ok(spawnIdx.length > 0, "doctor.js should call spawn");
+  for (const idx of spawnIdx) {
+    const window = code.slice(idx, idx + 600);
+    // The spawn MUST set env, and the value MUST be the sanitized chain.
+    assert.match(
+      window,
+      /\benv\s*:\s*ensureSessionInWslEnv\s*\(\s*buildFilteredEnv\s*\(/,
+      `doctor.js spawn at index ${idx} must set env: ensureSessionInWslEnv(buildFilteredEnv(...)); got:\n${window.slice(0, 400)}`,
+    );
+    // Never pass a bare process.env to env: (it must be wrapped).
+    assert.equal(
+      /\benv\s*:\s*process\.env\b/.test(window),
+      false,
+      `doctor.js spawn at index ${idx} must not pass raw process.env to env:; got:\n${window.slice(0, 400)}`,
+    );
   }
 });
 
