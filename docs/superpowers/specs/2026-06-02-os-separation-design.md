@@ -1,7 +1,7 @@
 # Spec: Clear Separation of OS-Related Parts
 
 - Date: 2026-06-02
-- Status: revised after agent doc-review (4 lenses, 26 findings); pending final spec review
+- Status: revised x2 after two agent review rounds (4-lens doc-review, then adversarial panel); pending re-review
 - Scope: Terminal Commander Rust workspace
 - Author: special-place-administrator (via Claude)
 
@@ -9,109 +9,116 @@
 
 OS-specific code is scattered inline across the workspace as `#[cfg(...)]`
 blocks: **179 `cfg(unix | windows | target_os)` occurrences across 39 files**.
-Hotspots:
+Major hotspots (this table covers ~100 of the 179; the remaining ~79 are
+diffuse/low-density and are enumerated in the Phase-2 sub-spec, not here):
 
 | Area | File(s) | cfg count |
 |---|---|---|
 | IPC transport (UDS vs Windows named pipe) | `daemon/src/ipc/server.rs` (20), `ipc/pipe_server.rs` (14), `ipc/mod.rs` (5) | 39 |
 | PTY (unix-only) | `daemon/src/ipc/handlers/pty.rs` (12), `probes/src/pty.rs` (2) | 14 |
 | Supervisor OS glue | `supervisor/src/paths.rs` (13), `replace.rs` (11), `pidfile.rs` (9) | 33 |
-| Process spawn | `probes/src/process.rs` (9: `windows_silent`, env, spawn) | 9 |
+| Process spawn | `probes/src/process.rs` (9) | 9 |
 | WSL bridge | `daemon/src/environment/wsl.rs` (4) | 4 |
 | Cross-cutting seam (exists, near-empty) | `core/src/platform.rs` (1) | 1 |
 
-### Root pain (what drives this work)
+### Root pain
 
 OS-specific code is **invisible to whatever OS the dev box is not**. The primary
-dev machine is Windows; `cargo test` / `cargo clippy` there do **not** compile
-`#[cfg(unix)]` code. Symmetrically, on a linux/mac box the `#[cfg(windows)]`
-paths never compile. Each direction has a dedicated, **required** CI gate the
-other-OS dev cannot run locally:
+dev machine is Windows; `cargo test`/`clippy` there do not compile `#[cfg(unix)]`
+code; on linux/mac the `#[cfg(windows)]` paths never compile. Each direction has
+its own CI gate the other-OS dev cannot run locally. On the trust-hardening PR
+(#72) this cost two CI cycles: a clippy error in `#[cfg(unix)]` env tests, then a
+`#[cfg(unix)]` integration test broken by a hardened contract — both caught by CI,
+late, after a false "green locally."
 
-- **linux gate** (`pre-build-gates`, ubuntu-24.04): the unix-compiled lint/test
-  surface.
-- **windows gate** (`pre-build-gates-windows`, windows-2022): the
-  `windows_no_console` + `windows_spawn_site_coverage` regressions (ROB-6
-  AttachConsole spawn).
+### Ground truth (read from the actual workflow — this is the authority)
 
-On the trust-hardening PR (#72) this cost **two CI cycles**: a
-`clippy::literal_string_with_formatting_args` error in `#[cfg(unix)]` env tests
-(never linted on Windows), then a `#[cfg(unix)]` integration test broken by a
-hardened contract (never run on Windows). Both were caught by CI — late, after
-push, after a false "green locally" claim.
+`.github/workflows/npm-binary-build.yml`, job `pre-build-gates`
+(name: `pre-build-gates (linux-x64)`, ubuntu-24.04, Rust 1.95.0). Steps in order:
 
-### The actual CI gate (ground truth)
-
-Read from `.github/workflows/npm-binary-build.yml`. This is the authority the
-local gate must match — NOT a remembered subset.
-
-`pre-build-gates` (ubuntu-24.04, Rust 1.95.0) runs, in order:
-
-1. `node scripts/release/verify-optional-dependencies.js`
+1. `node scripts/release/verify-optional-dependencies.js` (gate step, runs BEFORE
+   the toolchain/cache/node infra steps in the current job)
 2. `cargo fmt --all --check`
-3. `cargo clippy --workspace --all-targets -- -D warnings`
-4. `cargo nextest run --workspace`
+3. `cargo clippy --workspace --all-targets -- -D warnings` (no `--all-features`)
+4. `cargo nextest run --workspace` (preceded by infra step `taiki-e/install-action@nextest`)
 5. TC47 load gate: `cargo test -p terminal-commanderd --test load_noise_backpressure -- --nocapture`
-6. MCP grep guard 1: no `Command::new|Command::spawn|TcpListener|UdpSocket` as
-   non-doc lines in `crates/mcp/src`
-7. MCP grep guard 2: no `tokio::fs|std::fs|File::open|read_to_string|read_to_end`
-   in `crates/mcp/src`
+6. MCP grep guard 1 — a `grep -RE "Command::new|Command::spawn|TcpListener|UdpSocket" ... || true`
+   captured into a var, then a SECOND regex post-filter that fails ONLY on
+   code-shaped matches (`^crates/mcp/src/...:(let|use|fn|pub|impl|let mut)`).
+   It deliberately allows doc/comment matches. Uses `|| true` + `if`-condition.
+7. MCP grep guard 2 — a bare `if grep -RE "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src; then exit 1`.
 
-`pre-build-gates-windows` (windows-2022, Rust 1.95.0) runs:
+Job `pre-build-gates-windows` (name: `pre-build-gates (windows-x64)`, windows-2022,
+Rust 1.95.0) runs, in one `run:` block: `cargo test -p terminal-commander-probes
+windows_no_console -- --nocapture` + `cargo test -p terminal-commanderd
+windows_spawn_site_coverage -- --nocapture`.
 
-- `cargo test -p terminal-commander-probes windows_no_console -- --nocapture`
-- `cargo test -p terminal-commanderd windows_spawn_site_coverage -- --nocapture`
+**Required-check set is enforced by the GitHub branch-protection ruleset
+`main-protection` (id 17000085), NOT by any committed file.** Verified via
+`gh api .../rulesets/17000085`, the required contexts are:
+`pre-build-gates (linux-x64)`, `build-linux-x64 / build-linux-x64`,
+`build-linux-arm64 / build-linux-arm64`, `build-mac-x64 / build-mac-x64`,
+`build-mac-arm64 / build-mac-arm64`, `build-windows-x64 / build-windows-x64`,
+`npm-pack (after all builds)`.
 
-Required check set (per `release-pr-sync.yml`): `pre-build-gates` +
-`pre-build-gates-windows` are gates; then 5 `build-*` + `npm-pack`.
+**Critical fact: `pre-build-gates (windows-x64)` is NOT in the required set, and
+no `build-*` job declares `needs: pre-build-gates-windows` — the windows gate
+currently gates nothing and is advisory.** A windows-only regression can merge
+red. The required CONTEXT is matched by the job `name:` field (e.g.
+`pre-build-gates (linux-x64)`), not the job key — renaming a job silently detaches
+its required check.
 
-A 3-step (fmt/clippy/nextest) local script would pass while CI fails on the load
-gate or MCP guards — the exact wasted-cycle failure this spec exists to kill. The
-earlier draft of this spec made that error (it was written from the CI failure
-log, not the workflow file). This revision is grounded in the workflow.
+Toolchain has TWO independent pins: `rust-toolchain.toml` (`channel = "1.95.0"`)
+and the workflow's explicit `RUST_TOOLCHAIN: "1.95.0"` env consumed by
+`dtolnay/rust-toolchain@master` (CI does NOT read the toml). They agree today but
+can drift.
 
 ## Goals
 
-1. **Verifiability (primary):** a developer can run the **exact** `pre-build-gates`
-   gate for BOTH target OSes before pushing — the unix gate via WSL on a Windows
-   box, the windows gate natively — so OS-specific defects are caught on the dev
-   box. This substantially reduces (does not, by convention alone, eliminate)
-   recurrence of the PR-#72 class of failure.
-2. **No drift, by construction:** the gate scripts are the **single source of
-   truth** that CI itself invokes, so "green from the script" implies "green in
-   the corresponding CI gate" because they run the identical commands.
-3. **Code locality (secondary):** OS-specific code lives behind clear seams /
-   dedicated modules instead of inline `cfg` sprawl (Phase 2).
+1. **Verifiability (primary):** a developer can run the exact `pre-build-gates`
+   gate for BOTH target OSes before pushing (linux via WSL on Windows, windows
+   natively), catching OS-specific defects on the dev box. This substantially
+   reduces — does not, by convention alone, eliminate — recurrence of the PR-#72
+   class.
+2. **No drift by construction (for deterministic gates):** the gate scripts are
+   the single source of truth that CI invokes, so "green from the script" implies
+   "green in the corresponding CI gate" for the DETERMINISTIC steps
+   (verify-deps, fmt, clippy, nextest, build, grep guards). The TC47 load gate is
+   a timing/concurrency stress suite whose pass/fail verdict is environment-
+   sensitive (WSL2/drvfs vs native ubuntu-24.04): a local pass is a best-effort
+   signal and CI remains authoritative for that one step.
+3. **Make the windows gate actually gate:** as part of Phase 1, promote
+   `pre-build-gates (windows-x64)` to a required check (ruleset + `needs:` wiring)
+   so the both-gates guarantee is real, not advisory.
+4. **Code locality (secondary):** OS-specific code behind clear seams instead of
+   inline `cfg` sprawl (Phase 2).
 
 ## Non-goals
 
-- No full `Platform`-trait dependency-injection abstraction (over-engineering for
-  a 2-OS + WSL target).
-- Not folded into the 0.1.39 trust-hardening release (already shipped; this is its
-  own branch/PR).
-- No behavior changes in Phase 1. Phase 2 relocation is behavior-preserving
-  per-seam (with the transport seam explicitly flagged — see Phase 2).
-- No always-on full-suite git hook. (A NARROW conditional hook is a Phase-1.5
-  fast-follow — see below.)
+- No full `Platform`-trait dependency-injection abstraction.
+- Not folded into the env-overlay fix (0.1.40) or any unrelated release.
+- No behavior changes in Phase 1 (scripts + workflow + docs + ruleset only).
+- No always-on full-suite git hook (a NARROW conditional hook is Phase 1.5).
 
 ## Decision
 
-Two phases, **safety-net first, then modularize**, with three decisions taken
-during review:
-
-- **CI invokes the gate scripts** (single source of truth; drift impossible).
-- **Both gates** are scripted and runnable locally (close both OS blind spots).
-- **Convention now; narrow pre-push hook as Phase 1.5** fast-follow.
+Safety-net first, then modularize. Review-driven decisions: CI invokes the gate
+scripts; both OS gates scripted AND the windows gate made required; convention now
++ narrow conditional pre-push hook as Phase 1.5; Phase-2 transport seam LAST.
 
 ---
 
-## Phase 1 — Local gates that CI invokes + convention
+## Phase 1 — Gate scripts that CI invokes + make-windows-required + convention
 
 ### Component 1: `scripts/linux-gate.sh`
 
-A `bash` script (shebang `#!/usr/bin/env bash`, `set -euo pipefail` — pipefail
-matters because the MCP guards pipe `grep` output) that runs the **full**
-`pre-build-gates` step list, in CI order:
+`bash` (shebang `#!/usr/bin/env bash`, `set -euo pipefail`). Runs the FULL
+`pre-build-gates` step list in CI order. Skeleton (the MCP guards are reproduced
+EXACTLY from the workflow, including `|| true` and the `if`-condition greps —
+these are load-bearing under `set -euo pipefail`; a no-match `grep` exits 1, so
+the guards MUST keep their `|| true` / `if` structure or they false-RED, and guard
+1's two-stage capture+post-filter MUST NOT be simplified to a plain grep or it
+false-GREENs by failing to distinguish code from doc matches):
 
 ```bash
 #!/usr/bin/env bash
@@ -119,184 +126,226 @@ set -euo pipefail
 export CARGO_TERM_COLOR=always
 export CARGO_TARGET_DIR="${TC_LINUX_TARGET:-$HOME/tc-linux-target}"
 
-# Toolchain fidelity: CI pins Rust 1.95.0 via rust-toolchain.toml. Fail loud if
-# the active toolchain is not rustup-managed at the pinned channel, else clippy
-# results can diverge from CI and look like they "ran".
+# Prechecks — a partial environment must FAIL LOUD, never silently skip a gate.
 require() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1 ($2)"; exit 127; }; }
 require cargo "install rustup + the pinned toolchain"
-require node "install node (verify-optional-dependencies.js needs it)"
+require node  "verify-optional-dependencies.js needs node"
 require cargo-nextest "cargo install cargo-nextest"
-# (assert rustc version matches rust-toolchain.toml channel; fail on mismatch)
+require python3 "the TC47 load gate (load_noise_backpressure) SKIPS = false-pass without python3"
+# Toolchain fidelity: parse [toolchain].channel from rust-toolchain.toml and
+# require the active rustc to match it AND be rustup-managed (so a distro cargo
+# on PATH cannot run a different toolchain whose clippy diverges from CI).
+exp="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+rustc --version | grep -q "$exp" || { echo "rustc != pinned $exp (is rustup the active cargo?)"; exit 1; }
 
-node scripts/release/verify-optional-dependencies.js
+node scripts/release/verify-optional-dependencies.js   # no npm deps -> safe after node setup
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace
+# Load gate MUST actually run (not skip): python3 precheck above guarantees it.
 cargo test -p terminal-commanderd --test load_noise_backpressure -- --nocapture
-# MCP grep guard 1 + guard 2 (verbatim from the workflow)
+# MCP guard 1 (capture + post-filter) and guard 2 (bare if-grep) -- byte-for-byte
+# from npm-binary-build.yml; do NOT simplify.
+out=$(grep -RE "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp/src || true)
+echo "$out"
+if echo "$out" | grep -E "^crates/mcp/src/[^:]+:[ \t]*(let|use|fn|pub|impl|let mut)" >/dev/null; then
+  echo "::error::MCP guard 1: non-doc match in production source"; exit 1
+fi
+if grep -RE "tokio::fs|std::fs|File::open|read_to_string|read_to_end" crates/mcp/src; then
+  echo "::error::MCP guard 2: direct-fs path"; exit 1
+fi
 ```
 
-- **Single source of truth:** the workflow's `pre-build-gates` job is refactored
-  to `run: bash scripts/linux-gate.sh` (CI keeps the infra steps — checkout,
-  `dtolnay/rust-toolchain`, `rust-cache`, `setup-node` — then calls the script).
-  Local and CI run the identical gate commands; divergence is impossible.
-- **Dedicated target dir** (`$HOME/tc-linux-target`, overridable via
-  `TC_LINUX_TARGET`) so a WSL/linux build never clobbers the Windows `target/`.
-- **Prechecks** fail loud with the exact remediation when `cargo`/`node`/
-  `cargo-nextest` are absent or the toolchain channel mismatches — so a partial
-  environment cannot produce a misleading green.
-- Runs natively on linux/mac; on Windows it is invoked through WSL by the `.ps1`.
+- **Dedicated linux-fs target dir** (`$HOME/tc-linux-target`, override `TC_LINUX_TARGET`)
+  so a WSL/linux build never clobbers the Windows `target/`.
+- **CI invokes this script.** The `pre-build-gates` job keeps EXACTLY these infra
+  steps (do not drop any): `actions/checkout@v4`, `dtolnay/rust-toolchain@master`
+  (toolchain `${RUST_TOOLCHAIN}`), `Swatinem/rust-cache@v2`, `actions/setup-node@v4`,
+  AND `taiki-e/install-action@nextest`. It then replaces the inner gate `run:`
+  steps with `run: bash scripts/linux-gate.sh`. The job **name:**
+  `pre-build-gates (linux-x64)` and key MUST be preserved verbatim (it is the
+  required-check context). Note `verify-optional-dependencies.js` moves from
+  pre-toolchain step #1 to inside the script (after node setup) — safe, it
+  `require()`s only local files, no `node_modules`.
 
 ### Component 2: `scripts/windows-gate.ps1`
 
 Runs the `pre-build-gates-windows` commands natively on the Windows dev box (no
-WSL needed for this half):
+WSL). Symmetric prechecks to Component 1: require the `x86_64-pc-windows-msvc`
+target and assert the active rustc == the pinned channel (a partial windows env
+must also fail loud, not pass).
 
 ```powershell
 cargo test -p terminal-commander-probes windows_no_console -- --nocapture
 cargo test -p terminal-commanderd windows_spawn_site_coverage -- --nocapture
 ```
 
-CI's `pre-build-gates-windows` job is refactored to invoke this script (same
-single-source-of-truth principle). It runs natively on the Windows-primary dev
-box. A contributor on linux/mac cannot run `cfg(windows)` tests locally at all;
-for them the windows gate stays a CI backstop (documented honestly).
+CI's `pre-build-gates-windows` job is refactored to invoke this script (one `run:`
+block replaces the current bundled block). Preserve the job **name:**
+`pre-build-gates (windows-x64)` verbatim. A linux/mac contributor cannot run
+`cfg(windows)` tests locally at all; for them the windows gate is a CI backstop
+(documented honestly — and made meaningful by Component 5).
 
 ### Component 3: `scripts/linux-gate.ps1` (Windows -> WSL wrapper)
 
-- Resolves the repo root and converts it with `wsl.exe wslpath -a` (handles spaces
-  and `/mnt/…` translation) rather than string-interpolating a Windows path.
-- Invokes `wsl.exe -e bash -lc "cd '<wslpath>' && bash ./scripts/linux-gate.sh"`,
-  forwarding the exit code.
-- WSL absent -> prints *"WSL not found; cfg(unix) paths were NOT verified locally,
-  only in CI"* and exits **non-zero** (honest: skipped != passed).
-- Missing `rustup`/`cargo`/`cargo-nextest`/`node` **inside** WSL -> emits the
-  specific remediation (not a generic cargo error). A one-time WSL provisioning
-  note (rustup + 1.95.0 toolchain honoring `rust-toolchain.toml`, `cargo-nextest`,
-  node) ships in CONTRIBUTING so first-run cost is not hidden.
-- drvfs note: building from `/mnt/e` (Windows fs) is materially slower than the
-  linux fs. The doc recommends cloning into the WSL filesystem (`~/src/...`) for
-  routine gate runs, or accepting the penalty; `CARGO_TARGET_DIR` is already on
-  the linux fs to avoid the worst of it.
+- Resolve the repo root with `wsl.exe wslpath -a` (handles spaces / `/mnt`),
+  invoke `wsl.exe -e bash -lc "cd '<wslpath>' && bash ./scripts/linux-gate.sh"`,
+  forward the exit code.
+- **Run against the ACTUAL working tree being pushed** (the `/mnt/e` checkout) by
+  default — the linux-fs `CARGO_TARGET_DIR` already mitigates the compile cost, so
+  the drvfs penalty is acceptable for a pre-push check. Do NOT default to a
+  separate WSL-fs clone: a stale `~/src` clone validates code you are not pushing
+  (a false-green by tree divergence). If a WSL-fs clone is used for fast routine
+  iteration, the wrapper/doc must require syncing it to the exact commit +
+  uncommitted changes before trusting it as a pre-push gate.
+- WSL absent -> warn + exit non-zero (skipped != passed). Missing
+  rustup/cargo/cargo-nextest/node/python3 INSIDE WSL -> specific remediation. A
+  one-time WSL provisioning note (rustup + 1.95.0 toolchain, cargo-nextest, node,
+  **python3**) ships in CONTRIBUTING.
 
-### Component 4: Convention (and doc reconciliation)
+### Component 4: Convention (and CORRECT doc reconciliation)
 
-Add an **"OS-specific code"** section to both `AGENTS.md` and `CONTRIBUTING.md`
-with **identical text** (sync rule: update both in the same commit; AGENTS.md is
-the agent copy, CONTRIBUTING.md the human copy):
+Add an identical "OS-specific code" section to `AGENTS.md` and `CONTRIBUTING.md`
+(sync rule: update both in the same commit): when a change touches
+`cfg(unix)`/`cfg(windows)`/`target_os` code or any test, run the gates before
+pushing — `pwsh scripts/linux-gate.ps1` + `pwsh scripts/windows-gate.ps1` on
+Windows, `bash scripts/linux-gate.sh` on linux/mac. Pointer: current OS seams live
+in `crates/core/src/platform.rs` + the hotspots above; Phase 2 consolidates them.
 
-- Rule: *When a change touches `cfg(unix)` / `cfg(windows)` / `target_os` code, or
-  any test, run the gate before pushing* — `pwsh scripts/linux-gate.ps1` (unix
-  half via WSL) and `pwsh scripts/windows-gate.ps1` (windows half) on the Windows
-  dev box; `bash scripts/linux-gate.sh` on linux/mac.
-- Why: *a single-OS `cargo test`/`cargo clippy` does not compile the other OS's
-  `cfg` paths; "tests pass" from one OS is false for the other.*
-- Pointer: *current OS seams live in `crates/core/src/platform.rs` and the
-  inline `cfg` hotspots above; Phase 2 will consolidate them into per-crate `os/`
-  modules.*
+Reconcile EXISTING drift (grounded — the prior draft mis-attributed this):
+- CONTRIBUTING's "seven-step CI sequence" (`cargo deny`/`cargo hack`/`cargo machete`)
+  is **NOT a CI gate**: those commands appear in NO workflow. They live in
+  `docs/research/tooling-baseline.md` (Status: RECOMMENDED) and are referenced by
+  CONTRIBUTING, which already attributes them to tooling-baseline.md. Leave them
+  labelled aspirational; do NOT claim they are "the release gate."
+- CONTRIBUTING's local-commands block (`cargo fmt` / clippy WITHOUT `--all-features`
+  / nextest `--no-fail-fast`) diverges from the real gate — repoint it at
+  `scripts/linux-gate.sh` so there is one authoritative list.
+- CONTRIBUTING section 3 states "Rust 1.92.0" while the active pin is 1.95.0
+  (`rust-toolchain.toml`). Annotate 1.92.0 as the MSRV floor (gated by
+  `cargo hack --rust-version`) and 1.95.0 as the active developer/CI pin.
 
-**Reconcile existing drift (same PR):** CONTRIBUTING.md already documents gate
-commands that do NOT match the real PR gate — a "7-step CI sequence"
-(`cargo deny`/`cargo hack`/`cargo machete`) that is actually the **release** gate
-(`release-please.yml`), and a clippy line with `--all-features` the PR gate does
-not use. Fix/annotate these so there is exactly one authoritative step list (the
-scripts), and docs reference the scripts by command rather than re-listing steps.
+Note the existing sibling `scripts/dev/verify-baseline.sh` (a separate
+fixture/doctrine/secret-scan check, currently carrying a stale
+`EXPECTED_BRANCH=feature/terminal-commander-mvp` — evidence orphaned scripts
+drift). Co-locate the new gate scripts at `scripts/` top level and state in one
+line that `linux-gate.sh` is the CI-invoked correctness gate while
+`scripts/dev/verify-baseline.sh` remains the separate fixture check.
 
-### Phase 1.5 (fast-follow, after the scripts prove out)
+### Component 5: Make the windows gate required + re-trigger on script edits
 
-A **narrow** pre-push hook that runs the gate ONLY when (1) the staged diff
-touches `cfg`/test files AND (2) WSL is present — skipping docs-only pushes and
-WSL-less machines with a warning. This sidesteps every objection to an always-on
-hook while enforcing the convention for the exact change class that burned PR #72.
-Deferred to its own small change so the scripts stabilize before auto-enforcement.
+Two workflow/config changes that make the design's guarantees real:
+- **Promote `pre-build-gates (windows-x64)` to a required check.** Add it to the
+  `main-protection` ruleset (17000085) required contexts AND add
+  `needs: pre-build-gates-windows` to `build-windows-x64` so a red windows gate
+  blocks the merge. Today it gates nothing — without this, the both-gates
+  rationale is half-broken. (Ruleset edit is out-of-repo GitHub config; call it
+  out as a named manual step with the `gh api` command.)
+- **Add the gate scripts to the workflow `paths:` filter.** `npm-binary-build.yml`
+  only triggers on `Cargo.toml`, `Cargo.lock`, `crates/**`, `packages/**`,
+  `scripts/release/**`, `scripts/smoke/**`, and the two workflow files — so a PR
+  editing ONLY `scripts/linux-gate.sh` would NOT re-run the gate that now depends
+  on it. Add `scripts/linux-gate.sh`, `scripts/windows-gate.ps1`,
+  `scripts/linux-gate.ps1` (or `scripts/*.sh` + `scripts/*.ps1`) to BOTH `paths:`
+  blocks. Otherwise the single source of truth is editable without CI re-validating it.
+
+### Phase 1.5 (fast-follow)
+
+A narrow pre-push hook that runs the gate ONLY when the staged diff touches
+`cfg`/test files AND WSL is present — skipping docs-only pushes and WSL-less
+machines with a warning. Deferred so the scripts stabilize before auto-enforcement.
 
 ### Phase 1 acceptance criteria
 
 - AC1: `scripts/linux-gate.sh` exists (bash, `set -euo pipefail`), runs the full
-  `pre-build-gates` step list in CI order with the dedicated target dir and
-  prechecks, and exits non-zero on any step failure.
-- AC2: On a known-green commit, `scripts/linux-gate.sh` in WSL exits **0** with
-  clippy clean, `nextest run --workspace` all-pass, fmt `--check` clean, the TC47
-  load gate passing, and both MCP guards passing. Evidence: paste the nextest
-  summary line + clippy/fmt exit 0 + load-gate result.
-- AC3: `scripts/windows-gate.ps1` runs both windows regression tests and exits
-  non-zero on failure (verified on the Windows dev box).
-- AC4: `scripts/linux-gate.ps1` runs the sh script through WSL via `wslpath`,
-  forwards the exit code, and with WSL absent warns + exits non-zero.
+  step list in CI order with the dedicated target dir, prechecks (incl. `python3`
+  and the rust-toolchain-channel assertion), and the EXACT two MCP guards; exits
+  non-zero on any failure.
+- AC2: On a known-green commit, the script exits 0 with fmt/clippy clean,
+  nextest all-pass, **the load gate actually EXECUTED its tests (not "skipping:
+  python3"; non-zero executed count)**, and both guards passing. Evidence: nextest
+  summary + load-gate executed-count + clippy/fmt exit 0.
+- AC3: `scripts/windows-gate.ps1` runs both windows tests, asserts a non-zero
+  executed-test count (a zero-match filter / cfg-skipped harness must FAIL, not
+  pass), and exits non-zero on failure (verified on the Windows dev box).
+- AC4: `scripts/linux-gate.ps1` runs the sh script through WSL via `wslpath`
+  against the actual working tree, forwards the exit code, warns + exits non-zero
+  when WSL absent.
 - AC5: CI's `pre-build-gates` and `pre-build-gates-windows` jobs invoke the
-  scripts (a green CI run confirms the refactor preserved the gate exactly).
-- AC6: `AGENTS.md` and `CONTRIBUTING.md` carry the identical OS-specific-code
-  convention; CONTRIBUTING's stale "7-step CI sequence" + `--all-features` clippy
-  drift are fixed/annotated; docs reference the scripts.
-- AC7: No production `crates/**/src` code changed in Phase 1 (scripts + workflow +
-  docs only).
+  scripts while keeping ALL infra steps (incl. `install-action@nextest`) and the
+  job `name:` fields verbatim. A green CI run preserves the gate command set +
+  pass/fail semantics (step ordering may change). Verify on the PR's required-check
+  contexts tab that both `pre-build-gates (linux-x64)` and
+  `pre-build-gates (windows-x64)` are still listed/green after the refactor.
+- AC6: `AGENTS.md` + `CONTRIBUTING.md` carry the identical convention referencing
+  the scripts; CONTRIBUTING's local-commands block repoints at the script; the
+  toolchain 1.92.0-vs-1.95.0 drift is annotated; the deny/hack/machete sequence is
+  correctly labelled aspirational (tooling-baseline.md), not "the release gate."
+- AC7: `pre-build-gates (windows-x64)` is a required check (ruleset) and
+  `build-windows-x64` `needs: pre-build-gates-windows`; the gate scripts are in
+  both `paths:` blocks (a gate-script-only PR triggers the gate jobs).
+- AC8: One toolchain authority — add a check (or doc) that the workflow
+  `RUST_TOOLCHAIN` env equals `rust-toolchain.toml` `[toolchain].channel`.
+- AC9: No production `crates/**/src` code changed in Phase 1.
 
 ---
 
-## Phase 2 — Per-crate `os/` modules (outline only)
+## Phase 2 — Per-crate `os/` modules (outline only; own sub-spec)
 
-Recorded so Phase 1 does not paint us into a corner. Phase 2 gets its **own
-spec**. Consolidate inline `cfg` sprawl into per-subsystem seams, one subsystem at
-a time, **phased to <=5 files each**, every phase gated by the Phase-1 gates
-before push. Behavior-preserving **per seam** (not asserted as a blanket — see the
-transport caveat).
+Consolidate inline `cfg` sprawl into per-subsystem seams, one at a time, phased to
+<=5 files each, every phase gated by the Phase-1 gates. Behavior-preserving PER
+SEAM (not a blanket claim). Recommended order — lowest cross-OS risk first,
+transport LAST:
 
-Recommended order — **lowest cross-OS risk first**, transport LAST (reversed from
-the earlier draft, per review):
-
-1. **Process spawn** — `probes/src/process.rs` (9) into a small `process/os.rs`
-   seam (`windows_silent`, env, spawn). Low risk; mostly mechanical.
-2. **Supervisor OS glue** — `paths.rs` (13), `pidfile.rs` (9), `replace.rs` (11)
-   into `supervisor/os/{unix,windows}.rs`.
-3. **PTY** — unix-only; `handlers/pty.rs` (12) + `probes/pty.rs` behind a
-   `#[cfg(unix)]` module with a single Windows `Unsupported` stub seam.
-4. **`core/platform.rs`** — grow the existing seam into the home for cross-cutting
-   platform constants/helpers.
-5. **IPC transport (LAST)** — the largest fork (UDS vs Windows named pipe). A
-   shared **seam** (design TBD in the Phase 2 spec — trait vs enum is a Phase-2
-   decision, not pre-committed here) splitting the implementations into
-   `ipc/transport/{unix,windows}.rs`. Done LAST because it carries the highest
-   behavior-change risk (error mapping, connection lifecycle, partial-read
-   semantics differ between transports) and the WEAKEST local verification: the
-   linux gate exercises only the UDS branch; the named-pipe branch is compiled +
-   tested only by the windows gate. Its Phase-2 sub-spec MUST require
-   behavior-preservation evidence on **both** branches (linux UDS via the linux
-   gate AND windows named pipe via the windows gate) before merge.
+1. Process spawn — `probes/src/process.rs` into `process/os.rs`.
+2. Supervisor OS glue — `paths.rs`/`pidfile.rs`/`replace.rs` into `supervisor/os/{unix,windows}.rs`.
+3. PTY — unix-only behind a `#[cfg(unix)]` module + a Windows `Unsupported` stub.
+4. `core/platform.rs` — grow into the cross-cutting platform seam.
+5. IPC transport (LAST) — UDS vs Windows named pipe into `ipc/transport/{unix,windows}.rs`
+   behind a shared seam (trait vs enum is a Phase-2 decision, NOT pre-committed).
+   Highest behavior-change risk + weakest local verification (linux gate exercises
+   only UDS; named pipe only via the windows gate). Its sub-spec MUST require
+   behavior-preservation evidence on BOTH branches before merge. The Phase-2
+   sub-spec also enumerates the ~79 cfg occurrences outside the hotspot table so
+   the ordering is grounded in the full surface.
 
 ## Sequencing
 
-1. Phase 1 on `feature/os-separation`: write scripts, refactor both CI gate jobs
-   to invoke them, add the convention + reconcile docs. Verify by running the
-   linux gate in WSL and the windows gate natively, plus a green CI run proving
-   the CI refactor preserved the gates. Own PR, merged independently.
-2. Phase 1.5 (narrow hook) after Phase 1 merges and the scripts prove out.
-3. Phase 2 begins only after Phase 1, decomposed per-subsystem (each its own small
-   PR), transport last.
+1. Phase 1 on `feature/os-separation`: scripts + CI refactor (both gate jobs
+   invoke scripts, names preserved, infra intact, paths filter updated) +
+   make-windows-required (ruleset + needs:) + convention/doc reconciliation.
+   Verify: linux gate in WSL against the working tree (load gate EXECUTED),
+   windows gate natively, a green CI run showing both required contexts intact.
+2. Phase 1.5 narrow hook after Phase 1 merges.
+3. Phase 2 per-subsystem, transport last.
 
 ## Risks and mitigations
 
-- **WSL absent / unprovisioned on a dev machine.** The `.ps1` fails loud
-  (non-zero + "not verified locally") and emits specific remediation for missing
-  rustup/toolchain/nextest/node; CONTRIBUTING carries a one-time provisioning
-  note. CI remains the backstop. The gate is a convention (+ Phase-1.5 narrow
-  hook), never a hard block for a WSL-less contributor.
-- **Script <-> CI drift.** Eliminated by construction: CI invokes the scripts
-  (Goal 2 / AC5). There is no separately-maintained mirror to drift.
-- **Toolchain mismatch in WSL** (distro `cargo` vs rustup 1.95.0). The script
-  asserts the active toolchain matches `rust-toolchain.toml` and fails loud.
-- **Cold/drvfs slowness** (~10-20 min first run from `/mnt/e`; faster from the
-  linux fs). Mitigated by the dedicated linux-fs target dir + the
-  clone-into-WSL recommendation; accepted because the gate runs on OS-touching
-  changes before push, not continuously.
-- **Linux/mac contributor cannot run the windows gate locally.** Accepted
-  residual: documented honestly; the windows gate stays a CI backstop for them
-  (the dev-box reality here is Windows-primary, where both halves run locally).
+- **WSL absent/unprovisioned.** `.ps1` fails loud + specific remediation;
+  provisioning note covers rustup/toolchain/nextest/node/**python3**; CI backstop.
+- **Script <-> CI drift.** Eliminated for the command set by CI invoking the
+  scripts (AC5) + the paths-filter re-trigger (AC7). The job `name:` must be
+  preserved or the required-check context detaches.
+- **Toolchain drift (two pins).** AC8 ties workflow `RUST_TOOLCHAIN` to
+  `rust-toolchain.toml`; the script asserts the active rustc matches the channel.
+- **Load gate is environment-sensitive** (timing/concurrency; WSL2/drvfs vs
+  ubuntu-24.04). A WSL pass is best-effort; CI is authoritative for that step
+  (Goal 2). The `python3` precheck ensures it at least EXECUTES locally rather
+  than skipping to a false pass.
+- **Windows gate was advisory.** Component 5 makes it required so the both-gates
+  guarantee holds; until the ruleset edit lands, a red windows gate does not block.
+- **drvfs slowness / tree divergence.** Default = same working tree (penalty
+  mitigated by linux-fs target dir); a WSL-fs clone must be commit-synced or it is
+  a false-green source.
 
-## Evidence / verification for this spec's implementation
+## Evidence / verification for implementation
 
-- AC2: run `scripts/linux-gate.sh` in WSL on HEAD; paste clippy/fmt exit 0,
-  nextest `--workspace` summary (0 failed), load-gate pass, guards pass.
-- AC3/AC4: run `windows-gate.ps1` and `linux-gate.ps1` on the Windows dev box;
-  show exit codes (incl. WSL-absent path).
-- AC5: a green CI run on the Phase-1 PR confirms both refactored gate jobs.
-- AC6: convention text present in both docs; CONTRIBUTING drift fixed.
+- AC2: run `scripts/linux-gate.sh` in WSL on HEAD; paste fmt/clippy exit 0,
+  nextest summary, load-gate EXECUTED-count (not skipped), guards pass.
+- AC3/AC4: run `windows-gate.ps1` + `linux-gate.ps1` on Windows; show exit codes
+  + executed-test counts + the WSL-absent path.
+- AC5/AC7: a green CI run on the Phase-1 PR; inspect the required-check contexts
+  showing both `pre-build-gates (...)` names; confirm a script-only edit
+  re-triggers the jobs; confirm `build-windows-x64 needs: pre-build-gates-windows`.
+- AC6/AC8: convention present in both docs; CONTRIBUTING drift fixed; toolchain
+  pins reconciled.
