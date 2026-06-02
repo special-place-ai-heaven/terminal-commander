@@ -1749,9 +1749,9 @@ pub struct McpCommandStartParams {
     pub cwd: Option<String>,
     /// Environment as an ARRAY of {"key":"NAME","value":"VAL"} objects
     /// (NOT a map), e.g. `[{"key":"FOO","value":"bar"}]`.
-    /// Empty/omitted = inherit the daemon's full environment; a
-    /// NON-EMPTY list REPLACES the entire environment (not merged) --
-    /// so include PATH etc. yourself when you set this.
+    /// Empty/omitted = inherit the daemon's full environment; entries
+    /// you provide are ADDED to (or override) that inherited environment
+    /// (merged, not replaced) -- PATH, SystemRoot, etc. are kept.
     #[serde(default, deserialize_with = "deserialize_env")]
     #[schemars(with = "Vec<EnvEntry>")]
     pub env: Vec<EnvEntry>,
@@ -1832,9 +1832,9 @@ pub struct McpRunAndWatchParams {
     pub cwd: Option<String>,
     /// Environment as an ARRAY of {"key":"NAME","value":"VAL"} objects
     /// (NOT a map), e.g. `[{"key":"FOO","value":"bar"}]`.
-    /// Empty/omitted = inherit the daemon's full environment; a
-    /// NON-EMPTY list REPLACES the entire environment (not merged) --
-    /// so include PATH etc. yourself when you set this.
+    /// Empty/omitted = inherit the daemon's full environment; entries
+    /// you provide are ADDED to (or override) that inherited environment
+    /// (merged, not replaced) -- PATH, SystemRoot, etc. are kept.
     #[serde(default, deserialize_with = "deserialize_env")]
     #[schemars(with = "Vec<EnvEntry>")]
     pub env: Vec<EnvEntry>,
@@ -2419,9 +2419,9 @@ pub struct McpPtyCommandStartParams {
     pub cwd: Option<String>,
     /// Environment as an ARRAY of {"key":"NAME","value":"VAL"} objects
     /// (NOT a map), e.g. `[{"key":"FOO","value":"bar"}]`.
-    /// Empty/omitted = inherit the daemon's full environment; a
-    /// NON-EMPTY list REPLACES the entire environment (not merged) --
-    /// so include PATH etc. yourself when you set this.
+    /// Empty/omitted = inherit the daemon's full environment; entries
+    /// you provide are ADDED to (or override) that inherited environment
+    /// (merged, not replaced) -- PATH, SystemRoot, etc. are kept.
     #[serde(default, deserialize_with = "deserialize_env")]
     #[schemars(with = "Vec<EnvEntry>")]
     pub env: Vec<EnvEntry>,

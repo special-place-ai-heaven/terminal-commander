@@ -231,6 +231,9 @@ mod runtime {
         pub probe_id: Option<ProbeId>,
         pub bucket_id: BucketId,
         pub cwd: Option<PathBuf>,
+        /// Environment OVERLAY. The child always inherits the daemon's
+        /// parent environment; each `(key, value)` here is ADDED to it
+        /// (or overrides an existing entry). Empty Vec = inherit unchanged.
         pub env: Vec<(OsString, OsString)>,
         pub grace: Duration,
         /// PTY rows. Defaults applied when `None`.
@@ -440,11 +443,15 @@ mod runtime {
             if let Some(cwd) = &config.cwd {
                 cmd = cmd.current_dir(cwd);
             }
-            if !config.env.is_empty() {
-                cmd = cmd.env_clear();
-                for (k, v) in &config.env {
-                    cmd = cmd.env(k, v);
-                }
+            // OVERLAY semantics: the child inherits the daemon's full parent
+            // environment; each supplied `(key, value)` is ADDED to it (or
+            // overrides an existing entry). We deliberately do NOT `env_clear`:
+            // clearing it stripped OS-essential vars (e.g. `SystemRoot`, `PATH`
+            // on Windows) and crashed Windows children at startup whenever a
+            // non-empty env was supplied. An empty `config.env` leaves the
+            // loop a no-op, which is exactly "inherit the parent env".
+            for (k, v) in &config.env {
+                cmd = cmd.env(k, v);
             }
             let mut child = cmd.spawn(pts)?;
 
