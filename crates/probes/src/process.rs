@@ -866,7 +866,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn env_empty_inherits_parent_path() {
-        let n = run_env_probe(vec![], "echo MARK:${PATH:+HASPATH}", "HASPATH");
+        // Brace-free PATH-presence check: `case "$PATH" in ?*) ...` matches
+        // only a non-empty PATH. We avoid the `${PATH:+...}` form because
+        // clippy::literal_string_with_formatting_args (rust 1.95) mistakes the
+        // `${...}` for a Rust format placeholder and denies it under -D warnings.
+        let n = run_env_probe(
+            vec![],
+            r#"case "$PATH" in ?*) echo MARK:HASPATH ;; esac"#,
+            "HASPATH",
+        );
         assert!(
             n >= 1,
             "empty env must inherit parent PATH (expected HASPATH match); events={n}"
@@ -897,7 +905,11 @@ mod tests {
             std::ffi::OsString::from("TCENV"),
             std::ffi::OsString::from("tcvalue"),
         )];
-        let n = run_env_probe(env, "echo MARK:${PATH:+HASPATH}", "HASPATH");
+        let n = run_env_probe(
+            env,
+            r#"case "$PATH" in ?*) echo MARK:HASPATH ;; esac"#,
+            "HASPATH",
+        );
         assert_eq!(
             n, 0,
             "non-empty env must REPLACE (env_clear) so PATH is absent; events={n}"
