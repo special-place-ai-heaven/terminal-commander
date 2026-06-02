@@ -72,7 +72,7 @@
   },
   "invariants": [
     "argv is required and must be non-empty",
-    "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list REPLACES it entirely (include PATH yourself)",
+    "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list is OVERLAID onto (added to or overrides) the inherited environment (merged, not replaced; PATH/SystemRoot are kept)",
     "an env map (e.g. {\"FOO\":\"bar\"}) is rejected with a teaching error naming the {key,value} array shape",
     "a non-array argv is rejected with a field-prefixed teaching error naming the array-of-strings shape with an example (TB-11)",
     "MCP request does not expose the daemon-only environment field, but does accept optional bucket_config_json and rules_json that map to daemon IPC without a prior registry_activate",

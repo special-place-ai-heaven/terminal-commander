@@ -60,7 +60,7 @@
     "success payload contains job_id, bucket_id, probe_id, and cursor only",
     "stdout and stderr are observed through bucket tools, not returned here",
     "optional bucket_config_json and rules_json bind a per-job bucket override and inline rules, mapped to daemon IPC without a prior registry_activate",
-    "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list REPLACES it entirely (include PATH yourself)",
+    "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list is OVERLAID onto (added to or overrides) the inherited environment (merged, not replaced; PATH/SystemRoot are kept)",
     "an env map (e.g. {\"FOO\":\"bar\"}) is rejected with a teaching error naming the {key,value} array shape",
     "a non-array argv is rejected with a field-prefixed teaching error naming the array-of-strings shape with an example (TB-11)"
   ]
