@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use super::common::{map_path_policy, require_regular_file};
+use super::common::{require_regular_file, resolve_and_authorize_file};
 use crate::ipc::protocol::{
     DEFAULT_FILE_READ_BYTES, DEFAULT_FILE_READ_LINES, DEFAULT_FILE_SEARCH_MATCHES,
     DEFAULT_FILE_SEARCH_SNIPPET_BYTES, FileLine, FileReadWindowParams, FileReadWindowResponse,
@@ -21,8 +21,11 @@ pub(in crate::ipc::server) fn handle_file_read_window(
 ) -> Result<IpcResponse, IpcError> {
     use std::io::{BufRead, BufReader};
 
-    map_path_policy(state, &params.path, false)?;
-    let meta = require_regular_file(&params.path)?;
+    // Resolve to a canonical, policy-authorized path (absolute-only +
+    // symlink-safe default-deny), then open THAT exact path so a symlink
+    // to a denied target cannot slip through between check and open.
+    let resolved = resolve_and_authorize_file(state, &params.path, false)?;
+    let meta = require_regular_file(&resolved)?;
     let file_bytes = meta.len();
 
     let start_line = params.start_line.unwrap_or(1).max(1);
@@ -35,7 +38,7 @@ pub(in crate::ipc::server) fn handle_file_read_window(
         .unwrap_or(DEFAULT_FILE_READ_BYTES)
         .min(MAX_FILE_READ_BYTES);
 
-    let f = std::fs::File::open(&params.path)
+    let f = std::fs::File::open(&resolved)
         .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("open: {e}")))?;
     let mut reader = BufReader::new(f);
     let mut byte_offset: u64 = 0;
@@ -109,8 +112,10 @@ pub(in crate::ipc::server) fn handle_file_search(
             "query must be non-empty",
         ));
     }
-    map_path_policy(state, &params.path, false)?;
-    require_regular_file(&params.path)?;
+    // Resolve to a canonical, policy-authorized path (absolute-only +
+    // symlink-safe default-deny), then open THAT exact path.
+    let resolved = resolve_and_authorize_file(state, &params.path, false)?;
+    require_regular_file(&resolved)?;
 
     let max_matches = params
         .max_matches
@@ -123,7 +128,7 @@ pub(in crate::ipc::server) fn handle_file_search(
     let case_insensitive = params.case_insensitive.unwrap_or(false);
     let needle_lower = params.query.to_ascii_lowercase();
 
-    let f = std::fs::File::open(&params.path)
+    let f = std::fs::File::open(&resolved)
         .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("open: {e}")))?;
     let mut reader = BufReader::new(f);
     let mut matches: Vec<FileSearchMatch> = Vec::new();
@@ -206,10 +211,14 @@ pub(in crate::ipc::server) fn handle_file_watch_start(
             ),
         ));
     }
+    // Resolve to a canonical, policy-authorized path (absolute-only +
+    // symlink-safe default-deny) before starting the watch, so the probe
+    // follows the exact target that policy authorized.
+    let resolved = resolve_and_authorize_file(state, &params.path, true)?;
     let bucket_cfg = params.bucket_config.clone().unwrap_or_default();
     let follow_from_beginning = params.follow_from_beginning.unwrap_or(false);
     match state.watch.start(
-        params.path.clone(),
+        resolved,
         bucket_cfg,
         params.rules.clone(),
         follow_from_beginning,

@@ -581,3 +581,160 @@ fn file_watch_list_reflects_live_then_stopped_state() {
         cleanup(&data);
     });
 }
+
+/// Build a default-deny target on disk (a file whose canonical path ends
+/// with a sensitive suffix) and an innocently-named symlink pointing at
+/// it. Returns `(secret_target, symlink)`.
+#[cfg(unix)]
+fn make_symlink_to_secret(data: &std::path::Path) -> (PathBuf, PathBuf) {
+    // `.ssh/id_rsa` is in DEFAULT_DENY_PATH_SUFFIXES.
+    let ssh_dir = data.join(".ssh");
+    std::fs::create_dir_all(&ssh_dir).unwrap();
+    let secret = ssh_dir.join("id_rsa");
+    write_text(&secret, "BEGIN OPENSSH PRIVATE KEY\n");
+    let link = data.join("innocent.txt");
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    (secret, link)
+}
+
+/// BUG 1 (security): a symlink whose own name is innocuous must NOT
+/// bypass the default-deny suffix check by resolving to a sensitive
+/// target. `file_read_window` canonicalizes BEFORE the policy check, so
+/// the symlink is denied on the real target, not allowed on the raw name.
+#[cfg(unix)]
+#[test]
+fn file_read_window_denies_symlink_to_default_deny_target() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let (_secret, link) = make_symlink_to_secret(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileReadWindow(FileReadWindowParams {
+                    path: link.clone(),
+                    start_line: None,
+                    max_lines: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .expect_err("symlink to a default-deny target must be denied");
+        assert_eq!(
+            err.code,
+            IpcErrorCode::PathDenied,
+            "symlink bypass: expected PathDenied, got {err:?}"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// BUG 1 (security): same symlink-bypass guarantee for `file_search`.
+#[cfg(unix)]
+#[test]
+fn file_search_denies_symlink_to_default_deny_target() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let (_secret, link) = make_symlink_to_secret(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileSearch(FileSearchParams {
+                    path: link.clone(),
+                    query: "PRIVATE".to_owned(),
+                    case_insensitive: None,
+                    max_matches: None,
+                    max_snippet_bytes: None,
+                }),
+            )
+            .await
+            .expect_err("symlink to a default-deny target must be denied");
+        assert_eq!(
+            err.code,
+            IpcErrorCode::PathDenied,
+            "symlink bypass: expected PathDenied, got {err:?}"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// BUG 1 (security): same symlink-bypass guarantee for `file_watch_start`.
+#[cfg(unix)]
+#[test]
+fn file_watch_denies_symlink_to_default_deny_target() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let (_secret, link) = make_symlink_to_secret(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWatchStart(FileWatchStartParams {
+                    path: link.clone(),
+                    bucket_config: None,
+                    rules: vec![],
+                    follow_from_beginning: None,
+                }),
+            )
+            .await
+            .expect_err("symlink to a default-deny target must be denied");
+        assert_eq!(
+            err.code,
+            IpcErrorCode::PathDenied,
+            "symlink bypass: expected PathDenied, got {err:?}"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// BUG 2 (trust/correctness): a relative path is rejected with a teaching
+/// `PathDenied`, not silently resolved against the daemon's CWD. (The
+/// cross-platform variant lives in `common.rs` lib unit tests; this is
+/// the end-to-end dispatch-path assertion.)
+#[test]
+fn file_read_window_rejects_relative_path() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileReadWindow(FileReadWindowParams {
+                    path: PathBuf::from("Cargo.toml"),
+                    start_line: None,
+                    max_lines: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .expect_err("relative path must be rejected");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+        assert!(
+            err.message.contains("must be absolute"),
+            "teaching message expected, got: {}",
+            err.message
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
