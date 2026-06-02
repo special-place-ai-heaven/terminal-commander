@@ -6,7 +6,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "event_context is the bounded raw-frame retrieval tool. It is the only MCP path in this batch through which frame text reaches the LLM. before/after/max_bytes are optional client hints clamped by daemon caps."
+    "note": "event_context is the bounded raw-frame retrieval tool. It is the only MCP path in this batch through which frame text reaches the LLM. before/after/max_bytes are optional client hints clamped by daemon caps. TB-8/TB-11: bucket_id and event_id carry opaque-id format notes (copy verbatim, e.g. bkt_/evt_<32hex>); the success body carries frames OR an empty frames list with a typed unavailable_reason (NoPointer/SyntheticEvent/AnchorEvicted) -- that is a success shape, not a JSON-RPC error."
   },
   "tool": "event_context",
   "request_example": {
@@ -79,6 +79,8 @@
   },
   "invariants": [
     "bucket_id and event_id are required",
+    "bucket_id and event_id descriptions carry bkt_/evt_ opaque-id format notes (TB-8)",
+    "unavailable_reason is a success-body field, not a JSON-RPC error (TB-11)",
     "frame text is bounded by daemon caps and returned only from event_context",
     "anchor_missing or unavailable_reason means frames=[]"
   ]

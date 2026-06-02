@@ -18,7 +18,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed lookup for one live probe by probe_id. Unknown probes are typed errors; success returns the same bounded row shape used by probe_list. v1.1 adds TC11 frames_suppressed* counters (additive)."
+    "note": "Daemon-backed lookup for one live probe by probe_id. Unknown probes are typed errors; success returns the same bounded row shape used by probe_list. v1.1 adds TC11 frames_suppressed* counters (additive). TB-11: the tool description states UnknownProbe is an error path (not a returned success body), and TB-7 gives probe_id a prb_<32hex> opaque-id format note (copy verbatim) so the first call uses the right id shape."
   },
   "response_example": {
     "probe": {

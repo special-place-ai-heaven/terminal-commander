@@ -185,7 +185,16 @@ impl EventStore {
             )?;
         }
 
-        let def_json = sj::to_string(def)?;
+        // Stamp the store-assigned version into the persisted definition so
+        // the blob's `version` is authoritative and matches the
+        // rule_versions.version column. Without this, registry_upsert returns
+        // this row version (latest+1) while activate/deactivate/list_active
+        // operate on the (unmodified) definition.version the caller sent -- a
+        // silent divergence where the upsert-returned version is rejected by
+        // every other registry API.
+        let mut stored_def = def.clone();
+        stored_def.version = next_version_u;
+        let def_json = sj::to_string(&stored_def)?;
         let status_s = match def.status {
             RuleStatus::Draft => "draft",
             RuleStatus::Active => "active",
@@ -862,6 +871,40 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn registry_stamps_assigned_version_into_persisted_blob() {
+        // The store ignores the caller's submitted `version` and assigns
+        // latest+1; the assigned value must also be the `version` read back
+        // from the persisted definition blob (not the caller's bogus value),
+        // so that registry_upsert's return value round-trips through every
+        // other registry API that keys on definition.version.
+        let mut s = EventStore::in_memory().unwrap();
+        s.ensure_registry().unwrap();
+
+        let mut bogus = k("kw1");
+        bogus.version = 99; // caller lies about the version
+
+        // First upsert: assigned v1 despite the caller claiming 99.
+        assert_eq!(s.create_rule_version(&bogus).unwrap(), 1);
+        let v1 = s.get_rule_version("kw1", 1).unwrap().unwrap();
+        assert_eq!(
+            v1.version, 1,
+            "blob version must equal the assigned row version, not the caller's 99"
+        );
+
+        // Second upsert of the SAME bogus def: assigned v2.
+        assert_eq!(s.create_rule_version(&bogus).unwrap(), 2);
+        let v2 = s.get_rule_version("kw1", 2).unwrap().unwrap();
+        assert_eq!(
+            v2.version, 2,
+            "blob version must equal the assigned row version, not the caller's 99"
+        );
+
+        // The latest read-back also reports the assigned version.
+        let latest = s.get_latest_rule("kw1").unwrap().unwrap();
+        assert_eq!(latest.version, 2);
     }
 
     #[test]

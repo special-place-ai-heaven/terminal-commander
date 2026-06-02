@@ -134,9 +134,17 @@ async fn mcp_activate_without_scope_returns_error() {
         .expect_err("missing scope must error");
         let msg = format!("{err}");
         let lower = msg.to_ascii_lowercase();
+        // TB-5: scope is now machine-readable REQUIRED in the MCP schema,
+        // so an omitted scope is rejected at the wire-form boundary
+        // ("missing field `scope`") BEFORE reaching the daemon. We still
+        // accept the daemon-level remedies ("required"/"scope_invalid")
+        // for any client that bypasses the schema. Either way the LLM
+        // never gets a silent widen-to-Global.
         assert!(
             lower.contains("scope")
-                && (lower.contains("required") || lower.contains("scope_invalid")),
+                && (lower.contains("required")
+                    || lower.contains("scope_invalid")
+                    || lower.contains("missing field")),
             "expected scope-required style error; got: {msg}"
         );
 
@@ -162,9 +170,17 @@ async fn mcp_deactivate_without_scope_returns_error() {
         .expect_err("missing scope must error");
         let msg = format!("{err}");
         let lower = msg.to_ascii_lowercase();
+        // TB-5: scope is now machine-readable REQUIRED in the MCP schema,
+        // so an omitted scope is rejected at the wire-form boundary
+        // ("missing field `scope`") BEFORE reaching the daemon. We still
+        // accept the daemon-level remedies ("required"/"scope_invalid")
+        // for any client that bypasses the schema. Either way the LLM
+        // never gets a silent widen-to-Global.
         assert!(
             lower.contains("scope")
-                && (lower.contains("required") || lower.contains("scope_invalid")),
+                && (lower.contains("required")
+                    || lower.contains("scope_invalid")
+                    || lower.contains("missing field")),
             "expected scope-required style error; got: {msg}"
         );
 

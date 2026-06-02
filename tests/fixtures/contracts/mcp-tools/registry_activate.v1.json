@@ -22,7 +22,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed rule activation. This fixture uses explicit global scope; do not treat omitted-scope success as locked until the MCP DTO comment and daemon behavior are reconciled."
+    "note": "Daemon-backed rule activation. scope is REQUIRED: it is present in the MCP input schema required[] (TB-5), so an omitted scope is rejected at the wire-form boundary and is never silently widened to global. This fixture uses explicit global scope. TB-7: scope.kind is a JSON-Schema enum [global,bucket,job,probe] and the bucket_id/job_id/probe_id fields carry opaque-id format notes (copy verbatim, e.g. bkt_/job_/prb_<32hex>) so the first call picks a legal shape."
   },
   "response_example": {
     "rule_id": "rust-compile-error",
@@ -56,7 +56,10 @@
   },
   "invariants": [
     "rule_id is required",
-    "version is optional; scope is explicit in this fixture",
+    "scope is required and present in the MCP input schema required[] (TB-5)",
+    "scope.kind is a JSON-Schema enum [global,bucket,job,probe] (TB-7)",
+    "version is optional (omit to activate the latest stored version)",
+    "an omitted scope is rejected, never silently widened to global",
     "jobs_rebound is a count, not job output"
   ]
 }

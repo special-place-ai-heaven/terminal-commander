@@ -33,6 +33,10 @@ logs/
 .terminal-commander/
 *.tcspool
 
+# Local scratch dirs (agent outputs, ad-hoc task notes)
+outputs/
+tasks/
+
 # Coverage and profiler outputs
 *.profraw
 *.profdata

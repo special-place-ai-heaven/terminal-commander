@@ -22,7 +22,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed scoped rule deactivation. This fixture uses explicit global scope; do not treat omitted-scope success as locked until the MCP DTO comment and daemon behavior are reconciled."
+    "note": "Daemon-backed scoped rule deactivation. scope is REQUIRED: it is present in the MCP input schema required[] (TB-5), so an omitted scope is rejected at the wire-form boundary, never silently widened to global. This fixture uses explicit global scope. TB-6: a deactivate that matches no active (rule_id, version, scope) row is NOT a silent ok; it returns a typed RuleNotActive teaching error that echoes the actually-active version(s)."
   },
   "response_example": {
     "rule_id": "rust-compile-error",
@@ -54,10 +54,20 @@
       }
     }
   },
+  "rule_not_active_error_example": {
+    "message": "no active row for rule 'rust-compile-error' v99 scope global; active version is 1",
+    "data": {
+      "ipc_code": "RuleNotActive"
+    }
+  },
   "invariants": [
     "rule_id and version are required",
-    "scope is explicit in this fixture",
+    "scope is required and present in the MCP input schema required[] (TB-5)",
+    "scope.kind is a JSON-Schema enum [global,bucket,job,probe] (TB-7)",
+    "an omitted scope is rejected, never silently widened to global",
     "jobs_rebound is a count, not job output",
-    "success payload reports whether an active binding was closed"
+    "success payload reports whether an active binding was closed",
+    "a deactivate matching no active (rule_id, version, scope) row returns a typed RuleNotActive error, not a silent ok:true/was_deactivated:false",
+    "the RuleNotActive message echoes the version(s) actually active under the scope so the caller can self-correct"
   ]
 }

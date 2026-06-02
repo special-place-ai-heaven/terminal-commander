@@ -260,7 +260,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "probe_status",
             status: ToolStatus::Live,
-            description: "Bounded per-probe lookup by probe_id. Returns UnknownProbe if not live.",
+            description: "Bounded per-probe lookup by probe_id. An id no runtime knows fails with an UnknownProbe error, not a success body.",
         },
     ]
 }
@@ -280,16 +280,57 @@ fn tool_requires_daemon(name: &str) -> bool {
     name != "system_discover"
 }
 
+/// Whether a tool name belongs to the PTY command family.
+///
+/// The PTY runtime is `#[cfg(unix)]`-only; on every other platform the
+/// daemon answers every `pty_*` IPC with `UnsupportedPlatform`. TB-1:
+/// `system_discover` must surface that platform truth so a naive client
+/// never calls a PTY tool that can only fail.
+#[must_use]
+const fn is_pty_tool(name: &str) -> bool {
+    matches!(
+        name.as_bytes(),
+        b"pty_command_start"
+            | b"pty_command_write_stdin"
+            | b"pty_command_stop"
+            | b"pty_command_list"
+    )
+}
+
+/// Whether the PTY runtime is actually available on this host.
+///
+/// TC44's PTY runtime is gated on `#[cfg(unix)]`; ConPTY support for
+/// Windows is still pending. On a non-unix host the four `pty_*` tools
+/// can only return `UnsupportedPlatform`, so discovery must report them
+/// `available: false` rather than implying a live PTY surface.
+#[must_use]
+const fn pty_runtime_available() -> bool {
+    cfg!(unix)
+}
+
+/// Reason string surfaced for PTY tools on a host without a PTY runtime.
+const PTY_UNAVAILABLE_REASON: &str = "PTY runtime unavailable on this platform (ConPTY pending)";
+
 #[must_use]
 fn discovered_tools(daemon_available: bool) -> Vec<DiscoveredToolEntry> {
+    let pty_available = pty_runtime_available();
     tool_catalogue()
         .iter()
         .map(|tool| {
             let requires_daemon = tool_requires_daemon(tool.name);
             let implemented = matches!(tool.status, ToolStatus::Live);
-            let available = implemented && (!requires_daemon || daemon_available);
+            // TB-1: a PTY tool is only available when the host actually
+            // has a PTY runtime. This is platform truth, evaluated even
+            // when the daemon is reachable, so the four pty_* tools never
+            // advertise `available: true` on a host that can only answer
+            // them with `UnsupportedPlatform`.
+            let platform_blocked = is_pty_tool(tool.name) && !pty_available;
+            let available =
+                implemented && !platform_blocked && (!requires_daemon || daemon_available);
             let unavailable_reason = if !implemented {
                 Some("not_implemented")
+            } else if platform_blocked {
+                Some(PTY_UNAVAILABLE_REASON)
             } else if requires_daemon && !daemon_available {
                 Some("daemon_unavailable")
             } else {
@@ -698,7 +739,7 @@ impl TerminalCommanderMcpServer {
 
     /// `event_context` — pointer-bounded context around an event.
     #[tool(
-        description = "Bounded context window around an event. Returns frames or a typed unavailable_reason when no pointer exists. Pointer-based; never streams."
+        description = "Bounded context window around an event. The success body carries frames, or an empty frames list with a typed unavailable_reason when no pointer exists (NoPointer/SyntheticEvent/AnchorEvicted) -- not an error. Pointer-based; never streams."
     )]
     async fn event_context(
         &self,
@@ -760,7 +801,7 @@ impl TerminalCommanderMcpServer {
     /// `registry_upsert` — create a new immutable version from a JSON
     /// rule definition.
     #[tool(
-        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string. Validates regex/keywords; existing versions are never mutated."
+        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword). NOTE: `version` is ASSIGNED by the store (monotonic, latest+1); any value you send is ignored and overwritten, and the assigned version (returned in the response) is the one registry_activate/registry_deactivate operate on. `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords; existing versions are never mutated."
     )]
     async fn registry_upsert(
         &self,
@@ -830,10 +871,11 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpRegistryActivateParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available()?;
-        let scope = match params.scope {
-            Some(s) => Some(s.into_ipc_scope()?),
-            None => None,
-        };
+        // `scope` is schema-required (TB-5): rmcp rejects an omitted
+        // scope before this handler runs, so it is always present here.
+        // We still pass it as `Some(..)` because the wire IPC type keeps
+        // `scope: Option` for backward compatibility.
+        let scope = Some(params.scope.into_ipc_scope()?);
         let ipc = RegistryActivateParams {
             rule_id: params.rule_id,
             version: params.version,
@@ -860,7 +902,7 @@ impl TerminalCommanderMcpServer {
 
     /// `registry_import_pack` — one-call expert signal extraction.
     #[tool(
-        description = "Import a curated rule pack (cargo, pytest, npm, gcc, apt, make, generic.terminal) so you get expert signal extraction without authoring any rule JSON. Pass activate=true + scope {kind:'global'} to make the rules live immediately for your commands; one call replaces ~6 rule-authoring calls. An unknown pack name returns the list of available packs."
+        description = "Import a curated rule pack (cargo, pytest, npm, gcc, apt, make, generic.terminal, cleanup) so you get expert signal extraction without authoring any rule JSON. CONDITIONAL scope contract: pass activate=true + scope {kind:'global'} together to make the rules live immediately for your commands (one call replaces ~6 rule-authoring calls); activate=true WITHOUT scope is rejected with a scope-required error, never silently widened to global. With activate=false (default) the pack is imported but not activated and scope is ignored. An unknown pack name returns the list of available packs."
     )]
     async fn registry_import_pack(
         &self,
@@ -902,10 +944,10 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpRegistryDeactivateParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available()?;
-        let scope = match params.scope {
-            Some(s) => Some(s.into_ipc_scope()?),
-            None => None,
-        };
+        // `scope` is schema-required (TB-5): rmcp rejects an omitted
+        // scope before this handler runs. The wire IPC type keeps
+        // `scope: Option` for backward compatibility, so wrap in `Some`.
+        let scope = Some(params.scope.into_ipc_scope()?);
         let ipc = RegistryDeactivateParams {
             rule_id: params.rule_id,
             version: params.version,
@@ -1240,7 +1282,7 @@ impl TerminalCommanderMcpServer {
 
     /// `probe_status` — bounded lookup for one probe by id.
     #[tool(
-        description = "Bounded per-probe lookup by probe_id. Returns UnknownProbe if no runtime knows the id."
+        description = "Bounded per-probe lookup by probe_id. On success returns the probe descriptor; an id no runtime knows fails with an UnknownProbe error (not a success body)."
     )]
     async fn probe_status(
         &self,
@@ -1405,12 +1447,98 @@ fn parse_severity_filter(s: &str) -> Result<Severity, String> {
     }
 }
 
-/// Env entry pair for the MCP wire form. Avoids relying on
-/// `JsonSchema` for a tuple struct.
+/// One environment variable as an object.
+///
+/// The `env` parameter is an ARRAY of these (NOT a JSON map), e.g.
+/// `[{"key":"FOO","value":"bar"}]`. A tuple/map form is intentionally
+/// not accepted: the explicit `{key,value}` shape is what the schema
+/// teaches so the first call from a naive client succeeds.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct EnvEntry {
+    /// Variable name, e.g. `"PATH"`.
     pub key: String,
+    /// Variable value, e.g. `"/usr/bin"`.
     pub value: String,
+}
+
+/// Deserialize the `env` parameter as an array of [`EnvEntry`] objects,
+/// mapping serde's bare `invalid type: map, expected a sequence` into a
+/// teaching error that names the exact `{key,value}` array shape.
+///
+/// TB-2c: a naive client often sends `env` as a JSON map
+/// (`{"FOO":"bar"}`). serde's default message ("invalid type: map,
+/// expected a sequence") does not tell the client what shape to use.
+/// We intercept the map case here and return the remedy inline so the
+/// client can self-correct in one step. Every other shape error still
+/// falls through to serde's own message.
+fn deserialize_env<'de, D>(deserializer: D) -> Result<Vec<EnvEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    // Buffer into an untyped value first so we can detect the map shape
+    // before attempting the typed conversion. The payload is already
+    // bounded by the transport frame cap, so this does not introduce an
+    // unbounded allocation.
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Array(_) => serde_json::from_value(value).map_err(D::Error::custom),
+        serde_json::Value::Object(_) => Err(D::Error::custom(
+            "env must be an ARRAY of {\"key\":\"NAME\",\"value\":\"VAL\"} objects, not a map; \
+             e.g. [{\"key\":\"FOO\",\"value\":\"bar\"}]",
+        )),
+        other => Err(D::Error::custom(format!(
+            "env must be an ARRAY of {{\"key\":\"NAME\",\"value\":\"VAL\"}} objects; \
+             got {}; e.g. [{{\"key\":\"FOO\",\"value\":\"bar\"}}]",
+            json_type_name(&other)
+        ))),
+    }
+}
+
+/// Human-readable JSON type name for teaching errors.
+const fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "a map",
+    }
+}
+
+/// Deserialize the `argv` parameter as an array of strings, mapping
+/// serde's bare `invalid type: ...` into a field-prefixed teaching
+/// error that names the exact array-of-strings shape with an example.
+///
+/// TB-11: a naive client often sends `argv` as a single shell-style
+/// string (`"node -e ..."`) or a map. serde's default message
+/// ("invalid type: string, expected a sequence") does not name the
+/// field or the remedy. We intercept the non-array cases here and
+/// return the example inline so the client self-corrects in one step.
+/// A genuine array still falls through to serde's element-level error.
+fn deserialize_argv<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    // Buffer into an untyped value first so we can detect the non-array
+    // shape before the typed conversion. The payload is already bounded
+    // by the transport frame cap, so this adds no unbounded allocation.
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Array(_) => serde_json::from_value(value).map_err(|e| {
+            D::Error::custom(format!(
+                "argv must be an array of strings, e.g. [\"node\",\"-e\",\"...\"]; {e}"
+            ))
+        }),
+        other => Err(D::Error::custom(format!(
+            "argv must be an array of strings, e.g. [\"node\",\"-e\",\"...\"]; got {}",
+            json_type_name(&other)
+        ))),
+    }
 }
 
 /// Lenient, LLM-friendly shorthand for an inline rule (TC erg2 P1).
@@ -1610,14 +1738,22 @@ fn parse_bucket_and_rules(
 /// daemon-side `CommandStartParams` in `into_ipc`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpCommandStartParams {
-    /// Non-empty argv. argv[0] is the program; rest are args.
+    /// Non-empty argv as an array of strings, e.g.
+    /// `["node","-e","..."]`. argv[0] is the program; the rest are args.
     /// Shell interpreters are rejected by the daemon.
+    #[serde(deserialize_with = "deserialize_argv")]
+    #[schemars(with = "Vec<String>")]
     pub argv: Vec<String>,
     /// Optional working directory.
     #[serde(default)]
     pub cwd: Option<String>,
-    /// Optional explicit environment. Empty = inherit.
-    #[serde(default)]
+    /// Environment as an ARRAY of {"key":"NAME","value":"VAL"} objects
+    /// (NOT a map), e.g. `[{"key":"FOO","value":"bar"}]`.
+    /// Empty/omitted = inherit the daemon's full environment; a
+    /// NON-EMPTY list REPLACES the entire environment (not merged) --
+    /// so include PATH etc. yourself when you set this.
+    #[serde(default, deserialize_with = "deserialize_env")]
+    #[schemars(with = "Vec<EnvEntry>")]
     pub env: Vec<EnvEntry>,
     /// Optional grace window between graceful and forced terminate,
     /// in milliseconds. Clamped at the daemon.
@@ -1664,7 +1800,9 @@ impl McpCommandStartParams {
 /// MCP-facing parameters for `command_status`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpCommandStatusParams {
-    /// Job id returned by `command_start_combed`.
+    /// Opaque job id returned by `command_start_combed` /
+    /// `run_and_watch` (e.g. `job_<32hex>`); copy it verbatim, not
+    /// free-form.
     pub job_id: String,
 }
 
@@ -1685,11 +1823,20 @@ const MAX_WAIT_SLICE_MS: u64 = 1_000;
 /// `command_start_combed`'s params plus the bounded wait controls.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRunAndWatchParams {
-    /// Non-empty argv. argv[0] is the program; rest are args.
+    /// Non-empty argv as an array of strings, e.g.
+    /// `["node","-e","..."]`. argv[0] is the program; the rest are args.
+    #[serde(deserialize_with = "deserialize_argv")]
+    #[schemars(with = "Vec<String>")]
     pub argv: Vec<String>,
     #[serde(default)]
     pub cwd: Option<String>,
-    #[serde(default)]
+    /// Environment as an ARRAY of {"key":"NAME","value":"VAL"} objects
+    /// (NOT a map), e.g. `[{"key":"FOO","value":"bar"}]`.
+    /// Empty/omitted = inherit the daemon's full environment; a
+    /// NON-EMPTY list REPLACES the entire environment (not merged) --
+    /// so include PATH etc. yourself when you set this.
+    #[serde(default, deserialize_with = "deserialize_env")]
+    #[schemars(with = "Vec<EnvEntry>")]
     pub env: Vec<EnvEntry>,
     #[serde(default)]
     pub grace_ms: Option<u64>,
@@ -1739,7 +1886,9 @@ impl McpRunAndWatchParams {
 /// MCP-facing parameters for `command_output_tail`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpCommandOutputTailParams {
-    /// Job id returned by `command_start_combed`.
+    /// Opaque job id returned by `command_start_combed` /
+    /// `run_and_watch` (e.g. `job_<32hex>`); copy it verbatim, not
+    /// free-form.
     pub job_id: String,
     /// Maximum lines to return. Clamped to 200 server-side.
     #[serde(default)]
@@ -1752,7 +1901,11 @@ pub struct McpCommandOutputTailParams {
 /// MCP-facing parameters for `bucket_events_since`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpBucketEventsSinceParams {
+    /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
+    /// verbatim, not free-form.
     pub bucket_id: String,
+    /// Pagination cursor; pass `0` on the first call, then the
+    /// `next_cursor` from the previous response.
     pub cursor: u64,
     /// Lowercase severity name: trace|debug|info|low|medium|high|critical.
     #[serde(default)]
@@ -1784,7 +1937,11 @@ impl McpBucketEventsSinceParams {
 /// MCP-facing parameters for `bucket_wait`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpBucketWaitParams {
+    /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
+    /// verbatim, not free-form.
     pub bucket_id: String,
+    /// Pagination cursor; pass `0` on the first call, then the
+    /// `next_cursor` from the previous response.
     pub cursor: u64,
     #[serde(default)]
     pub severity_min: Option<String>,
@@ -1819,13 +1976,19 @@ impl McpBucketWaitParams {
 /// MCP-facing parameters for `bucket_summary`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpBucketSummaryParams {
+    /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
+    /// verbatim, not free-form.
     pub bucket_id: String,
 }
 
 /// MCP-facing parameters for `event_context`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpEventContextParams {
+    /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
+    /// verbatim, not free-form.
     pub bucket_id: String,
+    /// Opaque event id from a bucket read (e.g. `evt_<32hex>`); copy it
+    /// verbatim, not free-form.
     pub event_id: String,
     #[serde(default)]
     pub before: Option<u32>,
@@ -1989,8 +2152,41 @@ pub struct McpRegistryGetParams {
 /// not need to mirror every field of the core schema.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryUpsertParams {
-    /// JSON-encoded `RuleDefinition`. Daemon validates regex /
-    /// keywords / kind before persisting.
+    /// JSON-encoded `RuleDefinition` (a STRING, not a nested object).
+    ///
+    /// REQUIRED fields: `id` (string), `version` (int, e.g. 1), `kind`,
+    /// `severity`, `event_kind` (string; the event label emitted on
+    /// match, e.g. `"compile_error"`), `summary_template` (string; use
+    /// `${line}` to echo the matched line). When `kind` is `regex` you
+    /// MUST also supply `pattern`; when `kind` is `keyword` supply
+    /// `keywords` (array).
+    ///
+    /// NOTE: `version` is ASSIGNED by the store (monotonic, latest+1);
+    /// any value you send is ignored and overwritten. The assigned
+    /// version is what the response returns and what
+    /// `registry_activate` / `registry_deactivate` operate on.
+    ///
+    /// `kind` enum: keyword | regex | prompt | exit_code | stream_marker
+    /// | progress_collapse | dedupe | threshold | sequence | anchor |
+    /// custom. Only `keyword` and `regex` are live at MVP; the rest
+    /// validate only to Draft.
+    ///
+    /// `severity` enum: trace | debug | info | low | medium | high |
+    /// critical.
+    ///
+    /// New rules default to `status=Draft` (test-only); set
+    /// `"status":"active"` in the definition to make the rule eligible
+    /// for `registry_activate`.
+    ///
+    /// Complete kind:regex example that succeeds on the first call:
+    /// `definition_json = "{\"id\":\"rust-compile-error\",\"version\":1,\
+    /// \"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\
+    /// \"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\
+    /// \"summary_template\":\"${line}\"}"`.
+    ///
+    /// Call `registry_get` for the canonical full shape of any stored
+    /// rule. The daemon validates regex / keywords / kind before
+    /// persisting.
     pub definition_json: String,
 }
 
@@ -2019,28 +2215,33 @@ pub struct McpRegistryActivateParams {
     /// Omit to activate the latest stored version.
     #[serde(default)]
     pub version: Option<u32>,
-    /// REQUIRED scope (TC42c/TC42d). There is no default: an omitted
-    /// scope is rejected with a scope-required error so a rule is never
-    /// silently widened to global. Use `{ "kind": "global" }` for the
-    /// common single-agent case (watch every command you start).
-    #[serde(default)]
-    pub scope: Option<McpActivationScope>,
+    /// REQUIRED scope (TC42c/TC42d). There is no default and it is in the
+    /// schema `required[]`: an omitted scope is rejected so a rule is
+    /// never silently widened to global. Use `{ "kind": "global" }` for
+    /// the common single-agent case (watch every command you start).
+    pub scope: McpActivationScope,
 }
 
 /// MCP-facing parameters for `registry_import_pack`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryImportPackParams {
     /// Pack name. One of: generic.terminal, apt, cargo, npm, pytest,
-    /// gcc, make.
+    /// gcc, make, cleanup.
+    #[schemars(extend("enum" = [
+        "generic.terminal", "apt", "cargo", "npm", "pytest", "gcc", "make", "cleanup"
+    ]))]
     pub pack: String,
     /// When true, promote the pack's rules to Active and activate them
-    /// in `scope` so they take effect immediately. Requires `scope`.
+    /// in `scope` so they take effect immediately. CONDITIONAL contract:
+    /// activate=true REQUIRES `scope`; activate=false (the default)
+    /// ignores `scope`.
     #[serde(default)]
     pub activate: bool,
     /// Activation scope. REQUIRED when activate=true (no default; an
-    /// omitted scope is rejected, never silently widened to global).
-    /// `{ "kind": "global" }` is the usual choice for a single agent
-    /// watching its own commands.
+    /// omitted scope with activate=true is rejected with a scope-required
+    /// error, never silently widened to global). Leave it out when
+    /// activate=false. `{ "kind": "global" }` is the usual choice for a
+    /// single agent watching its own commands.
     #[serde(default)]
     pub scope: Option<McpActivationScope>,
 }
@@ -2050,13 +2251,12 @@ pub struct McpRegistryImportPackParams {
 pub struct McpRegistryDeactivateParams {
     pub rule_id: String,
     pub version: u32,
-    /// REQUIRED scope (TC42c/TC42d). No default: an omitted scope is
-    /// rejected with a scope-required error. MUST match the scope used
-    /// at activation; deactivating with a different scope will not close
-    /// the previously-opened activation row. Use `{ "kind": "global" }`
-    /// to close a global activation.
-    #[serde(default)]
-    pub scope: Option<McpActivationScope>,
+    /// REQUIRED scope (TC42c/TC42d). No default and it is in the schema
+    /// `required[]`: an omitted scope is rejected. MUST match the scope
+    /// used at activation; deactivating with a different scope will not
+    /// close the previously-opened activation row. Use
+    /// `{ "kind": "global" }` to close a global activation.
+    pub scope: McpActivationScope,
 }
 
 /// MCP-facing scope DTO. Flat string fields so the generated JSON
@@ -2070,12 +2270,23 @@ pub struct McpRegistryDeactivateParams {
 /// - `{ "kind": "probe", "probe_id": "prb_..." }`
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpActivationScope {
-    /// One of: `global`, `bucket`, `job`, `probe`.
+    /// Scope discriminant. One of: `global`, `bucket`, `job`, `probe`.
+    /// `global` watches every command you start; the other three bind
+    /// the rule to a single opaque id (provide the matching `*_id`).
+    #[schemars(extend("enum" = ["global", "bucket", "job", "probe"]))]
     pub kind: String,
+    /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
+    /// verbatim, not free-form. Required when `kind` is `bucket`.
     #[serde(default)]
     pub bucket_id: Option<String>,
+    /// Opaque job id from `command_start_combed` / `run_and_watch`
+    /// (e.g. `job_<32hex>`); copy it verbatim, not free-form. Required
+    /// when `kind` is `job`.
     #[serde(default)]
     pub job_id: Option<String>,
+    /// Opaque probe id from `probe_list` / `runtime_state` (e.g.
+    /// `prb_<32hex>`); copy it verbatim, not free-form. Required when
+    /// `kind` is `probe`.
     #[serde(default)]
     pub probe_id: Option<String>,
 }
@@ -2131,8 +2342,10 @@ impl McpActivationScope {
 pub struct McpFileReadWindowParams {
     /// Absolute or repo-relative path to a regular file.
     pub path: String,
-    /// 1-based start line. Omit to read from line 1.
+    /// 1-based start line. Omit to read from line 1. A value of `0` is
+    /// clamped up to `1` by the daemon (there is no line 0).
     #[serde(default)]
+    #[schemars(extend("minimum" = 1))]
     pub start_line: Option<u64>,
     /// Max lines returned. Clamped by the daemon.
     #[serde(default)]
@@ -2145,7 +2358,12 @@ pub struct McpFileReadWindowParams {
 /// MCP-facing parameters for `file_search`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileSearchParams {
+    /// Absolute or repo-relative path to the single regular file to
+    /// search. (This is a per-file search, not a directory walk.)
     pub path: String,
+    /// The match expression: a plain SUBSTRING (literal), NOT a regex.
+    /// Regex metacharacters are matched literally. Use `case_insensitive`
+    /// to fold ASCII case.
     pub query: String,
     #[serde(default)]
     pub case_insensitive: Option<bool>,
@@ -2180,7 +2398,8 @@ pub struct McpFileWatchStartParams {
 /// MCP-facing parameters for `file_watch_stop`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileWatchStopParams {
-    /// Wire-form JobId returned by `file_watch_start`.
+    /// Opaque watch id (a job id) returned by `file_watch_start` (e.g.
+    /// `job_<32hex>`); copy it verbatim, not free-form.
     pub watch_id: String,
 }
 
@@ -2190,12 +2409,21 @@ pub struct McpFileWatchStopParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpPtyCommandStartParams {
-    /// Non-empty argv. argv[0] is the program; rest are args. Shell
-    /// interpreters denied.
+    /// Non-empty argv as an array of strings, e.g.
+    /// `["node","-e","..."]`. argv[0] is the program; the rest are args.
+    /// Shell interpreters denied.
+    #[serde(deserialize_with = "deserialize_argv")]
+    #[schemars(with = "Vec<String>")]
     pub argv: Vec<String>,
     #[serde(default)]
     pub cwd: Option<String>,
-    #[serde(default)]
+    /// Environment as an ARRAY of {"key":"NAME","value":"VAL"} objects
+    /// (NOT a map), e.g. `[{"key":"FOO","value":"bar"}]`.
+    /// Empty/omitted = inherit the daemon's full environment; a
+    /// NON-EMPTY list REPLACES the entire environment (not merged) --
+    /// so include PATH etc. yourself when you set this.
+    #[serde(default, deserialize_with = "deserialize_env")]
+    #[schemars(with = "Vec<EnvEntry>")]
     pub env: Vec<EnvEntry>,
     #[serde(default)]
     pub rows: Option<u16>,
@@ -2218,7 +2446,8 @@ pub struct McpPtyCommandStartParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpPtyCommandWriteStdinParams {
-    /// Wire-form JobId returned by `pty_command_start`.
+    /// Opaque job id returned by `pty_command_start` (e.g.
+    /// `job_<32hex>`); copy it verbatim, not free-form.
     pub job_id: String,
     /// UTF-8 stdin payload. Capped at 4096 bytes by the daemon.
     pub bytes: String,
@@ -2226,6 +2455,8 @@ pub struct McpPtyCommandWriteStdinParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpPtyCommandStopParams {
+    /// Opaque job id returned by `pty_command_start` (e.g.
+    /// `job_<32hex>`); copy it verbatim, not free-form.
     pub job_id: String,
 }
 
@@ -2235,7 +2466,8 @@ pub struct McpPtyCommandStopParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpProbeStatusParams {
-    /// Wire-form ProbeId.
+    /// Opaque probe id from `probe_list` / `runtime_state` (e.g.
+    /// `prb_<32hex>`); copy it verbatim, not free-form.
     pub probe_id: String,
 }
 
@@ -2319,6 +2551,64 @@ mod tests {
             Some(terminal_commander_core::SourceStream::Stderr)
         );
         def.validate().unwrap();
+    }
+
+    #[test]
+    fn env_array_of_objects_deserializes() {
+        // TB-2: the documented array-of-{key,value} shape must parse.
+        let params: McpCommandStartParams = serde_json::from_str(
+            r#"{"argv":["echo"],"env":[{"key":"FOO","value":"bar"},{"key":"BAZ","value":"qux"}]}"#,
+        )
+        .expect("array-of-objects env should deserialize");
+        assert_eq!(params.env.len(), 2);
+        assert_eq!(params.env[0].key, "FOO");
+        assert_eq!(params.env[0].value, "bar");
+    }
+
+    #[test]
+    fn env_omitted_defaults_to_empty() {
+        // TB-2: omitted env stays empty (inherit semantics downstream).
+        let params: McpCommandStartParams =
+            serde_json::from_str(r#"{"argv":["echo"]}"#).expect("omitted env should default");
+        assert!(params.env.is_empty());
+    }
+
+    #[test]
+    fn env_as_map_teaches_key_value_array_shape() {
+        // TB-2c: the common map mistake must surface the remedy, not
+        // serde's bare "invalid type: map, expected a sequence".
+        let err = serde_json::from_str::<McpCommandStartParams>(
+            r#"{"argv":["echo"],"env":{"FOO":"bar"}}"#,
+        )
+        .expect_err("map-form env must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ARRAY") && msg.contains("\"key\"") && msg.contains("\"value\""),
+            "env map error must name the {{key,value}} array shape: {msg}"
+        );
+        assert!(
+            msg.contains("not a map"),
+            "env map error must call out the map mistake: {msg}"
+        );
+    }
+
+    #[test]
+    fn env_teaching_error_applies_to_run_and_watch_and_pty() {
+        // TB-2: the same teaching error covers every env-bearing tool.
+        let raw = r#"{"argv":["echo"],"env":{"FOO":"bar"}}"#;
+        let raw_pty = r#"{"argv":["bash"],"env":{"FOO":"bar"}}"#;
+        let e1 = serde_json::from_str::<McpRunAndWatchParams>(raw)
+            .expect_err("run_and_watch map env must be rejected")
+            .to_string();
+        let e2 = serde_json::from_str::<McpPtyCommandStartParams>(raw_pty)
+            .expect_err("pty_command_start map env must be rejected")
+            .to_string();
+        for msg in [&e1, &e2] {
+            assert!(
+                msg.contains("ARRAY") && msg.contains("not a map"),
+                "env teaching error missing in: {msg}"
+            );
+        }
     }
 
     #[test]
@@ -2492,9 +2782,22 @@ mod tests {
                 tool.name
             );
 
+            // TB-1: a PTY tool on a host without a PTY runtime is
+            // platform-blocked; that reason takes precedence over
+            // daemon reachability since the tool can only ever return
+            // UnsupportedPlatform on this host.
+            let platform_blocked = is_pty_tool(tool.name) && !pty_runtime_available();
+
             if !expected_requires_daemon {
                 assert!(tool.available, "{} should remain callable", tool.name);
                 assert_eq!(tool.unavailable_reason, None);
+            } else if platform_blocked {
+                assert!(
+                    !tool.available,
+                    "{} should be unavailable without a PTY runtime",
+                    tool.name
+                );
+                assert_eq!(tool.unavailable_reason, Some(PTY_UNAVAILABLE_REASON));
             } else if matches!(tool.status, ToolStatus::Live) {
                 assert!(
                     !tool.available,
@@ -2511,6 +2814,234 @@ mod tests {
                 assert_eq!(tool.unavailable_reason, Some("not_implemented"));
             }
         }
+    }
+
+    /// TB-1 regression: on a host without a PTY runtime (non-unix; ConPTY
+    /// pending) the four `pty_*` tools MUST be reported `available: false`
+    /// with the platform reason -- even when the daemon is reachable. They
+    /// must never advertise a live PTY surface the daemon can only reject
+    /// with `UnsupportedPlatform`.
+    #[cfg(not(unix))]
+    #[test]
+    fn pty_tools_unavailable_on_unsupported_platform() {
+        // daemon_available = true on purpose: the platform block must
+        // fire regardless of daemon reachability.
+        let tools = discovered_tools(true);
+        let pty_names = [
+            "pty_command_start",
+            "pty_command_write_stdin",
+            "pty_command_stop",
+            "pty_command_list",
+        ];
+        for name in pty_names {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from discovered tools"));
+            assert!(
+                !tool.available,
+                "{name} must be unavailable without a PTY runtime"
+            );
+            assert_eq!(
+                tool.unavailable_reason,
+                Some(PTY_UNAVAILABLE_REASON),
+                "{name} must surface the PTY platform reason"
+            );
+        }
+    }
+
+    /// TB-1 companion: on a unix host with the daemon reachable the PTY
+    /// tools ARE available (the platform block does not fire). This keeps
+    /// the fix narrow -- it never suppresses a real PTY surface.
+    #[cfg(unix)]
+    #[test]
+    fn pty_tools_available_on_supported_platform_with_daemon() {
+        let tools = discovered_tools(true);
+        for name in [
+            "pty_command_start",
+            "pty_command_write_stdin",
+            "pty_command_stop",
+            "pty_command_list",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from discovered tools"));
+            assert!(tool.available, "{name} should be available on unix");
+            assert_eq!(tool.unavailable_reason, None);
+        }
+    }
+
+    // --- TB-5: scope is machine-readable REQUIRED on activate/deactivate ---
+
+    /// Collect the `required[]` names from a generated JSON schema.
+    fn schema_required(schema: &schemars::Schema) -> Vec<String> {
+        schema
+            .as_value()
+            .pointer("/required")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn activate_schema_lists_scope_as_required() {
+        // TB-5: the prose says scope is REQUIRED; the machine-readable
+        // schema must agree so a naive LLM is told up front, not after a
+        // ScopeInvalid round-trip.
+        let schema = schemars::schema_for!(McpRegistryActivateParams);
+        let required = schema_required(&schema);
+        assert!(
+            required.iter().any(|f| f == "scope"),
+            "registry_activate schema must list scope in required[]; got {required:?}"
+        );
+        assert!(
+            required.iter().any(|f| f == "rule_id"),
+            "rule_id must remain required; got {required:?}"
+        );
+        // version stays optional (latest-version sugar).
+        assert!(
+            !required.iter().any(|f| f == "version"),
+            "version must stay optional; got {required:?}"
+        );
+    }
+
+    #[test]
+    fn deactivate_schema_lists_scope_as_required() {
+        let schema = schemars::schema_for!(McpRegistryDeactivateParams);
+        let required = schema_required(&schema);
+        for field in ["rule_id", "version", "scope"] {
+            assert!(
+                required.iter().any(|f| f == field),
+                "registry_deactivate schema must list {field} in required[]; got {required:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn activate_without_scope_fails_deserialization() {
+        // TB-5: dropping the Option means an omitted scope is rejected at
+        // the wire-form boundary (no silent widen to global).
+        let err = serde_json::from_str::<McpRegistryActivateParams>(r#"{"rule_id":"r"}"#)
+            .expect_err("activate without scope must fail");
+        assert!(
+            err.to_string().contains("scope"),
+            "missing-scope error must name the scope field; got: {err}"
+        );
+    }
+
+    #[test]
+    fn deactivate_without_scope_fails_deserialization() {
+        let err =
+            serde_json::from_str::<McpRegistryDeactivateParams>(r#"{"rule_id":"r","version":1}"#)
+                .expect_err("deactivate without scope must fail");
+        assert!(
+            err.to_string().contains("scope"),
+            "missing-scope error must name the scope field; got: {err}"
+        );
+    }
+
+    #[test]
+    fn activate_with_global_scope_deserializes() {
+        // The happy path the schema teaches must still parse.
+        let params = serde_json::from_str::<McpRegistryActivateParams>(
+            r#"{"rule_id":"r","scope":{"kind":"global"}}"#,
+        )
+        .expect("activate with global scope must deserialize");
+        assert_eq!(params.rule_id, "r");
+        assert_eq!(params.scope.kind, "global");
+    }
+
+    #[test]
+    fn import_pack_scope_stays_optional_in_schema() {
+        // TB-5: import_pack scope is CONDITIONAL (required only when
+        // activate=true), so it must NOT be in the unconditional
+        // required[]; the conditional is documented + enforced by the
+        // daemon teaching error.
+        let schema = schemars::schema_for!(McpRegistryImportPackParams);
+        let required = schema_required(&schema);
+        assert!(
+            required.iter().any(|f| f == "pack"),
+            "import_pack must require pack; got {required:?}"
+        );
+        assert!(
+            !required.iter().any(|f| f == "scope"),
+            "import_pack scope is conditional and must not be unconditionally required; got {required:?}"
+        );
+        // activate=false (default) with no scope must still parse.
+        serde_json::from_str::<McpRegistryImportPackParams>(r#"{"pack":"cargo"}"#)
+            .expect("import_pack without activate/scope must deserialize");
+    }
+
+    /// Read a string field from a generated JSON schema by JSON pointer.
+    fn schema_str<'a>(schema: &'a schemars::Schema, pointer: &str) -> &'a str {
+        schema
+            .as_value()
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("schema pointer {pointer} is not a string"))
+    }
+
+    /// T2 regression: `event_kind` is a hard-REQUIRED RuleDefinition field
+    /// (no serde default; `validate()` rejects an empty value), so it MUST
+    /// appear in the authoritative REQUIRED-fields enumeration the client
+    /// builds from. If it drifts out of the description again, a naive
+    /// first `registry_upsert` call fails with `missing field event_kind`
+    /// -- exactly the teaching-error-first failure this work eliminates.
+    #[test]
+    fn upsert_required_fields_list_includes_event_kind() {
+        // 1. Live tool-level description (the surface system_discover shows
+        //    and the router advertises).
+        let router = TerminalCommanderMcpServer::tool_router();
+        let upsert = router
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "registry_upsert")
+            .expect("registry_upsert must be a live tool");
+        let tool_desc = upsert
+            .description
+            .as_deref()
+            .expect("registry_upsert must carry a description");
+        assert!(
+            tool_desc.contains("event_kind"),
+            "registry_upsert tool description must list event_kind in its REQUIRED set; got: {tool_desc}"
+        );
+
+        // 2. schemars-derived definition_json param doc (the schema surface).
+        let schema = schemars::schema_for!(McpRegistryUpsertParams);
+        let param_desc = schema_str(&schema, "/properties/definition_json/description");
+        assert!(
+            param_desc.contains("event_kind"),
+            "definition_json schema description must list event_kind; got: {param_desc}"
+        );
+    }
+
+    /// T2 regression: pin the exact serde failure mode. Omitting
+    /// `event_kind` (as a client would if it trusted a list that lacked it)
+    /// fails deserialization, while the documented worked example -- which
+    /// includes event_kind -- both deserializes AND validates. This proves
+    /// the REQUIRED list is the load-bearing surface.
+    #[test]
+    fn upsert_definition_without_event_kind_fails_but_example_succeeds() {
+        let missing = r#"{"id":"r","version":1,"kind":"regex","status":"active","severity":"high","pattern":"x","summary_template":"${line}"}"#;
+        let err = serde_json::from_str::<RuleDefinition>(missing)
+            .expect_err("definition without event_kind must fail deserialization");
+        assert!(
+            err.to_string().contains("event_kind"),
+            "missing-event_kind error must name the field; got: {err}"
+        );
+
+        // The exact shape embedded in the tool description as the
+        // first-try example.
+        let example = r#"{"id":"rust-compile-error","version":1,"kind":"regex","status":"active","severity":"high","event_kind":"compile_error","pattern":"error\\[E[0-9]+\\]","summary_template":"${line}"}"#;
+        let def = serde_json::from_str::<RuleDefinition>(example)
+            .expect("documented example must deserialize");
+        def.validate()
+            .expect("documented example must pass validate()");
     }
 
     fn unavailable_status_server() -> TerminalCommanderMcpServer {
@@ -2643,5 +3174,206 @@ mod tests {
                 "{code:?} is not caller-fixable and must stay internal_error"
             );
         }
+    }
+
+    // --- T3 (TB-7/8/9/10/11): clarity polish regressions ---
+
+    /// Collect a JSON-Schema `enum` array at `pointer` as owned strings.
+    fn schema_enum(schema: &schemars::Schema, pointer: &str) -> Vec<String> {
+        schema
+            .as_value()
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn tb7_scope_kind_is_a_schema_enum() {
+        // TB-7: scope.kind must carry a machine-readable enum so a naive
+        // LLM picks a legal discriminant on the first call, not after a
+        // ScopeInvalid round-trip.
+        let schema = schemars::schema_for!(McpActivationScope);
+        let kinds = schema_enum(&schema, "/properties/kind/enum");
+        assert_eq!(
+            kinds,
+            vec!["global", "bucket", "job", "probe"],
+            "scope.kind must enumerate the four legal discriminants; got {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn tb7_scope_id_descriptions_teach_verbatim_copy() {
+        let schema = schemars::schema_for!(McpActivationScope);
+        for (field, prefix) in [
+            ("bucket_id", "bkt_"),
+            ("job_id", "job_"),
+            ("probe_id", "prb_"),
+        ] {
+            let desc = schema_str(&schema, &format!("/properties/{field}/description"));
+            assert!(
+                desc.contains(prefix) && desc.contains("verbatim"),
+                "scope.{field} description must teach the {prefix} prefix and verbatim copy; got: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn tb8_cursor_descriptions_teach_pagination() {
+        for schema in [
+            schemars::schema_for!(McpBucketEventsSinceParams),
+            schemars::schema_for!(McpBucketWaitParams),
+        ] {
+            let desc = schema_str(&schema, "/properties/cursor/description");
+            assert!(
+                desc.contains("first call") && desc.contains("next_cursor"),
+                "cursor description must teach the 0-then-next_cursor protocol; got: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn tb8_bucket_and_event_id_descriptions_carry_format_notes() {
+        let summary = schemars::schema_for!(McpBucketSummaryParams);
+        let bkt = schema_str(&summary, "/properties/bucket_id/description");
+        assert!(
+            bkt.contains("bkt_"),
+            "bucket_id must teach the bkt_ prefix; got: {bkt}"
+        );
+
+        let ctx = schemars::schema_for!(McpEventContextParams);
+        let evt = schema_str(&ctx, "/properties/event_id/description");
+        assert!(
+            evt.contains("evt_"),
+            "event_id must teach the evt_ prefix; got: {evt}"
+        );
+    }
+
+    #[test]
+    fn tb9_import_pack_schema_enumerates_all_eight_seed_packs() {
+        // TB-9: the schema's pack enum must match the daemon's seed-pack
+        // set exactly (8 packs incl. cleanup), so the schema can never
+        // again list fewer packs than the daemon accepts.
+        let schema = schemars::schema_for!(McpRegistryImportPackParams);
+        let packs = schema_enum(&schema, "/properties/pack/enum");
+        assert_eq!(
+            packs,
+            vec![
+                "generic.terminal",
+                "apt",
+                "cargo",
+                "npm",
+                "pytest",
+                "gcc",
+                "make",
+                "cleanup",
+            ],
+            "import_pack schema must enumerate all eight seed packs; got {packs:?}"
+        );
+        assert!(
+            packs.iter().any(|p| p == "cleanup"),
+            "TB-9: cleanup must be present in the pack enum"
+        );
+    }
+
+    #[test]
+    fn tb10_file_search_params_carry_descriptions() {
+        let schema = schemars::schema_for!(McpFileSearchParams);
+        let path = schema_str(&schema, "/properties/path/description");
+        assert!(
+            !path.is_empty(),
+            "file_search.path must carry a description"
+        );
+        let query = schema_str(&schema, "/properties/query/description");
+        assert!(
+            query.contains("SUBSTRING") && query.contains("NOT a regex"),
+            "file_search.query must teach literal-substring (not regex) behavior; got: {query}"
+        );
+    }
+
+    #[test]
+    fn tb11_argv_string_form_teaches_array_shape() {
+        // TB-11: a single shell-style string for argv must surface the
+        // field-prefixed array example, not serde's bare "invalid type".
+        for raw in [
+            r#"{"argv":"node -e x"}"#,
+            r#"{"argv":{"0":"node"}}"#,
+            r#"{"argv":42}"#,
+        ] {
+            let err = serde_json::from_str::<McpCommandStartParams>(raw)
+                .expect_err("non-array argv must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("argv must be an array of strings")
+                    && msg.contains("[\"node\",\"-e\""),
+                "argv teaching error must name the field and example; got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn tb11_argv_teaching_error_covers_run_and_watch_and_pty() {
+        let e1 = serde_json::from_str::<McpRunAndWatchParams>(r#"{"argv":"node -e x"}"#)
+            .expect_err("run_and_watch string argv must be rejected")
+            .to_string();
+        let e2 = serde_json::from_str::<McpPtyCommandStartParams>(r#"{"argv":"node -e x"}"#)
+            .expect_err("pty_command_start string argv must be rejected")
+            .to_string();
+        for msg in [&e1, &e2] {
+            assert!(
+                msg.contains("argv must be an array of strings"),
+                "argv teaching error missing in: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn tb11_valid_argv_array_still_parses() {
+        let params: McpCommandStartParams =
+            serde_json::from_str(r#"{"argv":["node","-e","1"]}"#).expect("array argv must parse");
+        assert_eq!(params.argv, vec!["node", "-e", "1"]);
+    }
+
+    #[test]
+    fn tb11_file_read_window_start_line_schema_has_minimum_one() {
+        // TB-11: the "1-based" prose must agree with the schema; a 0 is
+        // clamped to 1 by the daemon, so the schema documents minimum 1.
+        let schema = schemars::schema_for!(McpFileReadWindowParams);
+        let min = schema
+            .as_value()
+            .pointer("/properties/start_line/minimum")
+            .and_then(serde_json::Value::as_u64);
+        assert_eq!(
+            min,
+            Some(1),
+            "start_line schema must declare minimum 1 to match the 1-based prose"
+        );
+        let desc = schema_str(&schema, "/properties/start_line/description");
+        assert!(
+            desc.contains("clamped"),
+            "start_line description must document the 0->1 clamp; got: {desc}"
+        );
+    }
+
+    #[test]
+    fn tb11_probe_status_description_does_not_mislabel_error_as_return() {
+        let router = TerminalCommanderMcpServer::tool_router();
+        let probe = router
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "probe_status")
+            .expect("probe_status must be a live tool");
+        let desc = probe
+            .description
+            .as_deref()
+            .expect("probe_status must carry a description");
+        assert!(
+            desc.contains("UnknownProbe error") && desc.contains("not a success body"),
+            "probe_status must describe UnknownProbe as an error path, not a returned body; got: {desc}"
+        );
     }
 }

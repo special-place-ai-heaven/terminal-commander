@@ -18,7 +18,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed lifecycle lookup for jobs started by command_start_combed. Success returns counters and exit metadata, never raw process output. v1.1 adds TC11 frames_suppressed* counters (additive)."
+    "note": "Daemon-backed lifecycle lookup for jobs started by command_start_combed. Success returns counters and exit metadata, never raw process output. v1.1 adds TC11 frames_suppressed* counters (additive). TB-7: job_id carries an opaque-id format note (copy verbatim, e.g. job_<32hex>; from command_start_combed / run_and_watch) so the first call uses the right id."
   },
   "response_example": {
     "job_id": "job_018f0000000000000000000000000001",

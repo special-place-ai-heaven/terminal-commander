@@ -13,12 +13,7 @@
           "print('ready')"
         ],
         "cwd": "C:\\work\\app",
-        "env": [
-          {
-            "key": "PYTHONUNBUFFERED",
-            "value": "1"
-          }
-        ],
+        "env": [],
         "rows": 24,
         "cols": 80,
         "bucket_config_json": "{\"max_events\": 512, \"ttl\": 300}",
@@ -77,7 +72,9 @@
   },
   "invariants": [
     "argv is required and must be non-empty",
-    "env is an array of key/value objects, not an object map",
+    "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list REPLACES it entirely (include PATH yourself)",
+    "an env map (e.g. {\"FOO\":\"bar\"}) is rejected with a teaching error naming the {key,value} array shape",
+    "a non-array argv is rejected with a field-prefixed teaching error naming the array-of-strings shape with an example (TB-11)",
     "MCP request does not expose the daemon-only environment field, but does accept optional bucket_config_json and rules_json that map to daemon IPC without a prior registry_activate",
     "success payload contains only job_id, bucket_id, probe_id, and cursor",
     "pty_command_start is not a shell bridge and rejects shell interpreters"

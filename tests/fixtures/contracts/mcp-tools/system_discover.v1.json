@@ -17,7 +17,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Availability contract for the rmcp stdio adapter. system_discover remains callable when the daemon is unavailable and reports daemon availability for every tool."
+    "note": "Availability contract for the rmcp stdio adapter. system_discover remains callable when the daemon is unavailable and reports daemon availability for every tool. TB-1: on a host without a PTY runtime (non-unix; ConPTY pending) the four pty_* tools report available:false with the platform reason regardless of daemon reachability. This example was captured on such a host; on a unix host with the daemon up the pty_* tools report available:true."
   },
   "response_example_daemon_unavailable": {
     "adapter_version": "0.1.10",
@@ -51,10 +51,10 @@
       {"name": "file_watch_start", "status": "live", "description": "Start a daemon-owned file watch bound to a bucket; emits signal only when scoped rules match.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
       {"name": "file_watch_stop", "status": "live", "description": "Stop a previously started file watch by watch_id.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
       {"name": "file_watch_list", "status": "live", "description": "Snapshot of every currently-live file watch.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
-      {"name": "pty_command_start", "status": "live", "description": "Start an interactive non-shell argv command attached to a PTY. Bounded metadata only.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
-      {"name": "pty_command_write_stdin", "status": "live", "description": "Write bounded stdin bytes to a running PTY job. Denied while a secret prompt is active.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
-      {"name": "pty_command_stop", "status": "live", "description": "Stop a previously started PTY job by job_id. Returns final counters.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
-      {"name": "pty_command_list", "status": "live", "description": "Snapshot of every currently-live PTY job (including secret_prompt_active).", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "pty_command_start", "status": "live", "description": "Start an interactive non-shell argv command attached to a PTY. Bounded metadata only.", "requires_daemon": true, "available": false, "unavailable_reason": "PTY runtime unavailable on this platform (ConPTY pending)"},
+      {"name": "pty_command_write_stdin", "status": "live", "description": "Write bounded stdin bytes to a running PTY job. Denied while a secret prompt is active.", "requires_daemon": true, "available": false, "unavailable_reason": "PTY runtime unavailable on this platform (ConPTY pending)"},
+      {"name": "pty_command_stop", "status": "live", "description": "Stop a previously started PTY job by job_id. Returns final counters.", "requires_daemon": true, "available": false, "unavailable_reason": "PTY runtime unavailable on this platform (ConPTY pending)"},
+      {"name": "pty_command_list", "status": "live", "description": "Snapshot of every currently-live PTY job (including secret_prompt_active).", "requires_daemon": true, "available": false, "unavailable_reason": "PTY runtime unavailable on this platform (ConPTY pending)"},
       {"name": "runtime_state", "status": "live", "description": "Bounded aggregate runtime snapshot: probes, buckets, active rule scopes.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
       {"name": "probe_list", "status": "live", "description": "Flat list of every live probe across all runtimes (command / pty / file watch).", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
       {"name": "probe_status", "status": "live", "description": "Bounded per-probe lookup by probe_id. Returns UnknownProbe if not live.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"}
@@ -63,6 +63,8 @@
   "availability_invariants": {
     "system_discover_requires_daemon": false,
     "daemon_backed_tools_require_daemon": true,
-    "daemon_unavailable_reason": "daemon_unavailable"
+    "daemon_unavailable_reason": "daemon_unavailable",
+    "pty_tools_require_pty_runtime": true,
+    "pty_unavailable_reason_when_no_runtime": "PTY runtime unavailable on this platform (ConPTY pending)"
   }
 }
