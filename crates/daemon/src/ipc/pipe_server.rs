@@ -34,6 +34,33 @@ const MAX_PIPE_CREATE_RETRIES: u32 = 30;
 #[cfg(windows)]
 const PIPE_CREATE_RETRY_DELAY_MS: u64 = 100;
 
+/// Upper bound on the graceful-shutdown drain of in-flight pipe
+/// connection handlers. Matches the Unix `DRAIN_CEILING` (10 s): a
+/// handler that does not finish in time is aborted so the process can
+/// exit rather than hanging shutdown.
+#[cfg(windows)]
+const PIPE_DRAIN_CEILING: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Await all in-flight pipe connection handlers, bounded by
+/// [`PIPE_DRAIN_CEILING`]. On timeout, abort the stragglers and return
+/// so shutdown cannot hang. Mirrors the Unix `drain_connections`.
+#[cfg(windows)]
+async fn drain_pipe_connections(conns: &mut tokio::task::JoinSet<()>) {
+    if conns.is_empty() {
+        return;
+    }
+    let drain = async { while conns.join_next().await.is_some() {} };
+    if tokio::time::timeout(PIPE_DRAIN_CEILING, drain)
+        .await
+        .is_err()
+    {
+        // Ceiling hit: a connection did not finish in time. Abort the
+        // stragglers and return so the process can exit. JoinSet::abort_all
+        // is best-effort; we do not re-await aborted handles.
+        conns.abort_all();
+    }
+}
+
 /// Fatal vs transient classification for `ServerOptions::create` /
 /// `create_named_pipe_with_sddl` errors.
 #[cfg(windows)]
@@ -149,6 +176,17 @@ async fn accept_loop(
     if *shutdown.borrow() {
         return;
     }
+    // Per-connection tasks are tracked in a JoinSet (rather than
+    // detached `tokio::spawn`) so a graceful shutdown can DRAIN them,
+    // mirroring the Unix UDS server. When the shutdown flag flips, the
+    // connection serving the `Shutdown` request finishes flushing its
+    // ACK and every other in-flight request runs to completion before
+    // the loop returns. The accept loop owns the set;
+    // `PipeServerHandle::shutdown` joins THIS task, so awaiting the join
+    // handle transitively waits for the drain below. Without this, an
+    // in-flight handler could outlive `shutdown_store` and touch a
+    // torn-down store.
+    let mut conns: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     // SDDL is process-stable (current user's SID does not change), so
     // build once before the loop instead of on every accept iteration.
     #[cfg(windows)]
@@ -236,11 +274,18 @@ async fn accept_loop(
                     break;
                 }
             }
+            // Reap finished connection tasks as they complete so the
+            // JoinSet does not grow without bound under steady load.
+            // Guarded so `join_next` is only polled when non-empty (it
+            // resolves to `None` immediately on an empty set, which
+            // would otherwise busy-spin this branch). Mirrors the Unix
+            // accept loop.
+            Some(_joined) = conns.join_next(), if !conns.is_empty() => {}
             res = server.connect() => {
                 if res.is_ok() {
                     let state = Arc::clone(&state);
                     let shutdown_for_conn = shutdown.clone();
-                    tokio::spawn(async move {
+                    conns.spawn(async move {
                         if let Err(e) = handle_pipe_connection(server, state, boot, shutdown_for_conn).await {
                             eprintln!("terminal-commanderd: pipe connection error: {e}");
                         }
@@ -249,28 +294,57 @@ async fn accept_loop(
             }
         }
     }
+
+    // Drain: we have stopped accepting. The shutdown flag is now
+    // `true`, so each in-flight `handle_pipe_connection` breaks out of
+    // its own loop at the next request boundary; a connection that is
+    // mid-dispatch finishes the current request (and flushes its
+    // response) first. Wait for all of them, bounded by
+    // PIPE_DRAIN_CEILING, before returning so no handler outlives
+    // `shutdown_store`. Mirrors the Unix `drain_connections`.
+    drain_pipe_connections(&mut conns).await;
 }
 
 async fn handle_pipe_connection(
     mut server: NamedPipeServer,
     state: Arc<DaemonState>,
     boot: Instant,
-    shutdown: watch::Receiver<bool>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> io::Result<()> {
     let identity: PeerIdentity = peer_identity_for(&server);
     #[cfg(any(test, feature = "test-util"))]
     state.test_record_peer_identity(identity.clone());
+    // Sticky shutdown: if the flag is already true, do not start
+    // serving requests on this connection.
+    if *shutdown.borrow() {
+        return Ok(());
+    }
     loop {
-        if *shutdown.borrow() {
-            break;
-        }
-        // Mirror the UDS server: a clean EOF between frames closes the
-        // connection silently, but a malformed frame / protocol error
-        // gets a typed `IpcError` envelope written back to the client
-        // (correlation_id 0) before the connection is closed. The shared
-        // classified read returns the same `IpcErrorCode` values the UDS
-        // path surfaces (FrameTooLarge / MalformedJson / Internal).
-        let req = match read_request_classified(&mut server).await {
+        // Mirror the UDS `handle_connection`: select on shutdown
+        // ALONGSIDE the read so a handler parked between frames wakes
+        // immediately when shutdown is requested, instead of blocking on
+        // the read until the drain ceiling aborts it. A request already
+        // being read/dispatched/written runs to completion (the drain
+        // waits for it); only a connection idle between frames is closed
+        // promptly. This is what makes `PipeServerHandle::shutdown`'s
+        // drain bounded and fast.
+        let read = tokio::select! {
+            biased;
+            res = shutdown.changed() => {
+                if res.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                continue;
+            }
+            read = read_request_classified(&mut server) => read,
+        };
+        // A clean EOF between frames closes the connection silently, but
+        // a malformed frame / protocol error gets a typed `IpcError`
+        // envelope written back to the client (correlation_id 0) before
+        // the connection is closed. The shared classified read returns
+        // the same `IpcErrorCode` values the UDS path surfaces
+        // (FrameTooLarge / MalformedJson / Internal).
+        let req = match read {
             ReadOutcome::Ok(req) => req,
             ReadOutcome::Eof => break,
             ReadOutcome::Err(error) => {

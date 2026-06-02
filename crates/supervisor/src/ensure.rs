@@ -338,6 +338,33 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 /// a length prefix above this is a non-conforming peer, not our daemon.
 const PROBE_MAX_FRAME_BYTES: usize = 256 * 1024;
 
+/// Win32 `ERROR_PIPE_BUSY` (231): the named pipe EXISTS but every
+/// instance is currently serving another client. This is proof the
+/// daemon is ALIVE, not absent -- collapsing it to "down" would make a
+/// live-but-busy daemon be misreported as unavailable and trigger a
+/// spurious cold respawn. The supervisor classifies it as transient and
+/// retries within the probe budget, the same way a connect-retry should
+/// behave (the daemon IS there). Matches the daemon-side
+/// `classify_pipe_create_error`, which also treats 231 as transient.
+#[cfg(windows)]
+const ERROR_PIPE_BUSY: i32 = 231;
+
+/// How long to wait between `ERROR_PIPE_BUSY` retries on the Windows
+/// pipe probe. Several attempts fit inside [`PROBE_TIMEOUT`] (500 ms),
+/// which still bounds the whole probe.
+#[cfg(windows)]
+const PIPE_BUSY_RETRY_DELAY_MS: u64 = 25;
+
+/// Classify a Windows pipe-open error: `true` iff it is
+/// `ERROR_PIPE_BUSY`, i.e. the daemon is present but all pipe instances
+/// are busy. A pure function so the classification is unit-testable and
+/// shared by the probe's retry loop. Errors with no OS code (or any
+/// other code) are NOT busy -- the daemon is genuinely unreachable.
+#[cfg(windows)]
+fn pipe_open_error_is_busy(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(ERROR_PIPE_BUSY)
+}
+
 /// Minimal mirror of the daemon's `ResponseEnvelope` (TC37 wire format)
 /// sufficient to recognise a well-formed `health` reply WITHOUT taking a
 /// dependency on the daemon crate (which would create a supervisor<->daemon
@@ -482,10 +509,25 @@ pub async fn probe_endpoint_health(endpoint: &Endpoint) -> Option<ProbeHealth> {
                 // step 2 (acceptable for Phase 3, revisit if probed in a
                 // hot path). The returned NamedPipeClient implements the
                 // tokio async I/O traits, so the same handshake applies.
+                //
+                // ERROR_PIPE_BUSY means the daemon EXISTS but every pipe
+                // instance is busy serving another client. That is NOT
+                // "down" -- collapsing it to None would misreport a live
+                // daemon as unavailable. Retry briefly (the daemon's
+                // accept loop recreates an instance after each accept);
+                // the outer PROBE_TIMEOUT still bounds the whole probe.
+                // Any other open error IS a genuine unreachable peer.
                 use tokio::net::windows::named_pipe::ClientOptions;
-                match ClientOptions::new().open(name.as_str()) {
-                    Ok(stream) => health_handshake(stream).await,
-                    Err(_) => None,
+                loop {
+                    match ClientOptions::new().open(name.as_str()) {
+                        Ok(stream) => break health_handshake(stream).await,
+                        Err(e) if pipe_open_error_is_busy(&e) => {
+                            tokio::time::sleep(Duration::from_millis(PIPE_BUSY_RETRY_DELAY_MS))
+                                .await;
+                            // Loop: the outer timeout caps total wait.
+                        }
+                        Err(_) => break None,
+                    }
                 }
             }
             #[cfg(not(windows))]
@@ -644,6 +686,40 @@ mod tests {
             !env.contains_key("WSLENV"),
             "no TC_SESSION => ambient WSLENV must be dropped entirely, got {:?}",
             env.get("WSLENV")
+        );
+    }
+
+    /// FIX 3B (Windows): ERROR_PIPE_BUSY (231) classifies as "busy"
+    /// (daemon present) so the probe retries instead of collapsing to
+    /// "down". A live-but-busy daemon must not be misreported as
+    /// unavailable.
+    #[cfg(windows)]
+    #[test]
+    fn pipe_busy_error_classifies_as_busy_not_down() {
+        let busy = std::io::Error::from_raw_os_error(ERROR_PIPE_BUSY);
+        assert!(
+            pipe_open_error_is_busy(&busy),
+            "ERROR_PIPE_BUSY (231) must classify as busy (daemon present)"
+        );
+    }
+
+    /// FIX 3B (Windows): a genuine unreachable error (file-not-found:
+    /// the pipe does not exist) is NOT busy -- the daemon is absent and
+    /// the probe correctly reports it down.
+    #[cfg(windows)]
+    #[test]
+    fn pipe_file_not_found_is_not_busy() {
+        // ERROR_FILE_NOT_FOUND (2): pipe does not exist at all.
+        let not_found = std::io::Error::from_raw_os_error(2);
+        assert!(
+            !pipe_open_error_is_busy(&not_found),
+            "a missing pipe (daemon absent) must NOT classify as busy"
+        );
+        // An error with no OS code is also not busy.
+        let no_code = std::io::Error::other("synthetic, no os code");
+        assert!(
+            !pipe_open_error_is_busy(&no_code),
+            "an error with no OS code must NOT classify as busy"
         );
     }
 }
