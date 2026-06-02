@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.41](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.40...v0.1.41) (2026-06-02)
+
+
+### Bug Fixes
+
+* release Rust crate changes ([28b0d51](https://github.com/special-place-ai-heaven/terminal-commander/commit/28b0d510752a84370b3b5958ed79b7590f682781))
+* round-1 trust/security hardening from external code review ([#77](https://github.com/special-place-ai-heaven/terminal-commander/issues/77)) ([f4e891d](https://github.com/special-place-ai-heaven/terminal-commander/commit/f4e891dc743ce8600c7312546a0c1def420a45a7))
+
 ## [0.1.40](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.39...v0.1.40) (2026-06-02)
 
 
