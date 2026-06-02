@@ -33,7 +33,7 @@ pub use activation::ActivationScope;
 pub use environment::EnvironmentSpec;
 pub use job::{DEFAULT_JOB_GRACE, JobConfig, JobExitInfo, JobManager, JobRecord, JobState};
 #[cfg(windows)]
-pub use platform::windows_silent;
+pub use platform::{sanitize_wslenv, windows_silent, wslenv_overlay_value};
 
 pub use bucket::{
     BucketConfig, BucketError, BucketManager, BucketReadRequest, BucketReadResponse, BucketState,

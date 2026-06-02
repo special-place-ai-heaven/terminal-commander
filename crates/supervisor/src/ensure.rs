@@ -23,9 +23,18 @@ use thiserror::Error;
 /// NOPASSWD sudoers is the sanctioned sudo path). Adding a key here is a
 /// deliberate, reviewed act -- never "forward everything".
 ///
-/// - `WSLENV`: tells WSL which Windows env vars to project into the
-///   Linux side; needed for the WSL cleanup bridge to see operator vars.
 /// - `TC_WSL_DISTRO`: operator's chosen WSL distro override.
+///
+/// SECURITY (WSLENV is NOT here): `WSLENV` names which Windows vars
+/// `wsl.exe` projects into the Linux process it launches. The daemon this
+/// supervisor spawns later runs `wsl.exe ... bash -lc` (see
+/// `daemon/src/environment/wsl.rs::wsl_username`), so forwarding the
+/// operator's AMBIENT `WSLENV` here would let `WSLENV=SOME_SECRET/u` ride the
+/// daemon into WSL and leak `SOME_SECRET`. Instead, [`build_forward_env_with`]
+/// REBUILDS `WSLENV` to the TC-only allowlist (`TC_SESSION/u` when present,
+/// else dropped) — never the ambient value. This mirrors the JS
+/// `ensureSessionInWslEnv` and the Rust
+/// `terminal_commander_core::wslenv_overlay_value` rule.
 ///
 /// NOTE (F1): `TC_SESSION` is deliberately absent — but NOT because this
 /// allowlist withholds it. The daemon spawn uses `std::process::Command`, which
@@ -38,11 +47,28 @@ use thiserror::Error;
 /// daemon binds the given socket and never re-resolves. Adding `TC_SESSION` to
 /// the overlay would be pointless (it is already inherited) and would muddy that
 /// invariant — do not add it here.
-pub const FORWARDED_ENV_ALLOWLIST: &[&str] = &["WSLENV", "TC_WSL_DISTRO"];
+pub const FORWARDED_ENV_ALLOWLIST: &[&str] = &["TC_WSL_DISTRO"];
+
+/// Compute the TC-only `WSLENV` value to forward onto the daemon, derived
+/// from `TC_SESSION` — NEVER the operator's ambient `WSLENV`.
+///
+/// Mirror of `terminal_commander_core::wslenv_overlay_value` and the JS
+/// `ensureSessionInWslEnv`. Kept as a local 2-liner so the lean supervisor
+/// crate need not take a dependency on `core` for one pure rule:
+///
+/// - `TC_SESSION` present & non-empty -> `Some("TC_SESSION/u")`.
+/// - otherwise -> `None` (do NOT forward `WSLENV` at all).
+fn forwarded_wslenv_value(env: &impl crate::paths::EnvSource) -> Option<String> {
+    match env.get("TC_SESSION") {
+        Some(token) if !token.is_empty() => Some("TC_SESSION/u".to_owned()),
+        _ => None,
+    }
+}
 
 /// Build the map of allowlisted host env vars currently set, read fresh
 /// from the process environment at call time. Only keys in
-/// [`FORWARDED_ENV_ALLOWLIST`] are ever included.
+/// [`FORWARDED_ENV_ALLOWLIST`] are ever included, plus a REBUILT (never
+/// ambient) `WSLENV` when `TC_SESSION` is set.
 #[must_use]
 pub fn build_forward_env() -> BTreeMap<String, String> {
     build_forward_env_with(&crate::paths::ProcessEnv)
@@ -52,10 +78,19 @@ pub fn build_forward_env() -> BTreeMap<String, String> {
 /// allowlist filtering without mutating the process-global env table.
 #[must_use]
 pub fn build_forward_env_with(env: &impl crate::paths::EnvSource) -> BTreeMap<String, String> {
-    FORWARDED_ENV_ALLOWLIST
+    let mut out: BTreeMap<String, String> = FORWARDED_ENV_ALLOWLIST
         .iter()
         .filter_map(|k| env.get(k).map(|v| ((*k).to_owned(), v)))
-        .collect()
+        .collect();
+    // SECURITY: rebuild WSLENV to the TC-only allowlist instead of forwarding
+    // the operator's ambient value. The spawned daemon later runs
+    // `wsl.exe ... bash -lc` (daemon wsl_username), and wsl.exe projects every
+    // WSLENV-named var into that Linux process — so an ambient
+    // WSLENV=SOME_SECRET/u forwarded here would leak SOME_SECRET into WSL.
+    if let Some(wslenv) = forwarded_wslenv_value(env) {
+        out.insert("WSLENV".to_owned(), wslenv);
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -536,29 +571,79 @@ mod tests {
                 "allowlist must be operational-only; '{k}' looks secret"
             );
         }
-        assert!(FORWARDED_ENV_ALLOWLIST.contains(&"WSLENV"));
+        // WSLENV is deliberately NOT in the verbatim-forward allowlist: it is
+        // REBUILT from TC_SESSION in build_forward_env_with, never copied from
+        // the ambient value. See the type-level SECURITY note.
+        assert!(
+            !FORWARDED_ENV_ALLOWLIST.contains(&"WSLENV"),
+            "WSLENV must NOT be verbatim-forwarded; it is rebuilt from TC_SESSION"
+        );
+        assert!(FORWARDED_ENV_ALLOWLIST.contains(&"TC_WSL_DISTRO"));
+    }
+
+    /// In-memory [`EnvSource`] for the forward-env tests. No process-global
+    /// mutation, so these run race-free under any `--test-threads`.
+    struct FakeEnv(std::collections::HashMap<String, String>);
+    impl crate::paths::EnvSource for FakeEnv {
+        fn get(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+    }
+    impl FakeEnv {
+        fn from(pairs: &[(&str, &str)]) -> Self {
+            Self(
+                pairs
+                    .iter()
+                    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                    .collect(),
+            )
+        }
     }
 
     #[test]
     fn build_forward_env_forwards_only_allowlisted_vars() {
-        // In-memory env: no process-global mutation, so this runs race-free
-        // alongside every other test regardless of --test-threads.
-        struct FakeEnv(std::collections::HashMap<String, String>);
-        impl crate::paths::EnvSource for FakeEnv {
-            fn get(&self, key: &str) -> Option<String> {
-                self.0.get(key).cloned()
-            }
-        }
         let secret = "TC_F6_TEST_SECRET_THING";
-        let mut map = std::collections::HashMap::new();
-        map.insert("WSLENV".to_owned(), "TC_F6/u".to_owned());
-        map.insert(secret.to_owned(), "nope".to_owned());
-
-        let env = build_forward_env_with(&FakeEnv(map));
-        assert_eq!(env.get("WSLENV").map(String::as_str), Some("TC_F6/u"));
+        let env = build_forward_env_with(&FakeEnv::from(&[
+            ("TC_WSL_DISTRO", "Ubuntu"),
+            (secret, "nope"),
+        ]));
+        assert_eq!(env.get("TC_WSL_DISTRO").map(String::as_str), Some("Ubuntu"));
         assert!(
             !env.contains_key(secret),
             "non-allowlisted var must not be forwarded"
+        );
+    }
+
+    #[test]
+    fn forwarded_wslenv_drops_ambient_and_rebuilds_from_session() {
+        // SECURITY regression: an ambient WSLENV naming a credential must NEVER
+        // survive into the forwarded env. With TC_SESSION present it is REBUILT
+        // to the TC-only allowlist (TC_SESSION/u); the ambient value is gone.
+        let env = build_forward_env_with(&FakeEnv::from(&[
+            ("WSLENV", "WSL_SUDO_CREDENTIAL/u:OTHER/p"),
+            ("TC_SESSION", "agent-1"),
+        ]));
+        assert_eq!(
+            env.get("WSLENV").map(String::as_str),
+            Some("TC_SESSION/u"),
+            "ambient WSLENV must be rebuilt to TC_SESSION/u, never passed through"
+        );
+        assert!(
+            !env.get("WSLENV").is_some_and(|v| v.contains("CREDENTIAL")),
+            "no ambient credential-named var may survive in forwarded WSLENV"
+        );
+    }
+
+    #[test]
+    fn forwarded_wslenv_dropped_when_no_session() {
+        // SECURITY regression: with no TC_SESSION, WSLENV must be DROPPED, not
+        // forwarded — even though the operator had a credential-laden ambient
+        // value set.
+        let env = build_forward_env_with(&FakeEnv::from(&[("WSLENV", "WSL_SUDO_CREDENTIAL/u")]));
+        assert!(
+            !env.contains_key("WSLENV"),
+            "no TC_SESSION => ambient WSLENV must be dropped entirely, got {:?}",
+            env.get("WSLENV")
         );
     }
 }

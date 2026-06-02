@@ -70,9 +70,17 @@ fn runner_socket_path(distro: &str) -> Result<PathBuf, RouteError> {
 #[cfg(windows)]
 fn wsl_username(distro: &str) -> Result<String, RouteError> {
     use std::process::Command;
-    use terminal_commander_core::windows_silent;
+    use terminal_commander_core::{sanitize_wslenv, windows_silent};
     let mut cmd = Command::new("wsl.exe");
     windows_silent(&mut cmd).args(["-d", distro, "--", "bash", "-lc", "whoami"]);
+    // SECURITY: `wsl.exe ... bash -lc` launches a Linux process, and wsl.exe
+    // forwards every Windows var NAMED in WSLENV into it. Without this, the
+    // child inherits the daemon's ambient WSLENV (e.g. WSL_SUDO_CREDENTIAL/u)
+    // and leaks operator secrets across the boundary. Rebuild WSLENV to the
+    // TC-only allowlist (mirrors JS `ensureSessionInWslEnv`); the child sees
+    // the daemon's own TC_SESSION, so resolve it from the parent env here.
+    let tc_session = std::env::var("TC_SESSION").ok();
+    sanitize_wslenv(&mut cmd, tc_session.as_deref());
     let out = cmd
         .output()
         .map_err(|e| RouteError::Bootstrap(format!("wsl whoami: {e}")))?;

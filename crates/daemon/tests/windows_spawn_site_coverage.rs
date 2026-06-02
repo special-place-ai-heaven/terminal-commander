@@ -26,6 +26,28 @@ fn in_scope_spawn_sites_use_windows_silent() {
     }
 }
 
+/// SECURITY gate (mirror of JS `wsl-static-guards`): every in-scope site that
+/// launches a Linux process via `wsl.exe ... bash -lc` must REBUILD `WSLENV`
+/// (via `sanitize_wslenv`) so an ambient `WSLENV=SOME_SECRET/u` cannot leak
+/// across the Windows->WSL boundary. The host-side `wsl -l -q` discovery call
+/// launches no Linux process and is exempt.
+#[test]
+fn wsl_linux_spawn_sites_rebuild_wslenv() {
+    let path = "src/environment/wsl.rs";
+    let source =
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+            .unwrap_or_else(|e| panic!("read {path}: {e}"));
+    assert!(
+        source.contains("bash") && source.contains("-lc"),
+        "{path} should still spawn a Linux process (test invariant moved if not)"
+    );
+    assert!(
+        source.contains("sanitize_wslenv"),
+        "{path} spawns `wsl.exe ... bash -lc`; it MUST call sanitize_wslenv to \
+         rebuild WSLENV (stop ambient credential leak across the WSL boundary)"
+    );
+}
+
 #[test]
 fn process_probe_uses_as_std_mut_for_flags() {
     let source = std::fs::read_to_string(
