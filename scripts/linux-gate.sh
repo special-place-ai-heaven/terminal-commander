@@ -20,7 +20,11 @@ require python3       "the TC47 load gate self-skips to a false pass without pyt
 # Toolchain fidelity: parse [toolchain].channel from rust-toolchain.toml and
 # require the active rustc to match it (so a distro 'cargo' on PATH cannot run a
 # different toolchain whose clippy diverges from CI).
-exp="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)"
+# tr -d '\r': when run via WSL against a Windows working tree (/mnt/...), the
+# checked-out rust-toolchain.toml may be CRLF, so the captured channel would
+# carry a trailing \r and never match the (LF) `rustc --version` output. On
+# CI/native-linux the file is LF and this is a no-op.
+exp="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r')"
 [ -n "$exp" ] || { echo "tc-gate: could not read channel from rust-toolchain.toml" >&2; exit 1; }
 rustc --version | grep -q "$exp" || { echo "tc-gate: rustc != pinned $exp (is rustup the active cargo?)" >&2; exit 1; }
 
