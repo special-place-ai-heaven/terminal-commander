@@ -114,6 +114,17 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
         CommandError::UnknownJob(id) => {
             IpcError::new(IpcErrorCode::UnknownJob, format!("unknown job: {id}"))
         }
+        // An inline rule that fails to compile is a CALLER-fixable error:
+        // the operator passed a bad regex / kind-keywords mismatch / empty
+        // id. Surface `RuleInvalid` (the same teaching code `registry_*`
+        // uses for rule validation) so the client can fix the rule, rather
+        // than the server-fault `Internal`. The bucket is allocated AFTER
+        // this compile in `start_combed`, so this path leaks nothing.
+        CommandError::Sifter(msg) => IpcError::new(
+            IpcErrorCode::RuleInvalid,
+            format!("inline rule compile failed: {msg}"),
+        ),
+        // Genuine server faults (bucket store failure, IO) stay Internal.
         other => IpcError::new(IpcErrorCode::Internal, other.to_string()),
     }
 }
@@ -401,5 +412,28 @@ mod tests {
         assert_eq!(resolved, expect);
 
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// FIX 1 (cross-platform): an inline-rule compile failure is a
+    /// CALLER-fixable error and must map to `RuleInvalid`, not the
+    /// server-fault `Internal`. The caller can fix their rule.
+    #[test]
+    fn sifter_rule_compile_failure_maps_to_rule_invalid() {
+        let err = map_command_error(CommandError::Sifter("bad regex".to_owned()));
+        assert_eq!(err.code, IpcErrorCode::RuleInvalid);
+        assert!(
+            err.message.contains("bad regex"),
+            "expected the underlying reason to be surfaced, got: {}",
+            err.message
+        );
+    }
+
+    /// FIX 1 (cross-platform): genuine server faults (IO) still map to
+    /// `Internal`. The RuleInvalid carve-out must not swallow real
+    /// server-side failures.
+    #[test]
+    fn io_error_still_maps_to_internal() {
+        let err = map_command_error(CommandError::Io(std::io::Error::other("disk gone")));
+        assert_eq!(err.code, IpcErrorCode::Internal);
     }
 }
