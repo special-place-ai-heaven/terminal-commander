@@ -1,7 +1,7 @@
 # Spec: Predicate-Routed Subscriptions + Real-Time-Active Bridge
 
 - Date: 2026-06-02
-- Status: design approved (direction); REVISED round 1 (18 blockers) → round 2 (7 fix clusters: tokio enroll idiom, off-by-one clamp, fairness cap, shutdown contract, MCP pull timeout, boot_id, runtime_state vecs) → round 3 (dropped-delta off-by-one). Focused correctness re-verify: 6/7 airtight, 1 residual fixed. IpcErrorCode amendment APPROVED (2026-06-02). Pending user sign-off → writing-plans.
+- Status: design approved (direction); REVISED round 1 (18 blockers) → round 2 (7 fix clusters) → round 3 (dropped-delta off-by-one) → round 4 (fresh-eyes adversarial doc review: C1 cross-consumer offset hazard, M2 dead drop_bucket path, M3 cancelled/starting liveness, M4 phase honesty, M5 alternatives). IpcErrorCode amendment APPROVED (2026-06-02). Pending final verify + user sign-off → writing-plans.
 - Scope: Terminal Commander Rust workspace (daemon + core + ipc + cli + mcp), plus a documented harness-loop pattern
 - Author: special-place-administrator (via Claude)
 
@@ -37,10 +37,12 @@ over-claim again.
 - **Public bucket accessors**: `events_since` (bucket.rs:565), `state` (:619),
   `summary` (:611), `drop_bucket` (:410), `list_bucket_ids` (:629),
   `has_bucket` (:416), `create_bucket` (:388). `BucketError::NotFound` (:244).
-- **Per-event routing fields**: `source.probe_id` / `source.job_id`
-  (core/src/source.rs) + `bucket_id`, enabling `sources:{buckets|jobs|probes}`
-  filtering; `severity_min`/`kind` already honored by `events_since` via
-  `BucketReadRequest`.
+- **Routing identity (per-BUCKET)**: `EventSource{probe_id, job_id, source_type,
+  stream}` (core/src/source.rs:56-64) + `bucket_id`, enabling
+  `sources:{buckets|jobs|probes}` filtering. **Filter fields (per-EVENT)**:
+  `severity` / `kind` live on `SignalEvent` (NOT on `EventSource`) and are already
+  honored by `events_since` via `BucketReadRequest`. Wire per-event filters against
+  `SignalEvent`, per-bucket routing against `EventSource` / the side-table.
 - **CLI is a daemon IPC client** (`crates/cli/src/ipc.rs`); `DaemonClient`
   (`crates/ipc/src/client.rs`) with an **overridable** per-call timeout —
   `with_timeout(Duration)` EXISTS (client.rs:48-53); the 5s is a default, not
@@ -81,9 +83,13 @@ over-claim again.
    liveness is NOT available today: command bindings LINGER in the `live` map after
    exit (the waiter never `remove`s them — verified zero matches), so presence ≠
    running; file-watch/pty have no exit-code concept (removal is `stop()`-driven).
-   Derive: command → `running|exited{code}|failed{code,signal}|cancelled` from
-   `JobState`+`JobExitInfo`; file-watch → `running` while present, else `stopped`
-   (no exit code); pty → present + job-ledger exit if wired. `dropped{count}` from
+   The single authoritative liveness union is `starting | running | exited{code} |
+   failed{code,signal} | cancelled | stopped | dropped{count}`. Exact `JobState →
+   liveness` mapping (job.rs:57-63): `Starting → starting`, `Running → running`,
+   `Exited → exited{code}`, `Failed → failed{code,signal}`, `Cancelled → cancelled`
+   (cancel sets signal `"CANCELLED"`, job.rs:190-198 — MUST NOT fold into `failed`).
+   file-watch → `running` while present, else `stopped` (no exit code); pty →
+   present + job-ledger exit if wired, else `stopped`. `dropped{count}` from
    `BucketState.dropped_count`.
 4. **Persistent/streaming `DaemonClient` mode** (Phase 2) — only `call`
    (connect-per-call) exists. The §5 stream bridge needs either a reconnect-per-pull
@@ -135,14 +141,19 @@ over-claim again.
 
 - No external message broker; no new network surface.
 - No persistence of subscriptions across daemon restart. On restart, registry +
-  buckets + offsets reset TOGETHER (consistent, not partial). `subscription_open`
-  returns a daemon `boot_id` so a looping agent detects a restart; a pull against an
-  unknown/expired `sub_id` returns the typed `UnknownSubscription` error, NEVER
-  empty+liveness (so "registry lost" is never mistaken for "no events").
+  buckets + offsets reset TOGETHER (consistent, not partial). The AUTHORITATIVE
+  restart signal for a pull loop is `UnknownSubscription`: a pull against an
+  unknown/expired `sub_id` returns that typed error, NEVER empty+liveness (so
+  "registry lost" is never mistaken for "no events") → the loop re-opens. `boot_id`
+  (returned by `subscription_open`) is the secondary signal for the OPEN/re-open flow
+  (compare across opens to confirm a restart). Two mechanisms, distinct roles: pull
+  loop relies on `UnknownSubscription`, open flow on `boot_id`.
 - No true server→model push (impossible over MCP — see Real-Time-Active). We make
   TC the ideal SOURCE for a harness loop, not a pusher into a dormant model.
 - No separate queueing/admission layer beyond the existing per-probe policy caps
-  (dedup falls out of the subscription hash; concurrency is the existing caps).
+  (concurrency is the existing caps). Predicate-hash dedup is internal (routing
+  EVALUATION only); cross-consumer offset-sharing dedup is a DEFERRED opt-in, not
+  default — see §1 `sub_id`.
 
 ## Decision
 
@@ -150,6 +161,25 @@ Add **predicate-routed Subscriptions** over the existing event log, an in-memory
 **SubscriptionRegistry**, an instantly-woken multiplexed **pull** with an explicit
 lossless discipline, a **CLI stream bridge** for harness loops, and an **optional
 MCP notification nudge**. Reframe "heartbeat" as liveness-on-empty.
+
+### Alternatives considered (why the registry edifice is justified)
+The load-bearing justification is **auto-join + multiplex**, NOT "cursor juggling is
+annoying" — be honest about the break-even:
+- (a) **Status quo: N×`bucket_wait`, agent tracks N cursors.** Already works for
+  `completion-watch` (N≈1 — `bucket_wait` has the exact enroll-recheck discipline,
+  bucket.rs:513-529, zero new daemon code). FAILS the headline case: you cannot
+  `bucket_wait` a bucket that does not exist yet, so "monitor all errors" (which must
+  cover FUTURE probes) is impossible. This is the real gap.
+- (b) **Server-side multiplex + CLIENT-held offsets** (agent passes its cursors per
+  pull, like `bucket_wait` today). Gets auto-join + one call, and — notably — dodges
+  the shared-offset hazard entirely (no server consumer-state). REJECTED for the
+  default because it re-imposes N-cursor juggling on the agent (the ergonomic problem
+  Goal 1 exists to remove) and bloats every pull request with the full offset map.
+- (c) **CHOSEN: server-side multiplex + server-held offsets keyed by an OPAQUE
+  per-open `sub_id`.** Auto-join + one opaque handle + server tracks cursors. The
+  opaque (not predicate-hash) key is what makes this safe — it gives (b)'s
+  consumer-isolation while keeping (c)'s ergonomics. The cost is the in-memory
+  registry, which is also the ledger the user asked for.
 
 ## Portability (any harness, any OS) — the load-bearing property
 
@@ -173,8 +203,13 @@ Code, Codex, Cursor, Agent SDK, ...) and every OS, because:
 Everything in "Real-Time-Active" BEYOND "agent loops `subscription_pull`" — the CLI
 `subscription-stream`, `Monitor`/Stop-hook wakes, MCP `notifications/message` — is an
 **OPTIONAL, additive, per-harness ACCELERATOR**. None is required for correctness;
-the core behaves identically everywhere without them. **Phase 1 (the universal core)
-is the whole solution; Phases 2-3 are sugar.**
+the core behaves identically everywhere without them. **Phase 1 is the
+correctness-complete core and fully serves the COMPLETION-WATCH use case ("tell me
+when X completes/activates", low-rate, N≈1). The HIGH-RATE case ("monitor all
+errors") is correct under Phase 1 but only ERGONOMIC with the Phase 2 stream bridge —
+looping `subscription_pull` through the MCP facade pays a model turn per cycle, so
+high event rates are laggy (long timeout) or token-heavy (short timeout). Phases 2-3
+are ergonomic accelerators, not correctness.**
 
 ---
 
@@ -182,10 +217,21 @@ is the whole solution; Phases 2-3 are sugar.**
 
 ### 1. Subscription model (daemon, `crates/daemon`)
 
-A `Subscription` = `{ sub_id, predicate, offsets: Map<BucketId, seq>, created_at,
-last_pull_at, rr_start: usize }` (`rr_start` = round-robin rotation cursor, §3).
-- `sub_id` = a stable content hash of the normalized predicate (so identical
-  predicates DEDUP to one subscription — the user's "hashing").
+A `Subscription` = `{ sub_id, predicate, predicate_hash, offsets: Map<BucketId, seq>,
+created_at, last_pull_at, rr_start: usize }` (`rr_start` = round-robin rotation
+cursor, §3).
+- `sub_id` = an **OPAQUE per-open handle** (random/uuid). Each `subscription_open`
+  mints a FRESH `sub_id` with its OWN independent offset map — so two callers opening
+  the SAME predicate get DISTINCT `sub_id`s and DISTINCT cursors, and caller A's pull
+  NEVER advances caller B's offsets. (Offsets are server-advanced per-`sub_id`
+  mutable state; sharing them across consumers silently reintroduces the exact
+  "consumed elsewhere" silence the trust thesis forbids.)
+- `predicate_hash` = the stable content hash of the normalized predicate (the user's
+  "hashing"). It is used ONLY to share the routing-index EVALUATION (compute "which
+  buckets match this predicate" once and reuse across subs with the same predicate),
+  NEVER to share offsets. Surfaced on responses so an agent can RECOGNIZE an
+  equivalent predicate, without coupling cursors. (True offset-sharing dedup =
+  consumer-group semantics = an explicit opt-in, DEFERRED to Phase 3, never default.)
 - **Predicate grammar** (all fields optional; AND semantics; a match = an event
   whose source bucket is in-scope AND the event satisfies the field filters):
   - `severity_min` (trace..critical) — **per-EVENT** filter (events_since honors it).
@@ -200,19 +246,27 @@ last_pull_at, rr_start: usize }` (`rr_start` = round-robin rotation cursor, §3)
   REBUILD: `list_bucket_ids()` intersected with the predicate evaluated over the
   side-table. `sources: all` (and Phase-3 `tag`) auto-include new matching buckets
   because the rebuild re-reads the table; `sources:{buckets:[...]}` is a fixed set.
-  A cheap dirty-flag bumped at bucket create/drop MAY short-circuit the rebuild
-  (optimization, not correctness).
-- **Join-offset semantics (lossless for auto-join)**: when a new bucket enters a
-  subscription's scope, its offset initializes to the bucket's **head** (`seq=0` /
-  creation), NOT its current tail. The side-table entry is written at `bucket_create`
-  AND bumps a dirty-flag that forces the routing rebuild on the next pull, so a
-  `sources: all` subscription picks up the new probe. Losslessness holds AS LONG AS
-  the rebuild observes the bucket before its ring FIFO-evicts the first events; a
-  probe that floods + evicts a whole ring BETWEEN two pulls falls back to the
-  standard lagged/dropped path (§ Leave/eviction) — never silent. (A late
-  `subscription_open` over a pre-existing bucket starts at that bucket's current tail
-  at open time; only AUTO-JOINED future buckets start at head, and they have no
-  backlog yet, so no full-ring replay.)
+  Subs with the same `predicate_hash` share the EVALUATION result (compute the
+  matching set once per hash per dirty-epoch), so dedup saves CPU without coupling
+  offsets. A dirty-flag bumped at bucket create short-circuits the rebuild when
+  unchanged — this is LOAD-BEARING, not optional: buckets are immortal in TC (no
+  production `drop_bucket` call site — bucket.rs `drop_bucket` is test-only;
+  `list_bucket_ids()` grows monotonically), so without the dirty-flag a `sources:all`
+  pull would scan all-ever-created buckets every call. Pair it with a daemon-wide
+  live-bucket ceiling (see Open decisions).
+- **Join-offset semantics (lossless for auto-join)**: a bucket auto-JOINED after
+  birth (born after `subscription_open`, matched on the next dirty-flag rebuild)
+  initializes its offset to `0` — the pre-first-append cursor; the first real event
+  seq is 1 (bucket.rs:444) — so there is no backlog and no full-ring replay. The
+  side-table entry is written at `bucket_create` AND bumps the dirty-flag, so a
+  `sources: all` subscription picks the new probe up next pull. Losslessness holds AS
+  LONG AS the rebuild observes the bucket before its ring FIFO-evicts its first
+  events; if a newborn probe floods + evicts a whole ring BETWEEN two pulls, the
+  bucket's `head_seq` is already > 0 when first observed, so init falls back to the
+  standard clamp (`head_seq.saturating_sub(1)`) + `lagged` path (§ Leave/eviction) —
+  never silent, never a false "no backlog." A late `subscription_open` over a
+  PRE-EXISTING bucket starts at that bucket's current tail at open time (from-now);
+  it never replays the ring.
 - **Leave / eviction reconciliation (per pull)**: if `stored_offset <
   bucket.head_seq` (events FIFO-evicted under us), clamp offset to
   `head_seq.saturating_sub(1)` — NOT `head_seq` — because `events_since` reads
@@ -221,18 +275,25 @@ last_pull_at, rr_start: usize }` (`rr_start` = round-robin rotation cursor, §3)
   survivor. Surface `lagged` + dropped delta = `head_seq.saturating_sub(1) -
   stored_offset` — NOT `head_seq - stored_offset` — because the survivor AT
   `head_seq` IS delivered, so only `stored_offset < seq < head_seq` are truly lost
-  (never silent). If a fixed-source bucket is `drop_bucket`'d, emit a final
-  `exited/gone` liveness entry and remove it from the offsets map.
+  (never silent). A source is "gone" via LIVENESS, NOT via bucket teardown: buckets
+  are immortal (no production `drop_bucket`; it is test-only), so a terminal source's
+  bucket LINGERS and keeps serving its final tail events. "Gone" = command `JobState`
+  terminal (`Exited/Failed/Cancelled`) or file-watch/pty absent from the runtime list
+  (file_watch.rs:346, pty_command.rs:411). On observing terminal, emit the final
+  liveness entry (`exited/failed/cancelled/stopped`); the bucket's offset stays in the
+  map until `subscription_close` so any unread tail is still delivered.
 - **Routing scan is bounded**: a hard cap of max buckets-per-subscription
   (default 200) with a `truncated` flag; the `list_bucket_ids()` ∩ side-table scan
   per pull is O(live buckets), acceptable under the cap.
 
 ### 2. SubscriptionRegistry (daemon, in-memory, ephemeral)
 Holds all open subscriptions for the daemon session. Bounded (a max-subscriptions
-cap; opening beyond it is `SubscriptionLimitExceeded`, MUST-ADD #5). Cleaned up on
-`subscription_close` and when its last fixed source exits (configurable; predicate
-subs stay open for late-joiners). This IS the in-memory ledger the user asked for.
-Reset wholesale on daemon restart (see Non-goals).
+cap; opening beyond it is `SubscriptionLimitExceeded`, MUST-ADD #5). Cleanup is
+registry-level and LIVENESS-keyed (not bucket-keyed — buckets never drop): a
+fixed-source sub auto-closes when all its sources are terminal AND their tails are
+drained (configurable); predicate subs stay open for late-joiners. This IS the
+in-memory ledger the user asked for. Reset wholesale on daemon restart (see
+Non-goals).
 
 ### 3. Multiplexed pull (the in-protocol realtime read) — LOSSLESS DISCIPLINE
 
@@ -272,9 +333,9 @@ NOT when created or pinned; "create + pin then read" still drops a wake. Algorit
    honors the hard cap AND prevents a flooding bucket from starving a quiet bucket's
    single high-sev event within one pull. (Proportional-to-lag deferred to Phase 3.)
 7. **On timeout (or `N == 0`)**: return `events: []` + `liveness[]` (per in-scope
-   source: `running | exited{code} | failed{code,signal} | stopped | dropped{count}`,
-   per-kind per MUST-ADD #3) + a global `lagged` flag if any bucket dropped. No
-   `heartbeat` field.
+   source, the single authoritative union: `starting | running | exited{code} |
+   failed{code,signal} | cancelled | stopped | dropped{count}`, per-kind mapping per
+   MUST-ADD #3) + a global `lagged` flag if any bucket dropped. No `heartbeat` field.
 8. **Bounded**: `max` (default 50, hard cap), per-event byte cap, `truncated` flag;
    the `liveness[]` array is ALSO bounded (shares the §6 limit+truncated shape); the
    COMBINED response (events + liveness) is asserted under `MAX_FRAME_BYTES`
@@ -382,6 +443,7 @@ TC's stream. Documented patterns (also captured in CONTRIBUTING/AGENTS):
 - No raw output; events are structured signals only.
 
 ## Testing / acceptance
+(Phase gates: AC1-AC8, AC10-AC13 are PHASE 1; AC9 is PHASE 2. Dual-OS spans both.)
 - AC1: `subscription_open` with `{severity_min: high, sources: all}` then start two
   noisy commands → `subscription_pull` returns high-sev events from BOTH, tagged by
   source, bounded, first try.
@@ -402,7 +464,8 @@ TC's stream. Documented patterns (also captured in CONTRIBUTING/AGENTS):
   empty+liveness with no division.
 - AC5 (liveness, no heartbeat): idle pull returns `events:[]` + per-source liveness
   within `timeout_ms`; command exited reports `exited{code}`/`failed{code,signal}`
-  derived from `JobState` (NOT presence in the live map); file-watch reports
+  derived from `JobState` (NOT presence in the live map); a CANCELLED command reports
+  `cancelled`, NEVER `failed` (job.rs Cancelled state); file-watch reports
   `running|stopped` (no exit code); a dropped/lagged bucket sets
   `lagged`/`dropped_count`. No `heartbeat` field in the subscription response.
 - AC6 (shutdown, Phase 1 timeout-below-ceiling): `timeout_ms` is capped below
@@ -414,10 +477,13 @@ TC's stream. Documented patterns (also captured in CONTRIBUTING/AGENTS):
 - AC7 (restart honesty): pull against an unknown/expired `sub_id` returns
   `UnknownSubscription`, never empty+liveness; `subscription_open` returns a
   `boot_id` that changes across restart.
-- AC8: identical predicates → same `sub_id` (hash dedup); registry cap enforced via
-  `SubscriptionLimitExceeded`.
-- AC9 (stream): `subscription-stream` emits NDJSON, one line per event, flushed per
-  event; exits non-zero on `UnknownSubscription`; a `Monitor` over it wakes one turn
+- AC8 (consumer isolation): two `subscription_open` calls with identical predicates
+  get DISTINCT `sub_id`s and INDEPENDENT offsets — caller A's pull never advances
+  caller B's cursor (no cross-consumer silence); both report the same
+  `predicate_hash`; registry cap enforced via `SubscriptionLimitExceeded`.
+- AC9 (stream — PHASE 2 gate, not Phase 1): `subscription-stream` emits NDJSON, one
+  line per event, flushed per event; exits non-zero on `UnknownSubscription`; a
+  `Monitor` over it wakes one turn
   per line (verified by driving it).
 - AC10 (privilege + bounds): MCP crate stays free of spawn/fs/socket (the existing
   grep guards still pass); all new tools bounded; the two new IpcErrorCode variants
