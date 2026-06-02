@@ -141,11 +141,19 @@ fn minimal_tool_args(tool: &str) -> serde_json::Value {
         "bucket_summary" => serde_json::json!({ "bucket_id": "bkt_x" }),
         "event_context" => serde_json::json!({ "bucket_id": "bkt_x", "event_id": "evt_x" }),
         "registry_search" => serde_json::json!({ "query": "x" }),
-        "registry_get" | "registry_activate" => serde_json::json!({ "rule_id": "rule_x" }),
+        "registry_get" => serde_json::json!({ "rule_id": "rule_x" }),
+        // scope is REQUIRED on activate/deactivate (TC42d); supply an explicit
+        // global scope so deserialization succeeds and the daemon-unavailable
+        // guard is the code path under test (not a missing-field schema error).
+        "registry_activate" => {
+            serde_json::json!({ "rule_id": "rule_x", "scope": { "kind": "global" } })
+        }
         "registry_import_pack" => serde_json::json!({ "pack": "cargo" }),
         "registry_upsert" => serde_json::json!({ "definition_json": "{}" }),
         "registry_test" => serde_json::json!({ "rule_id": "rule_x", "samples": [] }),
-        "registry_deactivate" => serde_json::json!({ "rule_id": "rule_x", "version": 1 }),
+        "registry_deactivate" => {
+            serde_json::json!({ "rule_id": "rule_x", "version": 1, "scope": { "kind": "global" } })
+        }
         "file_read_window" | "file_watch_start" => {
             serde_json::json!({ "path": "/tmp/tc-unavail" })
         }

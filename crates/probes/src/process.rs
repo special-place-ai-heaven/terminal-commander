@@ -866,13 +866,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn env_empty_inherits_parent_path() {
-        // Brace-free PATH-presence check: `case "$PATH" in ?*) ...` matches
-        // only a non-empty PATH. We avoid the `${PATH:+...}` form because
-        // clippy::literal_string_with_formatting_args (rust 1.95) mistakes the
-        // `${...}` for a Rust format placeholder and denies it under -D warnings.
+        // Probe the child's ACTUAL environment via `printenv PATH`, not the
+        // shell `$PATH` variable. A POSIX `sh` repopulates `$PATH` with a
+        // compiled-in default when launched without PATH, so `$PATH` cannot
+        // distinguish "env supplied PATH" from "shell invented a default" --
+        // it is non-empty either way. `printenv PATH` reads the real process
+        // environment and exits non-zero when PATH is absent. The form is
+        // brace-free so it dodges clippy::literal_string_with_formatting_args
+        // (rust 1.95), which mistakes `${...}` for a Rust format placeholder.
         let n = run_env_probe(
             vec![],
-            r#"case "$PATH" in ?*) echo MARK:HASPATH ;; esac"#,
+            r"if printenv PATH > /dev/null 2>&1; then echo MARK:HASPATH; fi",
             "HASPATH",
         );
         assert!(
@@ -905,9 +909,16 @@ mod tests {
             std::ffi::OsString::from("TCENV"),
             std::ffi::OsString::from("tcvalue"),
         )];
+        // `printenv PATH` reads the child's ACTUAL environment. With env_clear
+        // the supplied env contains only TCENV, so PATH is genuinely absent and
+        // `printenv` exits non-zero -> no MARK:HASPATH -> 0 events. We must NOT
+        // probe the shell `$PATH` variable here: a POSIX `sh` repopulates it
+        // with a compiled-in default when launched without PATH, which would
+        // mask the env_clear and make this test always see PATH (the false
+        // positive that surfaced when the detector used `case "$PATH"`).
         let n = run_env_probe(
             env,
-            r#"case "$PATH" in ?*) echo MARK:HASPATH ;; esac"#,
+            r"if printenv PATH > /dev/null 2>&1; then echo MARK:HASPATH; fi",
             "HASPATH",
         );
         assert_eq!(
