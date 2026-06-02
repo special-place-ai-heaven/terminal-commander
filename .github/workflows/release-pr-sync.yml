@@ -31,8 +31,9 @@ jobs:
           # GitHub deliberately does NOT re-trigger workflows on pushes made
           # with the built-in GITHUB_TOKEN (loop-prevention), so a sync push
           # under GITHUB_TOKEN never fires `pull_request: synchronize` and the
-          # required npm-binary-build checks (pre-build-gates + 5 build-* +
-          # npm-pack) never report on the new head — the armed auto-merge then
+          # required npm-binary-build checks (pre-build-gates (linux-x64) +
+          # pre-build-gates (windows-x64) + 5 build-* + npm-pack) never report
+          # on the new head — the armed auto-merge then
           # waits forever for a human admin-merge. A PAT-authenticated push DOES
           # trigger `synchronize`, so the required checks run on the synced head
           # and the queued --auto merge fires with no human step.

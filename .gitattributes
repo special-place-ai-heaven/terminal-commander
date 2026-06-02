@@ -1,0 +1,6 @@
+# Default: normalize text to LF in the repo; let git decide eol on checkout.
+* text=auto
+# Shell scripts MUST be LF or they fail under bash/WSL (\r treated as part of args).
+*.sh text eol=lf
+# PowerShell scripts are fine as LF too; keep them consistent.
+*.ps1 text eol=lf
