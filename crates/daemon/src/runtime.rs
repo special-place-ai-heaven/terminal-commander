@@ -308,8 +308,22 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     // F1 idle self-reap: see the Unix branch for rationale. ttl=0 disables.
     spawn_idle_reaper(&state);
 
-    wait_for_shutdown_signal_windows().await?;
-    tracing::info!("shutdown signal received, draining...");
+    // Two shutdown sources, mirroring the Unix arm: an OS signal
+    // (Ctrl-C) or an internal `Shutdown` IPC request that flipped the
+    // state trigger via `trigger_shutdown`. Without the
+    // `shutdown_notified()` branch the daemon would ACK a `Shutdown`
+    // IPC request (ShutdownAck) but never actually exit on Windows --
+    // a false success. Whichever fires first wins; the other branch is
+    // dropped.
+    tokio::select! {
+        r = wait_for_shutdown_signal_windows() => {
+            r?;
+            tracing::info!("OS shutdown signal (Ctrl-C) received, draining...");
+        }
+        () = state.shutdown_notified() => {
+            tracing::info!("internal shutdown (Shutdown IPC), draining...");
+        }
+    }
     handle.shutdown().await;
     shutdown_store(state.as_ref());
     terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
