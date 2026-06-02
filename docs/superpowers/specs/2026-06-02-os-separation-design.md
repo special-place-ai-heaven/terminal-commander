@@ -1,7 +1,7 @@
 # Spec: Clear Separation of OS-Related Parts
 
 - Date: 2026-06-02
-- Status: revised x2 after two agent review rounds (4-lens doc-review, then adversarial panel); pending re-review
+- Status: APPROVED by adversarial agent panel (re-review: all 4 lenses approve-with-changes; prior criticals confirmed fixed; the flagged spec-text corrections have been applied). Ready for implementation planning (Phase 1).
 - Scope: Terminal Commander Rust workspace
 - Author: special-place-administrator (via Claude)
 
@@ -113,12 +113,16 @@ scripts; both OS gates scripted AND the windows gate made required; convention n
 ### Component 1: `scripts/linux-gate.sh`
 
 `bash` (shebang `#!/usr/bin/env bash`, `set -euo pipefail`). Runs the FULL
-`pre-build-gates` step list in CI order. Skeleton (the MCP guards are reproduced
-EXACTLY from the workflow, including `|| true` and the `if`-condition greps —
-these are load-bearing under `set -euo pipefail`; a no-match `grep` exits 1, so
-the guards MUST keep their `|| true` / `if` structure or they false-RED, and guard
-1's two-stage capture+post-filter MUST NOT be simplified to a plain grep or it
-false-GREENs by failing to distinguish code from doc matches):
+`pre-build-gates` step list in CI order. Skeleton — the MCP guards reproduce the
+workflow's guard LOGIC/BEHAVIOR, not its echo text: guard 1 = a `grep ... || true`
+captured into a var + a SECOND code-vs-doc post-filter that fails only on
+code-shaped matches; guard 2 = a bare `if grep ...; then exit 1`. The
+`|| true` / `if`-condition structure is load-bearing under `set -euo pipefail`
+(a no-match `grep` exits 1, so dropping `|| true` / the `if` false-REDs), and
+guard 1's two-stage capture+post-filter MUST NOT be collapsed to a plain grep or
+it false-GREENs by failing to distinguish code from doc matches. Because CI now
+INVOKES this script, the script's own messages REPLACE the old inline workflow
+strings — match the behavior, not the literal echo text:
 
 ```bash
 #!/usr/bin/env bash
@@ -131,7 +135,7 @@ require() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1 ($2)"; exit 1
 require cargo "install rustup + the pinned toolchain"
 require node  "verify-optional-dependencies.js needs node"
 require cargo-nextest "cargo install cargo-nextest"
-require python3 "the TC47 load gate (load_noise_backpressure) SKIPS = false-pass without python3"
+require python3 "the TC47 load gate (load_noise_backpressure) SELF-SKIPS to a false-pass without python3 — this precheck reduces that, but AC2 (assert executed count) is the real guarantee; align this with the test's own /usr/bin|/usr/local/bin|/bin/python3 probe"
 # Toolchain fidelity: parse [toolchain].channel from rust-toolchain.toml and
 # require the active rustc to match it AND be rustup-managed (so a distro cargo
 # on PATH cannot run a different toolchain whose clippy diverges from CI).
@@ -142,10 +146,18 @@ node scripts/release/verify-optional-dependencies.js   # no npm deps -> safe aft
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace
-# Load gate MUST actually run (not skip): python3 precheck above guarantees it.
+# Load gate: the python3 precheck above REDUCES a false-skip, but it is NOT the
+# guarantee — the load test does its OWN python3 detection and each #[test]
+# early-returns with eprintln "skipping: python3 not on PATH" (a returning test
+# = PASS). The real guarantee is AC2: assert a non-zero executed count / fail on
+# "skipping: python3" in the captured output. Keep this precheck ALIGNED with the
+# test's own detection (it probes /usr/bin/python3, /usr/local/bin/python3,
+# /bin/python3 — not just `command -v python3`).
 cargo test -p terminal-commanderd --test load_noise_backpressure -- --nocapture
-# MCP guard 1 (capture + post-filter) and guard 2 (bare if-grep) -- byte-for-byte
-# from npm-binary-build.yml; do NOT simplify.
+# MCP guard 1 (capture + post-filter) and guard 2 (bare if-grep) reproduce the
+# workflow guard BEHAVIOR, not its echo text; the messages below are the script's
+# own (they replace the old inline workflow strings). Do NOT simplify the
+# `|| true` / `if` structure or collapse guard 1's two stages.
 out=$(grep -RE "Command::new|Command::spawn|TcpListener|UdpSocket" crates/mcp/src || true)
 echo "$out"
 if echo "$out" | grep -E "^crates/mcp/src/[^:]+:[ \t]*(let|use|fn|pub|impl|let mut)" >/dev/null; then
@@ -188,7 +200,11 @@ block replaces the current bundled block). Preserve the job **name:**
 
 ### Component 3: `scripts/linux-gate.ps1` (Windows -> WSL wrapper)
 
-- Resolve the repo root with `wsl.exe wslpath -a` (handles spaces / `/mnt`),
+- Resolve the repo root with `wsl.exe wslpath -a` (handles spaces / `/mnt`). If
+  `wslpath` fails or returns empty (e.g. a UNC path, a network/virtual drive, or a
+  drive not mounted under `/mnt` in WSL), the wrapper MUST error loud with specific
+  remediation and exit non-zero — never fall through to an unresolved path.
+  Otherwise
   invoke `wsl.exe -e bash -lc "cd '<wslpath>' && bash ./scripts/linux-gate.sh"`,
   forward the exit code.
 - **Run against the ACTUAL working tree being pushed** (the `/mnt/e` checkout) by
@@ -205,25 +221,40 @@ block replaces the current bundled block). Preserve the job **name:**
 
 ### Component 4: Convention (and CORRECT doc reconciliation)
 
-Add an identical "OS-specific code" section to `AGENTS.md` and `CONTRIBUTING.md`
-(sync rule: update both in the same commit): when a change touches
-`cfg(unix)`/`cfg(windows)`/`target_os` code or any test, run the gates before
-pushing — `pwsh scripts/linux-gate.ps1` + `pwsh scripts/windows-gate.ps1` on
-Windows, `bash scripts/linux-gate.sh` on linux/mac. Pointer: current OS seams live
-in `crates/core/src/platform.rs` + the hotspots above; Phase 2 consolidates them.
+Add the authoritative "OS-specific code" convention to `CONTRIBUTING.md`: when a
+change touches `cfg(unix)`/`cfg(windows)`/`target_os` code or any test, run the
+gates before pushing — `pwsh scripts/linux-gate.ps1` + `pwsh scripts/windows-gate.ps1`
+on Windows, `bash scripts/linux-gate.sh` on linux/mac. Pointer: current OS seams
+live in `crates/core/src/platform.rs` + the hotspots above; Phase 2 consolidates
+them. `AGENTS.md` is a small "Cursor Cloud specific instructions" file that defers
+routine commands to README/CONTRIBUTING/TESTING — do NOT duplicate the convention
+there; add a ONE-LINE pointer in `AGENTS.md` to the CONTRIBUTING OS-specific-code
+section (and update both in the same commit when the pointer changes).
 
-Reconcile EXISTING drift (grounded — the prior draft mis-attributed this):
-- CONTRIBUTING's "seven-step CI sequence" (`cargo deny`/`cargo hack`/`cargo machete`)
-  is **NOT a CI gate**: those commands appear in NO workflow. They live in
-  `docs/research/tooling-baseline.md` (Status: RECOMMENDED) and are referenced by
-  CONTRIBUTING, which already attributes them to tooling-baseline.md. Leave them
-  labelled aspirational; do NOT claim they are "the release gate."
-- CONTRIBUTING's local-commands block (`cargo fmt` / clippy WITHOUT `--all-features`
-  / nextest `--no-fail-fast`) diverges from the real gate — repoint it at
-  `scripts/linux-gate.sh` so there is one authoritative list.
-- CONTRIBUTING section 3 states "Rust 1.92.0" while the active pin is 1.95.0
-  (`rust-toolchain.toml`). Annotate 1.92.0 as the MSRV floor (gated by
-  `cargo hack --rust-version`) and 1.95.0 as the active developer/CI pin.
+Reconcile EXISTING drift (grounded — CONTRIBUTING currently MISLABELS this, and
+the labels must be CORRECTED, not preserved):
+- CONTRIBUTING **mislabels** the seven-step `cargo deny`/`cargo hack`/`cargo machete`
+  pipeline as "The canonical CI sequence" (CONTRIBUTING.md:112) and marks
+  `cargo-machete`/`cargo-hack` as "required (CI)" (CONTRIBUTING.md:83-84). Both
+  labels are FALSE: verified `grep -rn` over `.github/workflows/` finds ZERO
+  occurrences of `cargo-deny`/`cargo-hack`/`cargo-machete`/`rust-version` — no
+  workflow runs any of them. The reconciliation MUST CORRECT those labels to
+  "RECOMMENDED / not yet wired into CI (tracked in
+  `docs/research/tooling-baseline.md`)". Do NOT say CONTRIBUTING "already
+  attributes them correctly" — it does not.
+- The authoritative PR gate is `scripts/linux-gate.sh` (the real `pre-build-gates`),
+  NOT the seven-step block. CONTRIBUTING's local-commands / pre-commit guidance
+  (CONTRIBUTING.md:104, `cargo nextest run --workspace --profile default
+  --no-fail-fast`, no clippy `--all-features`) must be REPOINTED at
+  `scripts/linux-gate.sh` so there is one authoritative list. Note the seven-step
+  block's clippy uses `--all-features` (CONTRIBUTING.md:120) which the REAL gate
+  (`npm-binary-build.yml` pre-build-gates, line 79) does NOT — that seven-step
+  block is the aspirational tooling baseline, not the PR gate.
+- CONTRIBUTING.md:64 states "Rust 1.92.0 (MSRV floor set by rmcp 1.7.0)" while the
+  active pin is 1.95.0 (`rust-toolchain.toml`). Annotate 1.92.0 as the MSRV floor
+  that is DOCUMENTED but NOT currently CI-enforced (no workflow runs
+  `cargo-hack`/`--rust-version`), and 1.95.0 as the active developer/CI pin
+  (`rust-toolchain.toml` + the workflow `RUST_TOOLCHAIN` env).
 
 Note the existing sibling `scripts/dev/verify-baseline.sh` (a separate
 fixture/doctrine/secret-scan check, currently carrying a stale
@@ -236,11 +267,15 @@ line that `linux-gate.sh` is the CI-invoked correctness gate while
 
 Two workflow/config changes that make the design's guarantees real:
 - **Promote `pre-build-gates (windows-x64)` to a required check.** Add it to the
-  `main-protection` ruleset (17000085) required contexts AND add
-  `needs: pre-build-gates-windows` to `build-windows-x64` so a red windows gate
-  blocks the merge. Today it gates nothing — without this, the both-gates
-  rationale is half-broken. (Ruleset edit is out-of-repo GitHub config; call it
-  out as a named manual step with the `gh api` command.)
+  `main-protection` ruleset (17000085) required contexts AND change
+  `build-windows-x64`'s current `needs: pre-build-gates` to
+  `needs: [pre-build-gates, pre-build-gates-windows]` (ADD the windows gate; do NOT
+  drop the existing linux dep) so a red windows gate blocks the merge. Today it
+  gates nothing — without this, the both-gates rationale is half-broken. (Ruleset
+  edit is out-of-repo GitHub config; call it out as a named manual step with the
+  `gh api` command.) Also update the comment in `release-pr-sync.yml:34-35` that
+  enumerates the required set as "pre-build-gates + 5 build-* + npm-pack" — it omits
+  the windows gate and must be updated once the windows gate is required.
 - **Add the gate scripts to the workflow `paths:` filter.** `npm-binary-build.yml`
   only triggers on `Cargo.toml`, `Cargo.lock`, `crates/**`, `packages/**`,
   `scripts/release/**`, `scripts/smoke/**`, and the two workflow files — so a PR
@@ -248,12 +283,26 @@ Two workflow/config changes that make the design's guarantees real:
   on it. Add `scripts/linux-gate.sh`, `scripts/windows-gate.ps1`,
   `scripts/linux-gate.ps1` (or `scripts/*.sh` + `scripts/*.ps1`) to BOTH `paths:`
   blocks. Otherwise the single source of truth is editable without CI re-validating it.
+- **Enforce LF on the shell scripts via `.gitattributes`.** The repo has NO
+  `.gitattributes` today and the Windows checkout working tree is CRLF
+  (`core.autocrlf=true`; e.g. `scripts/dev/verify-baseline.sh` carries `^M`
+  terminators). A CRLF `linux-gate.sh` fails under WSL (`bash` chokes on the `\r`),
+  and `cargo fmt --check` can flag CRLF in tracked text. Phase 1 MUST add a
+  `.gitattributes` that forces LF for `scripts/*.sh` (and a sane default such as
+  `* text=auto eol=lf` for the repo generally), and the new gate scripts MUST be
+  committed with LF endings.
 
 ### Phase 1.5 (fast-follow)
 
-A narrow pre-push hook that runs the gate ONLY when the staged diff touches
-`cfg`/test files AND WSL is present — skipping docs-only pushes and WSL-less
-machines with a warning. Deferred so the scripts stabilize before auto-enforcement.
+A narrow pre-push hook that runs the gate ONLY when the pushed commit range
+touches `cfg`/test files AND WSL is present — skipping docs-only pushes and
+WSL-less machines with a warning. NOTE: a pre-push hook does NOT see a staged diff;
+git feeds it the push ref-range on stdin (lines of
+`<local-ref> <local-sha> <remote-ref> <remote-sha>`), so the hook computes the
+changed files across that commit range (e.g. `git diff --name-only
+<remote-sha>..<local-sha>`, handling the all-zeros remote-sha for a new branch) and
+greps those paths for `cfg`/test files. Deferred so the scripts stabilize before
+auto-enforcement.
 
 ### Phase 1 acceptance criteria
 
@@ -277,13 +326,19 @@ machines with a warning. Deferred so the scripts stabilize before auto-enforceme
   pass/fail semantics (step ordering may change). Verify on the PR's required-check
   contexts tab that both `pre-build-gates (linux-x64)` and
   `pre-build-gates (windows-x64)` are still listed/green after the refactor.
-- AC6: `AGENTS.md` + `CONTRIBUTING.md` carry the identical convention referencing
-  the scripts; CONTRIBUTING's local-commands block repoints at the script; the
-  toolchain 1.92.0-vs-1.95.0 drift is annotated; the deny/hack/machete sequence is
-  correctly labelled aspirational (tooling-baseline.md), not "the release gate."
+- AC6: `CONTRIBUTING.md` carries the authoritative OS-specific-code convention
+  referencing the scripts and `AGENTS.md` carries a ONE-LINE pointer to it (not a
+  duplicated section); CONTRIBUTING's local/pre-commit block repoints at
+  `scripts/linux-gate.sh`; the toolchain 1.92.0-vs-1.95.0 drift is annotated
+  (1.92.0 = MSRV floor, documented but NOT CI-enforced; 1.95.0 = active pin); the
+  deny/hack/machete seven-step block and the "required (CI)" tool labels are
+  CORRECTED to "RECOMMENDED / not wired into CI (tooling-baseline.md)", not left as
+  "the canonical CI sequence."
 - AC7: `pre-build-gates (windows-x64)` is a required check (ruleset) and
-  `build-windows-x64` `needs: pre-build-gates-windows`; the gate scripts are in
-  both `paths:` blocks (a gate-script-only PR triggers the gate jobs).
+  `build-windows-x64` declares `needs: [pre-build-gates, pre-build-gates-windows]`
+  (both deps present, linux dep NOT dropped); the `release-pr-sync.yml:34-35`
+  required-set comment is updated to include the windows gate; the gate scripts are
+  in both `paths:` blocks (a gate-script-only PR triggers the gate jobs).
 - AC8: One toolchain authority — add a check (or doc) that the workflow
   `RUST_TOOLCHAIN` env equals `rust-toolchain.toml` `[toolchain].channel`.
 - AC9: No production `crates/**/src` code changed in Phase 1.
@@ -330,13 +385,21 @@ transport LAST:
   `rust-toolchain.toml`; the script asserts the active rustc matches the channel.
 - **Load gate is environment-sensitive** (timing/concurrency; WSL2/drvfs vs
   ubuntu-24.04). A WSL pass is best-effort; CI is authoritative for that step
-  (Goal 2). The `python3` precheck ensures it at least EXECUTES locally rather
-  than skipping to a false pass.
+  (Goal 2). The `python3` precheck REDUCES the false-skip but does NOT guarantee
+  execution — the load test does its OWN python3 detection and self-skips with a
+  PASSing returning `#[test]`. AC2 (assert non-zero executed count / fail on
+  "skipping: python3" in captured output) is the authoritative guarantee; keep the
+  precheck ALIGNED with the test's own python3 probe.
 - **Windows gate was advisory.** Component 5 makes it required so the both-gates
   guarantee holds; until the ruleset edit lands, a red windows gate does not block.
 - **drvfs slowness / tree divergence.** Default = same working tree (penalty
   mitigated by linux-fs target dir); a WSL-fs clone must be commit-synced or it is
   a false-green source.
+- **CRLF line endings on the shell gate.** No `.gitattributes` exists and the
+  Windows checkout is CRLF, so a committed `linux-gate.sh` would carry `\r` and
+  fail under WSL `bash` (and `cargo fmt --check` can flag CRLF). Mitigation: Phase 1
+  adds a `.gitattributes` forcing LF for `scripts/*.sh` (and a repo-wide
+  `text=auto eol=lf` default) and commits the gate scripts with LF.
 
 ## Evidence / verification for implementation
 
@@ -346,6 +409,7 @@ transport LAST:
   + executed-test counts + the WSL-absent path.
 - AC5/AC7: a green CI run on the Phase-1 PR; inspect the required-check contexts
   showing both `pre-build-gates (...)` names; confirm a script-only edit
-  re-triggers the jobs; confirm `build-windows-x64 needs: pre-build-gates-windows`.
+  re-triggers the jobs; confirm `build-windows-x64` declares
+  `needs: [pre-build-gates, pre-build-gates-windows]` (both deps).
 - AC6/AC8: convention present in both docs; CONTRIBUTING drift fixed; toolchain
   pins reconciled.
