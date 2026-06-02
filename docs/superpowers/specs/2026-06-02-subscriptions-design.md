@@ -1,7 +1,7 @@
 # Spec: Predicate-Routed Subscriptions + Real-Time-Active Bridge
 
 - Date: 2026-06-02
-- Status: design approved (direction); REVISED after adversarial review round 1 (18 blockers / 37 findings across correctness+product+feasibility+scope) — pending re-review then user sign-off
+- Status: design approved (direction); REVISED round 1 (18 blockers) then round 2 (7 fix clusters: tokio enroll idiom, off-by-one clamp, fairness cap, shutdown contract, MCP pull timeout, boot_id, runtime_state vecs) — pending focused correctness re-verify + user sign-off. One open governance decision: the IpcErrorCode amendment.
 - Scope: Terminal Commander Rust workspace (daemon + core + ipc + cli + mcp), plus a documented harness-loop pattern
 - Author: special-place-administrator (via Claude)
 
@@ -88,15 +88,29 @@ over-claim again.
 4. **Persistent/streaming `DaemonClient` mode** (Phase 2) — only `call`
    (connect-per-call) exists. The §5 stream bridge needs either a reconnect-per-pull
    loop or a connection-reusing client; server needs no change for
-   request/response pipelining, but does for any push (§5).
+   request/response pipelining, but does for any push (§5). On Windows the named
+   pipe is single-pending-instance with a short `ERROR_PIPE_BUSY` retry budget
+   (pipe_client.rs:18-26; pipe_server.rs:232-250), so a long-lived persistent
+   connection contends with other clients — PREFER reconnect-per-pull on Windows.
 5. **Two new `IpcErrorCode` variants — REQUIRES A GOAL-FILE AMENDMENT** (the set is
    closed by governance, protocol.rs:359-360, and the MCP match is exhaustive):
    `UnknownSubscription` (→ `invalid_params`/-32602, matching the
    `UnknownJob/UnknownWatch/UnknownProbe` pattern) and `SubscriptionLimitExceeded`
    (→ `invalid_params`/-32602; caller can free a slot). No existing variant fits
    (`UnknownJob`/`OversizedRequest` are semantic mismatches). Both force an edit to
-   the exhaustive `into_mcp_error` match. **This is a decision for the user** —
-   flagged in Open Decisions.
+   the exhaustive `into_mcp_error` match (tools.rs:1389-1416). **This is a decision
+   for the user** — flagged in Open Decisions.
+6. **`boot_id` on `DaemonState` + `SubscriptionOpenResponse`** — net-new wire state.
+   DaemonState holds only a `std::time::Instant` (state.rs:54-114), not a stable
+   serializable ID, and no `boot_id` is on any IpcResponse today. Mint a `Uuid` (or
+   `OffsetDateTime`) at `bootstrap` and surface it on `subscription_open` so a
+   looping agent detects a restart (registry/offsets/buckets all reset together).
+7. **MCP `subscription_pull` per-call timeout override** — the MCP daemon client is
+   built with the 5s default (tools.rs:3124 / main.rs:190). The pull path MUST issue
+   its daemon call with `with_timeout(> pull server cap)` (EXISTS, client.rs:50) so
+   an idle ~8s pull returns SUCCESS empty+liveness, NOT a -32603 client timeout (a
+   trust-thesis hole). Timeout hierarchy: `pull_server_cap (~8s) < DRAIN_CEILING
+   (10s) < MCP pull client timeout (~12s)`.
 
 ## Goals
 
@@ -190,17 +204,26 @@ last_pull_at, rr_start: usize }` (`rr_start` = round-robin rotation cursor, §3)
   (optimization, not correctness).
 - **Join-offset semantics (lossless for auto-join)**: when a new bucket enters a
   subscription's scope, its offset initializes to the bucket's **head** (`seq=0` /
-  creation), NOT its current tail. Because the side-table entry is written at
-  `bucket_create` (before the probe's first append), a `sources: all` subscription
-  sees the new probe's FIRST event with no gap. (A late `subscription_open` over a
-  pre-existing bucket still starts at that bucket's current tail at open time — only
-  AUTO-JOINED future buckets start at head, and they have no backlog yet, so no
-  full-ring replay.)
+  creation), NOT its current tail. The side-table entry is written at `bucket_create`
+  AND bumps a dirty-flag that forces the routing rebuild on the next pull, so a
+  `sources: all` subscription picks up the new probe. Losslessness holds AS LONG AS
+  the rebuild observes the bucket before its ring FIFO-evicts the first events; a
+  probe that floods + evicts a whole ring BETWEEN two pulls falls back to the
+  standard lagged/dropped path (§ Leave/eviction) — never silent. (A late
+  `subscription_open` over a pre-existing bucket starts at that bucket's current tail
+  at open time; only AUTO-JOINED future buckets start at head, and they have no
+  backlog yet, so no full-ring replay.)
 - **Leave / eviction reconciliation (per pull)**: if `stored_offset <
-  bucket.head_seq` (events FIFO-evicted under us), clamp offset to `head_seq` and
-  surface `lagged` + the dropped delta (correct log-semantics loss, never silent).
-  If a fixed-source bucket is `drop_bucket`'d, emit a final `exited/gone` liveness
-  entry and remove it from the subscription's offsets map.
+  bucket.head_seq` (events FIFO-evicted under us), clamp offset to
+  `head_seq.saturating_sub(1)` — NOT `head_seq` — because `events_since` reads
+  strictly `e.seq > cursor` (bucket.rs:582) and `head_seq` is the oldest SURVIVING
+  event's own seq (bucket.rs:339-340); clamping to `head_seq` would skip that
+  survivor. Surface `lagged` + dropped delta = `head_seq - stored_offset` (correct
+  log-semantics loss, never silent). If a fixed-source bucket is `drop_bucket`'d,
+  emit a final `exited/gone` liveness entry and remove it from the offsets map.
+- **Routing scan is bounded**: a hard cap of max buckets-per-subscription
+  (default 200) with a `truncated` flag; the `list_bucket_ids()` ∩ side-table scan
+  per pull is O(live buckets), acceptable under the cap.
 
 ### 2. SubscriptionRegistry (daemon, in-memory, ephemeral)
 Holds all open subscriptions for the daemon session. Bounded (a max-subscriptions
@@ -211,48 +234,68 @@ Reset wholesale on daemon restart (see Non-goals).
 
 ### 3. Multiplexed pull (the in-protocol realtime read) — LOSSLESS DISCIPLINE
 
-`subscription_pull(sub_id, max?, timeout_ms?)`. Correctness rests on
-**register-before-drain**, because the bucket signals with `notify_waiters()` (no
-stored permit; only ALREADY-registered waiters wake). The cursor/seq is the SOURCE
-OF TRUTH (lossless); Notify is a latency hint only. Algorithm:
+`subscription_pull(sub_id, max?, timeout_ms?)`. Correctness rests on an explicit
+**enroll-before-recheck** ordering, because the bucket signals with
+`notify_waiters()` (no stored permit; only ENROLLED waiters wake — bucket.rs:459,
+484). The cursor/seq is the SOURCE OF TRUTH (lossless); Notify is a latency hint
+only. THE INVARIANT: within a pull pass, no `events_since` read for a bucket may
+precede that bucket's waiter ENROLLMENT. In tokio (1.52) a `Notified` future
+enrolls into the waiter list only when FIRST POLLED or via `Notified::enable()` —
+NOT when created or pinned; "create + pin then read" still drops a wake. Algorithm:
 
 1. Resolve the subscription. If `sub_id` is unknown/expired → return
    `UnknownSubscription` (typed error, never empty).
 2. Snapshot the in-scope bucket set (routing rebuild, §1) and clone each bucket's
-   `Arc<Notify>` via `bucket_notify` (MUST-ADD #1).
-3. **Register** every in-scope bucket's `notify.notified()` future FIRST and pin
-   them (arm the waiters BEFORE reading).
-4. **Fast-path recheck**: scan ALL in-scope offsets via `events_since`. If any
-   bucket has events past its offset, drain (fair, step 6) and return immediately —
-   the armed futures are dropped harmlessly.
-5. **Slow path**: `select!` over the armed `FuturesUnordered` of `notified()`s,
-   raced against `timeout_ms` AND the connection's shutdown `watch::Receiver`
-   (server-side; see shutdown note). On ANY wake, **re-scan ALL in-scope offsets**
-   (not just the woken bucket) and drain. A SPURIOUS wake (Notify fired but no
-   in-scope event passes the predicate) RE-ENTERS the loop (re-arm + re-scan) — it
-   does NOT return empty. A bucket born during the `select!` is picked up on the
-   next iteration's rebuild (latency-bounded by the next wake/timeout, never lost —
-   its events sit in the ring with offset=head).
-6. **Fairness (v1 = deterministic round-robin)**: drain at most `ceil(max / N)` per
-   in-scope bucket per pass, starting from `rr_start` and rotating it each pull, so
-   every in-scope bucket with pending events contributes before any bucket
-   contributes its second batch. A flooding bucket cannot starve a quiet bucket's
+   `Arc<Notify>` via `bucket_notify` (MUST-ADD #1). `N` = in-scope bucket count;
+   if `N == 0`, skip straight to step 7 (timeout/liveness — no `ceil(max/0)`).
+3. **Enroll**: for each in-scope bucket, create `notify.notified()`, pin it, and
+   call `Notified::enable()` (or poll-to-`Pending`) to ENROLL the waiter NOW —
+   before any read. Each loop iteration constructs FRESH `notified()` futures (they
+   are single-use); a prior iteration's future is never reused.
+4. **Fast-path recheck (after enroll)**: scan ALL in-scope offsets via
+   `events_since`. If any bucket has events past its offset, drain (fair, step 6)
+   and return immediately — the enrolled futures drop harmlessly.
+5. **Slow path**: `select!` over the enrolled `FuturesUnordered` raced against
+   `timeout_ms`. On ANY wake, **re-scan ALL in-scope offsets** (not just the woken
+   bucket) and drain. A SPURIOUS wake (Notify fired but no in-scope event passes the
+   predicate) RE-ENTERS the loop — and re-entry MUST re-enroll fresh waiters (step 3)
+   BEFORE the re-scan, so an append landing in the re-arm window is not lost. A
+   bucket born during the `select!` is picked up on the next iteration's rebuild
+   (latency-bounded by the next wake/timeout, never lost — its events sit in the
+   ring at offset=head).
+6. **Fairness (v1 = deterministic round-robin, capped at `max`)**: per-bucket share
+   = `max(1, max / N)`; drain buckets starting from `rr_start`, STOPPING the moment
+   the running total reaches `max` (so `N > max` still returns ≤ `max` — buckets
+   past the cut-off get priority next pull via the rotated `rr_start`). This both
+   honors the hard cap AND prevents a flooding bucket from starving a quiet bucket's
    single high-sev event within one pull. (Proportional-to-lag deferred to Phase 3.)
-7. **On timeout**: return `events: []` + `liveness[]` (per in-scope source:
-   `running | exited{code} | failed{code,signal} | stopped | dropped{count}`,
+7. **On timeout (or `N == 0`)**: return `events: []` + `liveness[]` (per in-scope
+   source: `running | exited{code} | failed{code,signal} | stopped | dropped{count}`,
    per-kind per MUST-ADD #3) + a global `lagged` flag if any bucket dropped. No
    `heartbeat` field.
 8. **Bounded**: `max` (default 50, hard cap), per-event byte cap, `truncated` flag;
    the `liveness[]` array is ALSO bounded (shares the §6 limit+truncated shape); the
-   COMBINED response is asserted under `MAX_FRAME_BYTES` (256 KiB).
+   COMBINED response (events + liveness) is asserted under `MAX_FRAME_BYTES`
+   (256 KiB), independent of `N`.
 
-**Timeout reconciliation**: `timeout_ms` is hard-capped strictly below
-`DRAIN_CEILING` (cap ~8s ≤ 10s) so a blocked pull is DRAINED, not abort_all'd, on
-graceful shutdown; a pull racing the shutdown receiver returns a clean `events:[]`
-+ `next_state: draining` (`ShuttingDown`-class) instead of a torn connection. The
-loop-of-pulls reaches the existing 30s `MAX_BUCKET_WAIT_MS` watch duration by
-issuing successive ≤8s pulls. The default one-shot client timeout (5s) is raised
-for the pull/stream path via `with_timeout(> pull cap)` (EXISTS).
+**Timeout reconciliation (Phase 1: timeout-below-ceiling, no shutdown-race)**:
+`timeout_ms` is hard-capped strictly below `DRAIN_CEILING` (cap ~8s < 10s) so a
+blocked pull RETURNS its normal empty+liveness at its own timeout before the unix
+drain would abort it; the loop-of-pulls reaches the 30s `MAX_BUCKET_WAIT_MS` watch
+duration by issuing successive ≤8s pulls. The MCP pull path raises its client
+timeout via `with_timeout(> pull cap)` (MUST-ADD #7) so an idle pull is SUCCESS, not
+-32603. Phase 1 does NOT race the connection's shutdown receiver server-side:
+`dispatch(state, boot, req_env, peer)` (server.rs:406; pipe_server dispatch_envelope)
+is NOT given the shutdown `watch::Receiver`, and threading it touches the shared
+signature used by every method (large blast radius). On graceful shutdown the
+in-flight pull simply returns at its short timeout; on a hard kill the looping agent
+re-detects via a changed `boot_id`. (A future Phase-2 enhancement MAY thread the
+shutdown receiver to emit a SUCCESS `next_state: draining` field — never a
+`ShuttingDown`/-32603 error. Out of Phase 1.) **Windows**: `pipe_server`'s
+`handle_pipe_connection` checks shutdown only at loop-top (no `select!` race, no
+`JoinSet`/`DRAIN_CEILING` — pipe_server.rs:263-290), so an in-flight pull returns at
+its own ≤8s timeout and the loop then breaks; a hard kill mid-pull is best-effort
+abort + `boot_id` re-detect. This asymmetry is documented, not silently assumed.
 
 Offsets are server-advanced (log semantics, replayable in principle); a
 `subscription_seek(sub_id, bucket_id, seq)` for explicit re-read is DEFERRED to
@@ -260,7 +303,7 @@ Phase 3.
 
 ### 4. Subscription lifecycle tools (MCP facade → daemon IPC, 1:1)
 - `subscription_open(predicate) -> { sub_id, boot_id, created_at, matched_sources }`
-- `subscription_pull(sub_id, max?, timeout_ms?) -> { events[], liveness[], lagged, truncated, next_state }`
+- `subscription_pull(sub_id, max?, timeout_ms?) -> { events[], liveness[], lagged, truncated }` (Phase 1 has no `next_state`; a SUCCESS `next_state: draining` is a possible Phase-2 add — see §3 Timeout reconciliation)
 - `subscription_list() -> [{ sub_id, predicate, source_count, created_at, last_pull_at }]` (bounded — §6)
 - `subscription_close(sub_id) -> { closed: bool }`
 - (Deferred/optional, Phase 3) `subscription_add`/`remove` for fixed-set edits;
@@ -286,11 +329,14 @@ NOTE: true server-initiated PUSH is NOT supported (the server only writes in
 response to a read); the bridge is still client-driven pulls, just pipelined.
 
 ### 6. Bounded ledger surface (folds in the deferred round-2 item)
-`subscription_list`, `runtime_state`, `probe_list`, `registry_list_active` share
-one bounded shape: a `limit` (default + hard cap), a `next_cursor`/`offset` for
-pagination, and a `truncated` flag. (This closes the deferred "list/snapshot tools
-are unbounded" finding coherently with the new ledger.) The pull `liveness[]` array
-reuses this bounding.
+`subscription_list`, `probe_list`, `registry_list_active` (single-vec responses)
+share one bounded shape: a `limit` (default + hard cap), a `next_cursor`/`offset`
+for pagination, and a `truncated` flag. `runtime_state` is the exception — it
+carries THREE independent vecs in one response (`probes`, `buckets`, `active_rules`
+— protocol.rs:1292-1294), so each vec is bounded SEPARATELY with its own
+`limit`+`truncated` (a single cursor cannot page three lists). The pull `liveness[]`
+array reuses the single-vec bounding. (This closes the deferred "list/snapshot tools
+are unbounded" finding coherently with the new ledger.)
 
 ### 7. Optional MCP notification nudge (Phase 2, best-effort)
 On new events for an open subscription, the MCP server MAY emit
@@ -338,23 +384,31 @@ TC's stream. Documented patterns (also captured in CONTRIBUTING/AGENTS):
   noisy commands → `subscription_pull` returns high-sev events from BOTH, tagged by
   source, bounded, first try.
 - AC2 (auto-join + join-offset): a future-started command matching the predicate
-  auto-joins and its FIRST event is delivered to the pre-existing `sources: all`
-  subscription with NO gap and NO full-ring replay.
-- AC3 (lossless register-before-drain): append to bucket B in the gap during the
-  drain of bucket A within one pull → the SAME or next pull returns B's event (no
-  lost wakeup). A spurious Notify wake with no in-scope match re-enters the loop and
-  does not return a premature empty.
-- AC4 (fairness): one flooding bucket does not starve a quiet one — the quiet
-  bucket's event appears in the SAME pull as the flood, with the flood capped to its
-  round-robin share `ceil(max/N)`.
+  auto-joins; its events are delivered to the pre-existing `sources: all`
+  subscription with NO LOST events (completeness), within one wake/timeout cycle
+  (latency), and with NO full-ring replay.
+- AC3 (lossless enroll-before-recheck): with a bucket enrolled via
+  `Notified::enable()` BEFORE the fast-path read, an append landing in the gap
+  between the read and the await is delivered on the SAME pull (not lost to timeout)
+  — a test must drive this exact ordering. A spurious Notify wake with no in-scope
+  match re-enrolls fresh waiters, re-scans, and does NOT return a premature empty;
+  an append in the re-arm window of a spurious wake is delivered on the same pull.
+- AC4 (fairness + hard cap): one flooding bucket does not starve a quiet one — the
+  quiet bucket's event appears in the SAME pull as the flood, flood capped to its
+  share `max(1, max/N)`. With `N > max` (e.g. 100 buckets, max=50) a pull returns
+  ≤ `max` events and the response stays under `MAX_FRAME_BYTES`; `N == 0` returns
+  empty+liveness with no division.
 - AC5 (liveness, no heartbeat): idle pull returns `events:[]` + per-source liveness
   within `timeout_ms`; command exited reports `exited{code}`/`failed{code,signal}`
   derived from `JobState` (NOT presence in the live map); file-watch reports
   `running|stopped` (no exit code); a dropped/lagged bucket sets
   `lagged`/`dropped_count`. No `heartbeat` field in the subscription response.
-- AC6 (shutdown): a pull blocked at timeout during graceful shutdown returns a clean
-  `events:[]` + `next_state: draining` (not a torn/abort connection); `timeout_ms`
-  is capped below `DRAIN_CEILING`.
+- AC6 (shutdown, Phase 1 timeout-below-ceiling): `timeout_ms` is capped below
+  `DRAIN_CEILING`, so a pull in flight during graceful shutdown returns its normal
+  `events:[]`+liveness at its own timeout (no -32603, no torn connection on the
+  graceful path) — verified on unix; on Windows the in-flight pull returns at its
+  ≤8s timeout then the loop breaks, and a hard kill is best-effort-abort with
+  `boot_id` re-detect (documented asymmetry). No server-side shutdown-race in Phase 1.
 - AC7 (restart honesty): pull against an unknown/expired `sub_id` returns
   `UnknownSubscription`, never empty+liveness; `subscription_open` returns a
   `boot_id` that changes across restart.
@@ -366,12 +420,20 @@ TC's stream. Documented patterns (also captured in CONTRIBUTING/AGENTS):
 - AC10 (privilege + bounds): MCP crate stays free of spawn/fs/socket (the existing
   grep guards still pass); all new tools bounded; the two new IpcErrorCode variants
   are classified in the exhaustive `into_mcp_error` match.
-- AC11: `subscription_list`/`runtime_state`/`probe_list`/`registry_list_active`
-  bounded with `limit` + `truncated`; the pull `liveness[]` array bounded; combined
-  pull response asserted under `MAX_FRAME_BYTES`.
+- AC11: `subscription_list`/`probe_list`/`registry_list_active` bounded with `limit`
+  + `truncated`; `runtime_state`'s three vecs each bounded independently; the pull
+  `liveness[]` array bounded; combined pull response asserted under `MAX_FRAME_BYTES`.
+- AC12 (eviction off-by-one): after FIFO eviction past a subscription's offset, the
+  next pull clamps to `head_seq.saturating_sub(1)` and delivers the event AT the
+  post-eviction head EXACTLY ONCE, with `lagged` + dropped delta set (no skipped
+  survivor, no silent loss).
+- AC13 (MCP trust path): an idle `subscription_pull` over the MCP facade returns
+  SUCCESS `events:[]`+liveness within `timeout_ms`, NEVER a -32603 (the MCP client
+  uses `with_timeout(> pull cap)`).
 - Dual-OS: daemon logic cross-platform; verify via the linux gate (WSL) + windows
-  gate; CONFIRM the Windows `pipe_server` request loop + shutdown race match the
-  unix path; the CLI stream on both.
+  gate; the CLI stream on both. The Windows `pipe_server` shutdown behavior is
+  best-effort-abort (documented in §3), NOT drain-parity with unix — AC6 asserts the
+  timeout-below-ceiling behavior, not a graceful-drain signal.
 
 ## Open decisions for review / user sign-off
 - **IpcErrorCode amendment (REQUIRES USER APPROVAL)**: add `UnknownSubscription` +
@@ -381,21 +443,25 @@ TC's stream. Documented patterns (also captured in CONTRIBUTING/AGENTS):
   against.)
 - Tags (§1, Phase 3) — confirm deferral (`sources: all` + severity/kind covers
   "monitor all errors").
-- Stream bridge: reconnect-per-pull (a) vs persistent client (b) for Phase 2.
+- Stream bridge: reconnect-per-pull (a) vs persistent client (b) for Phase 2 —
+  Windows leans (a) (single-instance pipe + `ERROR_PIPE_BUSY`).
 - Subscription lifetime: predicate subs stay open for late-joiners; fixed-source
   subs auto-close when all sources exit — confirm.
-- Caps: max subscriptions, max buckets-per-subscription, pull `timeout_ms` hard cap
-  (~8s), `max` default (50).
+- Caps (proposed, confirm): max subscriptions; max buckets-per-subscription = 200
+  (+`truncated`); pull `timeout_ms` hard cap ~8s (< `DRAIN_CEILING` 10s); MCP pull
+  client timeout ~12s; `max` default 50.
 
 ## Phasing
 - **Phase 1 (universal core)**: `bucket_notify` accessor (MUST-ADD #1); bucket
   source side-table + 3 call-site writes (MUST-ADD #2); `ProbeListEntry` liveness +
   per-kind derivation (MUST-ADD #3); SubscriptionRegistry; predicate
-  (severity/kind/sources); multiplexed pull with register-before-drain + round-robin
-  fairness + timeout/shutdown reconciliation; the 2 IpcErrorCode variants
-  (MUST-ADD #5, pending approval); `subscription_open/pull/list/close`; bounded
-  ledger surface (§6); dual-OS tests incl. Windows pipe_server. (No tags, no seek,
-  no stream bridge.)
+  (severity/kind/sources); multiplexed pull with enroll-before-recheck (`enable()`)
+  + capped round-robin fairness + timeout-below-ceiling (no server-side
+  shutdown-race); the 2 IpcErrorCode variants (MUST-ADD #5, pending approval);
+  `boot_id` (MUST-ADD #6); MCP pull timeout override (MUST-ADD #7);
+  `subscription_open/pull/list/close`; bounded ledger surface (§6); dual-OS tests
+  (Windows shutdown = best-effort-abort, documented). (No tags, no seek, no stream
+  bridge.)
 - **Phase 2 (accelerators)**: CLI `subscription-stream` bridge (NET-NEW client mode,
   MUST-ADD #4) + the documented harness-loop patterns (Monitor/loop/Stop-hook,
   default OFF) + optional MCP notification (Peer<RoleServer> prereq).
