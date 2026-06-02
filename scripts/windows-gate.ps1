@@ -11,22 +11,29 @@ if (-not $exp) { Write-Error 'tc-gate: cannot read channel from rust-toolchain.t
 if (-not ((rustc --version) -match [regex]::Escape($exp))) { Write-Error "tc-gate: rustc != pinned $exp"; exit 1 }
 if (-not ((rustup target list --installed) -match 'x86_64-pc-windows-msvc')) { Write-Error 'tc-gate: msvc target missing'; exit 1 }
 
-function Invoke-Gate([string]$pkg, [string]$filter, [string[]]$extra) {
-  Write-Host "== $pkg $filter $extra =="
-  $out = & cargo test -p $pkg $filter -- --nocapture @extra 2>&1 | Tee-Object -Variable _ | Out-String
+# NOTE on the test selector. The CI command (npm-binary-build.yml) is
+#   cargo test -p <pkg> <name> -- --nocapture
+# where <name> is the TEST FILE/BINARY name (windows_no_console,
+# windows_spawn_site_coverage). But cargo's POSITIONAL argument is a test
+# *function-name* substring filter — and NONE of the actual #[test] fn names
+# contain those file-name strings, so the CI command matches 0 tests and passes
+# VACUOUSLY. That is the exact "looks green but never ran" false-pass this gate
+# exists to kill. To genuinely EXECUTE the regressions we select by binary with
+# `--test <binary>` (which runs every test in that integration target).
+function Invoke-Gate([string]$pkg, [string]$bin, [string[]]$extra) {
+  Write-Host "== $pkg --test $bin $extra =="
+  $out = & cargo test -p $pkg --test $bin -- --nocapture @extra 2>&1 | Tee-Object -Variable _ | Out-String
   Write-Host $out
-  if ($LASTEXITCODE -ne 0) { Write-Error "tc-gate: $pkg $filter FAILED"; exit 1 }
+  if ($LASTEXITCODE -ne 0) { Write-Error "tc-gate: $pkg --test $bin FAILED"; exit 1 }
   if ($out -notmatch '(\d+) passed' -or [int]($out | Select-String '(\d+) passed').Matches.Groups[1].Value -lt 1) {
-    Write-Error "tc-gate: $pkg $filter ran 0 tests — refusing false pass"; exit 1
+    Write-Error "tc-gate: $pkg --test $bin ran 0 tests — refusing false pass"; exit 1
   }
 }
 # crates/probes/tests/windows_no_console_spawn.rs marks all 3 regression tests
 # #[ignore] (their AttachConsole probe depends on the runner's console session),
-# with the documented run mode "CI-only via cargo test -- --ignored". Without
-# --include-ignored the filter matches 0 NON-ignored tests, which would trip the
-# >=1-passed assertion below as a false-green. --include-ignored runs both the
-# normal and ignored tests, so this genuinely EXECUTES the console regression.
-Invoke-Gate 'terminal-commander-probes' 'windows_no_console' @('--include-ignored')
+# documented run mode "CI-only via cargo test -- --ignored". --include-ignored
+# runs them so the console regression genuinely EXECUTES, not skips-to-green.
+Invoke-Gate 'terminal-commander-probes' 'windows_no_console_spawn' @('--include-ignored')
 # crates/daemon/tests/windows_spawn_site_coverage.rs tests are NOT ignored.
 Invoke-Gate 'terminal-commanderd' 'windows_spawn_site_coverage' @()
 Write-Host 'tc-gate: windows gate PASSED'
