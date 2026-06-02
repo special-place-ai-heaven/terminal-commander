@@ -9,7 +9,9 @@ if (-not $wsl) {
   Write-Warning 'WSL not found — cfg(unix) paths were NOT verified locally, only CI will check them.'
   exit 2   # non-zero: skipped != passed
 }
-$wslPath = (& wsl.exe wslpath -a "$repo") 2>$null
+# -e runs the binary directly: without it, wsl.exe mangles a backslash Windows
+# path and wslpath returns empty (consistent with the `wsl.exe -e bash` calls below).
+$wslPath = (& wsl.exe -e wslpath -a "$repo") 2>$null
 if (-not $wslPath) { Write-Error "tc-gate: wslpath failed for '$repo' (UNC/unmounted drive?) — cannot run the linux gate"; exit 1 }
 $wslPath = $wslPath.Trim()
 
