@@ -42,6 +42,10 @@ const {
   assertSafeDistroName,
   UNSAFE_DISTRO_NAME,
 } = require("./distro-name.js");
+const {
+  buildFilteredEnv,
+  ensureSessionInWslEnv,
+} = require("./filtered_env.js");
 const { spawn } = require("node:child_process");
 
 const DOCTOR_STATUSES = Object.freeze({
@@ -72,6 +76,13 @@ function defaultProbeExec({ wslPath, argv, timeoutMs }) {
       child = spawn(wslPath, argv, {
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
+        // The runtime probe path runs `wsl -d <distro> -- bash -lc ...`, which
+        // launches a Linux process. Without an explicit env the child inherits
+        // the full process.env, so an ambient WSLENV=SOME_SECRET/u would
+        // forward SOME_SECRET into WSL. Rebuild WSLENV to the TC-only allowlist
+        // after name-based filtering. (Harmless for the host-side `-l -v`
+        // discovery call, which launches no Linux process.)
+        env: ensureSessionInWslEnv(buildFilteredEnv(process.env)),
       });
     } catch (err) {
       resolve({

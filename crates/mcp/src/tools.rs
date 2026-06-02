@@ -395,20 +395,37 @@ impl TerminalCommanderMcpServer {
         }
     }
 
-    fn unavailable_startup_daemon_error(&self) -> Option<McpError> {
-        let status = self.daemon.status()?;
-        status
-            .is_unavailable()
-            .then(|| daemon_unavailable_error(&status.current()))
-    }
-
     /// Single daemon-availability guard shared by every daemon-backed tool.
     /// Returns the structured `daemon_unavailable` envelope error when the
-    /// supervisor reported the daemon as `Unavailable` at startup; otherwise
-    /// `Ok(())`. Call `self.ensure_daemon_available()?` at the top of each
-    /// handler before issuing IPC.
-    fn ensure_daemon_available(&self) -> Result<(), McpError> {
-        self.unavailable_startup_daemon_error().map_or(Ok(()), Err)
+    /// daemon is not reachable; otherwise `Ok(())`. Call
+    /// `self.ensure_daemon_available().await?` at the top of each handler
+    /// before issuing IPC.
+    ///
+    /// Self-heal (audit H1): the startup status is a one-shot sample, so a
+    /// daemon that was slow to bind would pin every tool to
+    /// `daemon_unavailable` for the whole process life. When the cached
+    /// status is `Unavailable`, this guard first attempts a single,
+    /// bounded, single-flight `Health` re-probe; if the daemon is now
+    /// live it clears the flag and returns `Ok(())` so the tool proceeds.
+    /// A genuinely-down daemon's probe fails and the envelope is returned
+    /// unchanged. The happy path (already available) is cheap: it never
+    /// probes.
+    async fn ensure_daemon_available(&self) -> Result<(), McpError> {
+        // Cheap happy path: no status handle, or already available.
+        let Some(status) = self.daemon.status() else {
+            return Ok(());
+        };
+        if !status.is_unavailable() {
+            return Ok(());
+        }
+
+        // Cached-unavailable: attempt a bounded, single-flight self-heal
+        // before surfacing the envelope.
+        if self.daemon.try_self_heal().await {
+            return Ok(());
+        }
+
+        Err(daemon_unavailable_error(&status.current()))
     }
 
     /// `system_discover` — adapter metadata + tool catalogue.
@@ -445,7 +462,7 @@ impl TerminalCommanderMcpServer {
     /// and a typed error otherwise.
     #[tool(description = "Daemon liveness ping. Returns uptime in seconds when reachable.")]
     async fn health(&self) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         match self.daemon.call(IpcRequest::Health).await {
             Ok(IpcResponse::Health { uptime_secs, .. }) => json_tool_result(&serde_json::json!({
                 "ok": true,
@@ -459,7 +476,7 @@ impl TerminalCommanderMcpServer {
     /// `policy_status` — active profile + per-call caps.
     #[tool(description = "Report the active policy profile and bounded per-call caps.")]
     async fn policy_status(&self) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         match self.daemon.call(IpcRequest::PolicyStatus).await {
             Ok(IpcResponse::PolicyStatus(PolicyStatusResponse {
                 profile,
@@ -482,7 +499,7 @@ impl TerminalCommanderMcpServer {
     /// `self_check` — re-run daemon self-check; bounded text report.
     #[tool(description = "Re-run the daemon self-check. Returns the bounded text report.")]
     async fn self_check(&self) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         match self.daemon.call(IpcRequest::SelfCheck).await {
             Ok(IpcResponse::SelfCheck(SelfCheckResponse { report, failures })) => {
                 json_tool_result(&serde_json::json!({
@@ -504,7 +521,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpCommandStartParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let ipc = params.into_ipc()?;
         match self.daemon.call(IpcRequest::CommandStartCombed(ipc)).await {
             Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
@@ -528,7 +545,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt}. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) and returns up to max_signals (default 50). Argv only; shell interpreters denied. Prefer plain shell for tiny one-off commands whose full verbatim output you want."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted}. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; poll command_status with the returned job_id for the final exit_code/signals — do not treat it as finished. Argv only; shell interpreters denied. Prefer plain shell for tiny one-off commands whose full verbatim output you want."
     )]
     async fn run_and_watch(
         &self,
@@ -536,7 +553,7 @@ impl TerminalCommanderMcpServer {
     ) -> Result<CallToolResult, McpError> {
         use terminal_commander_core::JobState;
 
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let (start_params, wait_ms, max_signals) = params.into_parts();
         let start_ipc = start_params.into_ipc()?;
 
@@ -625,6 +642,17 @@ impl TerminalCommanderMcpServer {
         // 3. Compose the response. The receipt is included only when the
         //    command finished with zero rule signals (no-silence rule):
         //    a quiet command yields a receipt, never an error.
+        //
+        // Completion markers (trust contract): the wait budget is bounded,
+        // so the loop can return while the job is still `Running`. The
+        // success-shaped payload (isError:false) is then ambiguous to a
+        // naive reader. `complete`/`wait_exhausted` make it unambiguous:
+        //   - `complete` is true iff the job reached a terminal state.
+        //   - `wait_exhausted` is true iff the loop returned non-terminal
+        //     (the wait budget was spent while the command was still
+        //     running). The caller MUST poll `command_status` for the
+        //     final exit_code/signals in that case.
+        let (complete, wait_exhausted) = run_and_watch_completion(final_state);
         let include_receipt = signals.is_empty();
         json_tool_result(&serde_json::json!({
             "job_id": job_id,
@@ -634,6 +662,8 @@ impl TerminalCommanderMcpServer {
             "signals": signals,
             "signal_count": signals.len(),
             "receipt": if include_receipt { receipt } else { None },
+            "complete": complete,
+            "wait_exhausted": wait_exhausted,
         }))
     }
 
@@ -645,7 +675,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpCommandStatusParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let job_id = parse_id::<terminal_commander_core::ids::JobIdKind>("job_id", &params.job_id)
             .map_err(invalid_params)?;
         let ipc = CommandStatusParams { job_id };
@@ -665,7 +695,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpCommandOutputTailParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let job_id = parse_id::<terminal_commander_core::ids::JobIdKind>("job_id", &params.job_id)
             .map_err(invalid_params)?;
         let ipc = CommandOutputTailParams {
@@ -691,7 +721,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpBucketEventsSinceParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let ipc = params.into_ipc().map_err(invalid_params)?;
         match self.daemon.call(IpcRequest::BucketEventsSince(ipc)).await {
             Ok(IpcResponse::BucketEventsSince(r)) => json_tool_result(&bucket_events_payload(&r)),
@@ -708,7 +738,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpBucketWaitParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let ipc = params.into_ipc().map_err(invalid_params)?;
         match self.daemon.call(IpcRequest::BucketWait(ipc)).await {
             Ok(IpcResponse::BucketWait(r)) => json_tool_result(&bucket_wait_payload(&r)),
@@ -725,7 +755,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpBucketSummaryParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let bucket_id =
             parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", &params.bucket_id)
                 .map_err(invalid_params)?;
@@ -745,7 +775,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpEventContextParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let ipc = params.into_ipc().map_err(invalid_params)?;
         match self.daemon.call(IpcRequest::EventContext(ipc)).await {
             Ok(IpcResponse::EventContext(r)) => json_tool_result(&event_context_payload(&r)),
@@ -762,7 +792,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistrySearchParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let ipc = RegistrySearchParams {
             query: params.query,
             limit: params.limit,
@@ -784,7 +814,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryGetParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let ipc = RegistryGetParams {
             rule_id: params.rule_id,
             version: params.version,
@@ -807,7 +837,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryUpsertParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let definition: RuleDefinition = serde_json::from_str(&params.definition_json)
             .map_err(|e| invalid_params(format!("definition_json: {e}")))?;
         let ipc = RegistryUpsertParams { definition };
@@ -831,7 +861,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryTestParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let mut samples: Vec<RegistryTestSample> = Vec::with_capacity(params.samples.len());
         for s in params.samples {
             let stream = match s.stream.as_deref() {
@@ -870,7 +900,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryActivateParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         // `scope` is schema-required (TB-5): rmcp rejects an omitted
         // scope before this handler runs, so it is always present here.
         // We still pass it as `Some(..)` because the wire IPC type keeps
@@ -908,7 +938,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryImportPackParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let scope = match params.scope {
             Some(s) => Some(s.into_ipc_scope()?),
             None => None,
@@ -943,7 +973,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpRegistryDeactivateParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         // `scope` is schema-required (TB-5): rmcp rejects an omitted
         // scope before this handler runs. The wire IPC type keeps
         // `scope: Option` for backward compatibility, so wrap in `Some`.
@@ -977,7 +1007,7 @@ impl TerminalCommanderMcpServer {
         description = "Snapshot of every currently-active rule. Returns id + version + severity + event_kind + tags."
     )]
     async fn registry_list_active(&self) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         match self.daemon.call(IpcRequest::RegistryListActive).await {
             Ok(IpcResponse::RegistryListActive(RegistryListActiveResponse { entries })) => {
                 json_tool_result(&serde_json::json!({ "entries": entries }))
@@ -995,7 +1025,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpFileReadWindowParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let ipc = FileReadWindowParams {
             path: std::path::PathBuf::from(params.path),
             start_line: params.start_line,
@@ -1029,7 +1059,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpFileSearchParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let ipc = FileSearchParams {
             path: std::path::PathBuf::from(params.path),
             query: params.query,
@@ -1062,7 +1092,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpFileWatchStartParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let (bucket_config, rules) =
             parse_bucket_and_rules(params.bucket_config_json, params.rules, params.rules_json)?;
         let ipc = FileWatchStartParams {
@@ -1096,7 +1126,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpFileWatchStopParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         use terminal_commander_core::ids::JobIdKind;
         let watch_id =
             parse_id::<JobIdKind>("watch_id", &params.watch_id).map_err(invalid_params)?;
@@ -1123,7 +1153,7 @@ impl TerminalCommanderMcpServer {
     /// `file_watch_list` — snapshot of live file watches.
     #[tool(description = "Snapshot of every currently-live file watch.")]
     async fn file_watch_list(&self) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         match self.daemon.call(IpcRequest::FileWatchList).await {
             Ok(IpcResponse::FileWatchList(FileWatchListResponse { entries })) => {
                 json_tool_result(&serde_json::json!({ "entries": entries }))
@@ -1141,7 +1171,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpPtyCommandStartParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         let env: Vec<(String, String)> = params.env.into_iter().map(|e| (e.key, e.value)).collect();
         let (bucket_config, rules) =
             parse_bucket_and_rules(params.bucket_config_json, params.rules, params.rules_json)?;
@@ -1180,7 +1210,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpPtyCommandWriteStdinParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         use terminal_commander_core::ids::JobIdKind;
         let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
         let ipc = PtyCommandWriteStdinParams {
@@ -1212,7 +1242,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpPtyCommandStopParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         use terminal_commander_core::ids::JobIdKind;
         let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
         let ipc = PtyCommandStopParams { job_id };
@@ -1242,7 +1272,7 @@ impl TerminalCommanderMcpServer {
     /// `pty_command_list` — snapshot of live PTY jobs.
     #[tool(description = "Snapshot of every currently-live PTY job.")]
     async fn pty_command_list(&self) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         match self.daemon.call(IpcRequest::PtyCommandList).await {
             Ok(IpcResponse::PtyCommandList(PtyCommandListResponse { entries })) => {
                 json_tool_result(&serde_json::json!({ "entries": entries }))
@@ -1257,7 +1287,7 @@ impl TerminalCommanderMcpServer {
         description = "Bounded aggregate runtime snapshot across all runtimes. Read-only; never returns raw stream content."
     )]
     async fn runtime_state(&self) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         match self.daemon.call(IpcRequest::RuntimeState).await {
             Ok(IpcResponse::RuntimeState(r)) => json_tool_result(&r),
             Ok(other) => Err(unexpected_variant(&other)),
@@ -1270,7 +1300,7 @@ impl TerminalCommanderMcpServer {
         description = "Flat list of every live probe across command / pty / file-watch runtimes."
     )]
     async fn probe_list(&self) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         match self.daemon.call(IpcRequest::ProbeList).await {
             Ok(IpcResponse::ProbeList(ProbeListResponse { probes })) => {
                 json_tool_result(&serde_json::json!({ "probes": probes }))
@@ -1288,7 +1318,7 @@ impl TerminalCommanderMcpServer {
         &self,
         Parameters(params): Parameters<McpProbeStatusParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available()?;
+        self.ensure_daemon_available().await?;
         use terminal_commander_core::ids::ProbeIdKind;
         let probe_id =
             parse_id::<ProbeIdKind>("probe_id", &params.probe_id).map_err(invalid_params)?;
@@ -1402,6 +1432,28 @@ fn unexpected_variant(_resp: &IpcResponse) -> McpError {
 #[must_use]
 pub fn format_ipc_error(e: &IpcError) -> String {
     format!("daemon ipc error [{:?}]: {}", e.code, e.message)
+}
+
+/// Completion markers for the `run_and_watch` response.
+///
+/// `run_and_watch` waits only up to a bounded budget, so the loop can
+/// return while the job is still non-terminal. Returns
+/// `(complete, wait_exhausted)`:
+/// - `complete` is true iff `state` is terminal (`Exited`, `Cancelled`,
+///   or `Failed`).
+/// - `wait_exhausted` is the negation: true when the bounded wait budget
+///   was spent while the job was still `Starting`/`Running`. A caller that
+///   sees `wait_exhausted` MUST poll `command_status` for the final
+///   exit_code/signals rather than treat the success-shaped payload as
+///   finished.
+#[must_use]
+const fn run_and_watch_completion(state: terminal_commander_core::JobState) -> (bool, bool) {
+    use terminal_commander_core::JobState;
+    let complete = matches!(
+        state,
+        JobState::Exited | JobState::Cancelled | JobState::Failed
+    );
+    (complete, !complete)
 }
 
 /// Build a structured `daemon_unavailable` MCP error envelope.
@@ -3111,6 +3163,38 @@ mod tests {
             .await
             .expect_err("self_check should fail");
         assert_daemon_unavailable_tool_error("self_check", &self_check);
+    }
+
+    // --- FIX A: run_and_watch completion markers ---
+
+    #[test]
+    fn run_and_watch_completion_marks_terminal_states_complete() {
+        use terminal_commander_core::JobState;
+        // A terminal job is complete and NOT wait-exhausted.
+        for state in [JobState::Exited, JobState::Cancelled, JobState::Failed] {
+            let (complete, wait_exhausted) = run_and_watch_completion(state);
+            assert!(complete, "{state:?} must be complete");
+            assert!(
+                !wait_exhausted,
+                "{state:?} is terminal, must not be wait_exhausted"
+            );
+        }
+    }
+
+    #[test]
+    fn run_and_watch_completion_marks_running_wait_exhausted() {
+        use terminal_commander_core::JobState;
+        // A still-running (or still-starting) job that returns because the
+        // wait budget was spent is NOT complete; it is wait_exhausted, so
+        // the caller knows to poll command_status for the real exit.
+        for state in [JobState::Running, JobState::Starting] {
+            let (complete, wait_exhausted) = run_and_watch_completion(state);
+            assert!(!complete, "{state:?} is non-terminal, must not be complete");
+            assert!(
+                wait_exhausted,
+                "{state:?} returned non-terminal -> wait_exhausted"
+            );
+        }
     }
 
     #[test]

@@ -4,7 +4,10 @@
 "use strict";
 
 const { spawn } = require("node:child_process");
-const { buildFilteredEnv } = require("../wsl/filtered_env.js");
+const {
+  buildFilteredEnv,
+  ensureSessionInWslEnv,
+} = require("../wsl/filtered_env.js");
 const { getInstallDaemonAutostartCmd } = require("./constants.js");
 const { shouldInstallDaemonAutostart } = require("../daemon/autostart.js");
 
@@ -19,7 +22,10 @@ const ENSURE_DAEMON_STATUSES = Object.freeze({
 function runWslBashLc({ distro, cmd, env, exec, wslPath, timeoutMs }) {
   return new Promise((resolve) => {
     const argv = ["-d", distro, "--", "bash", "-lc", cmd];
-    const filtered = buildFilteredEnv(env || process.env);
+    // Rebuild WSLENV to a TC-only allowlist after name-based filtering: this
+    // spawn launches a Linux process (`bash -lc`), so an ambient
+    // WSLENV=SOME_SECRET/u would otherwise forward SOME_SECRET into WSL.
+    const filtered = ensureSessionInWslEnv(buildFilteredEnv(env || process.env));
     let stdoutBuf = "";
     let stderrBuf = "";
     let child;

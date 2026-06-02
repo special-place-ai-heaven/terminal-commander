@@ -12,9 +12,9 @@ use tokio::sync::watch;
 
 use terminal_commander_supervisor::identity::PeerIdentity;
 
-use crate::ipc::framing::{read_request, write_response};
+use crate::ipc::framing::{ReadOutcome, read_request_classified, write_response};
 use crate::ipc::peer_windows::peer_identity_for;
-use crate::ipc::protocol::RequestEnvelope;
+use crate::ipc::protocol::{IpcResult, ResponseEnvelope};
 use crate::ipc::server::dispatch_envelope;
 use crate::state::DaemonState;
 
@@ -264,9 +264,25 @@ async fn handle_pipe_connection(
         if *shutdown.borrow() {
             break;
         }
-        let req: RequestEnvelope = match read_request(&mut server).await {
-            Ok(r) => r,
-            Err(_) => break,
+        // Mirror the UDS server: a clean EOF between frames closes the
+        // connection silently, but a malformed frame / protocol error
+        // gets a typed `IpcError` envelope written back to the client
+        // (correlation_id 0) before the connection is closed. The shared
+        // classified read returns the same `IpcErrorCode` values the UDS
+        // path surfaces (FrameTooLarge / MalformedJson / Internal).
+        let req = match read_request_classified(&mut server).await {
+            ReadOutcome::Ok(req) => req,
+            ReadOutcome::Eof => break,
+            ReadOutcome::Err(error) => {
+                let env = ResponseEnvelope {
+                    correlation_id: 0,
+                    result: IpcResult::Err { error },
+                };
+                // Best-effort: the client may have already gone away.
+                let _ = write_response(&mut server, &env).await;
+                // Malformed framing is connection-fatal.
+                break;
+            }
         };
         let resp = dispatch_envelope(&state, boot, &req, &identity).await;
         write_response(&mut server, &resp).await?;

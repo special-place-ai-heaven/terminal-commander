@@ -43,6 +43,7 @@ const { detectWsl, DETECT_REASONS } = require("./detect.js");
 const { wslDoctor, DOCTOR_STATUSES } = require("./doctor.js");
 const {
   buildFilteredEnv,
+  ensureSessionInWslEnv,
   isSecretEnvKey,
   SECRET_ENV_PATTERNS,
   EXPLICIT_SECRET_KEYS,
@@ -143,41 +144,9 @@ function resolveBridgeDistro(env, detect) {
   return { status: BRIDGE_STATUSES.NO_DEFAULT_DISTRO, distro: null };
 }
 
-/**
- * Rebuild WSLENV from a TC-only allowlist so the bridge forwards exactly
- * `TC_SESSION/u` to the WSL child — nothing else.
- *
- * `wsl.exe` forwards every Windows env var listed in WSLENV into the Linux
- * process. Preserving the operator's ambient WSLENV would leak whatever they
- * had named there (e.g. `WSL_SUDO_CREDENTIAL/u`) across the boundary. The
- * bridge does not need any ambient entry: the distro is selected host-side
- * before this spawn, so the Linux side never reads a WSLENV-forwarded var
- * other than TC_SESSION. Therefore:
- *
- *   - TC_SESSION present -> WSLENV = "TC_SESSION/u" (ambient dropped).
- *   - TC_SESSION absent  -> WSLENV deleted (ambient dropped to avoid
- *     forwarding credential-shaped vars even when we have nothing of our own
- *     to send).
- *
- * Flag `/u` = forward Windows->WSL only, no path translation (TC_SESSION is
- * an opaque token, not a path). Pure: returns a new object.
- *
- * @param {NodeJS.ProcessEnv} filteredEnv  Already secret-filtered env.
- * @returns {NodeJS.ProcessEnv}
- */
-function ensureSessionInWslEnv(filteredEnv) {
-  const out = { ...filteredEnv };
-  if (out.TC_SESSION == null || out.TC_SESSION === "") {
-    // No session token -> drop any ambient WSLENV. The bridge forwards nothing
-    // the WSL runtime needs (distro is host-side), and ambient entries could
-    // forward credentials (e.g. WSL_SUDO_CREDENTIAL).
-    delete out.WSLENV;
-    return out;
-  }
-  // TC-only allowlist: TC_SESSION/u and nothing else. Ambient WSLENV dropped.
-  out.WSLENV = "TC_SESSION/u";
-  return out;
-}
+// `ensureSessionInWslEnv` now lives in ./filtered_env.js so every wsl-spawn
+// site can import it alongside buildFilteredEnv without a require cycle through
+// this module. It is imported above and re-exported below for back-compat.
 
 function defaultBridgeExec({ wslPath, argv, env }) {
   // Production path. Returns a child handle so the shim can wire

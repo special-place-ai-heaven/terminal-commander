@@ -1019,9 +1019,20 @@ fn wsl_distro_reachable() -> bool {
 /// sudoers grant matches by exact command path. Fail-open => false.
 fn wsl_sudoers_grant_ok() -> bool {
     let probe = "sudo -n /usr/sbin/fstrim --version >/dev/null 2>&1 && echo OK || true";
-    std::process::Command::new("wsl.exe")
-        .args(["--", "bash", "-lc", probe])
-        .output()
+    let mut cmd = std::process::Command::new("wsl.exe");
+    cmd.args(["--", "bash", "-lc", probe]);
+    // SECURITY: this `wsl.exe ... bash -lc` launches a Linux process, so
+    // wsl.exe forwards every Windows var NAMED in WSLENV into it. Rebuild
+    // WSLENV to the TC-only allowlist so an ambient WSLENV=SOME_SECRET/u
+    // cannot leak SOME_SECRET into WSL (mirrors JS `ensureSessionInWslEnv`).
+    // (The host-side `wsl -l -q` in `wsl_distro_reachable` launches no Linux
+    // process, so WSLENV forwarding is moot there — left unchanged.)
+    #[cfg(windows)]
+    {
+        let tc_session = std::env::var("TC_SESSION").ok();
+        terminal_commander_core::sanitize_wslenv(&mut cmd, tc_session.as_deref());
+    }
+    cmd.output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("OK"))
 }
 
