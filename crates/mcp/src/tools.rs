@@ -2392,7 +2392,10 @@ impl McpActivationScope {
 /// MCP-facing parameters for `file_read_window`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileReadWindowParams {
-    /// Absolute or repo-relative path to a regular file.
+    /// Absolute path to a regular file (e.g. `/home/u/project/Cargo.toml`).
+    /// Absolute is required: the daemon has no workspace root, so a
+    /// relative path is rejected rather than resolved against the
+    /// daemon's working directory.
     pub path: String,
     /// 1-based start line. Omit to read from line 1. A value of `0` is
     /// clamped up to `1` by the daemon (there is no line 0).
@@ -2410,8 +2413,11 @@ pub struct McpFileReadWindowParams {
 /// MCP-facing parameters for `file_search`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileSearchParams {
-    /// Absolute or repo-relative path to the single regular file to
-    /// search. (This is a per-file search, not a directory walk.)
+    /// Absolute path to the single regular file to search (e.g.
+    /// `/home/u/project/Cargo.toml`). This is a per-file search, not a
+    /// directory walk. Absolute is required: the daemon has no workspace
+    /// root, so a relative path is rejected rather than resolved against
+    /// the daemon's working directory.
     pub path: String,
     /// The match expression: a plain SUBSTRING (literal), NOT a regex.
     /// Regex metacharacters are matched literally. Use `case_insensitive`
@@ -2428,6 +2434,10 @@ pub struct McpFileSearchParams {
 /// MCP-facing parameters for `file_watch_start`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileWatchStartParams {
+    /// Absolute path to the regular file to watch (e.g.
+    /// `/home/u/project/build.log`). Absolute is required: the daemon has
+    /// no workspace root, so a relative path is rejected rather than
+    /// resolved against the daemon's working directory.
     pub path: String,
     /// Follow from beginning (default false = follow-end / tail-like).
     #[serde(default)]
