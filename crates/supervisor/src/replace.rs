@@ -198,15 +198,24 @@ pub fn pid_belongs_to_daemon(pid: u32, state_dir: &Path) -> bool {
     }
     #[cfg(unix)]
     {
-        // `ps -p <pid> -o args=` prints only that pid's command line (empty
-        // if the pid is gone). Confirm both the daemon name and state_dir
-        // via the shared whole-argument matcher.
-        std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "args="])
-            .output()
-            .ok()
-            .map(|o| cmdline_is_our_daemon(&String::from_utf8_lossy(&o.stdout), state_dir))
-            .unwrap_or(false)
+        // Identity is decided from the kernel-authoritative argv in
+        // `/proc/<pid>/cmdline` (NUL-separated), NOT from a substring test
+        // over a flattened command line. A flattened-string match
+        // over-matched: any process whose command line merely CONTAINED the
+        // string "terminal-commanderd" and our state_dir as some argument --
+        // e.g. `vim /.../terminal-commanderd/notes.txt --data-dir /.../state`
+        // or a `grep`/`tail` over the daemon's own log dir -- passed the old
+        // `cmdline_is_our_daemon` check and would have been force-killed.
+        //
+        // The strict predicate (`unix_argv_is_our_daemon`) instead requires
+        // argv[0] to BE the daemon executable (basename == terminal-commanderd)
+        // and the `--data-dir` argument VALUE to EQUAL our state_dir. A pid
+        // whose /proc entry is unreadable (race: it exited, or permissions)
+        // is treated as "not ours" -- we never kill on uncertainty.
+        match read_proc_cmdline(pid) {
+            Some(argv) => unix_argv_is_our_daemon(&argv, state_dir),
+            None => false,
+        }
     }
 }
 
@@ -214,9 +223,17 @@ pub fn pid_belongs_to_daemon(pid: u32, state_dir: &Path) -> bool {
 /// daemon bound to `state_dir`: it must reference the daemon binary name and
 /// carry `state_dir` as a COMPLETE `--data-dir` path argument (see
 /// [`contains_path_arg`]), so a sibling session whose dir merely PREFIXES
-/// ours is never mistaken for it. The shared matcher for both
-/// `pid_belongs_to_daemon` and `find_daemon_pid_os` on every platform, so the
-/// callers agree by construction (review finding #3 + cross-session-kill).
+/// ours is never mistaken for it.
+///
+/// WINDOWS path only: the `Win32_Process` query already filters by the fixed
+/// binary name, so this whole-line matcher confirms the state_dir argument.
+/// The UNIX path instead reads the kernel-authoritative argv from
+/// `/proc/<pid>/cmdline` and uses [`unix_argv_is_our_daemon`], which also
+/// requires argv[0] itself to be the daemon executable (a flattened-line
+/// substring test over-matched non-daemon processes -- see that function).
+/// Allowed to be dead on unix, where it is reachable only from the
+/// cross-platform tests of the Windows matcher's logic.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn cmdline_is_our_daemon(args: &str, state_dir: &Path) -> bool {
     if !args.contains("terminal-commanderd") {
         return false;
@@ -238,6 +255,10 @@ fn cmdline_is_our_daemon(args: &str, state_dir: &Path) -> bool {
 /// real `--data-dir <state_dir>` argument, including paths that contain
 /// spaces, brackets, or apostrophes (matched verbatim, never interpolated
 /// into a shell pattern).
+///
+/// Used by the Windows whole-line matcher; allowed to be dead on unix, where
+/// it is reachable only from the cross-platform tests.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn contains_path_arg(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
@@ -263,8 +284,107 @@ fn contains_path_arg(haystack: &str, needle: &str) -> bool {
 /// a quote wraps a path containing spaces. A path separator (`/` or `\`)
 /// is deliberately NOT a boundary -- that is exactly the prefix case the
 /// whole-argument match must reject.
+///
+/// Used by the Windows whole-line matcher; allowed to be dead on unix, where
+/// it is reachable only from the cross-platform tests.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_arg_boundary(b: u8) -> bool {
     b.is_ascii_whitespace() || b == b'=' || b == b'"' || b == b'\''
+}
+
+/// Read `/proc/<pid>/cmdline` and split it into the process's argv.
+///
+/// The kernel stores the command line as NUL-separated, NUL-terminated
+/// arguments -- the authoritative argv the process was exec'd with, immune
+/// to the word-splitting and quoting ambiguity of a flattened `ps args=`
+/// string. Returns `None` if the entry cannot be read (the pid exited, or
+/// is not ours to inspect) or is empty (a kernel thread has an empty
+/// cmdline); callers MUST treat `None` as "not our daemon" so an uncertain
+/// or racing pid is never killed.
+#[cfg(unix)]
+fn read_proc_cmdline(pid: u32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    // Trim a single trailing NUL terminator so it does not yield a spurious
+    // empty final argv element, then split on the NUL separators.
+    let raw = raw.strip_suffix(b"\0").unwrap_or(&raw);
+    let argv: Vec<String> = raw
+        .split(|&b| b == 0)
+        .map(|seg| String::from_utf8_lossy(seg).into_owned())
+        .collect();
+    if argv.is_empty() {
+        return None;
+    }
+    Some(argv)
+}
+
+/// Strict identity predicate over a parsed argv: true ONLY when this argv
+/// is our daemon bound to `state_dir`. This is the kill-authorization gate;
+/// it is deliberately exact, not a substring/whole-line heuristic.
+///
+/// Two independent requirements must BOTH hold:
+///
+/// 1. `argv[0]`'s file-name component is exactly `terminal-commanderd`. A
+///    process is only a candidate for kill if it actually IS the daemon
+///    executable -- not merely a process (vim, grep, tail, a shell) whose
+///    arguments happen to mention the string. The basename is compared so a
+///    PATH-resolved bare name, a relative `./terminal-commanderd`, and an
+///    absolute `/opt/.../terminal-commanderd` all match, while
+///    `terminal-commanderd.log` or `my-terminal-commanderd` (a different
+///    binary) do not.
+/// 2. The daemon is launched as `--data-dir <state_dir>` (see
+///    `ensure_daemon`). We scan argv for a `--data-dir` flag and require its
+///    VALUE to EQUAL `state_dir` -- both the space-separated
+///    (`--data-dir`, `<value>`) and the joined (`--data-dir=<value>`) forms
+///    are accepted. Equality (not prefix / containment) means a sibling
+///    session under a longer or shorter dir is never matched.
+///
+/// Factored to take a borrowed argv so it is unit-testable from a plain
+/// `Vec<String>` without a live `/proc`.
+#[cfg(unix)]
+fn unix_argv_is_our_daemon<S: AsRef<str>>(argv: &[S], state_dir: &Path) -> bool {
+    const DAEMON_BIN: &str = "terminal-commanderd";
+    const DATA_DIR_FLAG: &str = "--data-dir";
+    const DATA_DIR_EQ: &str = "--data-dir=";
+
+    let exe = match argv.first() {
+        Some(first) => first.as_ref(),
+        None => return false,
+    };
+    // argv[0] must be the daemon executable itself, compared by file name so
+    // a path-qualified or PATH-resolved invocation still matches while a
+    // mere substring (e.g. `.../terminal-commanderd.log`) does not.
+    if std::path::Path::new(exe)
+        .file_name()
+        .and_then(|n| n.to_str())
+        != Some(DAEMON_BIN)
+    {
+        return false;
+    }
+
+    // Find the `--data-dir` value (space-separated or `=`-joined) and require
+    // it to equal our state_dir exactly. Path equality (not string equality)
+    // tolerates a benign trailing separator while still rejecting a sibling
+    // session's distinct directory.
+    let mut iter = argv.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        let arg = arg.as_ref();
+        // Space-separated form: the value is the next argv element.
+        // Joined form: the value follows the `--data-dir=` prefix.
+        let value = if arg == DATA_DIR_FLAG {
+            iter.next().map(AsRef::as_ref)
+        } else {
+            arg.strip_prefix(DATA_DIR_EQ)
+        };
+        if let Some(value) = value {
+            return std::path::Path::new(value) == state_dir;
+        }
+    }
+    // No `--data-dir` argument: this daemon is not bound to our state_dir by
+    // an explicit flag, so it is not ours to kill.
+    false
 }
 
 /// OS-query fallback: find the pid of a terminal-commanderd process
@@ -588,5 +708,157 @@ mod tests {
             "terminal-commanderd --data-dir /home/OBrien'X/state-2 start",
             dir
         ));
+    }
+
+    // --- Cross-session-kill / non-daemon-kill: the UNIX identity predicate ---
+    //
+    // Before the fix, the unix kill gate flattened the candidate's command line
+    // and required only that the string "terminal-commanderd" appear SOMEWHERE
+    // and that our state_dir appear as some whole argument. Any process whose
+    // argv merely mentioned both -- a text editor opening a file under the
+    // daemon's dir, a `grep`/`tail` over the log dir, an unrelated binary passed
+    // our --data-dir -- passed the gate and would have been SIGTERM/SIGKILLed.
+    //
+    // `unix_argv_is_our_daemon` decides identity from the parsed argv:
+    //   1. argv[0]'s basename must BE the daemon executable, and
+    //   2. the --data-dir VALUE must EQUAL our state_dir.
+    // These drive it from plain Vec<String> argvs (no live /proc needed).
+    #[cfg(unix)]
+    #[test]
+    fn unix_argv_matches_the_real_daemon() {
+        let dir = std::path::Path::new("/home/u/.local/share/terminal-commanderd/state");
+        // The real daemon, exactly as `ensure_daemon` spawns it.
+        let argv = vec![
+            "/opt/tc/terminal-commanderd",
+            "--data-dir",
+            "/home/u/.local/share/terminal-commanderd/state",
+            "start",
+            "--mode",
+            "ipc-server",
+        ];
+        assert!(
+            unix_argv_is_our_daemon(&argv, dir),
+            "the real daemon (argv[0]=terminal-commanderd, --data-dir=<our dir>) must match"
+        );
+
+        // The `--data-dir=<value>` joined form is equally accepted.
+        let joined = vec![
+            "terminal-commanderd",
+            "--data-dir=/home/u/.local/share/terminal-commanderd/state",
+            "start",
+        ];
+        assert!(
+            unix_argv_is_our_daemon(&joined, dir),
+            "the --data-dir=<value> form of the real daemon must match"
+        );
+
+        // A bare, PATH-resolved argv[0] still matches (basename comparison).
+        let bare = vec![
+            "terminal-commanderd",
+            "--data-dir",
+            "/home/u/.local/share/terminal-commanderd/state",
+        ];
+        assert!(unix_argv_is_our_daemon(&bare, dir));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_argv_rejects_non_daemon_impostors() {
+        let dir = std::path::Path::new("/home/u/.local/share/terminal-commanderd/state");
+
+        // (a) A text editor opening a file UNDER the daemon's dir, whose argv
+        // even carries a --data-dir to our state_dir. The OLD flattened-string
+        // gate matched this; argv[0]=vim must reject it.
+        let vim = vec![
+            "vim",
+            "/home/u/.local/share/terminal-commanderd/notes.txt",
+            "--data-dir",
+            "/home/u/.local/share/terminal-commanderd/state",
+        ];
+        assert!(
+            !unix_argv_is_our_daemon(&vim, dir),
+            "a non-daemon process (vim) must NEVER be matched, even when its argv \
+             mentions the daemon string and our state_dir"
+        );
+
+        // (b) A different binary whose argv merely CONTAINS both substrings.
+        let grep = vec![
+            "grep",
+            "-rn",
+            "terminal-commanderd",
+            "/home/u/.local/share/terminal-commanderd/state",
+        ];
+        assert!(
+            !unix_argv_is_our_daemon(&grep, dir),
+            "grep over the daemon dir must NEVER be matched"
+        );
+
+        // (c) argv[0] is a file whose NAME merely contains the daemon string
+        // (e.g. tailing the log, or a differently-named binary). Basename
+        // equality -- not substring -- must reject it.
+        let tail_log = vec![
+            "tail",
+            "-f",
+            "/home/u/.local/share/terminal-commanderd/logs/terminal-commanderd.log",
+            "--data-dir",
+            "/home/u/.local/share/terminal-commanderd/state",
+        ];
+        assert!(!unix_argv_is_our_daemon(&tail_log, dir));
+        let wrong_bin = vec![
+            "/opt/tc/my-terminal-commanderd",
+            "--data-dir",
+            "/home/u/.local/share/terminal-commanderd/state",
+        ];
+        assert!(
+            !unix_argv_is_our_daemon(&wrong_bin, dir),
+            "a different binary whose name merely contains the daemon string must reject"
+        );
+        let log_as_argv0 = vec![
+            "/home/u/.local/share/terminal-commanderd/logs/terminal-commanderd.log",
+            "--data-dir",
+            "/home/u/.local/share/terminal-commanderd/state",
+        ];
+        assert!(
+            !unix_argv_is_our_daemon(&log_as_argv0, dir),
+            "argv[0]=...terminal-commanderd.log must reject (basename != terminal-commanderd)"
+        );
+
+        // (d) The REAL daemon binary, but bound to a DIFFERENT --data-dir
+        // (a sibling session). Value equality -- not prefix/containment --
+        // must reject it: this is the cross-session-kill guard.
+        let other_session = vec![
+            "terminal-commanderd",
+            "--data-dir",
+            "/home/u/.local/share/terminal-commanderd/state/agent-1",
+            "start",
+        ];
+        assert!(
+            !unix_argv_is_our_daemon(&other_session, dir),
+            "the daemon of a sibling session (different --data-dir) must NEVER be matched"
+        );
+        // And a shorter/prefix dir must not be confused either.
+        let parent_dir = std::path::Path::new("/home/u/.local/share/terminal-commanderd");
+        assert!(
+            !unix_argv_is_our_daemon(
+                &[
+                    "terminal-commanderd",
+                    "--data-dir",
+                    "/home/u/.local/share/terminal-commanderd/state",
+                ],
+                parent_dir
+            ),
+            "a daemon under <dir>/state must not match a request for <dir>"
+        );
+
+        // (e) The daemon binary with NO --data-dir at all is not ours to kill.
+        let no_flag = vec!["terminal-commanderd", "start"];
+        assert!(
+            !unix_argv_is_our_daemon(&no_flag, dir),
+            "a daemon without an explicit --data-dir is not bound to our dir"
+        );
+
+        // (f) Empty argv is rejected (mirrors an unreadable /proc entry).
+        let empty: Vec<&str> = vec![];
+        assert!(!unix_argv_is_our_daemon(&empty, dir));
     }
 }
