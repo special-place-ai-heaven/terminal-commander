@@ -63,7 +63,7 @@ pub use protocol::{
     decode_payload, encode_frame,
 };
 
-pub use framing::{read_frame, read_request, write_response};
+pub use framing::{ReadOutcome, read_frame, read_request, read_request_classified, write_response};
 
 #[cfg(unix)]
 pub use client::DaemonClient;
