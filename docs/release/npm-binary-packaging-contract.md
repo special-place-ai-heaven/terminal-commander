@@ -185,7 +185,7 @@ packages/
 ├─ terminal-commander/
 │  ├─ package.json
 │  ├─ README.md                                 # quickstart + boundary statement
-│  ├─ LICENSE                                   # Apache-2.0 copy
+│  ├─ LICENSE                                   # PolyForm-Noncommercial-1.0.0 copy
 │  ├─ bin/
 │  │  ├─ terminal-commanderd.js                 # Node shim → daemon
 │  │  ├─ terminal-commander-mcp.js              # Node shim → MCP adapter

@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: Apache-2.0
+-- SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 -- Registry schema for the Terminal Commander rule store (TC13).
 -- See docs/storage/REGISTRY_STORE.md for the design.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Exercise every terminal-commander MCP tool over stdio (Windows-native path)."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
--- SPDX-License-Identifier: Apache-2.0
+-- SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 -- TC42c: scoped activation columns on rule_activations.
 --
 -- Adds `scope_kind` + `scope_value` so the same (rule_id, version)

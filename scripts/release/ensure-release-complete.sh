@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ensure manifest version on main has a GitHub release at HEAD and npm is publishable.
 # Emits GitHub Actions outputs: publish (true|false), version, need_release_please.
 

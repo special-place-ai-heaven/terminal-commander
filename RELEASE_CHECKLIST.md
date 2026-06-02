@@ -206,7 +206,7 @@ of TC47:
 
 ## Doctrine snapshot (locked decisions, refreshed at TC48)
 
-- License: Apache-2.0.
+- License: PolyForm-Noncommercial-1.0.0.
 - Rust toolchain: 1.95.0 active (rmcp 1.7.0 MSRV floor 1.92).
 - Storage: rusqlite 0.39 bundled + FTS5; manual migration runner
   (refinery 0.9 pinned rusqlite <=0.38; conflict resolved by

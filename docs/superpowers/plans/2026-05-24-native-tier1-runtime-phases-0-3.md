@@ -247,7 +247,7 @@ tokio = { version = "1", features = ["test-util"] }
 
 Create `crates/supervisor/src/lib.rs`:
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Shared daemon-supervisor library used by the MCP adapter and the
 // operator CLI. Owns: daemon endpoint resolution, daemon health
 // probing, structured Unavailable diagnostics, peer-identity model.
@@ -284,7 +284,7 @@ git commit -m "chore(supervisor): scaffold terminal-commander-supervisor crate"
 
 Create `crates/supervisor/src/identity.rs` with this content (test first):
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Platform-neutral peer identity. Replaces the prior
 // `PeerCred { uid: 0, gid: 0, pid: None }` constant on Windows.
 
@@ -377,7 +377,7 @@ git commit -m "feat(supervisor): add PeerIdentity enum (unix/windows/unknown)"
 
 Create `crates/supervisor/src/ensure.rs`:
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Daemon ensure/readiness library entry point.
 //
 // The MCP adapter calls `ensure_daemon()` before serving rmcp. The
@@ -514,7 +514,7 @@ git commit -m "feat(supervisor): scaffold ensure_daemon types + stub"
 
 Create `crates/supervisor/tests/ensure_smoke.rs`:
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Smoke test for ensure_daemon. Uses an already-running listener so
 // the test does not depend on the real daemon binary; that exercise
 // is covered by crates/daemon tests.
@@ -746,7 +746,7 @@ structured Unavailable diagnostics on every failure mode."
 
 Create `crates/mcp/tests/daemon_unavailable_envelope.rs`:
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Verifies that when the daemon endpoint is unreachable, the MCP
 // adapter still responds to initialize and tools/list, and that tool
 // calls return a structured `daemon_unavailable` error envelope
@@ -1004,7 +1004,7 @@ daemon_unavailable envelope from tool calls that require the daemon."
 
 Create `crates/daemon/tests/pipe_accept_loop.rs`:
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Verifies the named-pipe accept loop:
 //   1. accepts the first client,
 //   2. accepts a second client after the first disconnects,
@@ -1148,7 +1148,7 @@ log and retry after 100ms unless shutdown is signalled."
 
 Create `crates/daemon/tests/pipe_peer_identity.rs`:
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Verifies that the named-pipe handler reports the real client SID
 // rather than the historical hard-coded uid=0,gid=0.
 
@@ -1196,7 +1196,7 @@ Expected: FAIL — current handler hard-codes `PeerCred { uid: 0, gid: 0, pid: N
 
 Create `crates/daemon/src/ipc/peer_windows.rs`:
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Resolve the Windows named-pipe client's SID, PID, and image path.
 
 #![cfg(windows)]
@@ -1373,7 +1373,7 @@ or PeerIdentity::Unknown when unresolvable."
 
 Create `crates/daemon/tests/pipe_acl.rs`:
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Verifies the named-pipe security descriptor restricts access to
 // LocalSystem + Administrators + current user.
 
@@ -1405,7 +1405,7 @@ Expected: FAIL with `module pipe_acl not found`.
 
 Create `crates/daemon/src/ipc/pipe_acl.rs`:
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Build a security descriptor string (SDDL) that restricts a Windows
 // named pipe to LocalSystem, Administrators, and the current user.
 
@@ -1588,7 +1588,7 @@ TokenUser + ConvertSidToStringSidW."
 
 Create `packages/terminal-commander/test/session_supervisor_no_rm.test.js`:
 ```javascript
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 'use strict';
 
 const test = require('node:test');
@@ -1709,7 +1709,7 @@ is diagnosable."
 
 Create `crates/daemon/tests/daemon_writes_log.rs`:
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Verifies that the daemon writes its startup line to
 // `<data_dir>/logs/terminal-commanderd.log` even when stdio is
 // redirected.
@@ -1817,7 +1817,7 @@ file. Diagnostics now survive supervised launches."
 
 Create `crates/mcp/tests/stdin_eof_survives.rs`:
 ```rust
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // End-to-end: launch the daemon, launch MCP pointing at it, close
 // MCP stdin, verify MCP exits 0 AND the daemon is still alive.
 

@@ -22,4 +22,4 @@ before `npm publish --tag beta`.
 
 ## License
 
-Apache-2.0. See `LICENSE`.
+PolyForm-Noncommercial-1.0.0. See `LICENSE`.

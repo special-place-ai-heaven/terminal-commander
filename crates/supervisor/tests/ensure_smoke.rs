@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Smoke test for ensure_daemon. Uses an already-running listener so
 // the test does not depend on the real daemon binary; that exercise
 // is covered by crates/daemon tests.

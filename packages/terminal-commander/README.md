@@ -80,4 +80,4 @@ Full README, architecture diagrams, and integration guides:
 
 ## License
 
-Apache-2.0
+PolyForm-Noncommercial-1.0.0

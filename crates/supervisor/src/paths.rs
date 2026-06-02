@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Canonical path resolution for the daemon state dir, IPC endpoint,
 // and log dir. Shared by terminal-commander-mcp,
 // terminal-commander (cli), and any other consumer that needs to

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Single source of truth for the list of platform packages whose
 // versions are pinned in root's optionalDependencies.
 "use strict";
