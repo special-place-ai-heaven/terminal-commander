@@ -29,10 +29,11 @@ function Invoke-Gate([string]$pkg, [string]$bin, [string[]]$extra) {
     Write-Error "tc-gate: $pkg --test $bin ran 0 tests — refusing false pass"; exit 1
   }
 }
-# crates/probes/tests/windows_no_console_spawn.rs marks all 3 regression tests
-# #[ignore] (their AttachConsole probe depends on the runner's console session),
-# documented run mode "CI-only via cargo test -- --ignored". --include-ignored
-# runs them so the console regression genuinely EXECUTES, not skips-to-green.
+# crates/probes/tests/windows_no_console_spawn.rs runs by default (the ConPTY fix
+# replaced the session-fragile AttachConsole-HWND probe with a poll-for-window
+# detector and removed the #[ignore]s). --include-ignored is kept defensively so a
+# future re-ignored windows regression still EXECUTES here rather than skipping to
+# a false green; the >=1-passed assertion below refuses a 0-tests-run pass.
 Invoke-Gate 'terminal-commander-probes' 'windows_no_console_spawn' @('--include-ignored')
 # crates/daemon/tests/windows_spawn_site_coverage.rs tests are NOT ignored.
 Invoke-Gate 'terminal-commanderd' 'windows_spawn_site_coverage' @()
