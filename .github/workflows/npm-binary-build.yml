@@ -13,37 +13,52 @@
 
 name: npm-binary-build
 
+# Branch-protection footgun (do NOT re-add a `paths:` filter to
+# `pull_request` here).
+#
+# The `main-protection` ruleset marks EIGHT contexts from this workflow as
+# REQUIRED status checks:
+#   pre-build-gates (linux-x64), pre-build-gates (windows-x64),
+#   build-linux-x64 / build-linux-x64, build-linux-arm64 / build-linux-arm64,
+#   build-windows-x64 / build-windows-x64, build-mac-x64 / build-mac-x64,
+#   build-mac-arm64 / build-mac-arm64, npm-pack (after all builds).
+#
+# GitHub's "required check + path filter" interaction: if a PR touches ONLY
+# paths that the `pull_request.paths` filter excludes (e.g. a workflow-only
+# change to release-please.yml, or a docs-only change), this workflow does NOT
+# run, so those eight required contexts NEVER report. A required check that
+# never reports is treated as pending forever -> mergeStateStatus=BLOCKED, and
+# the PR can only land via admin override. This already bit PR #85 (a
+# release-please.yml-only fix needed an admin merge).
+#
+# Because ALL EIGHT required contexts are produced by THIS workflow (the gates,
+# every build-* matrix leg, and npm-pack), a single "no-op skip" job cannot
+# fix it -- it could only satisfy one context name; the other seven would stay
+# pending. The robust cure within `.github/workflows/` scope is to drop the
+# `pull_request.paths` filter entirely so EVERY PR to `main` runs the full
+# chain and reports all eight required contexts. No PR can be permanently
+# BLOCKED.
+#
+# Trade-off (accepted, not avoidable here): a docs-only or workflow-only PR now
+# runs the full native 5-platform build matrix. That cost is inherent to the
+# ruleset requiring the `build-*` legs as gates -- the only way the
+# `build-mac-arm64 / build-mac-arm64` context can report success is to actually
+# run the reusable build. Skipping the build for trivial paths would require
+# removing those build legs from the required set in the ruleset (outside the
+# `.github/workflows/` change scope). If that cost becomes a problem, the
+# follow-up is to narrow the REQUIRED set in `main-protection` to just the two
+# `pre-build-gates`, then a path-aware no-op skip becomes viable.
+#
+# `push` (main only) also drops its `paths` filter so the post-merge build/
+# provenance gate always runs on `main` and is never silently skipped by the
+# same footgun.
 on:
   push:
     branches:
       - main
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**"
-      - "packages/**"
-      - "scripts/release/**"
-      - "scripts/smoke/**"
-      - "scripts/linux-gate.sh"
-      - "scripts/windows-gate.ps1"
-      - "scripts/linux-gate.ps1"
-      - ".github/workflows/npm-binary-build.yml"
-      - ".github/workflows/_build-platform-binary.yml"
   pull_request:
     branches:
       - main
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**"
-      - "packages/**"
-      - "scripts/release/**"
-      - "scripts/smoke/**"
-      - "scripts/linux-gate.sh"
-      - "scripts/windows-gate.ps1"
-      - "scripts/linux-gate.ps1"
-      - ".github/workflows/npm-binary-build.yml"
-      - ".github/workflows/_build-platform-binary.yml"
   workflow_dispatch:
 
 permissions:

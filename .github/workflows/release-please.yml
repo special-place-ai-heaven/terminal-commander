@@ -18,31 +18,44 @@
 #   the merge commit triggers `push: main`).
 #
 # NPM07 portion (publish jobs):
-#   When release-please reports `releases_created == 'true'`, three
-#   downstream jobs run on the same workflow invocation:
-#     1. publish-linux-x64   — builds `@terminal-commander/linux-x64`
-#                              binaries and `npm publish` (dist-tag latest).
-#     2. publish-linux-arm64 — builds `@terminal-commander/linux-arm64`
-#                              binaries and `npm publish`.
-#     3. publish-root        — depends on the two platform jobs above;
-#                              `npm publish` for the root wrapper (latest).
-#                              `terminal-commander` wrapper.
-#   First npm publish uses `secrets.NPM_TOKEN_TC` via
-#   `NODE_AUTH_TOKEN` (trusted-publisher OIDC not yet configured on
-#   npmjs.com for all three package names). No `CARGO_REGISTRY_TOKEN`,
-#   release-please job uses `RELEASE_PLEASE_TOKEN_TC` when
-#   `GITHUB_TOKEN` cannot open/update the release PR (Bad credentials).
+#   When release-please reports `releases_created == 'true'`, the
+#   downstream publish chain runs on the same workflow invocation:
+#     - build-<platform> + publish-<platform> for all 5 targets
+#       (linux-x64, linux-arm64, windows-x64, mac-x64, mac-arm64):
+#       each builds the platform binaries and `npm publish`es
+#       `@terminal-commander/<platform>` (dist-tag latest).
+#     - publish-root: depends on all 5 platform publishes; `npm publish`
+#       for the `terminal-commander` root wrapper (latest).
+#     - then the crates.io cargo-publish chain (see below).
+#   npm publish uses `secrets.NPM_TOKEN_TC` via `NODE_AUTH_TOKEN`
+#   (trusted-publisher OIDC not yet configured on npmjs.com for all
+#   package names). The release-please job uses `RELEASE_PLEASE_TOKEN_TC`
+#   when `GITHUB_TOKEN` cannot open/update the release PR (Bad credentials).
+#
+# crates.io portion (cargo publish chain):
+#   This workflow DOES publish to crates.io. After `publish-root`
+#   succeeds, a strictly dep-ordered chain publishes the workspace
+#   crates with `cargo publish`:
+#     core -> sifters -> probes -> store -> supervisor -> ipc
+#   (the `terminal-commander-ipc` leg was added by PR #85). Each
+#   `cargo publish` step authenticates with `CARGO_REGISTRY_TOKEN`
+#   set from `secrets.CARGO_REGISTRY_TOKEN_TC`, then polls the
+#   crates.io HTTP API until the just-published version is visible
+#   before the next crate (whose path-deps resolve against the
+#   registry) publishes.
 #
 # This workflow does NOT:
-#   - reference any long-lived secret (NPM_TOKEN, NPM_TOKEN_TC,
-#     CARGO_REGISTRY_TOKEN_TC, RELEASE_PLEASE_TOKEN_TC),
-#   - publish to crates.io,
 #   - call the NPM05 `npm-binary-build` workflow (kept separate as a
 #     non-publishing CI gate),
 #   - auto-merge the release PR (release-pr-sync.yml; feat/fix only),
-#   - touch `crates/**`, `Cargo.toml`, `Cargo.lock`, or `scripts/**`,
 #   - request `id-token: write` (OIDC may return after trusted
-#     publisher is configured on npmjs.com for all three names).
+#     publisher is configured on npmjs.com / crates.io for all names).
+#
+# NOTE: this workflow DOES reference long-lived secrets
+#   (NPM_TOKEN_TC, CARGO_REGISTRY_TOKEN_TC, RELEASE_PLEASE_TOKEN_TC)
+#   and the cargo-publish chain DOES touch `crates/**`, `Cargo.toml`,
+#   and `Cargo.lock` at checkout time. The earlier comment that
+#   claimed otherwise predated the crates.io publish chain.
 #
 # Action pin doctrine (NPM06):
 #   `googleapis/release-please-action` is pinned to immutable commit

@@ -10,8 +10,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
+
+use crate::proc_lock::{self, ProcessLock, TryLockResult};
 
 /// Host env vars the supervisor re-reads at spawn and forwards into the
 /// daemon, so a respawn (e.g. `terminal-commander restart`) picks up
@@ -153,17 +155,28 @@ pub struct EnsureDaemonOptions {
 }
 
 /// Probe the endpoint; if reachable, return `AlreadyRunning`. If not
-/// and `allow_spawn` is true, spawn the daemon and wait up to
+/// and `allow_spawn` is true, single-flight the bring-up behind a
+/// cross-process advisory lock and spawn the daemon, waiting up to
 /// `startup_timeout` for the endpoint to bind. On failure, return
 /// `Unavailable { reason, diagnostics }` with the log path included
 /// so callers can surface it.
 ///
+/// H6 single-flight: two adapters cold-starting in the same window must
+/// not both reach the spawn branch (on Unix the daemon's bind
+/// unconditionally `remove_file`s + rebinds, orphaning the first daemon
+/// that holds the DB open). The cheap pre-probe stays the common-case
+/// fast path; only when the endpoint is down and spawning is allowed do
+/// we take `<state_dir>/terminal-commanderd.lock`. The loser of the race
+/// sees `Contended`, re-probes until the winner binds, and returns
+/// `AlreadyRunning` — never `Unavailable` unless the winner truly fails
+/// to bind in time.
+///
 /// This function must not panic; it must always return a structured
 /// status the caller can render to the operator.
 pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
 
-    // 1. Probe endpoint first.
+    // 1. Cheap pre-lock probe (fast path: a daemon is already up).
     if probe_endpoint(&opts.endpoint).await {
         return EnsureDaemonStatus::AlreadyRunning {
             endpoint: opts.endpoint,
@@ -184,7 +197,81 @@ pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
         };
     }
 
-    // 2. Spawn daemon. Only fail-fast on BinaryNotFound when the caller
+    // 2. Single-flight the bring-up. The lock lives under state_dir, so
+    // ensure it exists before opening the lock file.
+    let _ = std::fs::create_dir_all(&opts.state_dir);
+    let lock_path = crate::pidfile::lock_path(&opts.state_dir);
+    match proc_lock::try_acquire(&lock_path) {
+        Ok(TryLockResult::Acquired(guard)) => {
+            // We own the bring-up. Double-check: a peer may have bound
+            // between the pre-probe and acquiring the lock.
+            if probe_endpoint(&opts.endpoint).await {
+                return EnsureDaemonStatus::AlreadyRunning {
+                    endpoint: opts.endpoint,
+                    pid: None,
+                };
+            }
+            // Spawn + wait-for-bind WHILE holding the guard; it drops
+            // (releases) only when this function returns.
+            spawn_under_lock(opts, start, &guard).await
+        }
+        Ok(TryLockResult::Contended) => {
+            // A peer owns the bring-up. Re-probe until it binds, bounded
+            // by startup_timeout. A freshly-bound endpoint is treated as
+            // AlreadyRunning (we did not spawn it, but it is up).
+            let deadline = start + opts.startup_timeout;
+            while Instant::now() < deadline {
+                if probe_endpoint(&opts.endpoint).await {
+                    return EnsureDaemonStatus::AlreadyRunning {
+                        endpoint: opts.endpoint,
+                        pid: None,
+                    };
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            EnsureDaemonStatus::Unavailable {
+                reason: DaemonUnavailableReason::StartupTimeout,
+                diagnostics: Diagnostics {
+                    endpoint: opts.endpoint,
+                    log_path: None,
+                    last_error: Some("lock contended; peer did not bind".into()),
+                    startup_attempted: false,
+                    startup_elapsed_ms: start.elapsed().as_millis() as u64,
+                },
+            }
+        }
+        Err(e) => {
+            // Could not open/lock the rendezvous file. Liveness over
+            // single-flight: proceed to spawn anyway (best effort). The
+            // daemon-side guard is the belt-and-suspenders defense against
+            // orphaning, so a missing supervisor lock degrades gracefully.
+            tracing::warn!("bring-up lock unavailable ({e}); spawning without single-flight");
+            spawn_daemon_impl(opts, start).await
+        }
+    }
+}
+
+/// Spawn the daemon and wait for it to bind, WHILE the caller holds the
+/// bring-up lock. The `guard` parameter makes the "must hold the lock"
+/// contract explicit at the type level — it is intentionally unused
+/// beyond proving the lock is held for the duration of this call (the
+/// guard's `Drop` releases the lock only after this returns). Shared by
+/// `ensure_daemon` (Acquired branch) and `ensure_or_replace`, so the
+/// kill -> spawn and probe -> spawn windows are both covered by one lock.
+pub(crate) async fn spawn_under_lock(
+    opts: EnsureDaemonOptions,
+    start: Instant,
+    _guard: &ProcessLock,
+) -> EnsureDaemonStatus {
+    spawn_daemon_impl(opts, start).await
+}
+
+/// The actual spawn + wait-for-bind body. Factored out of `ensure_daemon`
+/// so the locked path (`spawn_under_lock`) and the lock-unavailable
+/// fallback can share it. Callers are responsible for the single-flight
+/// lock; this function performs no locking of its own.
+async fn spawn_daemon_impl(opts: EnsureDaemonOptions, start: Instant) -> EnsureDaemonStatus {
+    // Spawn daemon. Only fail-fast on BinaryNotFound when the caller
     // gave us an absolute or relative path (something with a separator).
     // A bare name like "terminal-commanderd" is intentionally resolved
     // via PATH at spawn time, so we MUST let Command::spawn try first
@@ -299,9 +386,9 @@ pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
     // commanderd outlives the supervisor call.
     drop(child);
 
-    // 3. Wait for endpoint bind up to startup_timeout.
-    let deadline = std::time::Instant::now() + opts.startup_timeout;
-    while std::time::Instant::now() < deadline {
+    // Wait for endpoint bind up to startup_timeout.
+    let deadline = Instant::now() + opts.startup_timeout;
+    while Instant::now() < deadline {
         if probe_endpoint(&opts.endpoint).await {
             return EnsureDaemonStatus::Started {
                 endpoint: opts.endpoint,

@@ -335,3 +335,88 @@ fn exited_command_reports_exited_liveness_from_jobstate() {
         cleanup(&data);
     });
 }
+
+// Item #1: a PTY that exits naturally must report `Exited{code}` derived
+// from the job ledger (JobState), NOT `Running` from lingering live-map
+// presence. The PTY binding lingers in the live map after exit (like the
+// command runtime's), and a lifecycle waiter flips the ledger via
+// `jobs.finish`, so `collect_probes`/`PtyRuntime::liveness` surfaces the
+// terminal state. PTY cannot run a shell interpreter, so use python3 with an
+// explicit exit code.
+#[test]
+fn exited_pty_reports_exited_liveness_from_jobstate() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(3));
+
+        let resp = client
+            .call(
+                1,
+                IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
+                    // Exit 0 promptly; `finish` maps a clean exit to Exited{0}.
+                    argv: vec![
+                        "python3".to_owned(),
+                        "-c".to_owned(),
+                        "import sys; sys.exit(0)".to_owned(),
+                    ],
+                    cwd: None,
+                    env: vec![],
+                    bucket_config: None,
+                    rules: vec![],
+                    rows: None,
+                    cols: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect("pty_command_start");
+        let started = match resp {
+            IpcResponse::PtyCommandStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // Poll runtime_state until the lingering PTY probe reports a terminal
+        // liveness. Presence in the live map is unconditional; the liveness
+        // must flip to Exited once the lifecycle waiter calls finish().
+        let mut found: Option<Liveness> = None;
+        for i in 2..80 {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let resp = client
+                .call(
+                    i,
+                    IpcRequest::RuntimeState(terminal_commanderd::ListLimitParams::default()),
+                )
+                .await
+                .expect("runtime_state");
+            let r = match resp {
+                IpcResponse::RuntimeState(r) => r,
+                other => panic!("unexpected: {other:?}"),
+            };
+            if let Some(p) = r
+                .probes
+                .iter()
+                .find(|p| matches!(p.kind, ProbeKind::Pty) && p.job_id == started.job_id)
+                && !matches!(p.liveness, Liveness::Starting | Liveness::Running)
+            {
+                found = Some(p.liveness.clone());
+                break;
+            }
+        }
+
+        assert_eq!(
+            found,
+            Some(Liveness::Exited { code: 0 }),
+            "an exited PTY must report Exited code 0 (not Running from live-map presence)"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}

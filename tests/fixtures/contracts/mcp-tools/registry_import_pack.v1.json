@@ -44,6 +44,24 @@
       "cargo.aborting"
     ]
   },
+  "partial_success_response_example": {
+    "_note": "M7: when some rules import+promote but one rule's ACTIVATION fails mid-loop, the response is still a SUCCESSFUL registry_import_pack (no error code). `activated[]` lists the rules that activated; the additive `failed[]` lists each rule that did not, with a reason. The daemon state matches: activated rules are live, failed rules are not. `failed` is omitted entirely when empty, so the all-success shape above is unchanged.",
+    "pack": "cargo",
+    "imported": [
+      "cargo.compile-error",
+      "cargo.warning"
+    ],
+    "skipped": [],
+    "activated": [
+      "cargo.compile-error"
+    ],
+    "failed": [
+      {
+        "rule_id": "cargo.warning",
+        "reason": "rule 'cargo.warning' v1 has status Draft, which is not runtime-eligible; only Active rules can be activated."
+      }
+    ]
+  },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
     "data": {
@@ -71,6 +89,9 @@
     "activate=true requires scope; missing scope is rejected with scope_invalid",
     "an unknown pack name returns invalid_params listing the known packs",
     "activated is a subset of imported and empty when activate=false",
-    "no raw stream content is returned; imported/activated are rule ids"
+    "no raw stream content is returned; imported/activated are rule ids",
+    "M7: a mid-loop activation failure is a PARTIAL SUCCESS, not an error -- the response returns activated[] (rules that succeeded) plus an additive failed[] of {rule_id, reason} (rules that did not), never a bare error that hides the activated rules",
+    "M7: failed[] is additive and omitted when empty, so the all-success wire shape is unchanged and older clients still deserialize",
+    "M7: daemon state matches the split -- rules in activated[] are live in the active set, rules in failed[] are not"
   ]
 }

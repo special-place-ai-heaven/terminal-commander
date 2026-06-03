@@ -156,25 +156,47 @@ impl Dedupe {
             if let Some(entry) = self.state.get_mut(&key) {
                 entry.count = entry.count.saturating_add(1);
                 entry.last_seen = d.timestamp;
-                // Same-batch collapse only: patch the representative draft if
-                // it was emitted in THIS batch. A carried-over entry has no
+                let (count, first_seen, last_seen, seq) = (
+                    entry.count,
+                    entry.first_seen,
+                    entry.last_seen,
+                    entry.representative_seq,
+                );
+                // Same-batch collapse: patch the representative draft if it
+                // was emitted in THIS batch. A carried-over entry has no
                 // batch_index entry, so its prior-batch index is never used
                 // to index this batch's emit vec.
-                if let Some(&idx) = batch_index.get(&key)
-                    && let Some(rep) = emit.get_mut(idx)
-                {
-                    rep.count = entry.count;
-                    rep.first_seen = Some(entry.first_seen);
-                    rep.last_seen = Some(entry.last_seen);
-                }
-                // Patch the already-appended bucket row when its seq is known.
-                if let Some(seq) = entry.representative_seq {
+                if let Some(&idx) = batch_index.get(&key) {
+                    if let Some(rep) = emit.get_mut(idx) {
+                        rep.count = count;
+                        rep.first_seen = Some(first_seen);
+                        rep.last_seen = Some(last_seen);
+                    }
+                } else if let Some(seq) = seq {
+                    // Cross-batch recurrence with a known seq: patch the
+                    // already-appended bucket row.
                     patches.push(DedupeAggregatePatch {
                         seq,
-                        count: entry.count,
-                        first_seen: entry.first_seen,
-                        last_seen: entry.last_seen,
+                        count,
+                        first_seen,
+                        last_seen,
                     });
+                } else {
+                    // Cross-batch recurrence whose representative has NO seq:
+                    // its first bucket append returned None (sink failure), so
+                    // `register_emitted` was never called. Patching is
+                    // impossible (no target) and there is no same-batch draft
+                    // to collapse onto, so dropping it would SILENTLY
+                    // UNDERCOUNT the bucket row. Re-emit a refreshed
+                    // representative carrying the aggregate so a fresh seq can
+                    // be registered for it, and record its batch index so any
+                    // further same-batch repeats collapse onto it.
+                    let representative_index = emit.len();
+                    batch_index.insert(key.clone(), representative_index);
+                    d.count = count;
+                    d.first_seen = Some(first_seen);
+                    d.last_seen = Some(last_seen);
+                    emit.push(d);
                 }
                 continue;
             }
@@ -403,6 +425,81 @@ mod tests {
         assert!(
             b.patches.iter().any(|p| p.seq == 4242 && p.count == 2),
             "K1 recurrence must patch its own bucket row (seq 4242) to count 2"
+        );
+    }
+
+    #[test]
+    fn cross_batch_repeat_with_no_seq_reemits_refreshed_representative() {
+        // L3 regression: the representative's first bucket append returned None
+        // (sink failure), so `register_emitted` was never called and
+        // `representative_seq` stays None. A later within-window, cross-batch
+        // repeat used to bump only the private count -- no patch (no seq to
+        // target) and no emit -- so the recurrence was SILENTLY LOST and the
+        // bucket row undercounted. The fix re-emits a refreshed representative
+        // draft so a fresh seq can be registered and the aggregate is not
+        // dropped.
+        let mut d = Dedupe::new();
+        let pol = NoisePolicy::default();
+        let rid = RuleId::new();
+        let ts = OffsetDateTime::now_utc();
+
+        // Batch A: K1 becomes the representative. We DELIBERATELY do NOT call
+        // `register_emitted` -- this models the sink-failure path where the
+        // bucket append returned None and no seq was ever recorded.
+        let a = d.apply_at(
+            vec![draft(rid, Severity::Low, &[("pkg", "a")], ts)],
+            &pol,
+            ts,
+        );
+        assert_eq!(a.emit.len(), 1, "first occurrence emits its representative");
+        assert_eq!(a.emit[0].count, 1);
+
+        // Batch B: a within-window repeat of K1. Because the prior representative
+        // has no seq, the recurrence must be re-emitted as a refreshed
+        // representative carrying the aggregated count (2) so a seq can be
+        // registered for it -- NOT silently dropped.
+        let b = d.apply_at(
+            vec![draft(rid, Severity::Low, &[("pkg", "a")], ts)],
+            &pol,
+            ts,
+        );
+        assert_eq!(
+            b.emit.len(),
+            1,
+            "seq-less recurrence must re-emit a refreshed representative, not drop it"
+        );
+        assert_eq!(
+            b.emit[0].count, 2,
+            "refreshed representative carries the aggregated count"
+        );
+        assert!(
+            b.emit[0].first_seen.is_some() && b.emit[0].last_seen.is_some(),
+            "refreshed representative carries first/last seen"
+        );
+        // No bucket patch is produced: there is no prior seq to patch; the
+        // recurrence flows through the re-emitted draft instead.
+        assert!(
+            b.patches.is_empty(),
+            "no seq to patch -- recurrence flows through the re-emit"
+        );
+
+        // Registering the re-emitted representative's seq now makes a SUBSEQUENT
+        // cross-batch repeat patch the bucket row (seq registered, no further
+        // re-emit). This proves the seq got registered and the row no longer
+        // undercounts.
+        d.register_emitted(&b.emit[0], 7777);
+        let c = d.apply_at(
+            vec![draft(rid, Severity::Low, &[("pkg", "a")], ts)],
+            &pol,
+            ts,
+        );
+        assert!(
+            c.emit.is_empty(),
+            "with a seq now registered, the repeat collapses (no re-emit)"
+        );
+        assert!(
+            c.patches.iter().any(|p| p.seq == 7777 && p.count == 3),
+            "recurrence now patches the registered bucket row (seq 7777) to count 3"
         );
     }
 

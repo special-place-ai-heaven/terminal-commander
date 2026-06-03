@@ -23,6 +23,77 @@ use tokio::sync::oneshot;
 use crate::noise_pipeline::ProbeNoisePipeline;
 use crate::process::{EventSink, InMemorySink};
 
+/// Stable identity of an open file, used to detect rotation that a
+/// size comparison alone misses (H2). A logrotate `create` /
+/// atomic-rename whose replacement file already reached or passed the
+/// old read position is NOT a size shrink, so without identity we
+/// would seek into the middle of the NEW file and emit a corrupt
+/// mid-line fragment. Captured from the OPEN handle so the identity
+/// reflects the file we are actually reading.
+///
+/// - Unix: `(st_dev, st_ino)` from the metadata.
+/// - Windows: `(dwVolumeSerialNumber, nFileIndexHigh:nFileIndexLow)`
+///   read via `GetFileInformationByHandle` on the open handle. The std
+///   `MetadataExt` accessors for these are unstable
+///   (`windows_by_handle`, rust-lang/rust#63010) and unusable on
+///   stable, so we read the same kernel fields directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    /// Device / volume the file lives on.
+    device: u64,
+    /// Inode / file-index uniquely identifying the file on that device.
+    inode: u64,
+}
+
+impl FileIdentity {
+    /// Capture a stable identity for the open file. `meta` is used on
+    /// Unix; the open `file` handle is used on Windows. Returns `None`
+    /// when the platform cannot supply an identity; a `None` identity
+    /// is treated as "unknown" and never triggers a false rotation.
+    #[cfg(unix)]
+    // Option return is required for cross-platform API uniformity: the
+    // Windows path can legitimately yield `None`.
+    #[allow(clippy::unnecessary_wraps)]
+    fn capture(_file: &File, meta: &std::fs::Metadata) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(Self {
+            device: meta.dev(),
+            inode: meta.ino(),
+        })
+    }
+
+    #[cfg(windows)]
+    fn capture(file: &File, _meta: &std::fs::Metadata) -> Option<Self> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+
+        let handle = file.as_raw_handle() as HANDLE;
+        // SAFETY: `handle` is a valid, open file handle for the lifetime
+        // of `file` (borrowed for this call). `GetFileInformationByHandle`
+        // only reads from the handle and writes into `info`, which is a
+        // properly aligned, fully owned `BY_HANDLE_FILE_INFORMATION`. We
+        // check the BOOL result before reading any field.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe { GetFileInformationByHandle(handle, &raw mut info) };
+        if ok == 0 {
+            return None;
+        }
+        let inode = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        Some(Self {
+            device: u64::from(info.dwVolumeSerialNumber),
+            inode,
+        })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn capture(_file: &File, _meta: &std::fs::Metadata) -> Option<Self> {
+        None
+    }
+}
+
 /// Default polling interval.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -175,6 +246,10 @@ async fn run(
     let mut pos: u64 = 0;
     let mut line_no: u64 = 0;
     let mut last_size: Option<u64> = None;
+    // H2: track the identity of the file we last read so a rotation
+    // that keeps (or grows) the size — a logrotate `create` /
+    // atomic-rename — is still detected and `pos` reset to 0.
+    let mut last_identity: Option<FileIdentity> = None;
     let mut noise_pipeline = ProbeNoisePipeline::with_default_policy();
 
     loop {
@@ -191,7 +266,9 @@ async fn run(
             }
             Err(e) => return Err(FileProbeError::Io(e)),
             Ok(mut f) => {
-                let size = f.metadata().await?.len();
+                let meta = f.metadata().await?;
+                let size = meta.len();
+                let identity = FileIdentity::capture(&f, &meta);
                 // Initial seek for FollowEnd on first open.
                 if last_size.is_none() {
                     match config.mode {
@@ -203,19 +280,42 @@ async fn run(
                         }
                     }
                 }
-                // Truncation / rotation detection: size decreased.
-                if let Some(prev) = last_size
+                // Rotation / truncation detection. Two independent
+                // signals, checked identity-first:
+                //
+                // H2 (rotation): the file we are now reading is a
+                //   DIFFERENT file than last poll (a logrotate
+                //   `create` / atomic-rename). This is missed by a
+                //   size comparison when the new file already reached
+                //   or passed the old `pos`; without it we would seek
+                //   into the middle of the new file and emit a corrupt
+                //   mid-line fragment. Only fires when BOTH identities
+                //   are known and differ.
+                //
+                // L2 (truncation): the same file shrank in place
+                //   (`size < prev`). ANY in-place shrink is a
+                //   truncation, not only a shrink to exactly 0 (a
+                //   truncate-then-write leaves a small non-zero size).
+                //
+                // Both reset `pos = 0` so the next read starts at the
+                // head of the (new or truncated) content.
+                let rotated = match (last_identity, identity) {
+                    (Some(prev), Some(curr)) => prev != curr,
+                    _ => false,
+                };
+                if rotated {
+                    let mut m = metrics.lock();
+                    m.rotations_detected = m.rotations_detected.saturating_add(1);
+                    pos = 0;
+                } else if let Some(prev) = last_size
                     && size < prev
                 {
                     let mut m = metrics.lock();
-                    if size == 0 {
-                        m.truncations_detected = m.truncations_detected.saturating_add(1);
-                    } else {
-                        m.rotations_detected = m.rotations_detected.saturating_add(1);
-                    }
+                    m.truncations_detected = m.truncations_detected.saturating_add(1);
                     pos = 0;
                 }
                 last_size = Some(size);
+                last_identity = identity;
 
                 if pos < size {
                     f.seek(SeekFrom::Start(pos)).await?;
@@ -572,6 +672,127 @@ mod tests {
                 m.truncations_detected >= 1,
                 "truncations: {}",
                 m.truncations_detected
+            );
+            let _ = std::fs::remove_file(&p);
+        });
+    }
+
+    #[test]
+    fn file_probe_nonzero_shrink_counts_as_truncation_not_rotation() {
+        // L2: a truncate-then-write that leaves a SMALL NON-ZERO size is
+        // an in-place truncation, not a rotation. `set_len` shrinks the
+        // file in place (same inode, no 0-byte transition), so the probe
+        // observes a direct large -> small-non-zero step. The old code
+        // counted any non-zero shrink as a rotation; it must now be a
+        // truncation, and never a rotation (identity is unchanged).
+        let runtime = rt();
+        runtime.block_on(async {
+            let p = temp_path("nonzero-shrink");
+            {
+                let mut f = std::fs::File::create(&p).unwrap();
+                writeln!(f, "ERROR a fairly long first line of content").unwrap();
+            }
+            let rings = Arc::new(ContextRingManager::new());
+            let sifter = Arc::new(SifterRuntime::build(&[rule_error()]).unwrap());
+            let cfg = FileProbeConfig::follow_beginning(p.clone(), BucketId::new());
+            let (mut probe, _sink) = spawn_with_sink(cfg, rings, sifter).unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            // Shrink in place to a non-zero size via a single ftruncate
+            // (no intermediate 0-byte state, same inode).
+            {
+                let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+                f.set_len(8).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            probe.cancel();
+            let _ = probe.wait().await;
+            let m = probe.metrics();
+            assert!(
+                m.truncations_detected >= 1,
+                "a non-zero in-place shrink must be a truncation; truncations: {}",
+                m.truncations_detected
+            );
+            assert_eq!(
+                m.rotations_detected, 0,
+                "a same-inode in-place shrink must NOT be a rotation; rotations: {}",
+                m.rotations_detected
+            );
+            let _ = std::fs::remove_file(&p);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_probe_rotation_same_or_larger_size_detected_via_identity() {
+        // H2: replace the watched file with a NEW inode whose size is >=
+        // the old size (an atomic-rename / logrotate `create`). A size
+        // comparison alone misses this (size did not shrink), so without
+        // identity tracking the probe would seek to the old `pos` in the
+        // NEW file, drop its leading bytes, and emit a corrupt mid-line
+        // fragment. With identity tracking the rotation is detected, `pos`
+        // resets to 0, and the new file's FIRST line (which contains a
+        // keyword living entirely within the dropped region) is read
+        // cleanly and fires an event.
+        let runtime = rt();
+        runtime.block_on(async {
+            let p = temp_path("rotate-identity");
+            let dir = p.parent().unwrap().to_path_buf();
+            // First-generation file: read fully so `pos` advances to its
+            // end. Does NOT contain the SECONDGEN keyword.
+            {
+                let mut f = std::fs::File::create(&p).unwrap();
+                writeln!(f, "first generation only, no marker here at all").unwrap();
+            }
+            let old_size = std::fs::metadata(&p).unwrap().len();
+
+            let rings = Arc::new(ContextRingManager::new());
+            // Rule keyed to a token that exists ONLY at the very start of
+            // the NEW file's first line — inside the byte range the buggy
+            // mid-file seek would drop.
+            let rule = {
+                let mut r = rule_error();
+                r.id = "test.secondgen".to_owned();
+                r.event_kind = "kw_secondgen".to_owned();
+                r.keywords = Some(vec!["SECONDGEN".to_owned()]);
+                r
+            };
+            let sifter = Arc::new(SifterRuntime::build(&[rule]).unwrap());
+            let cfg = FileProbeConfig::follow_beginning(p.clone(), BucketId::new());
+            let (mut probe, sink) = spawn_with_sink(cfg, rings, sifter).unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // Build a replacement file (NEW inode) whose size is >= the
+            // old size, with SECONDGEN at the head, then atomically rename
+            // it over the watched path.
+            let new_path = dir.join(format!("tc-rotate-new-{}", std::process::id()));
+            {
+                let mut f = std::fs::File::create(&new_path).unwrap();
+                let mut line = String::from("SECONDGEN marker leads the new file");
+                // Pad so the new file is at least as large as the old one,
+                // ensuring `size < prev` is FALSE (the H2 case).
+                while (line.len() as u64) < old_size + 8 {
+                    line.push('x');
+                }
+                writeln!(f, "{line}").unwrap();
+            }
+            std::fs::rename(&new_path, &p).unwrap();
+
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            probe.cancel();
+            let _ = probe.wait().await;
+
+            let m = probe.metrics();
+            assert!(
+                m.rotations_detected >= 1,
+                "same-or-larger-size rotation must be detected via identity; rotations: {}",
+                m.rotations_detected
+            );
+            let drained = sink.drain();
+            assert!(
+                drained.iter().any(|d| d.kind == "kw_secondgen"),
+                "the new file's leading line must be read from the head (no dropped \
+                 bytes / corrupt fragment); emitted kinds: {:?}",
+                drained.iter().map(|d| d.kind.as_str()).collect::<Vec<_>>()
             );
             let _ = std::fs::remove_file(&p);
         });

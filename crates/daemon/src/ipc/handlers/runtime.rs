@@ -60,7 +60,9 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
     }
 
     // PtyRuntime: list returns (job_id, bucket_id, probe_id, argv, metrics, secret_active).
-    // PTY exit is not wired through this list path: present -> Running.
+    // The binding lingers after exit (like command's), so liveness is the
+    // authoritative JobState from the ledger via `PtyRuntime::liveness`, NOT
+    // live-map presence: a terminated PTY reports Exited{code}/Failed/Cancelled.
     #[cfg(unix)]
     for (jid, bid, pid, _argv, m, secret) in state.pty.list() {
         out.push(ProbeListEntry {
@@ -76,7 +78,7 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
             secret_prompts_total: m.secret_prompts_total,
             secret_prompt_active: secret,
             path: None,
-            liveness: Liveness::Running,
+            liveness: state.pty.liveness(jid),
         });
     }
 

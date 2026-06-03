@@ -238,16 +238,16 @@
     },
     {
       "name": "subscription_seek",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/subscription_seek.v1.json",
+      "status": "covered_live"
     }
   ],
   "obsolete_fixtures": [],
   "counts": {
     "live_tools": 37,
-    "covered_live": 32,
+    "covered_live": 33,
     "placeholder_for_live_tool": 0,
-    "missing_fixture": 5,
+    "missing_fixture": 4,
     "obsolete_fixture_present": 0
   }
 }

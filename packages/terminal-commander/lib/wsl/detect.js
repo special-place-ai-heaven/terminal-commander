@@ -36,6 +36,14 @@
 "use strict";
 
 const { spawn } = require("node:child_process");
+// Import the env helpers from the LEAF module `filtered_env.js`, NOT from
+// `spawn.js`. `spawn.js` requires `./detect.js`, so requiring it back here
+// would form a circular dependency (detect.js would see a partial `{}` export
+// at load and the helpers would be `undefined` at call time).
+const {
+  buildFilteredEnv,
+  ensureSessionInWslEnv,
+} = require("./filtered_env.js");
 
 const DETECT_REASONS = Object.freeze({
   OK: "ok",
@@ -63,6 +71,17 @@ function defaultExec({ wslPath, argv, timeoutMs }) {
       child = spawn(wslPath, argv, {
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
+        // Never let the spawned wsl.exe inherit the full ambient process.env.
+        // `buildFilteredEnv` drops secret-shaped vars by name;
+        // `ensureSessionInWslEnv` then rebuilds WSLENV to the TC-only allowlist
+        // (TC_SESSION/u) or drops it, so an ambient `WSLENV=SECRET/u` cannot
+        // forward credentials across the Windows->WSL boundary. The discovery
+        // call here is host-side `wsl -l -v` (launches no Linux process), so
+        // WSLENV forwarding is moot for it, but this keeps every wsl.exe spawn
+        // site uniform with the doctor runtime probe and closes the leak by
+        // construction. Helpers come from filtered_env.js to avoid a require
+        // cycle through spawn.js (see import note above).
+        env: ensureSessionInWslEnv(buildFilteredEnv(process.env)),
       });
     } catch (err) {
       resolve({

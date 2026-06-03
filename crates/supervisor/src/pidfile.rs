@@ -28,6 +28,16 @@ pub fn pidfile_path(state_dir: &Path) -> PathBuf {
     state_dir.join("terminal-commanderd.pid")
 }
 
+/// Path to the cross-process bring-up lock, a sibling of the pidfile.
+/// Held (advisory, non-blocking) around the probe -> spawn (and probe
+/// -> kill -> spawn) critical section so two cold-starting adapters
+/// single-flight daemon launch instead of racing to orphan each other's
+/// daemon (H6). The lock *file* itself carries no liveness meaning; see
+/// `proc_lock` for why it is never deleted.
+pub fn lock_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("terminal-commanderd.lock")
+}
+
 /// Write the pidfile atomically (tmp + rename).
 pub fn write_pidfile(state_dir: &Path, rec: &RunningDaemon) -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir)?;

@@ -957,7 +957,34 @@ pub struct RegistryImportPackResponse {
     pub pack: String,
     pub imported: Vec<String>,
     pub skipped: Vec<String>,
+    /// Rules that imported AND activated successfully. Only the rules
+    /// whose activation completed appear here; a rule listed in
+    /// `imported` but missing from both `activated` and `failed` means
+    /// `activate` was false (nothing was activated).
     pub activated: Vec<String>,
+    /// Partial-success channel (M7): rules that imported and were
+    /// promoted to Active but whose *activation* failed mid-loop. Each
+    /// entry carries the rule id + a human-readable reason. This is an
+    /// ADDITIVE field: it serializes only when non-empty, so the
+    /// all-success wire shape is unchanged and older clients that do
+    /// not know the field still deserialize. A non-empty `failed` is
+    /// still a SUCCESSFUL response (no IPC error code) -- the caller
+    /// inspects `failed` to learn which rules need a retry rather than
+    /// receiving a bare error that hides the rules that did activate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<RegistryImportFailure>,
+}
+
+/// One rule whose activation failed during a partial-success import.
+///
+/// The rule WAS imported (and promoted to Active in the store) by
+/// `registry_import_pack`; only the in-memory/durable activation step
+/// failed. `reason` is the typed IPC error message surfaced to the
+/// caller so it can decide whether to retry that single rule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegistryImportFailure {
+    pub rule_id: String,
+    pub reason: String,
 }
 
 /// `registry_deactivate` parameters. Scope follows the same default

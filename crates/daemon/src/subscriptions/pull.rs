@@ -596,13 +596,13 @@ fn commit(
             s.offsets.insert(*bid, *off);
         }
         s.rr_start = next_rr;
-        s.last_pull_at = Some(std::time::Instant::now());
+        s.last_pull_at = Some(std::time::SystemTime::now());
     });
 }
 
 /// Stamp `last_pull_at` without touching offsets. Silently no-ops if closed.
 fn mark_pulled(state: &Arc<DaemonState>, sub_id: Uuid) {
     let _ = state.subscriptions.with_sub_mut(sub_id, |s| {
-        s.last_pull_at = Some(std::time::Instant::now());
+        s.last_pull_at = Some(std::time::SystemTime::now());
     });
 }

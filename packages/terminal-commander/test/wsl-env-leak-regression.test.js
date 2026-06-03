@@ -58,6 +58,7 @@ const {
   ensureDaemonAutostartInWsl,
 } = require("../lib/bootstrap/ensure_daemon_autostart.js");
 const { runInstallProbe } = require("../lib/cli/setup_cursor_wsl.js");
+const { detectWsl } = require("../lib/wsl/detect.js");
 const { wslDoctor } = require("../lib/wsl/doctor.js");
 const { runDoctorDaemon } = require("../lib/cli/doctor_daemon.js");
 
@@ -260,4 +261,67 @@ test("cli/doctor_daemon: ambient WSLENV does not survive into the live wsl spawn
   );
   assert.ok(probe, "expected a `wsl -d <distro> -- bash -lc ...` daemon probe spawn");
   assertWslenvSanitizedWithSession(probe.env, "cli/doctor_daemon");
+});
+
+// M10: wsl/detect.js `defaultExec` is a direct-spawn site. Its only call is the
+// host-side discovery `wsl.exe -l -v`, which launches no Linux process, so
+// WSLENV forwarding is moot for it in practice — but it previously passed NO
+// `env` at all, so the spawned wsl.exe inherited the FULL ambient process.env
+// (every secret-shaped var) by default. The fix routes the spawn env through
+// `ensureSessionInWslEnv(buildFilteredEnv(process.env))`, identical to the
+// doctor runtime probe. This asserts (a) an ambient secret-shaped var is
+// stripped from the spawn env and (b) WSLENV is reduced to the TC-only
+// allowlist. The detect spawn is identified by its `-l` argv (no `-d`).
+test("wsl/detect discovery: spawn drops ambient secrets and sanitizes WSLENV", async () => {
+  spawnCalls.length = 0;
+  const prevSession = process.env.TC_SESSION;
+  const prevWslenv = process.env.WSLENV;
+  const prevExplicitSecret = process.env.ANTHROPIC_API_KEY;
+  const prevPatternSecret = process.env.MY_AMBIENT_SECRET;
+  process.env.TC_SESSION = "tc-detect01";
+  process.env.WSLENV = AMBIENT_SECRET;
+  // (a) Two flavours of secret-shaped var that buildFilteredEnv must strip:
+  //   - explicit allowlist key
+  //   - name pattern match (/_SECRET$/i)
+  process.env.ANTHROPIC_API_KEY = "sk-ant-LEAK-ME-IF-YOU-DARE";
+  process.env.MY_AMBIENT_SECRET = "do-not-forward";
+  try {
+    await detectWsl({
+      platform: "win32",
+      wslPath: "wsl.exe",
+      timeoutMs: 5000,
+    });
+  } finally {
+    if (prevSession === undefined) delete process.env.TC_SESSION;
+    else process.env.TC_SESSION = prevSession;
+    if (prevWslenv === undefined) delete process.env.WSLENV;
+    else process.env.WSLENV = prevWslenv;
+    if (prevExplicitSecret === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prevExplicitSecret;
+    if (prevPatternSecret === undefined) delete process.env.MY_AMBIENT_SECRET;
+    else process.env.MY_AMBIENT_SECRET = prevPatternSecret;
+  }
+  // The discovery spawn is `wsl.exe -l -v` (no `-d`).
+  const discovery = spawnCalls.find(
+    (c) => Array.isArray(c.argv) && c.argv.includes("-l") && !c.argv.includes("-d"),
+  );
+  assert.ok(discovery, "expected a `wsl -l -v` discovery spawn");
+  assert.ok(
+    discovery.env,
+    "wsl/detect: spawn must pass an explicit env (not inherit ambient process.env)",
+  );
+  // (a) ambient secret-shaped vars must NOT be present in the spawn env.
+  assert.equal(
+    "ANTHROPIC_API_KEY" in discovery.env,
+    false,
+    "wsl/detect: explicit secret key must be stripped from the spawn env",
+  );
+  assert.equal(
+    "MY_AMBIENT_SECRET" in discovery.env,
+    false,
+    "wsl/detect: pattern-matched secret var must be stripped from the spawn env",
+  );
+  // (b) WSLENV must be reduced to the TC-only allowlist, with no ambient
+  //     credential forwarding.
+  assertWslenvSanitizedWithSession(discovery.env, "wsl/detect");
 });

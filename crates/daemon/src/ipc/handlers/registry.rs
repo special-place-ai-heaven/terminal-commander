@@ -8,9 +8,10 @@ use crate::ipc::protocol::{
     IpcError, IpcErrorCode, IpcResponse, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
     RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
     RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
-    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
-    RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse, RegistryTestMatch,
-    RegistryTestParams, RegistryTestResponse, RegistryUpsertParams, RegistryUpsertResponse,
+    RegistryImportFailure, RegistryImportPackParams, RegistryImportPackResponse,
+    RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
+    RegistryTestMatch, RegistryTestParams, RegistryTestResponse, RegistryUpsertParams,
+    RegistryUpsertResponse,
 };
 use crate::state::DaemonState;
 
@@ -270,29 +271,63 @@ pub(in crate::ipc::server) fn handle_registry_import_pack(
         .store
         .import_rule_pack_by_name(&params.pack, params.activate)
         .map_err(map_store_error)?;
-    let mut activated = Vec::new();
-    if params.activate {
-        // Reuse the canonical activate path per rule (no fourth copy):
-        // it looks up the now-Active stored def, passes the
-        // eligibility gate, activates, records, and rebinds live jobs.
-        for rule_id in &import.imported {
-            let aparams = RegistryActivateParams {
-                rule_id: rule_id.clone(),
-                version: None, // latest = the just-imported Active version
-                scope: params.scope,
-            };
-            handle_registry_activate(state, &aparams)?;
-            activated.push(rule_id.clone());
-        }
-    }
+    // M7 (partial-success): activate each imported rule, collecting
+    // per-rule outcomes instead of `?`-bailing on the first failure.
+    let (activated, failed) = match params.scope {
+        Some(scope) if params.activate => activate_imported_rules(state, &import.imported, scope),
+        _ => (Vec::new(), Vec::new()),
+    };
     Ok(IpcResponse::RegistryImportPack(
         RegistryImportPackResponse {
             pack: import.pack,
             imported: import.imported,
             skipped: import.skipped,
             activated,
+            failed,
         },
     ))
+}
+
+/// M7 (partial-success): activate each imported rule independently,
+/// returning `(activated, failed)`. A mid-loop failure previously
+/// `?`-bailed, leaving rules 0..N-1 active + persisted and the pack
+/// imported while the caller received ONLY a bare error -- it could not
+/// tell which rules already activated, so it could not safely retry.
+///
+/// Now every rule's activation is independent: a success lands in
+/// `activated`, a failure lands in `failed` with its typed reason, and
+/// the loop continues. One rule's failure never rolls back the rules
+/// that already activated, and the failed rule's own activate is
+/// internally `?`-safe (durability-first ordering in
+/// [`handle_registry_activate`] never leaves a half-applied
+/// activation). The caller wraps this in a SUCCESSFUL
+/// `RegistryImportPack` response: a non-empty `failed` is a partial
+/// success, not an IPC error code.
+fn activate_imported_rules(
+    state: &Arc<DaemonState>,
+    rule_ids: &[String],
+    scope: terminal_commander_core::ActivationScope,
+) -> (Vec<String>, Vec<RegistryImportFailure>) {
+    let mut activated = Vec::new();
+    let mut failed = Vec::new();
+    for rule_id in rule_ids {
+        // Reuse the canonical activate path per rule (no fourth copy):
+        // it looks up the now-Active stored def, passes the eligibility
+        // gate, activates, records, and rebinds live jobs.
+        let aparams = RegistryActivateParams {
+            rule_id: rule_id.clone(),
+            version: None, // latest = the just-imported Active version
+            scope: Some(scope),
+        };
+        match handle_registry_activate(state, &aparams) {
+            Ok(_) => activated.push(rule_id.clone()),
+            Err(e) => failed.push(RegistryImportFailure {
+                rule_id: rule_id.clone(),
+                reason: e.message,
+            }),
+        }
+    }
+    (activated, failed)
 }
 
 /// Versions of `rule_id` currently active under `scope`, sorted
@@ -442,4 +477,169 @@ pub(in crate::ipc::server) fn handle_registry_list_active(
     let truncated = all.len() > limit;
     let entries: Vec<_> = all.into_iter().take(limit).collect();
     IpcResponse::RegistryListActive(RegistryListActiveResponse { entries, truncated })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use terminal_commander_core::{
+        ActivationScope, ContextHint, RuleDefinition, RuleStatus, RuleType, Severity,
+    };
+
+    fn unique_data_dir(tag: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        p.push(format!("tc-import-pack-{tag}-{pid}-{nanos}-{n}"));
+        p
+    }
+
+    fn state_for(data: &std::path::Path) -> Arc<DaemonState> {
+        let cfg = crate::config::DaemonConfig::defaults_in(data);
+        Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"))
+    }
+
+    fn rule(id: &str, status: RuleStatus) -> RuleDefinition {
+        RuleDefinition {
+            id: id.to_owned(),
+            version: 1,
+            kind: RuleType::Keyword,
+            status,
+            severity: Severity::Medium,
+            event_kind: "test".to_owned(),
+            stream: None,
+            description: None,
+            pattern: None,
+            keywords: Some(vec!["boom".to_owned()]),
+            captures: vec![],
+            summary_template: "matched boom".to_owned(),
+            tags: vec![],
+            rate_limit_per_min: None,
+            redact: vec![],
+            context_hint: ContextHint::default(),
+            examples: vec![],
+        }
+    }
+
+    /// M7: when one imported rule's activation fails mid-loop, the import
+    /// must return a PARTIAL-SUCCESS split -- `activated[]` carries the
+    /// rules that succeeded and `failed[]` carries the bad one with a
+    /// reason -- NOT a bare error that hides the rules that did activate.
+    /// The daemon's in-memory activation state must agree with the split:
+    /// the good rule is active, the bad rule is not.
+    #[test]
+    fn one_failed_activation_yields_partial_success_not_bare_error() {
+        let data = unique_data_dir("partial");
+        let state = state_for(&data);
+
+        // Seed two rules directly in the store, bypassing the pack
+        // re-promote so the eligibility gate diverges per rule:
+        //   - `good.rule` latest = Active  -> activation eligible
+        //   - `bad.rule`  latest = Draft   -> activation rejected
+        //     (RuleNotActive) by handle_registry_activate's gate.
+        state
+            .store
+            .create_rule_version(&rule("good.rule", RuleStatus::Active))
+            .expect("seed good rule");
+        state
+            .store
+            .create_rule_version(&rule("bad.rule", RuleStatus::Draft))
+            .expect("seed bad rule");
+
+        let ids = vec!["good.rule".to_owned(), "bad.rule".to_owned()];
+        let (activated, failed) = activate_imported_rules(&state, &ids, ActivationScope::Global);
+
+        // The good rule activated; the bad one is reported as failed --
+        // and the call returned BOTH lists, never a bare error.
+        assert_eq!(
+            activated,
+            vec!["good.rule".to_owned()],
+            "good rule must activate"
+        );
+        assert_eq!(failed.len(), 1, "exactly one rule must fail: {failed:?}");
+        assert_eq!(failed[0].rule_id, "bad.rule");
+        assert!(
+            failed[0].reason.contains("not runtime-eligible") || failed[0].reason.contains("Draft"),
+            "failure reason should explain the ineligibility, got: {}",
+            failed[0].reason
+        );
+
+        // Daemon state matches the split: good active, bad NOT active.
+        assert!(
+            state
+                .activation
+                .is_active("good.rule", 1, ActivationScope::Global),
+            "the activated rule must be live in the in-memory set"
+        );
+        assert!(
+            !state
+                .activation
+                .is_active("bad.rule", 1, ActivationScope::Global),
+            "the failed rule must NOT be live in the in-memory set"
+        );
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// M7: the all-success path keeps the original shape -- every rule in
+    /// `activated`, `failed` empty -- so the additive field never changes
+    /// the wire shape when nothing fails.
+    #[test]
+    fn all_eligible_rules_activate_with_empty_failed() {
+        let data = unique_data_dir("allok");
+        let state = state_for(&data);
+        state
+            .store
+            .create_rule_version(&rule("a.rule", RuleStatus::Active))
+            .expect("seed a");
+        state
+            .store
+            .create_rule_version(&rule("b.rule", RuleStatus::Active))
+            .expect("seed b");
+
+        let ids = vec!["a.rule".to_owned(), "b.rule".to_owned()];
+        let (activated, failed) = activate_imported_rules(&state, &ids, ActivationScope::Global);
+
+        assert_eq!(activated, ids, "all rules must activate");
+        assert!(failed.is_empty(), "no rule should fail: {failed:?}");
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// M7 wire-shape: `failed` serializes only when non-empty, so the
+    /// all-success response keeps the historical 4-field JSON and older
+    /// clients that never knew `failed` still deserialize it.
+    #[test]
+    fn empty_failed_is_omitted_from_serialized_response() {
+        let resp = RegistryImportPackResponse {
+            pack: "cargo".to_owned(),
+            imported: vec!["cargo.compile-error".to_owned()],
+            skipped: vec![],
+            activated: vec!["cargo.compile-error".to_owned()],
+            failed: vec![],
+        };
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert!(
+            json.get("failed").is_none(),
+            "empty `failed` must be omitted to preserve the additive wire shape, got: {json}"
+        );
+
+        // A non-empty `failed` serializes as [{rule_id, reason}].
+        let resp2 = RegistryImportPackResponse {
+            failed: vec![RegistryImportFailure {
+                rule_id: "bad.rule".to_owned(),
+                reason: "not runtime-eligible".to_owned(),
+            }],
+            ..resp
+        };
+        let json2 = serde_json::to_value(&resp2).expect("serialize");
+        let failed = json2.get("failed").expect("failed present when non-empty");
+        assert_eq!(failed[0]["rule_id"], "bad.rule");
+        assert_eq!(failed[0]["reason"], "not runtime-eligible");
+    }
 }

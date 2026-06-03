@@ -68,8 +68,13 @@ fn initial_offsets(
 
 /// Milliseconds since the Unix epoch right now (wall clock for wire stamps).
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    system_time_ms(std::time::SystemTime::now())
+}
+
+/// Convert a wall-clock [`SystemTime`] to milliseconds since the Unix epoch
+/// for wire stamps. A pre-epoch time (clock skew) saturates to 0.
+fn system_time_ms(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
@@ -165,11 +170,11 @@ pub(in crate::ipc::server) fn handle_subscription_list(
             sub_id: s.sub_id.to_string(),
             predicate_hash: s.predicate_hash.to_string(),
             source_count: u32::try_from(s.source_count).unwrap_or(u32::MAX),
-            created_at_ms: now_ms(),
-            // `Instant` is not wall-clock convertible; surface the last-pull
-            // recency only as presence (a wall-clock stamp would require
-            // storing a `SystemTime` per pull, out of Phase 1 scope).
-            last_pull_at_ms: s.last_pull_at.map(|_| now_ms()),
+            // True wall-clock stamps: `created_at` is captured at open and
+            // `last_pull_at` per pull (both `SystemTime`), so these report WHEN
+            // the events happened, not when this list call ran.
+            created_at_ms: system_time_ms(s.created_at),
+            last_pull_at_ms: s.last_pull_at.map(system_time_ms),
         })
         .collect();
     IpcResponse::SubscriptionList(SubscriptionListResponse {

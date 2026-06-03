@@ -44,6 +44,6 @@ pub use process::{
 pub use pty::{AnsiNormalizer, PromptDetector, PromptKind};
 #[cfg(unix)]
 pub use pty::{
-    DEFAULT_PTY_GRACE, MAX_PTY_STDIN_BYTES, PtyProbe, PtyProbeConfig, PtyProbeError,
-    PtyProbeMetrics, WriteStdinError,
+    DEFAULT_PTY_GRACE, MAX_PTY_STDIN_BYTES, PtyExitOutcome, PtyProbe, PtyProbeConfig,
+    PtyProbeError, PtyProbeMetrics, WriteStdinError,
 };
