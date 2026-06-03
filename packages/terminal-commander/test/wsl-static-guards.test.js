@@ -308,20 +308,31 @@ test("spawn.js does not invoke lazy bootstrap or runtime install helpers", () =>
   }
 });
 
-test("detect.js does not forward any env var to the spawn call", () => {
-  // detect.js spawn() options must NOT include an `env:` key. Its only
-  // spawn is `wsl.exe -l -v`, a host-side WSL management command that
-  // launches NO Linux process, so WSLENV forwarding is moot there and
-  // the default (inherit) env is acceptable. We strip comments + strings
-  // first so doc examples don't trip the guard.
-  const src = stripCommentsAndStrings(readSource("detect.js"));
-  const spawnIdx = [...src.matchAll(/\bspawn\s*\(/g)].map((m) => m.index);
+test("detect.js spawn sanitizes env (no raw process.env leak) [M10]", () => {
+  // SECURITY (M10): detect.js's only spawn is `wsl.exe -l -v`, a host-side WSL
+  // management command that launches NO Linux process, so WSLENV forwarding is
+  // moot there. But passing NO `env:` made the child inherit the FULL ambient
+  // process.env (every secret-shaped var) by default. The fix routes the spawn
+  // env through `ensureSessionInWslEnv(buildFilteredEnv(...))`, identical to the
+  // doctor runtime probe, so the guard now enforces that sanitized chain and
+  // forbids a raw process.env. We strip comments + strings first so doc
+  // examples don't trip the guard.
+  const code = stripCommentsAndStrings(readSource("detect.js"));
+  const spawnIdx = [...code.matchAll(/\bspawn\s*\(/g)].map((m) => m.index);
+  assert.ok(spawnIdx.length > 0, "detect.js should call spawn");
   for (const idx of spawnIdx) {
-    const window = src.slice(idx, idx + 400);
+    const window = code.slice(idx, idx + 600);
+    // The spawn MUST set env, and the value MUST be the sanitized chain.
+    assert.match(
+      window,
+      /\benv\s*:\s*ensureSessionInWslEnv\s*\(\s*buildFilteredEnv\s*\(/,
+      `detect.js spawn at index ${idx} must set env: ensureSessionInWslEnv(buildFilteredEnv(...)); got:\n${window.slice(0, 400)}`,
+    );
+    // Never pass a bare process.env to env: (it must be wrapped).
     assert.equal(
-      /\benv\s*:/.test(window),
+      /\benv\s*:\s*process\.env\b/.test(window),
       false,
-      `detect.js spawn at index ${idx} must not set env:`,
+      `detect.js spawn at index ${idx} must not pass raw process.env to env:; got:\n${window.slice(0, 400)}`,
     );
   }
 });
