@@ -269,6 +269,9 @@ pub struct CommandRuntime {
     /// with the per-call inline rules before the per-job
     /// `SifterRuntime` is built (TC42) or rebuilt (TC42b).
     activation: Arc<ActivationRegistry>,
+    /// Bucket source side-table (subscriptions MUST-ADD #2). Recorded
+    /// at `start_combed` immediately after `bucket_create`.
+    sources: Arc<crate::subscriptions::source::BucketSourceTable>,
 }
 
 impl std::fmt::Debug for CommandRuntime {
@@ -293,6 +296,7 @@ impl CommandRuntime {
         audit: Arc<dyn AuditSink>,
         policy: PolicyEngine,
         activation: Arc<ActivationRegistry>,
+        sources: Arc<crate::subscriptions::source::BucketSourceTable>,
     ) -> Self {
         let profile_label = match policy.profile {
             PolicyProfile::DeveloperLocal => "developer_local".to_owned(),
@@ -309,6 +313,7 @@ impl CommandRuntime {
             profile_label,
             live: Arc::new(RwLock::new(std::collections::HashMap::default())),
             activation,
+            sources,
         }
     }
 
@@ -467,6 +472,18 @@ impl CommandRuntime {
         // here guarantees we will not orphan it on a rule-compile error.
         let bucket_cfg = req.bucket_config.unwrap_or_default();
         self.router.bucket_create(bucket_id, bucket_cfg)?;
+        // Record the bucket's source identity for subscription routing
+        // (MUST-ADD #2). Bumps the side-table dirty epoch so a `sources: all`
+        // subscription picks this new bucket up on its next pull.
+        self.sources.record(
+            bucket_id,
+            crate::subscriptions::source::BucketSource {
+                kind: terminal_commander_ipc::ProbeKind::Command,
+                job_id: Some(job_id),
+                probe_id: Some(probe_id),
+                path: None,
+            },
+        );
         // Keep a handle for the live binding so TC42b's
         // `rebind_all_jobs` can swap this job's rule set without
         // restarting the probe.

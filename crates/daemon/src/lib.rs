@@ -28,6 +28,7 @@ pub mod router;
 pub mod runtime;
 pub mod state;
 pub mod store_actor;
+pub mod subscriptions;
 
 pub use activation::{ActivationRegistry, ActivationRegistryHandle};
 pub use audit::{AuditSink, InMemoryAudit, PersistentAudit};
@@ -86,3 +87,9 @@ pub use runtime::{
     RuntimeError, SelfCheckReport, run_foreground_idle, run_ipc_server, run_self_check,
 };
 pub use state::{BootstrapError, DaemonState};
+pub use subscriptions::model::{Predicate, SourceSel, Subscription};
+pub use subscriptions::pull::{
+    EventOrigin, PullOutcome, SourceLiveness, SubEvent, pull as subscription_pull,
+};
+pub use subscriptions::registry::{SubscriptionRegistry, SubscriptionSummary};
+pub use subscriptions::source::{BucketSource, BucketSourceTable};

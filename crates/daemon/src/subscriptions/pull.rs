@@ -1,0 +1,492 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 The Terminal Commander Authors
+
+//! Multiplexed, lossless `subscription_pull` engine (subscriptions §3) —
+//! the load-bearing correctness core.
+//!
+//! THE INVARIANT: within a pull pass, no `events_since` read for a bucket may
+//! precede that bucket's waiter ENROLLMENT, because the bucket signals with the
+//! permit-less `notify_waiters()` (no stored permit; only ENROLLED waiters
+//! wake). In tokio a `Notified` future enrolls into the waiter list only when
+//! FIRST POLLED or via `Notified::enable()` — NOT when created or pinned. So we
+//! create fresh `notified()` futures each loop iteration, `enable()` them to
+//! enroll, and ONLY THEN read offsets. The cursor/seq is the source of truth
+//! (lossless); `Notify` is a latency hint only.
+//!
+//! Fairness (v1): deterministic round-robin, per-bucket share `max(1, max/N)`,
+//! draining from `rr_start`, STOPPING the moment the running total reaches
+//! `max` (so `N > max` still returns `<= max`). Eviction reconciliation: if a
+//! stored offset has fallen behind a bucket's `head_seq` (events FIFO-evicted),
+//! clamp to `head_seq.saturating_sub(1)` (NOT `head_seq` — `events_since` reads
+//! strictly `seq > cursor`, and `head_seq` is the oldest SURVIVING event's own
+//! seq, so clamping to `head_seq` would skip that survivor) and flag `lagged`.
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use terminal_commander_core::{BucketId, BucketReadRequest, JobId, ProbeId, SignalEvent};
+use terminal_commander_ipc::{IpcError, IpcErrorCode, Liveness, MAX_BUCKETS_PER_SUBSCRIPTION};
+use tokio::sync::Notify;
+use uuid::Uuid;
+
+use crate::state::DaemonState;
+use crate::subscriptions::model::Predicate;
+use crate::subscriptions::source::BucketSource;
+
+/// Default hard cap on events returned by one pull when the caller omits a
+/// `max` (mirrors the wire `MAX_PULL_EVENTS` that Task 9 will add).
+pub const DEFAULT_PULL_MAX: usize = 50;
+/// Absolute hard cap on events per pull, independent of the caller's `max`.
+pub const MAX_PULL_MAX: usize = 50;
+
+/// Where a delivered event came from. Tags each event so a multiplexed
+/// consumer can attribute it without juggling N cursors.
+#[derive(Debug, Clone)]
+pub struct EventOrigin {
+    /// Bucket the event was read from.
+    pub bucket_id: BucketId,
+    /// Owning job (when the bucket's source recorded one).
+    pub job_id: Option<JobId>,
+    /// The event's per-bucket sequence number.
+    pub seq: u64,
+}
+
+/// A delivered event plus its source tag.
+#[derive(Debug, Clone)]
+pub struct SubEvent {
+    /// Provenance of this event.
+    pub origin: EventOrigin,
+    /// The matched signal event.
+    pub event: SignalEvent,
+}
+
+/// Per-source liveness entry returned with every pull (including idle pulls).
+#[derive(Debug, Clone)]
+pub struct SourceLiveness {
+    /// The in-scope bucket this entry describes.
+    pub bucket_id: BucketId,
+    /// Owning job, if recorded.
+    pub job_id: Option<JobId>,
+    /// Owning probe, if recorded.
+    pub probe_id: Option<ProbeId>,
+    /// Process / probe liveness (the single authoritative union).
+    pub liveness: Liveness,
+}
+
+/// The outcome of one pull: bounded events + per-source liveness + flags.
+#[derive(Debug, Clone)]
+pub struct PullOutcome {
+    /// Matched events, tagged by source, capped at `max`.
+    pub events: Vec<SubEvent>,
+    /// Per in-scope source liveness.
+    pub liveness: Vec<SourceLiveness>,
+    /// Any in-scope bucket dropped events under us (eviction lag).
+    pub lagged: bool,
+    /// The routing scan hit [`MAX_BUCKETS_PER_SUBSCRIPTION`] (more in-scope
+    /// buckets exist than were scanned this pull).
+    pub truncated: bool,
+}
+
+impl PullOutcome {
+    /// An idle outcome: no events, just liveness + flags.
+    const fn idle(liveness: Vec<SourceLiveness>, lagged: bool, truncated: bool) -> Self {
+        Self {
+            events: Vec::new(),
+            liveness,
+            lagged,
+            truncated,
+        }
+    }
+}
+
+/// One in-scope bucket resolved by the routing rebuild.
+struct ScopedBucket {
+    bucket_id: BucketId,
+    source: BucketSource,
+}
+
+/// The result of a routing rebuild for one pull.
+struct Scope {
+    /// In-scope buckets (capped at [`MAX_BUCKETS_PER_SUBSCRIPTION`]).
+    buckets: Vec<ScopedBucket>,
+    /// The subscription's per-bucket offsets (a working copy, committed back
+    /// only when events are delivered).
+    offsets: HashMap<BucketId, u64>,
+    /// Round-robin rotation cursor copied from the subscription.
+    rr_start: usize,
+    /// More buckets matched than the cap allowed.
+    truncated: bool,
+}
+
+/// Rebuild the in-scope bucket set: `list_bucket_ids()` ∩ side-table predicate
+/// match, capped. Returns the subscription's working offsets + rr cursor.
+///
+/// # Errors
+/// [`IpcErrorCode::UnknownSubscription`] if `sub_id` is not in the registry.
+fn scope_snapshot(state: &Arc<DaemonState>, sub_id: Uuid) -> Result<Scope, IpcError> {
+    // Copy the subscription's predicate, offsets, and rr cursor under the lock.
+    let (predicate, offsets, rr_start): (Predicate, HashMap<BucketId, u64>, usize) =
+        state.subscriptions.with_sub(sub_id, |s| {
+            (s.predicate.clone(), s.offsets.clone(), s.rr_start)
+        })?;
+
+    let mut buckets: Vec<ScopedBucket> = Vec::new();
+    let mut truncated = false;
+    for id in state.buckets.list_bucket_ids() {
+        let Some(source) = state.sources.get(id) else {
+            continue;
+        };
+        if predicate.bucket_in_scope(id, &source) {
+            if buckets.len() >= MAX_BUCKETS_PER_SUBSCRIPTION {
+                truncated = true;
+                break;
+            }
+            buckets.push(ScopedBucket {
+                bucket_id: id,
+                source,
+            });
+        }
+    }
+    // Deterministic order so rr rotation is stable across pulls.
+    buckets.sort_by_key(|b| b.bucket_id.to_string());
+
+    Ok(Scope {
+        buckets,
+        offsets,
+        rr_start,
+        truncated,
+    })
+}
+
+/// Map a `BucketError` to a typed `IpcError`.
+fn map_bucket(e: terminal_commander_core::BucketError) -> IpcError {
+    use terminal_commander_core::BucketError;
+    match e {
+        BucketError::NotFound(_) => IpcError::new(IpcErrorCode::BucketNotFound, e.to_string()),
+        other => IpcError::new(IpcErrorCode::Internal, other.to_string()),
+    }
+}
+
+/// The single-kind fast path uses `events_since`'s native `kind_filter`; the
+/// multi-kind / no-kind path reads severity-only and post-filters by the kind
+/// allowlist (the bucket read API takes ONE kind, but a predicate's `kind` is
+/// an allowlist). `None` kind = any kind.
+fn kind_filter_for(predicate: &Predicate) -> (Option<String>, Option<&[String]>) {
+    match &predicate.kind {
+        None => (None, None),
+        Some(kinds) if kinds.len() == 1 => (Some(kinds[0].clone()), None),
+        Some(kinds) => (None, Some(kinds.as_slice())),
+    }
+}
+
+/// The fair, capped, eviction-clamped drain across the in-scope buckets.
+struct Drained {
+    events: Vec<SubEvent>,
+    lagged: bool,
+    /// New round-robin start (rotated by one for next pull).
+    next_rr: usize,
+}
+
+/// Drain matched events fair + capped (subscriptions §3 step 6 + AC4/AC12).
+///
+/// `offsets` is advanced in place to the last SCANNED (severity-passing) seq
+/// per bucket, so kind-dropped events are not re-delivered.
+fn drain_fair(
+    state: &Arc<DaemonState>,
+    scope: &Scope,
+    offsets: &mut HashMap<BucketId, u64>,
+    predicate: &Predicate,
+    cap: usize,
+) -> Result<Drained, IpcError> {
+    let n = scope.buckets.len();
+    let mut events: Vec<SubEvent> = Vec::new();
+    let mut lagged = false;
+    if n == 0 || cap == 0 {
+        return Ok(Drained {
+            events,
+            lagged,
+            next_rr: 0,
+        });
+    }
+    let per = (cap / n).max(1);
+    let (kind_native, kind_allow) = kind_filter_for(predicate);
+
+    // Visit order rotated by rr_start so a flooding bucket cannot starve a
+    // quiet one across pulls.
+    let order: Vec<usize> = (0..n).map(|i| (scope.rr_start + i) % n).collect();
+
+    'outer: loop {
+        let mut progressed = false;
+        for &i in &order {
+            if events.len() >= cap {
+                break 'outer;
+            }
+            let scoped = &scope.buckets[i];
+            let bid = scoped.bucket_id;
+            let st = state.buckets.state(bid).map_err(map_bucket)?;
+            let off = offsets.entry(bid).or_insert(0);
+
+            // AC12 eviction clamp: clamp to head_seq-1 (NOT head_seq), so the
+            // survivor AT head_seq is still delivered. Dropped delta counts
+            // only truly-lost events (stored_offset < seq < head_seq).
+            let clamp_floor = st.head_seq.saturating_sub(1);
+            if *off < clamp_floor {
+                *off = clamp_floor;
+                lagged = true;
+            }
+            // Bucket-level drop (eviction) is also a lag signal.
+            if st.dropped_count > 0 {
+                lagged = true;
+            }
+
+            let want = per.min(cap - events.len());
+            if want == 0 {
+                continue;
+            }
+            let resp = state
+                .buckets
+                .events_since(
+                    bid,
+                    &BucketReadRequest {
+                        cursor: *off,
+                        severity_min: predicate.severity_min,
+                        kind_filter: kind_native.clone(),
+                        limit: Some(want),
+                    },
+                )
+                .map_err(map_bucket)?;
+
+            // Advance to the last SCANNED severity-passing seq so kind-dropped
+            // events are never re-read.
+            if resp.next_cursor > *off {
+                *off = resp.next_cursor;
+            }
+
+            let job_id = scoped.source.job_id;
+            for ev in resp.events {
+                // Multi-kind allowlist post-filter (native single-kind already
+                // applied by events_since).
+                if let Some(allow) = kind_allow
+                    && !allow.contains(&ev.kind)
+                {
+                    continue;
+                }
+                if events.len() >= cap {
+                    break 'outer;
+                }
+                let seq = ev.seq;
+                events.push(SubEvent {
+                    origin: EventOrigin {
+                        bucket_id: bid,
+                        job_id,
+                        seq,
+                    },
+                    event: ev,
+                });
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    Ok(Drained {
+        events,
+        lagged,
+        next_rr: (scope.rr_start + 1) % n,
+    })
+}
+
+/// Derive per-source liveness for every in-scope bucket (subscriptions §3
+/// step 7 + MUST-ADD #3). Command sources read the authoritative `JobState`;
+/// file-watch / pty present -> Running.
+fn liveness_for(state: &Arc<DaemonState>, scope: &Scope) -> Vec<SourceLiveness> {
+    use terminal_commander_ipc::ProbeKind;
+    let mut out = Vec::with_capacity(scope.buckets.len());
+    for scoped in &scope.buckets {
+        let source = &scoped.source;
+        let liveness = match source.kind {
+            ProbeKind::Command => source.job_id.map_or(Liveness::Running, |job| {
+                state.command.status(job).map_or(Liveness::Stopped, |s| {
+                    command_liveness(s.state, s.exit_code, s.signal)
+                })
+            }),
+            // File-watch / pty have no exit-code surface on this path: present
+            // in the side-table -> Running (the side-table is immortal, so a
+            // stopped watch still appears Running here; Phase 1 reports
+            // process-state liveness only for commands).
+            ProbeKind::FileWatch | ProbeKind::Pty => Liveness::Running,
+        };
+        out.push(SourceLiveness {
+            bucket_id: scoped.bucket_id,
+            job_id: source.job_id,
+            probe_id: source.probe_id,
+            liveness,
+        });
+    }
+    out
+}
+
+/// Map a command job's ledger state to [`Liveness`] (mirrors the private
+/// `command_liveness` in `ipc::handlers::runtime`; cancellation MUST NOT fold
+/// into `Failed`).
+fn command_liveness(
+    state: terminal_commander_core::JobState,
+    exit_code: Option<i32>,
+    signal: Option<String>,
+) -> Liveness {
+    use terminal_commander_core::JobState;
+    match state {
+        JobState::Starting => Liveness::Starting,
+        JobState::Running => Liveness::Running,
+        JobState::Exited => Liveness::Exited {
+            code: exit_code.unwrap_or(0),
+        },
+        JobState::Failed => Liveness::Failed {
+            code: exit_code,
+            signal,
+        },
+        JobState::Cancelled => Liveness::Cancelled,
+    }
+}
+
+/// Poll N pinned single-use `Notified` futures, completing when ANY fires.
+/// Avoids a `futures`-crate dependency for `select_all`.
+///
+/// Correctness: each `Notified` is already ENROLLED (via `enable()`) before
+/// this is polled, so a wake landing between enroll and the first poll is NOT
+/// lost — `Notified` latches the notification and reports `Ready` on the next
+/// poll.
+fn poll_any_notified<N>(futs: &mut [Pin<Box<N>>], cx: &mut Context<'_>) -> Poll<()>
+where
+    N: Future<Output = ()>,
+{
+    for fut in futs.iter_mut() {
+        if fut.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(());
+        }
+    }
+    Poll::Pending
+}
+
+/// Multiplexed, lossless `subscription_pull`.
+///
+/// See the module docs for the enroll-before-recheck invariant. `timeout` is
+/// honored as passed; the CALLER (Task 10) clamps it strictly below
+/// `DRAIN_CEILING`.
+///
+/// # Errors
+/// [`IpcErrorCode::UnknownSubscription`] if `sub_id` is unknown/expired (NEVER
+/// returned as empty — registry-loss must not be mistaken for no-events).
+pub async fn pull(
+    state: &Arc<DaemonState>,
+    sub_id: Uuid,
+    max: usize,
+    timeout: Duration,
+) -> Result<PullOutcome, IpcError> {
+    let cap = if max == 0 {
+        DEFAULT_PULL_MAX
+    } else {
+        max.min(MAX_PULL_MAX)
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        // (1) resolve + (2) snapshot scope. UnknownSubscription if gone.
+        let mut scope = scope_snapshot(state, sub_id)?;
+        let predicate = state
+            .subscriptions
+            .with_sub(sub_id, |s| s.predicate.clone())?;
+        let n = scope.buckets.len();
+
+        // N == 0: nothing to enroll/drain. Sleep out the remaining time and
+        // return idle + liveness (no ceil(max/0)).
+        if n == 0 {
+            tokio::time::sleep_until(deadline).await;
+            mark_pulled(state, sub_id);
+            return Ok(PullOutcome::idle(Vec::new(), false, scope.truncated));
+        }
+
+        // (3) ENROLL: clone each bucket's Notify, build FRESH notified()
+        // futures, and enable() them to enroll the waiters BEFORE any read.
+        let notifies: Vec<Arc<Notify>> = scope
+            .buckets
+            .iter()
+            .filter_map(|b| state.buckets.bucket_notify(b.bucket_id).ok())
+            .collect();
+        let mut futs: Vec<Pin<Box<tokio::sync::futures::Notified<'_>>>> =
+            notifies.iter().map(|n| Box::pin(n.notified())).collect();
+        for f in &mut futs {
+            f.as_mut().enable();
+        }
+
+        // (4) fast-path recheck (AFTER enroll): scan ALL in-scope offsets.
+        let mut offsets = scope.offsets.clone();
+        let drained = drain_fair(state, &scope, &mut offsets, &predicate, cap)?;
+        if !drained.events.is_empty() {
+            let liveness = liveness_for(state, &scope);
+            commit(state, sub_id, &offsets, drained.next_rr);
+            return Ok(PullOutcome {
+                events: drained.events,
+                liveness,
+                lagged: drained.lagged,
+                truncated: scope.truncated,
+            });
+        }
+
+        // (5) slow path: race the enrolled futures against the remaining time.
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            let liveness = liveness_for(state, &scope);
+            // No new events, but a clamp may have flagged lag.
+            commit(state, sub_id, &offsets, scope.rr_start);
+            mark_pulled(state, sub_id);
+            return Ok(PullOutcome::idle(liveness, drained.lagged, scope.truncated));
+        }
+        let any = std::future::poll_fn(|cx| poll_any_notified(&mut futs, cx));
+        if tokio::time::timeout(remaining, any).await.is_err() {
+            // (6) timeout -> idle + liveness.
+            let liveness = liveness_for(state, &scope);
+            commit(state, sub_id, &offsets, scope.rr_start);
+            mark_pulled(state, sub_id);
+            return Ok(PullOutcome::idle(liveness, drained.lagged, scope.truncated));
+        }
+
+        // Woken (or spurious): drop the enrolled futures and loop. The next
+        // iteration re-enrolls FRESH waiters before re-scanning, so an append
+        // in the re-arm window is not lost. A spurious wake (no in-scope event)
+        // re-enters and does NOT return a premature empty. Persist any
+        // clamp-advanced offsets so eviction lag is not re-counted next pass.
+        drop(futs);
+        scope.offsets = offsets;
+    }
+}
+
+/// Commit advanced offsets + the new rr cursor back into the subscription, and
+/// stamp `last_pull_at`. Silently no-ops if the sub was closed mid-pull.
+fn commit(
+    state: &Arc<DaemonState>,
+    sub_id: Uuid,
+    offsets: &HashMap<BucketId, u64>,
+    next_rr: usize,
+) {
+    let _ = state.subscriptions.with_sub_mut(sub_id, |s| {
+        for (bid, off) in offsets {
+            s.offsets.insert(*bid, *off);
+        }
+        s.rr_start = next_rr;
+        s.last_pull_at = Some(std::time::Instant::now());
+    });
+}
+
+/// Stamp `last_pull_at` without touching offsets. Silently no-ops if closed.
+fn mark_pulled(state: &Arc<DaemonState>, sub_id: Uuid) {
+    let _ = state.subscriptions.with_sub_mut(sub_id, |s| {
+        s.last_pull_at = Some(std::time::Instant::now());
+    });
+}

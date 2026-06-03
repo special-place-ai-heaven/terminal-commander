@@ -102,6 +102,15 @@ pub struct DaemonState {
     /// persistent `rule_activations` table at bootstrap; mutated by
     /// the `registry_activate` / `registry_deactivate` IPC handlers.
     pub activation: Arc<ActivationRegistry>,
+    /// Per-bucket source side-table (subscriptions MUST-ADD #2).
+    /// Written at the 3 `bucket_create` call sites; the routing
+    /// substrate for predicate-resolved subscriptions. Shared with the
+    /// command / watch / pty runtimes so they can record at create.
+    pub sources: Arc<crate::subscriptions::source::BucketSourceTable>,
+    /// In-memory subscription registry (subscriptions §2). Bounded,
+    /// opaque-keyed, reset wholesale on daemon restart. Holds every
+    /// open subscription's predicate + per-consumer offsets.
+    pub subscriptions: Arc<crate::subscriptions::registry::SubscriptionRegistry>,
     /// File-watch runtime (TC43). Owns live `FileProbe` handles
     /// attached to buckets. Deliberately separate from
     /// `CommandRuntime`.
@@ -194,6 +203,12 @@ impl DaemonState {
             .collect();
         let activation = Arc::new(ActivationRegistry::from_entries(entries));
 
+        // Subscriptions Phase 1: the bucket source side-table is threaded into
+        // each runtime (mirroring `activation`) so the create sites can record
+        // source identity; the subscription registry is daemon-owned state.
+        let sources = Arc::new(crate::subscriptions::source::BucketSourceTable::new());
+        let subscriptions = Arc::new(crate::subscriptions::registry::SubscriptionRegistry::new());
+
         let router = Arc::new(Router::with_sink(
             Arc::clone(&buckets),
             Arc::clone(&rings),
@@ -213,6 +228,7 @@ impl DaemonState {
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
             policy.clone(),
             Arc::clone(&activation),
+            Arc::clone(&sources),
         ));
         let watch = Arc::new(WatchRuntime::new(
             Arc::clone(&router),
@@ -221,6 +237,7 @@ impl DaemonState {
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
             policy.clone(),
             Arc::clone(&activation),
+            Arc::clone(&sources),
         ));
         #[cfg(unix)]
         let pty = Arc::new(PtyRuntime::new(
@@ -230,6 +247,7 @@ impl DaemonState {
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
             policy.clone(),
             Arc::clone(&activation),
+            Arc::clone(&sources),
         ));
 
         // Mint a fresh per-boot identity. A restart produces a new value;
@@ -251,6 +269,8 @@ impl DaemonState {
             router,
             command,
             activation,
+            sources,
+            subscriptions,
             watch,
             #[cfg(unix)]
             pty,

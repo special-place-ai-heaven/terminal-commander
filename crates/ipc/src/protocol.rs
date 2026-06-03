@@ -154,6 +154,20 @@ pub const DEFAULT_CONTEXT_AFTER: u32 = 5;
 /// `max_bytes` cap; the dispatcher clamps oversize values.
 pub const MAX_CONTEXT_BYTES: usize = 64 * 1024;
 
+/// Maximum number of subscriptions open at once in the in-memory registry.
+///
+/// Opening beyond this returns
+/// [`IpcErrorCode::SubscriptionLimitExceeded`]; the caller frees a
+/// slot via `subscription_close` and retries. (Subscriptions design,
+/// Phase 1, Task 7.)
+pub const MAX_SUBSCRIPTIONS: usize = 64;
+/// Hard cap on in-scope buckets a single subscription scans per pull.
+///
+/// The `list_bucket_ids()` ∩ side-table scan is bounded by this; over-cap
+/// is flagged `truncated`. (Subscriptions design §1 "Routing scan is
+/// bounded".)
+pub const MAX_BUCKETS_PER_SUBSCRIPTION: usize = 200;
+
 /// Method-typed request union.
 ///
 /// Method names are namespaced `<domain>_<verb>` to match the MCP tool
