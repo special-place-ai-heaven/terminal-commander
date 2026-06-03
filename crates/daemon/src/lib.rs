@@ -21,6 +21,7 @@ pub mod config;
 pub mod environment;
 pub mod file_watch;
 pub mod ipc;
+pub mod liveness;
 pub mod policy;
 #[cfg(unix)]
 pub mod pty_command;
@@ -28,6 +29,7 @@ pub mod router;
 pub mod runtime;
 pub mod state;
 pub mod store_actor;
+pub mod subscriptions;
 
 pub use activation::{ActivationRegistry, ActivationRegistryHandle};
 pub use audit::{AuditSink, InMemoryAudit, PersistentAudit};
@@ -46,19 +48,21 @@ pub use ipc::{
     CommandStartParams, CommandStatusParams, ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT,
     DEFAULT_BUCKET_WAIT_MS, DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES,
     DEFAULT_FILE_READ_LINES, DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES,
-    DEFAULT_REGISTRY_SEARCH_LIMIT, DiscoverResponse, EventContextParams, EventContextResponse,
-    FileLine, FileReadWindowParams, FileReadWindowResponse, FileSearchMatch, FileSearchParams,
-    FileSearchResponse, FileWatchListEntry, FileWatchListResponse, FileWatchStartParams,
-    FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, IpcContextFrame, IpcError,
-    IpcErrorCode, IpcRequest, IpcResponse, IpcResult, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS,
+    DEFAULT_PULL_TIMEOUT_MS, DEFAULT_REGISTRY_SEARCH_LIMIT, DiscoverResponse, EventContextParams,
+    EventContextResponse, FileLine, FileReadWindowParams, FileReadWindowResponse, FileSearchMatch,
+    FileSearchParams, FileSearchResponse, FileWatchListEntry, FileWatchListResponse,
+    FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse,
+    IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, ListLimitParams,
+    Liveness, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS, MAX_BUCKETS_PER_SUBSCRIPTION,
     MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_GRACE_MS, MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES,
     MAX_CONTEXT_FRAMES, MAX_FILE_READ_BYTES, MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES,
-    MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS,
-    MAX_PTY_STDIN_BYTES, MAX_REGISTRY_SEARCH_LIMIT, MAX_REGISTRY_TEST_SAMPLE_BYTES,
-    MAX_REGISTRY_TEST_SAMPLES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_TAIL_BYTES,
-    MAX_TAIL_LINES, PolicyStatusResponse, ProbeKind, ProbeListEntry, ProbeListResponse,
-    ProbeStatusParams, ProbeStatusResponse, PtyCommandListEntry, PtyCommandListResponse,
-    PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
+    MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_LIST_LIMIT,
+    MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES, MAX_PULL_EVENTS, MAX_PULL_TIMEOUT_MS,
+    MAX_REGISTRY_SEARCH_LIMIT, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
+    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_SUBSCRIPTIONS, MAX_TAIL_BYTES, MAX_TAIL_LINES,
+    PolicyStatusResponse, ProbeKind, ProbeListEntry, ProbeListResponse, ProbeStatusParams,
+    ProbeStatusResponse, PtyCommandListEntry, PtyCommandListResponse, PtyCommandStartParams,
+    PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
     PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RegistryActivateParams,
     RegistryActivateResponse, RegistryActiveEntry, RegistryDeactivateParams,
     RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
@@ -66,7 +70,10 @@ pub use ipc::{
     RegistrySearchParams, RegistrySearchResponse, RegistryTestMatch, RegistryTestParams,
     RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
     RequestEnvelope, ResponseEnvelope, RuntimeActiveRule, RuntimeBucketSummary,
-    RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
+    RuntimeStateResponse, SelfCheckResponse, SeverityHistogram, SubscriptionCloseParams,
+    SubscriptionCloseResponse, SubscriptionEvent, SubscriptionListParams, SubscriptionListResponse,
+    SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
+    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSourceSel,
 };
 #[cfg(unix)]
 pub use ipc::{DaemonClient, IpcServer, PeerCred, ServerHandle};
@@ -86,3 +93,9 @@ pub use runtime::{
     RuntimeError, SelfCheckReport, run_foreground_idle, run_ipc_server, run_self_check,
 };
 pub use state::{BootstrapError, DaemonState};
+pub use subscriptions::model::{Predicate, SourceSel, Subscription};
+pub use subscriptions::pull::{
+    EventOrigin, PullOutcome, SourceLiveness, SubEvent, pull as subscription_pull,
+};
+pub use subscriptions::registry::{SubscriptionRegistry, SubscriptionSummary};
+pub use subscriptions::source::{BucketSource, BucketSourceTable};

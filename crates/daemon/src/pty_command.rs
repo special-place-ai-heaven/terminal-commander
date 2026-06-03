@@ -144,6 +144,9 @@ mod runtime {
         profile_label: String,
         live: Arc<RwLock<HashMap<JobId, PtyBinding>>>,
         activation: Arc<ActivationRegistry>,
+        /// Bucket source side-table (subscriptions MUST-ADD #2).
+        /// Recorded at `start` immediately after `bucket_create`.
+        sources: Arc<crate::subscriptions::source::BucketSourceTable>,
     }
 
     impl std::fmt::Debug for PtyRuntime {
@@ -171,6 +174,7 @@ mod runtime {
             audit: Arc<dyn AuditSink>,
             policy: PolicyEngine,
             activation: Arc<ActivationRegistry>,
+            sources: Arc<crate::subscriptions::source::BucketSourceTable>,
         ) -> Self {
             let profile_label = match policy.profile {
                 PolicyProfile::DeveloperLocal => "developer_local".to_owned(),
@@ -187,6 +191,7 @@ mod runtime {
                 profile_label,
                 live: Arc::new(RwLock::new(HashMap::default())),
                 activation,
+                sources,
             }
         }
 
@@ -278,6 +283,18 @@ mod runtime {
             let job_id = JobId::new();
             let bucket_cfg = req.bucket_config.unwrap_or_default();
             self.router.bucket_create(bucket_id, bucket_cfg)?;
+            // Record the bucket's source identity for subscription routing
+            // (MUST-ADD #2). PTY is unix-only (this module is `#[cfg(unix)]`),
+            // so the write is naturally unix-gated. Bumps the dirty epoch.
+            self.sources.record(
+                bucket_id,
+                crate::subscriptions::source::BucketSource {
+                    kind: terminal_commander_ipc::ProbeKind::Pty,
+                    job_id: Some(job_id),
+                    probe_id: Some(probe_id),
+                    path: None,
+                },
+            );
 
             let active_for_job = self
                 .activation

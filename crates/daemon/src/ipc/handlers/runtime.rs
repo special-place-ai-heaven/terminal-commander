@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use crate::ipc::protocol::{
-    IpcError, IpcErrorCode, IpcResponse, ProbeKind, ProbeListEntry, ProbeListResponse,
+    IpcError, IpcErrorCode, IpcResponse, Liveness, ProbeKind, ProbeListEntry, ProbeListResponse,
     ProbeStatusParams, ProbeStatusResponse, RuntimeActiveRule, RuntimeBucketSummary,
     RuntimeStateResponse,
 };
@@ -16,6 +16,12 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
     // CommandRuntime: live_jobs + per-job status for counters.
     for j in state.command.live_jobs() {
         let status = state.command.status(j.job_id).ok();
+        // Liveness is the authoritative JobState from the ledger, NOT
+        // live-map presence (bindings linger after exit). Missing status
+        // (job dropped between live_jobs() and status()) -> Running.
+        let liveness = status.as_ref().map_or(Liveness::Running, |s| {
+            crate::liveness::command_liveness(s.state, s.exit_code, s.signal.clone())
+        });
         out.push(ProbeListEntry {
             kind: ProbeKind::Command,
             job_id: j.job_id,
@@ -29,10 +35,12 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
             secret_prompts_total: 0,
             secret_prompt_active: false,
             path: None,
+            liveness,
         });
     }
 
     // WatchRuntime: list returns (job_id, bucket_id, probe_id, path, metrics).
+    // File-watch has no exit-code concept: present -> Running.
     for (wid, bid, pid, path, m) in state.watch.list() {
         out.push(ProbeListEntry {
             kind: ProbeKind::FileWatch,
@@ -47,10 +55,12 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
             secret_prompts_total: 0,
             secret_prompt_active: false,
             path: Some(path),
+            liveness: Liveness::Running,
         });
     }
 
     // PtyRuntime: list returns (job_id, bucket_id, probe_id, argv, metrics, secret_active).
+    // PTY exit is not wired through this list path: present -> Running.
     #[cfg(unix)]
     for (jid, bid, pid, _argv, m, secret) in state.pty.list() {
         out.push(ProbeListEntry {
@@ -66,14 +76,24 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
             secret_prompts_total: m.secret_prompts_total,
             secret_prompt_active: secret,
             path: None,
+            liveness: Liveness::Running,
         });
     }
 
     out
 }
 
-pub(in crate::ipc::server) fn handle_runtime_state(state: &Arc<DaemonState>) -> IpcResponse {
+pub(in crate::ipc::server) fn handle_runtime_state(
+    state: &Arc<DaemonState>,
+    params: &crate::ipc::protocol::ListLimitParams,
+) -> IpcResponse {
+    let limit = params
+        .limit
+        .unwrap_or(crate::ipc::protocol::MAX_LIST_LIMIT)
+        .min(crate::ipc::protocol::MAX_LIST_LIMIT);
     let probes = collect_probes(state);
+    // Counts reflect the TRUE totals (computed before truncation); the
+    // returned vecs are bounded independently by `limit`.
     let command_jobs = u32::try_from(
         probes
             .iter()
@@ -126,6 +146,15 @@ pub(in crate::ipc::server) fn handle_runtime_state(state: &Arc<DaemonState>) -> 
         .collect();
     let active_rules_count = u32::try_from(active_rules.len()).unwrap_or(u32::MAX);
 
+    // Bound each of the three vecs INDEPENDENTLY (a single cursor cannot
+    // page three lists — subscriptions §6).
+    let probes_truncated = probes.len() > limit;
+    let buckets_truncated = buckets.len() > limit;
+    let active_rules_truncated = active_rules.len() > limit;
+    let probes: Vec<_> = probes.into_iter().take(limit).collect();
+    let buckets: Vec<_> = buckets.into_iter().take(limit).collect();
+    let active_rules: Vec<_> = active_rules.into_iter().take(limit).collect();
+
     IpcResponse::RuntimeState(RuntimeStateResponse {
         command_jobs,
         pty_jobs,
@@ -135,13 +164,24 @@ pub(in crate::ipc::server) fn handle_runtime_state(state: &Arc<DaemonState>) -> 
         probes,
         buckets,
         active_rules,
+        probes_truncated,
+        buckets_truncated,
+        active_rules_truncated,
     })
 }
 
-pub(in crate::ipc::server) fn handle_probe_list(state: &Arc<DaemonState>) -> IpcResponse {
-    IpcResponse::ProbeList(ProbeListResponse {
-        probes: collect_probes(state),
-    })
+pub(in crate::ipc::server) fn handle_probe_list(
+    state: &Arc<DaemonState>,
+    params: &crate::ipc::protocol::ListLimitParams,
+) -> IpcResponse {
+    let limit = params
+        .limit
+        .unwrap_or(crate::ipc::protocol::MAX_LIST_LIMIT)
+        .min(crate::ipc::protocol::MAX_LIST_LIMIT);
+    let probes = collect_probes(state);
+    let truncated = probes.len() > limit;
+    let probes: Vec<_> = probes.into_iter().take(limit).collect();
+    IpcResponse::ProbeList(ProbeListResponse { probes, truncated })
 }
 
 #[allow(clippy::option_if_let_else)]

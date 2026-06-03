@@ -557,6 +557,16 @@ impl BucketManager {
         }
     }
 
+    /// Clone a bucket's wakeup [`Notify`] so a multiplexed consumer can arm it
+    /// (see `subscription_pull`). Short outer read-lock to clone the cell Arc,
+    /// then a short inner read-lock to clone the Notify — no lock held across
+    /// await (mirrors the snapshot block in [`BucketManager::bucket_wait`]).
+    pub fn bucket_notify(&self, bucket_id: BucketId) -> Result<Arc<Notify>, BucketError> {
+        let cell = self.bucket(bucket_id)?;
+        let inner = cell.read();
+        Ok(Arc::clone(&inner.notify))
+    }
+
     /// Read events strictly after `cursor`. The response is bounded
     /// by `limit` (clamped to [`MAX_READ_LIMIT`]).
     ///
@@ -962,6 +972,38 @@ mod tests {
             let resp = waiter.await.unwrap().unwrap();
             assert!(!resp.heartbeat);
             assert_eq!(resp.events.len(), 1);
+        });
+    }
+
+    #[test]
+    fn bucket_notify_returns_handle_and_wakes() {
+        let runtime = rt();
+        runtime.block_on(async {
+            let mgr = std::sync::Arc::new(BucketManager::new());
+            let bid = BucketId::new();
+            mgr.create_bucket_default(bid).unwrap();
+
+            // Known bucket -> a handle.
+            let notify = mgr.bucket_notify(bid).expect("handle");
+            // Unknown bucket -> NotFound.
+            assert!(matches!(
+                mgr.bucket_notify(BucketId::new()),
+                Err(BucketError::NotFound(_))
+            ));
+
+            // An enrolled waiter wakes on append. Spawn the waiter so its
+            // `notified()` future is parked (enrolled) before we append; the
+            // permit-less `notify_waiters()` only wakes already-enrolled waiters.
+            let waiter = tokio::spawn(async move {
+                notify.notified().await;
+            });
+            // Give the waiter a moment to park (virtual time auto-advances).
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            mgr.append(bid, ev(bid, Severity::High, "k1")).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), waiter)
+                .await
+                .expect("woken")
+                .expect("waiter task completes");
         });
     }
 

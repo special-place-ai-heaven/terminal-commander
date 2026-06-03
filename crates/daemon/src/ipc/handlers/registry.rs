@@ -201,21 +201,36 @@ pub(in crate::ipc::server) fn handle_registry_activate(
         ));
     }
     validate_scope_against_live_jobs(state, scope)?;
+    // Snapshot prior membership BEFORE any mutation so the response
+    // reports whether the rule was already active. Reading memory here
+    // is identical whether done before or after the durable write (the
+    // write does not touch the in-memory set), so it is safe to capture
+    // it up front.
     let was_already_active = state.activation.is_active(&def.id, version, scope);
-    // In-memory authority first so a concurrent command_start picks
-    // up the rule even if the persistent insert is slow.
-    state.activation.activate(def.clone(), scope);
-    // Persistent activation row for the audit trail and restart
-    // recovery.
+    // Durability-first ordering (data-integrity invariant): persist the
+    // activation row BEFORE mutating the in-memory authority. If the
+    // store write fails, `?` returns the error with the in-memory set
+    // UNCHANGED, so memory and store never diverge on a failed write.
+    // (Previously memory was mutated first; a store failure then left a
+    // rule active in memory but absent from the durable store, and a
+    // restart would silently drop it -- memory/store divergence.) The
+    // store layer is idempotent on the open row (see
+    // `record_activation_scoped`), so re-activating an already-open key
+    // is a harmless no-op.
     let profile = format!("{:?}", state.policy.profile);
     state
         .store
         .record_activation_scoped(&def.id, version, scope, Some(&profile), Some("ipc"))
         .map_err(map_store_error)?;
+    // Store write succeeded: now make the in-memory authority agree so a
+    // concurrent command_start picks up the rule. `activate` is an
+    // idempotent single-entry upsert keyed on (rule_id, version, scope).
+    state.activation.activate(def.clone(), scope);
     // TC42c: push the new rule set into every already-running
     // command's sifter that the scope matches. Global scope rebinds
     // every live job (TC42b behavior preserved). Scoped activations
-    // only touch matching jobs.
+    // only touch matching jobs. Rebinds run ONLY after memory + store
+    // agree, so no job ever rebinds against a half-applied activation.
     let cmd_report = state.command.rebind_jobs_in_scope(Some(scope));
     // TC43: file watches share the activation registry.
     let watch_report = state.watch.rebind_watches_in_scope(Some(scope));
@@ -315,20 +330,33 @@ pub(in crate::ipc::server) fn handle_registry_deactivate(
         )
     })?;
     validate_scope_against_live_jobs(state, scope)?;
-    let was_in_memory = state
-        .activation
-        .deactivate(&params.rule_id, params.version, scope);
+    // Durability-first ordering (data-integrity invariant): close the
+    // persistent row(s) BEFORE removing from the in-memory authority. If
+    // the store write fails, `?` returns the error with the in-memory
+    // set UNCHANGED, so memory and store never diverge on a failed
+    // write. (Previously memory was mutated first; a store failure then
+    // left a rule removed from memory but still open in the durable
+    // store, and a restart would silently resurrect it -- memory/store
+    // divergence.)
     let was_persisted = state
         .store
         .deactivate_rule_scoped(&params.rule_id, params.version, scope)
         .map_err(map_store_error)?;
+    // Read the CURRENT in-memory membership (not yet mutated). Combined
+    // with `was_persisted`, this drives both the teaching-error branch
+    // and the response's `was_deactivated`.
+    let was_in_memory = state
+        .activation
+        .is_active(&params.rule_id, params.version, scope);
     // TB-6: a deactivate that closed NOTHING was previously a silent
     // ok:true / was_deactivated:false no-op. That hides the operator's
     // mistake (wrong version or wrong scope) behind a success envelope.
     // Surface a teaching RuleNotActive instead, echoing the version(s)
     // that ARE active under this scope so the caller can self-correct in
     // one step. (Closed error set: RuleNotActive already exists and fits
-    // -- no new code minted.)
+    // -- no new code minted.) The store close was a no-op (was_persisted
+    // false) and memory is untouched here, so returning early leaves
+    // both stores consistent.
     if !was_in_memory && !was_persisted {
         let active_versions = active_versions_for_scope(state, &params.rule_id, scope);
         let active_hint = if active_versions.is_empty() {
@@ -359,10 +387,17 @@ pub(in crate::ipc::server) fn handle_registry_deactivate(
             ),
         ));
     }
+    // Store row(s) are closed: now make the in-memory authority agree.
+    // Runs only after the durable write succeeded, so memory + store are
+    // consistent before any rebind observes the change.
+    state
+        .activation
+        .deactivate(&params.rule_id, params.version, scope);
     // TC42c: rebind every running command the scope matches so
     // future frames stop matching against the deactivated rule.
     // In-flight frames finish against the snapshot they captured
-    // (no fake historical un-matches).
+    // (no fake historical un-matches). Rebinds run ONLY after memory +
+    // store agree.
     let cmd_report = state.command.rebind_jobs_in_scope(Some(scope));
     let watch_report = state.watch.rebind_watches_in_scope(Some(scope));
     #[cfg(unix)]
@@ -383,8 +418,15 @@ pub(in crate::ipc::server) fn handle_registry_deactivate(
     ))
 }
 
-pub(in crate::ipc::server) fn handle_registry_list_active(state: &Arc<DaemonState>) -> IpcResponse {
-    let entries: Vec<RegistryActiveEntry> = state
+pub(in crate::ipc::server) fn handle_registry_list_active(
+    state: &Arc<DaemonState>,
+    params: &crate::ipc::protocol::ListLimitParams,
+) -> IpcResponse {
+    let limit = params
+        .limit
+        .unwrap_or(crate::ipc::protocol::MAX_LIST_LIMIT)
+        .min(crate::ipc::protocol::MAX_LIST_LIMIT);
+    let all: Vec<RegistryActiveEntry> = state
         .activation
         .snapshot_entries()
         .into_iter()
@@ -397,5 +439,7 @@ pub(in crate::ipc::server) fn handle_registry_list_active(state: &Arc<DaemonStat
             scope: e.scope,
         })
         .collect();
-    IpcResponse::RegistryListActive(RegistryListActiveResponse { entries })
+    let truncated = all.len() > limit;
+    let entries: Vec<_> = all.into_iter().take(limit).collect();
+    IpcResponse::RegistryListActive(RegistryListActiveResponse { entries, truncated })
 }

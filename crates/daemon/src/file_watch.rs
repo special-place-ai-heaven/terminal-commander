@@ -150,6 +150,9 @@ pub struct WatchRuntime {
     profile_label: String,
     live: Arc<RwLock<HashMap<JobId, WatchBinding>>>,
     activation: Arc<ActivationRegistry>,
+    /// Bucket source side-table (subscriptions MUST-ADD #2). Recorded
+    /// at `start` immediately after `bucket_create`.
+    sources: Arc<crate::subscriptions::source::BucketSourceTable>,
 }
 
 impl std::fmt::Debug for WatchRuntime {
@@ -169,6 +172,7 @@ impl WatchRuntime {
         audit: Arc<dyn AuditSink>,
         policy: PolicyEngine,
         activation: Arc<ActivationRegistry>,
+        sources: Arc<crate::subscriptions::source::BucketSourceTable>,
     ) -> Self {
         let profile_label = match policy.profile {
             PolicyProfile::DeveloperLocal => "developer_local".to_owned(),
@@ -185,6 +189,7 @@ impl WatchRuntime {
             profile_label,
             live: Arc::new(RwLock::new(HashMap::default())),
             activation,
+            sources,
         }
     }
 
@@ -272,6 +277,18 @@ impl WatchRuntime {
         let probe_id = ProbeId::new();
         let watch_id = JobId::new();
         self.router.bucket_create(bucket_id, bucket_cfg)?;
+        // Record the bucket's source identity for subscription routing
+        // (MUST-ADD #2). File-watch records its `watch_id` as the job id and
+        // the watched path. Bumps the side-table dirty epoch.
+        self.sources.record(
+            bucket_id,
+            crate::subscriptions::source::BucketSource {
+                kind: terminal_commander_ipc::ProbeKind::FileWatch,
+                job_id: Some(watch_id),
+                probe_id: Some(probe_id),
+                path: Some(path.clone()),
+            },
+        );
 
         // Merge scope-resolved active rules with the per-call inline
         // rules. Same helper semantics as TC42c.

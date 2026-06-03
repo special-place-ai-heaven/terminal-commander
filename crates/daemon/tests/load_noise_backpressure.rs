@@ -754,7 +754,10 @@ fn runtime_state_stays_bounded_under_live_load() {
 
         // runtime_state must be bounded and list all 3.
         let rs = client
-            .call(2, IpcRequest::RuntimeState)
+            .call(
+                2,
+                IpcRequest::RuntimeState(terminal_commanderd::ListLimitParams::default()),
+            )
             .await
             .expect("runtime_state");
         let snap = match rs {

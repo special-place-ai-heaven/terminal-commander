@@ -42,6 +42,9 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# Subscriptions e2e (mcp_subscriptions_e2e) mints opaque sub_ids to assert the
+# unknown-subscription error path; uuid is dev-only here.
+uuid = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "io-util"] }
 # Integration tests (mcp_live_command_e2e, daemon_unavailable_envelope, pty_tools_live_e2e)
 # instantiate rmcp's in-process client (ClientHandler, RoleClient) so the test

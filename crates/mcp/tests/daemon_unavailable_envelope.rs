@@ -160,8 +160,13 @@ fn minimal_tool_args(tool: &str) -> serde_json::Value {
         "file_search" => serde_json::json!({ "path": "/tmp/tc-unavail", "query": "q" }),
         "file_watch_stop" => serde_json::json!({ "watch_id": "job_x" }),
         "probe_status" => serde_json::json!({ "probe_id": "prb_x" }),
+        // subscription_pull / subscription_close require a sub_id (no default);
+        // supply one so the daemon-unavailable guard — not a missing-field
+        // schema error — is the path under test.
+        "subscription_pull" | "subscription_close" => serde_json::json!({ "sub_id": "sub_x" }),
         // health, policy_status, self_check, *_list, runtime_state, probe_list,
-        // registry_list_active take no required arguments.
+        // registry_list_active, subscription_open, subscription_list take no
+        // required arguments.
         _ => serde_json::json!({}),
     }
 }
@@ -202,8 +207,8 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
         "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
     assert_eq!(
-        checked, 31,
-        "expected 31 daemon-backed tools (32 catalogue entries minus system_discover)"
+        checked, 35,
+        "expected 35 daemon-backed tools (36 catalogue entries minus system_discover)"
     );
 
     let _ = client.cancel().await;

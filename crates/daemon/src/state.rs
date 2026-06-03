@@ -54,6 +54,13 @@ pub type Result<T> = core::result::Result<T, BootstrapError>;
 pub struct DaemonState {
     /// Original config (kept so callers can inspect / re-render).
     pub config: DaemonConfig,
+    /// Per-boot identifier minted once at [`DaemonState::bootstrap`].
+    /// Stable for the life of this daemon process; a fresh value on a
+    /// restart. Surfaced on `subscription_open` so a looping agent can
+    /// detect that the registry + buckets + offsets all reset together
+    /// (a restart) and re-open from a clean state. See subscriptions
+    /// spec MUST-ADD #6.
+    pub boot_id: uuid::Uuid,
     /// Store actor client (single writer thread). Shared between IPC
     /// registry handlers, bootstrap, and the persistent audit sink.
     pub store: StoreClient,
@@ -95,6 +102,15 @@ pub struct DaemonState {
     /// persistent `rule_activations` table at bootstrap; mutated by
     /// the `registry_activate` / `registry_deactivate` IPC handlers.
     pub activation: Arc<ActivationRegistry>,
+    /// Per-bucket source side-table (subscriptions MUST-ADD #2).
+    /// Written at the 3 `bucket_create` call sites; the routing
+    /// substrate for predicate-resolved subscriptions. Shared with the
+    /// command / watch / pty runtimes so they can record at create.
+    pub sources: Arc<crate::subscriptions::source::BucketSourceTable>,
+    /// In-memory subscription registry (subscriptions §2). Bounded,
+    /// opaque-keyed, reset wholesale on daemon restart. Holds every
+    /// open subscription's predicate + per-consumer offsets.
+    pub subscriptions: Arc<crate::subscriptions::registry::SubscriptionRegistry>,
     /// File-watch runtime (TC43). Owns live `FileProbe` handles
     /// attached to buckets. Deliberately separate from
     /// `CommandRuntime`.
@@ -187,6 +203,12 @@ impl DaemonState {
             .collect();
         let activation = Arc::new(ActivationRegistry::from_entries(entries));
 
+        // Subscriptions Phase 1: the bucket source side-table is threaded into
+        // each runtime (mirroring `activation`) so the create sites can record
+        // source identity; the subscription registry is daemon-owned state.
+        let sources = Arc::new(crate::subscriptions::source::BucketSourceTable::new());
+        let subscriptions = Arc::new(crate::subscriptions::registry::SubscriptionRegistry::new());
+
         let router = Arc::new(Router::with_sink(
             Arc::clone(&buckets),
             Arc::clone(&rings),
@@ -206,6 +228,7 @@ impl DaemonState {
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
             policy.clone(),
             Arc::clone(&activation),
+            Arc::clone(&sources),
         ));
         let watch = Arc::new(WatchRuntime::new(
             Arc::clone(&router),
@@ -214,6 +237,7 @@ impl DaemonState {
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
             policy.clone(),
             Arc::clone(&activation),
+            Arc::clone(&sources),
         ));
         #[cfg(unix)]
         let pty = Arc::new(PtyRuntime::new(
@@ -223,10 +247,16 @@ impl DaemonState {
             Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
             policy.clone(),
             Arc::clone(&activation),
+            Arc::clone(&sources),
         ));
+
+        // Mint a fresh per-boot identity. A restart produces a new value;
+        // surfaced on `subscription_open` as the restart signal (MUST-ADD #6).
+        let boot_id = uuid::Uuid::new_v4();
 
         Ok(Self {
             config,
+            boot_id,
             store,
             last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
             shutdown_tx: watch::channel(false).0,
@@ -239,6 +269,8 @@ impl DaemonState {
             router,
             command,
             activation,
+            sources,
+            subscriptions,
             watch,
             #[cfg(unix)]
             pty,
@@ -406,6 +438,18 @@ mod tests {
         assert_eq!(state.idle_secs(), 0, "fresh state is not idle");
         state.bump_activity();
         assert_eq!(state.idle_secs(), 0, "bump resets idle to ~0");
+        cleanup(&data);
+    }
+
+    #[test]
+    fn boot_id_is_stable_within_session() {
+        let data = temp_data_dir("bootid");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+        let a = state.boot_id;
+        let b = state.boot_id;
+        assert_eq!(a, b, "boot_id is stable for the life of the process");
+        assert!(!a.is_nil(), "boot_id must be a real (non-nil) uuid");
         cleanup(&data);
     }
 }

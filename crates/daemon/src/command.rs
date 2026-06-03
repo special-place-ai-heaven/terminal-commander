@@ -269,6 +269,9 @@ pub struct CommandRuntime {
     /// with the per-call inline rules before the per-job
     /// `SifterRuntime` is built (TC42) or rebuilt (TC42b).
     activation: Arc<ActivationRegistry>,
+    /// Bucket source side-table (subscriptions MUST-ADD #2). Recorded
+    /// at `start_combed` immediately after `bucket_create`.
+    sources: Arc<crate::subscriptions::source::BucketSourceTable>,
 }
 
 impl std::fmt::Debug for CommandRuntime {
@@ -293,6 +296,7 @@ impl CommandRuntime {
         audit: Arc<dyn AuditSink>,
         policy: PolicyEngine,
         activation: Arc<ActivationRegistry>,
+        sources: Arc<crate::subscriptions::source::BucketSourceTable>,
     ) -> Self {
         let profile_label = match policy.profile {
             PolicyProfile::DeveloperLocal => "developer_local".to_owned(),
@@ -309,6 +313,7 @@ impl CommandRuntime {
             profile_label,
             live: Arc::new(RwLock::new(std::collections::HashMap::default())),
             activation,
+            sources,
         }
     }
 
@@ -436,18 +441,24 @@ impl CommandRuntime {
             return Err(CommandError::PolicyDenied(verdict.reason));
         }
 
-        // Allocate identifiers + bucket.
+        // Allocate identifiers. These are pure value allocations (no
+        // backing resource), so generating them before any side effect
+        // is free and lets the scope snapshot + rule compile run first.
         let bucket_id = BucketId::new();
         let probe_id = ProbeId::new();
         let job_id = JobId::new();
-        let bucket_cfg = req.bucket_config.unwrap_or_default();
-        self.router.bucket_create(bucket_id, bucket_cfg)?;
 
         // Merge scope-resolved active rules (TC42c) with the per-call
-        // inline rules. Same helper TC42b uses on every rebind so
-        // semantics stay identical. The scoped snapshot returns only
-        // entries whose scope matches `(global ∪ matching-bucket ∪
-        // matching-job ∪ matching-probe)`.
+        // inline rules, then COMPILE them BEFORE allocating the bucket.
+        // An invalid inline rule is a caller-fixable error: failing the
+        // compile here (before `bucket_create`) means a bad rule fails
+        // fast with no orphaned bucket left behind. `bucket_create` has
+        // no inverse on the Router, so allocating it only after the rule
+        // set is known good avoids a leak on the build-failure path.
+        // Same merge helper TC42b uses on every rebind so semantics stay
+        // identical. The scoped snapshot returns only entries whose scope
+        // matches `(global ∪ matching-bucket ∪ matching-job ∪
+        // matching-probe)`.
         let active_for_job = self
             .activation
             .snapshot_for_job(bucket_id, job_id, probe_id);
@@ -455,6 +466,23 @@ impl CommandRuntime {
             merge_active_and_inline(&active_for_job, &req.rules);
         let sifter = Arc::new(
             SifterRuntime::build(&merged_rules).map_err(|e| CommandError::Sifter(e.to_string()))?,
+        );
+
+        // Rule set compiled cleanly: now allocate the bucket. Reaching
+        // here guarantees we will not orphan it on a rule-compile error.
+        let bucket_cfg = req.bucket_config.unwrap_or_default();
+        self.router.bucket_create(bucket_id, bucket_cfg)?;
+        // Record the bucket's source identity for subscription routing
+        // (MUST-ADD #2). Bumps the side-table dirty epoch so a `sources: all`
+        // subscription picks this new bucket up on its next pull.
+        self.sources.record(
+            bucket_id,
+            crate::subscriptions::source::BucketSource {
+                kind: terminal_commander_ipc::ProbeKind::Command,
+                job_id: Some(job_id),
+                probe_id: Some(probe_id),
+                path: None,
+            },
         );
         // Keep a handle for the live binding so TC42b's
         // `rebind_all_jobs` can swap this job's rule set without

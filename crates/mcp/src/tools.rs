@@ -17,15 +17,16 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 32 live
+//! [`tool_catalogue`] is the single source of truth for the 36 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry,
-//! file, PTY, and aggregate runtime views. Each maps 1:1 to a daemon
-//! IPC method. `system_discover` is the only daemon-independent tool;
-//! every other tool returns the structured `daemon_unavailable`
-//! envelope when the daemon is unreachable.
+//! file, PTY, aggregate runtime views, and predicate-routed
+//! subscriptions (`subscription_open/pull/list/close`). Each maps 1:1
+//! to a daemon IPC method. `system_discover` is the only
+//! daemon-independent tool; every other tool returns the structured
+//! `daemon_unavailable` envelope when the daemon is unreachable.
 //!
-//! Source-status: live; all 32 tools forward through daemon IPC.
+//! Source-status: live; all 36 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -49,14 +50,17 @@ use terminal_commanderd::ipc::protocol::{
     FileReadWindowParams, FileReadWindowResponse, FileSearchParams, FileSearchResponse,
     FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
     FileWatchStopResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse,
-    PolicyStatusResponse, ProbeListResponse, ProbeStatusParams, ProbeStatusResponse,
-    PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams,
-    PtyCommandStopResponse, PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse,
-    RegistryActivateParams, RegistryActivateResponse, RegistryDeactivateParams,
-    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
-    RegistryImportPackResponse, RegistryListActiveResponse, RegistrySearchParams,
-    RegistrySearchResponse, RegistryTestParams, RegistryTestResponse, RegistryTestSample,
-    RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
+    ListLimitParams, PolicyStatusResponse, ProbeListResponse, ProbeStatusParams,
+    ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
+    PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
+    PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
+    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
+    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
+    RegistrySearchParams, RegistrySearchResponse, RegistryTestParams, RegistryTestResponse,
+    RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
+    SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionListParams,
+    SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
+    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSourceSel,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -262,6 +266,26 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             status: ToolStatus::Live,
             description: "Bounded per-probe lookup by probe_id. An id no runtime knows fails with an UnknownProbe error, not a success body.",
         },
+        ToolCatalogueEntry {
+            name: "subscription_open",
+            status: ToolStatus::Live,
+            description: "Open ONE predicate-routed subscription (severity/kind/sources) over many sources; returns an opaque sub_id + boot_id. sources:all auto-joins future probes.",
+        },
+        ToolCatalogueEntry {
+            name: "subscription_pull",
+            status: ToolStatus::Live,
+            description: "Blocking multiplexed pull of matched events + per-source liveness from a sub_id. Idle returns SUCCESS empty+liveness; unknown sub_id errors.",
+        },
+        ToolCatalogueEntry {
+            name: "subscription_list",
+            status: ToolStatus::Live,
+            description: "Bounded snapshot of open subscriptions (sub_id + predicate_hash + counters).",
+        },
+        ToolCatalogueEntry {
+            name: "subscription_close",
+            status: ToolStatus::Live,
+            description: "Close a subscription by sub_id, freeing its slot. Idempotent (closed:false if unknown).",
+        },
     ]
 }
 
@@ -359,10 +383,22 @@ pub struct SystemDiscoverPayload {
     pub tools: Vec<DiscoveredToolEntry>,
 }
 
+/// Long-poll client timeout for `subscription_pull`. STRICTLY ABOVE the
+/// server-side pull cap (`MAX_PULL_TIMEOUT_MS` = 8 s): an idle ~8 s pull
+/// must return SUCCESS empty+liveness, never a -32603 client timeout
+/// (AC13 / MUST-ADD #7). Timeout hierarchy: pull server cap (8 s) <
+/// DRAIN_CEILING (10 s) < this MCP pull client timeout (12 s).
+const SUBSCRIPTION_PULL_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
 /// MCP server handler. Holds the daemon client and the tool router.
 #[derive(Clone)]
 pub struct TerminalCommanderMcpServer {
     daemon: McpDaemonClient,
+    /// Dedicated long-poll daemon client for `subscription_pull` ONLY.
+    /// `with_timeout` is per-CLIENT, so the normal 5 s client cannot be
+    /// reused for an 8 s idle pull without surfacing a -32603. This client
+    /// shares the same socket but a 12 s timeout (MUST-ADD #7).
+    pull_daemon: McpDaemonClient,
     /// Tool router populated by the rmcp `#[tool_router]` macro. The
     /// router is read by the rmcp service layer, not by us directly,
     /// so the dead-code lint trips here; suppressed below.
@@ -389,8 +425,15 @@ impl TerminalCommanderMcpServer {
     /// Construct a new server wired to the given daemon client.
     #[must_use]
     pub fn new(daemon: McpDaemonClient) -> Self {
+        // Dedicated long-poll client for `subscription_pull` (MUST-ADD #7):
+        // same socket + status handle, but a 12 s per-CLIENT timeout so an
+        // idle ~8 s pull returns SUCCESS empty+liveness, never a -32603.
+        let pull_daemon = daemon
+            .clone()
+            .with_timeout(SUBSCRIPTION_PULL_CLIENT_TIMEOUT);
         Self {
             daemon,
+            pull_daemon,
             tool_router: Self::tool_router(),
         }
     }
@@ -1006,12 +1049,22 @@ impl TerminalCommanderMcpServer {
     #[tool(
         description = "Snapshot of every currently-active rule. Returns id + version + severity + event_kind + tags."
     )]
-    async fn registry_list_active(&self) -> Result<CallToolResult, McpError> {
+    async fn registry_list_active(
+        &self,
+        Parameters(params): Parameters<McpListLimitParams>,
+    ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
-        match self.daemon.call(IpcRequest::RegistryListActive).await {
-            Ok(IpcResponse::RegistryListActive(RegistryListActiveResponse { entries })) => {
-                json_tool_result(&serde_json::json!({ "entries": entries }))
-            }
+        let ipc = ListLimitParams {
+            limit: params.limit,
+        };
+        match self.daemon.call(IpcRequest::RegistryListActive(ipc)).await {
+            Ok(IpcResponse::RegistryListActive(RegistryListActiveResponse {
+                entries,
+                truncated,
+            })) => json_tool_result(&serde_json::json!({
+                "entries": entries,
+                "truncated": truncated,
+            })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
@@ -1286,9 +1339,15 @@ impl TerminalCommanderMcpServer {
     #[tool(
         description = "Bounded aggregate runtime snapshot across all runtimes. Read-only; never returns raw stream content."
     )]
-    async fn runtime_state(&self) -> Result<CallToolResult, McpError> {
+    async fn runtime_state(
+        &self,
+        Parameters(params): Parameters<McpListLimitParams>,
+    ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
-        match self.daemon.call(IpcRequest::RuntimeState).await {
+        let ipc = ListLimitParams {
+            limit: params.limit,
+        };
+        match self.daemon.call(IpcRequest::RuntimeState(ipc)).await {
             Ok(IpcResponse::RuntimeState(r)) => json_tool_result(&r),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -1299,11 +1358,17 @@ impl TerminalCommanderMcpServer {
     #[tool(
         description = "Flat list of every live probe across command / pty / file-watch runtimes."
     )]
-    async fn probe_list(&self) -> Result<CallToolResult, McpError> {
+    async fn probe_list(
+        &self,
+        Parameters(params): Parameters<McpListLimitParams>,
+    ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
-        match self.daemon.call(IpcRequest::ProbeList).await {
-            Ok(IpcResponse::ProbeList(ProbeListResponse { probes })) => {
-                json_tool_result(&serde_json::json!({ "probes": probes }))
+        let ipc = ListLimitParams {
+            limit: params.limit,
+        };
+        match self.daemon.call(IpcRequest::ProbeList(ipc)).await {
+            Ok(IpcResponse::ProbeList(ProbeListResponse { probes, truncated })) => {
+                json_tool_result(&serde_json::json!({ "probes": probes, "truncated": truncated }))
             }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -1326,6 +1391,119 @@ impl TerminalCommanderMcpServer {
         match self.daemon.call(IpcRequest::ProbeStatus(ipc)).await {
             Ok(IpcResponse::ProbeStatus(ProbeStatusResponse { probe })) => {
                 json_tool_result(&serde_json::json!({ "probe": probe }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `subscription_open` — open a predicate-routed subscription.
+    #[tool(
+        description = "Open ONE multiplexed subscription over many sources by PREDICATE (severity_min, kind allowlist, sources: all|{jobs:[..]}|{buckets:[..]}|{probes:[..]}), instead of juggling N (bucket_id, cursor) triples. Returns an opaque sub_id + boot_id (a changed boot_id across opens means the daemon restarted and all subscriptions reset). sources:all auto-joins future matching probes. A late open starts from-now (no ring replay). Then loop subscription_pull on the sub_id."
+    )]
+    async fn subscription_open(
+        &self,
+        Parameters(params): Parameters<McpSubscriptionOpenParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let predicate = params.into_predicate().map_err(invalid_params)?;
+        let ipc = SubscriptionOpenParams { predicate };
+        match self.daemon.call(IpcRequest::SubscriptionOpen(ipc)).await {
+            Ok(IpcResponse::SubscriptionOpen(SubscriptionOpenResponse {
+                sub_id,
+                boot_id,
+                predicate_hash,
+                created_at_ms,
+                matched_sources,
+            })) => json_tool_result(&serde_json::json!({
+                "sub_id": sub_id,
+                "boot_id": boot_id,
+                "predicate_hash": predicate_hash,
+                "created_at_ms": created_at_ms,
+                "matched_sources": matched_sources,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `subscription_pull` — multiplexed, lossless, blocking pull.
+    #[tool(
+        description = "Pull matched events from an open subscription, multiplexed across all in-scope buckets. Blocks up to timeout_ms (default 5000, max 8000) until events arrive or the timeout elapses. Returns source-tagged events[] (bounded by max, default/cap 50) + per-source liveness[] (starting|running|exited|failed|cancelled|stopped) + lagged + truncated. An IDLE pull is SUCCESS with empty events[] + liveness (never an error). An unknown/expired sub_id returns an unknown_subscription error (re-open). Loop this for real-time-relative-to-turn delivery."
+    )]
+    async fn subscription_pull(
+        &self,
+        Parameters(params): Parameters<McpSubscriptionPullParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = SubscriptionPullParams {
+            sub_id: params.sub_id,
+            max: params.max,
+            timeout_ms: params.timeout_ms,
+        };
+        // Route through the dedicated long-poll client: an idle ~8 s pull on the
+        // default 5 s client would surface a -32603 (AC13 / MUST-ADD #7).
+        match self
+            .pull_daemon
+            .call(IpcRequest::SubscriptionPull(ipc))
+            .await
+        {
+            Ok(IpcResponse::SubscriptionPull(SubscriptionPullResponse {
+                events,
+                liveness,
+                lagged,
+                truncated,
+            })) => json_tool_result(&serde_json::json!({
+                "events": events,
+                "liveness": liveness,
+                "lagged": lagged,
+                "truncated": truncated,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `subscription_list` — bounded snapshot of open subscriptions.
+    #[tool(
+        description = "Snapshot of every open subscription: sub_id + predicate_hash + source_count + created_at_ms + last_pull_at_ms. Bounded by an optional limit (default/cap 64); truncated flags when more exist."
+    )]
+    async fn subscription_list(
+        &self,
+        Parameters(params): Parameters<McpSubscriptionListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = SubscriptionListParams {
+            limit: params.limit,
+        };
+        match self.daemon.call(IpcRequest::SubscriptionList(ipc)).await {
+            Ok(IpcResponse::SubscriptionList(SubscriptionListResponse {
+                subscriptions,
+                truncated,
+            })) => json_tool_result(&serde_json::json!({
+                "subscriptions": subscriptions,
+                "truncated": truncated,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `subscription_close` — close a subscription and free its slot.
+    #[tool(
+        description = "Close a subscription by sub_id, freeing its registry slot. Returns closed: true if it existed, false if it was already unknown (idempotent)."
+    )]
+    async fn subscription_close(
+        &self,
+        Parameters(params): Parameters<McpSubscriptionCloseParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = SubscriptionCloseParams {
+            sub_id: params.sub_id,
+        };
+        match self.daemon.call(IpcRequest::SubscriptionClose(ipc)).await {
+            Ok(IpcResponse::SubscriptionClose(SubscriptionCloseResponse { closed })) => {
+                json_tool_result(&serde_json::json!({ "closed": closed }))
             }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -1412,7 +1590,9 @@ pub fn into_mcp_error(e: &IpcError) -> McpError {
         | IpcErrorCode::UnknownWatch
         | IpcErrorCode::SecretInputDenied
         | IpcErrorCode::UnknownProbe
-        | IpcErrorCode::RuleNotActive => McpError::invalid_params(message, Some(data)),
+        | IpcErrorCode::RuleNotActive
+        | IpcErrorCode::UnknownSubscription
+        | IpcErrorCode::SubscriptionLimitExceeded => McpError::invalid_params(message, Some(data)),
     }
 }
 
@@ -2392,7 +2572,10 @@ impl McpActivationScope {
 /// MCP-facing parameters for `file_read_window`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileReadWindowParams {
-    /// Absolute or repo-relative path to a regular file.
+    /// Absolute path to a regular file (e.g. `/home/u/project/Cargo.toml`).
+    /// Absolute is required: the daemon has no workspace root, so a
+    /// relative path is rejected rather than resolved against the
+    /// daemon's working directory.
     pub path: String,
     /// 1-based start line. Omit to read from line 1. A value of `0` is
     /// clamped up to `1` by the daemon (there is no line 0).
@@ -2410,8 +2593,11 @@ pub struct McpFileReadWindowParams {
 /// MCP-facing parameters for `file_search`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileSearchParams {
-    /// Absolute or repo-relative path to the single regular file to
-    /// search. (This is a per-file search, not a directory walk.)
+    /// Absolute path to the single regular file to search (e.g.
+    /// `/home/u/project/Cargo.toml`). This is a per-file search, not a
+    /// directory walk. Absolute is required: the daemon has no workspace
+    /// root, so a relative path is rejected rather than resolved against
+    /// the daemon's working directory.
     pub path: String,
     /// The match expression: a plain SUBSTRING (literal), NOT a regex.
     /// Regex metacharacters are matched literally. Use `case_insensitive`
@@ -2428,6 +2614,10 @@ pub struct McpFileSearchParams {
 /// MCP-facing parameters for `file_watch_start`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileWatchStartParams {
+    /// Absolute path to the regular file to watch (e.g.
+    /// `/home/u/project/build.log`). Absolute is required: the daemon has
+    /// no workspace root, so a relative path is rejected rather than
+    /// resolved against the daemon's working directory.
     pub path: String,
     /// Follow from beginning (default false = follow-end / tail-like).
     #[serde(default)]
@@ -2521,6 +2711,136 @@ pub struct McpProbeStatusParams {
     /// Opaque probe id from `probe_list` / `runtime_state` (e.g.
     /// `prb_<32hex>`); copy it verbatim, not free-form.
     pub probe_id: String,
+}
+
+// =====================================================================
+// Bounded-ledger + subscriptions MCP DTOs.
+// =====================================================================
+
+/// Shared `limit` param for the bounded list snapshots (`runtime_state`,
+/// `probe_list`, `registry_list_active`). Clamped daemon-side to
+/// `MAX_LIST_LIMIT`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct McpListLimitParams {
+    /// Max rows per list (each of runtime_state's three vecs bounds
+    /// independently). Omit for the daemon default/cap. Over-cap sets the
+    /// response `truncated` flag.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// MCP-facing per-bucket routing selector for `subscription_open`.
+///
+/// Mirrors the wire `SubscriptionSourceSel` but takes wire-form id STRINGS so
+/// an agent passes the same ids it sees in `probe_list` / `runtime_state`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum McpSubscriptionSourceSel {
+    /// Every bucket; future matching probes auto-join.
+    #[default]
+    All,
+    /// A fixed set of owning job ids (`job_<hex>`).
+    Jobs { jobs: Vec<String> },
+    /// A fixed set of bucket ids (`bkt_<hex>`).
+    Buckets { buckets: Vec<String> },
+    /// A fixed set of owning probe ids (`prb_<hex>`).
+    Probes { probes: Vec<String> },
+}
+
+impl McpSubscriptionSourceSel {
+    /// Resolve into the wire selector, parsing each id string.
+    fn into_wire(self) -> Result<SubscriptionSourceSel, String> {
+        use terminal_commander_core::ids::{BucketIdKind, JobIdKind, ProbeIdKind};
+        match self {
+            Self::All => Ok(SubscriptionSourceSel::All),
+            Self::Jobs { jobs } => {
+                let parsed = jobs
+                    .iter()
+                    .map(|s| parse_id::<JobIdKind>("sources.jobs", s))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(SubscriptionSourceSel::Jobs { jobs: parsed })
+            }
+            Self::Buckets { buckets } => {
+                let parsed = buckets
+                    .iter()
+                    .map(|s| parse_id::<BucketIdKind>("sources.buckets", s))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(SubscriptionSourceSel::Buckets { buckets: parsed })
+            }
+            Self::Probes { probes } => {
+                let parsed = probes
+                    .iter()
+                    .map(|s| parse_id::<ProbeIdKind>("sources.probes", s))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(SubscriptionSourceSel::Probes { probes: parsed })
+            }
+        }
+    }
+}
+
+/// MCP-facing parameters for `subscription_open`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpSubscriptionOpenParams {
+    /// Minimum severity (per-EVENT): one of
+    /// trace|debug|info|low|medium|high|critical. Omit for no severity floor.
+    #[serde(default)]
+    pub severity_min: Option<String>,
+    /// Event-kind allowlist (per-EVENT), e.g. `["error","panic"]`. Omit for
+    /// any kind.
+    #[serde(default)]
+    pub kind: Option<Vec<String>>,
+    /// Per-BUCKET routing. Omit for `{ "kind": "all" }` (every source,
+    /// future probes auto-join).
+    #[serde(default)]
+    pub sources: McpSubscriptionSourceSel,
+}
+
+impl McpSubscriptionOpenParams {
+    /// Build the wire predicate, validating severity + ids before any IPC.
+    fn into_predicate(self) -> Result<SubscriptionPredicate, String> {
+        let severity_min = match self.severity_min.as_deref() {
+            None => None,
+            Some(s) => Some(parse_severity_filter(s)?),
+        };
+        let sources = self.sources.into_wire()?;
+        Ok(SubscriptionPredicate {
+            severity_min,
+            kind: self.kind,
+            sources,
+        })
+    }
+}
+
+/// MCP-facing parameters for `subscription_pull`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpSubscriptionPullParams {
+    /// Opaque sub_id from `subscription_open`; copy it verbatim.
+    pub sub_id: String,
+    /// Max events to return. Omit for the daemon default/cap (50).
+    #[serde(default)]
+    pub max: Option<usize>,
+    /// Blocking timeout in milliseconds. Omit for 5000; clamped to
+    /// [1, 8000]. The MCP client waits longer (12 s) so an idle pull is
+    /// SUCCESS empty+liveness, never a timeout error.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// MCP-facing parameters for `subscription_list`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct McpSubscriptionListParams {
+    /// Max rows. Omit for the daemon default/cap (64). Over-cap sets
+    /// `truncated`.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// MCP-facing parameters for `subscription_close`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpSubscriptionCloseParams {
+    /// Opaque sub_id to close; copy it verbatim. An unknown id returns
+    /// closed: false (idempotent).
+    pub sub_id: String,
 }
 
 #[cfg(test)]
@@ -2719,7 +3039,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_thirty_two_live_tools() {
+    fn catalogue_lists_thirty_six_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -2760,6 +3080,10 @@ mod tests {
                 "runtime_state",
                 "probe_list",
                 "probe_status",
+                "subscription_open",
+                "subscription_pull",
+                "subscription_list",
+                "subscription_close",
             ]
         );
         let not_impl: Vec<_> = tool_catalogue()
@@ -2816,6 +3140,10 @@ mod tests {
                 "run_and_watch".to_owned(),
                 "runtime_state".to_owned(),
                 "self_check".to_owned(),
+                "subscription_close".to_owned(),
+                "subscription_list".to_owned(),
+                "subscription_open".to_owned(),
+                "subscription_pull".to_owned(),
                 "system_discover".to_owned(),
             ]
         );

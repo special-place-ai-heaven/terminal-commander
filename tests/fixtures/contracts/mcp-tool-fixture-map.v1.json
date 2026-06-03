@@ -48,7 +48,11 @@
     "pty_command_list": "ensure_daemon_status_v1",
     "runtime_state": "ensure_daemon_status_v1",
     "probe_list": "ensure_daemon_status_v1",
-    "probe_status": "ensure_daemon_status_v1"
+    "probe_status": "ensure_daemon_status_v1",
+    "subscription_open": "ensure_daemon_status_v1",
+    "subscription_pull": "ensure_daemon_status_v1",
+    "subscription_list": "ensure_daemon_status_v1",
+    "subscription_close": "ensure_daemon_status_v1"
   },
   "live_tools": [
     {
@@ -210,14 +214,34 @@
       "name": "probe_status",
       "fixture": "mcp-tools/probe_status.v1.json",
       "status": "covered_live"
+    },
+    {
+      "name": "subscription_open",
+      "fixture": null,
+      "status": "missing_fixture"
+    },
+    {
+      "name": "subscription_pull",
+      "fixture": null,
+      "status": "missing_fixture"
+    },
+    {
+      "name": "subscription_list",
+      "fixture": null,
+      "status": "missing_fixture"
+    },
+    {
+      "name": "subscription_close",
+      "fixture": null,
+      "status": "missing_fixture"
     }
   ],
   "obsolete_fixtures": [],
   "counts": {
-    "live_tools": 32,
+    "live_tools": 36,
     "covered_live": 32,
     "placeholder_for_live_tool": 0,
-    "missing_fixture": 0,
+    "missing_fixture": 4,
     "obsolete_fixture_present": 0
   }
 }

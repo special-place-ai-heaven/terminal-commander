@@ -186,7 +186,14 @@ fn registry_upsert_returned_version_round_trips_through_activate_deactivate() {
         );
 
         // list_active must surface version 2.
-        let resp = call(&state, boot, &peer, 4, IpcRequest::RegistryListActive).await;
+        let resp = call(
+            &state,
+            boot,
+            &peer,
+            4,
+            IpcRequest::RegistryListActive(terminal_commanderd::ListLimitParams::default()),
+        )
+        .await;
         let entries = match resp {
             IpcResponse::RegistryListActive(r) => r.entries,
             other => panic!("unexpected response: {other:?}"),
