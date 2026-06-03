@@ -151,12 +151,15 @@ fn main() -> ExitCode {
 }
 
 /// `update` run-mode: replace a stale running daemon with this binary,
-/// then ensure a current daemon is running. Prints `old -> new` (or
-/// `up-to-date`) and exits 0 on success.
+/// then ensure a current daemon is running. Single-flights the whole
+/// replace -> spawn under one cross-process lock (H6) via
+/// `ensure_or_replace`, so a concurrent adapter cannot bind a competing
+/// daemon in the kill -> spawn window. Prints the resulting status and
+/// exits 0 on success.
 async fn run_update(cfg: &DaemonConfig, force: bool) -> ExitCode {
-    use terminal_commander_supervisor::ensure::{EnsureDaemonOptions, ensure_daemon};
+    use terminal_commander_supervisor::ensure::EnsureDaemonOptions;
     use terminal_commander_supervisor::paths::endpoint_from_socket_path;
-    use terminal_commander_supervisor::replace::{ReplaceOutcome, replace_if_stale};
+    use terminal_commander_supervisor::replace::ensure_or_replace;
 
     let installed = env!("CARGO_PKG_VERSION");
     let daemon_binary = std::env::current_exe().unwrap_or_else(|_| "terminal-commanderd".into());
@@ -181,29 +184,11 @@ async fn run_update(cfg: &DaemonConfig, force: bool) -> ExitCode {
         allow_spawn: true,
     };
 
-    match replace_if_stale(&opts, installed, force).await {
-        ReplaceOutcome::UpToDate { version } => {
-            println!("terminal-commanderd: up-to-date (running {version})");
-            ExitCode::SUCCESS
-        }
-        ReplaceOutcome::Skipped { reason } => {
-            // Not a hard failure (e.g. endpoint mismatch). Still ensure
-            // a daemon is up.
-            eprintln!("terminal-commanderd: update skipped: {reason}");
-            let status = ensure_daemon(opts).await;
-            report_ensure(&status)
-        }
-        ReplaceOutcome::Replaced { old, new } => {
-            println!("terminal-commanderd: replaced {old} -> {new}");
-            let status = ensure_daemon(opts).await;
-            report_ensure(&status)
-        }
-        ReplaceOutcome::NoDaemonRunning => {
-            println!("terminal-commanderd: no daemon running; starting {installed}");
-            let status = ensure_daemon(opts).await;
-            report_ensure(&status)
-        }
-    }
+    // Single-flight: one lock spans the (probe -> kill -> spawn) sequence
+    // so two `update` runs (or an `update` racing an adapter cold start)
+    // cannot orphan each other's daemon.
+    let status = ensure_or_replace(&opts, installed, force).await;
+    report_ensure(&status)
 }
 
 fn report_ensure(status: &terminal_commander_supervisor::ensure::EnsureDaemonStatus) -> ExitCode {

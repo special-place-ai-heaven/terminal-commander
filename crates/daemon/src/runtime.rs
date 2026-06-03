@@ -219,6 +219,71 @@ pub async fn run_foreground_idle(config: DaemonConfig) -> Result<(), RuntimeErro
     Ok(())
 }
 
+/// Decision returned by [`acquire_bringup_guard`].
+enum BringUpGuard {
+    /// We took the cross-process bring-up lock; hold this guard for the
+    /// process lifetime so a later cold-starting peer rendezvous on it.
+    Held(terminal_commander_supervisor::proc_lock::ProcessLock),
+    /// Proceed to bind WITHOUT holding the lock. This is the NORMAL path
+    /// for a daemon that our own supervisor spawned: the supervisor holds
+    /// the lock across (probe -> spawn -> wait-for-bind), so the child it
+    /// launched necessarily sees `Contended`. Contention is expected, not
+    /// an error.
+    Proceed,
+    /// A DIFFERENT, live daemon already owns this endpoint. Exit
+    /// gracefully WITHOUT binding, so we do not `remove_file` + rebind the
+    /// socket and orphan it (the orphaning bug H6 fixes on Unix).
+    AlreadyServed,
+}
+
+/// Belt-and-suspenders daemon-side single-flight guard (H6).
+///
+/// Tries the same `<state_dir>/terminal-commanderd.lock` the supervisor
+/// uses. CRITICAL subtlety: the daemon NORMALLY sees `Contended` because
+/// the very supervisor that spawned it is holding the lock while it waits
+/// for this process to bind. That is the EXPECTED path and is NOT an
+/// error — we [`BringUpGuard::Proceed`] to bind in that case. We only
+/// bail ([`BringUpGuard::AlreadyServed`]) when the pidfile shows a
+/// DIFFERENT (`pid != self`), live, endpoint-matching daemon already
+/// bound — the actual orphaning scenario. A lock open/IO error is
+/// non-fatal: log and proceed to bind.
+fn acquire_bringup_guard(state_dir: &std::path::Path, endpoint: &str) -> BringUpGuard {
+    use terminal_commander_supervisor::pidfile;
+    use terminal_commander_supervisor::proc_lock::{self, TryLockResult};
+
+    let lock_path = pidfile::lock_path(state_dir);
+    match proc_lock::try_acquire(&lock_path) {
+        Ok(TryLockResult::Acquired(guard)) => BringUpGuard::Held(guard),
+        Ok(TryLockResult::Contended) => {
+            // `read_pidfile` is liveness-gated (returns None if the
+            // recorded pid is dead). Only a DIFFERENT, live daemon on the
+            // SAME endpoint is a real competitor; our own supervisor
+            // holding the lock (no matching live pidfile, or the pid is
+            // ours) is the normal spawn path.
+            match pidfile::read_pidfile(state_dir) {
+                Some(rec) if rec.pid != std::process::id() && rec.endpoint == endpoint => {
+                    tracing::info!(
+                        "bring-up lock contended and a live daemon (pid {}) already \
+                         serves {endpoint}; exiting without rebinding to avoid orphaning it",
+                        rec.pid
+                    );
+                    BringUpGuard::AlreadyServed
+                }
+                _ => {
+                    tracing::debug!(
+                        "bring-up lock contended (supervisor holds it); proceeding to bind"
+                    );
+                    BringUpGuard::Proceed
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("bring-up lock unavailable ({e}); proceeding to bind");
+            BringUpGuard::Proceed
+        }
+    }
+}
+
 /// Bootstrap + bind the UDS IPC listener + wait for shutdown signal.
 ///
 /// On non-Unix targets this returns immediately with an unsupported-
@@ -243,6 +308,19 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     // shutdown trigger (flipped by the `Shutdown` IPC dispatch arm)
     // alongside the OS-signal path below.
     let state = Arc::new(state);
+
+    // H6 daemon-side single-flight guard. Take the same bring-up lock the
+    // supervisor uses BEFORE binding, so a stray second daemon does not
+    // `remove_file` + rebind the socket and orphan a live first daemon.
+    // NOTE: seeing `Contended` here is the NORMAL case — our own supervisor
+    // holds the lock while it waits for us to bind — so we proceed unless a
+    // DIFFERENT live daemon already serves this endpoint.
+    let _bringup_guard = match acquire_bringup_guard(&state_dir, &endpoint) {
+        BringUpGuard::Held(guard) => Some(guard),
+        BringUpGuard::Proceed => None,
+        BringUpGuard::AlreadyServed => return Ok(()),
+    };
+
     let server = IpcServer::new(Arc::clone(&state), socket_path);
     let handle = server
         .spawn()
@@ -295,6 +373,19 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     let pipe_name = state.config.pipe_name();
     tracing::info!("binding named pipe at {pipe_name}");
     let state = Arc::new(state);
+
+    // H6 daemon-side single-flight guard. Windows pipe bind already treats
+    // a duplicate first-instance as fatal (so it never orphans like the
+    // Unix socket rebind), but taking the same bring-up lock here still
+    // collapses the spawn-then-die race and keeps the two OSes symmetric.
+    // NOTE: `Contended` is the NORMAL case (our supervisor holds the lock);
+    // we bail only when a DIFFERENT live daemon already serves this pipe.
+    let _bringup_guard = match acquire_bringup_guard(&state_dir, &pipe_name) {
+        BringUpGuard::Held(guard) => Some(guard),
+        BringUpGuard::Proceed => None,
+        BringUpGuard::AlreadyServed => return Ok(()),
+    };
+
     let server = PipeServer::new(Arc::clone(&state), pipe_name.clone());
     let handle = server
         .spawn()

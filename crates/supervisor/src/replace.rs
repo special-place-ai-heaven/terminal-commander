@@ -10,10 +10,14 @@
 // connect-only by design).
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::ensure::{Endpoint, EnsureDaemonOptions, probe_endpoint};
+use crate::ensure::{
+    Endpoint, EnsureDaemonOptions, EnsureDaemonStatus, ensure_daemon, probe_endpoint,
+    spawn_under_lock,
+};
 use crate::pidfile;
+use crate::proc_lock::{self, TryLockResult};
 
 /// Outcome of a replace attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -513,6 +517,95 @@ pub async fn replace_if_stale(
 
     ReplaceOutcome::Skipped {
         reason: format!("killed pid {pid} but endpoint still reachable after 3s"),
+    }
+}
+
+/// Single-flight `replace`-then-`ensure` under ONE cross-process lock
+/// (H6). This is the entry point the daemon `update` run-mode uses
+/// instead of calling `replace_if_stale` + `ensure_daemon` separately:
+/// holding the same guard across the kill AND the spawn closes the
+/// kill -> spawn gap (a concurrent adapter cannot bind a fresh daemon in
+/// the window between this process killing the stale one and binding the
+/// replacement), and the lock is the same one `ensure_daemon` and the
+/// daemon itself take, so all bring-up paths rendezvous on it.
+///
+/// Returns an `EnsureDaemonStatus` describing the end state:
+/// `AlreadyRunning` when a current daemon was left in place (or a peer
+/// brought one up under contention), `Started` when this call spawned
+/// one, or `Unavailable` on failure. The detailed `old -> new` replace
+/// narrative is dropped in favor of the unified status; callers that
+/// need it can still call `replace_if_stale` directly.
+pub async fn ensure_or_replace(
+    opts: &EnsureDaemonOptions,
+    version: &str,
+    force: bool,
+) -> EnsureDaemonStatus {
+    let start = Instant::now();
+
+    // Fast path: a current, non-stale daemon is already up and we are
+    // not forcing a restart — no lock, no kill, no spawn.
+    if !force
+        && probe_endpoint(&opts.endpoint).await
+        && let Some(rec) = pidfile::read_pidfile(&opts.state_dir)
+        && !is_stale(&rec.version, version)
+    {
+        return EnsureDaemonStatus::AlreadyRunning {
+            endpoint: opts.endpoint.clone(),
+            pid: Some(rec.pid),
+        };
+    }
+
+    let _ = std::fs::create_dir_all(&opts.state_dir);
+    let lock_path = pidfile::lock_path(&opts.state_dir);
+    match proc_lock::try_acquire(&lock_path) {
+        Ok(TryLockResult::Acquired(guard)) => {
+            // Under the lock: replace a stale/forced daemon (best effort;
+            // a Skipped/UpToDate outcome simply leaves the endpoint bound),
+            // then decide whether a spawn is still needed.
+            let outcome = replace_if_stale(opts, version, force).await;
+            tracing::debug!("ensure_or_replace: replace outcome = {outcome:?}");
+
+            // If anything is still bound to the endpoint we deliberately
+            // did NOT clear it (up-to-date, refused, or a peer rebound it):
+            // do not spawn a competing daemon.
+            if probe_endpoint(&opts.endpoint).await {
+                let pid = pidfile::read_pidfile(&opts.state_dir).map(|r| r.pid);
+                return EnsureDaemonStatus::AlreadyRunning {
+                    endpoint: opts.endpoint.clone(),
+                    pid,
+                };
+            }
+
+            // Endpoint is free; spawn the replacement WHILE still holding
+            // the guard. The guard releases only when this fn returns.
+            spawn_under_lock(opts.clone(), start, &guard).await
+        }
+        Ok(TryLockResult::Contended) => {
+            // A peer owns the bring-up (replace+spawn). Wait for an
+            // endpoint to bind, bounded by startup_timeout.
+            let deadline = start + opts.startup_timeout;
+            while Instant::now() < deadline {
+                if probe_endpoint(&opts.endpoint).await {
+                    let pid = pidfile::read_pidfile(&opts.state_dir).map(|r| r.pid);
+                    return EnsureDaemonStatus::AlreadyRunning {
+                        endpoint: opts.endpoint.clone(),
+                        pid,
+                    };
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            // Fall back to the structured timeout via ensure_daemon, which
+            // produces the canonical Unavailable diagnostics.
+            ensure_daemon(opts.clone()).await
+        }
+        Err(e) => {
+            // Lock unavailable: degrade gracefully (liveness over
+            // single-flight). Best-effort replace, then defer to
+            // ensure_daemon, which re-probes and spawns if still down.
+            tracing::warn!("bring-up lock unavailable ({e}); replace+ensure without single-flight");
+            let _ = replace_if_stale(opts, version, force).await;
+            ensure_daemon(opts.clone()).await
+        }
     }
 }
 
