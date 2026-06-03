@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 
 //! FIX 3A (Windows): the named-pipe accept loop must DRAIN in-flight
