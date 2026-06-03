@@ -73,7 +73,8 @@ pub use ipc::{
     RuntimeStateResponse, SelfCheckResponse, SeverityHistogram, SubscriptionCloseParams,
     SubscriptionCloseResponse, SubscriptionEvent, SubscriptionListParams, SubscriptionListResponse,
     SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
-    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSourceSel,
+    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSeekParams,
+    SubscriptionSeekResponse, SubscriptionSourceSel,
 };
 #[cfg(unix)]
 pub use ipc::{DaemonClient, IpcServer, PeerCred, ServerHandle};

@@ -96,6 +96,7 @@ print("pty bye", flush=True)
                     rules: vec![],
                     rows: None,
                     cols: None,
+                    tag: None,
                 }),
             )
             .await
@@ -171,6 +172,7 @@ fn pty_command_rejects_shell_interpreter() {
                     rules: vec![],
                     rows: None,
                     cols: None,
+                    tag: None,
                 }),
             )
             .await
@@ -200,6 +202,7 @@ fn pty_command_rejects_empty_argv() {
                     rules: vec![],
                     rows: None,
                     cols: None,
+                    tag: None,
                 }),
             )
             .await
@@ -239,6 +242,7 @@ fn pty_write_stdin_oversized_is_rejected() {
                     rules: vec![],
                     rows: None,
                     cols: None,
+                    tag: None,
                 }),
             )
             .await
@@ -336,6 +340,7 @@ time.sleep(2)
                     rules: vec![],
                     rows: None,
                     cols: None,
+                    tag: None,
                 }),
             )
             .await
@@ -451,6 +456,7 @@ fn pty_command_list_reflects_live_then_stopped_state() {
                     rules: vec![],
                     rows: None,
                     cols: None,
+                    tag: None,
                 }),
             )
             .await

@@ -35,6 +35,7 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
         bucket_config: params.bucket_config.clone(),
         rules: params.rules.clone(),
         grace: params.grace(),
+        tag: params.tag.clone(),
     };
     let resp = state.command.start_combed(req).map_err(map_command_error)?;
     Ok(IpcResponse::CommandStartCombed(resp))

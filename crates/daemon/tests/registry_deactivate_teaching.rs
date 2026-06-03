@@ -287,6 +287,7 @@ async fn deactivate_wrong_scope_teaches_cross_scope_and_preserves_row() {
             bucket_config: None,
             rules: vec![],
             follow_from_beginning: None,
+            tag: None,
         }),
     )
     .await

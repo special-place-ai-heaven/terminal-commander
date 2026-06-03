@@ -238,6 +238,7 @@ impl WatchRuntime {
         bucket_cfg: BucketConfig,
         inline_rules: Vec<RuleDefinition>,
         follow_from_beginning: bool,
+        tag: Option<String>,
     ) -> Result<(JobId, BucketId, ProbeId), WatchError> {
         // Path-policy gate. The default-deny suffix list inside
         // PolicyEngine already covers ssh keys, sudoers, .aws, etc.
@@ -287,6 +288,7 @@ impl WatchRuntime {
                 job_id: Some(watch_id),
                 probe_id: Some(probe_id),
                 path: Some(path.clone()),
+                tag,
             },
         );
 

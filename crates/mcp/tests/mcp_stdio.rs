@@ -107,6 +107,7 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "subscription_list".to_owned(),
             "subscription_open".to_owned(),
             "subscription_pull".to_owned(),
+            "subscription_seek".to_owned(),
             "system_discover".to_owned(),
         ],
         "TC45 set plus aggregate runtime view plus predicate-routed subscriptions"

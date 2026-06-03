@@ -222,6 +222,7 @@ pub(in crate::ipc::server) fn handle_file_watch_start(
         bucket_cfg,
         params.rules.clone(),
         follow_from_beginning,
+        params.tag.clone(),
     ) {
         Ok((watch_id, bucket_id, probe_id)) => {
             Ok(IpcResponse::FileWatchStart(FileWatchStartResponse {

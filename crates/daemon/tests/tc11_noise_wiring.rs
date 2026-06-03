@@ -88,6 +88,7 @@ fn progress_only_stdout_suppresses_before_evaluate() {
                 bucket_config: None,
                 rules: vec![],
                 grace: None,
+                tag: None,
             })
             .expect("start ok");
 
@@ -143,6 +144,7 @@ fn dedupe_collapses_repeated_matches_within_window() {
                 bucket_config: None,
                 rules: vec![repeat_rule()],
                 grace: None,
+                tag: None,
             })
             .expect("start ok");
 

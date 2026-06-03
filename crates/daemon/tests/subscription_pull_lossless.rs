@@ -69,6 +69,7 @@ fn make_bucket(state: &Arc<DaemonState>, cfg: BucketConfig) -> (BucketId, JobId)
             job_id: Some(job),
             probe_id: Some(ProbeId::new()),
             path: None,
+            tag: None,
         },
     );
     (bucket, job)
@@ -120,6 +121,7 @@ fn open_all(state: &Arc<DaemonState>, severity_min: Option<Severity>) -> Uuid {
         severity_min,
         kind: None,
         sources: SourceSel::All,
+        tag: None,
     };
     state.subscriptions.open(predicate, HashMap::new()).unwrap()
 }
@@ -308,6 +310,92 @@ fn pull_two_floods_split_fairly_per_share() {
         assert_eq!(from_a, 2, "bucket A gets its fair share (no monopoly)");
         assert_eq!(from_b, 2, "bucket B gets its fair share (no monopoly)");
     });
+    cleanup(&data);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pull_proportional_share_favors_high_backlog_bucket() {
+    // Phase 3 lag-weighted fairness: A has a LARGE backlog (100 unread), B a
+    // SMALLER one (20 unread). Both exceed the FLAT per-bucket share
+    // (max/n = 10), so the OLD flat policy would split the cap EQUALLY (10/10)
+    // and fail the strict inequality below. Lag-weighting instead gives A a
+    // strictly larger share. One pull with max=20:
+    //   - A receives strictly MORE than B (proportional to backlog),
+    //   - total <= 20 (the hard cap still bounds the pull),
+    //   - B is NOT starved (>= 1 event).
+    let (data, state) = boot("proportional");
+    {
+        let (big, _ja) = make_bucket(&state, BucketConfig::default());
+        let (small, _jb) = make_bucket(&state, BucketConfig::default());
+        let sub = open_all(&state, Some(Severity::High));
+        for _ in 0..100 {
+            append(&state, big, Severity::High, "error");
+        }
+        for _ in 0..20 {
+            append(&state, small, Severity::High, "error");
+        }
+
+        let out = subscription_pull(&state, sub, 20, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(out.events.len() <= 20, "hard cap honored (<= max)");
+        let from_big = out
+            .events
+            .iter()
+            .filter(|e| e.origin.bucket_id == big)
+            .count();
+        let from_small = out
+            .events
+            .iter()
+            .filter(|e| e.origin.bucket_id == small)
+            .count();
+        assert!(
+            from_big > from_small,
+            "high-backlog bucket gets a strictly larger share (big={from_big}, small={from_small})"
+        );
+        assert!(
+            from_small >= 1,
+            "low-backlog bucket is never starved (small={from_small})"
+        );
+    }
+    cleanup(&data);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pull_equal_backlogs_behave_like_round_robin() {
+    // Equal backlogs -> roughly equal shares (the AC4 round-robin behavior is
+    // preserved). Two buckets with equal backlog, max=4 -> 2 and 2.
+    let (data, state) = boot("equalbacklog");
+    {
+        let (a, _ja) = make_bucket(&state, BucketConfig::default());
+        let (b, _jb) = make_bucket(&state, BucketConfig::default());
+        let sub = open_all(&state, Some(Severity::High));
+        for _ in 0..10 {
+            append(&state, a, Severity::High, "error");
+            append(&state, b, Severity::High, "error");
+        }
+
+        let out = subscription_pull(&state, sub, 4, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(out.events.len(), 4, "cap honored exactly");
+        let from_a = out
+            .events
+            .iter()
+            .filter(|e| e.origin.bucket_id == a)
+            .count();
+        let from_b = out
+            .events
+            .iter()
+            .filter(|e| e.origin.bucket_id == b)
+            .count();
+        let diff = from_a.abs_diff(from_b);
+        assert!(
+            diff <= 1,
+            "equal backlogs -> roughly equal shares (a={from_a}, b={from_b})"
+        );
+        assert!(from_a >= 1 && from_b >= 1, "neither bucket starved");
+    }
     cleanup(&data);
 }
 

@@ -118,6 +118,7 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
                     bucket_config: None,
                     rules: vec![],
                     grace_ms: Some(2_000),
+                    tag: None,
                 }),
             )
             .await
@@ -132,6 +133,7 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
                     bucket_config: None,
                     rules: vec![],
                     follow_from_beginning: Some(false),
+                    tag: None,
                 }),
             )
             .await
@@ -159,6 +161,7 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
                     rules: vec![],
                     rows: None,
                     cols: None,
+                    tag: None,
                 }),
             )
             .await
@@ -286,6 +289,7 @@ fn exited_command_reports_exited_liveness_from_jobstate() {
                     bucket_config: None,
                     rules: vec![],
                     grace_ms: Some(2_000),
+                    tag: None,
                 }),
             )
             .await

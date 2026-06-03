@@ -155,6 +155,7 @@ mod tests {
             severity_min: None,
             kind: None,
             sources: SourceSel::All,
+            tag: None,
         }
     }
 

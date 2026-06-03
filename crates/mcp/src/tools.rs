@@ -17,16 +17,16 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 36 live
+//! [`tool_catalogue`] is the single source of truth for the 37 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry,
 //! file, PTY, aggregate runtime views, and predicate-routed
-//! subscriptions (`subscription_open/pull/list/close`). Each maps 1:1
+//! subscriptions (`subscription_open/pull/list/close/seek`). Each maps 1:1
 //! to a daemon IPC method. `system_discover` is the only
 //! daemon-independent tool; every other tool returns the structured
 //! `daemon_unavailable` envelope when the daemon is unreachable.
 //!
-//! Source-status: live; all 36 tools forward through daemon IPC.
+//! Source-status: live; all 37 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -60,7 +60,8 @@ use terminal_commanderd::ipc::protocol::{
     RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
     SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionListParams,
     SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
-    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSourceSel,
+    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse,
+    SubscriptionSeekParams, SubscriptionSeekResponse, SubscriptionSourceSel,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -285,6 +286,11 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "subscription_close",
             status: ToolStatus::Live,
             description: "Close a subscription by sub_id, freeing its slot. Idempotent (closed:false if unknown).",
+        },
+        ToolCatalogueEntry {
+            name: "subscription_seek",
+            status: ToolStatus::Live,
+            description: "Reposition a subscription's offset for one bucket (explicit re-read). The requested seq is clamped to the bucket's live range (never an error); lagged flags an evicted request.",
         },
     ]
 }
@@ -1153,6 +1159,7 @@ impl TerminalCommanderMcpServer {
             bucket_config,
             rules,
             follow_from_beginning: params.follow_from_beginning,
+            tag: params.tag,
         };
         match self.daemon.call(IpcRequest::FileWatchStart(ipc)).await {
             Ok(IpcResponse::FileWatchStart(FileWatchStartResponse {
@@ -1237,6 +1244,7 @@ impl TerminalCommanderMcpServer {
             rules,
             rows: params.rows,
             cols: params.cols,
+            tag: params.tag,
         };
         match self.daemon.call(IpcRequest::PtyCommandStart(ipc)).await {
             Ok(IpcResponse::PtyCommandStart(PtyCommandStartResponse {
@@ -1505,6 +1513,35 @@ impl TerminalCommanderMcpServer {
             Ok(IpcResponse::SubscriptionClose(SubscriptionCloseResponse { closed })) => {
                 json_tool_result(&serde_json::json!({ "closed": closed }))
             }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `subscription_seek` — reposition a subscription's offset for one bucket.
+    #[tool(
+        description = "Reposition a subscription's offset for one bucket (explicit re-read). The requested seq is clamped to the bucket's live range and is never an error; lagged=true means the requested events were already evicted. Unknown sub_id errors."
+    )]
+    async fn subscription_seek(
+        &self,
+        Parameters(params): Parameters<McpSubscriptionSeekParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let bucket_id =
+            parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", &params.bucket_id)
+                .map_err(invalid_params)?;
+        let ipc = SubscriptionSeekParams {
+            sub_id: params.sub_id,
+            bucket_id,
+            seq: params.seq,
+        };
+        match self.daemon.call(IpcRequest::SubscriptionSeek(ipc)).await {
+            Ok(IpcResponse::SubscriptionSeek(SubscriptionSeekResponse {
+                clamped_seq,
+                lagged,
+            })) => json_tool_result(
+                &serde_json::json!({ "clamped_seq": clamped_seq, "lagged": lagged }),
+            ),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
@@ -2009,6 +2046,10 @@ pub struct McpCommandStartParams {
     /// `RuleDefinition`s. Prefer the typed `rules` field. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
+    /// Optional per-bucket tag (Phase 3). Tag this probe so a subscription
+    /// opened with a matching `tag` predicate routes to it. Omit for none.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 impl McpCommandStartParams {
@@ -2025,6 +2066,7 @@ impl McpCommandStartParams {
             bucket_config,
             rules,
             grace_ms: self.grace_ms,
+            tag: self.tag,
         })
     }
 }
@@ -2110,6 +2152,7 @@ impl McpRunAndWatchParams {
             bucket_config_json: self.bucket_config_json,
             rules: self.rules,
             rules_json: self.rules_json,
+            tag: None,
         };
         (start, wait_ms, max_signals)
     }
@@ -2635,6 +2678,10 @@ pub struct McpFileWatchStartParams {
     /// `RuleDefinition`s). Prefer `rules`. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
+    /// Optional per-bucket tag (Phase 3). Tag this watch so a subscription
+    /// opened with a matching `tag` predicate routes to it. Omit for none.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 /// MCP-facing parameters for `file_watch_stop`.
@@ -2684,6 +2731,10 @@ pub struct McpPtyCommandStartParams {
     /// `RuleDefinition`s). Prefer `rules`. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
+    /// Optional per-bucket tag (Phase 3). Tag this PTY job so a subscription
+    /// opened with a matching `tag` predicate routes to it. Omit for none.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -2793,6 +2844,10 @@ pub struct McpSubscriptionOpenParams {
     /// future probes auto-join).
     #[serde(default)]
     pub sources: McpSubscriptionSourceSel,
+    /// Per-BUCKET tag AND-filter. Omit to ignore the tag dimension; set it to
+    /// route only to probes started with a matching `tag`.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 impl McpSubscriptionOpenParams {
@@ -2807,6 +2862,7 @@ impl McpSubscriptionOpenParams {
             severity_min,
             kind: self.kind,
             sources,
+            tag: self.tag,
         })
     }
 }
@@ -2841,6 +2897,18 @@ pub struct McpSubscriptionCloseParams {
     /// Opaque sub_id to close; copy it verbatim. An unknown id returns
     /// closed: false (idempotent).
     pub sub_id: String,
+}
+
+/// MCP-facing parameters for `subscription_seek`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpSubscriptionSeekParams {
+    /// Opaque sub_id from subscription_open; copy it verbatim.
+    pub sub_id: String,
+    /// Bucket id (`bkt_<hex>`) to reposition within.
+    pub bucket_id: String,
+    /// Requested re-read position; clamped to the bucket's live range. A
+    /// position below the surviving head returns lagged=true (never an error).
+    pub seq: u64,
 }
 
 #[cfg(test)]
@@ -3039,7 +3107,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_thirty_six_live_tools() {
+    fn catalogue_lists_thirty_seven_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -3084,6 +3152,7 @@ mod tests {
                 "subscription_pull",
                 "subscription_list",
                 "subscription_close",
+                "subscription_seek",
             ]
         );
         let not_impl: Vec<_> = tool_catalogue()
@@ -3144,6 +3213,7 @@ mod tests {
                 "subscription_list".to_owned(),
                 "subscription_open".to_owned(),
                 "subscription_pull".to_owned(),
+                "subscription_seek".to_owned(),
                 "system_discover".to_owned(),
             ]
         );

@@ -16,7 +16,8 @@ use crate::ipc::protocol::{
     MAX_PULL_TIMEOUT_MS, MAX_SUBSCRIPTIONS, SourceLiveness, SubscriptionCloseParams,
     SubscriptionCloseResponse, SubscriptionEvent, SubscriptionListParams, SubscriptionListResponse,
     SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
-    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSourceSel, SubscriptionSummary,
+    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSeekParams,
+    SubscriptionSeekResponse, SubscriptionSourceSel, SubscriptionSummary,
 };
 use crate::state::DaemonState;
 use crate::subscriptions::model::{Predicate, SourceSel};
@@ -36,6 +37,7 @@ fn predicate_from_wire(wire: SubscriptionPredicate) -> Predicate {
         severity_min: wire.severity_min,
         kind: wire.kind,
         sources,
+        tag: wire.tag,
     }
 }
 
@@ -184,4 +186,46 @@ pub(in crate::ipc::server) fn handle_subscription_close(
     // error (matches the registry's `close -> bool` contract).
     let closed = Uuid::parse_str(&params.sub_id).is_ok_and(|id| state.subscriptions.close(id));
     IpcResponse::SubscriptionClose(SubscriptionCloseResponse { closed })
+}
+
+/// Map a bucket-store error onto the closed IPC error set. A missing bucket is
+/// the existing [`IpcErrorCode::BucketNotFound`]; anything else is internal.
+/// Phase 3 adds NO new error code.
+fn map_bucket(e: terminal_commander_core::BucketError) -> IpcError {
+    use terminal_commander_core::BucketError;
+    match e {
+        BucketError::NotFound(_) => IpcError::new(IpcErrorCode::BucketNotFound, e.to_string()),
+        other => IpcError::new(IpcErrorCode::Internal, other.to_string()),
+    }
+}
+
+/// `subscription_seek` -> reposition this consumer's offset for ONE bucket.
+///
+/// The requested seq is CLAMPED to `[head_seq.saturating_sub(1), tail_seq]`
+/// (never an error); `lagged` flags a request below the surviving head (the
+/// requested events were already evicted). Phase 3 adds NO new error code.
+///
+/// # Errors
+/// - [`IpcErrorCode::UnknownSubscription`] if `sub_id` is malformed or the sub
+///   is not present (via `parse_sub_id` and `with_sub_mut`'s miss path).
+/// - [`IpcErrorCode::BucketNotFound`] if the daemon does not know the bucket.
+pub(in crate::ipc::server) fn handle_subscription_seek(
+    state: &Arc<DaemonState>,
+    params: &SubscriptionSeekParams,
+) -> Result<IpcResponse, IpcError> {
+    let sub_id = parse_sub_id(&params.sub_id)?;
+    let st = state.buckets.state(params.bucket_id).map_err(map_bucket)?;
+    // The smallest position a consumer can be parked at is `head_seq - 1` (the
+    // pre-first-readable cursor); the largest is `tail_seq`. A request below
+    // the floor means the events it wanted were evicted -> lagged.
+    let floor = st.head_seq.saturating_sub(1);
+    let lagged = params.seq < floor;
+    let clamped = params.seq.clamp(floor, st.tail_seq);
+    state.subscriptions.with_sub_mut(sub_id, |s| {
+        s.offsets.insert(params.bucket_id, clamped);
+    })?;
+    Ok(IpcResponse::SubscriptionSeek(SubscriptionSeekResponse {
+        clamped_seq: clamped,
+        lagged,
+    }))
 }

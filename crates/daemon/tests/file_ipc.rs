@@ -359,6 +359,7 @@ fn file_watch_start_then_append_emits_events_when_rule_active() {
                     bucket_config: None,
                     rules: vec![kw_rule("kw-watch", "needle", "needle_match")],
                     follow_from_beginning: Some(false),
+                    tag: None,
                 }),
             )
             .await
@@ -492,6 +493,7 @@ fn file_watch_denies_default_deny_path() {
                     bucket_config: None,
                     rules: vec![],
                     follow_from_beginning: None,
+                    tag: None,
                 }),
             )
             .await
@@ -521,6 +523,7 @@ fn file_watch_list_reflects_live_then_stopped_state() {
                     bucket_config: None,
                     rules: vec![],
                     follow_from_beginning: Some(false),
+                    tag: None,
                 }),
             )
             .await
@@ -688,6 +691,7 @@ fn file_watch_denies_symlink_to_default_deny_target() {
                     bucket_config: None,
                     rules: vec![],
                     follow_from_beginning: None,
+                    tag: None,
                 }),
             )
             .await

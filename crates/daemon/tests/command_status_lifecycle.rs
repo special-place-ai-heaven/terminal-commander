@@ -52,6 +52,7 @@ fn command_status_counts_lifecycle_event_when_no_rules_match() {
                 bucket_config: None,
                 rules: vec![],
                 grace: None,
+                tag: None,
             })
             .expect("start ok");
 
@@ -142,6 +143,7 @@ fn no_rule_command_returns_exit_receipt() {
                 bucket_config: None,
                 rules: vec![],
                 grace: None,
+                tag: None,
             })
             .expect("start ok");
 
@@ -186,6 +188,7 @@ fn command_output_tail_returns_bounded_lines_without_a_rule() {
                 bucket_config: None,
                 rules: vec![],
                 grace: None,
+                tag: None,
             })
             .expect("start ok");
 
@@ -232,6 +235,7 @@ fn command_output_tail_clamps_to_200_lines() {
                 bucket_config: None,
                 rules: vec![],
                 grace: None,
+                tag: None,
             })
             .expect("start ok");
 
@@ -290,6 +294,7 @@ fn rule_match_command_has_no_receipt() {
                 bucket_config: None,
                 rules: vec![hello_rule()],
                 grace: None,
+                tag: None,
             })
             .expect("start ok");
 

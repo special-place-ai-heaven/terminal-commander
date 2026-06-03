@@ -296,6 +296,10 @@ pub enum IpcRequest {
     SubscriptionList(SubscriptionListParams),
     /// Close a subscription, freeing its registry slot. (Subscriptions §4.)
     SubscriptionClose(SubscriptionCloseParams),
+    /// Reposition one bucket's offset for a subscription (explicit re-read).
+    /// The requested seq is clamped to the bucket's live range. (Subscriptions
+    /// §3 seek.)
+    SubscriptionSeek(SubscriptionSeekParams),
     /// Request a graceful shutdown. The daemon ACKs immediately
     /// (`ShutdownAck`), stops accepting new connections, drains in-flight
     /// requests, removes its pidfile, and exits 0. New connections during the
@@ -366,6 +370,7 @@ pub enum IpcResponse {
     SubscriptionPull(SubscriptionPullResponse),
     SubscriptionList(SubscriptionListResponse),
     SubscriptionClose(SubscriptionCloseResponse),
+    SubscriptionSeek(SubscriptionSeekResponse),
     /// Ack for `Shutdown`. `draining=true` once the daemon has stopped accepting
     /// new connections and begun draining.
     ShutdownAck {
@@ -734,6 +739,9 @@ pub struct CommandStartParams {
     /// milliseconds. Clamped to `MAX_COMMAND_GRACE_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grace_ms: Option<u64>,
+    /// Optional per-bucket tag for subscription routing (Phase 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 impl CommandStartParams {
@@ -1134,6 +1142,9 @@ pub struct FileWatchStartParams {
     /// Defaults to follow-end (typical "tail -F" semantics).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_from_beginning: Option<bool>,
+    /// Optional per-bucket tag for subscription routing (Phase 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1205,6 +1216,9 @@ pub struct PtyCommandStartParams {
     pub rows: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
+    /// Optional per-bucket tag for subscription routing (Phase 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1569,6 +1583,9 @@ pub struct SubscriptionPredicate {
     /// Per-BUCKET routing selector. Omitted = `all`.
     #[serde(default = "default_source_sel")]
     pub sources: SubscriptionSourceSel,
+    /// Per-BUCKET tag AND-filter. Omitted = ignore the tag dimension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 /// Default routing selector (`all`) when `sources` is omitted on the wire.
@@ -1704,6 +1721,32 @@ pub struct SubscriptionCloseResponse {
     pub closed: bool,
 }
 
+/// `subscription_seek` parameters.
+///
+/// Reposition ONE bucket's offset for an existing subscription (explicit
+/// re-read). The requested `seq` is clamped to the bucket's live range; it is
+/// never an error. (Subscriptions §3 seek.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionSeekParams {
+    /// Opaque handle from `subscription_open`.
+    pub sub_id: String,
+    /// Bucket to reposition within.
+    pub bucket_id: BucketId,
+    /// Requested re-read position. Clamped to
+    /// `[head_seq.saturating_sub(1), tail_seq]`; never an error.
+    pub seq: u64,
+}
+
+/// `subscription_seek` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionSeekResponse {
+    /// The offset actually stored after clamping.
+    pub clamped_seq: u64,
+    /// True when the requested seq was below `head_seq.saturating_sub(1)`
+    /// (the requested events were already evicted).
+    pub lagged: bool,
+}
+
 /// Serialize an envelope to a length-prefixed wire frame. Returns
 /// the bytes ready to write to the socket. Rejects payloads larger
 /// than [`MAX_FRAME_BYTES`].
@@ -1823,6 +1866,7 @@ mod tests {
                 sources: SubscriptionSourceSel::Jobs {
                     jobs: vec![JobId::new()],
                 },
+                tag: None,
             },
         };
         let req = IpcRequest::SubscriptionOpen(params);
@@ -1938,6 +1982,34 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
         match back {
             IpcResponse::SubscriptionClose(r) => assert!(r.closed),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscription_seek_pair_round_trips_through_request_and_response() {
+        let req = IpcRequest::SubscriptionSeek(SubscriptionSeekParams {
+            sub_id: "sub-1".to_owned(),
+            bucket_id: BucketId::new(),
+            seq: 42,
+        });
+        let back: IpcRequest = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        match back {
+            IpcRequest::SubscriptionSeek(p) => assert_eq!(p.seq, 42),
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let resp = IpcResponse::SubscriptionSeek(SubscriptionSeekResponse {
+            clamped_seq: 7,
+            lagged: true,
+        });
+        let back: IpcResponse =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        match back {
+            IpcResponse::SubscriptionSeek(r) => {
+                assert_eq!(r.clamped_seq, 7);
+                assert!(r.lagged);
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }

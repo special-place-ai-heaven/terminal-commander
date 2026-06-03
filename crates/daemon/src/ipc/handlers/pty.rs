@@ -110,6 +110,7 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
         rules: params.rules.clone(),
         rows: params.rows,
         cols: params.cols,
+        tag: params.tag.clone(),
     };
     match state.pty.start(req) {
         Ok(r) => Ok(IpcResponse::PtyCommandStart(PtyCommandStartResponse {
