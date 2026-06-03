@@ -66,7 +66,10 @@ fn runtime_state_empty_when_no_runtimes_live() {
         let client = DaemonClient::new(handle.socket_path().to_path_buf())
             .with_timeout(Duration::from_secs(2));
         let resp = client
-            .call(1, IpcRequest::RuntimeState)
+            .call(
+                1,
+                IpcRequest::RuntimeState(terminal_commanderd::ListLimitParams::default()),
+            )
             .await
             .expect("runtime_state");
         let r = match resp {
@@ -167,7 +170,10 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
 
         // Aggregate runtime state must show all three.
         let resp = client
-            .call(4, IpcRequest::RuntimeState)
+            .call(
+                4,
+                IpcRequest::RuntimeState(terminal_commanderd::ListLimitParams::default()),
+            )
             .await
             .expect("runtime_state");
         let r = match resp {
@@ -202,7 +208,10 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
 
         // probe_list returns the same flat list.
         let resp = client
-            .call(5, IpcRequest::ProbeList)
+            .call(
+                5,
+                IpcRequest::ProbeList(terminal_commanderd::ListLimitParams::default()),
+            )
             .await
             .expect("probe_list");
         let pl = match resp {
@@ -289,7 +298,10 @@ fn exited_command_reports_exited_liveness_from_jobstate() {
         for i in 2..60 {
             tokio::time::sleep(Duration::from_millis(40)).await;
             let resp = client
-                .call(i, IpcRequest::RuntimeState)
+                .call(
+                    i,
+                    IpcRequest::RuntimeState(terminal_commanderd::ListLimitParams::default()),
+                )
                 .await
                 .expect("runtime_state");
             let r = match resp {

@@ -223,7 +223,7 @@ fn unexpected_variant(method: &str) -> terminal_commander_ipc::IpcError {
 fn run_rules_list() -> std::process::ExitCode {
     run_daemon_command(
         "rules list",
-        IpcRequest::RegistryListActive,
+        IpcRequest::RegistryListActive(terminal_commander_ipc::ListLimitParams::default()),
         |resp| match resp {
             IpcResponse::RegistryListActive(r) => {
                 render::rules_list(&r);
@@ -252,24 +252,32 @@ fn run_rules_show(rule_id: &str) -> std::process::ExitCode {
 
 /// `jobs` -> `runtime_state` -> counts + probe/bucket tables.
 fn run_jobs() -> std::process::ExitCode {
-    run_daemon_command("jobs", IpcRequest::RuntimeState, |resp| match resp {
-        IpcResponse::RuntimeState(r) => {
-            render::jobs(&r);
-            Ok(())
-        }
-        _ => Err(unexpected_variant("runtime_state")),
-    })
+    run_daemon_command(
+        "jobs",
+        IpcRequest::RuntimeState(terminal_commander_ipc::ListLimitParams::default()),
+        |resp| match resp {
+            IpcResponse::RuntimeState(r) => {
+                render::jobs(&r);
+                Ok(())
+            }
+            _ => Err(unexpected_variant("runtime_state")),
+        },
+    )
 }
 
 /// `probes` -> `probe_list` -> one row per live probe.
 fn run_probes() -> std::process::ExitCode {
-    run_daemon_command("probes", IpcRequest::ProbeList, |resp| match resp {
-        IpcResponse::ProbeList(r) => {
-            render::probes(&r);
-            Ok(())
-        }
-        _ => Err(unexpected_variant("probe_list")),
-    })
+    run_daemon_command(
+        "probes",
+        IpcRequest::ProbeList(terminal_commander_ipc::ListLimitParams::default()),
+        |resp| match resp {
+            IpcResponse::ProbeList(r) => {
+                render::probes(&r);
+                Ok(())
+            }
+            _ => Err(unexpected_variant("probe_list")),
+        },
+    )
 }
 
 /// `policy` -> `policy_status` -> profile + deny counts + caps.
@@ -291,7 +299,7 @@ fn run_policy() -> std::process::ExitCode {
 fn run_buckets_list() -> std::process::ExitCode {
     run_daemon_command(
         "buckets list",
-        IpcRequest::RuntimeState,
+        IpcRequest::RuntimeState(terminal_commander_ipc::ListLimitParams::default()),
         |resp| match resp {
             IpcResponse::RuntimeState(r) => {
                 render::buckets_list(&r);

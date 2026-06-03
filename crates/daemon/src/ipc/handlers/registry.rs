@@ -418,8 +418,15 @@ pub(in crate::ipc::server) fn handle_registry_deactivate(
     ))
 }
 
-pub(in crate::ipc::server) fn handle_registry_list_active(state: &Arc<DaemonState>) -> IpcResponse {
-    let entries: Vec<RegistryActiveEntry> = state
+pub(in crate::ipc::server) fn handle_registry_list_active(
+    state: &Arc<DaemonState>,
+    params: &crate::ipc::protocol::ListLimitParams,
+) -> IpcResponse {
+    let limit = params
+        .limit
+        .unwrap_or(crate::ipc::protocol::MAX_LIST_LIMIT)
+        .min(crate::ipc::protocol::MAX_LIST_LIMIT);
+    let all: Vec<RegistryActiveEntry> = state
         .activation
         .snapshot_entries()
         .into_iter()
@@ -432,5 +439,7 @@ pub(in crate::ipc::server) fn handle_registry_list_active(state: &Arc<DaemonStat
             scope: e.scope,
         })
         .collect();
-    IpcResponse::RegistryListActive(RegistryListActiveResponse { entries })
+    let truncated = all.len() > limit;
+    let entries: Vec<_> = all.into_iter().take(limit).collect();
+    IpcResponse::RegistryListActive(RegistryListActiveResponse { entries, truncated })
 }

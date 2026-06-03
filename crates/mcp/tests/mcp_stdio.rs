@@ -103,9 +103,13 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "run_and_watch".to_owned(),
             "runtime_state".to_owned(),
             "self_check".to_owned(),
+            "subscription_close".to_owned(),
+            "subscription_list".to_owned(),
+            "subscription_open".to_owned(),
+            "subscription_pull".to_owned(),
             "system_discover".to_owned(),
         ],
-        "TC45 must advertise the full TC44 set plus aggregate runtime view"
+        "TC45 set plus aggregate runtime view plus predicate-routed subscriptions"
     );
 
     let _ = client.cancel().await;

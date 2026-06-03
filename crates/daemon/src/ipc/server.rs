@@ -526,8 +526,8 @@ async fn dispatch(
                 Err(e) => ("registry_deactivate", IpcResult::Err { error: e }),
             }
         }
-        IpcRequest::RegistryListActive => {
-            let r = handlers::registry::handle_registry_list_active(state);
+        IpcRequest::RegistryListActive(p) => {
+            let r = handlers::registry::handle_registry_list_active(state, p);
             ("registry_list_active", IpcResult::Ok { response: r })
         }
         IpcRequest::FileReadWindow(p) => match handlers::file::handle_file_read_window(state, p) {
@@ -588,12 +588,12 @@ async fn dispatch(
             Err(e) => ("pty_command_stop", IpcResult::Err { error: e }),
         },
         IpcRequest::PtyCommandList => handlers::pty::dispatch_pty_command_list(state),
-        IpcRequest::RuntimeState => {
-            let r = handlers::runtime::handle_runtime_state(state);
+        IpcRequest::RuntimeState(p) => {
+            let r = handlers::runtime::handle_runtime_state(state, p);
             ("runtime_state", IpcResult::Ok { response: r })
         }
-        IpcRequest::ProbeList => {
-            let r = handlers::runtime::handle_probe_list(state);
+        IpcRequest::ProbeList(p) => {
+            let r = handlers::runtime::handle_probe_list(state, p);
             ("probe_list", IpcResult::Ok { response: r })
         }
         IpcRequest::ProbeStatus(p) => match handlers::runtime::handle_probe_status(state, p) {
@@ -604,6 +604,26 @@ async fn dispatch(
             Ok(r) => ("audit_since", IpcResult::Ok { response: r }),
             Err(e) => ("audit_since", IpcResult::Err { error: e }),
         },
+        IpcRequest::SubscriptionOpen(p) => {
+            match handlers::subscription::handle_subscription_open(state, p) {
+                Ok(r) => ("subscription_open", IpcResult::Ok { response: r }),
+                Err(e) => ("subscription_open", IpcResult::Err { error: e }),
+            }
+        }
+        IpcRequest::SubscriptionPull(p) => {
+            match handlers::subscription::handle_subscription_pull(state, p).await {
+                Ok(r) => ("subscription_pull", IpcResult::Ok { response: r }),
+                Err(e) => ("subscription_pull", IpcResult::Err { error: e }),
+            }
+        }
+        IpcRequest::SubscriptionList(p) => {
+            let r = handlers::subscription::handle_subscription_list(state, p);
+            ("subscription_list", IpcResult::Ok { response: r })
+        }
+        IpcRequest::SubscriptionClose(p) => {
+            let r = handlers::subscription::handle_subscription_close(state, p);
+            ("subscription_close", IpcResult::Ok { response: r })
+        }
         // Graceful shutdown (E2). Flip the internal trigger and ACK
         // immediately. The ACK is written back to THIS connection
         // before any teardown: `trigger_shutdown` only flips a sticky
@@ -680,6 +700,10 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
             "probe_list".to_owned(),
             "probe_status".to_owned(),
             "audit_since".to_owned(),
+            "subscription_open".to_owned(),
+            "subscription_pull".to_owned(),
+            "subscription_list".to_owned(),
+            "subscription_close".to_owned(),
         ],
     })
 }

@@ -111,8 +111,17 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
     out
 }
 
-pub(in crate::ipc::server) fn handle_runtime_state(state: &Arc<DaemonState>) -> IpcResponse {
+pub(in crate::ipc::server) fn handle_runtime_state(
+    state: &Arc<DaemonState>,
+    params: &crate::ipc::protocol::ListLimitParams,
+) -> IpcResponse {
+    let limit = params
+        .limit
+        .unwrap_or(crate::ipc::protocol::MAX_LIST_LIMIT)
+        .min(crate::ipc::protocol::MAX_LIST_LIMIT);
     let probes = collect_probes(state);
+    // Counts reflect the TRUE totals (computed before truncation); the
+    // returned vecs are bounded independently by `limit`.
     let command_jobs = u32::try_from(
         probes
             .iter()
@@ -165,6 +174,15 @@ pub(in crate::ipc::server) fn handle_runtime_state(state: &Arc<DaemonState>) -> 
         .collect();
     let active_rules_count = u32::try_from(active_rules.len()).unwrap_or(u32::MAX);
 
+    // Bound each of the three vecs INDEPENDENTLY (a single cursor cannot
+    // page three lists — subscriptions §6).
+    let probes_truncated = probes.len() > limit;
+    let buckets_truncated = buckets.len() > limit;
+    let active_rules_truncated = active_rules.len() > limit;
+    let probes: Vec<_> = probes.into_iter().take(limit).collect();
+    let buckets: Vec<_> = buckets.into_iter().take(limit).collect();
+    let active_rules: Vec<_> = active_rules.into_iter().take(limit).collect();
+
     IpcResponse::RuntimeState(RuntimeStateResponse {
         command_jobs,
         pty_jobs,
@@ -174,13 +192,24 @@ pub(in crate::ipc::server) fn handle_runtime_state(state: &Arc<DaemonState>) -> 
         probes,
         buckets,
         active_rules,
+        probes_truncated,
+        buckets_truncated,
+        active_rules_truncated,
     })
 }
 
-pub(in crate::ipc::server) fn handle_probe_list(state: &Arc<DaemonState>) -> IpcResponse {
-    IpcResponse::ProbeList(ProbeListResponse {
-        probes: collect_probes(state),
-    })
+pub(in crate::ipc::server) fn handle_probe_list(
+    state: &Arc<DaemonState>,
+    params: &crate::ipc::protocol::ListLimitParams,
+) -> IpcResponse {
+    let limit = params
+        .limit
+        .unwrap_or(crate::ipc::protocol::MAX_LIST_LIMIT)
+        .min(crate::ipc::protocol::MAX_LIST_LIMIT);
+    let probes = collect_probes(state);
+    let truncated = probes.len() > limit;
+    let probes: Vec<_> = probes.into_iter().take(limit).collect();
+    IpcResponse::ProbeList(ProbeListResponse { probes, truncated })
 }
 
 #[allow(clippy::option_if_let_else)]

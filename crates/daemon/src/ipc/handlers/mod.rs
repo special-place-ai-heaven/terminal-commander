@@ -9,3 +9,4 @@ pub(in crate::ipc::server) mod file;
 pub(in crate::ipc::server) mod pty;
 pub(in crate::ipc::server) mod registry;
 pub(in crate::ipc::server) mod runtime;
+pub(in crate::ipc::server) mod subscription;

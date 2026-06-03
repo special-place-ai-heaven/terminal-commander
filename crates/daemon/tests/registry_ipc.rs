@@ -349,7 +349,10 @@ fn registry_activate_then_list_then_deactivate() {
 
         // List active.
         let resp = client
-            .call(4, IpcRequest::RegistryListActive)
+            .call(
+                4,
+                IpcRequest::RegistryListActive(terminal_commanderd::ListLimitParams::default()),
+            )
             .await
             .expect("list active");
         let entries = match resp {

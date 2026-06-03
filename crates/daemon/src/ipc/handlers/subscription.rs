@@ -1,0 +1,187 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 The Terminal Commander Authors
+
+//! IPC handlers for the predicate-routed subscription surface
+//! (`subscription_open/pull/list/close`). Thin glue between the wire
+//! protocol and the daemon-internal subscription core (`crate::subscriptions`):
+//! parse the wire predicate, compute from-now initial offsets, drive the
+//! lossless multiplexed `pull`, and project the outcome back onto the wire.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::ipc::protocol::{
+    DEFAULT_PULL_TIMEOUT_MS, IpcError, IpcErrorCode, IpcResponse, MAX_PULL_EVENTS,
+    MAX_PULL_TIMEOUT_MS, MAX_SUBSCRIPTIONS, SourceLiveness, SubscriptionCloseParams,
+    SubscriptionCloseResponse, SubscriptionEvent, SubscriptionListParams, SubscriptionListResponse,
+    SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
+    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSourceSel, SubscriptionSummary,
+};
+use crate::state::DaemonState;
+use crate::subscriptions::model::{Predicate, SourceSel};
+use crate::subscriptions::pull::{self, PullOutcome};
+use terminal_commander_core::BucketId;
+use uuid::Uuid;
+
+/// Convert the wire predicate into the daemon-internal [`Predicate`].
+fn predicate_from_wire(wire: SubscriptionPredicate) -> Predicate {
+    let sources = match wire.sources {
+        SubscriptionSourceSel::All => SourceSel::All,
+        SubscriptionSourceSel::Jobs { jobs } => SourceSel::Jobs(jobs),
+        SubscriptionSourceSel::Buckets { buckets } => SourceSel::Buckets(buckets),
+        SubscriptionSourceSel::Probes { probes } => SourceSel::Probes(probes),
+    };
+    Predicate {
+        severity_min: wire.severity_min,
+        kind: wire.kind,
+        sources,
+    }
+}
+
+/// Compute from-now initial offsets for every already-in-scope bucket: a
+/// late open starts at each bucket's CURRENT tail (`tail_seq`), so it never
+/// replays the ring. Buckets born after the open start at offset 0 and are
+/// auto-joined by the next pull's routing rebuild. Returns the offset map
+/// plus the matched-source count.
+fn initial_offsets(
+    state: &Arc<DaemonState>,
+    predicate: &Predicate,
+) -> (HashMap<BucketId, u64>, u32) {
+    let mut offsets: HashMap<BucketId, u64> = HashMap::new();
+    for id in state.buckets.list_bucket_ids() {
+        let Some(source) = state.sources.get(id) else {
+            continue;
+        };
+        if predicate.bucket_in_scope(id, &source) {
+            // From-now: events_since reads strictly `seq > cursor`, so the
+            // current `tail_seq` means "deliver only events after the tip".
+            let tail = state.buckets.state(id).map_or(0, |s| s.tail_seq);
+            offsets.insert(id, tail);
+        }
+    }
+    let matched = u32::try_from(offsets.len()).unwrap_or(u32::MAX);
+    (offsets, matched)
+}
+
+/// Milliseconds since the Unix epoch right now (wall clock for wire stamps).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+pub(in crate::ipc::server) fn handle_subscription_open(
+    state: &Arc<DaemonState>,
+    params: &SubscriptionOpenParams,
+) -> Result<IpcResponse, IpcError> {
+    let predicate = predicate_from_wire(params.predicate.clone());
+    let predicate_hash = predicate.normalized_hash();
+    let (offsets, matched_sources) = initial_offsets(state, &predicate);
+    let sub_id = state.subscriptions.open(predicate, offsets)?;
+    Ok(IpcResponse::SubscriptionOpen(SubscriptionOpenResponse {
+        sub_id: sub_id.to_string(),
+        boot_id: state.boot_id.to_string(),
+        predicate_hash: predicate_hash.to_string(),
+        created_at_ms: now_ms(),
+        matched_sources,
+    }))
+}
+
+/// Parse a wire `sub_id` string into a [`Uuid`]. A parse failure is treated
+/// as [`IpcErrorCode::UnknownSubscription`] (a malformed handle is, by
+/// definition, not a known subscription).
+fn parse_sub_id(s: &str) -> Result<Uuid, IpcError> {
+    Uuid::parse_str(s).map_err(|_| {
+        IpcError::new(
+            IpcErrorCode::UnknownSubscription,
+            format!("unknown subscription: {s}"),
+        )
+    })
+}
+
+pub(in crate::ipc::server) async fn handle_subscription_pull(
+    state: &Arc<DaemonState>,
+    params: &SubscriptionPullParams,
+) -> Result<IpcResponse, IpcError> {
+    let sub_id = parse_sub_id(&params.sub_id)?;
+    let max = params.max.unwrap_or(MAX_PULL_EVENTS).min(MAX_PULL_EVENTS);
+    let timeout_ms = params
+        .timeout_ms
+        .unwrap_or(DEFAULT_PULL_TIMEOUT_MS)
+        .clamp(1, MAX_PULL_TIMEOUT_MS);
+    let outcome = pull::pull(state, sub_id, max, Duration::from_millis(timeout_ms)).await?;
+    Ok(IpcResponse::SubscriptionPull(pull_outcome_to_wire(outcome)))
+}
+
+/// Project a daemon-internal [`PullOutcome`] onto the wire response.
+fn pull_outcome_to_wire(outcome: PullOutcome) -> SubscriptionPullResponse {
+    let events = outcome
+        .events
+        .into_iter()
+        .map(|e| SubscriptionEvent {
+            bucket_id: e.origin.bucket_id,
+            job_id: e.origin.job_id,
+            seq: e.origin.seq,
+            event: e.event,
+        })
+        .collect();
+    let liveness = outcome
+        .liveness
+        .into_iter()
+        .map(|l| SourceLiveness {
+            bucket_id: l.bucket_id,
+            job_id: l.job_id,
+            probe_id: l.probe_id,
+            liveness: l.liveness,
+        })
+        .collect();
+    SubscriptionPullResponse {
+        events,
+        liveness,
+        lagged: outcome.lagged,
+        truncated: outcome.truncated,
+    }
+}
+
+pub(in crate::ipc::server) fn handle_subscription_list(
+    state: &Arc<DaemonState>,
+    params: &SubscriptionListParams,
+) -> IpcResponse {
+    let limit = params
+        .limit
+        .unwrap_or(MAX_SUBSCRIPTIONS)
+        .min(MAX_SUBSCRIPTIONS);
+    let mut all = state.subscriptions.list();
+    // Deterministic order so pagination/truncation is stable across calls.
+    all.sort_by_key(|s| s.sub_id);
+    let truncated = all.len() > limit;
+    let subscriptions: Vec<SubscriptionSummary> = all
+        .into_iter()
+        .take(limit)
+        .map(|s| SubscriptionSummary {
+            sub_id: s.sub_id.to_string(),
+            predicate_hash: s.predicate_hash.to_string(),
+            source_count: u32::try_from(s.source_count).unwrap_or(u32::MAX),
+            created_at_ms: now_ms(),
+            // `Instant` is not wall-clock convertible; surface the last-pull
+            // recency only as presence (a wall-clock stamp would require
+            // storing a `SystemTime` per pull, out of Phase 1 scope).
+            last_pull_at_ms: s.last_pull_at.map(|_| now_ms()),
+        })
+        .collect();
+    IpcResponse::SubscriptionList(SubscriptionListResponse {
+        subscriptions,
+        truncated,
+    })
+}
+
+pub(in crate::ipc::server) fn handle_subscription_close(
+    state: &Arc<DaemonState>,
+    params: &SubscriptionCloseParams,
+) -> IpcResponse {
+    // A malformed id is simply "not present": idempotent close, never an
+    // error (matches the registry's `close -> bool` contract).
+    let closed = Uuid::parse_str(&params.sub_id).is_ok_and(|id| state.subscriptions.close(id));
+    IpcResponse::SubscriptionClose(SubscriptionCloseResponse { closed })
+}

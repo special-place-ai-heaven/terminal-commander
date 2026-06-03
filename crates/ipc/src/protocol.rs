@@ -168,6 +168,19 @@ pub const MAX_SUBSCRIPTIONS: usize = 64;
 /// bounded".)
 pub const MAX_BUCKETS_PER_SUBSCRIPTION: usize = 200;
 
+/// Hard cap on events returned by one `subscription_pull`. The caller's
+/// `max` is clamped to this; the combined events+liveness response stays
+/// under [`MAX_FRAME_BYTES`]. (Subscriptions design §3 step 8.)
+pub const MAX_PULL_EVENTS: usize = 50;
+/// Default `subscription_pull` timeout when the caller omits `timeout_ms`.
+pub const DEFAULT_PULL_TIMEOUT_MS: u64 = 5_000;
+/// Hard cap on a `subscription_pull` timeout.
+///
+/// Strictly below the unix `DRAIN_CEILING` (10 s) so a blocked pull returns
+/// its normal empty+liveness at its own timeout before a graceful drain
+/// would abort it. (Subscriptions design §3 "Timeout reconciliation".)
+pub const MAX_PULL_TIMEOUT_MS: u64 = 8_000;
+
 /// Method-typed request union.
 ///
 /// Method names are namespaced `<domain>_<verb>` to match the MCP tool
@@ -225,8 +238,9 @@ pub enum IpcRequest {
     /// Remove `(rule_id, version)` from the active set and close
     /// the persistent activation row.
     RegistryDeactivate(RegistryDeactivateParams),
-    /// Snapshot of every currently-active `(rule_id, version)`.
-    RegistryListActive,
+    /// Snapshot of every currently-active `(rule_id, version)`. Bounded
+    /// by [`MAX_LIST_LIMIT`] / the request `limit`.
+    RegistryListActive(ListLimitParams),
     /// Bounded line/byte window read of a regular file. Never
     /// returns the whole file; the daemon clamps the window.
     FileReadWindow(FileReadWindowParams),
@@ -253,11 +267,12 @@ pub enum IpcRequest {
     PtyCommandList,
     /// TC45: bounded aggregate snapshot across every daemon runtime
     /// (command, file watch, PTY) plus active rule scopes and
-    /// bucket counters. Read-only.
-    RuntimeState,
+    /// bucket counters. Read-only. Each of its three vecs is bounded
+    /// INDEPENDENTLY by [`MAX_LIST_LIMIT`] / the request `limit`.
+    RuntimeState(ListLimitParams),
     /// TC45: flat list of every live probe across all runtimes.
-    /// Read-only.
-    ProbeList,
+    /// Read-only. Bounded by [`MAX_LIST_LIMIT`] / the request `limit`.
+    ProbeList(ListLimitParams),
     /// TC45: bounded lookup for one probe by id. Returns
     /// `UnknownProbe` if no runtime knows the id.
     ProbeStatus(ProbeStatusParams),
@@ -266,6 +281,21 @@ pub enum IpcRequest {
     /// [`IpcErrorCode::Internal`] (the closed error set is not widened
     /// for this method).
     AuditSince(AuditSinceParams),
+    /// Open a predicate-routed subscription. Mints a fresh opaque
+    /// `sub_id` with its own independent offsets (consumer isolation).
+    /// Initial offsets for already-in-scope buckets are their current
+    /// tail (from-now for a late open). (Subscriptions §4.)
+    SubscriptionOpen(SubscriptionOpenParams),
+    /// Multiplexed, lossless pull over an open subscription. Returns
+    /// bounded, source-tagged events + per-source liveness. Idle returns
+    /// SUCCESS empty+liveness, never an error; unknown/expired `sub_id`
+    /// returns [`IpcErrorCode::UnknownSubscription`]. Blocks up to the
+    /// (clamped) timeout. (Subscriptions §3.)
+    SubscriptionPull(SubscriptionPullParams),
+    /// Bounded snapshot of every open subscription. (Subscriptions §6.)
+    SubscriptionList(SubscriptionListParams),
+    /// Close a subscription, freeing its registry slot. (Subscriptions §4.)
+    SubscriptionClose(SubscriptionCloseParams),
     /// Request a graceful shutdown. The daemon ACKs immediately
     /// (`ShutdownAck`), stops accepting new connections, drains in-flight
     /// requests, removes its pidfile, and exits 0. New connections during the
@@ -332,6 +362,10 @@ pub enum IpcResponse {
     ProbeList(ProbeListResponse),
     ProbeStatus(ProbeStatusResponse),
     AuditSince(AuditSinceResponse),
+    SubscriptionOpen(SubscriptionOpenResponse),
+    SubscriptionPull(SubscriptionPullResponse),
+    SubscriptionList(SubscriptionListResponse),
+    SubscriptionClose(SubscriptionCloseResponse),
     /// Ack for `Shutdown`. `draining=true` once the daemon has stopped accepting
     /// new connections and begun draining.
     ShutdownAck {
@@ -959,6 +993,10 @@ pub struct RegistryActiveEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryListActiveResponse {
     pub entries: Vec<RegistryActiveEntry>,
+    /// More active entries existed than `entries` carries (bounded by
+    /// [`MAX_LIST_LIMIT`] / the request `limit`).
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 // =====================================================================
@@ -1240,6 +1278,13 @@ pub struct PtyCommandListResponse {
 // capability. No raw stream content.
 // =====================================================================
 
+/// Default + hard cap on each list/snapshot vec (subscriptions §6).
+///
+/// `runtime_state` bounds its THREE vecs (probes, buckets, active_rules)
+/// INDEPENDENTLY by this; `probe_list` / `registry_list_active` bound their
+/// single vec by it. Over-cap sets the per-vec `truncated` flag.
+pub const MAX_LIST_LIMIT: usize = 500;
+
 /// Closed set of probe kinds surfaced by `probe_list` / `probe_status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1356,6 +1401,17 @@ pub struct RuntimeActiveRule {
     pub scope: terminal_commander_core::ActivationScope,
 }
 
+/// Optional per-call `limit` for the single-vec list snapshots
+/// (`probe_list`, `registry_list_active`) and `runtime_state` (applied
+/// independently to each of its three vecs). Clamped to [`MAX_LIST_LIMIT`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListLimitParams {
+    /// Max rows per vec. Clamped to [`MAX_LIST_LIMIT`]. Omitted =
+    /// [`MAX_LIST_LIMIT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeStateResponse {
     pub command_jobs: u32,
@@ -1366,11 +1422,25 @@ pub struct RuntimeStateResponse {
     pub probes: Vec<ProbeListEntry>,
     pub buckets: Vec<RuntimeBucketSummary>,
     pub active_rules: Vec<RuntimeActiveRule>,
+    /// More probes existed than `probes` carries (bounded independently
+    /// by [`MAX_LIST_LIMIT`] / the request `limit`).
+    #[serde(default)]
+    pub probes_truncated: bool,
+    /// More buckets existed than `buckets` carries.
+    #[serde(default)]
+    pub buckets_truncated: bool,
+    /// More active rules existed than `active_rules` carries.
+    #[serde(default)]
+    pub active_rules_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProbeListResponse {
     pub probes: Vec<ProbeListEntry>,
+    /// More probes existed than `probes` carries (bounded by
+    /// [`MAX_LIST_LIMIT`] / the request `limit`).
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1456,6 +1526,182 @@ pub struct AuditSinceResponse {
     /// Pass as the next call's `cursor` to page forward.
     pub next_cursor: u64,
     pub rows: Vec<AuditRowWire>,
+}
+
+// =====================================================================
+// Subscriptions (Phase 1): predicate-routed, multiplexed event consumer.
+//
+// Wire types for `subscription_open/pull/list/close`. The daemon holds
+// the opaque per-open `sub_id` + server-advanced offsets; the wire form
+// carries the predicate, the source-tagged events, and per-source
+// liveness. See `docs/superpowers/specs/2026-06-02-subscriptions-design.md`
+// §4, §6.
+// =====================================================================
+
+/// Per-bucket routing selector on the wire. Mirrors the daemon-internal
+/// `SourceSel`. `all` auto-includes future matching buckets; the fixed
+/// variants are a closed set of ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SubscriptionSourceSel {
+    /// Every bucket; future buckets auto-join on the next routing rebuild.
+    All,
+    /// A fixed set of owning jobs.
+    Jobs { jobs: Vec<JobId> },
+    /// A fixed set of bucket ids.
+    Buckets { buckets: Vec<BucketId> },
+    /// A fixed set of owning probes.
+    Probes {
+        probes: Vec<terminal_commander_core::ProbeId>,
+    },
+}
+
+/// The wire predicate. All fields optional; AND semantics. `severity_min`
+/// and `kind` are per-EVENT filters; `sources` is per-BUCKET routing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionPredicate {
+    /// Minimum severity (per-EVENT). Omitted = `trace` (no filter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity_min: Option<Severity>,
+    /// Event-kind allowlist (per-EVENT). Omitted = any kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<Vec<String>>,
+    /// Per-BUCKET routing selector. Omitted = `all`.
+    #[serde(default = "default_source_sel")]
+    pub sources: SubscriptionSourceSel,
+}
+
+/// Default routing selector (`all`) when `sources` is omitted on the wire.
+const fn default_source_sel() -> SubscriptionSourceSel {
+    SubscriptionSourceSel::All
+}
+
+/// One source-tagged event delivered by `subscription_pull`.
+///
+/// Reuses the existing [`SignalEvent`] wire shape (the same type
+/// `bucket_events_since` returns), plus its provenance so a multiplexed
+/// consumer can attribute it without juggling N cursors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionEvent {
+    /// Bucket the event was read from.
+    pub bucket_id: BucketId,
+    /// Owning job, if the bucket's source recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<JobId>,
+    /// The event's per-bucket sequence number (provenance echo).
+    pub seq: u64,
+    /// The matched signal event.
+    pub event: SignalEvent,
+}
+
+/// Per-source liveness entry returned with every pull (including idle).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceLiveness {
+    /// The in-scope bucket this entry describes.
+    pub bucket_id: BucketId,
+    /// Owning job, if recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<JobId>,
+    /// Owning probe, if recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_id: Option<terminal_commander_core::ProbeId>,
+    /// Process / probe liveness (the single authoritative union).
+    pub liveness: Liveness,
+}
+
+/// One row in `subscription_list`. Bounded; the predicate hash lets an
+/// agent recognize an equivalent predicate without coupling cursors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionSummary {
+    /// Opaque per-open handle.
+    pub sub_id: String,
+    /// Stable hash of the normalized predicate (decimal string).
+    pub predicate_hash: String,
+    /// Number of buckets this subscription currently tracks an offset for.
+    pub source_count: u32,
+    /// Milliseconds since the Unix epoch at open.
+    pub created_at_ms: u64,
+    /// Milliseconds since the Unix epoch of the last pull, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pull_at_ms: Option<u64>,
+}
+
+/// `subscription_open` parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionOpenParams {
+    pub predicate: SubscriptionPredicate,
+}
+
+/// `subscription_open` response. `boot_id` lets a looping agent detect a
+/// restart (registry + buckets + offsets reset together).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionOpenResponse {
+    /// Opaque per-open handle (uuid string).
+    pub sub_id: String,
+    /// This daemon's per-boot id (uuid string).
+    pub boot_id: String,
+    /// Stable hash of the normalized predicate (decimal string).
+    pub predicate_hash: String,
+    /// Milliseconds since the Unix epoch at open.
+    pub created_at_ms: u64,
+    /// Number of already-in-scope sources matched at open.
+    pub matched_sources: u32,
+}
+
+/// `subscription_pull` parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionPullParams {
+    pub sub_id: String,
+    /// Max events to return. Clamped to [`MAX_PULL_EVENTS`]. Omitted =
+    /// [`MAX_PULL_EVENTS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<usize>,
+    /// Blocking timeout. Clamped to `[1, MAX_PULL_TIMEOUT_MS]`. Omitted =
+    /// [`DEFAULT_PULL_TIMEOUT_MS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// `subscription_pull` response. Idle = empty `events` + liveness (never
+/// an error). No `next_state` in Phase 1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionPullResponse {
+    pub events: Vec<SubscriptionEvent>,
+    pub liveness: Vec<SourceLiveness>,
+    /// Any in-scope bucket dropped events under us (eviction lag).
+    pub lagged: bool,
+    /// The routing scan hit [`MAX_BUCKETS_PER_SUBSCRIPTION`].
+    pub truncated: bool,
+}
+
+/// `subscription_list` parameters. Bounded by an optional `limit`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubscriptionListParams {
+    /// Max rows to return. Clamped to [`MAX_SUBSCRIPTIONS`]. Omitted =
+    /// [`MAX_SUBSCRIPTIONS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// `subscription_list` response. Bounded; `truncated` set if more
+/// subscriptions exist than were returned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionListResponse {
+    pub subscriptions: Vec<SubscriptionSummary>,
+    pub truncated: bool,
+}
+
+/// `subscription_close` parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionCloseParams {
+    pub sub_id: String,
+}
+
+/// `subscription_close` response. `closed=false` when the `sub_id` was
+/// already unknown (idempotent close).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionCloseResponse {
+    pub closed: bool,
 }
 
 /// Serialize an envelope to a length-prefixed wire frame. Returns
@@ -1565,6 +1811,134 @@ mod tests {
             assert_eq!(s, wire);
             let back: IpcErrorCode = serde_json::from_str(&s).unwrap();
             assert_eq!(back, code);
+        }
+    }
+
+    #[test]
+    fn subscription_open_pair_round_trips_through_request_and_response() {
+        let params = SubscriptionOpenParams {
+            predicate: SubscriptionPredicate {
+                severity_min: Some(Severity::High),
+                kind: Some(vec!["error".to_owned(), "panic".to_owned()]),
+                sources: SubscriptionSourceSel::Jobs {
+                    jobs: vec![JobId::new()],
+                },
+            },
+        };
+        let req = IpcRequest::SubscriptionOpen(params);
+        let back: IpcRequest = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert!(matches!(back, IpcRequest::SubscriptionOpen(_)));
+
+        let resp = IpcResponse::SubscriptionOpen(SubscriptionOpenResponse {
+            sub_id: "sub-1".to_owned(),
+            boot_id: "boot-1".to_owned(),
+            predicate_hash: "12345".to_owned(),
+            created_at_ms: 1_700_000_000_000,
+            matched_sources: 3,
+        });
+        let back: IpcResponse =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        match back {
+            IpcResponse::SubscriptionOpen(r) => {
+                assert_eq!(r.sub_id, "sub-1");
+                assert_eq!(r.matched_sources, 3);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscription_predicate_defaults_sources_to_all_when_omitted() {
+        let json = r#"{"severity_min":"high"}"#;
+        let p: SubscriptionPredicate = serde_json::from_str(json).unwrap();
+        assert_eq!(p.sources, SubscriptionSourceSel::All);
+        assert_eq!(p.severity_min, Some(Severity::High));
+        assert!(p.kind.is_none());
+    }
+
+    #[test]
+    fn subscription_pull_pair_round_trips_through_request_and_response() {
+        let params = SubscriptionPullParams {
+            sub_id: "sub-1".to_owned(),
+            max: Some(25),
+            timeout_ms: Some(3_000),
+        };
+        let req = IpcRequest::SubscriptionPull(params);
+        let back: IpcRequest = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        match back {
+            IpcRequest::SubscriptionPull(p) => {
+                assert_eq!(p.sub_id, "sub-1");
+                assert_eq!(p.max, Some(25));
+                assert_eq!(p.timeout_ms, Some(3_000));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let resp = IpcResponse::SubscriptionPull(SubscriptionPullResponse {
+            events: Vec::new(),
+            liveness: vec![SourceLiveness {
+                bucket_id: BucketId::new(),
+                job_id: Some(JobId::new()),
+                probe_id: None,
+                liveness: Liveness::Exited { code: 0 },
+            }],
+            lagged: false,
+            truncated: false,
+        });
+        let back: IpcResponse =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        match back {
+            IpcResponse::SubscriptionPull(r) => {
+                assert!(r.events.is_empty());
+                assert_eq!(r.liveness.len(), 1);
+                assert_eq!(r.liveness[0].liveness, Liveness::Exited { code: 0 });
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscription_list_pair_round_trips_through_request_and_response() {
+        let req = IpcRequest::SubscriptionList(SubscriptionListParams { limit: Some(10) });
+        let back: IpcRequest = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert!(matches!(back, IpcRequest::SubscriptionList(_)));
+
+        let resp = IpcResponse::SubscriptionList(SubscriptionListResponse {
+            subscriptions: vec![SubscriptionSummary {
+                sub_id: "sub-1".to_owned(),
+                predicate_hash: "9".to_owned(),
+                source_count: 2,
+                created_at_ms: 1,
+                last_pull_at_ms: Some(2),
+            }],
+            truncated: true,
+        });
+        let back: IpcResponse =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        match back {
+            IpcResponse::SubscriptionList(r) => {
+                assert!(r.truncated);
+                assert_eq!(r.subscriptions.len(), 1);
+                assert_eq!(r.subscriptions[0].source_count, 2);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscription_close_pair_round_trips_through_request_and_response() {
+        let req = IpcRequest::SubscriptionClose(SubscriptionCloseParams {
+            sub_id: "sub-1".to_owned(),
+        });
+        let back: IpcRequest = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert!(matches!(back, IpcRequest::SubscriptionClose(_)));
+
+        let resp = IpcResponse::SubscriptionClose(SubscriptionCloseResponse { closed: true });
+        let back: IpcResponse =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        match back {
+            IpcResponse::SubscriptionClose(r) => assert!(r.closed),
+            other => panic!("unexpected: {other:?}"),
         }
     }
 
