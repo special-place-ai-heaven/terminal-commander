@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.44](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.43...v0.1.44) (2026-06-03)
+
+
+### Bug Fixes
+
+* clear deferred correctness/security/trust backlog (12 findings + CI footgun + polish) ([#86](https://github.com/special-place-ai-heaven/terminal-commander/issues/86)) ([272e644](https://github.com/special-place-ai-heaven/terminal-commander/commit/272e6448094414ac184cff3068be86ccc903c0f2))
+* release Rust crate changes ([1554449](https://github.com/special-place-ai-heaven/terminal-commander/commit/15544496b8b9e2665c72799e7c547e2a8c94399b))
+
 ## [0.1.43](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.42...v0.1.43) (2026-06-03)
 
 
