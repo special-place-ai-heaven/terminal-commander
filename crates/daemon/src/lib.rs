@@ -21,6 +21,7 @@ pub mod config;
 pub mod environment;
 pub mod file_watch;
 pub mod ipc;
+pub mod liveness;
 pub mod policy;
 #[cfg(unix)]
 pub mod pty_command;

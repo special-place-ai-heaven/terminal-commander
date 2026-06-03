@@ -34,7 +34,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::state::DaemonState;
-use crate::subscriptions::model::Predicate;
+use crate::subscriptions::model::{CachedScope, Predicate};
 use crate::subscriptions::source::BucketSource;
 
 /// Default hard cap on events returned by one pull when the caller omits a
@@ -122,18 +122,71 @@ struct Scope {
     truncated: bool,
 }
 
-/// Rebuild the in-scope bucket set: `list_bucket_ids()` ∩ side-table predicate
-/// match, capped. Returns the subscription's working offsets + rr cursor.
+/// Resolve the in-scope bucket set for a pull, gated by the source side-table's
+/// dirty epoch (subscriptions §1, LOAD-BEARING).
+///
+/// Fast path: if the subscription's cached scope was resolved against the live
+/// [`crate::subscriptions::source::BucketSourceTable::dirty_epoch`], no bucket
+/// was created since (buckets are immortal and every `bucket_create` bumps the
+/// epoch), so the in-scope set is unchanged. We re-fetch each cached bucket's
+/// source (O(in-scope), not O(all-ever-created)) and skip the
+/// `list_bucket_ids()` ∩ predicate scan entirely.
+///
+/// Slow path: on a cache miss (first pull, or a new bucket bumped the epoch),
+/// rebuild via `list_bucket_ids()` ∩ side-table predicate match, capped, and
+/// store `(epoch, bucket_ids, truncated)` back. A new MATCHING bucket bumps the
+/// epoch, forcing a rebuild that routes to it — AC2 auto-join preserved.
+///
+/// Returns the subscription's working offsets + rr cursor either way.
 ///
 /// # Errors
 /// [`IpcErrorCode::UnknownSubscription`] if `sub_id` is not in the registry.
 fn scope_snapshot(state: &Arc<DaemonState>, sub_id: Uuid) -> Result<Scope, IpcError> {
-    // Copy the subscription's predicate, offsets, and rr cursor under the lock.
-    let (predicate, offsets, rr_start): (Predicate, HashMap<BucketId, u64>, usize) =
-        state.subscriptions.with_sub(sub_id, |s| {
-            (s.predicate.clone(), s.offsets.clone(), s.rr_start)
-        })?;
+    // Copy the subscription's predicate, offsets, rr cursor, and cached scope
+    // under the lock.
+    #[allow(clippy::type_complexity)]
+    let (predicate, offsets, rr_start, cached): (
+        Predicate,
+        HashMap<BucketId, u64>,
+        usize,
+        Option<CachedScope>,
+    ) = state.subscriptions.with_sub(sub_id, |s| {
+        (
+            s.predicate.clone(),
+            s.offsets.clone(),
+            s.rr_start,
+            s.cached_scope.clone(),
+        )
+    })?;
 
+    let epoch = state.sources.dirty_epoch();
+
+    // Fast path: the cache is valid for the current epoch. Nothing was created
+    // since it was built, so the in-scope set is identical; just re-resolve each
+    // bucket's source (immortal side-table) and reuse the cached `truncated`.
+    if let Some(c) = &cached
+        && c.dirty_epoch == epoch
+    {
+        let mut buckets: Vec<ScopedBucket> = Vec::with_capacity(c.buckets.len());
+        for &id in &c.buckets {
+            // The side-table is immortal, so a cached id resolves; if it somehow
+            // does not, skip it (matches the slow-path `continue`).
+            if let Some(source) = state.sources.get(id) {
+                buckets.push(ScopedBucket {
+                    bucket_id: id,
+                    source,
+                });
+            }
+        }
+        return Ok(Scope {
+            buckets,
+            offsets,
+            rr_start,
+            truncated: c.truncated,
+        });
+    }
+
+    // Slow path: full rebuild — `list_bucket_ids()` ∩ predicate match, capped.
     let mut buckets: Vec<ScopedBucket> = Vec::new();
     let mut truncated = false;
     for id in state.buckets.list_bucket_ids() {
@@ -153,6 +206,17 @@ fn scope_snapshot(state: &Arc<DaemonState>, sub_id: Uuid) -> Result<Scope, IpcEr
     }
     // Deterministic order so rr rotation is stable across pulls.
     buckets.sort_by_key(|b| b.bucket_id.to_string());
+
+    // Cache the resolved scope against the epoch it was built from. The next
+    // pull reuses it while no bucket is created (epoch unchanged).
+    let cached_ids: Vec<BucketId> = buckets.iter().map(|b| b.bucket_id).collect();
+    let _ = state.subscriptions.with_sub_mut(sub_id, |s| {
+        s.cached_scope = Some(CachedScope {
+            dirty_epoch: epoch,
+            buckets: cached_ids,
+            truncated,
+        });
+    });
 
     Ok(Scope {
         buckets,
@@ -193,8 +257,10 @@ struct Drained {
 
 /// Drain matched events fair + capped (subscriptions §3 step 6 + AC4/AC12).
 ///
-/// `offsets` is advanced in place to the last SCANNED (severity-passing) seq
-/// per bucket, so kind-dropped events are not re-delivered.
+/// `offsets` is advanced in place to the last DELIVERED seq per bucket (the
+/// `next_cursor` from `events_since`, which only counts events that passed
+/// severity + the native single-kind filter). Trailing non-matching events are
+/// re-scanned on the next pull but never re-delivered — lossless, not loss.
 fn drain_fair(
     state: &Arc<DaemonState>,
     scope: &Scope,
@@ -260,8 +326,15 @@ fn drain_fair(
                 )
                 .map_err(map_bucket)?;
 
-            // Advance to the last SCANNED severity-passing seq so kind-dropped
-            // events are never re-read.
+            // Advance to the last DELIVERED seq (`events_since` sets
+            // `next_cursor` to the seq of the last event it actually returned
+            // — one that passed severity + the native single-kind filter).
+            // Events that FAIL those filters do NOT move the cursor, so any
+            // trailing non-matching events are RE-SCANNED on the next read.
+            // That is lossless, not loss: a re-scanned non-match is re-filtered
+            // out (never re-delivered), and a multi-kind allowlist drop below
+            // is likewise re-scanned but never re-delivered. The cursor only
+            // ever advances past events we returned to the caller.
             if resp.next_cursor > *off {
                 *off = resp.next_cursor;
             }
@@ -313,7 +386,7 @@ fn liveness_for(state: &Arc<DaemonState>, scope: &Scope) -> Vec<SourceLiveness> 
         let liveness = match source.kind {
             ProbeKind::Command => source.job_id.map_or(Liveness::Running, |job| {
                 state.command.status(job).map_or(Liveness::Stopped, |s| {
-                    command_liveness(s.state, s.exit_code, s.signal)
+                    crate::liveness::command_liveness(s.state, s.exit_code, s.signal)
                 })
             }),
             // File-watch / pty have no exit-code surface on this path: present
@@ -330,29 +403,6 @@ fn liveness_for(state: &Arc<DaemonState>, scope: &Scope) -> Vec<SourceLiveness> 
         });
     }
     out
-}
-
-/// Map a command job's ledger state to [`Liveness`] (mirrors the private
-/// `command_liveness` in `ipc::handlers::runtime`; cancellation MUST NOT fold
-/// into `Failed`).
-fn command_liveness(
-    state: terminal_commander_core::JobState,
-    exit_code: Option<i32>,
-    signal: Option<String>,
-) -> Liveness {
-    use terminal_commander_core::JobState;
-    match state {
-        JobState::Starting => Liveness::Starting,
-        JobState::Running => Liveness::Running,
-        JobState::Exited => Liveness::Exited {
-            code: exit_code.unwrap_or(0),
-        },
-        JobState::Failed => Liveness::Failed {
-            code: exit_code,
-            signal,
-        },
-        JobState::Cancelled => Liveness::Cancelled,
-    }
 }
 
 /// Poll N pinned single-use `Notified` futures, completing when ANY fires.
@@ -402,6 +452,31 @@ pub async fn pull(
         let predicate = state
             .subscriptions
             .with_sub(sub_id, |s| s.predicate.clone())?;
+        // (3) ENROLL: clone each in-scope bucket's Notify, keeping the waiter
+        // set and the drain set (`scope.buckets`) in LOCKSTEP. If
+        // `bucket_notify` fails for a bucket (only `NotFound`, near-impossible
+        // since buckets are immortal), drop that bucket from BOTH sets so they
+        // cannot desync — a bucket we cannot enroll must not be drained (a wake
+        // on it would be lost). The drop is logged so it is observable rather
+        // than silently swallowed.
+        let mut notifies: Vec<Arc<Notify>> = Vec::with_capacity(scope.buckets.len());
+        scope
+            .buckets
+            .retain(|b| match state.buckets.bucket_notify(b.bucket_id) {
+                Ok(notify) => {
+                    notifies.push(notify);
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bucket_id = %b.bucket_id,
+                        sub_id = %sub_id,
+                        "subscription_pull: skipping in-scope bucket — bucket_notify failed ({e}); \
+                         dropped from both waiter and drain sets to avoid desync"
+                    );
+                    false
+                }
+            });
         let n = scope.buckets.len();
 
         // N == 0: nothing to enroll/drain. Sleep out the remaining time and
@@ -412,13 +487,8 @@ pub async fn pull(
             return Ok(PullOutcome::idle(Vec::new(), false, scope.truncated));
         }
 
-        // (3) ENROLL: clone each bucket's Notify, build FRESH notified()
-        // futures, and enable() them to enroll the waiters BEFORE any read.
-        let notifies: Vec<Arc<Notify>> = scope
-            .buckets
-            .iter()
-            .filter_map(|b| state.buckets.bucket_notify(b.bucket_id).ok())
-            .collect();
+        // Build FRESH notified() futures and enable() them to enroll the
+        // waiters BEFORE any read (the load-bearing enroll-before-recheck).
         let mut futs: Vec<Pin<Box<tokio::sync::futures::Notified<'_>>>> =
             notifies.iter().map(|n| Box::pin(n.notified())).collect();
         for f in &mut futs {
@@ -460,10 +530,15 @@ pub async fn pull(
         // Woken (or spurious): drop the enrolled futures and loop. The next
         // iteration re-enrolls FRESH waiters before re-scanning, so an append
         // in the re-arm window is not lost. A spurious wake (no in-scope event)
-        // re-enters and does NOT return a premature empty. Persist any
-        // clamp-advanced offsets so eviction lag is not re-counted next pass.
+        // re-enters and does NOT return a premature empty.
+        //
+        // No offsets are carried across iterations: the working `offsets` were a
+        // clone of `scope.offsets`, and the only in-loop mutation is the
+        // eviction clamp, which is IDEMPOTENT — `drain_fair` recomputes it from
+        // each bucket's live `head_seq` every pass. The next iteration re-reads
+        // committed offsets from the registry via `scope_snapshot`, so there is
+        // nothing to persist here.
         drop(futs);
-        scope.offsets = offsets;
     }
 }
 

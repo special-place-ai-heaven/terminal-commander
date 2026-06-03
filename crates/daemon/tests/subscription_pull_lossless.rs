@@ -490,3 +490,153 @@ fn pull_auto_joins_future_bucket() {
     });
     cleanup(&data);
 }
+
+// ---------------------------------------------------------------------------
+// Dirty-epoch scope cache (subscriptions §1, LOAD-BEARING). The cache only
+// skips a routing rebuild when the source side-table's dirty epoch is
+// unchanged; a new bucket bumps the epoch and forces a rebuild (auto-join).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pull_caches_scope_and_reuses_when_dirty_epoch_unchanged() {
+    // (b) Cache reuse: after the first pull, the subscription holds a cached
+    // scope keyed to the live dirty_epoch. With no new buckets created, the
+    // epoch is unchanged, so a repeat pull reuses the SAME cache (same epoch,
+    // same bucket set) and returns the same scope behaviorally.
+    let (data, state) = boot("cache-reuse");
+    rt().block_on(async {
+        let (b1, _j1) = make_bucket(&state, BucketConfig::default());
+        let (b2, _j2) = make_bucket(&state, BucketConfig::default());
+        let sub = open_all(&state, Some(Severity::High));
+
+        // No cache yet (never pulled).
+        let pre = state
+            .subscriptions
+            .with_sub(sub, |s| s.cached_scope.clone())
+            .unwrap();
+        assert!(pre.is_none(), "no cached scope before the first pull");
+
+        // First pull populates the cache (no events present -> short timeout).
+        let epoch_before = state.sources.dirty_epoch();
+        let out1 = subscription_pull(&state, sub, 10, Duration::from_millis(150))
+            .await
+            .unwrap();
+        assert!(out1.events.is_empty(), "no events appended yet");
+
+        let cached = state
+            .subscriptions
+            .with_sub(sub, |s| s.cached_scope.clone())
+            .unwrap()
+            .expect("first pull populates the cache");
+        assert_eq!(
+            cached.dirty_epoch, epoch_before,
+            "cache is keyed to the dirty epoch it was built from"
+        );
+        let mut cached_ids = cached.buckets.clone();
+        cached_ids.sort_by_key(ToString::to_string);
+        let mut want_ids = vec![b1, b2];
+        want_ids.sort_by_key(ToString::to_string);
+        assert_eq!(cached_ids, want_ids, "both in-scope buckets cached");
+        assert!(!cached.truncated, "well under the bucket cap");
+
+        // Second pull with NO new buckets: epoch unchanged -> cache reused.
+        assert_eq!(
+            state.sources.dirty_epoch(),
+            epoch_before,
+            "no record() between pulls, so the epoch is unchanged"
+        );
+        let out2 = subscription_pull(&state, sub, 10, Duration::from_millis(150))
+            .await
+            .unwrap();
+        assert!(out2.events.is_empty(), "still no events");
+        // Liveness still covers both in-scope buckets via the reused cache.
+        assert_eq!(
+            out2.liveness.len(),
+            2,
+            "reused cache still resolves both in-scope sources"
+        );
+        let cached2 = state
+            .subscriptions
+            .with_sub(sub, |s| s.cached_scope.clone())
+            .unwrap()
+            .expect("cache still present");
+        assert_eq!(
+            cached2.dirty_epoch, epoch_before,
+            "reused cache keeps the same epoch (no rebuild happened)"
+        );
+
+        // Now drain an event from a cached bucket to prove the reused scope is
+        // behaviorally identical to a fresh rebuild.
+        append(&state, b1, Severity::High, "error");
+        let out3 = subscription_pull(&state, sub, 10, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(out3.events.len(), 1, "reused-cache scope still delivers");
+        assert_eq!(out3.events[0].origin.bucket_id, b1);
+    });
+    cleanup(&data);
+}
+
+#[test]
+fn pull_cache_invalidates_on_new_bucket_and_auto_joins() {
+    // (a) AC2 preserved WITH the cache: a matching bucket created AFTER the
+    // first pull (which populated the cache) bumps the side-table's dirty
+    // epoch, invalidating the cache. The next pull rebuilds and routes to the
+    // new bucket, delivering its event (auto-join survives the cache).
+    let (data, state) = boot("cache-invalidate");
+    rt().block_on(async {
+        let (b1, _j1) = make_bucket(&state, BucketConfig::default());
+        let sub = open_all(&state, Some(Severity::High));
+
+        // First pull populates the cache against the current epoch (1 bucket).
+        let out1 = subscription_pull(&state, sub, 10, Duration::from_millis(150))
+            .await
+            .unwrap();
+        assert!(out1.events.is_empty());
+        let cached = state
+            .subscriptions
+            .with_sub(sub, |s| s.cached_scope.clone())
+            .unwrap()
+            .expect("cache populated");
+        assert_eq!(cached.buckets, vec![b1], "only b1 cached at first pull");
+        let epoch_after_first = cached.dirty_epoch;
+
+        // Create a NEW matching bucket: record() bumps the dirty epoch, so the
+        // cache (keyed to the old epoch) is now stale.
+        let (b2, _j2) = make_bucket(&state, BucketConfig::default());
+        assert!(
+            state.sources.dirty_epoch() > epoch_after_first,
+            "new bucket bumped the dirty epoch -> cache stale"
+        );
+        append(&state, b2, Severity::High, "error");
+
+        // Next pull MUST rebuild (epoch changed) and auto-join b2.
+        let out2 = subscription_pull(&state, sub, 10, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            out2.events.len(),
+            1,
+            "new bucket auto-joined with the cache"
+        );
+        assert_eq!(out2.events[0].origin.bucket_id, b2);
+
+        // The cache was refreshed to the new epoch and now holds both buckets.
+        let refreshed = state
+            .subscriptions
+            .with_sub(sub, |s| s.cached_scope.clone())
+            .unwrap()
+            .expect("cache refreshed");
+        assert_eq!(
+            refreshed.dirty_epoch,
+            state.sources.dirty_epoch(),
+            "rebuild re-keyed the cache to the live epoch"
+        );
+        let mut got = refreshed.buckets;
+        got.sort_by_key(ToString::to_string);
+        let mut want = vec![b1, b2];
+        want.sort_by_key(ToString::to_string);
+        assert_eq!(got, want, "refreshed cache holds both buckets");
+    });
+    cleanup(&data);
+}

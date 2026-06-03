@@ -144,6 +144,28 @@ impl Predicate {
     }
 }
 
+/// The cached result of a routing rebuild, gated by the source side-table's
+/// dirty epoch (subscriptions §1, LOAD-BEARING).
+///
+/// `scope_snapshot` scans `list_bucket_ids()` ∩ predicate on a full rebuild —
+/// O(all-ever-created buckets). Because buckets are immortal and every
+/// `bucket_create` bumps [`crate::subscriptions::source::BucketSourceTable::dirty_epoch`],
+/// a pull can skip that scan when the epoch is unchanged: nothing was created,
+/// so the in-scope set is identical. A new matching bucket bumps the epoch and
+/// invalidates this cache, so AC2 auto-join is preserved (the next pull
+/// rebuilds and routes to the new bucket).
+#[derive(Debug, Clone)]
+pub struct CachedScope {
+    /// The `dirty_epoch` this scope was resolved against. Reused only while the
+    /// live epoch equals this value.
+    pub dirty_epoch: u64,
+    /// In-scope bucket ids, in the deterministic sort order used by the pull
+    /// engine. Sources are re-fetched per id on reuse (immortal side-table).
+    pub buckets: Vec<BucketId>,
+    /// Whether the matching set exceeded the per-subscription bucket cap.
+    pub truncated: bool,
+}
+
 /// One open subscription's server-side state. Keyed in the registry by the
 /// opaque `sub_id`.
 #[derive(Debug, Clone)]
@@ -162,6 +184,10 @@ pub struct Subscription {
     pub last_pull_at: Option<Instant>,
     /// Round-robin rotation cursor for fair draining across in-scope buckets.
     pub rr_start: usize,
+    /// Cached routing rebuild, gated by the source side-table's dirty epoch.
+    /// `None` until the first pull; reused while the epoch is unchanged so a
+    /// `sources: all` pull does not re-scan every ever-created bucket.
+    pub cached_scope: Option<CachedScope>,
 }
 
 impl Subscription {
@@ -178,6 +204,7 @@ impl Subscription {
             created_at: Instant::now(),
             last_pull_at: None,
             rr_start: 0,
+            cached_scope: None,
         }
     }
 }
