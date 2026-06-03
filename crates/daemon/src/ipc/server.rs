@@ -402,6 +402,105 @@ async fn write_envelope(
     stream.write_all(&frame).await
 }
 
+/// The single source of truth mapping every [`IpcRequest`] variant to
+/// its stable wire method name. M6 drift-proofing: `dispatch` derives
+/// its audit label from this function, `handle_system_discover`
+/// advertises exactly these names (via [`DISCOVERABLE_METHODS`]), and a
+/// parity test asserts the three surfaces agree. Adding an `IpcRequest`
+/// variant forces a new arm here (the match is exhaustive), and the
+/// parity test then fails until the name is also added to
+/// [`DISCOVERABLE_METHODS`] -- so a method can never silently exist in
+/// the dispatcher while being absent from `system_discover`.
+const fn method_name(req: &IpcRequest) -> &'static str {
+    match req {
+        IpcRequest::SystemDiscover => "system_discover",
+        IpcRequest::Health => "health",
+        IpcRequest::PolicyStatus => "policy_status",
+        IpcRequest::SelfCheck => "self_check",
+        IpcRequest::BucketEventsSince(_) => "bucket_events_since",
+        IpcRequest::BucketWait(_) => "bucket_wait",
+        IpcRequest::BucketSummary(_) => "bucket_summary",
+        IpcRequest::EventContext(_) => "event_context",
+        IpcRequest::CommandStartCombed(_) => "command_start_combed",
+        IpcRequest::CommandStatus(_) => "command_status",
+        IpcRequest::CommandOutputTail(_) => "command_output_tail",
+        IpcRequest::RegistrySearch(_) => "registry_search",
+        IpcRequest::RegistryGet(_) => "registry_get",
+        IpcRequest::RegistryUpsert(_) => "registry_upsert",
+        IpcRequest::RegistryTest(_) => "registry_test",
+        IpcRequest::RegistryActivate(_) => "registry_activate",
+        IpcRequest::RegistryImportPack(_) => "registry_import_pack",
+        IpcRequest::RegistryDeactivate(_) => "registry_deactivate",
+        IpcRequest::RegistryListActive(_) => "registry_list_active",
+        IpcRequest::FileReadWindow(_) => "file_read_window",
+        IpcRequest::FileSearch(_) => "file_search",
+        IpcRequest::FileWatchStart(_) => "file_watch_start",
+        IpcRequest::FileWatchStop(_) => "file_watch_stop",
+        IpcRequest::FileWatchList => "file_watch_list",
+        IpcRequest::PtyCommandStart(_) => "pty_command_start",
+        IpcRequest::PtyCommandWriteStdin(_) => "pty_command_write_stdin",
+        IpcRequest::PtyCommandStop(_) => "pty_command_stop",
+        IpcRequest::PtyCommandList => "pty_command_list",
+        IpcRequest::RuntimeState(_) => "runtime_state",
+        IpcRequest::ProbeList(_) => "probe_list",
+        IpcRequest::ProbeStatus(_) => "probe_status",
+        IpcRequest::AuditSince(_) => "audit_since",
+        IpcRequest::SubscriptionOpen(_) => "subscription_open",
+        IpcRequest::SubscriptionPull(_) => "subscription_pull",
+        IpcRequest::SubscriptionList(_) => "subscription_list",
+        IpcRequest::SubscriptionClose(_) => "subscription_close",
+        IpcRequest::SubscriptionSeek(_) => "subscription_seek",
+        IpcRequest::Shutdown => "shutdown",
+    }
+}
+
+/// Every callable method name advertised by `system_discover`. This is
+/// the authoritative list `handle_system_discover` returns. It MUST
+/// equal the set of names [`method_name`] can produce across all
+/// `IpcRequest` variants -- the `system_discover_methods_match_dispatch`
+/// parity test enforces both directions, so a method added to the
+/// dispatcher but forgotten here (or vice-versa) fails the test.
+const DISCOVERABLE_METHODS: &[&str] = &[
+    "system_discover",
+    "health",
+    "policy_status",
+    "self_check",
+    "bucket_events_since",
+    "bucket_wait",
+    "bucket_summary",
+    "event_context",
+    "command_start_combed",
+    "command_status",
+    "command_output_tail",
+    "registry_search",
+    "registry_get",
+    "registry_upsert",
+    "registry_test",
+    "registry_activate",
+    "registry_import_pack",
+    "registry_deactivate",
+    "registry_list_active",
+    "file_read_window",
+    "file_search",
+    "file_watch_start",
+    "file_watch_stop",
+    "file_watch_list",
+    "pty_command_start",
+    "pty_command_write_stdin",
+    "pty_command_stop",
+    "pty_command_list",
+    "runtime_state",
+    "probe_list",
+    "probe_status",
+    "audit_since",
+    "subscription_open",
+    "subscription_pull",
+    "subscription_list",
+    "subscription_close",
+    "subscription_seek",
+    "shutdown",
+];
+
 #[allow(clippy::too_many_lines)] // method dispatcher
 async fn dispatch(
     state: &Arc<DaemonState>,
@@ -415,219 +514,224 @@ async fn dispatch(
     if !matches!(&req_env.request, IpcRequest::Health) {
         state.bump_activity();
     }
-    let (method_name, response_result) = match &req_env.request {
+    // M6 (drift-proofing): the method-name label is derived ONCE from
+    // the shared `method_name` authority -- the SAME function
+    // `handle_system_discover` advertises and the parity test checks.
+    // Each match arm below now only produces the `IpcResult`; it can no
+    // longer carry a divergent name literal, so the audit label, the
+    // advertised `methods` list, and the dispatch table cannot drift.
+    let method_name = method_name(&req_env.request);
+    let response_result = match &req_env.request {
         IpcRequest::SystemDiscover => {
             let r = handle_system_discover(state);
-            ("system_discover", IpcResult::Ok { response: r })
+            IpcResult::Ok { response: r }
         }
         IpcRequest::Health => {
             let r = IpcResponse::Health {
                 uptime_secs: boot.elapsed().as_secs(),
                 idle_secs: Some(state.idle_secs()),
             };
-            ("health", IpcResult::Ok { response: r })
+            IpcResult::Ok { response: r }
         }
         IpcRequest::PolicyStatus => {
             let r = handle_policy_status(state);
-            ("policy_status", IpcResult::Ok { response: r })
+            IpcResult::Ok { response: r }
         }
         IpcRequest::SelfCheck => {
             let r = handle_self_check(state);
-            ("self_check", IpcResult::Ok { response: r })
+            IpcResult::Ok { response: r }
         }
         IpcRequest::BucketEventsSince(p) => {
             match handlers::bucket::handle_bucket_events_since(state, p) {
-                Ok(r) => ("bucket_events_since", IpcResult::Ok { response: r }),
-                Err(e) => ("bucket_events_since", IpcResult::Err { error: e }),
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
             }
         }
         IpcRequest::BucketWait(p) => match handlers::bucket::handle_bucket_wait(state, p).await {
-            Ok(r) => ("bucket_wait", IpcResult::Ok { response: r }),
-            Err(e) => ("bucket_wait", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::BucketSummary(p) => match handlers::bucket::handle_bucket_summary(state, p) {
-            Ok(r) => ("bucket_summary", IpcResult::Ok { response: r }),
-            Err(e) => ("bucket_summary", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::EventContext(p) => match handlers::bucket::handle_event_context(state, p) {
-            Ok(r) => ("event_context", IpcResult::Ok { response: r }),
-            Err(e) => ("event_context", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::CommandStartCombed(p) => {
             let env = p.environment.clone().unwrap_or_default();
             if matches!(env, EnvironmentSpec::Local) {
                 match handlers::command::handle_command_start_combed(state, p) {
-                    Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
-                    Err(e) => ("command_start_combed", IpcResult::Err { error: e }),
+                    Ok(r) => IpcResult::Ok { response: r },
+                    Err(e) => IpcResult::Err { error: e },
                 }
             } else {
                 match EnvironmentRouter::route_request(state, &env, &req_env.request).await {
-                    Ok(RouteOutcome::RunnerResponse(r)) => {
-                        ("command_start_combed", IpcResult::Ok { response: *r })
-                    }
+                    Ok(RouteOutcome::RunnerResponse(r)) => IpcResult::Ok { response: *r },
                     Ok(RouteOutcome::Local) => {
                         match handlers::command::handle_command_start_combed(state, p) {
-                            Ok(r) => ("command_start_combed", IpcResult::Ok { response: r }),
-                            Err(e) => ("command_start_combed", IpcResult::Err { error: e }),
+                            Ok(r) => IpcResult::Ok { response: r },
+                            Err(e) => IpcResult::Err { error: e },
                         }
                     }
-                    Err(e) => (
-                        "command_start_combed",
-                        IpcResult::Err {
-                            error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
-                        },
-                    ),
+                    Err(e) => IpcResult::Err {
+                        error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
+                    },
                 }
             }
         }
         IpcRequest::CommandStatus(p) => match handlers::command::handle_command_status(state, p) {
-            Ok(r) => ("command_status", IpcResult::Ok { response: r }),
-            Err(e) => ("command_status", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::CommandOutputTail(p) => {
             match handlers::command::handle_command_output_tail(state, p) {
-                Ok(r) => ("command_output_tail", IpcResult::Ok { response: r }),
-                Err(e) => ("command_output_tail", IpcResult::Err { error: e }),
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
             }
         }
         IpcRequest::RegistrySearch(p) => match handlers::registry::handle_registry_search(state, p)
         {
-            Ok(r) => ("registry_search", IpcResult::Ok { response: r }),
-            Err(e) => ("registry_search", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::RegistryGet(p) => match handlers::registry::handle_registry_get(state, p) {
-            Ok(r) => ("registry_get", IpcResult::Ok { response: r }),
-            Err(e) => ("registry_get", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::RegistryUpsert(p) => match handlers::registry::handle_registry_upsert(state, p)
         {
-            Ok(r) => ("registry_upsert", IpcResult::Ok { response: r }),
-            Err(e) => ("registry_upsert", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::RegistryTest(p) => match handlers::registry::handle_registry_test(state, p) {
-            Ok(r) => ("registry_test", IpcResult::Ok { response: r }),
-            Err(e) => ("registry_test", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::RegistryActivate(p) => {
             match handlers::registry::handle_registry_activate(state, p) {
-                Ok(r) => ("registry_activate", IpcResult::Ok { response: r }),
-                Err(e) => ("registry_activate", IpcResult::Err { error: e }),
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
             }
         }
         IpcRequest::RegistryImportPack(p) => {
             match handlers::registry::handle_registry_import_pack(state, p) {
-                Ok(r) => ("registry_import_pack", IpcResult::Ok { response: r }),
-                Err(e) => ("registry_import_pack", IpcResult::Err { error: e }),
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
             }
         }
         IpcRequest::RegistryDeactivate(p) => {
             match handlers::registry::handle_registry_deactivate(state, p) {
-                Ok(r) => ("registry_deactivate", IpcResult::Ok { response: r }),
-                Err(e) => ("registry_deactivate", IpcResult::Err { error: e }),
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
             }
         }
         IpcRequest::RegistryListActive(p) => {
             let r = handlers::registry::handle_registry_list_active(state, p);
-            ("registry_list_active", IpcResult::Ok { response: r })
+            IpcResult::Ok { response: r }
         }
         IpcRequest::FileReadWindow(p) => match handlers::file::handle_file_read_window(state, p) {
-            Ok(r) => ("file_read_window", IpcResult::Ok { response: r }),
-            Err(e) => ("file_read_window", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::FileSearch(p) => match handlers::file::handle_file_search(state, p) {
-            Ok(r) => ("file_search", IpcResult::Ok { response: r }),
-            Err(e) => ("file_search", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::FileWatchStart(p) => match handlers::file::handle_file_watch_start(state, p) {
-            Ok(r) => ("file_watch_start", IpcResult::Ok { response: r }),
-            Err(e) => ("file_watch_start", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::FileWatchStop(p) => match handlers::file::handle_file_watch_stop(state, p) {
-            Ok(r) => ("file_watch_stop", IpcResult::Ok { response: r }),
-            Err(e) => ("file_watch_stop", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::FileWatchList => {
             let r = handlers::file::handle_file_watch_list(state);
-            ("file_watch_list", IpcResult::Ok { response: r })
+            IpcResult::Ok { response: r }
         }
         IpcRequest::PtyCommandStart(p) => {
             let env = p.environment.clone().unwrap_or_default();
             if matches!(env, EnvironmentSpec::Local) {
                 match handlers::pty::handle_pty_command_start(state, p) {
-                    Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
-                    Err(e) => ("pty_command_start", IpcResult::Err { error: e }),
+                    Ok(r) => IpcResult::Ok { response: r },
+                    Err(e) => IpcResult::Err { error: e },
                 }
             } else {
                 match EnvironmentRouter::route_request(state, &env, &req_env.request).await {
-                    Ok(RouteOutcome::RunnerResponse(r)) => {
-                        ("pty_command_start", IpcResult::Ok { response: *r })
-                    }
+                    Ok(RouteOutcome::RunnerResponse(r)) => IpcResult::Ok { response: *r },
                     Ok(RouteOutcome::Local) => {
                         match handlers::pty::handle_pty_command_start(state, p) {
-                            Ok(r) => ("pty_command_start", IpcResult::Ok { response: r }),
-                            Err(e) => ("pty_command_start", IpcResult::Err { error: e }),
+                            Ok(r) => IpcResult::Ok { response: r },
+                            Err(e) => IpcResult::Err { error: e },
                         }
                     }
-                    Err(e) => (
-                        "pty_command_start",
-                        IpcResult::Err {
-                            error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
-                        },
-                    ),
+                    Err(e) => IpcResult::Err {
+                        error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
+                    },
                 }
             }
         }
         IpcRequest::PtyCommandWriteStdin(p) => {
             match handlers::pty::handle_pty_command_write_stdin(state, p).await {
-                Ok(r) => ("pty_command_write_stdin", IpcResult::Ok { response: r }),
-                Err(e) => ("pty_command_write_stdin", IpcResult::Err { error: e }),
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
             }
         }
         IpcRequest::PtyCommandStop(p) => match handlers::pty::handle_pty_command_stop(state, p) {
-            Ok(r) => ("pty_command_stop", IpcResult::Ok { response: r }),
-            Err(e) => ("pty_command_stop", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
-        IpcRequest::PtyCommandList => handlers::pty::dispatch_pty_command_list(state),
+        IpcRequest::PtyCommandList => {
+            // `dispatch_pty_command_list` returns `(name, IpcResult)` for
+            // historical reasons; the name it returns MUST match
+            // `method_name` (the parity test guards this). Drop its name
+            // and keep only the result so the single `method_name`
+            // authority above wins.
+            let (_name, r) = handlers::pty::dispatch_pty_command_list(state);
+            r
+        }
         IpcRequest::RuntimeState(p) => {
             let r = handlers::runtime::handle_runtime_state(state, p);
-            ("runtime_state", IpcResult::Ok { response: r })
+            IpcResult::Ok { response: r }
         }
         IpcRequest::ProbeList(p) => {
             let r = handlers::runtime::handle_probe_list(state, p);
-            ("probe_list", IpcResult::Ok { response: r })
+            IpcResult::Ok { response: r }
         }
         IpcRequest::ProbeStatus(p) => match handlers::runtime::handle_probe_status(state, p) {
-            Ok(r) => ("probe_status", IpcResult::Ok { response: r }),
-            Err(e) => ("probe_status", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::AuditSince(p) => match handlers::audit::handle_audit_since(state, p) {
-            Ok(r) => ("audit_since", IpcResult::Ok { response: r }),
-            Err(e) => ("audit_since", IpcResult::Err { error: e }),
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::SubscriptionOpen(p) => {
             match handlers::subscription::handle_subscription_open(state, p) {
-                Ok(r) => ("subscription_open", IpcResult::Ok { response: r }),
-                Err(e) => ("subscription_open", IpcResult::Err { error: e }),
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
             }
         }
         IpcRequest::SubscriptionPull(p) => {
             match handlers::subscription::handle_subscription_pull(state, p).await {
-                Ok(r) => ("subscription_pull", IpcResult::Ok { response: r }),
-                Err(e) => ("subscription_pull", IpcResult::Err { error: e }),
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
             }
         }
         IpcRequest::SubscriptionList(p) => {
             let r = handlers::subscription::handle_subscription_list(state, p);
-            ("subscription_list", IpcResult::Ok { response: r })
+            IpcResult::Ok { response: r }
         }
         IpcRequest::SubscriptionClose(p) => {
             let r = handlers::subscription::handle_subscription_close(state, p);
-            ("subscription_close", IpcResult::Ok { response: r })
+            IpcResult::Ok { response: r }
         }
         IpcRequest::SubscriptionSeek(p) => {
             match handlers::subscription::handle_subscription_seek(state, p) {
-                Ok(r) => ("subscription_seek", IpcResult::Ok { response: r }),
-                Err(e) => ("subscription_seek", IpcResult::Err { error: e }),
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
             }
         }
         // Graceful shutdown (E2). Flip the internal trigger and ACK
@@ -641,12 +745,9 @@ async fn dispatch(
         // drain in-flight) and pidfile removal.
         IpcRequest::Shutdown => {
             state.trigger_shutdown();
-            (
-                "shutdown",
-                IpcResult::Ok {
-                    response: IpcResponse::ShutdownAck { draining: true },
-                },
-            )
+            IpcResult::Ok {
+                response: IpcResponse::ShutdownAck { draining: true },
+            }
         }
     };
     // Audit one row per accepted request. The decision label reflects
@@ -674,43 +775,16 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         mcp_spec: "2025-11-25".to_owned(),
         policy_profile: format!("{:?}", state.policy.profile),
-        methods: vec![
-            "system_discover".to_owned(),
-            "health".to_owned(),
-            "policy_status".to_owned(),
-            "self_check".to_owned(),
-            "bucket_events_since".to_owned(),
-            "bucket_wait".to_owned(),
-            "bucket_summary".to_owned(),
-            "event_context".to_owned(),
-            "command_start_combed".to_owned(),
-            "command_status".to_owned(),
-            "command_output_tail".to_owned(),
-            "registry_search".to_owned(),
-            "registry_get".to_owned(),
-            "registry_upsert".to_owned(),
-            "registry_test".to_owned(),
-            "registry_activate".to_owned(),
-            "registry_deactivate".to_owned(),
-            "registry_list_active".to_owned(),
-            "file_read_window".to_owned(),
-            "file_search".to_owned(),
-            "file_watch_start".to_owned(),
-            "file_watch_stop".to_owned(),
-            "file_watch_list".to_owned(),
-            "pty_command_start".to_owned(),
-            "pty_command_write_stdin".to_owned(),
-            "pty_command_stop".to_owned(),
-            "pty_command_list".to_owned(),
-            "runtime_state".to_owned(),
-            "probe_list".to_owned(),
-            "probe_status".to_owned(),
-            "audit_since".to_owned(),
-            "subscription_open".to_owned(),
-            "subscription_pull".to_owned(),
-            "subscription_list".to_owned(),
-            "subscription_close".to_owned(),
-        ],
+        // M6: advertise EXACTLY the shared method authority. Previously a
+        // hand-maintained literal list that drifted from the dispatcher
+        // (it omitted registry_import_pack / subscription_seek /
+        // shutdown). Deriving from `DISCOVERABLE_METHODS` -- which the
+        // parity test pins to `method_name` over every IpcRequest
+        // variant -- makes future drift a compile/test failure.
+        methods: DISCOVERABLE_METHODS
+            .iter()
+            .map(|m| (*m).to_owned())
+            .collect(),
     })
 }
 
@@ -751,4 +825,267 @@ pub async fn dispatch_envelope(
     peer: &PeerIdentity,
 ) -> ResponseEnvelope {
     dispatch(state, boot, req_env, peer).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::protocol::{
+        AuditSinceParams, BucketEventsSinceParams, BucketSummaryParams, BucketWaitParams,
+        CommandOutputTailParams, CommandStartParams, CommandStatusParams, EventContextParams,
+        FileReadWindowParams, FileSearchParams, FileWatchStartParams, FileWatchStopParams,
+        ListLimitParams, ProbeStatusParams, PtyCommandStartParams, PtyCommandStopParams,
+        PtyCommandWriteStdinParams, RegistryActivateParams, RegistryDeactivateParams,
+        RegistryGetParams, RegistryImportPackParams, RegistrySearchParams, RegistryTestParams,
+        RegistryUpsertParams, SubscriptionCloseParams, SubscriptionListParams,
+        SubscriptionOpenParams, SubscriptionPredicate, SubscriptionPullParams,
+        SubscriptionSeekParams, SubscriptionSourceSel,
+    };
+    use std::collections::BTreeSet;
+    use terminal_commander_core::{
+        BucketId, ContextHint, EventId, JobId, ProbeId, RuleDefinition, RuleStatus, RuleType,
+        Severity,
+    };
+
+    fn minimal_rule() -> RuleDefinition {
+        RuleDefinition {
+            id: "parity.rule".to_owned(),
+            version: 1,
+            kind: RuleType::Keyword,
+            status: RuleStatus::Active,
+            severity: Severity::Info,
+            event_kind: "test".to_owned(),
+            stream: None,
+            description: None,
+            pattern: None,
+            keywords: Some(vec!["x".to_owned()]),
+            captures: vec![],
+            summary_template: "x".to_owned(),
+            tags: vec![],
+            rate_limit_per_min: None,
+            redact: vec![],
+            context_hint: ContextHint::default(),
+            examples: vec![],
+        }
+    }
+
+    /// Every [`IpcRequest`] variant, constructed with the cheapest valid
+    /// payload. Adding a variant to the enum without adding it here makes
+    /// `method_name`'s exhaustive match fail to compile FIRST; the length
+    /// cross-check in the parity test catches the reverse (a method added
+    /// to `DISCOVERABLE_METHODS` with no matching variant here).
+    #[allow(clippy::too_many_lines)] // one line per IpcRequest variant
+    fn all_request_variants() -> Vec<IpcRequest> {
+        vec![
+            IpcRequest::SystemDiscover,
+            IpcRequest::Health,
+            IpcRequest::PolicyStatus,
+            IpcRequest::SelfCheck,
+            IpcRequest::BucketEventsSince(BucketEventsSinceParams {
+                bucket_id: BucketId::new(),
+                cursor: 0,
+                severity_min: None,
+                kind_filter: None,
+                limit: None,
+            }),
+            IpcRequest::BucketWait(BucketWaitParams {
+                bucket_id: BucketId::new(),
+                cursor: 0,
+                severity_min: None,
+                kind_filter: None,
+                limit: None,
+                timeout_ms: None,
+            }),
+            IpcRequest::BucketSummary(BucketSummaryParams {
+                bucket_id: BucketId::new(),
+            }),
+            IpcRequest::EventContext(EventContextParams {
+                bucket_id: BucketId::new(),
+                event_id: EventId::new(),
+                before: None,
+                after: None,
+                max_bytes: None,
+            }),
+            IpcRequest::CommandStartCombed(CommandStartParams {
+                environment: None,
+                argv: vec!["true".to_owned()],
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                grace_ms: None,
+                tag: None,
+            }),
+            IpcRequest::CommandStatus(CommandStatusParams {
+                job_id: JobId::new(),
+            }),
+            IpcRequest::CommandOutputTail(CommandOutputTailParams {
+                job_id: JobId::new(),
+                max_lines: 1,
+                max_bytes: 1,
+            }),
+            IpcRequest::RegistrySearch(RegistrySearchParams {
+                query: "x".to_owned(),
+                limit: None,
+            }),
+            IpcRequest::RegistryGet(RegistryGetParams {
+                rule_id: "x".to_owned(),
+                version: None,
+            }),
+            IpcRequest::RegistryUpsert(RegistryUpsertParams {
+                definition: minimal_rule(),
+            }),
+            IpcRequest::RegistryTest(RegistryTestParams {
+                rule_id: "x".to_owned(),
+                version: None,
+                samples: vec![],
+            }),
+            IpcRequest::RegistryActivate(RegistryActivateParams {
+                rule_id: "x".to_owned(),
+                version: None,
+                scope: None,
+            }),
+            IpcRequest::RegistryImportPack(RegistryImportPackParams {
+                pack: "cargo".to_owned(),
+                activate: false,
+                scope: None,
+            }),
+            IpcRequest::RegistryDeactivate(RegistryDeactivateParams {
+                rule_id: "x".to_owned(),
+                version: 1,
+                scope: None,
+            }),
+            IpcRequest::RegistryListActive(ListLimitParams { limit: None }),
+            IpcRequest::FileReadWindow(FileReadWindowParams {
+                path: std::path::PathBuf::from("/x"),
+                start_line: None,
+                max_lines: None,
+                max_bytes: None,
+            }),
+            IpcRequest::FileSearch(FileSearchParams {
+                path: std::path::PathBuf::from("/x"),
+                query: "x".to_owned(),
+                case_insensitive: None,
+                max_matches: None,
+                max_snippet_bytes: None,
+            }),
+            IpcRequest::FileWatchStart(FileWatchStartParams {
+                path: std::path::PathBuf::from("/x"),
+                bucket_config: None,
+                rules: vec![],
+                follow_from_beginning: None,
+                tag: None,
+            }),
+            IpcRequest::FileWatchStop(FileWatchStopParams {
+                watch_id: JobId::new(),
+            }),
+            IpcRequest::FileWatchList,
+            IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                environment: None,
+                argv: vec!["true".to_owned()],
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                rows: None,
+                cols: None,
+                tag: None,
+            }),
+            IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
+                job_id: JobId::new(),
+                bytes: String::new(),
+            }),
+            IpcRequest::PtyCommandStop(PtyCommandStopParams {
+                job_id: JobId::new(),
+            }),
+            IpcRequest::PtyCommandList,
+            IpcRequest::RuntimeState(ListLimitParams { limit: None }),
+            IpcRequest::ProbeList(ListLimitParams { limit: None }),
+            IpcRequest::ProbeStatus(ProbeStatusParams {
+                probe_id: ProbeId::new(),
+            }),
+            IpcRequest::AuditSince(AuditSinceParams {
+                cursor: 0,
+                action_filter: None,
+                decision_filter: None,
+                limit: None,
+            }),
+            IpcRequest::SubscriptionOpen(SubscriptionOpenParams {
+                predicate: SubscriptionPredicate {
+                    severity_min: None,
+                    kind: None,
+                    sources: SubscriptionSourceSel::All,
+                    tag: None,
+                },
+            }),
+            IpcRequest::SubscriptionPull(SubscriptionPullParams {
+                sub_id: "x".to_owned(),
+                max: None,
+                timeout_ms: None,
+            }),
+            IpcRequest::SubscriptionList(SubscriptionListParams { limit: None }),
+            IpcRequest::SubscriptionClose(SubscriptionCloseParams {
+                sub_id: "x".to_owned(),
+            }),
+            IpcRequest::SubscriptionSeek(SubscriptionSeekParams {
+                sub_id: "x".to_owned(),
+                bucket_id: BucketId::new(),
+                seq: 0,
+            }),
+            IpcRequest::Shutdown,
+        ]
+    }
+
+    /// M6 parity guard: the method names the dispatcher can produce
+    /// (`method_name` over every variant) MUST equal exactly the names
+    /// `system_discover` advertises (`DISCOVERABLE_METHODS`). Drift in
+    /// EITHER direction fails this test, so a method can never be live in
+    /// the dispatcher while invisible to `system_discover`, nor advertised
+    /// without a real dispatch arm.
+    #[test]
+    fn system_discover_methods_match_dispatch() {
+        let dispatch_names: BTreeSet<&'static str> =
+            all_request_variants().iter().map(method_name).collect();
+        let advertised: BTreeSet<&'static str> = DISCOVERABLE_METHODS.iter().copied().collect();
+
+        let missing_from_discover: Vec<&&str> = dispatch_names.difference(&advertised).collect();
+        assert!(
+            missing_from_discover.is_empty(),
+            "dispatch arms missing from system_discover.methods: {missing_from_discover:?}"
+        );
+        let advertised_without_arm: Vec<&&str> = advertised.difference(&dispatch_names).collect();
+        assert!(
+            advertised_without_arm.is_empty(),
+            "system_discover.methods names with no dispatch arm: {advertised_without_arm:?}"
+        );
+
+        // Cross-checks that catch a forgotten test-vec entry: the
+        // advertised list has no duplicates, and the number of distinct
+        // dispatch names equals the advertised count (so a variant
+        // omitted from `all_request_variants` -- which would otherwise
+        // shrink `dispatch_names` -- is caught here once it is advertised).
+        assert_eq!(
+            advertised.len(),
+            DISCOVERABLE_METHODS.len(),
+            "DISCOVERABLE_METHODS contains duplicate method names"
+        );
+        assert_eq!(
+            dispatch_names.len(),
+            DISCOVERABLE_METHODS.len(),
+            "dispatch name count diverged from advertised count"
+        );
+    }
+
+    /// The three specific names the audit flagged as historically missing
+    /// must now be advertised. A focused regression for M6 so the exact
+    /// drift that was found cannot silently return.
+    #[test]
+    fn system_discover_advertises_previously_missing_methods() {
+        for m in ["registry_import_pack", "subscription_seek", "shutdown"] {
+            assert!(
+                DISCOVERABLE_METHODS.contains(&m),
+                "system_discover must advertise '{m}'"
+            );
+        }
+    }
 }

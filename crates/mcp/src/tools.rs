@@ -1023,12 +1023,31 @@ impl TerminalCommanderMcpServer {
                 imported,
                 skipped,
                 activated,
-            })) => json_tool_result(&serde_json::json!({
-                "pack": pack,
-                "imported": imported,
-                "skipped": skipped,
-                "activated": activated,
-            })),
+                failed,
+            })) => {
+                // M7 (partial-success): surface `failed` so the agent
+                // sees WHICH rules activated and which need a retry,
+                // instead of a bare error that hides the ones that
+                // succeeded. A non-empty `failed` is still a successful
+                // tool result (the daemon returned Ok, not an IPC
+                // error). `failed` is rendered as [{rule_id, reason}].
+                let failed_json: Vec<serde_json::Value> = failed
+                    .into_iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "rule_id": f.rule_id,
+                            "reason": f.reason,
+                        })
+                    })
+                    .collect();
+                json_tool_result(&serde_json::json!({
+                    "pack": pack,
+                    "imported": imported,
+                    "skipped": skipped,
+                    "activated": activated,
+                    "failed": failed_json,
+                }))
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
