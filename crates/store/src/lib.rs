@@ -53,6 +53,12 @@ use time::format_description::well_known::Rfc3339;
 /// 0.39 + bundled requirement.
 const MIGRATION_V0001: &str = include_str!("../migrations/V0001__initial_schema.sql");
 
+/// Embedded V0005 migration: drops the dormant `events_fts` FTS5 table
+/// and its three maintenance triggers (audit finding L4). Runs inside
+/// the core `migrate()` path so every writer open applies it, on both
+/// fresh and upgraded databases. Idempotent (`DROP ... IF EXISTS`).
+const MIGRATION_V0005: &str = include_str!("../migrations/V0005__drop_events_fts.sql");
+
 /// Default per-bucket maximum event count (count-based retention).
 pub const DEFAULT_BUCKET_MAX_EVENTS: u64 = 100_000;
 
@@ -242,6 +248,31 @@ impl EventStore {
             let now_s = OffsetDateTime::now_utc().format(&Rfc3339)?;
             tx.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
+                params![now_s],
+            )?;
+            tx.commit()?;
+        }
+        // V0005: drop the dormant `events_fts` FTS5 table + its three
+        // maintenance triggers (audit finding L4). They added an FTS
+        // write per append and per eviction for a search path that was
+        // never exposed. `DROP ... IF EXISTS` makes this safe on a fresh
+        // DB (V0001 just created it) and on an upgraded DB (present ->
+        // dropped). The registry FTS (`rule_search`) is untouched.
+        let v5: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 5",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if v5 == 0 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(MIGRATION_V0005)
+                .map_err(|e| EventStoreError::Migration(e.to_string()))?;
+            let now_s = OffsetDateTime::now_utc().format(&Rfc3339)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (5, ?1)",
                 params![now_s],
             )?;
             tx.commit()?;
@@ -885,6 +916,73 @@ mod tests {
         let sum = s.summary(bid).unwrap();
         assert_eq!(sum.event_count, 3);
         assert_eq!(sum.dropped_count, 2);
+    }
+
+    /// Audit finding L4: the V0005 migration drops the dormant `events_fts`
+    /// FTS5 table and its three maintenance triggers. A fresh store must open
+    /// cleanly (V0001 creates it, V0005 drops it in the same boot), the table
+    /// and triggers must be absent afterward, and append + eviction (the hot
+    /// paths the triggers used to fire on) must still work without them.
+    #[test]
+    fn store_drops_dormant_events_fts_and_triggers() {
+        let mut s = EventStore::in_memory().unwrap();
+
+        // The FTS table is gone (dropped by V0005 right after V0001 created it).
+        let fts_tables: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'events_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_tables, 0, "events_fts table should be dropped");
+
+        // All three maintenance triggers are gone.
+        let fts_triggers: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'trigger' \
+                 AND name IN ('events_ai', 'events_ad', 'events_au')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_triggers, 0, "events_fts triggers should be dropped");
+
+        // The V0005 bookkeeping row is recorded (migration applied exactly once).
+        let v5: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 5",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v5, 1, "V0005 should be recorded in schema_migrations");
+
+        // Append + eviction (the old trigger fire paths: INSERT then DELETE on
+        // `events`) still work with the triggers removed.
+        let bid = BucketId::new();
+        s.ensure_bucket(
+            bid,
+            &StoreBucketConfig {
+                max_events: 3,
+                ttl: Duration::from_hours(1),
+            },
+        )
+        .unwrap();
+        for _ in 0..5 {
+            s.append(make_event(bid, Severity::Low, "k")).unwrap();
+        }
+        let sum = s.summary(bid).unwrap();
+        assert_eq!(sum.event_count, 3);
+        assert_eq!(sum.dropped_count, 2);
+
+        // `events` base table is intact (still has its columns).
+        assert!(s.events_table_has_no_blob());
     }
 
     #[test]
