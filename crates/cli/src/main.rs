@@ -65,6 +65,18 @@ enum Command {
     Jobs,
     /// Probe inspection.
     Probes,
+    /// Stream matched events for an open subscription as NDJSON (one JSON
+    /// object per event) to stdout, for a harness `Monitor`. Loops
+    /// `subscription_pull` (reconnect-per-pull); exits 0 on close or when
+    /// `--max` events are emitted, NON-ZERO on an unknown sub_id or daemon
+    /// shutdown so the `Monitor` terminates instead of silently idling.
+    SubscriptionStream {
+        /// Opaque sub_id from `subscription_open`.
+        sub_id: String,
+        /// Stop after emitting this many events (default: stream until close).
+        #[arg(long)]
+        max: Option<usize>,
+    },
     /// Policy inspection.
     Policy,
     /// Audit log inspection.
@@ -148,6 +160,7 @@ fn run(cli: Cli) -> std::process::ExitCode {
         },
         Command::Jobs => run_jobs(),
         Command::Probes => run_probes(),
+        Command::SubscriptionStream { sub_id, max } => run_subscription_stream(&sub_id, max),
         Command::Policy => run_policy(),
         Command::Audit { limit } => run_audit(limit),
         Command::Session { op } => match op {
@@ -278,6 +291,95 @@ fn run_probes() -> std::process::ExitCode {
             _ => Err(unexpected_variant("probe_list")),
         },
     )
+}
+
+/// `subscription-stream <sub_id> [--max N]` -> a reconnect-per-pull loop that
+/// emits one NDJSON object per matched event to stdout (flushed per event).
+///
+/// Exit codes: 0 on `--max` reached or a clean subscription close; non-zero on
+/// `UnknownSubscription` (sub gone / daemon restarted -> the `Monitor` must
+/// terminate) and on an unavailable daemon or a torn connection. The daemon
+/// holds this sub's offsets, so reconnect-per-pull is lossless across
+/// reconnects -- no client-side cursor.
+fn run_subscription_stream(sub_id: &str, max: Option<usize>) -> std::process::ExitCode {
+    use std::io::Write;
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("terminal-commander: tokio runtime build failed: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    // Per-pull client timeout MUST exceed the server's MAX_PULL_TIMEOUT_MS (8 s)
+    // so an idle ~8 s blocking pull returns SUCCESS, not a client timeout.
+    let pull_timeout = std::time::Duration::from_secs(12);
+    let mut emitted: usize = 0;
+    let mut corr: u64 = 1;
+    rt.block_on(async {
+        let mut stdout = std::io::stdout();
+        loop {
+            let req =
+                IpcRequest::SubscriptionPull(terminal_commander_ipc::SubscriptionPullParams {
+                    sub_id: sub_id.to_owned(),
+                    max,
+                    // Block up to the server cap so the loop returns promptly on a
+                    // match and re-arms the daemon's Notify on the next iteration.
+                    timeout_ms: Some(8_000),
+                });
+            let resp = ipc::connect_or_unavailable_with_timeout(corr, req, pull_timeout).await;
+            corr = corr.wrapping_add(1);
+            let pull = match resp {
+                Ok(IpcResponse::SubscriptionPull(p)) => p,
+                Ok(_) => {
+                    // The daemon answered the wrong variant for this method: a
+                    // contract violation, surfaced as exit 1, never a row.
+                    CliIpcError::Ipc(unexpected_variant("subscription_pull"))
+                        .report("subscription-stream");
+                    return std::process::ExitCode::from(1);
+                }
+                // UnknownSubscription (sub gone / restart) and Unavailable both
+                // terminate the stream non-zero so a `Monitor` stops.
+                Err(err) => {
+                    err.report("subscription-stream");
+                    return std::process::ExitCode::from(err.exit_code());
+                }
+            };
+            for ev in &pull.events {
+                // One NDJSON object per matched event; flush per event so a
+                // `Monitor` sees each line immediately.
+                match serde_json::to_string(ev) {
+                    Ok(line) => {
+                        if writeln!(stdout, "{line}").is_err() || stdout.flush().is_err() {
+                            // The reader (a Monitor) closed: stop, non-zero.
+                            return std::process::ExitCode::from(1);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("terminal-commander: subscription-stream: serialize failed: {e}");
+                        return std::process::ExitCode::from(1);
+                    }
+                }
+                emitted += 1;
+                if let Some(limit) = max
+                    && emitted >= limit
+                {
+                    return std::process::ExitCode::SUCCESS;
+                }
+            }
+            // `lagged`/`truncated` are surfaced once per pull on stderr so a
+            // Monitor's operator can see loss; the empty/idle path simply loops
+            // again, re-arming the daemon's Notify.
+            if pull.lagged || pull.truncated {
+                eprintln!(
+                    "terminal-commander: subscription-stream: lagged={} truncated={}",
+                    pull.lagged, pull.truncated
+                );
+            }
+        }
+    })
 }
 
 /// `policy` -> `policy_status` -> profile + deny counts + caps.
