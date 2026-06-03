@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.43](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.42...v0.1.43) (2026-06-03)
+
+
+### Features
+
+* release Rust crate changes ([8e758d9](https://github.com/special-place-ai-heaven/terminal-commander/commit/8e758d9063c9c14cbbb1b91753dfa5cb957777dc))
+* Subscriptions Phase 2 + Phase 3 (stream bridge, notifications, tags, seek, fairness) ([#83](https://github.com/special-place-ai-heaven/terminal-commander/issues/83)) ([c9c07bf](https://github.com/special-place-ai-heaven/terminal-commander/commit/c9c07bfbabe1866ef0e661840dcdf86f2da35a23))
+
 ## [0.1.42](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.41...v0.1.42) (2026-06-03)
 
 
