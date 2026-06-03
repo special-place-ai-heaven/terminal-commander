@@ -340,10 +340,14 @@ mod runtime {
         probe_id: ProbeId,
         metrics: Arc<Mutex<PtyProbeMetrics>>,
         // Atomic flag set by the prompt detector and read by
-        // `write_stdin`. Cleared as soon as the next non-secret frame
-        // arrives (so the LLM can respond to non-secret prompts that
-        // follow a secret one without operator intervention — the
-        // secret line itself is always rejected).
+        // `write_stdin`. It stays STICKY (active) through arbitrary
+        // child output and is cleared only on a DEFINITE "secret prompt
+        // resolved" signal — a fresh non-secret prompt (`Shell` /
+        // `YesNo`), meaning the command that read the secret has
+        // advanced to a new prompt. It is NEVER cleared on a bare
+        // non-prompt (`None`) output line, since the child's stdout is
+        // untrusted and a decoy line must not be able to disarm the
+        // gate while the child blocks reading the password.
         secret_prompt_active: Arc<AtomicBool>,
         // Atomic generation counter incremented whenever the detector
         // flips the active flag. Exposed for tests + audit metadata
@@ -681,15 +685,23 @@ mod runtime {
                 secret_counted_gen.store(new_gen, Ordering::Release);
                 flipped_here = true;
             }
-        } else if !matches!(
-            kind,
-            PromptKind::None | PromptKind::Shell | PromptKind::YesNo
-        ) {
-            secret_prompt_active.store(false, Ordering::Release);
-        } else if matches!(kind, PromptKind::None) {
-            // A normal line resolves any pending secret prompt; the
-            // child has emitted output past the password line so any
-            // typed secret is already consumed.
+        } else if matches!(kind, PromptKind::Shell | PromptKind::YesNo) {
+            // SECURITY: clear the secret gate ONLY on a DEFINITE
+            // "secret prompt resolved" signal — a fresh NON-secret
+            // prompt (the shell returned to a `$`/`#` prompt, or a
+            // program emitted a `(y/n)` prompt). Reaching a new prompt
+            // means the command that read the secret has advanced past
+            // it, so the prompt is answered.
+            //
+            // We deliberately do NOT clear on a bare `PromptKind::None`
+            // output line: the child's stdout is UNTRUSTED, and an
+            // attacker-controlled child could otherwise emit a single
+            // non-prompt "decoy" line to disarm the gate while it is
+            // genuinely blocked reading the password, then have the LLM
+            // type the secret into the live prompt. Keeping the flag
+            // STICKY through arbitrary output only ever over-denies
+            // stdin (safe); clearing on arbitrary output under-denies
+            // (the exploit this gate exists to prevent).
             secret_prompt_active.store(false, Ordering::Release);
         }
 
@@ -851,6 +863,96 @@ mod runtime {
                     m.prompts_total
                 );
             });
+        }
+
+        /// Drive `process_line` over a sequence of completed (`\n`-terminated)
+        /// lines against a fresh set of secret-state atomics, returning the
+        /// final value of `secret_prompt_active`. This bypasses PTY timing so
+        /// the security invariant is asserted deterministically.
+        fn run_process_lines(lines: &[&str]) -> bool {
+            let runtime = rt();
+            runtime.block_on(async {
+                let probe_id = ProbeId::default();
+                let bucket_id = BucketId::new();
+                let rings = Arc::new(ContextRingManager::new());
+                rings
+                    .create_ring_default(probe_id)
+                    .expect("create ring for test probe");
+                let sifter = empty_runtime();
+                let sink: Arc<dyn EventSink> = Arc::new(InMemorySink::new());
+                let metrics = Arc::new(Mutex::new(PtyProbeMetrics::default()));
+                let secret_prompt_active = Arc::new(AtomicBool::new(false));
+                let secret_prompt_gen = Arc::new(AtomicU64::new(0));
+                let secret_counted_gen = Arc::new(AtomicU64::new(0));
+                let noise_pipeline: SharedProbeNoisePipeline =
+                    Arc::new(Mutex::new(ProbeNoisePipeline::with_default_policy()));
+
+                for line in lines {
+                    process_line(
+                        line,
+                        probe_id,
+                        bucket_id,
+                        Arc::clone(&rings),
+                        Arc::clone(&sifter),
+                        Arc::clone(&sink),
+                        Arc::clone(&metrics),
+                        Arc::clone(&secret_prompt_active),
+                        Arc::clone(&secret_prompt_gen),
+                        Arc::clone(&secret_counted_gen),
+                        Arc::clone(&noise_pipeline),
+                    );
+                }
+                secret_prompt_active.load(Ordering::Acquire)
+            })
+        }
+
+        #[test]
+        fn pty_decoy_none_line_does_not_disarm_secret_gate() {
+            // SECURITY REGRESSION: an attacker-controlled child can emit a
+            // completed secret prompt line, then a completed NON-prompt
+            // (`PromptKind::None`) "decoy" line, then block reading the
+            // password while emitting no further output. The old
+            // clear-on-`None` arm cleared `secret_prompt_active` on the decoy
+            // line, leaving the gate OPEN while the child genuinely waits for
+            // the secret — a later `write_stdin` would then type into the live
+            // secret prompt. The flag MUST stay active: a bare `None` output
+            // line is untrusted and is NOT a "secret resolved" signal.
+            //
+            // Reproduces:
+            //   printf 'password: \n'   # SET secret_prompt_active
+            //   printf 'decoy\n'        # must NOT clear it (the hole)
+            //   read SECRET             # child blocks; no further output
+            let active = run_process_lines(&["password: ", "decoy"]);
+            assert!(
+                active,
+                "a `None` decoy line must NOT disarm the secret gate; \
+                 secret_prompt_active stayed flag={active} (expected true)"
+            );
+        }
+
+        #[test]
+        fn pty_fresh_shell_prompt_resolves_secret_gate() {
+            // Complementary: once the secret prompt is genuinely RESOLVED — the
+            // shell returns to a normal `$`/`#` prompt — the flag clears so
+            // legitimate stdin is allowed again (no permanent lock-out).
+            let active = run_process_lines(&["password: ", "dev@host:~$"]);
+            assert!(
+                !active,
+                "a fresh non-secret shell prompt must clear the secret gate; \
+                 secret_prompt_active stayed flag={active} (expected false)"
+            );
+        }
+
+        #[test]
+        fn pty_yes_no_prompt_resolves_secret_gate() {
+            // A fresh `(y/n)` prompt is also a genuine "the program advanced
+            // past the secret" signal and clears the gate.
+            let active = run_process_lines(&["password: ", "Overwrite? (y/n)"]);
+            assert!(
+                !active,
+                "a fresh yes/no prompt must clear the secret gate; \
+                 secret_prompt_active stayed flag={active} (expected false)"
+            );
         }
     }
 }
