@@ -1412,7 +1412,9 @@ pub fn into_mcp_error(e: &IpcError) -> McpError {
         | IpcErrorCode::UnknownWatch
         | IpcErrorCode::SecretInputDenied
         | IpcErrorCode::UnknownProbe
-        | IpcErrorCode::RuleNotActive => McpError::invalid_params(message, Some(data)),
+        | IpcErrorCode::RuleNotActive
+        | IpcErrorCode::UnknownSubscription
+        | IpcErrorCode::SubscriptionLimitExceeded => McpError::invalid_params(message, Some(data)),
     }
 }
 

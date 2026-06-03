@@ -49,7 +49,7 @@ pub use protocol::{
     FileReadWindowResponse, FileSearchMatch, FileSearchParams, FileSearchResponse,
     FileWatchListEntry, FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse,
     FileWatchStopParams, FileWatchStopResponse, IpcContextFrame, IpcError, IpcErrorCode,
-    IpcRequest, IpcResponse, IpcResult, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS,
+    IpcRequest, IpcResponse, IpcResult, Liveness, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS,
     MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_GRACE_MS, MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES,
     MAX_CONTEXT_FRAMES, MAX_FILE_READ_BYTES, MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES,
     MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_PTY_ARGV_ITEMS,

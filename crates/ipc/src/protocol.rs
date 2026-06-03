@@ -439,6 +439,13 @@ pub enum IpcErrorCode {
     /// in the message (promote the rule to status=Active and re-upsert)
     /// rather than poisoning the scope. See the agent-ergonomics chain.
     RuleNotActive,
+    /// `subscription_pull`/`subscription_close` referenced a `sub_id` the
+    /// daemon does not know (unknown or reset by a daemon restart). Caller
+    /// re-opens. Approved goal-file amendment 2026-06-02.
+    UnknownSubscription,
+    /// `subscription_open` exceeded the max-subscriptions cap. Caller frees
+    /// a slot (subscription_close) and retries. Approved 2026-06-02.
+    SubscriptionLimitExceeded,
     /// Returned to a new request that arrives while the daemon is draining for
     /// shutdown. Retryable: the client should cold-spawn a fresh daemon.
     ShuttingDown,
@@ -1228,6 +1235,52 @@ pub enum ProbeKind {
     Pty,
 }
 
+/// Single authoritative liveness union for a probe / subscription source.
+///
+/// Derived from the job ledger (NOT from live-map presence: command
+/// bindings linger in the live map after exit, so presence is not
+/// "running"). Reused by `ProbeListEntry.liveness` and the subscription
+/// `SourceLiveness`. See subscriptions spec MUST-ADD #3.
+///
+/// `JobState -> Liveness` mapping (command kind):
+/// `Starting -> Starting`, `Running -> Running`,
+/// `Exited -> Exited{code}`, `Failed -> Failed{code,signal}`,
+/// `Cancelled -> Cancelled` (cancel sets signal `"CANCELLED"` and MUST
+/// NOT be folded into `Failed`). File-watch / PTY report `Running`
+/// while present (no exit-code concept on the live-map path).
+/// `Dropped{count}` carries a bucket's `dropped_count` when surfacing
+/// bucket-level lag (not used by per-probe derivation today).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum Liveness {
+    /// Probe registered, process not yet observed running.
+    Starting,
+    /// Probe is live (process running, or watch/PTY present).
+    Running,
+    /// Process exited cleanly (code 0, no signal).
+    Exited { code: i32 },
+    /// Process exited non-zero or was killed by a signal.
+    Failed {
+        code: Option<i32>,
+        signal: Option<String>,
+    },
+    /// Operator-initiated kill before exit (JobState::Cancelled).
+    Cancelled,
+    /// Probe stopped without an exit code (watch/PTY removal).
+    Stopped,
+    /// Bucket-level lag: `count` events were dropped (eviction).
+    Dropped { count: u64 },
+}
+
+impl Default for Liveness {
+    /// Backstop for `#[serde(default)]` on `ProbeListEntry.liveness`
+    /// when decoding an older payload that predates the field. A
+    /// present-but-unannotated probe is treated as `Running`.
+    fn default() -> Self {
+        Self::Running
+    }
+}
+
 /// One row in `probe_list` / `runtime_state.probes`.
 ///
 /// Bounded; never carries raw stream content. `argv` is the
@@ -1257,6 +1310,13 @@ pub struct ProbeListEntry {
     /// File-watch only — surfaces the watched path. Other kinds
     /// return None.
     pub path: Option<std::path::PathBuf>,
+    /// Per-source liveness. Command probes derive this from the job
+    /// ledger (`command.status(job).state`) — NOT from live-map
+    /// presence, which lingers after exit. File-watch and PTY probes
+    /// report `Running` while present. `#[serde(default)]` so older
+    /// payloads (pre-liveness) decode as `Running`.
+    #[serde(default)]
+    pub liveness: Liveness,
 }
 
 /// Bucket-level counters surfaced by `runtime_state.buckets`.
@@ -1473,6 +1533,25 @@ mod tests {
         };
         let err = encode_frame(&env).unwrap_err();
         assert_eq!(err.code, IpcErrorCode::FrameTooLarge);
+    }
+
+    #[test]
+    fn subscription_error_codes_roundtrip_snake_case() {
+        for (code, wire) in [
+            (
+                IpcErrorCode::UnknownSubscription,
+                "\"unknown_subscription\"",
+            ),
+            (
+                IpcErrorCode::SubscriptionLimitExceeded,
+                "\"subscription_limit_exceeded\"",
+            ),
+        ] {
+            let s = serde_json::to_string(&code).unwrap();
+            assert_eq!(s, wire);
+            let back: IpcErrorCode = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, code);
+        }
     }
 
     #[test]

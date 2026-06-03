@@ -4,18 +4,52 @@
 use std::sync::Arc;
 
 use crate::ipc::protocol::{
-    IpcError, IpcErrorCode, IpcResponse, ProbeKind, ProbeListEntry, ProbeListResponse,
+    IpcError, IpcErrorCode, IpcResponse, Liveness, ProbeKind, ProbeListEntry, ProbeListResponse,
     ProbeStatusParams, ProbeStatusResponse, RuntimeActiveRule, RuntimeBucketSummary,
     RuntimeStateResponse,
 };
 use crate::state::DaemonState;
 
+/// Map a command job's ledger state to [`Liveness`]. Reads the
+/// authoritative `JobState` (+ exit metadata) from
+/// `command.status(job)` rather than live-map presence (bindings
+/// linger after exit). See subscriptions spec MUST-ADD #3.
+///
+/// Cancellation is reported as [`Liveness::Cancelled`] and MUST NOT be
+/// folded into `Failed`, even though `cancel()` sets a `"CANCELLED"`
+/// signal on the exit info.
+fn command_liveness(
+    state: terminal_commander_core::JobState,
+    exit_code: Option<i32>,
+    signal: Option<String>,
+) -> Liveness {
+    use terminal_commander_core::JobState;
+    match state {
+        JobState::Starting => Liveness::Starting,
+        JobState::Running => Liveness::Running,
+        // `finish` only assigns `Exited` for code 0 with no signal.
+        JobState::Exited => Liveness::Exited {
+            code: exit_code.unwrap_or(0),
+        },
+        JobState::Failed => Liveness::Failed {
+            code: exit_code,
+            signal,
+        },
+        JobState::Cancelled => Liveness::Cancelled,
+    }
+}
 pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<ProbeListEntry> {
     let mut out: Vec<ProbeListEntry> = Vec::new();
 
     // CommandRuntime: live_jobs + per-job status for counters.
     for j in state.command.live_jobs() {
         let status = state.command.status(j.job_id).ok();
+        // Liveness is the authoritative JobState from the ledger, NOT
+        // live-map presence (bindings linger after exit). Missing status
+        // (job dropped between live_jobs() and status()) -> Running.
+        let liveness = status.as_ref().map_or(Liveness::Running, |s| {
+            command_liveness(s.state, s.exit_code, s.signal.clone())
+        });
         out.push(ProbeListEntry {
             kind: ProbeKind::Command,
             job_id: j.job_id,
@@ -29,10 +63,12 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
             secret_prompts_total: 0,
             secret_prompt_active: false,
             path: None,
+            liveness,
         });
     }
 
     // WatchRuntime: list returns (job_id, bucket_id, probe_id, path, metrics).
+    // File-watch has no exit-code concept: present -> Running.
     for (wid, bid, pid, path, m) in state.watch.list() {
         out.push(ProbeListEntry {
             kind: ProbeKind::FileWatch,
@@ -47,10 +83,12 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
             secret_prompts_total: 0,
             secret_prompt_active: false,
             path: Some(path),
+            liveness: Liveness::Running,
         });
     }
 
     // PtyRuntime: list returns (job_id, bucket_id, probe_id, argv, metrics, secret_active).
+    // PTY exit is not wired through this list path: present -> Running.
     #[cfg(unix)]
     for (jid, bid, pid, _argv, m, secret) in state.pty.list() {
         out.push(ProbeListEntry {
@@ -66,6 +104,7 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
             secret_prompts_total: m.secret_prompts_total,
             secret_prompt_active: secret,
             path: None,
+            liveness: Liveness::Running,
         });
     }
 
@@ -159,5 +198,58 @@ pub(in crate::ipc::server) fn handle_probe_status(
                 params.probe_id.to_wire_string()
             ),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use terminal_commander_core::JobState;
+
+    // The load-bearing invariant (spec MUST-ADD #3): a cancelled job
+    // reports `Cancelled`, NOT `Failed`, even though `cancel()` stamps a
+    // `"CANCELLED"` signal on the exit info. An exited job reports
+    // `Exited{code}`.
+    #[test]
+    fn command_liveness_maps_jobstate_without_folding_cancel_into_failed() {
+        assert_eq!(
+            command_liveness(JobState::Starting, None, None),
+            Liveness::Starting
+        );
+        assert_eq!(
+            command_liveness(JobState::Running, None, None),
+            Liveness::Running
+        );
+        // Clean exit -> Exited{code}. `finish` only sets Exited for code 0.
+        assert_eq!(
+            command_liveness(JobState::Exited, Some(0), None),
+            Liveness::Exited { code: 0 }
+        );
+        // Missing exit code on an Exited state defaults to 0 (clean).
+        assert_eq!(
+            command_liveness(JobState::Exited, None, None),
+            Liveness::Exited { code: 0 }
+        );
+        // Non-zero / signalled exit -> Failed{code,signal}.
+        assert_eq!(
+            command_liveness(JobState::Failed, Some(2), None),
+            Liveness::Failed {
+                code: Some(2),
+                signal: None
+            }
+        );
+        assert_eq!(
+            command_liveness(JobState::Failed, None, Some("SIGTERM".to_owned())),
+            Liveness::Failed {
+                code: None,
+                signal: Some("SIGTERM".to_owned())
+            }
+        );
+        // Cancellation -> Cancelled, NOT Failed (even with a CANCELLED
+        // signal present on the exit info).
+        assert_eq!(
+            command_liveness(JobState::Cancelled, None, Some("CANCELLED".to_owned())),
+            Liveness::Cancelled
+        );
     }
 }
