@@ -114,6 +114,17 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
         CommandError::UnknownJob(id) => {
             IpcError::new(IpcErrorCode::UnknownJob, format!("unknown job: {id}"))
         }
+        // An inline rule that fails to compile is a CALLER-fixable error:
+        // the operator passed a bad regex / kind-keywords mismatch / empty
+        // id. Surface `RuleInvalid` (the same teaching code `registry_*`
+        // uses for rule validation) so the client can fix the rule, rather
+        // than the server-fault `Internal`. The bucket is allocated AFTER
+        // this compile in `start_combed`, so this path leaks nothing.
+        CommandError::Sifter(msg) => IpcError::new(
+            IpcErrorCode::RuleInvalid,
+            format!("inline rule compile failed: {msg}"),
+        ),
+        // Genuine server faults (bucket store failure, IO) stay Internal.
         other => IpcError::new(IpcErrorCode::Internal, other.to_string()),
     }
 }
@@ -149,6 +160,67 @@ pub(in crate::ipc::server) fn map_path_policy(
         return Err(IpcError::new(IpcErrorCode::PathDenied, verdict.reason));
     }
     Ok(())
+}
+
+/// Resolve a client-supplied file path to a canonical, policy-authorized
+/// path that callers then open directly.
+///
+/// This closes two path-handling holes (external review TC22 I5):
+///
+/// 1. ABSOLUTE-ONLY (trust/correctness): the daemon has no workspace
+///    root, so a relative path would silently resolve against the
+///    daemon's process CWD - not the client's "repo". Relative paths are
+///    rejected up front with a teaching [`IpcErrorCode::PathDenied`].
+///
+/// 2. SYMLINK-SAFE DEFAULT-DENY (security): the default-deny suffix check
+///    inside [`PolicyEngine::evaluate`] matches on the path STRING, but
+///    `File::open` follows symlinks. A symlink whose own name does not
+///    match a sensitive suffix (e.g. `/tmp/x -> ~/.ssh/id_rsa`) would
+///    pass the string check and then read the secret target. We
+///    canonicalize FIRST (resolving every symlink) and run the policy
+///    check on the real target, then return that canonical path so the
+///    caller opens the SAME path it authorized (closing the TOCTOU
+///    window - no re-resolution between check and open).
+///
+/// `canonicalize` requires the target to exist; for `file_read_window` /
+/// `file_search` / `file_watch_start` the target MUST exist, so a missing
+/// path is an honest [`IpcErrorCode::FileNotFound`], not a bypass.
+pub(in crate::ipc::server) fn resolve_and_authorize_file(
+    state: &Arc<DaemonState>,
+    path: &std::path::Path,
+    is_watch: bool,
+) -> Result<std::path::PathBuf, IpcError> {
+    // (1) Absolute-only: the daemon has no workspace root.
+    if !path.is_absolute() {
+        return Err(IpcError::new(
+            IpcErrorCode::PathDenied,
+            format!(
+                "path '{}' must be absolute (e.g. /home/u/project/Cargo.toml); \
+                 the daemon has no workspace root and would otherwise resolve \
+                 it against its own working directory",
+                path.display()
+            ),
+        ));
+    }
+
+    // (2) Canonicalize BEFORE the policy check so symlinks resolve to
+    // their real target and the default-deny suffix check sees it.
+    let canonical = std::fs::canonicalize(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => IpcError::new(
+            IpcErrorCode::FileNotFound,
+            format!("'{}' does not exist", path.display()),
+        ),
+        _ => IpcError::new(
+            IpcErrorCode::Internal,
+            format!("resolve '{}': {e}", path.display()),
+        ),
+    })?;
+
+    // (3) Policy-gate the CANONICAL path. A symlink to a denied target is
+    // now caught because `canonical` is the real target.
+    map_path_policy(state, &canonical, is_watch)?;
+
+    Ok(canonical)
 }
 
 pub(in crate::ipc::server) fn require_regular_file(
@@ -272,5 +344,96 @@ pub(in crate::ipc::server) fn validate_scope_against_live_jobs(
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::protocol::IpcErrorCode;
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn unique_data_dir(tag: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        p.push(format!("tc-resolve-{tag}-{pid}-{nanos}-{n}"));
+        p
+    }
+
+    fn state_for(data: &std::path::Path) -> Arc<DaemonState> {
+        let cfg = crate::config::DaemonConfig::defaults_in(data);
+        Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"))
+    }
+
+    /// BUG 2 (cross-platform): a relative path is rejected with a teaching
+    /// `PathDenied` instead of being silently resolved against the
+    /// daemon's process CWD. The daemon has no workspace root.
+    #[test]
+    fn relative_path_is_rejected_with_teaching_error() {
+        let data = unique_data_dir("rel");
+        let state = state_for(&data);
+
+        let err = resolve_and_authorize_file(&state, std::path::Path::new("Cargo.toml"), false)
+            .expect_err("relative path must be rejected");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+        assert!(
+            err.message.contains("must be absolute"),
+            "teaching message expected, got: {}",
+            err.message
+        );
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// BUG 2 (cross-platform): an absolute path to an existing regular
+    /// file is authorized and resolves to a canonical path.
+    #[test]
+    fn absolute_existing_path_is_authorized() {
+        let data = unique_data_dir("abs");
+        let state = state_for(&data);
+        let file = data.join("ok.txt");
+        {
+            let mut f = std::fs::File::create(&file).expect("create");
+            f.write_all(b"hello\n").expect("write");
+        }
+        assert!(file.is_absolute(), "temp file path must be absolute");
+
+        let resolved =
+            resolve_and_authorize_file(&state, &file, false).expect("absolute path authorized");
+        // Canonical form points at the same file (compare canonicalized
+        // both sides to tolerate the Windows `\\?\` verbatim prefix).
+        let expect = std::fs::canonicalize(&file).expect("canonicalize");
+        assert_eq!(resolved, expect);
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// FIX 1 (cross-platform): an inline-rule compile failure is a
+    /// CALLER-fixable error and must map to `RuleInvalid`, not the
+    /// server-fault `Internal`. The caller can fix their rule.
+    #[test]
+    fn sifter_rule_compile_failure_maps_to_rule_invalid() {
+        let err = map_command_error(CommandError::Sifter("bad regex".to_owned()));
+        assert_eq!(err.code, IpcErrorCode::RuleInvalid);
+        assert!(
+            err.message.contains("bad regex"),
+            "expected the underlying reason to be surfaced, got: {}",
+            err.message
+        );
+    }
+
+    /// FIX 1 (cross-platform): genuine server faults (IO) still map to
+    /// `Internal`. The RuleInvalid carve-out must not swallow real
+    /// server-side failures.
+    #[test]
+    fn io_error_still_maps_to_internal() {
+        let err = map_command_error(CommandError::Io(std::io::Error::other("disk gone")));
+        assert_eq!(err.code, IpcErrorCode::Internal);
     }
 }

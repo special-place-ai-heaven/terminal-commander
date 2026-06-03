@@ -81,6 +81,32 @@ fn keyword_rule(id: &str, kw: &str, severity: Severity, kind: &str) -> RuleDefin
     }
 }
 
+/// Build a deliberately INVALID inline rule: a regex rule whose
+/// pattern does not compile. `SifterRuntime::build` (called from
+/// `start_combed`) rejects it, exercising the caller-fixable error
+/// path. The unbalanced `(` is a classic malformed regex.
+fn invalid_regex_rule(id: &str) -> RuleDefinition {
+    RuleDefinition {
+        id: id.to_owned(),
+        version: 1,
+        kind: RuleType::Regex,
+        status: RuleStatus::Active,
+        severity: Severity::High,
+        event_kind: "kw_bad".to_owned(),
+        stream: None,
+        description: None,
+        pattern: Some("(".to_owned()),
+        keywords: None,
+        captures: vec![],
+        summary_template: "bad rule".to_owned(),
+        tags: vec![],
+        rate_limit_per_min: None,
+        redact: vec![],
+        context_hint: ContextHint::default(),
+        examples: vec![],
+    }
+}
+
 /// Build a python3 argv that writes to stdout AND stderr, then
 /// exits with the requested code. python3 is a non-shell program.
 fn py_argv(stdout: &str, stderr: &str, exit_code: i32) -> Vec<String> {
@@ -215,6 +241,55 @@ fn command_start_denied_for_sudo_argv() {
             rows.iter()
                 .any(|r| r.action == "command_rejected" && r.decision == "deny"),
             "rows: {rows:?}"
+        );
+
+        cleanup(&data);
+    });
+}
+
+/// FIX 1 regression: an invalid INLINE rule must fail BEFORE the
+/// bucket is allocated, so no bucket is orphaned, and the error is
+/// the caller-fixable `Sifter` variant (mapped to `RuleInvalid` at
+/// the IPC boundary), never a server-fault.
+///
+/// Asserts:
+///  1. `start_combed` returns `CommandError::Sifter(_)`.
+///  2. NO bucket was created: `Router::bucket_create` audits a
+///     `bucket_create` row on every allocation, so zero such rows
+///     proves nothing was leaked. (Before the fix the bucket was
+///     created first, leaving exactly one orphaned `bucket_create`
+///     row and an unreachable bucket.)
+#[test]
+fn command_start_with_invalid_inline_rule_fails_fast_without_leaking_bucket() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("bad-rule");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let req = CommandStartRequest {
+            argv: py_argv("noise", "noise", 0),
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![invalid_regex_rule("test.bad")],
+            grace: None,
+        };
+
+        let err = state.command.start_combed(req).unwrap_err();
+        assert!(
+            matches!(err, CommandError::Sifter(_)),
+            "expected Sifter (rule-compile) error, got: {err:?}"
+        );
+
+        // No bucket leaked: the bucket is allocated only AFTER the
+        // rule set compiles, so a failed compile must leave zero
+        // `bucket_create` audit rows behind.
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        let bucket_creates = rows.iter().filter(|r| r.action == "bucket_create").count();
+        assert_eq!(
+            bucket_creates, 0,
+            "invalid inline rule leaked a bucket: {bucket_creates} bucket_create rows in {rows:?}"
         );
 
         cleanup(&data);
