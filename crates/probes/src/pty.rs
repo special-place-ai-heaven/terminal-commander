@@ -319,6 +319,33 @@ mod runtime {
         }
     }
 
+    /// Terminal outcome of a PTY child.
+    ///
+    /// Surfaced to the daemon waiter so it can flip the job ledger to the right
+    /// [`terminal_commander_core::JobState`] exactly like the command runtime
+    /// does. Mirrors `command.rs::ProbeOutcome`.
+    #[derive(Debug, Clone)]
+    pub enum PtyExitOutcome {
+        /// The child exited (cleanly or not). `code` is the OS exit code when
+        /// available; `signal` is the terminating signal (POSIX) when available.
+        Exited {
+            code: Option<i32>,
+            signal: Option<String>,
+        },
+        /// The probe was cancelled (`cancel`/`stop`) before a natural exit.
+        Cancelled,
+    }
+
+    /// Map a finished child's `ExitStatus` to a natural [`PtyExitOutcome::Exited`].
+    /// Signal extraction is POSIX-only; PTY is a unix-only surface.
+    fn exit_outcome_from_status(status: std::process::ExitStatus) -> PtyExitOutcome {
+        use std::os::unix::process::ExitStatusExt;
+        PtyExitOutcome::Exited {
+            code: status.code(),
+            signal: status.signal().map(|s| format!("SIG{s}")),
+        }
+    }
+
     /// Errors specifically for `write_stdin`. The dedicated enum keeps
     /// the secret-denied case typed so the daemon can map it to
     /// `IpcErrorCode::SecretInputDenied` without sniffing message
@@ -363,6 +390,12 @@ mod runtime {
         >,
         cancel_tx: Option<oneshot::Sender<()>>,
         join: Option<tokio::task::JoinHandle<Result<(), PtyProbeError>>>,
+        // Fires once with the terminal [`PtyExitOutcome`] when the streaming
+        // task ends (natural exit or cancellation). The daemon takes this at
+        // spawn time and moves it into a lifecycle waiter so it can flip the
+        // job ledger WITHOUT locking the probe across an `.await` (the probe
+        // mutex stays free for `write_stdin`). `None` once taken.
+        completion_rx: Option<oneshot::Receiver<PtyExitOutcome>>,
     }
 
     impl std::fmt::Debug for PtyProbe {
@@ -446,6 +479,15 @@ mod runtime {
             }
         }
 
+        /// Take the one-shot completion receiver that fires with the terminal
+        /// [`PtyExitOutcome`] when the streaming task ends. The daemon calls this
+        /// once at spawn time and moves the receiver into a lifecycle waiter so it
+        /// can flip the job ledger without locking the probe across an `.await`.
+        /// Returns `None` if already taken.
+        pub const fn take_completion(&mut self) -> Option<oneshot::Receiver<PtyExitOutcome>> {
+            self.completion_rx.take()
+        }
+
         /// Spawn an argv command attached to a fresh PTY.
         pub fn spawn(
             argv: &[String],
@@ -498,6 +540,7 @@ mod runtime {
             let secret_counted_gen = Arc::new(AtomicU64::new(0));
             let bucket_id = config.bucket_id;
             let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
+            let (completion_tx, completion_rx) = oneshot::channel::<PtyExitOutcome>();
             let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<(
                 Vec<u8>,
                 oneshot::Sender<Result<usize, std::io::Error>>,
@@ -521,6 +564,10 @@ mod runtime {
                 let mut pty = pty;
                 let mut normalizer = AnsiNormalizer::new();
                 let mut buf = [0u8; 4096];
+                // Terminal outcome sent on `completion_tx` when the task ends.
+                // Cancellation overrides the child's own status (the kill is
+                // what ended it); a natural exit carries the real code/signal.
+                let mut exit_outcome = PtyExitOutcome::Cancelled;
                 let outcome: Result<(), PtyProbeError> = loop {
                     if cancel_rx.try_recv().is_ok() {
                         let _ = child.start_kill();
@@ -636,7 +683,24 @@ mod runtime {
                         noise_pipeline,
                     );
                 }
-                let _ = child.wait().await;
+                // A natural exit (loop broke with `Ok`) carries the child's
+                // real status; a cancellation already killed the child inside
+                // the loop, so `exit_outcome` stays `Cancelled`. A wait error
+                // on the natural path is reported as an exit with no code
+                // rather than misclassified as a cancellation.
+                let wait_result = child.wait().await;
+                if outcome.is_ok() {
+                    exit_outcome = match wait_result {
+                        Ok(status) => exit_outcome_from_status(status),
+                        Err(e) => PtyExitOutcome::Exited {
+                            code: None,
+                            signal: Some(format!("error:{e}")),
+                        },
+                    };
+                }
+                // Best-effort: the daemon waiter may already be gone (probe
+                // dropped). A dropped receiver is not an error here.
+                let _ = completion_tx.send(exit_outcome);
                 outcome
             });
 
@@ -648,6 +712,7 @@ mod runtime {
                 stdin_tx: Some(stdin_tx),
                 cancel_tx: Some(cancel_tx),
                 join: Some(join),
+                completion_rx: Some(completion_rx),
             })
         }
     }
@@ -959,8 +1024,8 @@ mod runtime {
 
 #[cfg(unix)]
 pub use runtime::{
-    DEFAULT_PTY_GRACE, MAX_PTY_STDIN_BYTES, PtyProbe, PtyProbeConfig, PtyProbeError,
-    PtyProbeMetrics, WriteStdinError,
+    DEFAULT_PTY_GRACE, MAX_PTY_STDIN_BYTES, PtyExitOutcome, PtyProbe, PtyProbeConfig,
+    PtyProbeError, PtyProbeMetrics, WriteStdinError,
 };
 
 #[cfg(test)]

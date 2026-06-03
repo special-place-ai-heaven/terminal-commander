@@ -229,6 +229,25 @@ mod runtime {
                 .collect()
         }
 
+        /// Authoritative wire [`Liveness`] for a PTY job, derived from the job
+        /// ledger (`JobManager`) exactly like the command runtime. A natural exit,
+        /// failure, or cancellation is recorded by the lifecycle waiter spawned in
+        /// `start`; the binding LINGERS in `live` after exit (like command's), so a
+        /// terminated PTY reports `Exited{code}` / `Failed` / `Cancelled` here
+        /// instead of `Running` from mere live-map presence. An unknown job (record
+        /// dropped/forgotten) reports `Stopped`.
+        pub fn liveness(&self, job_id: JobId) -> terminal_commander_ipc::Liveness {
+            self.jobs
+                .get(job_id)
+                .map_or(terminal_commander_ipc::Liveness::Stopped, |rec| {
+                    crate::liveness::command_liveness(
+                        rec.state,
+                        rec.exit_info.as_ref().and_then(|e| e.exit_code),
+                        rec.exit_info.as_ref().and_then(|e| e.signal.clone()),
+                    )
+                })
+        }
+
         fn shell_interpreter_basename(argv0: &str) -> Option<&'static str> {
             let basename = Path::new(argv0)
                 .file_name()
@@ -321,13 +340,18 @@ mod runtime {
             cfg.rows = req.rows;
             cfg.cols = req.cols;
 
-            let probe = PtyProbe::spawn(
+            let mut probe = PtyProbe::spawn(
                 &req.argv,
                 &cfg,
                 Arc::clone(&self.rings),
                 Arc::clone(&sifter),
                 sink,
             )?;
+            // Take the completion receiver BEFORE the probe is moved into the
+            // live binding. The lifecycle waiter below owns it so it can flip
+            // the job ledger on exit without ever locking the probe mutex
+            // (which `write_stdin` holds across `.await`).
+            let completion = probe.take_completion();
 
             let job_cfg = JobConfig {
                 job_id,
@@ -338,6 +362,78 @@ mod runtime {
             };
             let _ = self.jobs.start(job_cfg);
             self.jobs.mark_running(job_id);
+
+            // Lifecycle waiter (mirrors command.rs::start_combed). When the
+            // child exits naturally we flip the ledger to Exited/Failed; when
+            // it is cancelled (stop / drop) we flip it to Cancelled. The
+            // binding deliberately LINGERS in `live` afterward so the runtime
+            // view (`collect_probes` via `PtyRuntime::liveness`) reports the
+            // terminal state instead of `Running`. `pty_command_list` filters
+            // terminal jobs out so the operator-facing live list stays clean.
+            if let Some(completion_rx) = completion {
+                let waiter_jobs = Arc::clone(&self.jobs);
+                let waiter_router = Arc::clone(&self.router);
+                let waiter_audit = Arc::clone(&self.audit);
+                let waiter_profile = self.profile_label.clone();
+                let argv0 = req.argv[0].clone();
+                tokio::spawn(async move {
+                    // A dropped sender (probe dropped before it could send)
+                    // is treated as a cancellation: the job did not exit
+                    // cleanly on its own.
+                    let outcome = completion_rx
+                        .await
+                        .unwrap_or(terminal_commander_probes::PtyExitOutcome::Cancelled);
+                    // `stop()` finalizes the ledger synchronously (so
+                    // `pty_command_list` is immediately consistent) and removes
+                    // the binding. If it already ran, the job is terminal: skip
+                    // so we do not double-append a lifecycle event or flip a
+                    // Cancelled job to Exited.
+                    if waiter_jobs.get(job_id).is_some_and(|r| {
+                        matches!(
+                            r.state,
+                            terminal_commander_core::JobState::Exited
+                                | terminal_commander_core::JobState::Failed
+                                | terminal_commander_core::JobState::Cancelled
+                        )
+                    }) {
+                        return;
+                    }
+                    let (draft, action, reason) = match outcome {
+                        terminal_commander_probes::PtyExitOutcome::Exited { code, signal } => {
+                            let nonzero = !matches!(code, Some(0)) || signal.is_some();
+                            let reason = nonzero
+                                .then(|| format!("nonzero exit: code={code:?} signal={signal:?}"));
+                            (
+                                waiter_jobs.finish(job_id, code, signal),
+                                "pty_command_exit",
+                                reason,
+                            )
+                        }
+                        terminal_commander_probes::PtyExitOutcome::Cancelled => (
+                            waiter_jobs.cancel(job_id),
+                            "pty_command_exit",
+                            Some("cancelled".to_owned()),
+                        ),
+                    };
+                    // Append the lifecycle event to the bucket so a bucket /
+                    // subscription consumer sees the exit, exactly like the
+                    // command runtime does.
+                    if let Some(d) = draft.as_ref() {
+                        let _ = waiter_router.bucket_append(bucket_id, d.clone());
+                    }
+                    let mut entry = AuditEntry::new(action, job_id.to_wire_string(), "info")
+                        .with_actor("pty_runtime")
+                        .with_profile(waiter_profile)
+                        .with_metadata_json(format!(
+                            "{{\"argv0\":{}}}",
+                            serde_json::Value::String(argv0)
+                        ));
+                    if let Some(r) = reason {
+                        entry = entry.with_reason(r);
+                    }
+                    let _ = waiter_audit.emit(&entry);
+                });
+            }
 
             self.live.write().insert(
                 job_id,
@@ -455,7 +551,12 @@ mod runtime {
                 events_emitted: probe_metrics.events_emitted.max(sink_snap.events_emitted),
                 ..probe_metrics
             };
-            let _ = self.jobs.finish(job_id, Some(0), None);
+            // An operator stop IS a cancellation, not a clean exit: record it
+            // as Cancelled so the ledger (and any lingering runtime view)
+            // reflects the kill. Synchronous so `pty_command_list` is
+            // immediately consistent; the lifecycle waiter spawned in `start`
+            // sees the terminal state and skips, avoiding a double event.
+            let _ = self.jobs.cancel(job_id);
             self.audit(
                 "pty_command_stop",
                 &job_id.to_wire_string(),

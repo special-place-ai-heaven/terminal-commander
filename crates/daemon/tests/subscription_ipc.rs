@@ -920,3 +920,104 @@ fn ac8_two_opens_same_predicate_get_distinct_ids_and_independent_offsets() {
         cleanup(&data);
     });
 }
+
+// Item #3: `created_at_ms` / `last_pull_at_ms` are TRUE wall-clock stamps.
+// Regression guard for the old presence-based hack that returned `now_ms()`
+// at LIST time: `created_at_ms` must be stable across two list calls (it is
+// the open time, not the list time), and `last_pull_at_ms` must be absent
+// until the first pull, then reflect the pull's wall-clock.
+#[test]
+fn subscription_list_reports_true_wall_clock_stamps() {
+    let data = tmp_data_dir("wallclock");
+    let runtime = rt();
+    runtime.block_on(async {
+        let (_state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(3));
+
+        let open = client
+            .call(
+                1,
+                IpcRequest::SubscriptionOpen(SubscriptionOpenParams {
+                    predicate: SubscriptionPredicate {
+                        severity_min: None,
+                        kind: None,
+                        sources: SubscriptionSourceSel::All,
+                        tag: None,
+                    },
+                }),
+            )
+            .await
+            .expect("subscription_open");
+        let sub_id = match open {
+            IpcResponse::SubscriptionOpen(r) => r.sub_id,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        let list = |id: u64| {
+            let client = &client;
+            async move {
+                match client
+                    .call(
+                        id,
+                        IpcRequest::SubscriptionList(SubscriptionListParams { limit: None }),
+                    )
+                    .await
+                    .expect("list")
+                {
+                    IpcResponse::SubscriptionList(r) => r,
+                    other => panic!("unexpected: {other:?}"),
+                }
+            }
+        };
+
+        // First list: created_at_ms present, last_pull_at_ms absent (no pull).
+        let first = list(2).await;
+        let s1 = &first.subscriptions[0];
+        let created_first = s1.created_at_ms;
+        assert!(
+            created_first > 0,
+            "created_at_ms must be a real epoch stamp"
+        );
+        assert!(
+            s1.last_pull_at_ms.is_none(),
+            "last_pull_at_ms must be absent before the first pull"
+        );
+
+        // A second list a beat later: created_at_ms is STABLE (open time, not
+        // list time). The old hack returned now_ms() here, so it would drift.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let second = list(3).await;
+        let s2 = &second.subscriptions[0];
+        assert_eq!(
+            s2.created_at_ms, created_first,
+            "created_at_ms must be the stable open time, not the list time"
+        );
+
+        // Pull once (idle pull is a success), then list: last_pull_at_ms is now
+        // present and >= created_at_ms (the pull happened after the open).
+        let _ = client
+            .call(
+                4,
+                IpcRequest::SubscriptionPull(SubscriptionPullParams {
+                    sub_id: sub_id.clone(),
+                    max: Some(10),
+                    timeout_ms: Some(100),
+                }),
+            )
+            .await
+            .expect("pull");
+        let third = list(5).await;
+        let s3 = &third.subscriptions[0];
+        let pulled = s3
+            .last_pull_at_ms
+            .expect("last_pull_at_ms must be present after a pull");
+        assert!(
+            pulled >= created_first,
+            "last_pull_at_ms ({pulled}) must be at or after created_at_ms ({created_first})"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}

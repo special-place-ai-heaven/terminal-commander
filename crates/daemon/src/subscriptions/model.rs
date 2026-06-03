@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::time::Instant;
+use std::time::SystemTime;
 
 use terminal_commander_core::{BucketId, JobId, ProbeId, Severity};
 
@@ -196,10 +196,13 @@ pub struct Subscription {
     pub predicate_hash: u64,
     /// Server-advanced per-bucket offsets (this consumer's cursors).
     pub offsets: HashMap<BucketId, u64>,
-    /// When this subscription was opened.
-    pub created_at: Instant,
-    /// When this subscription was last pulled (None until the first pull).
-    pub last_pull_at: Option<Instant>,
+    /// Wall-clock time this subscription was opened. Stored as `SystemTime`
+    /// (not `Instant`) so it can be surfaced as a true epoch-ms wire stamp.
+    pub created_at: SystemTime,
+    /// Wall-clock time of this subscription's last pull (None until the first
+    /// pull). Stored per-pull so `last_pull_at_ms` reflects WHEN the pull
+    /// happened, not when the list call ran.
+    pub last_pull_at: Option<SystemTime>,
     /// Round-robin rotation cursor for fair draining across in-scope buckets.
     pub rr_start: usize,
     /// Cached routing rebuild, gated by the source side-table's dirty epoch.
@@ -219,7 +222,7 @@ impl Subscription {
             predicate,
             predicate_hash,
             offsets,
-            created_at: Instant::now(),
+            created_at: SystemTime::now(),
             last_pull_at: None,
             rr_start: 0,
             cached_scope: None,

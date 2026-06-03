@@ -14,7 +14,7 @@
 //! pull never advances another's cursor.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::SystemTime;
 
 use parking_lot::RwLock;
 use terminal_commander_core::BucketId;
@@ -35,10 +35,10 @@ pub struct SubscriptionSummary {
     pub predicate: Predicate,
     /// Number of buckets this subscription currently tracks an offset for.
     pub source_count: usize,
-    /// When the subscription was opened.
-    pub created_at: Instant,
-    /// When the subscription was last pulled.
-    pub last_pull_at: Option<Instant>,
+    /// Wall-clock time the subscription was opened.
+    pub created_at: SystemTime,
+    /// Wall-clock time the subscription was last pulled.
+    pub last_pull_at: Option<SystemTime>,
 }
 
 /// In-memory registry of open subscriptions.

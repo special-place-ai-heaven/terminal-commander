@@ -1,0 +1,74 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "subscription_seek",
+      "arguments": {
+        "sub_id": "11111111-1111-4111-8111-111111111111",
+        "bucket_id": "bkt_018f0000000000000000000000000001",
+        "seq": 2
+      }
+    }
+  },
+  "tool": "subscription_seek",
+  "_meta": {
+    "schema_anchor": "TC46/mcp-tools/subscription_seek-v1",
+    "fixture_id": "contracts/mcp-tools/subscription_seek.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed explicit reposition of one subscription's offset for one bucket (Phase 3). The requested seq is CLAMPED to the bucket's live range [head_seq-1, tail_seq] and is NEVER an error: a seek above tail parks at tail; a seek below the surviving head (head_seq-1) parks at the floor and sets lagged=true (the requested events were already evicted). The write is scope-guarded: an offset is stored ONLY for a bucket the subscription actually routes to (in predicate scope, or already tracked); seeking an out-of-scope bucket still reports the clamp but leaves no dangling offset. Repositioning a bucket the daemon does not know returns bucket_not_found; an unknown/malformed sub_id returns unknown_subscription. Phase 3 adds NO new error code."
+  },
+  "response_example": {
+    "clamped_seq": 2,
+    "lagged": false
+  },
+  "response_example_clamped_lagged": {
+    "_note": "AC12 eviction clamp: with max_events=3 and 5 appends, FIFO evicts seq 1,2 so head_seq=3 and the seek floor is head_seq-1=2. A seek to seq 0 (below the surviving head) clamps to the floor and reports lagged=true. This is a successful response, not an error -- the consumer is simply told it lagged behind eviction and where it was parked.",
+    "clamped_seq": 2,
+    "lagged": true
+  },
+  "unknown_subscription_error_example": {
+    "_note": "An unknown or malformed sub_id (unknown handle, or reset by a daemon restart) surfaces as the unknown_subscription IPC code. The MCP facade maps every caller-fixable IPC error to JSON-RPC invalid_params (-32602) so the agent corrects its input and keeps routing through Terminal Commander; data.ipc_code carries the typed daemon code verbatim. The remedy is to re-open the subscription.",
+    "code": -32602,
+    "message": "unknown subscription: 99999999-9999-4999-8999-999999999999",
+    "data": {
+      "ipc_code": "UnknownSubscription"
+    }
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "sub_id, bucket_id, and seq are all required",
+    "the requested seq is clamped to the bucket's live range [head_seq-1, tail_seq] and is NEVER an error",
+    "a within-range seek is a no-op clamp: clamped_seq equals the requested seq and lagged is false",
+    "a seek below the surviving head (head_seq-1) clamps to the floor and reports lagged=true",
+    "a seek above tail_seq clamps down to tail_seq",
+    "the offset write is scope-guarded: only an in-scope or already-tracked bucket gets a stored offset; seeking an out-of-scope bucket reports the clamp but creates no dangling offset",
+    "an unknown or malformed sub_id returns the unknown_subscription IPC code (mapped to invalid_params on the wire); the caller re-opens",
+    "a bucket the daemon does not know returns bucket_not_found",
+    "Phase 3 adds NO new error code; clamp + lagged carry the eviction semantics on a successful response"
+  ]
+}
