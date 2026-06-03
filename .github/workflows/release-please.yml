@@ -1465,9 +1465,18 @@ jobs:
           echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
           exit 1
 
-  # ---------- terminal-commanderd ----------
-  publish-cargo-terminal-commanderd:
-    name: publish-cargo-terminal-commanderd
+  # ---------- terminal-commander-ipc ----------
+  # Sits in the chain AFTER core (its only workspace dep) and BEFORE
+  # daemon/mcp (which both depend on it). Historically this job was
+  # missing: the chain ran core -> ... -> supervisor -> daemon, so
+  # `terminal-commander-ipc` never landed on crates.io and every
+  # release the daemon's `cargo publish --dry-run` failed with
+  # "no matching package named `terminal-commander-ipc` found"
+  # (location searched: crates.io index). Daemon + mcp were stuck at
+  # the last version published before ipc was introduced. Adding this
+  # job restores the full topological publish order.
+  publish-cargo-terminal-commander-ipc:
+    name: publish-cargo-terminal-commander-ipc
     needs:
       - release-please
       - ensure-release
@@ -1476,6 +1485,97 @@ jobs:
     if: >-
       always() && !cancelled() &&
       needs.publish-cargo-terminal-commander-supervisor.result == 'success' &&
+      (needs.release-please.outputs.releases_created == 'true' ||
+      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
+      needs.publish-version.outputs.publish == 'true')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-publish-terminal-commander-ipc
+      - name: Assert crate version matches release-please version
+        shell: bash
+        env:
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          set -e
+          actual=$(cargo pkgid -p terminal-commander-ipc | awk -F'[@#]' '{print $NF}')
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::cargo crate version ($actual) != release-please version ($EXPECTED)"
+            exit 1
+          fi
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run -p terminal-commander-ipc
+      - name: cargo publish (CARGO_REGISTRY_TOKEN_TC for 0.2.0; OIDC at Task 23)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN_TC }}
+        run: |
+          set -e
+          if cargo publish -p terminal-commander-ipc; then
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
+            ver=$(cargo pkgid -p terminal-commander-ipc | awk -F'[@#]' '{print $NF}')
+            url="https://crates.io/api/v1/crates/terminal-commander-ipc/$ver"
+            http_code=$(curl -sS -o /tmp/api.json -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-recovery (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url")
+            if [ "$http_code" = "200" ]; then
+              echo "::warning::terminal-commander-ipc@$ver already on crates.io (HTTP 200, force_publish recovery)"
+              exit 0
+            fi
+            echo "crates.io API returned HTTP $http_code; payload:"
+            cat /tmp/api.json
+          fi
+          exit 1
+      - name: Poll crates.io until this crate's version is queryable (max 5 min)
+        shell: bash
+        env:
+          JOB: ${{ github.job }}
+          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+        run: |
+          # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
+          # crates.io sparse-index lag exceeds 60s. Poll instead: query
+          # the HTTP API every 10s up to 5 min, exit success when the
+          # just-published version appears. The next cargo job's
+          # `cargo publish --dry-run` resolves this crate as a dep, so
+          # gating on real availability eliminates the propagation race.
+          set -e
+          # Job name is `publish-cargo-<crate>`; derive crate name.
+          crate="${JOB#publish-cargo-}"
+          url="https://crates.io/api/v1/crates/${crate}/${EXPECTED}"
+          for i in $(seq 1 30); do
+            http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: terminal-commander-release (https://github.com/special-place-administrator/terminal-commander)' \
+              "$url" || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "${crate}@${EXPECTED} visible on crates.io after ${i} polls (~$((i * 10))s)"
+              exit 0
+            fi
+            echo "poll ${i}/30: HTTP ${http_code}, waiting 10s"
+            sleep 10
+          done
+          echo "::error::${crate}@${EXPECTED} did not appear on crates.io within 5 min"
+          exit 1
+
+  # ---------- terminal-commanderd ----------
+  publish-cargo-terminal-commanderd:
+    name: publish-cargo-terminal-commanderd
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+      - publish-cargo-terminal-commander-ipc
+    if: >-
+      always() && !cancelled() &&
+      needs.publish-cargo-terminal-commander-ipc.result == 'success' &&
       (needs.release-please.outputs.releases_created == 'true' ||
       (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
       needs.publish-version.outputs.publish == 'true')
@@ -1849,6 +1949,7 @@ jobs:
       - publish-cargo-terminal-commander-probes
       - publish-cargo-terminal-commander-store
       - publish-cargo-terminal-commander-supervisor
+      - publish-cargo-terminal-commander-ipc
       - publish-cargo-terminal-commanderd
       - publish-cargo-terminal-commander-mcp
       - verify-linux-x64
@@ -1869,6 +1970,7 @@ jobs:
        needs.publish-cargo-terminal-commander-probes.result == 'failure' ||
        needs.publish-cargo-terminal-commander-store.result == 'failure' ||
        needs.publish-cargo-terminal-commander-supervisor.result == 'failure' ||
+       needs.publish-cargo-terminal-commander-ipc.result == 'failure' ||
        needs.publish-cargo-terminal-commanderd.result == 'failure' ||
        needs.publish-cargo-terminal-commander-mcp.result == 'failure' ||
        needs.verify-linux-x64.result == 'failure' ||
@@ -1894,6 +1996,7 @@ jobs:
           PUB_PROBES: ${{ needs.publish-cargo-terminal-commander-probes.result }}
           PUB_STORE: ${{ needs.publish-cargo-terminal-commander-store.result }}
           PUB_SUPERVISOR: ${{ needs.publish-cargo-terminal-commander-supervisor.result }}
+          PUB_IPC: ${{ needs.publish-cargo-terminal-commander-ipc.result }}
           PUB_DAEMON: ${{ needs.publish-cargo-terminal-commanderd.result }}
           PUB_MCP: ${{ needs.publish-cargo-terminal-commander-mcp.result }}
           # Verify job results
@@ -1906,33 +2009,41 @@ jobs:
         run: |
           set -e
           # printf, NOT heredoc — heredoc indentation + GH-Actions YAML is fragile.
-          printf 'Release **%s** failed somewhere in the publish pipeline.\n\n' "$VER" > /tmp/body.md
-          printf 'NPM publish:\n' >> /tmp/body.md
-          printf '- linux-x64   : %s\n' "$PUB_LX64"  >> /tmp/body.md
-          printf '- linux-arm64 : %s\n' "$PUB_LARM"  >> /tmp/body.md
-          printf '- windows-x64 : %s\n' "$PUB_WIN"   >> /tmp/body.md
-          printf '- mac-x64     : %s\n' "$PUB_MX64"  >> /tmp/body.md
-          printf '- mac-arm64   : %s\n' "$PUB_MARM"  >> /tmp/body.md
-          printf '- root        : %s\n\n' "$PUB_ROOT" >> /tmp/body.md
-          printf 'Cargo publish:\n' >> /tmp/body.md
-          printf '- core        : %s\n' "$PUB_CORE" >> /tmp/body.md
-          printf '- sifters     : %s\n' "$PUB_SIFTERS" >> /tmp/body.md
-          printf '- probes      : %s\n' "$PUB_PROBES" >> /tmp/body.md
-          printf '- store       : %s\n' "$PUB_STORE" >> /tmp/body.md
-          printf '- supervisor  : %s\n' "$PUB_SUPERVISOR" >> /tmp/body.md
-          printf '- daemon      : %s\n' "$PUB_DAEMON" >> /tmp/body.md
-          printf '- mcp         : %s\n\n' "$PUB_MCP" >> /tmp/body.md
-          printf 'Post-publish verify:\n' >> /tmp/body.md
-          printf '- linux-x64   : %s\n' "$RES_LX64"  >> /tmp/body.md
-          printf '- linux-arm64 : %s\n' "$RES_LARM"  >> /tmp/body.md
-          printf '- windows-x64 : %s\n' "$RES_WIN"   >> /tmp/body.md
-          printf '- mac-x64     : %s\n' "$RES_MX64"  >> /tmp/body.md
-          printf '- mac-arm64   : %s\n\n' "$RES_MARM" >> /tmp/body.md
-          printf '**Action required:**\n' >> /tmp/body.md
-          printf '1. Run `bash scripts/release/recover-partial-publish.sh %s` to identify missing artifacts.\n' "$VER" >> /tmp/body.md
-          printf '2. If some packages shipped + some failed: re-run release-please.yml with `force_publish: true` (the E409-tolerant pattern republishes only missing).\n' >> /tmp/body.md
-          printf '3. If a published version is broken: run `.github/workflows/deprecate-version.yml` for version %s, then patch release.\n\n' "$VER" >> /tmp/body.md
-          printf 'Workflow run: %s\n' "$RUN_URL" >> /tmp/body.md
+          # `printf --` ends option parsing so a format string starting
+          # with `-` (e.g. `- linux-x64 : %s`) is NOT mistaken for a flag.
+          # Without it, bash's builtin printf fails with
+          # `printf: - : invalid option` and, under `set -e`, aborts this
+          # step — so the broken-release issue was never filed. Values are
+          # always injected via `%s` (never used as the format), so a value
+          # like `-` or an empty `$VER` is rendered literally and safely.
+          printf -- 'Release **%s** failed somewhere in the publish pipeline.\n\n' "$VER" > /tmp/body.md
+          printf -- 'NPM publish:\n' >> /tmp/body.md
+          printf -- '- linux-x64   : %s\n' "$PUB_LX64"  >> /tmp/body.md
+          printf -- '- linux-arm64 : %s\n' "$PUB_LARM"  >> /tmp/body.md
+          printf -- '- windows-x64 : %s\n' "$PUB_WIN"   >> /tmp/body.md
+          printf -- '- mac-x64     : %s\n' "$PUB_MX64"  >> /tmp/body.md
+          printf -- '- mac-arm64   : %s\n' "$PUB_MARM"  >> /tmp/body.md
+          printf -- '- root        : %s\n\n' "$PUB_ROOT" >> /tmp/body.md
+          printf -- 'Cargo publish:\n' >> /tmp/body.md
+          printf -- '- core        : %s\n' "$PUB_CORE" >> /tmp/body.md
+          printf -- '- sifters     : %s\n' "$PUB_SIFTERS" >> /tmp/body.md
+          printf -- '- probes      : %s\n' "$PUB_PROBES" >> /tmp/body.md
+          printf -- '- store       : %s\n' "$PUB_STORE" >> /tmp/body.md
+          printf -- '- supervisor  : %s\n' "$PUB_SUPERVISOR" >> /tmp/body.md
+          printf -- '- ipc         : %s\n' "$PUB_IPC" >> /tmp/body.md
+          printf -- '- daemon      : %s\n' "$PUB_DAEMON" >> /tmp/body.md
+          printf -- '- mcp         : %s\n\n' "$PUB_MCP" >> /tmp/body.md
+          printf -- 'Post-publish verify:\n' >> /tmp/body.md
+          printf -- '- linux-x64   : %s\n' "$RES_LX64"  >> /tmp/body.md
+          printf -- '- linux-arm64 : %s\n' "$RES_LARM"  >> /tmp/body.md
+          printf -- '- windows-x64 : %s\n' "$RES_WIN"   >> /tmp/body.md
+          printf -- '- mac-x64     : %s\n' "$RES_MX64"  >> /tmp/body.md
+          printf -- '- mac-arm64   : %s\n\n' "$RES_MARM" >> /tmp/body.md
+          printf -- '**Action required:**\n' >> /tmp/body.md
+          printf -- '1. Run `bash scripts/release/recover-partial-publish.sh %s` to identify missing artifacts.\n' "$VER" >> /tmp/body.md
+          printf -- '2. If some packages shipped + some failed: re-run release-please.yml with `force_publish: true` (the E409-tolerant pattern republishes only missing).\n' >> /tmp/body.md
+          printf -- '3. If a published version is broken: run `.github/workflows/deprecate-version.yml` for version %s, then patch release.\n\n' "$VER" >> /tmp/body.md
+          printf -- 'Workflow run: %s\n' "$RUN_URL" >> /tmp/body.md
       - name: Open P0 issue (PAT first, fall back to GITHUB_TOKEN if PAT is the broken one)
         env:
           PAT: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
