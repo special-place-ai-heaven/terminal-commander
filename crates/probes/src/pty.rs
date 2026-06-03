@@ -33,6 +33,14 @@ pub struct AnsiNormalizer {
     parser: Parser,
     line: String,
     pending: Vec<String>,
+    /// The most recent line content that a Carriage Return overwrote
+    /// (i.e. the pre-`\r` buffer captured just before it was cleared).
+    /// A `\r`-terminated prompt that never receives a `\n` (e.g.
+    /// `[sudo] password: \r`) would otherwise vanish from both
+    /// `line` and `pending`; the PTY probe classifies this for secret
+    /// prompt detection so the secret flag still flips. Drained via
+    /// `take_overwritten`.
+    last_overwritten: String,
 }
 
 #[allow(clippy::missing_fields_in_debug)]
@@ -58,6 +66,7 @@ impl AnsiNormalizer {
         let mut sink = Sink {
             line: &mut self.line,
             pending: &mut self.pending,
+            last_overwritten: &mut self.last_overwritten,
         };
         self.parser.advance(&mut sink, bytes);
     }
@@ -76,6 +85,15 @@ impl AnsiNormalizer {
         &self.line
     }
 
+    /// Drain the most recent `\r`-overwritten line content (the pre-CR
+    /// buffer captured before it was cleared). Empty when no CR cleared a
+    /// non-empty line since the last drain. Used by the PTY probe to
+    /// classify a `\r`-terminated secret prompt that never received a
+    /// `\n` and so never reached `pending` or `peek_pending`.
+    pub fn take_overwritten(&mut self) -> String {
+        std::mem::take(&mut self.last_overwritten)
+    }
+
     /// Flush whatever partial line is pending as a final line.
     pub fn flush(&mut self) -> Option<String> {
         if self.line.is_empty() {
@@ -90,6 +108,7 @@ impl AnsiNormalizer {
 struct Sink<'a> {
     line: &'a mut String,
     pending: &'a mut Vec<String>,
+    last_overwritten: &'a mut String,
 }
 
 impl vte::Perform for Sink<'_> {
@@ -103,6 +122,14 @@ impl vte::Perform for Sink<'_> {
             }
             b'\r' if CR_COLLAPSE => {
                 // Carriage return: overwrite from start of line.
+                // Capture the pre-CR content first so a `\r`-terminated
+                // prompt (no `\n`) can still be classified for secret
+                // detection before it is wiped. Only retain non-empty
+                // content; the most recent overwrite wins.
+                if !self.line.is_empty() {
+                    self.last_overwritten.clear();
+                    self.last_overwritten.push_str(self.line);
+                }
                 self.line.clear();
             }
             b'\t' => self.line.push('\t'),
@@ -458,6 +485,13 @@ mod runtime {
             let metrics = Arc::new(Mutex::new(PtyProbeMetrics::default()));
             let secret_prompt_active = Arc::new(AtomicBool::new(false));
             let secret_prompt_gen = Arc::new(AtomicU64::new(0));
+            // Tracks the generation for which the secret prompt has
+            // already been counted (via the peek path or `process_line`),
+            // so a single prompt detected at peek time and again when its
+            // line completes is not counted twice (M1). Starts at 0,
+            // which is never a live generation (the first flip bumps the
+            // generation to 1).
+            let secret_counted_gen = Arc::new(AtomicU64::new(0));
             let bucket_id = config.bucket_id;
             let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
             let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<(
@@ -468,6 +502,7 @@ mod runtime {
             let metrics_for_task = Arc::clone(&metrics);
             let secret_for_task = Arc::clone(&secret_prompt_active);
             let secret_gen_for_task = Arc::clone(&secret_prompt_gen);
+            let secret_counted_gen_for_task = Arc::clone(&secret_counted_gen);
             let rings_for_task = Arc::clone(&rings);
             let noise_pipeline: SharedProbeNoisePipeline =
                 Arc::new(Mutex::new(ProbeNoisePipeline::with_default_policy()));
@@ -524,6 +559,7 @@ mod runtime {
                                     Arc::clone(&metrics_for_task),
                                     Arc::clone(&secret_for_task),
                                     Arc::clone(&secret_gen_for_task),
+                                    Arc::clone(&secret_counted_gen_for_task),
                                     Arc::clone(&noise_pipeline),
                                 );
                             }
@@ -534,17 +570,37 @@ mod runtime {
                             // detection on the pending buffer too
                             // so the secret flag flips before the
                             // LLM gets a chance to write.
+                            //
+                            // M2: a secret prompt terminated by `\r`
+                            // (no `\n`) is wiped from `peek_pending`
+                            // by the CR-collapse, so also classify
+                            // the most recent CR-overwritten content.
+                            // We only ever SET the secret flag from a
+                            // peek (never clear it): a wiped buffer
+                            // must not leave a window where the LLM
+                            // can write into the prompt.
                             let pending = normalizer.peek_pending().to_owned();
-                            if !pending.is_empty() {
-                                let kind = PromptDetector::classify(&pending);
+                            let overwritten = normalizer.take_overwritten();
+                            for candidate in [pending.as_str(), overwritten.as_str()] {
+                                if candidate.is_empty() {
+                                    continue;
+                                }
+                                let kind = PromptDetector::classify(candidate);
                                 if PromptDetector::is_secret(kind)
                                     && !secret_for_task.swap(true, Ordering::AcqRel)
                                 {
-                                    secret_gen_for_task.fetch_add(1, Ordering::AcqRel);
+                                    let new_gen =
+                                        secret_gen_for_task.fetch_add(1, Ordering::AcqRel) + 1;
+                                    // M1: record that this generation
+                                    // is counted so the later
+                                    // `process_line` completion does
+                                    // not double count it.
+                                    secret_counted_gen_for_task.store(new_gen, Ordering::Release);
                                     let mut m = metrics_for_task.lock();
                                     m.prompts_total = m.prompts_total.saturating_add(1);
                                     m.secret_prompts_total =
                                         m.secret_prompts_total.saturating_add(1);
+                                    break;
                                 }
                             }
                             let mut m = metrics_for_task.lock();
@@ -572,6 +628,7 @@ mod runtime {
                         Arc::clone(&metrics_for_task),
                         secret_for_task,
                         secret_gen_for_task,
+                        secret_counted_gen_for_task,
                         noise_pipeline,
                     );
                 }
@@ -606,14 +663,23 @@ mod runtime {
         metrics: Arc<Mutex<PtyProbeMetrics>>,
         secret_prompt_active: Arc<AtomicBool>,
         secret_prompt_gen: Arc<AtomicU64>,
+        secret_counted_gen: Arc<AtomicU64>,
         noise_pipeline: SharedProbeNoisePipeline,
     ) {
         let kind = PromptDetector::classify(line);
         let is_secret = PromptDetector::is_secret(kind);
+        // M1: a secret prompt may already have been detected (and
+        // counted) by the peek path before its line completed with a
+        // `\n`. `flipped_here` is true only when THIS call is the one
+        // that flips the flag false->true and bumps the generation; in
+        // that case it is the first detection and must be counted.
+        let mut flipped_here = false;
         if is_secret {
             // flip false->true and bump generation
             if !secret_prompt_active.swap(true, Ordering::AcqRel) {
-                secret_prompt_gen.fetch_add(1, Ordering::AcqRel);
+                let new_gen = secret_prompt_gen.fetch_add(1, Ordering::AcqRel) + 1;
+                secret_counted_gen.store(new_gen, Ordering::Release);
+                flipped_here = true;
             }
         } else if !matches!(
             kind,
@@ -633,9 +699,19 @@ mod runtime {
             let mut m = metrics.lock();
             m.frames_total = m.frames_total.saturating_add(1);
             if !matches!(kind, PromptKind::None) {
-                m.prompts_total = m.prompts_total.saturating_add(1);
                 if is_secret {
-                    m.secret_prompts_total = m.secret_prompts_total.saturating_add(1);
+                    // M1: count the secret prompt (and the prompt
+                    // itself) only when THIS call first detected it.
+                    // If the peek path already counted this generation,
+                    // skip both so one prompt is counted exactly once.
+                    if flipped_here {
+                        m.prompts_total = m.prompts_total.saturating_add(1);
+                        m.secret_prompts_total = m.secret_prompts_total.saturating_add(1);
+                    }
+                } else {
+                    // Non-secret prompts (shell, yes/no) are never
+                    // peek-counted; count them here.
+                    m.prompts_total = m.prompts_total.saturating_add(1);
                 }
             }
         }
@@ -659,7 +735,123 @@ mod runtime {
             );
             m.events_emitted = events_emitted;
         }
-        let _ = secret_prompt_gen;
+    }
+
+    #[cfg(test)]
+    mod runtime_tests {
+        use super::*;
+        use crate::process::InMemorySink;
+        use terminal_commander_core::ContextRingManager;
+        use terminal_commander_sifters::SifterRuntime;
+
+        fn rt() -> tokio::runtime::Runtime {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        }
+
+        fn empty_runtime() -> Arc<SifterRuntime> {
+            Arc::new(SifterRuntime::build(&[]).unwrap())
+        }
+
+        fn sh_argv(script: &str) -> Vec<String> {
+            vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()]
+        }
+
+        async fn poll_until<F: Fn(&PtyProbeMetrics) -> bool>(
+            probe: &PtyProbe,
+            pred: F,
+            timeout: Duration,
+        ) -> bool {
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                if pred(&probe.metrics()) {
+                    return true;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        #[test]
+        fn pty_cr_terminated_secret_prompt_sets_active_flag() {
+            // M2: a secret prompt terminated by `\r` (no `\n`) in one chunk
+            // must still flip `secret_prompt_active`, even though the
+            // CR-collapse wiped it from the pending buffer.
+            let runtime = rt();
+            runtime.block_on(async {
+                let rings = Arc::new(ContextRingManager::new());
+                let sifter = empty_runtime();
+                let sink: Arc<dyn EventSink> = Arc::new(InMemorySink::new());
+                let cfg = PtyProbeConfig::for_bucket(BucketId::new());
+                // Emit a `\r`-terminated sudo prompt, then hold the child
+                // open so the flag can be observed before exit.
+                let argv = sh_argv("printf '[sudo] password for dev: \\r'; sleep 2");
+                let mut probe =
+                    PtyProbe::spawn(&argv, &cfg, rings, sifter, sink).expect("spawn pty probe");
+                let flagged = poll_until(
+                    &probe,
+                    |_| probe.is_secret_prompt_active(),
+                    Duration::from_secs(10),
+                )
+                .await;
+                assert!(
+                    flagged,
+                    "a `\\r`-terminated secret prompt must set secret_prompt_active"
+                );
+                probe.cancel();
+                let _ = probe.wait().await;
+            });
+        }
+
+        #[test]
+        fn pty_single_secret_prompt_counted_exactly_once() {
+            // M1: one secret prompt detected at peek time (no trailing
+            // newline yet) and then completed when its line ends with `\n`
+            // must increment secret_prompts_total / prompts_total exactly
+            // once, not twice.
+            let runtime = rt();
+            runtime.block_on(async {
+                let rings = Arc::new(ContextRingManager::new());
+                let sifter = empty_runtime();
+                let sink: Arc<dyn EventSink> = Arc::new(InMemorySink::new());
+                let cfg = PtyProbeConfig::for_bucket(BucketId::new());
+                // Emit the prompt with NO newline (peek detects + counts),
+                // pause so the peek path runs, then complete the line and
+                // emit a normal line so the prompt resolves.
+                let argv = sh_argv(
+                    "printf '[sudo] password for dev: '; sleep 0.6; \
+                     printf '\\nordinary output line\\n'; sleep 0.4",
+                );
+                let mut probe =
+                    PtyProbe::spawn(&argv, &cfg, rings, sifter, sink).expect("spawn pty probe");
+                // Wait until the secret was counted via the peek path.
+                let counted = poll_until(
+                    &probe,
+                    |m| m.secret_prompts_total >= 1,
+                    Duration::from_secs(10),
+                )
+                .await;
+                assert!(counted, "secret prompt was never counted");
+                // Let the prompt line complete + the resolving line arrive,
+                // which is the window where a double count would occur.
+                let _ = probe.wait().await;
+                let m = probe.metrics();
+                assert_eq!(
+                    m.secret_prompts_total, 1,
+                    "secret prompt must be counted exactly once (peek + completion); got {}",
+                    m.secret_prompts_total
+                );
+                assert_eq!(
+                    m.prompts_total, 1,
+                    "the prompt must be counted exactly once; got {}",
+                    m.prompts_total
+                );
+            });
+        }
     }
 }
 
@@ -688,6 +880,38 @@ mod tests {
         n.feed(b"10%\r25%\r100%\n");
         let lines = n.take_lines();
         assert_eq!(lines, vec!["100%".to_owned()]);
+    }
+
+    #[test]
+    fn ansi_cr_terminated_secret_prompt_recovered_via_overwritten() {
+        // M2: a secret prompt terminated by `\r` (no `\n`) in one chunk is
+        // wiped from both `pending` and `peek_pending` by the CR-collapse.
+        // `take_overwritten` must recover the pre-CR content so prompt
+        // detection can still classify it as a secret prompt.
+        let mut n = AnsiNormalizer::new();
+        n.feed(b"[sudo] password for dev: \r");
+        // The line buffer was cleared by the CR; nothing completed.
+        assert!(n.take_lines().is_empty());
+        assert!(n.peek_pending().is_empty());
+        // The overwritten content is preserved and classifies as secret.
+        let overwritten = n.take_overwritten();
+        assert_eq!(overwritten, "[sudo] password for dev: ");
+        let kind = PromptDetector::classify(&overwritten);
+        assert_eq!(kind, PromptKind::SudoPassword);
+        assert!(PromptDetector::is_secret(kind));
+        // Draining clears it; a second take is empty.
+        assert!(n.take_overwritten().is_empty());
+    }
+
+    #[test]
+    fn ansi_overwritten_keeps_only_latest_and_skips_empty() {
+        // Progress redraws (`10%\r25%\r`) overwrite repeatedly; the most
+        // recent non-empty pre-CR content wins and none of them classify
+        // as a secret prompt. A leading bare `\r` (empty line) is ignored.
+        let mut n = AnsiNormalizer::new();
+        n.feed(b"\r10%\r25%\r");
+        assert_eq!(n.take_overwritten(), "25%");
+        assert_eq!(PromptDetector::classify("25%"), PromptKind::None);
     }
 
     #[test]

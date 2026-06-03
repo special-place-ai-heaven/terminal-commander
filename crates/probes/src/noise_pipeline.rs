@@ -132,13 +132,20 @@ impl ProbeNoisePipeline {
         events_emitted: &mut u64,
         extra_drafts: impl IntoIterator<Item = EventDraft>,
     ) {
-        if self.policy.drop_progress_frames && ProgressDetector::is_progress_line(&frame.text) {
+        // M3: evaluate FIRST so a rule (even High/Critical) keyed to a
+        // progress-shaped line (`%`, `n/m`, spinner, blank) still fires.
+        // A progress frame is suppressed ONLY when the sifter produced
+        // zero drafts; a matched rule is never silently dropped.
+        let mut drafts = runtime.evaluate(frame, bucket_id);
+        drafts.extend(extra_drafts);
+
+        if drafts.is_empty()
+            && self.policy.drop_progress_frames
+            && ProgressDetector::is_progress_line(&frame.text)
+        {
             metrics.record_progress_suppressed();
             return;
         }
-
-        let mut drafts = runtime.evaluate(frame, bucket_id);
-        drafts.extend(extra_drafts);
 
         let (bypass, rest): (Vec<_>, Vec<_>) = drafts
             .into_iter()
@@ -280,7 +287,12 @@ mod tests {
     }
 
     #[test]
-    fn progress_line_skips_evaluate() {
+    fn progress_line_with_no_matching_rule_is_suppressed() {
+        // M3 new contract: a progress-shaped line is evaluated FIRST;
+        // it is suppressed as progress ONLY because no rule matched
+        // (zero drafts). The keyword rule keys on "WARN", which "45%"
+        // does not contain, so evaluation yields nothing and the frame
+        // is recorded as a progress suppression.
         let runtime = Arc::new(SifterRuntime::build(&[keyword_rule("r", "k", "WARN")]).unwrap());
         let sink = VecSink(Arc::new(Mutex::new(Vec::new())));
         let probe_id = ProbeId::new();
@@ -301,6 +313,38 @@ mod tests {
         assert_eq!(events, 0);
         assert_eq!(metrics.inner.frames_suppressed_progress, 1);
         assert!(sink.0.lock().is_empty());
+    }
+
+    #[test]
+    fn progress_shaped_line_matching_a_rule_still_fires() {
+        // M3: a rule keyed to a progress-shaped line MUST fire — the
+        // old pre-filter dropped such frames before evaluation, masking
+        // even High/Critical rules. Here a keyword rule keys on a token
+        // that appears in a progress-shaped line; the event must emit
+        // and NOTHING must be recorded as a progress suppression.
+        let runtime = Arc::new(SifterRuntime::build(&[keyword_rule("r", "k", "100%")]).unwrap());
+        let sink = VecSink(Arc::new(Mutex::new(Vec::new())));
+        let probe_id = ProbeId::new();
+        let bucket_id = BucketId::new();
+        let frame = SourceFrame::new(probe_id, SourceStream::Stdout, "100%".to_owned());
+        let mut pipeline = ProbeNoisePipeline::with_default_policy();
+        let mut metrics = TestMetrics::default();
+        let mut events = 0u64;
+        pipeline.process_frame(
+            &frame,
+            bucket_id,
+            &runtime,
+            &sink,
+            &mut metrics,
+            &mut events,
+            std::iter::empty::<EventDraft>(),
+        );
+        assert_eq!(events, 1, "rule keyed to a progress line must fire");
+        assert_eq!(
+            metrics.inner.frames_suppressed_progress, 0,
+            "a matched progress-shaped frame must NOT be suppressed"
+        );
+        assert_eq!(sink.0.lock().len(), 1);
     }
 
     #[test]

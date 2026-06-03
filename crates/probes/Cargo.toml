@@ -27,6 +27,16 @@ vte = "0.15.0"
 [target.'cfg(unix)'.dependencies]
 pty-process = { version = "=0.5.3", features = ["async"] }
 
+# H2: file-rotation identity on Windows. The std `MetadataExt`
+# volume-serial / file-index accessors are unstable (`windows_by_handle`,
+# rust-lang/rust#63010), so the file probe reads the same fields via
+# `GetFileInformationByHandle` from the open handle on stable.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
@@ -34,11 +44,13 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 # Replicate workspace lints rather than using `workspace = true` so we
-# can allow `unsafe_code` for the Win32 FFI in
+# can allow `unsafe_code` for Win32 FFI. Two Windows-only sites use it:
 # tests/windows_no_console_spawn.rs (AttachConsole / GetConsoleWindow /
-# FreeConsole). Production probe code does NOT use unsafe.
+# FreeConsole) and file.rs `GetFileInformationByHandle` for H2 file
+# rotation identity (no stable std API exists). Non-Windows production
+# probe code does NOT use unsafe.
 [lints.rust]
-unsafe_code = "allow"          # Win32 FFI in windows_no_console_spawn test only
+unsafe_code = "allow"          # Win32 FFI: console test + file.rs rotation identity
 unreachable_pub = "warn"
 unused_lifetimes = "warn"
 
