@@ -33,18 +33,25 @@ fi
 session_id="$(printf '%s' "$input" \
   | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 session_id="${session_id:-unknown}"
+# Sanitize: session_id is UNTRUSTED stdin JSON and is spliced into a temp-file
+# path below. Collapse anything outside [A-Za-z0-9_-] to '_' so it cannot
+# traverse out of the temp dir (e.g. "../../etc/x"). Done BEFORE building paths.
+session_id="${session_id//[^A-Za-z0-9_-]/_}"
 max="${TC_KEEPALIVE_MAX:-3}"
 
-# Per-session counter file (keyed by session_id) under the temp dir.
+# Per-session counter file (keyed by the SANITIZED session_id) under temp dir.
 counter_file="${TMPDIR:-/tmp}/tc-keepalive-${session_id}.count"
 count="$(cat "$counter_file" 2>/dev/null || echo 0)"
 case "$count" in
   ''|*[!0-9]*) count=0 ;;
 esac
 
-# One-shot pull of pending events (bounded by the daemon's pull cap). The CLI
-# bridge exits non-zero on an unknown/closed sub_id; treat that as "no events".
-events="$(terminal-commander subscription-stream "$TC_KEEPALIVE_SUB" --max 20 2>/dev/null || true)"
+# One-shot pull of pending events (bounded by the daemon's pull cap). MUST be
+# the ONE-SHOT `subscription-pull` verb: it issues a single pull and EXITS
+# immediately (even on empty), so the hook never blocks/loops and cannot wedge
+# the session -- unlike `subscription-stream`, which loops ~8 s/pull forever.
+# The CLI exits non-zero on an unknown/closed sub_id; treat that as "no events".
+events="$(terminal-commander subscription-pull "$TC_KEEPALIVE_SUB" --max 20 2>/dev/null || true)"
 
 if [ -z "$events" ]; then
   # Nothing pending (or headless / sub closed): reset the budget, allow stop.

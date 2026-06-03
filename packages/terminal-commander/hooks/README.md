@@ -43,8 +43,10 @@ event line). This hook is for LOW-RATE completion/activation watches only
   (`{ session_id, stop_hook_active, ... }`).
 - If `stop_hook_active` is `true` (Claude Code is ALREADY continuing from a
   prior block), it exits 0 (allow) to avoid stacking blocks.
-- It pulls pending events ONCE via
-  `terminal-commander subscription-stream <sub_id> --max 20`.
+- It pulls pending events ONCE via the ONE-SHOT
+  `terminal-commander subscription-pull <sub_id> --max 20` (a single pull that
+  exits immediately even when empty, so the hook never blocks or loops). The
+  looping `subscription-stream` is for a long-lived `Monitor`, NOT a Stop hook.
 - No events (or headless / closed sub): it resets the budget and exits 0
   (allow the stop).
 - Events pending and budget remaining: it prints

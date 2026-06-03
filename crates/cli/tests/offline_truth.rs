@@ -50,6 +50,10 @@ fn daemon_backed_inspection_commands_do_not_fake_empty_success() {
         &["probes"],
         &["policy"],
         &["audit"],
+        // The one-shot `subscription-pull` routes through the SAME
+        // probe-before-IPC handshake; against a dead endpoint it must honestly
+        // fail unavailable (exit 69), never synthesize an empty snapshot.
+        &["subscription-pull", "00000000-0000-0000-0000-000000000000"],
     ] {
         let output = terminal_commander()
             .args(args)

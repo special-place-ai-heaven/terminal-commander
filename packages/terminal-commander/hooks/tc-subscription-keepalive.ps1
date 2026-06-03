@@ -33,9 +33,13 @@ try {
 if ($stopActive) { exit 0 }
 
 if ([string]::IsNullOrEmpty($session)) { $session = 'unknown' }
+# Sanitize: $session is UNTRUSTED stdin JSON and is spliced into a temp-file
+# path below. Collapse anything outside [A-Za-z0-9_-] to '_' so it cannot
+# traverse out of the temp dir. Done BEFORE building paths.
+$session = $session -replace '[^A-Za-z0-9_-]','_'
 $max = if ($env:TC_KEEPALIVE_MAX) { [int]$env:TC_KEEPALIVE_MAX } else { 3 }
 
-# Per-session counter file (keyed by session_id) under the temp dir.
+# Per-session counter file (keyed by the SANITIZED session_id) under temp dir.
 $counterFile = Join-Path $env:TEMP "tc-keepalive-$session.count"
 $count = 0
 if (Test-Path $counterFile) {
@@ -43,11 +47,14 @@ if (Test-Path $counterFile) {
   if ([int]::TryParse((Get-Content $counterFile -Raw).Trim(), [ref]$parsedCount)) { $count = $parsedCount }
 }
 
-# One-shot pull of pending events (bounded by the daemon's pull cap). The CLI
-# bridge exits non-zero on an unknown/closed sub_id; treat that as "no events".
+# One-shot pull of pending events (bounded by the daemon's pull cap). MUST be
+# the ONE-SHOT `subscription-pull` verb: it issues a single pull and EXITS
+# immediately (even on empty), so the hook never blocks/loops and cannot wedge
+# the session -- unlike `subscription-stream`, which loops ~8 s/pull forever.
+# The CLI exits non-zero on an unknown/closed sub_id; treat that as "no events".
 $events = ''
 try {
-  $events = (& terminal-commander subscription-stream $env:TC_KEEPALIVE_SUB --max 20 2>$null) -join "`n"
+  $events = (& terminal-commander subscription-pull $env:TC_KEEPALIVE_SUB --max 20 2>$null) -join "`n"
 } catch { $events = '' }
 
 if ([string]::IsNullOrWhiteSpace($events)) {

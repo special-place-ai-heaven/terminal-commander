@@ -205,6 +205,13 @@ fn map_bucket(e: terminal_commander_core::BucketError) -> IpcError {
 /// (never an error); `lagged` flags a request below the surviving head (the
 /// requested events were already evicted). Phase 3 adds NO new error code.
 ///
+/// Scope guard: an offset is written ONLY for a bucket the subscription
+/// actually routes to -- one currently in the sub's predicate scope, or one
+/// already tracked in `offsets`. Seeking a bucket OUTSIDE the predicate scope
+/// is a NO-OP (it does not create a dangling offset that no pull would ever
+/// read or advance); the response still reports the clamp so the caller sees
+/// where it would park, but no dead state is left behind.
+///
 /// # Errors
 /// - [`IpcErrorCode::UnknownSubscription`] if `sub_id` is malformed or the sub
 ///   is not present (via `parse_sub_id` and `with_sub_mut`'s miss path).
@@ -221,8 +228,22 @@ pub(in crate::ipc::server) fn handle_subscription_seek(
     let floor = st.head_seq.saturating_sub(1);
     let lagged = params.seq < floor;
     let clamped = params.seq.clamp(floor, st.tail_seq);
+
+    // Resolve the bucket's source (immortal side-table) OUTSIDE the sub lock so
+    // the in-scope check inside `with_sub_mut` uses the SAME predicate the pull
+    // routing uses. An unknown source -> never in scope (only an already-tracked
+    // offset keeps it routable).
+    let source = state.sources.get(params.bucket_id);
     state.subscriptions.with_sub_mut(sub_id, |s| {
-        s.offsets.insert(params.bucket_id, clamped);
+        // Write the offset only for a bucket this sub actually routes to:
+        // in-scope per the live predicate, or already tracked. Seeking an
+        // out-of-scope bucket is a no-op -- no dangling offset is created.
+        let in_scope = source
+            .as_ref()
+            .is_some_and(|src| s.predicate.bucket_in_scope(params.bucket_id, src));
+        if in_scope || s.offsets.contains_key(&params.bucket_id) {
+            s.offsets.insert(params.bucket_id, clamped);
+        }
     })?;
     Ok(IpcResponse::SubscriptionSeek(SubscriptionSeekResponse {
         clamped_seq: clamped,

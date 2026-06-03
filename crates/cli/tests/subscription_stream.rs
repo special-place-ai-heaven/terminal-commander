@@ -54,6 +54,9 @@ struct LiveDaemon {
     child: std::process::Child,
     base: PathBuf,
     token: String,
+    // `endpoint` is read only by the `#[cfg(unix)]` direct-seed test below; on
+    // Windows that module is gated out, so the field is genuinely unused there.
+    #[cfg_attr(not(unix), allow(dead_code))]
     endpoint: String,
 }
 
@@ -161,9 +164,40 @@ fn stream_unknown_sub_id_exits_nonzero() {
     );
 }
 
+#[test]
+fn pull_unknown_sub_id_exits_nonzero() {
+    // The one-shot `subscription-pull` must exit NON-ZERO on an unknown sub_id
+    // (sub gone / daemon restarted) so a hook treats it as "no events / stop"
+    // rather than a fabricated empty success.
+    let daemon = LiveDaemon::spawn("pull-unknown");
+    let out = daemon.run_cli(&[
+        "subscription-pull",
+        "00000000-0000-0000-0000-000000000000",
+        "--max",
+        "20",
+    ]);
+    assert!(
+        !out.status.success(),
+        "unknown sub_id must exit non-zero; stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
+    assert!(
+        err.contains("subscription") || err.contains("unknown"),
+        "stderr must name the typed unknown-subscription error; got: {err}"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "no event rows on the unknown-sub_id path; got stdout={:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 #[cfg(unix)]
 mod unix_live {
     use super::{Duration, LiveDaemon};
+    use std::time::Instant;
 
     use terminal_commander_core::{
         ContextHint, RuleDefinition, RuleStatus, RuleType, Severity, SourceStream,
@@ -284,5 +318,72 @@ mod unix_live {
                 "each NDJSON object carries its bucket origin: {line}"
             );
         }
+    }
+
+    #[test]
+    fn pull_empty_open_sub_returns_promptly_and_exits_zero() {
+        // The CRITICAL property of the one-shot verb: against an OPEN sub with NO
+        // pending events it must return PROMPTLY and exit 0 -- it must NOT loop
+        // (that is `subscription-stream`'s job and would wedge a Stop hook).
+        use terminal_commander_core::Severity;
+        use terminal_commander_ipc::{
+            DaemonClient, IpcRequest, IpcResponse, SubscriptionOpenParams, SubscriptionPredicate,
+            SubscriptionSourceSel,
+        };
+
+        let daemon = LiveDaemon::spawn("pull-empty");
+        let endpoint = daemon.endpoint.clone();
+
+        // Open a subscription (no command started -> no events will be pending).
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("seed runtime");
+        let sub_id = rt.block_on(async {
+            let client = DaemonClient::new(endpoint.clone()).with_timeout(Duration::from_secs(10));
+            let open = client
+                .call(
+                    1,
+                    IpcRequest::SubscriptionOpen(SubscriptionOpenParams {
+                        predicate: SubscriptionPredicate {
+                            severity_min: Some(Severity::High),
+                            kind: None,
+                            sources: SubscriptionSourceSel::All,
+                            tag: None,
+                        },
+                    }),
+                )
+                .await
+                .expect("subscription_open");
+            match open {
+                IpcResponse::SubscriptionOpen(r) => r.sub_id,
+                other => panic!("unexpected open response: {other:?}"),
+            }
+        });
+
+        // One-shot pull with the default small timeout. Time it: a single ~1 s
+        // server wait + client overhead is well under the ceiling, whereas a
+        // looping stream would never return.
+        let start = Instant::now();
+        let out = daemon.run_cli(&["subscription-pull", &sub_id, "--max", "20"]);
+        let elapsed = start.elapsed();
+
+        assert!(
+            out.status.success(),
+            "empty one-shot pull must exit 0; stdout={:?} stderr={:?}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "empty pull emits no event rows; got stdout={:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        // The non-loop guarantee: a looping stream would block ~8 s/pull forever.
+        // The one-shot returns in ~1 s; allow generous slack for CI scheduling.
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "one-shot pull must NOT loop/block; returned in {elapsed:?}"
+        );
     }
 }

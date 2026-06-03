@@ -684,6 +684,107 @@ fn seek_unknown_sub_is_unknown_subscription() {
     });
 }
 
+/// Phase 3 seek scope-guard: seeking a bucket OUTSIDE the subscription's
+/// predicate scope is a NO-OP -- it must NOT create a dangling offset that no
+/// pull would ever read or advance. An IN-scope seek, by contrast, DOES write
+/// the offset. Proves the fix leaves no dead state for out-of-scope buckets.
+#[test]
+fn seek_out_of_scope_bucket_creates_no_dead_state() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("seek-scope");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+
+        // Seed two real buckets so both bucket-store lookups succeed (the seek
+        // floor/tail clamp needs a known bucket; the failure under test is the
+        // SCOPE miss, not a bucket miss).
+        let (in_scope_bucket, _t1) = seed_bucket(&state, BucketConfig::default(), 3);
+        let (out_of_scope_bucket, _t2) = seed_bucket(&state, BucketConfig::default(), 3);
+
+        // Open a subscription scoped to ONLY the in-scope bucket. The
+        // out-of-scope bucket is a real bucket the sub never routes to.
+        let open = client
+            .call(
+                1,
+                IpcRequest::SubscriptionOpen(SubscriptionOpenParams {
+                    predicate: SubscriptionPredicate {
+                        severity_min: Some(Severity::High),
+                        kind: None,
+                        sources: SubscriptionSourceSel::Buckets {
+                            buckets: vec![in_scope_bucket],
+                        },
+                        tag: None,
+                    },
+                }),
+            )
+            .await
+            .expect("subscription_open");
+        let sub_id = match open {
+            IpcResponse::SubscriptionOpen(r) => r.sub_id,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let sub_uuid: uuid::Uuid = sub_id.parse().expect("sub_id is a uuid");
+
+        // Seek the OUT-OF-SCOPE bucket: clamps + responds (never an error) but
+        // must NOT persist an offset for a bucket the sub does not route to.
+        let seek_out = client
+            .call(
+                2,
+                IpcRequest::SubscriptionSeek(SubscriptionSeekParams {
+                    sub_id: sub_id.clone(),
+                    bucket_id: out_of_scope_bucket,
+                    seq: 1,
+                }),
+            )
+            .await
+            .expect("out-of-scope seek still responds, never errors");
+        assert!(
+            matches!(seek_out, IpcResponse::SubscriptionSeek(_)),
+            "out-of-scope seek returns the typed seek response: {seek_out:?}"
+        );
+
+        // The dead-state assertion: NO offset was created for the out-of-scope
+        // bucket.
+        let has_dead_offset = state
+            .subscriptions
+            .with_sub(sub_uuid, |s| s.offsets.contains_key(&out_of_scope_bucket))
+            .expect("sub present");
+        assert!(
+            !has_dead_offset,
+            "out-of-scope seek must NOT create a dangling offset"
+        );
+
+        // Control: an IN-scope seek DOES write the offset (the guard is not
+        // over-broad).
+        let seek_in = client
+            .call(
+                3,
+                IpcRequest::SubscriptionSeek(SubscriptionSeekParams {
+                    sub_id: sub_id.clone(),
+                    bucket_id: in_scope_bucket,
+                    seq: 1,
+                }),
+            )
+            .await
+            .expect("in-scope seek responds");
+        assert!(matches!(seek_in, IpcResponse::SubscriptionSeek(_)));
+        let in_scope_offset = state
+            .subscriptions
+            .with_sub(sub_uuid, |s| s.offsets.get(&in_scope_bucket).copied())
+            .expect("sub present");
+        assert_eq!(
+            in_scope_offset,
+            Some(1),
+            "in-scope seek writes the clamped offset"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn ac8_two_opens_same_predicate_get_distinct_ids_and_independent_offsets() {
