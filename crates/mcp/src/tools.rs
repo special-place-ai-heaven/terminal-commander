@@ -17,16 +17,16 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 36 live
+//! [`tool_catalogue`] is the single source of truth for the 37 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry,
 //! file, PTY, aggregate runtime views, and predicate-routed
-//! subscriptions (`subscription_open/pull/list/close`). Each maps 1:1
+//! subscriptions (`subscription_open/pull/list/close/seek`). Each maps 1:1
 //! to a daemon IPC method. `system_discover` is the only
 //! daemon-independent tool; every other tool returns the structured
 //! `daemon_unavailable` envelope when the daemon is unreachable.
 //!
-//! Source-status: live; all 36 tools forward through daemon IPC.
+//! Source-status: live; all 37 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -34,7 +34,8 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolResult, Content, Implementation, LoggingLevel, LoggingMessageNotificationParam,
+        ProtocolVersion, ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
     tool, tool_handler, tool_router,
@@ -60,7 +61,8 @@ use terminal_commanderd::ipc::protocol::{
     RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
     SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionListParams,
     SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
-    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSourceSel,
+    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse,
+    SubscriptionSeekParams, SubscriptionSeekResponse, SubscriptionSourceSel,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -286,6 +288,11 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             status: ToolStatus::Live,
             description: "Close a subscription by sub_id, freeing its slot. Idempotent (closed:false if unknown).",
         },
+        ToolCatalogueEntry {
+            name: "subscription_seek",
+            status: ToolStatus::Live,
+            description: "Reposition a subscription's offset for one bucket (explicit re-read). The requested seq is clamped to the bucket's live range (never an error); lagged flags an evicted request.",
+        },
     ]
 }
 
@@ -399,6 +406,11 @@ pub struct TerminalCommanderMcpServer {
     /// reused for an 8 s idle pull without surfacing a -32603. This client
     /// shares the same socket but a 12 s timeout (MUST-ADD #7).
     pull_daemon: McpDaemonClient,
+    /// BEST-EFFORT subscription notification opt-in (`TC_MCP_NOTIFY=1`), read
+    /// ONCE at construction (default OFF). When true, a non-empty
+    /// `subscription_pull` batch emits a `notifications/message` nudge as a
+    /// hint; delivery of events is ALWAYS the pull, never this notification.
+    notify: bool,
     /// Tool router populated by the rmcp `#[tool_router]` macro. The
     /// router is read by the rmcp service layer, not by us directly,
     /// so the dead-code lint trips here; suppressed below.
@@ -425,6 +437,19 @@ impl TerminalCommanderMcpServer {
     /// Construct a new server wired to the given daemon client.
     #[must_use]
     pub fn new(daemon: McpDaemonClient) -> Self {
+        // The notification nudge opt-in is read ONCE here (default OFF). Reading
+        // at construction keeps the per-pull path a single bool check and gives
+        // tests a clean seam (`with_notify`) that does NOT mutate process env --
+        // `std::env::set_var` is `unsafe` under edition 2024 and the crate
+        // forbids `unsafe_code`.
+        Self::with_notify(daemon, notify_enabled())
+    }
+
+    /// Construct with an explicit notification opt-in, bypassing the
+    /// `TC_MCP_NOTIFY` env read. Used by tests to observe the guarded
+    /// `notifications/message` nudge without mutating process-global env.
+    #[must_use]
+    pub fn with_notify(daemon: McpDaemonClient, notify: bool) -> Self {
         // Dedicated long-poll client for `subscription_pull` (MUST-ADD #7):
         // same socket + status handle, but a 12 s per-CLIENT timeout so an
         // idle ~8 s pull returns SUCCESS empty+liveness, never a -32603.
@@ -434,6 +459,7 @@ impl TerminalCommanderMcpServer {
         Self {
             daemon,
             pull_daemon,
+            notify,
             tool_router: Self::tool_router(),
         }
     }
@@ -1153,6 +1179,7 @@ impl TerminalCommanderMcpServer {
             bucket_config,
             rules,
             follow_from_beginning: params.follow_from_beginning,
+            tag: params.tag,
         };
         match self.daemon.call(IpcRequest::FileWatchStart(ipc)).await {
             Ok(IpcResponse::FileWatchStart(FileWatchStartResponse {
@@ -1237,6 +1264,7 @@ impl TerminalCommanderMcpServer {
             rules,
             rows: params.rows,
             cols: params.cols,
+            tag: params.tag,
         };
         match self.daemon.call(IpcRequest::PtyCommandStart(ipc)).await {
             Ok(IpcResponse::PtyCommandStart(PtyCommandStartResponse {
@@ -1434,6 +1462,7 @@ impl TerminalCommanderMcpServer {
     async fn subscription_pull(
         &self,
         Parameters(params): Parameters<McpSubscriptionPullParams>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
         let ipc = SubscriptionPullParams {
@@ -1453,12 +1482,43 @@ impl TerminalCommanderMcpServer {
                 liveness,
                 lagged,
                 truncated,
-            })) => json_tool_result(&serde_json::json!({
-                "events": events,
-                "liveness": liveness,
-                "lagged": lagged,
-                "truncated": truncated,
-            })),
+            })) => {
+                // BEST-EFFORT nudge: ONLY on a non-empty batch AND only when
+                // explicitly opted in (TC_MCP_NOTIFY=1). NEVER on the idle
+                // path. A send error is ignored -- delivery of events is ALWAYS
+                // the pull, never this notification. Claude Code DROPS
+                // notifications to idle sessions (claude-code #36665 "not
+                // planned", #61797 drop-bug), so this is a hint for harnesses
+                // that surface notifications and a silent no-op for those that
+                // do not. It is in-process over the already-open stdio pipe (no
+                // spawn/fs/socket), so the MCP facade guards stay green.
+                if !events.is_empty() && self.notify {
+                    let max_sev = events
+                        .iter()
+                        .map(|e| e.event.severity)
+                        .max()
+                        .unwrap_or(Severity::Info);
+                    let _ = ctx
+                        .peer
+                        .notify_logging_message(LoggingMessageNotificationParam {
+                            level: LoggingLevel::Info,
+                            logger: Some("terminal-commander".to_owned()),
+                            data: serde_json::json!({
+                                "subscription": "new_events",
+                                "count": events.len(),
+                                "max_severity": max_sev,
+                                "lagged": lagged,
+                            }),
+                        })
+                        .await;
+                }
+                json_tool_result(&serde_json::json!({
+                    "events": events,
+                    "liveness": liveness,
+                    "lagged": lagged,
+                    "truncated": truncated,
+                }))
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
@@ -1509,12 +1569,50 @@ impl TerminalCommanderMcpServer {
             Err(e) => Err(into_mcp_error(&e)),
         }
     }
+
+    /// `subscription_seek` — reposition a subscription's offset for one bucket.
+    #[tool(
+        description = "Reposition a subscription's offset for one bucket (explicit re-read). The requested seq is clamped to the bucket's live range and is never an error; lagged=true means the requested events were already evicted. Unknown sub_id errors."
+    )]
+    async fn subscription_seek(
+        &self,
+        Parameters(params): Parameters<McpSubscriptionSeekParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let bucket_id =
+            parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", &params.bucket_id)
+                .map_err(invalid_params)?;
+        let ipc = SubscriptionSeekParams {
+            sub_id: params.sub_id,
+            bucket_id,
+            seq: params.seq,
+        };
+        match self.daemon.call(IpcRequest::SubscriptionSeek(ipc)).await {
+            Ok(IpcResponse::SubscriptionSeek(SubscriptionSeekResponse {
+                clamped_seq,
+                lagged,
+            })) => json_tool_result(
+                &serde_json::json!({ "clamped_seq": clamped_seq, "lagged": lagged }),
+            ),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
 }
 
 #[tool_handler]
 impl ServerHandler for TerminalCommanderMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                // Advertise `logging` so the BEST-EFFORT subscription_pull nudge
+                // (TC_MCP_NOTIFY, off by default) can ride the open stdio pipe
+                // as a `notifications/message`. Delivery of events is ALWAYS the
+                // pull; this capability never makes the notification load-bearing.
+                .enable_logging()
+                .build(),
+        )
             .with_server_info(Implementation::new(
                 "terminal-commander-mcp",
                 ADAPTER_VERSION,
@@ -1607,6 +1705,14 @@ fn unexpected_variant(_resp: &IpcResponse) -> McpError {
         Cow::Borrowed("daemon returned a response that did not match the request method"),
         None,
     )
+}
+
+/// The BEST-EFFORT subscription notification nudge is gated behind the
+/// `TC_MCP_NOTIFY` opt-in (default OFF). Read here so the call site stays a
+/// single boolean check; the env var is only consulted on the non-empty pull
+/// path, never on the idle path.
+fn notify_enabled() -> bool {
+    std::env::var("TC_MCP_NOTIFY").as_deref() == Ok("1")
 }
 
 #[must_use]
@@ -2009,6 +2115,10 @@ pub struct McpCommandStartParams {
     /// `RuleDefinition`s. Prefer the typed `rules` field. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
+    /// Optional per-bucket tag (Phase 3). Tag this probe so a subscription
+    /// opened with a matching `tag` predicate routes to it. Omit for none.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 impl McpCommandStartParams {
@@ -2025,6 +2135,7 @@ impl McpCommandStartParams {
             bucket_config,
             rules,
             grace_ms: self.grace_ms,
+            tag: self.tag,
         })
     }
 }
@@ -2110,6 +2221,7 @@ impl McpRunAndWatchParams {
             bucket_config_json: self.bucket_config_json,
             rules: self.rules,
             rules_json: self.rules_json,
+            tag: None,
         };
         (start, wait_ms, max_signals)
     }
@@ -2635,6 +2747,10 @@ pub struct McpFileWatchStartParams {
     /// `RuleDefinition`s). Prefer `rules`. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
+    /// Optional per-bucket tag (Phase 3). Tag this watch so a subscription
+    /// opened with a matching `tag` predicate routes to it. Omit for none.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 /// MCP-facing parameters for `file_watch_stop`.
@@ -2684,6 +2800,10 @@ pub struct McpPtyCommandStartParams {
     /// `RuleDefinition`s). Prefer `rules`. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
+    /// Optional per-bucket tag (Phase 3). Tag this PTY job so a subscription
+    /// opened with a matching `tag` predicate routes to it. Omit for none.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -2793,6 +2913,10 @@ pub struct McpSubscriptionOpenParams {
     /// future probes auto-join).
     #[serde(default)]
     pub sources: McpSubscriptionSourceSel,
+    /// Per-BUCKET tag AND-filter. Omit to ignore the tag dimension; set it to
+    /// route only to probes started with a matching `tag`.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 impl McpSubscriptionOpenParams {
@@ -2807,6 +2931,7 @@ impl McpSubscriptionOpenParams {
             severity_min,
             kind: self.kind,
             sources,
+            tag: self.tag,
         })
     }
 }
@@ -2841,6 +2966,18 @@ pub struct McpSubscriptionCloseParams {
     /// Opaque sub_id to close; copy it verbatim. An unknown id returns
     /// closed: false (idempotent).
     pub sub_id: String,
+}
+
+/// MCP-facing parameters for `subscription_seek`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpSubscriptionSeekParams {
+    /// Opaque sub_id from subscription_open; copy it verbatim.
+    pub sub_id: String,
+    /// Bucket id (`bkt_<hex>`) to reposition within.
+    pub bucket_id: String,
+    /// Requested re-read position; clamped to the bucket's live range. A
+    /// position below the surviving head returns lagged=true (never an error).
+    pub seq: u64,
 }
 
 #[cfg(test)]
@@ -3039,7 +3176,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_thirty_six_live_tools() {
+    fn catalogue_lists_thirty_seven_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -3084,6 +3221,7 @@ mod tests {
                 "subscription_pull",
                 "subscription_list",
                 "subscription_close",
+                "subscription_seek",
             ]
         );
         let not_impl: Vec<_> = tool_catalogue()
@@ -3144,6 +3282,7 @@ mod tests {
                 "subscription_list".to_owned(),
                 "subscription_open".to_owned(),
                 "subscription_pull".to_owned(),
+                "subscription_seek".to_owned(),
                 "system_discover".to_owned(),
             ]
         );

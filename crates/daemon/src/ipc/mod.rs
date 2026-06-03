@@ -70,7 +70,8 @@ pub use protocol::{
     SeverityHistogram, SourceLiveness, SubscriptionCloseParams, SubscriptionCloseResponse,
     SubscriptionEvent, SubscriptionListParams, SubscriptionListResponse, SubscriptionOpenParams,
     SubscriptionOpenResponse, SubscriptionPredicate, SubscriptionPullParams,
-    SubscriptionPullResponse, SubscriptionSourceSel, SubscriptionSummary,
+    SubscriptionPullResponse, SubscriptionSeekParams, SubscriptionSeekResponse,
+    SubscriptionSourceSel, SubscriptionSummary,
 };
 
 // `CommandStartResponse` / `CommandStatusResponse` now live in

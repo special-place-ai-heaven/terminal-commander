@@ -63,6 +63,7 @@ fn sleeper_params() -> CommandStartParams {
         bucket_config: None,
         rules: Vec::new(),
         grace_ms: Some(2_000),
+        tag: None,
     }
 }
 
@@ -268,6 +269,7 @@ fn subscription_list_bounds_and_flags_truncated() {
                             severity_min: None,
                             kind: None,
                             sources: SubscriptionSourceSel::All,
+                            tag: None,
                         },
                     }),
                 )

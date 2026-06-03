@@ -133,6 +133,8 @@ mod runtime {
         pub rules: Vec<RuleDefinition>,
         pub rows: Option<u16>,
         pub cols: Option<u16>,
+        /// Optional per-bucket tag for subscription routing (Phase 3).
+        pub tag: Option<String>,
     }
 
     pub struct PtyRuntime {
@@ -293,6 +295,7 @@ mod runtime {
                     job_id: Some(job_id),
                     probe_id: Some(probe_id),
                     path: None,
+                    tag: req.tag.clone(),
                 },
             );
 

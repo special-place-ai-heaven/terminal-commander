@@ -73,6 +73,7 @@ fn small_start_params(argv: &[&str]) -> CommandStartParams {
         bucket_config: None,
         rules: Vec::new(),
         grace_ms: Some(2_000),
+        tag: None,
     }
 }
 

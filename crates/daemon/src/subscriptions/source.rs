@@ -40,6 +40,9 @@ pub struct BucketSource {
     pub probe_id: Option<ProbeId>,
     /// Watched path (file-watch only).
     pub path: Option<PathBuf>,
+    /// Optional per-bucket tag for predicate AND-filtering (Phase 3). Set at
+    /// probe start from the start request; None when the caller omits it.
+    pub tag: Option<String>,
 }
 
 /// Immortal bucket -> source map plus a monotonically-increasing dirty epoch.
@@ -103,6 +106,7 @@ mod tests {
             job_id: Some(job),
             probe_id: Some(probe),
             path: None,
+            tag: None,
         }
     }
 

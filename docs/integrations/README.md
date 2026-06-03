@@ -19,6 +19,13 @@ Per-provider walk-throughs:
 - [`gemini.md`](gemini.md) - Gemini stub (INSTALL01; path unverified).
 - [`kimi.md`](kimi.md) - Kimi stub (INSTALL01; path unverified).
 
+Real-Time-Active patterns (react to subscription events as they happen): see the
+"Real-Time-Active patterns" section in [`claude-code.md`](claude-code.md) -
+`Monitor` over `subscription-stream`, a one-shot backgrounded `subscription_pull`,
+`/loop`/`ScheduleWakeup` cadence, and the default-OFF Stop-hook keep-alive
+([`packages/terminal-commander/hooks/`](../../packages/terminal-commander/hooks/)).
+The universal cross-harness pattern is a background loop over `subscription_pull`.
+
 Operational guides (not provider-specific):
 - [`wsl-cleanup-and-sudo.md`](wsl-cleanup-and-sudo.md) - run WSL disk/cache
   cleanup through TC; the scoped NOPASSWD sudoers discipline (no password ever

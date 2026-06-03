@@ -255,6 +255,44 @@ struct Drained {
     next_rr: usize,
 }
 
+/// Compute the lag-weighted per-bucket pull share for `drain_fair`
+/// (subscriptions §3 step 6, Phase 3).
+///
+/// `backlog_i = tail_seq - eff_off` is each bucket's unread depth, measured at
+/// the SAME clamp floor (`head_seq - 1`) the drain loop uses, so the two can
+/// never disagree. The share is `per_i = max(1, cap * backlog_i / sum(backlog))`
+/// — proportional to lag, but never zero (no starvation). When every backlog is
+/// equal or zero this collapses to the flat round-robin share `max(1, cap / n)`,
+/// preserving the AC4 behavior. The returned vector is indexed by the bucket's
+/// position in `scope.buckets`.
+fn lag_weighted_shares(
+    state: &Arc<DaemonState>,
+    scope: &Scope,
+    offsets: &HashMap<BucketId, u64>,
+    cap: usize,
+) -> Result<Vec<usize>, IpcError> {
+    let n = scope.buckets.len();
+    let mut backlog: Vec<u64> = Vec::with_capacity(n);
+    for scoped in &scope.buckets {
+        let st = state.buckets.state(scoped.bucket_id).map_err(map_bucket)?;
+        let off = offsets.get(&scoped.bucket_id).copied().unwrap_or(0);
+        let floor = st.head_seq.saturating_sub(1);
+        let eff_off = off.max(floor);
+        backlog.push(st.tail_seq.saturating_sub(eff_off));
+    }
+    let total_backlog: u64 = backlog.iter().copied().sum();
+    if total_backlog == 0 {
+        // No backlog anywhere -> flat fallback (round-robin share).
+        return Ok(vec![(cap / n).max(1); n]);
+    }
+    Ok(backlog
+        .iter()
+        .map(|&b| {
+            let share = (cap as u128 * u128::from(b) / u128::from(total_backlog)) as usize;
+            share.max(1)
+        })
+        .collect())
+}
 /// Drain matched events fair + capped (subscriptions §3 step 6 + AC4/AC12).
 ///
 /// `offsets` is advanced in place to the last DELIVERED seq per bucket (the
@@ -278,7 +316,10 @@ fn drain_fair(
             next_rr: 0,
         });
     }
-    let per = (cap / n).max(1);
+    // Lag-weighted per-bucket share (Phase 3): a high-backlog bucket drains
+    // more within one pull, while a quiet bucket is never starved (>= 1). The
+    // cap remains a hard stop and the rr_start rotation breaks ties.
+    let per_i = lag_weighted_shares(state, scope, offsets, cap)?;
     let (kind_native, kind_allow) = kind_filter_for(predicate);
 
     // Visit order rotated by rr_start so a flooding bucket cannot starve a
@@ -309,7 +350,7 @@ fn drain_fair(
                 lagged = true;
             }
 
-            let want = per.min(cap - events.len());
+            let want = per_i[i].min(cap - events.len());
             if want == 0 {
                 continue;
             }

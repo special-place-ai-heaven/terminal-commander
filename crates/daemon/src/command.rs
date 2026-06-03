@@ -148,6 +148,9 @@ pub struct CommandStartRequest {
     pub rules: Vec<RuleDefinition>,
     /// Optional grace window between graceful and forced terminate.
     pub grace: Option<Duration>,
+    /// Optional per-bucket tag for subscription routing (Phase 3). Recorded on
+    /// the bucket source so a tag predicate can AND-filter to this probe.
+    pub tag: Option<String>,
 }
 
 // `CommandStartResponse`, `CommandReceipt`, and `CommandStatusResponse`
@@ -482,6 +485,7 @@ impl CommandRuntime {
                 job_id: Some(job_id),
                 probe_id: Some(probe_id),
                 path: None,
+                tag: req.tag.clone(),
             },
         );
         // Keep a handle for the live binding so TC42b's

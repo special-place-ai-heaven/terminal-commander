@@ -16,7 +16,8 @@ use crate::ipc::protocol::{
     MAX_PULL_TIMEOUT_MS, MAX_SUBSCRIPTIONS, SourceLiveness, SubscriptionCloseParams,
     SubscriptionCloseResponse, SubscriptionEvent, SubscriptionListParams, SubscriptionListResponse,
     SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
-    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSourceSel, SubscriptionSummary,
+    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSeekParams,
+    SubscriptionSeekResponse, SubscriptionSourceSel, SubscriptionSummary,
 };
 use crate::state::DaemonState;
 use crate::subscriptions::model::{Predicate, SourceSel};
@@ -36,6 +37,7 @@ fn predicate_from_wire(wire: SubscriptionPredicate) -> Predicate {
         severity_min: wire.severity_min,
         kind: wire.kind,
         sources,
+        tag: wire.tag,
     }
 }
 
@@ -184,4 +186,67 @@ pub(in crate::ipc::server) fn handle_subscription_close(
     // error (matches the registry's `close -> bool` contract).
     let closed = Uuid::parse_str(&params.sub_id).is_ok_and(|id| state.subscriptions.close(id));
     IpcResponse::SubscriptionClose(SubscriptionCloseResponse { closed })
+}
+
+/// Map a bucket-store error onto the closed IPC error set. A missing bucket is
+/// the existing [`IpcErrorCode::BucketNotFound`]; anything else is internal.
+/// Phase 3 adds NO new error code.
+fn map_bucket(e: terminal_commander_core::BucketError) -> IpcError {
+    use terminal_commander_core::BucketError;
+    match e {
+        BucketError::NotFound(_) => IpcError::new(IpcErrorCode::BucketNotFound, e.to_string()),
+        other => IpcError::new(IpcErrorCode::Internal, other.to_string()),
+    }
+}
+
+/// `subscription_seek` -> reposition this consumer's offset for ONE bucket.
+///
+/// The requested seq is CLAMPED to `[head_seq.saturating_sub(1), tail_seq]`
+/// (never an error); `lagged` flags a request below the surviving head (the
+/// requested events were already evicted). Phase 3 adds NO new error code.
+///
+/// Scope guard: an offset is written ONLY for a bucket the subscription
+/// actually routes to -- one currently in the sub's predicate scope, or one
+/// already tracked in `offsets`. Seeking a bucket OUTSIDE the predicate scope
+/// is a NO-OP (it does not create a dangling offset that no pull would ever
+/// read or advance); the response still reports the clamp so the caller sees
+/// where it would park, but no dead state is left behind.
+///
+/// # Errors
+/// - [`IpcErrorCode::UnknownSubscription`] if `sub_id` is malformed or the sub
+///   is not present (via `parse_sub_id` and `with_sub_mut`'s miss path).
+/// - [`IpcErrorCode::BucketNotFound`] if the daemon does not know the bucket.
+pub(in crate::ipc::server) fn handle_subscription_seek(
+    state: &Arc<DaemonState>,
+    params: &SubscriptionSeekParams,
+) -> Result<IpcResponse, IpcError> {
+    let sub_id = parse_sub_id(&params.sub_id)?;
+    let st = state.buckets.state(params.bucket_id).map_err(map_bucket)?;
+    // The smallest position a consumer can be parked at is `head_seq - 1` (the
+    // pre-first-readable cursor); the largest is `tail_seq`. A request below
+    // the floor means the events it wanted were evicted -> lagged.
+    let floor = st.head_seq.saturating_sub(1);
+    let lagged = params.seq < floor;
+    let clamped = params.seq.clamp(floor, st.tail_seq);
+
+    // Resolve the bucket's source (immortal side-table) OUTSIDE the sub lock so
+    // the in-scope check inside `with_sub_mut` uses the SAME predicate the pull
+    // routing uses. An unknown source -> never in scope (only an already-tracked
+    // offset keeps it routable).
+    let source = state.sources.get(params.bucket_id);
+    state.subscriptions.with_sub_mut(sub_id, |s| {
+        // Write the offset only for a bucket this sub actually routes to:
+        // in-scope per the live predicate, or already tracked. Seeking an
+        // out-of-scope bucket is a no-op -- no dangling offset is created.
+        let in_scope = source
+            .as_ref()
+            .is_some_and(|src| s.predicate.bucket_in_scope(params.bucket_id, src));
+        if in_scope || s.offsets.contains_key(&params.bucket_id) {
+            s.offsets.insert(params.bucket_id, clamped);
+        }
+    })?;
+    Ok(IpcResponse::SubscriptionSeek(SubscriptionSeekResponse {
+        clamped_seq: clamped,
+        lagged,
+    }))
 }

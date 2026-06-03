@@ -116,6 +116,7 @@ fn bucket_events_since_returns_structured_events_no_raw_text() {
                 bucket_config: None,
                 rules: vec![rule],
                 grace: None,
+                tag: None,
             })
             .unwrap();
 
@@ -360,6 +361,7 @@ fn event_context_returns_bounded_window_around_event_pointer() {
                 bucket_config: None,
                 rules: vec![rule],
                 grace: None,
+                tag: None,
             })
             .unwrap();
 

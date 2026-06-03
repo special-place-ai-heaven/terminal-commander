@@ -86,6 +86,9 @@ pub struct Predicate {
     pub kind: Option<Vec<String>>,
     /// Per-BUCKET routing selector.
     pub sources: SourceSel,
+    /// Per-BUCKET tag AND-filter (Phase 3). `None` = ignore the tag dimension.
+    /// Matches only buckets whose source `tag` equals this value.
+    pub tag: Option<String>,
 }
 
 impl Predicate {
@@ -118,6 +121,14 @@ impl Predicate {
             }
             None => 0u8.hash(&mut h),
         }
+        // tag (presence byte + value, like severity_min)
+        match &self.tag {
+            Some(t) => {
+                1u8.hash(&mut h);
+                t.hash(&mut h);
+            }
+            None => 0u8.hash(&mut h),
+        }
         // sources
         self.sources.hash_normalized(&mut h);
         h.finish()
@@ -135,6 +146,13 @@ impl Predicate {
     /// (e.g. `Jobs` but the bucket recorded no `job_id`) is OUT of scope.
     #[must_use]
     pub fn bucket_in_scope(&self, id: BucketId, src: &BucketSource) -> bool {
+        // Tag is an AND-filter: a Some(tag) predicate requires the bucket's
+        // source tag to equal it; None ignores the tag dimension entirely.
+        if let Some(want) = &self.tag
+            && src.tag.as_ref() != Some(want)
+        {
+            return false;
+        }
         match &self.sources {
             SourceSel::All => true,
             SourceSel::Buckets(ids) => ids.contains(&id),
@@ -220,6 +238,7 @@ mod tests {
             job_id: job,
             probe_id: probe,
             path: None,
+            tag: None,
         }
     }
 
@@ -231,11 +250,13 @@ mod tests {
             severity_min: Some(Severity::High),
             kind: Some(vec!["error".to_owned(), "panic".to_owned()]),
             sources: SourceSel::Jobs(vec![j1, j2]),
+            tag: None,
         };
         let b = Predicate {
             severity_min: Some(Severity::High),
             kind: Some(vec!["panic".to_owned(), "error".to_owned()]),
             sources: SourceSel::Jobs(vec![j2, j1]),
+            tag: None,
         };
         assert_eq!(
             a.normalized_hash(),
@@ -250,21 +271,25 @@ mod tests {
             severity_min: Some(Severity::High),
             kind: None,
             sources: SourceSel::All,
+            tag: None,
         };
         let diff_sev = Predicate {
             severity_min: Some(Severity::Critical),
             kind: None,
             sources: SourceSel::All,
+            tag: None,
         };
         let diff_kind = Predicate {
             severity_min: Some(Severity::High),
             kind: Some(vec!["error".to_owned()]),
             sources: SourceSel::All,
+            tag: None,
         };
         let diff_src = Predicate {
             severity_min: Some(Severity::High),
             kind: None,
             sources: SourceSel::Buckets(vec![BucketId::new()]),
+            tag: None,
         };
         assert_ne!(base.normalized_hash(), diff_sev.normalized_hash());
         assert_ne!(base.normalized_hash(), diff_kind.normalized_hash());
@@ -277,9 +302,53 @@ mod tests {
             severity_min: None,
             kind: None,
             sources: SourceSel::All,
+            tag: None,
         };
         let id = BucketId::new();
         assert!(p.bucket_in_scope(id, &src(ProbeKind::Command, None, None)));
+    }
+
+    #[test]
+    fn tag_predicate_matches_only_tagged_source() {
+        let mut tagged = src(ProbeKind::Command, Some(JobId::new()), Some(ProbeId::new()));
+        tagged.tag = Some("deploy".to_owned());
+        let untagged = src(ProbeKind::Command, Some(JobId::new()), Some(ProbeId::new()));
+        let id = BucketId::new();
+
+        let pred = Predicate {
+            severity_min: None,
+            kind: None,
+            sources: SourceSel::All,
+            tag: Some("deploy".to_owned()),
+        };
+        assert!(pred.bucket_in_scope(id, &tagged), "tag matches");
+        assert!(!pred.bucket_in_scope(id, &untagged), "untagged excluded");
+
+        // A None tag predicate ignores the tag dimension entirely.
+        let pred_any = Predicate { tag: None, ..pred };
+        assert!(pred_any.bucket_in_scope(id, &tagged));
+        assert!(pred_any.bucket_in_scope(id, &untagged));
+    }
+
+    #[test]
+    fn normalized_hash_includes_tag() {
+        let base = Predicate {
+            severity_min: None,
+            kind: None,
+            sources: SourceSel::All,
+            tag: None,
+        };
+        let tagged = Predicate {
+            tag: Some("a".to_owned()),
+            ..base.clone()
+        };
+        assert_ne!(base.normalized_hash(), tagged.normalized_hash());
+        // Same tag -> same hash (stable).
+        let tagged2 = Predicate {
+            tag: Some("a".to_owned()),
+            ..base
+        };
+        assert_eq!(tagged.normalized_hash(), tagged2.normalized_hash());
     }
 
     #[test]
@@ -290,6 +359,7 @@ mod tests {
             severity_min: None,
             kind: None,
             sources: SourceSel::Buckets(vec![target]),
+            tag: None,
         };
         let s = src(ProbeKind::Command, Some(JobId::new()), Some(ProbeId::new()));
         assert!(p.bucket_in_scope(target, &s));
@@ -303,6 +373,7 @@ mod tests {
             severity_min: None,
             kind: None,
             sources: SourceSel::Jobs(vec![job]),
+            tag: None,
         };
         let id = BucketId::new();
         assert!(p.bucket_in_scope(id, &src(ProbeKind::Command, Some(job), None)));
@@ -318,6 +389,7 @@ mod tests {
             severity_min: None,
             kind: None,
             sources: SourceSel::Probes(vec![probe]),
+            tag: None,
         };
         let id = BucketId::new();
         assert!(p.bucket_in_scope(id, &src(ProbeKind::FileWatch, None, Some(probe))));
@@ -331,6 +403,7 @@ mod tests {
             severity_min: None,
             kind: None,
             sources: SourceSel::All,
+            tag: None,
         };
         let a = Subscription::new(p.clone(), HashMap::new());
         let b = Subscription::new(p, HashMap::new());

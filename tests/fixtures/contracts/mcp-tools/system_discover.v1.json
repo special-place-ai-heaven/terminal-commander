@@ -61,7 +61,8 @@
       {"name": "subscription_open", "status": "live", "description": "Open ONE predicate-routed subscription over many sources; returns an opaque sub_id + boot_id.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
       {"name": "subscription_pull", "status": "live", "description": "Blocking multiplexed pull of matched events + per-source liveness. Idle returns SUCCESS empty+liveness.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
       {"name": "subscription_list", "status": "live", "description": "Bounded snapshot of open subscriptions.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
-      {"name": "subscription_close", "status": "live", "description": "Close a subscription by sub_id; idempotent.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"}
+      {"name": "subscription_close", "status": "live", "description": "Close a subscription by sub_id; idempotent.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "subscription_seek", "status": "live", "description": "Reposition a subscription's offset for one bucket (explicit re-read); clamped, never an error.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"}
     ]
   },
   "availability_invariants": {

@@ -70,6 +70,27 @@ Ask Claude Code to:
 
 Every response is bounded JSON.
 
+## Subscription Notifications (best-effort, default OFF)
+
+Terminal Commander advertises the MCP `logging` capability, so the
+`subscription_pull` tool can emit a `notifications/message` nudge when a pull
+returns a non-empty batch. This is OFF by default and BEST-EFFORT only:
+
+- Opt in by launching the MCP server with `TC_MCP_NOTIFY=1` in its env block.
+  With the flag unset, no notification is ever sent.
+- The nudge fires ONLY on a non-empty pull, NEVER on an idle/empty pull. It
+  carries a small summary (`count`, `max_severity`, `lagged`).
+- It is NEVER load-bearing. The authoritative delivery of events is always the
+  pull itself (`subscription_pull`, or `subscription-stream` under a `Monitor`).
+  Treat the notification as a hint, not a guarantee.
+
+Why best-effort: Claude Code currently DROPS server-originated notifications to
+idle sessions (claude-code issue #36665, closed "not planned"; issue #61797, a
+drop-bug). So even with the flag on, a notification may never surface in an idle
+session. Harnesses that do surface server notifications can use it as a wake
+hint; everything else simply ignores it. The send rides the already-open stdio
+pipe in-process (no spawned process, file, or socket).
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -78,6 +99,37 @@ Every response is bounded JSON.
 | MCP server failed to start | Confirm `terminal-commander-mcp --help` works from the same user account. |
 | Daemon unavailable | Run `terminal-commander doctor daemon`; the MCP adapter normally attempts daemon auto-start on connect. |
 | Non-default endpoint | Set `TC_SOCKET` explicitly in the MCP env block. |
+
+## Real-Time-Active patterns
+
+How to make Claude Code react to subscription events as they happen. All four
+patterns sit on top of the same authoritative delivery primitive
+(`subscription_pull`); pick by cadence and how persistent the watch is.
+
+- Primary - Monitor: run
+  `Monitor("terminal-commander subscription-stream <sub_id>")`. The
+  `subscription-stream` CLI bridge emits one NDJSON object per matched event to
+  stdout (flushed per event); the harness wakes one model turn per line. It
+  exits 0 on `--max`/close and NON-ZERO on an unknown sub_id or daemon
+  shutdown, so the `Monitor` terminates instead of silently idling. Best for
+  persistent, session-length watches.
+- One-shot - backgrounded pull: a single blocking `subscription_pull` (or one
+  backgrounded `subscription-stream ... --max 1`) that returns when the awaited
+  event arrives. Best for "tell me when X completes/activates".
+- Cadence - `/loop` / `ScheduleWakeup` / `CronCreate`: re-invoke a
+  `subscription_pull` on an interval. Best for periodic checks where you do not
+  need event-driven latency.
+- Optional hack - Stop-hook keep-alive (default OFF): a `Stop` hook that blocks
+  the stop and injects pending events while a subscription is still active,
+  bounded to N=3 consecutive keep-alives. It is the ONLY pattern that can wedge
+  a session, so it is default OFF and hard-bounded. See
+  [`packages/terminal-commander/hooks/`](../../packages/terminal-commander/hooks/).
+
+Cross-harness note: the universal pattern is a background loop over
+`subscription_pull`. Codex CLI / Cursor (see [`codex-cli.md`](codex-cli.md),
+[`cursor.md`](cursor.md)) use their own background loop over `subscription_pull`
+rather than a `Monitor`; the `subscription-stream` NDJSON bridge and the
+Stop-hook are Claude-Code-specific conveniences over that same primitive.
 
 ## Smoke Evidence
 

@@ -170,6 +170,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
                     bucket_config: None,
                     rules: vec![],
                     grace_ms: Some(5_000),
+                    tag: None,
                 }),
             )
             .await
@@ -189,6 +190,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
                     bucket_config: None,
                     rules: vec![],
                     grace_ms: Some(5_000),
+                    tag: None,
                 }),
             )
             .await

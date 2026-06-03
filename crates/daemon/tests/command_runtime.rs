@@ -138,6 +138,7 @@ fn command_start_emits_matching_signal_into_bucket_no_raw_text() {
             bucket_config: None,
             rules: vec![rule],
             grace: None,
+            tag: None,
         };
         let resp = state.command.start_combed(req).expect("start ok");
 
@@ -232,6 +233,7 @@ fn command_start_denied_for_sudo_argv() {
             bucket_config: None,
             rules: vec![],
             grace: None,
+            tag: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
         assert!(matches!(err, CommandError::PolicyDenied(_)));
@@ -274,6 +276,7 @@ fn command_start_with_invalid_inline_rule_fails_fast_without_leaking_bucket() {
             bucket_config: None,
             rules: vec![invalid_regex_rule("test.bad")],
             grace: None,
+            tag: None,
         };
 
         let err = state.command.start_combed(req).unwrap_err();
@@ -314,6 +317,7 @@ fn command_start_denied_for_bare_sh_argv() {
             bucket_config: None,
             rules: vec![],
             grace: None,
+            tag: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
         assert!(
@@ -365,6 +369,7 @@ fn command_start_denied_for_absolute_sh_argv() {
             bucket_config: None,
             rules: vec![],
             grace: None,
+            tag: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
         assert!(
@@ -423,6 +428,7 @@ fn command_start_denies_all_known_shell_interpreters() {
                 bucket_config: None,
                 rules: vec![],
                 grace: None,
+                tag: None,
             };
             let err = state.command.start_combed(req).unwrap_err();
             match err {
@@ -460,6 +466,7 @@ fn nonzero_exit_produces_command_failed_event_in_bucket() {
             bucket_config: None,
             rules: vec![],
             grace: None,
+            tag: None,
         };
         let resp = state.command.start_combed(req).expect("start ok");
 
@@ -512,6 +519,7 @@ fn empty_argv_is_rejected_before_spawn() {
             bucket_config: None,
             rules: vec![],
             grace: None,
+            tag: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
         assert!(matches!(err, CommandError::EmptyArgv));

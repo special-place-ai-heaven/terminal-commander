@@ -52,7 +52,8 @@
     "subscription_open": "ensure_daemon_status_v1",
     "subscription_pull": "ensure_daemon_status_v1",
     "subscription_list": "ensure_daemon_status_v1",
-    "subscription_close": "ensure_daemon_status_v1"
+    "subscription_close": "ensure_daemon_status_v1",
+    "subscription_seek": "ensure_daemon_status_v1"
   },
   "live_tools": [
     {
@@ -234,14 +235,19 @@
       "name": "subscription_close",
       "fixture": null,
       "status": "missing_fixture"
+    },
+    {
+      "name": "subscription_seek",
+      "fixture": null,
+      "status": "missing_fixture"
     }
   ],
   "obsolete_fixtures": [],
   "counts": {
-    "live_tools": 36,
+    "live_tools": 37,
     "covered_live": 32,
     "placeholder_for_live_tool": 0,
-    "missing_fixture": 4,
+    "missing_fixture": 5,
     "obsolete_fixture_present": 0
   }
 }

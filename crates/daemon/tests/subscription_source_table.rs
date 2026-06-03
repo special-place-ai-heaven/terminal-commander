@@ -43,6 +43,7 @@ fn daemon_state_carries_source_table_that_records_and_bumps_epoch() {
         job_id: Some(job),
         probe_id: Some(probe),
         path: None,
+        tag: None,
     };
 
     assert!(state.sources.get(bucket).is_none(), "no source yet");

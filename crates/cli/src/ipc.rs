@@ -44,6 +44,12 @@ pub(crate) const EX_UNAVAILABLE: u8 = 69;
 /// bounds the probe of an ALREADY-running daemon, not a cold start.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Default per-call request timeout for single-shot daemon-backed subcommands.
+/// Matches `DaemonClient`'s built-in default; named here so the shared
+/// [`connect_or_unavailable_with_timeout`] body sets it explicitly while
+/// [`connect_or_unavailable`] preserves the historical 5 s behavior.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A daemon-backed CLI call failed for one of two HONEST reasons. There is no
 /// "synthesized empty" arm by design.
 #[derive(Debug)]
@@ -97,7 +103,8 @@ impl CliIpcError {
 }
 
 /// Resolve the endpoint, run the probe-before-IPC handshake (`allow_spawn:
-/// false`), and on a reachable daemon issue exactly ONE `call(id, req)`.
+/// false`), and on a reachable daemon issue exactly ONE `call(id, req)` with the
+/// 5 s default `DaemonClient` timeout.
 ///
 /// Returns `Ok(IpcResponse)` with REAL daemon data, or a typed [`CliIpcError`]:
 /// `Unavailable` (exit 69) only after the probe fails, `Ipc` (exit 1) when the
@@ -108,6 +115,21 @@ impl CliIpcError {
 pub(crate) async fn connect_or_unavailable(
     correlation_id: u64,
     request: IpcRequest,
+) -> Result<IpcResponse, CliIpcError> {
+    connect_or_unavailable_with_timeout(correlation_id, request, DEFAULT_REQUEST_TIMEOUT).await
+}
+
+/// Like [`connect_or_unavailable`] but with a caller-chosen per-call timeout.
+///
+/// Used by `subscription-stream`, whose blocking pulls need a client timeout
+/// ABOVE the server's `MAX_PULL_TIMEOUT_MS` (8 s) so an idle ~8 s server pull
+/// returns SUCCESS, not a premature client timeout. Shares the SINGLE
+/// probe-before-IPC path: it differs only in the constructed `DaemonClient`'s
+/// `.with_timeout(timeout)`.
+pub(crate) async fn connect_or_unavailable_with_timeout(
+    correlation_id: u64,
+    request: IpcRequest,
+    timeout: Duration,
 ) -> Result<IpcResponse, CliIpcError> {
     let state_dir = resolve_state_dir();
     let endpoint_path = resolve_socket_path();
@@ -132,7 +154,7 @@ pub(crate) async fn connect_or_unavailable(
         // Reachable: construct the transport ONLY now and issue one call.
         EnsureDaemonStatus::AlreadyRunning { endpoint, .. }
         | EnsureDaemonStatus::Started { endpoint, .. } => {
-            let client = DaemonClient::new(endpoint_string(&endpoint));
+            let client = DaemonClient::new(endpoint_string(&endpoint)).with_timeout(timeout);
             client
                 .call(correlation_id, request)
                 .await

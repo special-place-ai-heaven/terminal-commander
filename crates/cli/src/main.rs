@@ -65,6 +65,36 @@ enum Command {
     Jobs,
     /// Probe inspection.
     Probes,
+    /// Stream matched events for an open subscription as NDJSON (one JSON
+    /// object per event) to stdout, for a harness `Monitor`. Loops
+    /// `subscription_pull` (reconnect-per-pull); exits 0 on close or when
+    /// `--max` events are emitted, NON-ZERO on an unknown sub_id or daemon
+    /// shutdown so the `Monitor` terminates instead of silently idling.
+    SubscriptionStream {
+        /// Opaque sub_id from `subscription_open`.
+        sub_id: String,
+        /// Stop after emitting this many events (default: stream until close).
+        #[arg(long)]
+        max: Option<usize>,
+    },
+    /// One-shot pull of pending events for an open subscription as NDJSON (one
+    /// JSON object per event) to stdout, then EXIT IMMEDIATELY. Issues a SINGLE
+    /// `subscription_pull` with a SMALL default timeout (a hook wants a quick
+    /// snapshot, not a blocking wait): exit 0 even on an empty pull (never
+    /// loops), NON-ZERO on an unknown sub_id or an unavailable daemon. This is
+    /// the verb a Stop-hook keep-alive must use; `subscription-stream` is the
+    /// looping variant for a long-lived harness `Monitor`.
+    SubscriptionPull {
+        /// Opaque sub_id from `subscription_open`.
+        sub_id: String,
+        /// Cap on events returned by this single pull (clamped server-side).
+        #[arg(long)]
+        max: Option<usize>,
+        /// Blocking timeout for this single pull, in milliseconds. Default is a
+        /// SMALL snapshot wait; clamped server-side to `[1, MAX_PULL_TIMEOUT_MS]`.
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+    },
     /// Policy inspection.
     Policy,
     /// Audit log inspection.
@@ -148,6 +178,12 @@ fn run(cli: Cli) -> std::process::ExitCode {
         },
         Command::Jobs => run_jobs(),
         Command::Probes => run_probes(),
+        Command::SubscriptionStream { sub_id, max } => run_subscription_stream(&sub_id, max),
+        Command::SubscriptionPull {
+            sub_id,
+            max,
+            timeout_ms,
+        } => run_subscription_pull(&sub_id, max, timeout_ms),
         Command::Policy => run_policy(),
         Command::Audit { limit } => run_audit(limit),
         Command::Session { op } => match op {
@@ -278,6 +314,192 @@ fn run_probes() -> std::process::ExitCode {
             _ => Err(unexpected_variant("probe_list")),
         },
     )
+}
+
+/// `subscription-stream <sub_id> [--max N]` -> a reconnect-per-pull loop that
+/// emits one NDJSON object per matched event to stdout (flushed per event).
+///
+/// Exit codes: 0 on `--max` reached or a clean subscription close; non-zero on
+/// `UnknownSubscription` (sub gone / daemon restarted -> the `Monitor` must
+/// terminate) and on an unavailable daemon or a torn connection. The daemon
+/// holds this sub's offsets, so reconnect-per-pull is lossless across
+/// reconnects -- no client-side cursor.
+fn run_subscription_stream(sub_id: &str, max: Option<usize>) -> std::process::ExitCode {
+    use std::io::Write;
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("terminal-commander: tokio runtime build failed: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    // Per-pull client timeout MUST exceed the server's MAX_PULL_TIMEOUT_MS (8 s)
+    // so an idle ~8 s blocking pull returns SUCCESS, not a client timeout.
+    let pull_timeout = std::time::Duration::from_secs(12);
+    let mut emitted: usize = 0;
+    let mut corr: u64 = 1;
+    rt.block_on(async {
+        let mut stdout = std::io::stdout();
+        loop {
+            let req =
+                IpcRequest::SubscriptionPull(terminal_commander_ipc::SubscriptionPullParams {
+                    sub_id: sub_id.to_owned(),
+                    max,
+                    // Block up to the server cap so the loop returns promptly on a
+                    // match and re-arms the daemon's Notify on the next iteration.
+                    timeout_ms: Some(8_000),
+                });
+            let resp = ipc::connect_or_unavailable_with_timeout(corr, req, pull_timeout).await;
+            corr = corr.wrapping_add(1);
+            let pull = match resp {
+                Ok(IpcResponse::SubscriptionPull(p)) => p,
+                Ok(_) => {
+                    // The daemon answered the wrong variant for this method: a
+                    // contract violation, surfaced as exit 1, never a row.
+                    CliIpcError::Ipc(unexpected_variant("subscription_pull"))
+                        .report("subscription-stream");
+                    return std::process::ExitCode::from(1);
+                }
+                // UnknownSubscription (sub gone / restart) and Unavailable both
+                // terminate the stream non-zero so a `Monitor` stops.
+                Err(err) => {
+                    err.report("subscription-stream");
+                    return std::process::ExitCode::from(err.exit_code());
+                }
+            };
+            for ev in &pull.events {
+                // One NDJSON object per matched event; flush per event so a
+                // `Monitor` sees each line immediately.
+                match serde_json::to_string(ev) {
+                    Ok(line) => {
+                        if writeln!(stdout, "{line}").is_err() || stdout.flush().is_err() {
+                            // The reader (a Monitor) closed: stop, non-zero.
+                            return std::process::ExitCode::from(1);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("terminal-commander: subscription-stream: serialize failed: {e}");
+                        return std::process::ExitCode::from(1);
+                    }
+                }
+                emitted += 1;
+                if let Some(limit) = max
+                    && emitted >= limit
+                {
+                    return std::process::ExitCode::SUCCESS;
+                }
+            }
+            // `lagged`/`truncated` are surfaced once per pull on stderr so a
+            // Monitor's operator can see loss; the empty/idle path simply loops
+            // again, re-arming the daemon's Notify.
+            if pull.lagged || pull.truncated {
+                eprintln!(
+                    "terminal-commander: subscription-stream: lagged={} truncated={}",
+                    pull.lagged, pull.truncated
+                );
+            }
+        }
+    })
+}
+
+/// `subscription-pull <sub_id> [--max N] [--timeout-ms M]` -> a ONE-SHOT pull
+/// that emits one NDJSON object per matched event to stdout, then EXITS
+/// IMMEDIATELY. Unlike `subscription-stream`, it does NOT loop: a Stop-hook
+/// keep-alive wants a quick snapshot, never an ~8 s blocking wait that could
+/// wedge the session.
+///
+/// Timeout: the client sends a SMALL default (`DEFAULT_PULL_TIMEOUT_MS`),
+/// clamped to the server cap (`MAX_PULL_TIMEOUT_MS`); the client transport
+/// timeout is set ABOVE that so a server pull that blocks for its full window
+/// still returns SUCCESS rather than a premature client timeout.
+///
+/// Exit codes: 0 on ANY successful pull -- including an EMPTY one (no events
+/// pending is a valid snapshot, never an error); NON-ZERO on
+/// `UnknownSubscription` (sub gone / daemon restarted) and on an unavailable
+/// daemon or a torn connection (via `CliIpcError`).
+fn run_subscription_pull(
+    sub_id: &str,
+    max: Option<usize>,
+    timeout_ms: Option<u64>,
+) -> std::process::ExitCode {
+    use std::io::Write;
+    /// A hook wants a quick snapshot, so the default blocking wait is small.
+    const DEFAULT_PULL_TIMEOUT_MS: u64 = 1_000;
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("terminal-commander: tokio runtime build failed: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    // Clamp the requested (or default) server timeout to the server cap so the
+    // client's transport timeout can be set strictly above it: a server pull
+    // that blocks for its full window returns SUCCESS, not a client timeout.
+    let server_timeout_ms = timeout_ms
+        .unwrap_or(DEFAULT_PULL_TIMEOUT_MS)
+        .clamp(1, terminal_commander_ipc::MAX_PULL_TIMEOUT_MS);
+    let client_timeout = std::time::Duration::from_millis(server_timeout_ms.saturating_add(4_000));
+
+    rt.block_on(async {
+        let req = IpcRequest::SubscriptionPull(terminal_commander_ipc::SubscriptionPullParams {
+            sub_id: sub_id.to_owned(),
+            max,
+            timeout_ms: Some(server_timeout_ms),
+        });
+        let pull = match ipc::connect_or_unavailable_with_timeout(1, req, client_timeout).await {
+            Ok(IpcResponse::SubscriptionPull(p)) => p,
+            Ok(_) => {
+                // Wrong variant for this method: a contract violation, exit 1.
+                CliIpcError::Ipc(unexpected_variant("subscription_pull"))
+                    .report("subscription-pull");
+                return std::process::ExitCode::from(1);
+            }
+            // UnknownSubscription (sub gone / restart) and Unavailable both
+            // surface non-zero so a caller treats it as "no events / stop".
+            Err(err) => {
+                err.report("subscription-pull");
+                return std::process::ExitCode::from(err.exit_code());
+            }
+        };
+
+        // One NDJSON object per matched event. An empty pull writes nothing and
+        // STILL exits 0 -- "no events pending" is a valid snapshot, not a loop.
+        let mut stdout = std::io::stdout();
+        for ev in &pull.events {
+            match serde_json::to_string(ev) {
+                Ok(line) => {
+                    if writeln!(stdout, "{line}").is_err() {
+                        return std::process::ExitCode::from(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("terminal-commander: subscription-pull: serialize failed: {e}");
+                    return std::process::ExitCode::from(1);
+                }
+            }
+        }
+        if stdout.flush().is_err() {
+            return std::process::ExitCode::from(1);
+        }
+
+        // Surface loss once on stderr so the caller's operator can see it; it
+        // does NOT change the exit code (a lagged snapshot is still a snapshot).
+        if pull.lagged || pull.truncated {
+            eprintln!(
+                "terminal-commander: subscription-pull: lagged={} truncated={}",
+                pull.lagged, pull.truncated
+            );
+        }
+        std::process::ExitCode::SUCCESS
+    })
 }
 
 /// `policy` -> `policy_status` -> profile + deny counts + caps.

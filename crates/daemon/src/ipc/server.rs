@@ -624,6 +624,12 @@ async fn dispatch(
             let r = handlers::subscription::handle_subscription_close(state, p);
             ("subscription_close", IpcResult::Ok { response: r })
         }
+        IpcRequest::SubscriptionSeek(p) => {
+            match handlers::subscription::handle_subscription_seek(state, p) {
+                Ok(r) => ("subscription_seek", IpcResult::Ok { response: r }),
+                Err(e) => ("subscription_seek", IpcResult::Err { error: e }),
+            }
+        }
         // Graceful shutdown (E2). Flip the internal trigger and ACK
         // immediately. The ACK is written back to THIS connection
         // before any teardown: `trigger_shutdown` only flips a sticky

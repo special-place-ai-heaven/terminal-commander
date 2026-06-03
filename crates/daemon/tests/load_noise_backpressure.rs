@@ -221,6 +221,7 @@ fn megabyte_scale_noisy_stdout_emits_signal_without_raw_leak() {
                     }),
                     rules: vec![],
                     grace_ms: Some(30_000),
+                    tag: None,
                 }),
             )
             .await
@@ -360,6 +361,7 @@ fn bucket_wait_heartbeat_respects_timeout_without_busy_poll() {
                     bucket_config: None,
                     rules: vec![],
                     grace_ms: Some(10_000),
+                    tag: None,
                 }),
             )
             .await
@@ -456,6 +458,7 @@ fn bucket_events_since_limit_clamps_to_max() {
                     }),
                     rules: vec![],
                     grace_ms: Some(15_000),
+                    tag: None,
                 }),
             )
             .await
@@ -580,6 +583,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
                     bucket_config: None,
                     rules: vec![],
                     grace_ms: Some(10_000),
+                    tag: None,
                 }),
             )
             .await
@@ -599,6 +603,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
                     bucket_config: None,
                     rules: vec![],
                     grace_ms: Some(10_000),
+                    tag: None,
                 }),
             )
             .await
@@ -743,6 +748,7 @@ fn runtime_state_stays_bounded_under_live_load() {
                         bucket_config: None,
                         rules: vec![],
                         grace_ms: Some(10_000),
+                        tag: None,
                     }),
                 )
                 .await
@@ -835,6 +841,7 @@ fn event_context_window_stays_bounded() {
                     bucket_config: None,
                     rules: vec![],
                     grace_ms: Some(10_000),
+                    tag: None,
                 }),
             )
             .await
@@ -962,6 +969,7 @@ fn bucket_dropped_count_visible_when_retention_evicts() {
                     }),
                     rules: vec![],
                     grace_ms: Some(15_000),
+                    tag: None,
                 }),
             )
             .await
@@ -1082,6 +1090,7 @@ for i in range(120):
                     bucket_config: None,
                     rules: vec![],
                     grace_ms: Some(15_000),
+                    tag: None,
                 }),
             )
             .await
