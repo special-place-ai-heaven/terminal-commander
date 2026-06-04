@@ -117,17 +117,28 @@ async fn initialize_and_list_tools_returns_full_live_set() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn health_against_missing_daemon_returns_typed_error_not_panic() {
+async fn health_against_missing_daemon_returns_daemon_unavailable_envelope_not_raw_connect() {
+    // FIX #2 (TB-7 / Cursor call #21): a mid-call connect failure (daemon
+    // socket/pipe absent) must self-heal + retry and then surface the CLEAN
+    // `daemon_unavailable` envelope -- NOT a raw `internal_error` that leaks
+    // "daemon ipc error"/"connect ... os error" and trains the agent to
+    // abandon the tool for raw shell.
     let (_server, client) = paired_service().await;
     let params = CallToolRequestParams::new("health");
     let err = client
         .call_tool(params)
         .await
-        .expect_err("expected typed error when daemon is unreachable");
+        .expect_err("expected daemon_unavailable envelope when daemon is unreachable");
     let rendered = err.to_string();
     assert!(
-        rendered.contains("daemon ipc error") || rendered.contains("connect"),
-        "error should surface the daemon connect failure, got: {rendered}"
+        rendered.contains("daemon_unavailable"),
+        "a missing daemon must surface the daemon_unavailable envelope, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("daemon ipc error")
+            && !rendered.contains("ipc_code")
+            && !rendered.contains("os error"),
+        "the raw transport/connect failure must NOT leak to the agent, got: {rendered}"
     );
     let _ = client.cancel().await;
 }

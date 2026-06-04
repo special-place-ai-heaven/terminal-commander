@@ -512,6 +512,20 @@ pub struct IpcError {
 }
 
 impl IpcError {
+    /// Marker lead-in for CLIENT-SIDE transport failures (connect, write,
+    /// read, request timeout, correlation mismatch). These never carry a
+    /// daemon-authored payload -- they fail before, or instead of, a decoded
+    /// response -- so the marker lets a caller distinguish "could not reach
+    /// the daemon" (recoverable: re-ensure + retry, then surface a clean
+    /// `daemon_unavailable` envelope) from a daemon-RETURNED [`IpcErrorCode`]
+    /// (a real, caller-actionable fault). The marker is a human-readable
+    /// prefix on an otherwise-`Internal` error so the rendered message stays
+    /// meaningful while [`IpcError::is_transport`] can detect it without
+    /// fragile substring scanning of OS error text. The daemon NEVER
+    /// constructs transport errors, so its `Internal` errors are never
+    /// misclassified.
+    pub const TRANSPORT_PREFIX: &'static str = "transport: ";
+
     /// Constructor.
     #[must_use]
     pub fn new(code: IpcErrorCode, message: impl Into<String>) -> Self {
@@ -519,6 +533,29 @@ impl IpcError {
             code,
             message: message.into(),
         }
+    }
+
+    /// Construct a client-side TRANSPORT failure: an [`IpcErrorCode::Internal`]
+    /// error tagged with [`Self::TRANSPORT_PREFIX`] so [`Self::is_transport`]
+    /// recognizes it. Use this only for failures to REACH or COMMUNICATE with
+    /// the daemon (connect / write / read / timeout / correlation mismatch),
+    /// never for a daemon-returned error.
+    #[must_use]
+    pub fn transport(message: impl AsRef<str>) -> Self {
+        Self {
+            code: IpcErrorCode::Internal,
+            message: format!("{}{}", Self::TRANSPORT_PREFIX, message.as_ref()),
+        }
+    }
+
+    /// True when this is a client-side transport failure (see
+    /// [`Self::transport`]). Distinguishes "could not reach the daemon" from a
+    /// daemon-returned error so the MCP adapter can self-heal + retry and then
+    /// surface a clean `daemon_unavailable` envelope instead of a raw
+    /// `internal_error` (-32603) that trains agents to abandon the tool.
+    #[must_use]
+    pub fn is_transport(&self) -> bool {
+        self.code == IpcErrorCode::Internal && self.message.starts_with(Self::TRANSPORT_PREFIX)
     }
 }
 
@@ -1808,6 +1845,51 @@ pub fn decode_payload<T: for<'de> Deserialize<'de>>(payload: &[u8]) -> Result<T,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_error_is_classified_and_daemon_internal_is_not() {
+        // A client-side transport failure carries the marker and is recognized.
+        let t = IpcError::transport("connect: os error 2");
+        assert_eq!(t.code, IpcErrorCode::Internal);
+        assert!(
+            t.is_transport(),
+            "a transport() error must classify as transport"
+        );
+        assert!(
+            t.message.starts_with(IpcError::TRANSPORT_PREFIX),
+            "transport message keeps a human-readable marker prefix"
+        );
+        assert!(
+            t.message.contains("connect: os error 2"),
+            "the underlying cause is preserved in the message"
+        );
+
+        // A daemon-RETURNED Internal error (no marker) must NOT classify as
+        // transport, so it keeps the real internal_error mapping at the MCP edge.
+        let daemon_internal = IpcError::new(IpcErrorCode::Internal, "open: permission denied");
+        assert!(
+            !daemon_internal.is_transport(),
+            "a daemon-returned Internal error must NOT be misread as transport"
+        );
+
+        // A caller-fixable code is never transport regardless of message text.
+        let fixable = IpcError::new(IpcErrorCode::PathDenied, "transport: not really");
+        assert!(
+            !fixable.is_transport(),
+            "only Internal-coded marker-prefixed errors are transport"
+        );
+    }
+
+    #[test]
+    fn transport_error_survives_wire_round_trip() {
+        // The marker rides in the message, so a transport error serialized and
+        // decoded over the wire is still recognized (defensive: the daemon never
+        // sends one, but the classifier must be robust if it ever did).
+        let t = IpcError::transport("pipe connect: os error 2");
+        let json = serde_json::to_string(&t).unwrap();
+        let back: IpcError = serde_json::from_str(&json).unwrap();
+        assert!(back.is_transport());
+    }
 
     #[test]
     fn encode_decode_envelope_round_trip() {

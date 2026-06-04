@@ -1665,6 +1665,19 @@ fn json_tool_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError>
 /// Map a daemon `IpcError` to an MCP `ErrorData` with stable codes.
 #[must_use]
 pub fn into_mcp_error(e: &IpcError) -> McpError {
+    // Mid-call TRANSPORT failure (the daemon pipe/socket went away during the
+    // call): `McpDaemonClient::call` already attempted self-heal + one retry
+    // and still could not reach the daemon. Surface the SAME clean
+    // `daemon_unavailable` envelope the startup-unavailable path produces --
+    // self-explanatory, recoverable, and crucially NOT a raw `internal_error`
+    // (-32603), which trains agents to abandon TC for raw shell (TB-7 / Cursor
+    // call #21). This must come BEFORE the code match: a transport error is
+    // `Internal`-coded but is "could not reach the daemon", not a server fault.
+    // The raw OS detail (e.g. "pipe connect ... os error 2") is deliberately
+    // NOT leaked into the message or data.
+    if e.is_transport() {
+        return transport_unavailable_error();
+    }
     let message: Cow<'static, str> = Cow::Owned(format_ipc_error(e));
     let data = serde_json::json!({
         "ipc_code": format!("{:?}", e.code),
@@ -1770,6 +1783,27 @@ fn daemon_unavailable_error(status: &EnsureDaemonStatus) -> McpError {
         "code": "daemon_unavailable",
         "message": "terminal-commanderd is not reachable",
         "details": status,
+    });
+    McpError::internal_error("daemon_unavailable", Some(payload))
+}
+
+/// Build the `daemon_unavailable` envelope for a MID-CALL transport failure
+/// that survived self-heal + one retry (see [`crate::daemon_client::McpDaemonClient::call`]).
+/// Same `code: "daemon_unavailable"` + teaching-text shape as
+/// [`daemon_unavailable_error`], so a transport loss mid-call is
+/// indistinguishable to the agent from a startup-time unavailability: a clean,
+/// recoverable signal, never a raw `internal_error` (-32603). Carries no
+/// `EnsureDaemonStatus` (we are past startup) and never leaks the raw OS error.
+fn transport_unavailable_error() -> McpError {
+    let payload = serde_json::json!({
+        "code": "daemon_unavailable",
+        "message": "terminal-commanderd became unreachable mid-call",
+        "details": {
+            "phase": "mid_call_transport",
+            "recovery": "auto-recovery (health re-probe + one retry) was attempted",
+            "remedy": "the daemon was unavailable; retry the tool -- the adapter \
+                       re-establishes the daemon on the next call",
+        },
     });
     McpError::internal_error("daemon_unavailable", Some(payload))
 }
@@ -3744,6 +3778,86 @@ mod tests {
                 "{code:?} is not caller-fixable and must stay internal_error"
             );
         }
+    }
+
+    // --- FIX #2: mid-call transport failure -> clean daemon_unavailable envelope ---
+
+    #[test]
+    fn transport_failure_maps_to_daemon_unavailable_envelope_not_raw_internal() {
+        // A mid-call connect/IO loss (the daemon pipe/socket went away) arrives
+        // as an IpcError::transport. `McpDaemonClient::call` already self-healed +
+        // retried; reaching `into_mcp_error` means it is still unreachable, so the
+        // edge must return the CLEAN daemon_unavailable envelope -- NOT the raw,
+        // leaky internal_error that pushes the LLM to raw shell.
+        let transport = IpcError::transport("pipe connect: ... os error 2");
+        let mcp = into_mcp_error(&transport);
+        let rendered = mcp.to_string();
+        assert!(
+            rendered.contains("daemon_unavailable"),
+            "transport failure must surface the daemon_unavailable envelope, got: {rendered}"
+        );
+        // The raw transport detail must NOT leak (this is the exact regression
+        // `assert_daemon_unavailable_tool_error` guards in the integration test).
+        assert!(
+            !rendered.contains("pipe connect") && !rendered.contains("ipc_code"),
+            "transport failure must not leak the raw IPC failure detail, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn daemon_returned_internal_still_maps_to_internal_error_unchanged() {
+        // A daemon-RETURNED Internal error (no transport marker) is a genuine
+        // server fault and must KEEP its internal_error (-32603) mapping -- the
+        // transport short-circuit must not swallow real daemon faults.
+        let daemon_fault = IpcError::new(IpcErrorCode::Internal, "open: permission denied");
+        assert!(!daemon_fault.is_transport());
+        let mcp = into_mcp_error(&daemon_fault);
+        assert_eq!(
+            mcp.code.0, -32603,
+            "a real daemon-returned Internal fault must stay internal_error"
+        );
+        let rendered = mcp.to_string();
+        assert!(
+            !rendered.contains("daemon_unavailable"),
+            "a real server fault must NOT be disguised as daemon_unavailable, got: {rendered}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn down_daemon_mid_call_yields_daemon_unavailable_envelope() {
+        // End-to-end at the client edge: a client wired to a socket/pipe that is
+        // NOT bound (daemon down) issues a real Health call. The inner client
+        // returns a transport failure; `McpDaemonClient::call` self-heals (fails,
+        // daemon still down) + retries (still down) and returns a transport error,
+        // which `into_mcp_error` renders as the clean daemon_unavailable envelope.
+        let sock = std::env::temp_dir().join(format!(
+            "tc-mcp-transport-down-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let client = crate::daemon_client::McpDaemonClient::new(sock)
+            .with_timeout(std::time::Duration::from_millis(50));
+        let result = client
+            .call(terminal_commander_ipc::IpcRequest::Health)
+            .await;
+        let err = result.expect_err("a down daemon must produce a transport error");
+        assert!(
+            err.is_transport(),
+            "mid-call failure against a down daemon must classify as transport, got: {err:?}"
+        );
+        let mcp = into_mcp_error(&err);
+        let rendered = mcp.to_string();
+        assert!(
+            rendered.contains("daemon_unavailable"),
+            "the down-daemon transport error must render as daemon_unavailable, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("ipc_code"),
+            "must not leak the raw ipc failure detail, got: {rendered}"
+        );
     }
 
     // --- T3 (TB-7/8/9/10/11): clarity polish regressions ---

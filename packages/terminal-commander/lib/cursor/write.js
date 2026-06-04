@@ -248,6 +248,7 @@ function writeCursorMcpConfig(opts) {
   let stanza;
   try {
     stanza = buildTerminalCommanderServerConfig({
+      exePath: o.exePath,
       sessionToken: o.sessionToken,
       distro: o.distro,
       knownDistros: o.knownDistros,

@@ -11,6 +11,7 @@ const { resolveDistro } = require("../cli/setup_cursor_wsl.js");
 const { writeSetupJson, readSetupJson } = require("../cli/setup_state.js");
 const { detectAllHarnesses } = require("../harness/detect.js");
 const { writeAllHarnesses, HARNESS_WRITE_STATUSES } = require("../harness/write_all.js");
+const { ensureStableBinaries } = require("../harness/stable_bin.js");
 const { ensureWslRuntime, ENSURE_STATUSES } = require("./ensure_wsl_runtime.js");
 const {
   ensureDaemonAutostartInWsl,
@@ -274,12 +275,35 @@ async function runBootstrap(opts) {
     const needsHarness =
       autoConfigure || o.force === true || harnessNeedsConfiguration({ platform, env });
 
+    // AV-safe direct-exe path: mirror the resolved native exe(s) into a STABLE
+    // per-user dir the package owns and point every harness config at that path
+    // (command: <stable>\terminal-commander-mcp.exe, args: []). This removes the
+    // npm script-launcher shim -> node -> JS-shim -> spawn chain that heuristic
+    // AV reads as a loader. A failed/locked copy yields exePath=null, so the
+    // writers fall back to the bare-name command and setup never hard-fails.
+    // In dry-run / print-config the path is resolved but nothing is copied.
+    let stableExePath;
+    if (autoConfigure || needsHarness || noWrite) {
+      const stable = (o.ensureStableBinaries || ensureStableBinaries)({
+        platform,
+        env,
+        dry_run: noWrite,
+      });
+      stableExePath = stable.exePath || undefined;
+      if (stable.exePath) {
+        lines.push(
+          `terminal-commander: harness configs point at stable exe ${stable.exePath}`,
+        );
+      }
+    }
+
     harnessResults =
       autoConfigure || needsHarness || noWrite
         ? (o.writeAllHarnesses || writeAllHarnesses)({
       platform,
       env,
       distro,
+      exePath: stableExePath,
       knownDistros,
       requireKnownDistro: platform === "win32" && distro != null,
       force: o.force === true || autoConfigure,

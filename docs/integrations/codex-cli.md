@@ -32,6 +32,24 @@ TC_SOCKET = "/path/to/terminal-commanderd.sock"
 On Windows, the default endpoint is a local named pipe and normally does not
 need `TC_SOCKET`. On Unix, the default endpoint is a Unix domain socket.
 
+## AV-Safe Direct-Exe Launch
+
+On `setup` (and `update` / `restart`), Terminal Commander copies the native exe
+into a stable per-user directory and writes `command` as that exe path with
+`args = []` instead of the bare `terminal-commander-mcp` name:
+
+```toml
+[mcp_servers.terminal_commander]
+command = "C:\\Users\\<you>\\AppData\\Local\\terminal-commander\\bin\\terminal-commander-mcp.exe"
+args = []
+```
+
+This removes the npm-shim -> node -> JS-shim launch chain that heuristic
+antivirus reads as a loader. It is user-space and no-admin; if the copy cannot
+complete it falls back to the bare-name command. See
+[`cursor.md`](cursor.md#av-safe-direct-exe-launch) for the full rationale and
+the opt-in logon-task option.
+
 ## Verify
 
 1. Run `terminal-commander doctor harness`.
