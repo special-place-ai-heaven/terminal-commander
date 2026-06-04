@@ -63,15 +63,12 @@ impl DaemonClient {
         };
         let resp_env = tokio::time::timeout(self.request_timeout, self.round_trip(&env))
             .await
-            .map_err(|_| IpcError::new(IpcErrorCode::Internal, "request timed out"))??;
+            .map_err(|_| IpcError::transport("request timed out"))??;
         if resp_env.correlation_id != correlation_id {
-            return Err(IpcError::new(
-                IpcErrorCode::Internal,
-                format!(
-                    "correlation mismatch: expected {correlation_id} got {}",
-                    resp_env.correlation_id
-                ),
-            ));
+            return Err(IpcError::transport(format!(
+                "correlation mismatch: expected {correlation_id} got {}",
+                resp_env.correlation_id
+            )));
         }
         match resp_env.result {
             IpcResult::Ok { response } => Ok(response),
@@ -100,20 +97,14 @@ impl DaemonClient {
                     Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY_OS) => {
                         attempt += 1;
                         if attempt >= PIPE_BUSY_RETRIES {
-                            return Err(IpcError::new(
-                                IpcErrorCode::Internal,
-                                format!(
-                                    "pipe connect: ERROR_PIPE_BUSY after {attempt} retries: {e}"
-                                ),
-                            ));
+                            return Err(IpcError::transport(format!(
+                                "pipe connect: ERROR_PIPE_BUSY after {attempt} retries: {e}"
+                            )));
                         }
                         tokio::time::sleep(Duration::from_millis(PIPE_BUSY_DELAY_MS)).await;
                     }
                     Err(e) => {
-                        return Err(IpcError::new(
-                            IpcErrorCode::Internal,
-                            format!("pipe connect: {e}"),
-                        ));
+                        return Err(IpcError::transport(format!("pipe connect: {e}")));
                     }
                 }
             }
@@ -122,8 +113,19 @@ impl DaemonClient {
         client
             .write_all(&frame)
             .await
-            .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("write: {e}")))?;
-        let payload = read_frame(&mut client).await?;
+            .map_err(|e| IpcError::transport(format!("write: {e}")))?;
+        // `read_frame` is shared with the server's request-read path, so its
+        // read errors arrive as plain `Internal`. On the CLIENT side a failed
+        // response read IS a transport failure (the daemon dropped the pipe
+        // mid-call), so re-tag it; a `FrameTooLarge` is a real protocol fault
+        // and is left untouched.
+        let payload = read_frame(&mut client).await.map_err(|e| {
+            if e.code == IpcErrorCode::Internal {
+                IpcError::transport(e.message)
+            } else {
+                e
+            }
+        })?;
         decode_payload::<ResponseEnvelope>(&payload)
     }
 }

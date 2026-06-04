@@ -167,9 +167,38 @@ impl McpDaemonClient {
 
     /// Issue one round trip against the daemon. Returns the typed
     /// `IpcResponse` on success and the typed `IpcError` otherwise.
+    ///
+    /// Mid-call transport recovery (TB-7 / Cursor call #21): a TRANSPORT
+    /// failure -- the daemon pipe/socket gone mid-call ("pipe connect ... os
+    /// error 2" on Windows, UDS ENOENT/ECONNREFUSED on unix) -- is
+    /// distinguished from a daemon-RETURNED [`IpcError`] via
+    /// [`IpcError::is_transport`]. On a transport failure this:
+    ///   1. triggers the existing bounded, single-flight self-heal (re-probe
+    ///      `Health`, flip the cached status back to available if the daemon
+    ///      is reachable again), then
+    ///   2. RETRIES the call once.
+    /// If the retry still fails on transport, the (transport-tagged) error is
+    /// returned so the tool edge ([`crate::tools::into_mcp_error`]) surfaces a
+    /// CLEAN `daemon_unavailable` envelope rather than a raw `internal_error`
+    /// (-32603) that trains agents to abandon the tool for raw shell. A
+    /// daemon-returned error keeps its normal mapping. No spawn/fs/socket
+    /// happens here: recovery routes through the supervisor-backed self-heal
+    /// path, mcp stays a thin client.
     pub async fn call(&self, request: IpcRequest) -> Result<IpcResponse, IpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.inner.call(id, request).await
+        match self.inner.call(id, request.clone()).await {
+            Ok(resp) => Ok(resp),
+            Err(e) if e.is_transport() => {
+                // Could not reach the daemon mid-call. Attempt recovery, then
+                // retry exactly once. `try_self_heal` is a no-op (returns
+                // false) when there is no status handle; we retry regardless
+                // because a transient pipe-busy / restart may already be over.
+                let _recovered = self.try_self_heal().await;
+                let retry_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                self.inner.call(retry_id, request).await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Self-heal the cached daemon availability (audit H1).

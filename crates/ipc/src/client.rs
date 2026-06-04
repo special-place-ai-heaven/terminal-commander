@@ -70,15 +70,12 @@ impl DaemonClient {
         };
         let resp_env = tokio::time::timeout(self.request_timeout, self.round_trip(&env))
             .await
-            .map_err(|_| IpcError::new(IpcErrorCode::Internal, "request timed out"))??;
+            .map_err(|_| IpcError::transport("request timed out"))??;
         if resp_env.correlation_id != correlation_id {
-            return Err(IpcError::new(
-                IpcErrorCode::Internal,
-                format!(
-                    "correlation mismatch: expected {correlation_id} got {}",
-                    resp_env.correlation_id
-                ),
-            ));
+            return Err(IpcError::transport(format!(
+                "correlation mismatch: expected {correlation_id} got {}",
+                resp_env.correlation_id
+            )));
         }
         match resp_env.result {
             IpcResult::Ok { response } => Ok(response),
@@ -89,17 +86,17 @@ impl DaemonClient {
     async fn round_trip(&self, env: &RequestEnvelope) -> Result<ResponseEnvelope, IpcError> {
         let mut stream = UnixStream::connect(&self.socket_path)
             .await
-            .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("connect: {e}")))?;
+            .map_err(|e| IpcError::transport(format!("connect: {e}")))?;
         let frame = encode_frame(env)?;
         stream
             .write_all(&frame)
             .await
-            .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("write: {e}")))?;
+            .map_err(|e| IpcError::transport(format!("write: {e}")))?;
         let mut len_buf = [0_u8; 4];
         stream
             .read_exact(&mut len_buf)
             .await
-            .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("read length: {e}")))?;
+            .map_err(|e| IpcError::transport(format!("read length: {e}")))?;
         let len = u32::from_be_bytes(len_buf) as usize;
         if len > MAX_FRAME_BYTES {
             return Err(IpcError::new(
@@ -111,7 +108,7 @@ impl DaemonClient {
         stream
             .read_exact(&mut payload)
             .await
-            .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("read payload: {e}")))?;
+            .map_err(|e| IpcError::transport(format!("read payload: {e}")))?;
         decode_payload::<ResponseEnvelope>(&payload)
     }
 }
