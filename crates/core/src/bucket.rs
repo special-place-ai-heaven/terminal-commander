@@ -253,6 +253,15 @@ pub enum BucketError {
     NonMonotonicSeq { seq: u64, tail: u64 },
     #[error("event seq {seq} not found in bucket '{bucket}'")]
     EventSeqNotFound { bucket: BucketId, seq: u64 },
+    #[error(
+        "caller pre-set a nonzero seq {seq} on the first event of empty bucket '{bucket}' \
+         (the manager assigns seq monotonically from 1; do not pre-set)"
+    )]
+    PresetSeqIntoEmptyBucket { bucket: BucketId, seq: u64 },
+    #[error(
+        "bucket '{bucket}' seq space exhausted at u64::MAX (tail {tail}); cannot assign a new monotonic seq"
+    )]
+    SeqExhausted { bucket: BucketId, tail: u64 },
     #[error("core error: {0}")]
     Core(#[from] CoreError),
 }
@@ -441,8 +450,29 @@ impl BucketManager {
         let cell = self.bucket(bucket_id)?;
         let mut inner = cell.write();
         let assigned_seq = if event.seq == 0 {
-            inner.state.tail_seq.saturating_add(1)
-        } else if event.seq <= inner.state.tail_seq && inner.state.event_count > 0 {
+            // Manager assigns the next monotonic seq. `checked_add`
+            // (not `saturating_add`) so an exhausted seq space at
+            // u64::MAX surfaces as a typed error instead of silently
+            // re-emitting the tail seq as a duplicate.
+            inner
+                .state
+                .tail_seq
+                .checked_add(1)
+                .ok_or(BucketError::SeqExhausted {
+                    bucket: bucket_id,
+                    tail: inner.state.tail_seq,
+                })?
+        } else if inner.state.event_count == 0 {
+            // Empty bucket: there is no rehydrate/restore path that
+            // pre-sets a seq (the sole production caller appends with
+            // seq == 0). A nonzero caller seq into an empty bucket is
+            // therefore always a bug; reject it rather than seeding the
+            // seq space from an unvalidated value.
+            return Err(BucketError::PresetSeqIntoEmptyBucket {
+                bucket: bucket_id,
+                seq: event.seq,
+            });
+        } else if event.seq <= inner.state.tail_seq {
             return Err(BucketError::NonMonotonicSeq {
                 seq: event.seq,
                 tail: inner.state.tail_seq,
@@ -722,6 +752,46 @@ mod tests {
         e.seq = 2;
         let err = mgr.append(bid, e).unwrap_err();
         assert!(matches!(err, BucketError::NonMonotonicSeq { .. }));
+    }
+
+    #[test]
+    fn preset_nonzero_seq_into_empty_bucket_rejected() {
+        let mgr = BucketManager::new();
+        let bid = BucketId::new();
+        mgr.create_bucket_default(bid).unwrap();
+        // No prior append: the bucket is empty (event_count == 0). A caller
+        // that pre-sets a nonzero seq is always a bug because there is no
+        // rehydrate path; the manager must reject rather than seed the seq
+        // space from the unvalidated value.
+        let mut e = ev(bid, Severity::Low, "k1");
+        e.seq = 5;
+        let err = mgr.append(bid, e).unwrap_err();
+        assert!(matches!(
+            err,
+            BucketError::PresetSeqIntoEmptyBucket { seq: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn seq_exhaustion_is_a_typed_error_not_a_silent_duplicate() {
+        let mgr = BucketManager::new();
+        let bid = BucketId::new();
+        mgr.create_bucket_default(bid).unwrap();
+        // Seed the bucket: first event takes the manager-assigned seq 1.
+        mgr.append(bid, ev(bid, Severity::Low, "k1")).unwrap();
+        // Drive the tail to u64::MAX via an explicit (strictly greater) seq
+        // on a non-empty bucket.
+        let mut e_max = ev(bid, Severity::Low, "k2");
+        e_max.seq = u64::MAX;
+        assert_eq!(mgr.append(bid, e_max).unwrap(), u64::MAX);
+        // The seq space is now exhausted. A manager-assigned append
+        // (seq == 0) must surface SeqExhausted rather than saturating back
+        // to u64::MAX (a silent duplicate seq).
+        let err = mgr.append(bid, ev(bid, Severity::Low, "k3")).unwrap_err();
+        assert!(matches!(
+            err,
+            BucketError::SeqExhausted { tail: u64::MAX, .. }
+        ));
     }
 
     #[test]

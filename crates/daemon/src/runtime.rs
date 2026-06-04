@@ -351,6 +351,11 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
         }
     }
     handle.shutdown().await;
+    // Drain command lifecycle waiters AFTER IPC connections have stopped
+    // (no new commands can start) and BEFORE the store closes. A command
+    // exiting inside the shutdown window otherwise loses its final
+    // command_exited event + audit row (D7).
+    state.command.drain_lifecycle_tasks().await;
     shutdown_store(&state);
     terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
     tracing::info!("IPC server exited cleanly.");
@@ -416,6 +421,11 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
         }
     }
     handle.shutdown().await;
+    // Drain command lifecycle waiters AFTER IPC connections have stopped
+    // (no new commands can start) and BEFORE the store closes. A command
+    // exiting inside the shutdown window otherwise loses its final
+    // command_exited event + audit row (D7).
+    state.command.drain_lifecycle_tasks().await;
     shutdown_store(state.as_ref());
     terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
     tracing::info!("IPC server exited cleanly.");

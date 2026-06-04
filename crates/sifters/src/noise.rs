@@ -78,6 +78,16 @@ pub struct Dedupe {
     /// Map from canonical key -> (first_seen, last_seen, count,
     /// representative event id within the current window).
     state: HashMap<String, DedupeEntry>,
+    /// Monotonic DATA clock: the maximum draft timestamp observed across
+    /// every `apply_at` batch so far. GC uses `max_seen_ts - window` as
+    /// the cutoff instead of wall-clock `now`. For a file/replay probe
+    /// processing historical lines (`d.timestamp << now_utc()`), a
+    /// wall-clock cutoff would GC every entry between batches and the
+    /// dedupe collapse would never accumulate. Anchoring the cutoff to
+    /// the data the dedupe actually saw keeps replay and live (near-real-
+    /// time stamps) on the same window semantics. `None` until the first
+    /// draft is observed.
+    max_seen_ts: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,9 +139,28 @@ impl Dedupe {
         now: OffsetDateTime,
     ) -> DedupeApplyResult {
         let window_secs = i64::try_from(policy.dedupe_window.as_secs()).unwrap_or(i64::MAX);
-        let cutoff = now - time::Duration::seconds(window_secs);
 
-        // Garbage-collect expired entries.
+        // Advance the monotonic DATA clock to include this batch's drafts
+        // BEFORE computing the GC cutoff. The clock is `max(prior clock,
+        // this batch's max draft timestamp)` and never moves backward, so
+        // an out-of-order older batch cannot rewind the window.
+        //
+        // Anchoring the cutoff to the data the dedupe has actually seen --
+        // NOT wall-clock `now` -- is the fix: a file/replay probe whose
+        // drafts are historical (`d.timestamp << now_utc()`) would, under a
+        // wall-clock cutoff, have every entry GC'd between batches and the
+        // dedupe collapse would never accumulate. A live process probe
+        // stamps drafts at near-real time, so its data clock tracks wall
+        // clock and the window semantics are unchanged. `now` is retained
+        // only as the cutoff basis for an empty first batch (no draft has
+        // ever been seen), where there are no entries to GC anyway.
+        let batch_max = drafts.iter().map(|d| d.timestamp).max();
+        let data_clock = self.max_seen_ts.into_iter().chain(batch_max).max();
+        self.max_seen_ts = data_clock;
+        let cutoff = data_clock.unwrap_or(now) - time::Duration::seconds(window_secs);
+
+        // Garbage-collect entries older than the window, measured on the
+        // data clock rather than wall clock.
         self.state.retain(|_, e| e.last_seen >= cutoff);
 
         let mut emit: Vec<EventDraft> = Vec::with_capacity(drafts.len());
@@ -500,6 +529,68 @@ mod tests {
         assert!(
             c.patches.iter().any(|p| p.seq == 7777 && p.count == 3),
             "recurrence now patches the registered bucket row (seq 7777) to count 3"
+        );
+    }
+
+    #[test]
+    fn replay_historical_drafts_within_window_collapse_on_data_clock() {
+        // D9 regression: a file/replay probe processes historical lines, so
+        // `now = now_utc()` is far in the future relative to the draft
+        // timestamps. Under a wall-clock GC cutoff (`now - window`), the
+        // entry created in batch A is older than the cutoff and is GC'd
+        // before batch B is processed, so the cross-batch repeat never
+        // collapses -- dedupe undercounts on replay. The fix anchors the
+        // cutoff to the DATA clock (max observed draft timestamp), so two
+        // historical drafts within the window of EACH OTHER collapse even
+        // when both are far in the past relative to wall clock.
+        let mut d = Dedupe::new();
+        let pol = NoisePolicy::default();
+        let rid = RuleId::new();
+
+        // Wall clock is "now"; the data is one hour old. The dedupe window
+        // is `DEFAULT_DEDUPE_WINDOW`; the two historical drafts are a few
+        // seconds apart, well inside that window of each other but far
+        // outside `now - window`.
+        let now = OffsetDateTime::now_utc();
+        let historical = now - time::Duration::hours(1);
+        let gap = time::Duration::seconds(2);
+        let historical_later = historical + gap;
+        assert!(
+            pol.dedupe_window > std::time::Duration::from_secs(2),
+            "test assumes the default window comfortably exceeds the 2s gap \
+             (DEFAULT_DEDUPE_WINDOW is 5s)"
+        );
+
+        // Batch A: first occurrence of K1 at the historical timestamp.
+        let a = d.apply_at(
+            vec![draft(rid, Severity::Low, &[("pkg", "a")], historical)],
+            &pol,
+            now,
+        );
+        assert_eq!(a.emit.len(), 1, "first occurrence emits its representative");
+        assert_eq!(a.emit[0].count, 1);
+        // Register a seq so a cross-batch repeat patches the row instead of
+        // re-emitting (isolating the GC behavior under test).
+        d.register_emitted(&a.emit[0], 42);
+
+        // Batch B: a within-window (2s later) repeat at a still-historical
+        // timestamp. Wall clock `now` is unchanged (an hour ahead). Without
+        // the data-clock fix the batch-A entry would have been GC'd and this
+        // would re-create a fresh entry with count 1; with the fix the entry
+        // survives and the count accumulates to 2.
+        let b = d.apply_at(
+            vec![draft(rid, Severity::Low, &[("pkg", "a")], historical_later)],
+            &pol,
+            now,
+        );
+        assert!(
+            b.emit.is_empty(),
+            "within-window historical repeat collapses (no re-emit)"
+        );
+        assert!(
+            b.patches.iter().any(|p| p.seq == 42 && p.count == 2),
+            "historical repeat patches the registered row to count 2 -- \
+             the entry was NOT GC'd on the data clock"
         );
     }
 
