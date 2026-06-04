@@ -74,8 +74,8 @@ fn endpoint_string(ep: &Endpoint) -> String {
 pub enum HardKillOutcome {
     /// The process was gone after the graceful signal; no force was needed.
     Reaped,
-    /// A force signal (SIGKILL / `taskkill /F`) was sent: the pid was still
-    /// alive AND still our daemon.
+    /// A force signal (SIGKILL on unix / native `TerminateProcess` on
+    /// windows) was sent: the pid was still alive AND still our daemon.
     Forced,
     /// After the grace window the pid was alive but NO LONGER our daemon --
     /// the OS recycled the number for an unrelated process during the grace.
@@ -85,8 +85,10 @@ pub enum HardKillOutcome {
     IdentitySkipped,
 }
 
-/// Hard-kill a pid (SIGTERM then SIGKILL on unix; taskkill /F on
-/// windows). Uses OS tools, no libc dependency.
+/// Hard-kill a pid (SIGTERM then SIGKILL on unix; native Win32
+/// `OpenProcess` + `TerminateProcess` on windows). The unix path uses the
+/// `kill(1)` tool; the windows path spawns NO external process (corporate-EDR
+/// hardening -- no powershell/taskkill).
 ///
 /// Both the graceful and the forced leg are identity-gated: the forced leg
 /// re-verifies, after the grace window, that the pid is still our daemon
@@ -114,24 +116,17 @@ pub fn hard_kill(pid: u32, state_dir: &Path) -> std::io::Result<HardKillOutcome>
     }
     #[cfg(windows)]
     {
-        // Windows has no graceful -> grace -> force window: `taskkill /F` is a
-        // single forced terminate with no intervening sleep, so the SIGKILL-leg
-        // recycle window the unix path closes does not exist here. Re-verify
-        // identity once more anyway, for defense in depth and parity with the
-        // unix kill-leg gate.
+        // Windows has no graceful -> grace -> force window: the native
+        // `TerminateProcess` is a single forced terminate with no intervening
+        // sleep, so the SIGKILL-leg recycle window the unix path closes does
+        // not exist here. Re-verify identity once more anyway, for defense in
+        // depth and parity with the unix kill-leg gate. Native Win32 only:
+        // NO powershell / taskkill / cmd is spawned (corporate-EDR hardening).
         if !pid_belongs_to_daemon(pid, state_dir) {
             return Ok(HardKillOutcome::IdentitySkipped);
         }
-        let out = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .output()?;
-        if out.status.success() {
-            Ok(HardKillOutcome::Forced)
-        } else {
-            Err(std::io::Error::other(
-                String::from_utf8_lossy(&out.stderr).to_string(),
-            ))
-        }
+        windows_native::terminate_process(pid)?;
+        Ok(HardKillOutcome::Forced)
     }
 }
 
@@ -178,27 +173,27 @@ fn hard_kill_unix(
 pub fn pid_belongs_to_daemon(pid: u32, state_dir: &Path) -> bool {
     #[cfg(windows)]
     {
-        // Fetch the candidate's name + command line and match in Rust. The
-        // state_dir path is deliberately NOT interpolated into the
-        // PowerShell query: doing so via `-like '*<path>*'` (a) confused a
-        // path PREFIX of a sibling session's dir for ours and (b) broke on a
-        // `'` in the path (which closed the single-quoted literal). Only the
-        // numeric pid enters the command.
-        let ps = format!(
-            "Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" | ForEach-Object {{ \"$($_.Name)`t$($_.CommandLine)\" }}"
-        );
-        std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &ps])
-            .output()
-            .ok()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout).lines().any(|line| {
-                    let (name, cmdline) = line.split_once('\t').unwrap_or(("", line));
-                    name.trim() == "terminal-commanderd.exe"
-                        && cmdline_is_our_daemon(cmdline, state_dir)
-                })
-            })
-            .unwrap_or(false)
+        // Native Win32 identity check -- NO powershell / WMI is spawned
+        // (corporate-EDR hardening). We OpenProcess(QUERY_LIMITED_INFORMATION)
+        // and QueryFullProcessImageNameW to read the pid's image path, then
+        // confirm its file name is the daemon executable.
+        //
+        // IDENTITY-NARROWING (vs the prior WMI cmdline match): the old code
+        // matched the `--data-dir` argument from the WMI command line to scope
+        // multi-session. We no longer read the command line: the pidfile is
+        // already per-state_dir (`state_dir/terminal-commanderd.pid` gives the
+        // pid for THIS data-dir), so the only residual risk this check defends
+        // against is PID RECYCLE -- the OS reusing the pidfile's number for an
+        // unrelated process (e.g. notepad) after our daemon exited. Confirming
+        // "pid X's image is terminal-commanderd.exe" closes exactly that
+        // window. Two daemons of DIFFERENT sessions are still both
+        // `terminal-commanderd.exe`, but a recycled pid that happens to be a
+        // *sibling daemon* is (a) astronomically unlikely and (b) harmless to
+        // never-kill-on-uncertainty here: this gate only ever AUTHORIZES a
+        // kill that the per-state_dir pidfile already selected, it does not
+        // widen the target set. `state_dir` is therefore unused on Windows.
+        let _ = state_dir;
+        windows_native::pid_image_is_daemon(pid)
     }
     #[cfg(unix)]
     {
@@ -229,15 +224,15 @@ pub fn pid_belongs_to_daemon(pid: u32, state_dir: &Path) -> bool {
 /// [`contains_path_arg`]), so a sibling session whose dir merely PREFIXES
 /// ours is never mistaken for it.
 ///
-/// WINDOWS path only: the `Win32_Process` query already filters by the fixed
-/// binary name, so this whole-line matcher confirms the state_dir argument.
-/// The UNIX path instead reads the kernel-authoritative argv from
-/// `/proc/<pid>/cmdline` and uses [`unix_argv_is_our_daemon`], which also
-/// requires argv[0] itself to be the daemon executable (a flattened-line
-/// substring test over-matched non-daemon processes -- see that function).
-/// Allowed to be dead on unix, where it is reachable only from the
-/// cross-platform tests of the Windows matcher's logic.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// HISTORICAL / TEST-ONLY: this whole-line matcher backed the prior Windows
+/// WMI-cmdline identity check. The Windows path now reads the pid's image
+/// path natively (`QueryFullProcessImageNameW`) and matches the daemon file
+/// name, so no command line is parsed in production on either OS (unix uses
+/// the kernel argv via [`unix_argv_is_our_daemon`]). The function is retained
+/// because its cross-platform tests pin the whole-argument matching logic
+/// (prefix rejection, apostrophe/`=` forms); it has no production caller and
+/// is therefore allowed to be dead outside `cfg(test)`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn cmdline_is_our_daemon(args: &str, state_dir: &Path) -> bool {
     if !args.contains("terminal-commanderd") {
         return false;
@@ -260,9 +255,10 @@ fn cmdline_is_our_daemon(args: &str, state_dir: &Path) -> bool {
 /// spaces, brackets, or apostrophes (matched verbatim, never interpolated
 /// into a shell pattern).
 ///
-/// Used by the Windows whole-line matcher; allowed to be dead on unix, where
-/// it is reachable only from the cross-platform tests.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// Test-only helper for [`cmdline_is_our_daemon`]; no production caller
+/// remains (see that function), so it is allowed to be dead outside
+/// `cfg(test)`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn contains_path_arg(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
@@ -289,9 +285,9 @@ fn contains_path_arg(haystack: &str, needle: &str) -> bool {
 /// is deliberately NOT a boundary -- that is exactly the prefix case the
 /// whole-argument match must reject.
 ///
-/// Used by the Windows whole-line matcher; allowed to be dead on unix, where
-/// it is reachable only from the cross-platform tests.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// Test-only helper for [`cmdline_is_our_daemon`]; no production caller
+/// remains, so it is allowed to be dead outside `cfg(test)`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn is_arg_boundary(b: u8) -> bool {
     b.is_ascii_whitespace() || b == b'=' || b == b'"' || b == b'\''
 }
@@ -399,23 +395,23 @@ fn unix_argv_is_our_daemon<S: AsRef<str>>(argv: &[S], state_dir: &Path) -> bool 
 pub fn find_daemon_pid_os(state_dir: &Path) -> Option<u32> {
     #[cfg(windows)]
     {
-        // Filter by the FIXED binary name (a literal, no path), then match
-        // the command line to state_dir in Rust via the whole-argument
-        // matcher. The path is never interpolated into the PowerShell query,
-        // so neither a path separator (prefix-confusion) nor an apostrophe in
-        // it can break the search.
-        let ps = "Get-CimInstance Win32_Process -Filter \"Name='terminal-commanderd.exe'\" | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }";
-        let out = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", ps])
-            .output()
-            .ok()?;
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .find_map(|line| {
-                let (pid_s, cmdline) = line.split_once('\t')?;
-                let pid: u32 = pid_s.trim().parse().ok()?;
-                cmdline_is_our_daemon(cmdline, state_dir).then_some(pid)
-            })
+        // Native ToolHelp enumeration -- NO powershell / WMI is spawned
+        // (corporate-EDR hardening). Snapshot every process, match
+        // `szExeFile == terminal-commanderd.exe`, then confirm via the same
+        // image-path check `pid_belongs_to_daemon` uses, excluding our own
+        // pid. Returns the first matching daemon pid.
+        //
+        // IDENTITY-NARROWING (vs the prior WMI cmdline match): this no-pidfile
+        // fallback can no longer scope to `state_dir` via the command line (we
+        // do not read it). It is reached ONLY when the per-state_dir pidfile is
+        // absent -- a daemon predating the pidfile feature, which
+        // `replace_if_stale` treats as stale-by-construction and replaces. In
+        // the single-session install this is exact; in a (rare) multi-session
+        // box with a pidfile-less legacy daemon it returns the first running
+        // daemon image, which is acceptable for the legacy-replace path.
+        // `state_dir` is therefore unused on Windows here.
+        let _ = state_dir;
+        windows_native::find_first_daemon_pid()
     }
     #[cfg(unix)]
     {
@@ -432,6 +428,166 @@ pub fn find_daemon_pid_os(state_dir: &Path) -> Option<u32> {
             .lines()
             .filter_map(|line| line.trim().parse::<u32>().ok())
             .find(|&pid| pid_belongs_to_daemon(pid, state_dir))
+    }
+}
+
+/// Native Win32 daemon-recovery primitives, replacing the prior
+/// powershell/WMI/taskkill shell-outs (corporate-EDR hardening: an unsigned
+/// exe spawning powershell+taskkill is a high-signal EDR event). Each FFI
+/// block is minimal, checks every handle/BOOL return, and closes every
+/// handle on all paths via the [`OwnedHandle`] RAII guard. The unix
+/// production path uses NO unsafe.
+///
+/// Lint note: this crate does not opt into the workspace lint table
+/// (`unsafe_code = "forbid"` is applied only to crates that set
+/// `[lints] workspace = true`), so these `unsafe` FFI blocks compile without
+/// a crate-level allow. The SAFETY discipline below is upheld regardless.
+///
+/// Mirrors the proven pattern in `crates/cli/src/update_locks.rs` and the H2
+/// FFI in `crates/probes/src/file.rs`.
+#[cfg(windows)]
+mod windows_native {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Threading::{
+        GetCurrentProcessId, OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess,
+    };
+
+    /// The daemon image file name we will authorize a kill against. Compared
+    /// case-insensitively against the candidate pid's image file name.
+    const DAEMON_IMAGE: &str = "terminal-commanderd.exe";
+
+    /// RAII guard so a process handle is always closed on every return path
+    /// (success, early return, or `?`). `CloseHandle` failure on drop is
+    /// ignored: the handle is being discarded regardless.
+    struct OwnedHandle(HANDLE);
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            // SAFETY: `self.0` is a handle we opened (OpenProcess) or received
+            // from CreateToolhelp32Snapshot and have not closed yet. Closing
+            // it exactly once here is the paired release for that open.
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    /// Read `pid`'s full image path via the OS and return its file name
+    /// lowercased, or `None` if the process cannot be opened/queried (it
+    /// exited, the pid is invalid, or access was denied). A `None` result is
+    /// treated by callers as "not our daemon" -- we never kill on uncertainty.
+    fn pid_image_file_name(pid: u32) -> Option<String> {
+        // SAFETY: OpenProcess takes a desired-access mask, an inherit BOOL,
+        // and a pid; it returns a valid handle on success or an Err we map to
+        // None. PROCESS_QUERY_LIMITED_INFORMATION is the least privilege that
+        // permits QueryFullProcessImageNameW.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
+        let proc = OwnedHandle(handle);
+
+        let mut buf = [0u16; 1024];
+        let mut len = u32::try_from(buf.len()).expect("image-path buffer length fits in u32");
+        // SAFETY: `proc.0` is a live handle (just opened) valid for this call.
+        // PROCESS_NAME_FORMAT(0) requests the win32 path form. `buf`/`len`
+        // describe a properly sized, owned u16 buffer; the call writes at most
+        // `len` code units and updates `len` to the count written. We check
+        // the BOOL result and a non-zero length before reading the buffer.
+        let ok = unsafe {
+            QueryFullProcessImageNameW(
+                proc.0,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(buf.as_mut_ptr()),
+                &raw mut len,
+            )
+            .is_ok()
+        };
+        if !ok || len == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        std::path::Path::new(&path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_ascii_lowercase)
+    }
+
+    /// True when `pid`'s image file name is the daemon executable. Defends
+    /// against a recycled pid (the OS reusing the pidfile's number for an
+    /// unrelated process such as `notepad.exe`) now answering the kill.
+    pub(super) fn pid_image_is_daemon(pid: u32) -> bool {
+        pid_image_file_name(pid).is_some_and(|name| name == DAEMON_IMAGE)
+    }
+
+    /// Force-terminate `pid` natively. Caller has already identity-gated the
+    /// pid (see `hard_kill`). Returns an IO error if the process cannot be
+    /// opened for termination or the terminate call fails.
+    pub(super) fn terminate_process(pid: u32) -> std::io::Result<()> {
+        let access = PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION;
+        // SAFETY: OpenProcess as above; PROCESS_TERMINATE is the access right
+        // TerminateProcess requires. The Err arm maps the Win32 error into an
+        // io::Error without dereferencing anything.
+        let handle = unsafe { OpenProcess(access, false, pid) }
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let proc = OwnedHandle(handle);
+        // SAFETY: `proc.0` is a live handle opened with PROCESS_TERMINATE.
+        // TerminateProcess posts the exit and returns a BOOL we propagate as
+        // an io::Error on failure. Exit code 1 mirrors the prior `taskkill /F`.
+        unsafe { TerminateProcess(proc.0, 1) }.map_err(|e| std::io::Error::other(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Enumerate all processes via a ToolHelp snapshot and return the first
+    /// whose image is the daemon executable (confirmed by image path), other
+    /// than our own pid. Used only as the no-pidfile fallback.
+    pub(super) fn find_first_daemon_pid() -> Option<u32> {
+        // SAFETY: CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) returns a
+        // valid snapshot handle or an Err we map to None. The handle is owned
+        // by `OwnedHandle` and released on every return path.
+        let snapshot =
+            OwnedHandle(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?);
+        // SAFETY: GetCurrentProcessId has no preconditions.
+        let current_pid = unsafe { GetCurrentProcessId() };
+
+        let mut entry = PROCESSENTRY32W {
+            dwSize: u32::try_from(std::mem::size_of::<PROCESSENTRY32W>())
+                .expect("PROCESSENTRY32W size fits in u32"),
+            ..Default::default()
+        };
+
+        // SAFETY: `snapshot.0` is a valid snapshot handle and `entry` is a
+        // properly initialized PROCESSENTRY32W with `dwSize` set, as the API
+        // requires. Process32FirstW fills `entry` and returns Ok/Err.
+        let mut has_entry = unsafe { Process32FirstW(snapshot.0, &raw mut entry).is_ok() };
+        while has_entry {
+            let pid = entry.th32ProcessID;
+            if pid != current_pid && exe_name_from_entry(&entry).eq_ignore_ascii_case(DAEMON_IMAGE)
+            {
+                // Confirm via the authoritative image path (the snapshot's
+                // szExeFile is the base name only) before returning the pid.
+                if pid_image_is_daemon(pid) {
+                    return Some(pid);
+                }
+            }
+            // SAFETY: same invariants as Process32FirstW; advances `entry` to
+            // the next process or returns Err at the end of the snapshot.
+            has_entry = unsafe { Process32NextW(snapshot.0, &raw mut entry).is_ok() };
+        }
+        None
+    }
+
+    /// Decode the NUL-terminated UTF-16 `szExeFile` base name from a snapshot
+    /// entry into a Rust string.
+    fn exe_name_from_entry(entry: &PROCESSENTRY32W) -> String {
+        let end = entry
+            .szExeFile
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(entry.szExeFile.len());
+        String::from_utf16_lossy(&entry.szExeFile[..end])
     }
 }
 
@@ -953,5 +1109,124 @@ mod tests {
         // (f) Empty argv is rejected (mirrors an unreadable /proc entry).
         let empty: Vec<&str> = vec![];
         assert!(!unix_argv_is_our_daemon(&empty, dir));
+    }
+}
+
+// --- FIX #1: native Win32 daemon-recovery path (no powershell/taskkill) ---
+//
+// These exercise the real FFI against live processes. To drive the
+// image-name identity gate without a real daemon build, a benign long-lived
+// system exe (`ping.exe`) is COPIED to a temp file named
+// `terminal-commanderd.exe` and spawned: its image FILE NAME then matches the
+// daemon, so the identity gate fires exactly as it would for the real daemon,
+// while the process itself is harmless and self-terminating.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// Copy a benign long-lived system exe to `<tmp>/terminal-commanderd.exe`
+    /// and spawn it so the process's image FILE NAME is the daemon name. The
+    /// returned `TempDir` keeps the copied exe alive for the test's duration.
+    fn spawn_fake_daemon() -> (tempfile::TempDir, std::process::Child) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fake = dir.path().join("terminal-commanderd.exe");
+        let ping = std::path::Path::new(r"C:\Windows\System32\PING.EXE");
+        std::fs::copy(ping, &fake).expect("copy ping.exe to terminal-commanderd.exe");
+        // `ping -n 30 127.0.0.1` stays alive ~30s; far longer than the test.
+        let child = std::process::Command::new(&fake)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn fake daemon");
+        (dir, child)
+    }
+
+    #[test]
+    fn pid_belongs_to_daemon_rejects_non_daemon_and_absent() {
+        // The test runner's own image is the test binary, NOT
+        // terminal-commanderd.exe -> must be refused (defends a recycled pid).
+        let self_pid = std::process::id();
+        assert!(
+            !pid_belongs_to_daemon(self_pid, std::path::Path::new(r"C:\tc-not-a-daemon")),
+            "the test runner's own pid (image != terminal-commanderd.exe) must be refused"
+        );
+        // A pid that is almost certainly absent must also be refused.
+        assert!(
+            !pid_belongs_to_daemon(0xFFFF_FFF0, std::path::Path::new(r"C:\tc-not-a-daemon")),
+            "an absent pid must be refused"
+        );
+    }
+
+    #[test]
+    fn pid_belongs_to_daemon_true_only_when_image_matches() {
+        let (_dir, mut child) = spawn_fake_daemon();
+        let pid = child.id();
+        // Image file name IS terminal-commanderd.exe -> accepted. state_dir is
+        // not consulted on Windows (per-state_dir pidfile already scopes).
+        let belongs = pid_belongs_to_daemon(pid, std::path::Path::new(r"C:\any\state"));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            belongs,
+            "a process whose image file name is terminal-commanderd.exe must be accepted"
+        );
+    }
+
+    #[test]
+    fn hard_kill_terminates_a_spawned_daemon_image() {
+        let (_dir, mut child) = spawn_fake_daemon();
+        let pid = child.id();
+        let outcome = hard_kill(pid, std::path::Path::new(r"C:\any\state")).expect("hard_kill");
+        assert_eq!(
+            outcome,
+            HardKillOutcome::Forced,
+            "an identity-matching live process must be force-terminated"
+        );
+        // Reap and confirm it actually exited (TerminateProcess took effect).
+        let status = child.wait().expect("wait on terminated child");
+        assert!(
+            !status.success(),
+            "TerminateProcess(exit=1) must make the child exit non-zero"
+        );
+        // A second hard_kill of the now-dead pid must not force-kill anything:
+        // the pid no longer resolves to our daemon image.
+        let after = hard_kill(pid, std::path::Path::new(r"C:\any\state")).expect("hard_kill again");
+        assert_eq!(
+            after,
+            HardKillOutcome::IdentitySkipped,
+            "a dead/absent pid must NOT be force-killed (identity gate)"
+        );
+    }
+
+    #[test]
+    fn hard_kill_withholds_force_for_non_daemon_pid() {
+        // The test runner itself is alive but is not the daemon image; hard_kill
+        // must refuse to terminate it (this would otherwise kill the test host).
+        let self_pid = std::process::id();
+        let outcome =
+            hard_kill(self_pid, std::path::Path::new(r"C:\any\state")).expect("hard_kill self");
+        assert_eq!(
+            outcome,
+            HardKillOutcome::IdentitySkipped,
+            "the test runner (non-daemon image) must NEVER be force-killed"
+        );
+    }
+
+    #[test]
+    fn find_daemon_pid_os_enumerates_running_daemon_image() {
+        let (_dir, mut child) = spawn_fake_daemon();
+        let pid = child.id();
+        // Native ToolHelp enumeration must discover the running daemon-image
+        // process. state_dir is unused on Windows (no-pidfile fallback).
+        let found = find_daemon_pid_os(std::path::Path::new(r"C:\any\state"));
+        let _ = child.kill();
+        let _ = child.wait();
+        // The snapshot may observe ANY terminal-commanderd.exe on the box, but
+        // it must find at least one (ours), and ours must be a valid candidate.
+        assert!(
+            found.is_some(),
+            "find_daemon_pid_os must enumerate the running daemon-image process (spawned pid {pid})"
+        );
     }
 }
