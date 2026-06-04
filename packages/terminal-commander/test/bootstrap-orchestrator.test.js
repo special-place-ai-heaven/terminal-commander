@@ -86,6 +86,73 @@ test("runBootstrap win32 defaults to native MCP path without WSL probe", async (
   assert.match(r.output, /native Windows MCP path selected/);
 });
 
+test("runBootstrap threads the stable exe path into writeAllHarnesses (direct-exe config)", async () => {
+  const writes = [];
+  let ensureOpts = null;
+  const STABLE =
+    "C:\\Users\\example\\AppData\\Local\\terminal-commander\\bin\\terminal-commander-mcp.exe";
+  const r = await runBootstrap({
+    mode: "cli",
+    platform: "win32",
+    env: { USERPROFILE: "C:\\Users\\example", LOCALAPPDATA: "C:\\Users\\example\\AppData\\Local" },
+    force: true,
+    acquireLock: false,
+    ensureStableBinaries: (opts) => {
+      ensureOpts = opts;
+      return { exePath: STABLE, copied: [STABLE], reason: "ok" };
+    },
+    writeAllHarnesses: (opts) => {
+      writes.push(opts);
+      return [{ id: "cursor", status: "ok" }];
+    },
+    writeState: () => ({ status: "ok" }),
+  });
+  assert.equal(r.exit_code, 0);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].exePath, STABLE, "harness writers receive the stable exe path");
+  assert.equal(ensureOpts.platform, "win32");
+  assert.equal(ensureOpts.dry_run, false, "a real bootstrap copies (not dry-run)");
+  assert.match(r.output, /stable exe/);
+});
+
+test("runBootstrap dry-run resolves the stable exe path WITHOUT copying", async () => {
+  let ensureOpts = null;
+  const r = await runBootstrap({
+    mode: "cli",
+    platform: "win32",
+    env: { USERPROFILE: "C:\\Users\\example", LOCALAPPDATA: "C:\\L" },
+    dry_run: true,
+    acquireLock: false,
+    ensureStableBinaries: (opts) => {
+      ensureOpts = opts;
+      return { exePath: null, copied: [], reason: "dry_run" };
+    },
+    writeAllHarnesses: () => [{ id: "cursor", status: "ok" }],
+  });
+  assert.equal(r.exit_code, 0);
+  assert.equal(ensureOpts.dry_run, true, "dry-run must not copy binaries");
+});
+
+test("runBootstrap falls back gracefully when the stable copy fails (exePath undefined)", async () => {
+  const writes = [];
+  const r = await runBootstrap({
+    mode: "cli",
+    platform: "win32",
+    env: { USERPROFILE: "C:\\Users\\example", LOCALAPPDATA: "C:\\L" },
+    force: true,
+    acquireLock: false,
+    ensureStableBinaries: () => ({ exePath: null, copied: [], reason: "copy_failed" }),
+    writeAllHarnesses: (opts) => {
+      writes.push(opts);
+      return [{ id: "cursor", status: "ok" }];
+    },
+    writeState: () => ({ status: "ok" }),
+  });
+  assert.equal(r.exit_code, 0);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].exePath, undefined, "a failed copy leaves exePath unset so the writer uses the bare-name fallback");
+});
+
 test("runBootstrap cli mode fails loudly when requested harness write fails", async () => {
   const r = await runBootstrap({
     mode: "cli",

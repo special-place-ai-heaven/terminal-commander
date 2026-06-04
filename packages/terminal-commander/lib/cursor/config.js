@@ -77,6 +77,18 @@ function defaultMcpScriptPath() {
 
 function buildTerminalCommanderCommandConfig(opts) {
   const o = opts || {};
+  // Highest precedence: a resolved native exe at a STABLE per-user path.
+  // The MCP client launches it directly (no npm script-launcher shim, no
+  // node hop), which removes the script-interpreter-then-spawn chain that
+  // heuristic AV reads as a loader. The path is a fixed per-user dir the
+  // package owns (e.g. %LOCALAPPDATA%\terminal-commander\bin\...), NOT the
+  // hoist-prone node_modules path, so npm updates never silently break it.
+  if (o.exePath) {
+    return {
+      command: o.exePath,
+      args: [],
+    };
+  }
   // Explicit node+script overrides (used by callers that know the exact
   // installed paths) -> emit the node.exe + JS-shim form.
   if (o.scriptPath || o.nodePath) {

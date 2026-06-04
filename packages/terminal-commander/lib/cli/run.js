@@ -28,6 +28,7 @@ const {
 const { runDoctorHarness } = require("./doctor_harness.js");
 const { runDoctorDaemon } = require("./doctor_daemon.js");
 const { runSetupDaemonAutostart } = require("./setup_daemon_autostart.js");
+const { runSetupDaemonLogon } = require("./setup_daemon_logon.js");
 const { runPairCreate } = require("./pair_create.js");
 const { runPairAccept } = require("./pair_accept.js");
 
@@ -93,6 +94,13 @@ async function run(opts) {
           platform,
           env,
           detect: o.detect,
+        });
+      }
+      if (parsed.subcommand === "daemon-logon") {
+        return runSetupDaemonLogon({
+          flags: parsed.flags,
+          platform,
+          env,
         });
       }
       if (parsed.subcommand === "cursor-wsl") {

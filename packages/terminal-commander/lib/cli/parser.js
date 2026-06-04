@@ -45,6 +45,7 @@ const BOOLEAN_FLAGS = new Set([
   "--dry-run",
   "--install-wsl-runtime",
   "--probe-runtime",
+  "--uninstall",
 ]);
 
 const STRING_FLAGS = new Set(["--distro", "--project", "--provider"]);
@@ -59,6 +60,7 @@ const HARNESS_SETUP_FLAGS = new Set([
   "dry-run",
   "install-wsl-runtime",
   "provider",
+  "uninstall",
 ]);
 
 function makeError(message, usage) {
@@ -160,6 +162,8 @@ function parseArgv(argv) {
         sub = "cursor-wsl";
       } else if (sub === "daemon-autostart") {
         sub = "daemon-autostart";
+      } else if (sub === "daemon-logon") {
+        sub = "daemon-logon";
       } else {
         return makeError(`unknown setup subcommand: ${sub}`);
       }
@@ -321,6 +325,11 @@ detected harness (Cursor, Codex CLI, Claude, ...).
 Subcommands:
   setup                               Full harness bootstrap (default).
   setup harness                       Same as setup.
+  setup daemon-autostart              Install daemon autostart (Linux / WSL).
+  setup daemon-logon                  OPT-IN, no-admin per-user logon Scheduled
+                                      Task that pre-starts the daemon at logon
+                                      (Windows). Off unless you run this.
+                                      Remove with --uninstall.
   setup cursor-wsl                    Deprecated alias (Cursor-focused).
 
 Legacy cursor-wsl flags still apply to harness / cursor-wsl:
@@ -352,6 +361,8 @@ FLAGS
   --provider <id>                     Configure only one harness (cursor,
                                       codex-cli, claude-code, claude-desktop,
                                       gemini, kimi).
+  --uninstall                         (daemon-logon only) Remove the per-user
+                                      logon Scheduled Task.
   --help, -h                          Show this panel.
 
 SAFETY

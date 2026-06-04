@@ -1,0 +1,49 @@
+{
+    "##": [
+        "Scoop manifest skeleton for Terminal Commander (per-user, no-admin install).",
+        "Scoop installs into the current user's profile (~/scoop) with NO elevation,",
+        "which matches Terminal Commander's user-space-only model exactly.",
+        "",
+        "PLACEHOLDERS: version / url / hash below are placeholders. Publishing this",
+        "manifest is a SEPARATE follow-up that needs (a) a GitHub-release zip asset",
+        "of the Windows binaries (terminal-commander.exe, terminal-commander-mcp.exe,",
+        "terminal-commanderd.exe) at the templated URL, and (b) a Scoop bucket repo",
+        "to host this manifest. Wiring the release-zip CI asset + bucket is tracked",
+        "as a follow-up CI/infra task; this file is the manifest skeleton only.",
+        "",
+        "When the release zip lands, replace VERSION_PLACEHOLDER and compute the",
+        "SHA256 of the asset (Scoop verifies it on install). 'autoupdate' lets",
+        "'scoop update' pick up new tags automatically once the bucket is live."
+    ],
+    "version": "VERSION_PLACEHOLDER",
+    "description": "Local MCP-operated terminal/file signal channel (native Windows binaries).",
+    "homepage": "https://github.com/special-place-ai-heaven/terminal-commander",
+    "license": "PolyForm-Noncommercial-1.0.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/special-place-ai-heaven/terminal-commander/releases/download/vVERSION_PLACEHOLDER/terminal-commander-windows-x64.zip",
+            "hash": "SHA256_PLACEHOLDER"
+        }
+    },
+    "bin": [
+        "terminal-commander.exe",
+        "terminal-commander-mcp.exe",
+        "terminal-commanderd.exe"
+    ],
+    "checkver": {
+        "github": "https://github.com/special-place-ai-heaven/terminal-commander"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/special-place-ai-heaven/terminal-commander/releases/download/v$version/terminal-commander-windows-x64.zip"
+            }
+        }
+    },
+    "notes": [
+        "Terminal Commander is installed per-user with no admin rights.",
+        "Configure your MCP client with: terminal-commander setup harness",
+        "Optional: pre-start the daemon at logon (per-user, no-admin):",
+        "  terminal-commander setup daemon-logon   (remove with --uninstall)"
+    ]
+}

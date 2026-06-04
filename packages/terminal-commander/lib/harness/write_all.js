@@ -90,6 +90,7 @@ function writeProvider(id, opts) {
   if (id === "cursor") {
     if (dryRun) {
       const stanza = buildTerminalCommanderServerConfig({
+        exePath: o.exePath,
         sessionToken,
         distro: o.distro,
         knownDistros: o.knownDistros,
@@ -102,6 +103,7 @@ function writeProvider(id, opts) {
       projectRoot: o.projectRoot,
       platform: o.platform,
       env: o.env,
+      exePath: o.exePath,
       sessionToken,
       distro: o.distro,
       knownDistros: o.knownDistros,
@@ -128,6 +130,7 @@ function writeProvider(id, opts) {
     // currently emits no env block (includeEnv: false). Tracked in B1 Phase 1 TODO.
     const r = writeCodexTomlConfig({
       path: target,
+      exePath: o.exePath,
       force,
       clobber_backup,
       includeEnv: false,

@@ -42,6 +42,81 @@ Use this shape on Linux, Windows, macOS, WSL, and project scopes:
 `terminal-commander setup harness --provider cursor` writes this server entry
 and preserves unrelated MCP servers.
 
+## AV-Safe Direct-Exe Launch
+
+On `setup` (and on `update` / `restart`), Terminal Commander copies the resolved
+native executables into a fixed per-user directory it owns and points the MCP
+config at that exe directly:
+
+```json
+{
+  "mcpServers": {
+    "terminal-commander": {
+      "type": "stdio",
+      "command": "C:\\Users\\<you>\\AppData\\Local\\terminal-commander\\bin\\terminal-commander-mcp.exe",
+      "args": []
+    }
+  }
+}
+```
+
+Why: launching the bare `terminal-commander-mcp` name makes the client run the
+npm launcher shim, then `node`, then the JS shim, which finally spawns the
+native exe. That script-interpreter-then-spawn chain is exactly what heuristic
+antivirus reads as a loader. Pointing the config at the exe directly removes the
+whole chain so the client launches one self-contained stdio MCP server.
+
+This is entirely user-space and no-admin: copying a tool into your own
+`%LOCALAPPDATA%` (or `~/.local/share` on Unix) and running it is ordinary
+developer behavior. Nothing is elevated, no service is installed, and no
+certificate or allowance is required.
+
+The stable path is deliberately NOT the
+`node_modules\@terminal-commander\windows-x64\bin\...` path, because npm
+hoisting moves that on update and would silently break the config. The copy is
+re-run whenever the installed version changes, so the stable exe always matches
+the installed build (this also removes any adapter/daemon version skew).
+
+If the copy cannot complete (for example a locked file mid-update), setup falls
+back to the portable bare-name command shown above so it never hard-fails.
+
+On macOS and Linux the same approach points the config at the resolved native
+exe (no script shim exists there).
+
+## Pre-Start the Daemon at Logon (Windows, opt-in)
+
+By default the MCP adapter starts the daemon on first connect. If you would
+rather have the daemon already running so the MCP server spawns nothing, you can
+register an OPT-IN, per-user logon Scheduled Task:
+
+```powershell
+terminal-commander setup daemon-logon
+```
+
+This runs, as your own user with no elevation:
+
+```text
+schtasks.exe /Create /SC ONLOGON /TN "TerminalCommander Daemon" \
+  /TR "<stable>\terminal-commanderd.exe start" /F
+```
+
+It is per-user only: there is no `/RU SYSTEM`, no `/RL HIGHEST`, no admin, and
+no certificate or allowance. `schtasks` is the documented user tool for
+scheduling your own tasks, and the task points at the same stable per-user exe
+path used for the direct-exe config above.
+
+It is OFF by default (nothing is registered unless you run the command),
+idempotent (re-running overwrites the same task), and removable:
+
+```powershell
+terminal-commander setup daemon-logon --uninstall
+```
+
+Add `--dry-run` to either form to print the exact `schtasks` action without
+registering anything.
+
+On Linux / WSL use `terminal-commander setup daemon-autostart` instead.
+
 ## Windows
 
 Windows uses the native `@terminal-commander/windows-x64` package by default.
