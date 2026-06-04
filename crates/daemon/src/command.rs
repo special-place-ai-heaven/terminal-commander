@@ -99,6 +99,13 @@ pub const SHELL_INTERPRETERS_DENY: &[&str] = &[
 pub const DEFAULT_COMMAND_SEVERITY_MIN: terminal_commander_core::Severity =
     terminal_commander_core::Severity::Info;
 
+/// Upper bound on how long a graceful shutdown waits for in-flight
+/// command lifecycle waiters to finish before aborting them. Matches
+/// the IPC connection drain ceiling (`server.rs::DRAIN_CEILING`,
+/// `pipe_server.rs::PIPE_DRAIN_CEILING`, 10 s) so the two drains have
+/// symmetric bounds.
+const LIFECYCLE_DRAIN_CEILING: Duration = Duration::from_secs(10);
+
 /// Errors raised by the command runtime.
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
@@ -275,6 +282,20 @@ pub struct CommandRuntime {
     /// Bucket source side-table (subscriptions MUST-ADD #2). Recorded
     /// at `start_combed` immediately after `bucket_create`.
     sources: Arc<crate::subscriptions::source::BucketSourceTable>,
+    /// Lifecycle waiter tasks spawned by `start_combed` (one per live
+    /// command). Tracked in a `JoinSet` rather than a detached
+    /// `tokio::spawn` so a graceful shutdown can DRAIN them via
+    /// [`CommandRuntime::drain_lifecycle_tasks`] BEFORE the store actor
+    /// is torn down. A command that exits inside the shutdown window
+    /// would otherwise have its waiter call `bucket_append` / `audit.emit`
+    /// AFTER the store is gone, silently losing the final
+    /// `command_exited` event and audit row. Mirrors the IPC-server
+    /// connection-drain pattern (`server.rs::drain_connections`,
+    /// `pipe_server.rs::drain_pipe_connections`). Wrapped in a
+    /// `parking_lot::Mutex` so the synchronous `start_combed` can enqueue
+    /// without an `.await`; the drain takes the set out under the lock and
+    /// joins it without holding the lock across an await.
+    lifecycle_tasks: Arc<parking_lot::Mutex<tokio::task::JoinSet<()>>>,
 }
 
 impl std::fmt::Debug for CommandRuntime {
@@ -317,6 +338,7 @@ impl CommandRuntime {
             live: Arc::new(RwLock::new(std::collections::HashMap::default())),
             activation,
             sources,
+            lifecycle_tasks: Arc::new(parking_lot::Mutex::new(tokio::task::JoinSet::new())),
         }
     }
 
@@ -587,7 +609,14 @@ impl CommandRuntime {
         let waiter_profile = self.profile_label.clone();
         let waiter_live = Arc::clone(&self.live);
         let waiter_rings = Arc::clone(&self.rings);
-        tokio::spawn(async move {
+        // Enqueue into the lifecycle JoinSet (not a detached
+        // `tokio::spawn`) so a graceful shutdown can await this waiter
+        // BEFORE the store actor closes; otherwise a command exiting in
+        // the shutdown window loses its final command_exited event +
+        // audit row. `JoinSet::spawn` needs an active runtime context,
+        // which every `start_combed` caller has (IPC handlers run on the
+        // daemon runtime). The lock is held only for the enqueue.
+        self.lifecycle_tasks.lock().spawn(async move {
             let (mut final_metrics, outcome) = drive_to_exit(probe).await;
 
             // TCE-ERG-1: build the no-silence receipt while
@@ -687,6 +716,40 @@ impl CommandRuntime {
         })
     }
 
+    /// Await every in-flight lifecycle waiter task, bounded by
+    /// [`LIFECYCLE_DRAIN_CEILING`]. Called by `run_ipc_server` AFTER the
+    /// IPC connections have drained and BEFORE `shutdown_store`, so a
+    /// command that exits inside the shutdown window still gets its
+    /// `command_exited` event appended and its exit audit row emitted
+    /// before the store actor is torn down.
+    ///
+    /// The set is taken out under the lock and joined OUTSIDE the lock so
+    /// the brief enqueue lock in `start_combed` is never blocked across an
+    /// await. Tasks spawned after the take (vanishingly unlikely once
+    /// shutdown has begun and IPC has stopped accepting) land in a fresh
+    /// set and are not awaited; this is acceptable -- the contract is to
+    /// drain the waiters in flight when shutdown began. Mirrors the
+    /// IPC-server drain (`server.rs::drain_connections`). Cross-platform:
+    /// the command runtime is not unix-only.
+    pub async fn drain_lifecycle_tasks(&self) {
+        let mut tasks = {
+            let mut guard = self.lifecycle_tasks.lock();
+            std::mem::take(&mut *guard)
+        };
+        if tasks.is_empty() {
+            return;
+        }
+        let drain = async { while tasks.join_next().await.is_some() {} };
+        if tokio::time::timeout(LIFECYCLE_DRAIN_CEILING, drain)
+            .await
+            .is_err()
+        {
+            // Ceiling hit: a waiter did not finish in time (e.g. a child
+            // ignoring its grace deadline). Abort the stragglers so the
+            // process can exit; best-effort, not re-awaited.
+            tasks.abort_all();
+        }
+    }
     /// Recompute every live job's sifter from the current
     /// activation registry snapshot + that job's stored inline
     /// rules. TC42c: pass an optional scope filter to restrict the

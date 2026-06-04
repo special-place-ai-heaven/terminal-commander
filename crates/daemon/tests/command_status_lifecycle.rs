@@ -80,6 +80,78 @@ fn command_status_counts_lifecycle_event_when_no_rules_match() {
     });
 }
 
+// D7: a command lifecycle waiter must be AWAITED by the graceful-shutdown
+// drain BEFORE the store closes, so a command exiting in the shutdown
+// window still persists its command_exited event + exit audit row.
+//
+// `drain_lifecycle_tasks` is exactly what `run_ipc_server` calls between
+// the IPC connection drain and `shutdown_store`. Here we call it directly
+// WITHOUT first polling for terminal state: if the waiter were a detached
+// `tokio::spawn` (the pre-fix behavior), the command_exited event would
+// race the assertion and could be missing. Because the waiter is tracked
+// in the lifecycle JoinSet and the drain joins it to completion, the
+// event MUST already be appended the instant the drain returns. Cross-
+// platform: the self-exec `--list` argv is the same quick-exit command
+// the no-rules test above uses on all targets.
+#[test]
+fn lifecycle_waiter_is_drained_before_store_close() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("drain-before-store");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+        let exe = std::env::current_exe()
+            .expect("current test binary path")
+            .to_string_lossy()
+            .into_owned();
+
+        let resp = state
+            .command
+            .start_combed(CommandStartRequest {
+                argv: vec![exe, "--list".to_owned()],
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                grace: None,
+                tag: None,
+            })
+            .expect("start ok");
+
+        // Simulate the graceful-shutdown sequence: drain the lifecycle
+        // waiters (this is the new D7 step). No prior poll-wait: the drain
+        // is what guarantees the waiter ran to completion.
+        state.command.drain_lifecycle_tasks().await;
+
+        // The waiter has been awaited to completion, so the synthetic
+        // command_exited event is already in the bucket and the exit was
+        // recorded on the job. A store close happening now (the real
+        // shutdown path) would therefore NOT lose the final event.
+        let bread = state
+            .router
+            .bucket_events_since(resp.bucket_id, &BucketReadRequest::new(0))
+            .expect("bucket read ok");
+        let kinds: Vec<&str> = bread.events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["command_exited"],
+            "drain must await the waiter so command_exited is persisted before store close"
+        );
+        assert!(
+            matches!(
+                state.command.job_record(resp.job_id).map(|r| r.state),
+                Some(JobState::Exited | JobState::Failed)
+            ),
+            "drain must leave the job in a terminal state"
+        );
+
+        cleanup(&data);
+    });
+}
+
 /// A stdout rule matching "hello"; status=Active so it is
 /// runtime-eligible (the draft-poison gate would otherwise reject it).
 #[cfg(unix)]
