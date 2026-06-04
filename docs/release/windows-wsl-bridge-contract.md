@@ -226,9 +226,19 @@ in `crates/core/src/platform.rs`. Those processes are LLM payload children with
 no operator console expectation; allocating a visible console is outward-filter
 leakage (the operator sees UI the LLM did not intend).
 
-EDR still sees the signed GUI-subsystem daemon as parent (single hop, declared
-service). This does not add a hidden bridge spawn or a LOLBin chain — it only
-suppresses console allocation for daemon-initiated payload children.
+EDR sees a normal user-space background process as parent (single hop) — NOT a
+signed binary and NOT a Windows service. Terminal Commander is a user-space dev
+tool: it runs unsigned (no code-signing/cert is required or used), with no
+service install and no admin. AV legitimacy comes from BEHAVIORAL normalcy —
+the daemon does only what a developer at their own terminal does: native
+user-space syscalls for process inspection/termination (`OpenProcess`/
+`TerminateProcess`/`Toolhelp`, the same calls Task Manager makes — never
+`powershell`/WMI/`taskkill` LOLBins), a direct-`.exe` launch (no `.ps1`/`.cmd`/
+node loader chain), and no process injection, hidden recon, or covert
+persistence (the optional logon Scheduled Task is opt-in/default-off). The only
+remaining hidden-window use is `CREATE_NO_WINDOW` on daemon-initiated payload
+children above — a common background-tool pattern, kept to avoid a console
+flash per command, not a signing/service claim.
 
 ## 5. WSL / Linux runtime package responsibilities (unchanged)
 
