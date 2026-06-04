@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.46](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.45...v0.1.46) (2026-06-04)
+
+
+### Bug Fixes
+
+* release Rust crate changes ([9cd97ce](https://github.com/special-place-ai-heaven/terminal-commander/commit/9cd97cec079dda2d7f90628d54817727b3fae61d))
+* **windows:** user-space AV-safety — behave like a developer, not a vendor ([#91](https://github.com/special-place-ai-heaven/terminal-commander/issues/91)) ([98826e6](https://github.com/special-place-ai-heaven/terminal-commander/commit/98826e648a1cc2b307deb30f76d72f4e55954029))
+
 ## [0.1.45](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.44...v0.1.45) (2026-06-04)
 
 
