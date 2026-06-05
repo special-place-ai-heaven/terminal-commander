@@ -172,16 +172,30 @@ impl McpDaemonClient {
     /// failure -- the daemon pipe/socket gone mid-call ("pipe connect ... os
     /// error 2" on Windows, UDS ENOENT/ECONNREFUSED on unix) -- is
     /// distinguished from a daemon-RETURNED [`IpcError`] via
-    /// [`IpcError::is_transport`]. On a transport failure this:
-    ///   1. triggers the existing bounded, single-flight self-heal (re-probe
-    ///      `Health`, flip the cached status back to available if the daemon
-    ///      is reachable again), then
-    ///   2. RETRIES the call once.
-    /// If the retry still fails on transport, the (transport-tagged) error is
-    /// returned so the tool edge ([`crate::tools::into_mcp_error`]) surfaces a
-    /// CLEAN `daemon_unavailable` envelope rather than a raw `internal_error`
-    /// (-32603) that trains agents to abandon the tool for raw shell. A
-    /// daemon-returned error keeps its normal mapping. No spawn/fs/socket
+    /// [`IpcError::is_transport`]. On a transport failure this ALWAYS triggers
+    /// the bounded, single-flight self-heal (re-probe `Health`, flip the cached
+    /// status back to available if the daemon is reachable again) so cached
+    /// availability is restored for the NEXT call regardless of the request
+    /// kind -- including after a legitimate daemon replace.
+    ///
+    /// Whether the request is then RE-SENT is gated on
+    /// [`IpcRequest::is_idempotent`]:
+    ///   - Idempotent RPCs (pure bounded reads / idempotent repositioning) are
+    ///     retried once; a transient pipe-busy / restart may already be over.
+    ///   - MUTATING RPCs (e.g. `CommandStartCombed`, registry writes, a
+    ///     subscription pull that commits offsets server-side) are NEVER
+    ///     auto-retried. A client-side timeout cannot prove the daemon did not
+    ///     already perform the side effect, so a blind re-send risks a silent
+    ///     double-effect -- the exact double-spawn this gate exists to kill. The
+    ///     (transport-tagged) error is returned immediately after the self-heal
+    ///     attempt; the tool edge surfaces an honest reconcile-don't-retry
+    ///     envelope (see [`crate::tools`]).
+    ///
+    /// If an idempotent retry still fails on transport, the (transport-tagged)
+    /// error is returned so the tool edge surfaces a CLEAN `daemon_unavailable`
+    /// envelope rather than a raw `internal_error` (-32603) that trains agents
+    /// to abandon the tool for raw shell. A daemon-returned error keeps its
+    /// normal mapping. No process launch, no file system, no socket creation
     /// happens here: recovery routes through the supervisor-backed self-heal
     /// path, mcp stays a thin client.
     pub async fn call(&self, request: IpcRequest) -> Result<IpcResponse, IpcError> {
@@ -189,13 +203,23 @@ impl McpDaemonClient {
         match self.inner.call(id, request.clone()).await {
             Ok(resp) => Ok(resp),
             Err(e) if e.is_transport() => {
-                // Could not reach the daemon mid-call. Attempt recovery, then
-                // retry exactly once. `try_self_heal` is a no-op (returns
-                // false) when there is no status handle; we retry regardless
-                // because a transient pipe-busy / restart may already be over.
+                // Could not reach the daemon mid-call. ALWAYS attempt recovery
+                // (restores cached availability for the next call, even for
+                // mutating RPCs after a daemon replace). `try_self_heal` is a
+                // no-op (returns false) when there is no status handle.
                 let _recovered = self.try_self_heal().await;
-                let retry_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                self.inner.call(retry_id, request).await
+                if request.is_idempotent() {
+                    // Safe to re-send: a pure read / idempotent reposition can
+                    // run twice without a server-side double-effect.
+                    let retry_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                    self.inner.call(retry_id, request).await
+                } else {
+                    // Mutating RPC: the daemon may already have performed the
+                    // side effect before the transport dropped. Returning the
+                    // transport error (no re-send) is the only safe choice; the
+                    // caller reconciles via command_status / runtime_state.
+                    Err(e)
+                }
             }
             Err(e) => Err(e),
         }

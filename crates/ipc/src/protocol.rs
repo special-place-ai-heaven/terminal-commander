@@ -307,6 +307,92 @@ pub enum IpcRequest {
     Shutdown,
 }
 
+impl IpcRequest {
+    /// Whether this RPC is safe to blindly re-send after a transport
+    /// failure (the daemon pipe/socket dropped mid-call so the client
+    /// never learned the outcome).
+    ///
+    /// Governing rule: return `false` for any RPC whose retry could
+    /// create or duplicate a server-side resource, mint a fresh id, or
+    /// advance server-held state; return `true` only for pure bounded
+    /// reads and idempotent-effect repositioning. When in doubt, return
+    /// `false` -- a missed retry is an error the caller can re-issue
+    /// deliberately, but a silent double-effect cannot be undone.
+    ///
+    /// The match is EXHAUSTIVE (no wildcard arm) so that adding a new
+    /// `IpcRequest` variant fails to compile until it is deliberately
+    /// classified here.
+    #[must_use]
+    pub const fn is_idempotent(&self) -> bool {
+        match self {
+            // Mutating / unsafe to blind-retry: each one creates or
+            // duplicates server-side state, mints a fresh id, or advances
+            // a server-held offset.
+            Self::CommandStartCombed(_)
+            | Self::PtyCommandStart(_)
+            | Self::PtyCommandWriteStdin(_)
+            | Self::PtyCommandStop(_)
+            | Self::RegistryUpsert(_)
+            | Self::RegistryActivate(_)
+            | Self::RegistryDeactivate(_)
+            | Self::RegistryImportPack(_)
+            | Self::FileWatchStart(_)
+            | Self::FileWatchStop(_)
+            // Mints a fresh sub_id + a registry slot; a blind retry leaks
+            // a slot and can trip SubscriptionLimitExceeded.
+            | Self::SubscriptionOpen(_)
+            // Frees a slot; conservative non-retry.
+            | Self::SubscriptionClose(_)
+            // NOT a safe read: per-consumer offsets are advanced and
+            // committed SERVER-SIDE inside the pull (the drain advances
+            // offsets and `commit` persists them, subscriptions/pull.rs
+            // commit sites at 543/633) BEFORE the response is serialized.
+            // A lost-then-
+            // retried pull restarts from the already-advanced offset, so
+            // the previously-drained events are silently dropped --
+            // converting the documented lossless pull into a lossy one.
+            // Contrast BucketWait, which is client-cursor-driven and fully
+            // replayable.
+            | Self::SubscriptionPull(_)
+            | Self::Shutdown => false,
+
+            // Pure bounded reads + idempotent-effect repositioning: a
+            // retry observes state without changing it (or re-applies the
+            // same absolute reposition).
+            Self::Health
+            | Self::SystemDiscover
+            | Self::PolicyStatus
+            | Self::SelfCheck
+            | Self::CommandStatus(_)
+            | Self::CommandOutputTail(_)
+            | Self::BucketWait(_)
+            | Self::BucketEventsSince(_)
+            | Self::BucketSummary(_)
+            | Self::EventContext(_)
+            | Self::RuntimeState(_)
+            | Self::ProbeList(_)
+            | Self::ProbeStatus(_)
+            | Self::PtyCommandList
+            | Self::FileReadWindow(_)
+            | Self::FileSearch(_)
+            | Self::FileWatchList
+            | Self::RegistrySearch(_)
+            | Self::RegistryGet(_)
+            | Self::RegistryTest(_)
+            | Self::RegistryListActive(_)
+            | Self::SubscriptionList(_)
+            // Set-position (absolute clamped offset), not advance-position,
+            // so a re-send re-applies the same reposition. Caveat: the
+            // clamp target is live state (head_seq/tail_seq), so a retry
+            // after bucket eviction may clamp to a later position than the
+            // first attempt -- identical to the hazard of any deliberate
+            // re-seek, hence still idempotent in shape.
+            | Self::SubscriptionSeek(_)
+            | Self::AuditSince(_) => true,
+        }
+    }
+}
+
 /// Success / error union. Success carries a typed payload per method;
 /// error carries a structured code + message.
 ///
@@ -1889,6 +1975,334 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let back: IpcError = serde_json::from_str(&json).unwrap();
         assert!(back.is_transport());
+    }
+
+    // Source-status: test-only. Verifies the retry-safety classification on
+    // `IpcRequest::is_idempotent`, which gates the MCP daemon-client retry so a
+    // transport-failed MUTATING RPC (e.g. a >5s-spawning CommandStartCombed) is
+    // never blindly re-sent. The list below is exhaustive over the enum; the
+    // `is_idempotent` match itself is wildcard-free so a new variant forces a
+    // deliberate classification before this test can even be updated.
+    #[test]
+    #[allow(clippy::too_many_lines)] // one table row per IpcRequest variant
+    fn is_idempotent_classifies_every_request_variant() {
+        use terminal_commander_core::{JobId, RuleDefinition};
+
+        // A minimal valid RuleDefinition for the two rule-carrying registry
+        // variants. Deserialized rather than hand-built so this test stays
+        // decoupled from the full struct shape (it only needs *a* value).
+        fn sample_rule() -> RuleDefinition {
+            serde_json::from_str(
+                r#"{
+                    "id": "r",
+                    "version": 1,
+                    "kind": "keyword",
+                    "severity": "low",
+                    "event_kind": "k",
+                    "keywords": ["x"],
+                    "summary_template": "s"
+                }"#,
+            )
+            .expect("sample rule deserializes")
+        }
+
+        let predicate = SubscriptionPredicate {
+            severity_min: None,
+            kind: None,
+            sources: SubscriptionSourceSel::All,
+            tag: None,
+        };
+
+        // (variant, expected is_idempotent). MUTATING = false (unsafe to blind
+        // re-send), READ / idempotent-reposition = true.
+        let cases: Vec<(IpcRequest, bool)> = vec![
+            // ---- mutating: must be false ----
+            (
+                IpcRequest::CommandStartCombed(CommandStartParams {
+                    environment: None,
+                    argv: vec!["x".to_owned()],
+                    cwd: None,
+                    env: vec![],
+                    bucket_config: None,
+                    rules: vec![],
+                    grace_ms: None,
+                    tag: None,
+                }),
+                false,
+            ),
+            (
+                IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
+                    argv: vec!["x".to_owned()],
+                    cwd: None,
+                    env: vec![],
+                    bucket_config: None,
+                    rules: vec![],
+                    rows: None,
+                    cols: None,
+                    tag: None,
+                }),
+                false,
+            ),
+            (
+                IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
+                    job_id: JobId::new(),
+                    bytes: "x".to_owned(),
+                }),
+                false,
+            ),
+            (
+                IpcRequest::PtyCommandStop(PtyCommandStopParams {
+                    job_id: JobId::new(),
+                }),
+                false,
+            ),
+            (
+                IpcRequest::RegistryUpsert(RegistryUpsertParams {
+                    definition: sample_rule(),
+                }),
+                false,
+            ),
+            (
+                IpcRequest::RegistryActivate(RegistryActivateParams {
+                    rule_id: "r".to_owned(),
+                    version: None,
+                    scope: None,
+                }),
+                false,
+            ),
+            (
+                IpcRequest::RegistryDeactivate(RegistryDeactivateParams {
+                    rule_id: "r".to_owned(),
+                    version: 1,
+                    scope: None,
+                }),
+                false,
+            ),
+            (
+                IpcRequest::RegistryImportPack(RegistryImportPackParams {
+                    pack: "p".to_owned(),
+                    activate: false,
+                    scope: None,
+                }),
+                false,
+            ),
+            (
+                IpcRequest::FileWatchStart(FileWatchStartParams {
+                    path: "x".into(),
+                    bucket_config: None,
+                    rules: vec![],
+                    follow_from_beginning: None,
+                    tag: None,
+                }),
+                false,
+            ),
+            (
+                IpcRequest::FileWatchStop(FileWatchStopParams {
+                    watch_id: JobId::new(),
+                }),
+                false,
+            ),
+            (
+                IpcRequest::SubscriptionOpen(SubscriptionOpenParams {
+                    predicate: predicate.clone(),
+                }),
+                false,
+            ),
+            (
+                IpcRequest::SubscriptionClose(SubscriptionCloseParams {
+                    sub_id: "s".to_owned(),
+                }),
+                false,
+            ),
+            (
+                IpcRequest::SubscriptionPull(SubscriptionPullParams {
+                    sub_id: "s".to_owned(),
+                    max: None,
+                    timeout_ms: None,
+                }),
+                false,
+            ),
+            (IpcRequest::Shutdown, false),
+            // ---- reads / idempotent repositioning: must be true ----
+            (IpcRequest::Health, true),
+            (IpcRequest::SystemDiscover, true),
+            (IpcRequest::PolicyStatus, true),
+            (IpcRequest::SelfCheck, true),
+            (
+                IpcRequest::CommandStatus(CommandStatusParams {
+                    job_id: JobId::new(),
+                }),
+                true,
+            ),
+            (
+                IpcRequest::CommandOutputTail(CommandOutputTailParams {
+                    job_id: JobId::new(),
+                    max_lines: 10,
+                    max_bytes: 1024,
+                }),
+                true,
+            ),
+            (
+                IpcRequest::BucketWait(BucketWaitParams {
+                    bucket_id: BucketId::new(),
+                    cursor: 0,
+                    severity_min: None,
+                    kind_filter: None,
+                    limit: None,
+                    timeout_ms: None,
+                }),
+                true,
+            ),
+            (
+                IpcRequest::BucketEventsSince(BucketEventsSinceParams {
+                    bucket_id: BucketId::new(),
+                    cursor: 0,
+                    severity_min: None,
+                    kind_filter: None,
+                    limit: None,
+                }),
+                true,
+            ),
+            (
+                IpcRequest::BucketSummary(BucketSummaryParams {
+                    bucket_id: BucketId::new(),
+                }),
+                true,
+            ),
+            (
+                IpcRequest::EventContext(EventContextParams {
+                    bucket_id: BucketId::new(),
+                    event_id: EventId::new(),
+                    before: None,
+                    after: None,
+                    max_bytes: None,
+                }),
+                true,
+            ),
+            (
+                IpcRequest::RuntimeState(ListLimitParams { limit: None }),
+                true,
+            ),
+            (IpcRequest::ProbeList(ListLimitParams { limit: None }), true),
+            (
+                IpcRequest::ProbeStatus(ProbeStatusParams {
+                    probe_id: terminal_commander_core::ProbeId::new(),
+                }),
+                true,
+            ),
+            (IpcRequest::PtyCommandList, true),
+            (
+                IpcRequest::FileReadWindow(FileReadWindowParams {
+                    path: "x".into(),
+                    start_line: None,
+                    max_lines: None,
+                    max_bytes: None,
+                }),
+                true,
+            ),
+            (
+                IpcRequest::FileSearch(FileSearchParams {
+                    path: "x".into(),
+                    query: "q".to_owned(),
+                    case_insensitive: None,
+                    max_matches: None,
+                    max_snippet_bytes: None,
+                }),
+                true,
+            ),
+            (IpcRequest::FileWatchList, true),
+            (
+                IpcRequest::RegistrySearch(RegistrySearchParams {
+                    query: "q".to_owned(),
+                    limit: None,
+                }),
+                true,
+            ),
+            (
+                IpcRequest::RegistryGet(RegistryGetParams {
+                    rule_id: "r".to_owned(),
+                    version: None,
+                }),
+                true,
+            ),
+            (
+                IpcRequest::RegistryTest(RegistryTestParams {
+                    rule_id: "r".to_owned(),
+                    version: None,
+                    samples: vec![],
+                }),
+                true,
+            ),
+            (
+                IpcRequest::RegistryListActive(ListLimitParams { limit: None }),
+                true,
+            ),
+            (
+                IpcRequest::SubscriptionList(SubscriptionListParams { limit: None }),
+                true,
+            ),
+            (
+                IpcRequest::SubscriptionSeek(SubscriptionSeekParams {
+                    sub_id: "s".to_owned(),
+                    bucket_id: BucketId::new(),
+                    seq: 0,
+                }),
+                true,
+            ),
+            (
+                IpcRequest::AuditSince(AuditSinceParams {
+                    cursor: 0,
+                    action_filter: None,
+                    decision_filter: None,
+                    limit: None,
+                }),
+                true,
+            ),
+        ];
+
+        for (req, expected) in &cases {
+            assert_eq!(
+                req.is_idempotent(),
+                *expected,
+                "is_idempotent classification wrong for {req:?}"
+            );
+        }
+
+        // Spot-check the two highest-harm classifications explicitly so a
+        // regression names the exact defect.
+        assert!(
+            !IpcRequest::CommandStartCombed(CommandStartParams {
+                environment: None,
+                argv: vec!["sleep".to_owned(), "10".to_owned()],
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                grace_ms: None,
+                tag: None,
+            })
+            .is_idempotent(),
+            "CommandStartCombed must be non-idempotent: a blind retry double-spawns"
+        );
+        assert!(
+            !IpcRequest::SubscriptionPull(SubscriptionPullParams {
+                sub_id: "s".to_owned(),
+                max: None,
+                timeout_ms: None,
+            })
+            .is_idempotent(),
+            "SubscriptionPull must be non-idempotent: per-consumer offsets are \
+             committed server-side inside the pull (subscriptions/pull.rs 543/633) \
+             before the response, so a lost-then-retried pull drops already-drained \
+             events -- it is NOT a replayable read like BucketWait"
+        );
+        assert!(
+            !IpcRequest::SubscriptionOpen(SubscriptionOpenParams { predicate }).is_idempotent(),
+            "SubscriptionOpen must be non-idempotent: a blind retry mints a second \
+             sub_id + registry slot, leaking a slot and risking \
+             SubscriptionLimitExceeded"
+        );
     }
 
     #[test]

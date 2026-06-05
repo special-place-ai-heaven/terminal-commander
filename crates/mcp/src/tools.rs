@@ -605,7 +605,7 @@ impl TerminalCommanderMcpServer {
                 "cursor": cursor,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -639,7 +639,7 @@ impl TerminalCommanderMcpServer {
                 ..
             })) => (job_id, bucket_id, cursor),
             Ok(other) => return Err(unexpected_variant(&other)),
-            Err(e) => return Err(into_mcp_error(&e)),
+            Err(e) => return Err(into_mcp_error_for(false, &e)),
         };
 
         // 2. Wait loop: drain signals until the job is terminal, the
@@ -918,7 +918,7 @@ impl TerminalCommanderMcpServer {
                 }))
             }
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -995,7 +995,7 @@ impl TerminalCommanderMcpServer {
                 "jobs_rebound": jobs_rebound,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -1049,7 +1049,7 @@ impl TerminalCommanderMcpServer {
                 }))
             }
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -1086,7 +1086,7 @@ impl TerminalCommanderMcpServer {
                 "jobs_rebound": jobs_rebound,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -1213,7 +1213,7 @@ impl TerminalCommanderMcpServer {
                 "cursor": cursor,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -1245,7 +1245,7 @@ impl TerminalCommanderMcpServer {
                 "bytes_total": bytes_total,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -1298,7 +1298,7 @@ impl TerminalCommanderMcpServer {
                 "cursor": cursor,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -1332,7 +1332,7 @@ impl TerminalCommanderMcpServer {
                 "secret_prompt_active": secret_prompt_active,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -1365,7 +1365,7 @@ impl TerminalCommanderMcpServer {
                 "secret_prompts_total": secret_prompts_total,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -1470,7 +1470,7 @@ impl TerminalCommanderMcpServer {
                 "matched_sources": matched_sources,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -1539,7 +1539,7 @@ impl TerminalCommanderMcpServer {
                 }))
             }
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -1585,7 +1585,7 @@ impl TerminalCommanderMcpServer {
                 json_tool_result(&serde_json::json!({ "closed": closed }))
             }
             Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error(&e)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -1662,21 +1662,31 @@ fn json_tool_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError>
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
-/// Map a daemon `IpcError` to an MCP `ErrorData` with stable codes.
+/// Map a daemon `IpcError` to an MCP `ErrorData`, honest about the mutability
+/// of the request that produced it.
+///
+/// `request_is_idempotent` matters ONLY on the transport-failure short-circuit:
+/// a transport loss is "could not reach the daemon", and whether it is safe to
+/// re-issue depends on whether the request was a pure read. For a mutating
+/// request the daemon may already have applied the side effect before the
+/// transport dropped, so the envelope must tell the agent to reconcile, never
+/// to blindly retry. Daemon-RETURNED errors (the code match below) are
+/// classified identically regardless of mutability.
 #[must_use]
-pub fn into_mcp_error(e: &IpcError) -> McpError {
+pub fn into_mcp_error_for(request_is_idempotent: bool, e: &IpcError) -> McpError {
     // Mid-call TRANSPORT failure (the daemon pipe/socket went away during the
-    // call): `McpDaemonClient::call` already attempted self-heal + one retry
-    // and still could not reach the daemon. Surface the SAME clean
+    // call): `McpDaemonClient::call` already attempted self-heal, and re-sent
+    // the request once IFF it was idempotent. Surface the clean
     // `daemon_unavailable` envelope the startup-unavailable path produces --
     // self-explanatory, recoverable, and crucially NOT a raw `internal_error`
-    // (-32603), which trains agents to abandon TC for raw shell (TB-7 / Cursor
-    // call #21). This must come BEFORE the code match: a transport error is
-    // `Internal`-coded but is "could not reach the daemon", not a server fault.
-    // The raw OS detail (e.g. "pipe connect ... os error 2") is deliberately
-    // NOT leaked into the message or data.
+    // semantics at the application layer (the `code` is `daemon_unavailable`),
+    // which trains agents to abandon TC for raw shell (TB-7 / Cursor call #21).
+    // This must come BEFORE the code match: a transport error is `Internal`-
+    // coded but is "could not reach the daemon", not a server fault. The raw OS
+    // detail (e.g. "pipe connect ... os error 2") is deliberately NOT leaked
+    // into the message or data.
     if e.is_transport() {
-        return transport_unavailable_error();
+        return transport_unavailable_error(request_is_idempotent);
     }
     let message: Cow<'static, str> = Cow::Owned(format_ipc_error(e));
     let data = serde_json::json!({
@@ -1724,6 +1734,18 @@ pub fn into_mcp_error(e: &IpcError) -> McpError {
         | IpcErrorCode::UnknownSubscription
         | IpcErrorCode::SubscriptionLimitExceeded => McpError::invalid_params(message, Some(data)),
     }
+}
+
+/// Map a daemon `IpcError` to an MCP `ErrorData` with stable codes.
+///
+/// This is the READ-ONLY edge: a transport failure produces the idempotent
+/// transport envelope (the read may be safely re-issued). Tool arms that send a
+/// MUTATING request MUST call [`into_mcp_error_for`] with
+/// `request_is_idempotent = false` so a transport failure produces the honest
+/// reconcile-don't-retry envelope instead.
+#[must_use]
+pub fn into_mcp_error(e: &IpcError) -> McpError {
+    into_mcp_error_for(true, e)
 }
 
 fn unexpected_variant(_resp: &IpcResponse) -> McpError {
@@ -1788,21 +1810,51 @@ fn daemon_unavailable_error(status: &EnsureDaemonStatus) -> McpError {
 }
 
 /// Build the `daemon_unavailable` envelope for a MID-CALL transport failure
-/// that survived self-heal + one retry (see [`crate::daemon_client::McpDaemonClient::call`]).
+/// (see [`crate::daemon_client::McpDaemonClient::call`]).
+///
 /// Same `code: "daemon_unavailable"` + teaching-text shape as
 /// [`daemon_unavailable_error`], so a transport loss mid-call is
-/// indistinguishable to the agent from a startup-time unavailability: a clean,
-/// recoverable signal, never a raw `internal_error` (-32603). Carries no
-/// `EnsureDaemonStatus` (we are past startup) and never leaks the raw OS error.
-fn transport_unavailable_error() -> McpError {
+/// indistinguishable to the agent from a startup-time unavailability. Carries
+/// no `EnsureDaemonStatus` (we are past startup) and never leaks the raw OS
+/// error.
+///
+/// Numeric code: this currently routes through [`McpError::internal_error`], so
+/// the wire is JSON-RPC `-32603`. The application-level `code` is the honest
+/// `daemon_unavailable`; the numeric-code migration off `-32603` is tracked
+/// separately and deliberately NOT done here.
+///
+/// The `remedy` depends on whether the failed request was idempotent:
+///   - idempotent (a pure read): the adapter already attempted self-heal + one
+///     retry, so a manual re-call of the read is safe -- the remedy says so.
+///   - mutating: the adapter did NOT re-send (a blind retry could double the
+///     side effect), and a client-side transport failure cannot prove whether
+///     the daemon already applied the change. The remedy is operation-neutral
+///     and explicitly does NOT say "retry the tool": it tells the agent to
+///     reconcile actual state via `command_status` / `runtime_state` first.
+fn transport_unavailable_error(operation_is_idempotent: bool) -> McpError {
+    let (recovery, remedy) = if operation_is_idempotent {
+        (
+            "auto-recovery (health re-probe + one retry) was attempted",
+            "the daemon was unavailable; retry the tool -- the adapter \
+             re-establishes the daemon on the next call",
+        )
+    } else {
+        (
+            "auto-recovery (health re-probe) was attempted; the request was \
+             NOT re-sent because re-sending a mutating operation could apply \
+             it twice",
+            "this mutating operation may or may not have taken effect; call \
+             command_status or runtime_state to confirm the actual state \
+             before re-issuing",
+        )
+    };
     let payload = serde_json::json!({
         "code": "daemon_unavailable",
         "message": "terminal-commanderd became unreachable mid-call",
         "details": {
             "phase": "mid_call_transport",
-            "recovery": "auto-recovery (health re-probe + one retry) was attempted",
-            "remedy": "the daemon was unavailable; retry the tool -- the adapter \
-                       re-establishes the daemon on the next call",
+            "recovery": recovery,
+            "remedy": remedy,
         },
     });
     McpError::internal_error("daemon_unavailable", Some(payload))
@@ -3821,6 +3873,77 @@ mod tests {
             !rendered.contains("daemon_unavailable"),
             "a real server fault must NOT be disguised as daemon_unavailable, got: {rendered}"
         );
+    }
+
+    /// Source-status: test-only. A MUTATING request that fails on transport must
+    /// NOT be told to "retry the tool" -- a blind re-issue could apply the side
+    /// effect twice. The envelope must instead instruct the agent to reconcile via
+    /// command_status / runtime_state. (TC-1a honest-remedy half.)
+    #[test]
+    fn mutating_transport_envelope_has_reconcile_remedy_not_retry() {
+        let transport = IpcError::transport("pipe connect: ... os error 2");
+        let mcp = into_mcp_error_for(false, &transport);
+
+        // Application-level code stays daemon_unavailable.
+        assert_eq!(mcp.message, "daemon_unavailable");
+
+        let data = mcp
+            .data
+            .expect("mutating transport envelope carries a data payload");
+        let remedy = data["details"]["remedy"]
+            .as_str()
+            .expect("remedy is a string");
+
+        assert!(
+            !remedy.contains("retry the tool"),
+            "the MUTATING remedy must NOT say 'retry the tool' (it could double the \
+             side effect); got: {remedy}"
+        );
+        assert!(
+            remedy.contains("command_status") && remedy.contains("runtime_state"),
+            "the MUTATING remedy must instruct the agent to reconcile via \
+             command_status / runtime_state; got: {remedy}"
+        );
+        // Operation-neutral: honest for start, stop, and shutdown alike.
+        assert!(
+            remedy.contains("may or may not have taken effect"),
+            "the MUTATING remedy must be operation-neutral; got: {remedy}"
+        );
+
+        // The raw OS detail still must not leak.
+        let rendered = serde_json::to_string(&data).unwrap();
+        assert!(
+            !rendered.contains("pipe connect"),
+            "the mutating envelope must not leak the raw IPC failure detail; got: {rendered}"
+        );
+    }
+
+    /// Source-status: test-only. A READ (idempotent) request that fails on
+    /// transport keeps the retry remedy -- the adapter already self-healed + retried
+    /// once, and a manual re-issue of a pure read is safe.
+    #[test]
+    fn idempotent_transport_envelope_keeps_retry_remedy() {
+        let transport = IpcError::transport("pipe connect: ... os error 2");
+
+        // Both the explicit idempotent path and the default `into_mcp_error`
+        // wrapper (which delegates with request_is_idempotent = true) keep the
+        // retry remedy.
+        for mcp in [
+            into_mcp_error_for(true, &transport),
+            into_mcp_error(&transport),
+        ] {
+            assert_eq!(mcp.message, "daemon_unavailable");
+            let data = mcp
+                .data
+                .expect("idempotent transport envelope carries a data payload");
+            let remedy = data["details"]["remedy"]
+                .as_str()
+                .expect("remedy is a string");
+            assert!(
+                remedy.contains("retry the tool"),
+                "the idempotent remedy keeps 'retry the tool'; got: {remedy}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
