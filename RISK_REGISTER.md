@@ -98,6 +98,124 @@ This is operator-input, not raw stdout content.
 No raw stdout / stderr / file body content reaches the LLM.
 **Follow-up:** None.
 
+### R-07 — Ghost job: client-timeout aborts a live spawn; blind retry of a mutating RPC double-spawns
+
+**Area:** Trust / command lifecycle / TC trust-defects campaign
+(`.planning/tc-bugfix-campaign/`).
+**Description:** A >5s client request timeout on a
+`CommandStartCombed` makes the shared retry path
+(`crates/mcp/src/daemon_client.rs:191-198`,
+`Err(e) if e.is_transport()`) re-send a cloned mutating request
+while the first spawn may already be running on the daemon =>
+DOUBLE SPAWN. The mid-call envelope compounds the harm: its remedy
+literally says "retry the tool"
+(`crates/mcp/src/tools.rs:1804-1805`), it routes through
+`McpError::internal_error` (numeric -32603, `tools.rs:1808`), and
+its doc comment (`tools.rs:1790-1796`) falsely claims "never a raw
+internal_error (-32603)". There is also no daemon-side dedup guard
+(`crates/daemon/src/command.rs` `start_combed` has no pre-spawn
+lookup; `RequestEnvelope` has no key), so a manual/LLM re-call of a
+timed-out start also double-spawns.
+**Status:** Open.
+**Mitigation:** Phase 1 (BACKLOG P0.1) gates the retry on a new
+`IpcRequest::is_idempotent()` so mutating RPCs are not auto-retried,
+splits self-heal from re-send, and replaces the "retry the tool"
+remedy with an operation-neutral "confirm via
+command_status/runtime_state" text + corrects the lying doc
+comment. Phase 2 (BACKLOG P1.0a) adds a narrow nonce-keyed
+in-flight dedup guard on `CommandRuntime` that closes the manual
+re-call window. The full server-honored idempotency key
+(BACKLOG TCD-1), the pre-spawn ack handshake (BACKLOG TCD-2), and
+the numeric -32603 wire-code change (BACKLOG TCD-4) are deferred,
+tracked here. This row stays Active until Phases 1+2 land WITH
+proof (one job, not two, on a TEST socket under an induced
+timeout).
+**Follow-up:** BACKLOG P0.1 (Phase 1), P1.0a (Phase 2); TCD-1,
+TCD-2, TCD-4 (deferred).
+
+### R-08 — self_check false-green: never exercises a real command spawn
+
+**Area:** Observability / health honesty / TC trust-defects
+campaign.
+**Description:** `handle_self_check`
+(`crates/daemon/src/ipc/server.rs:801-818`) hardcodes
+`failures:0` and never spawns a command; the dispatch arm
+(`server.rs:540-543`) is sync. A live client polling `self_check`
+during a real outage (e.g. the TC-1/TC-6 window) receives a false
+GREEN — the health probe does not exercise the spawn path it
+implicitly attests.
+**Status:** Open.
+**Mitigation:** Phase 5 (BACKLOG P1.0d) makes `handle_self_check`
+async and adds a profile-gated bounded real round-trip that spawns
+`current_exe()` as a hidden clap subcommand
+(`[exe, "selfcheck-noop"]`, NOT a flag) through the normal
+CommandRuntime path into ONE cached immortal bucket. It is
+profile-gated to skip-or-assert-deny so a healthy daemon is NEVER
+false-RED, and a forced round-trip failure DOES yield failures>0
+(negative test). This row stays Active until Phase 5 lands WITH
+proof (failures==0 healthy, failures>0 on real breakage, bucket
+grows by exactly 1 over the daemon lifetime).
+**Follow-up:** BACKLOG P1.0d (Phase 5).
+
+### R-09 — run_and_watch advertised wait cap is not honored
+
+**Area:** Trust / API honesty / TC trust-defects campaign.
+**Description:** `run_and_watch` advertises a `wait_ms` cap (max
+60000) but the loop `for _ in 0..deadline_slices`
+(`crates/mcp/src/tools.rs:650`) x per-slice BucketWait blocking up
+to `MAX_WAIT_SLICE_MS=1000` (`tools.rs:683`) + RTTs yields ~62-70s
+wall vs the 60000ms advertised. Separately, a mid-wait IPC error
+after a job_id is known discards the live job handle
+(`tools.rs:665`, `:703`) instead of returning a recoverable
+result.
+**Status:** Open.
+**Mitigation:** Phase 3 (BACKLOG P0.2 + P1.0e) rewrites the wait
+loop once (shared body `tools.rs:650-709`) with a wall-clock
+`Instant` deadline so the advertised cap is honest, keeping
+`MAX_WAIT_SLICE_MS=1000` (no load-gate RPC-doubling risk), and
+converts the two post-job_id error arms to a degraded
+isError:false result that preserves the job_id/cursor/signals
+(state last-observed/UNKNOWN, never silently Running;
+`recover_hint` says confirm daemon health first). This row stays
+Active until Phase 3 lands WITH proof (measured wall <= ~61s at
+wait_ms=60000; mid-loop error returns degraded:true, not a bare
+error).
+**Follow-up:** BACKLOG P0.2 (TC-1b), P1.0e (TC-6), both Phase 3.
+
+### R-10 — ProbeListEntry argv_head/tag widens the local read surface to any IPC client
+
+**Area:** Observability / read-surface widening / TC trust-defects
+campaign.
+**Description:** Phase 4 (BACKLOG P1.0c) adds `argv_head` (bounded
+redacted argv head) + `tag` to `ProbeListEntry`
+(`crates/ipc/src/protocol.rs`), surfaced from `collect_probes`
+(`crates/daemon/src/ipc/handlers/runtime.rs:13-86`). Read handlers
+take no peer authz today, so this surfaces the program + bounded
+redacted head + tag of every live job to ANY local IPC client —
+a widening from R-06's per-job-client posture to any-local-client.
+A correctness pitfall enables it: `format_argv_metadata`
+(`crates/daemon/src/command.rs:989-1004`) only TRUNCATES (128
+bytes); it redacts NOTHING, and the only redaction in the tree is
+on command OUTPUT lines (`crates/sifters/src/lib.rs:309-343`),
+never argv — so argv_head without a new redactor would leak
+secrets sitting in argv[0..2] (`Authorization: Bearer ...`,
+`-ppassword`, `postgres://user:pass@host`).
+**Status:** Accepted (single-tenant local-daemon trust model;
+mitigated by a new argv redactor). Operator-level acceptance: the
+local daemon is a single-tenant trust boundary; argv is already
+treated as operator-input-safe (R-06).
+**Mitigation:** Phase 4 builds a NEW argv redactor that masks
+values after secret-shaped flags (`-H`/`--header`,
+`-p`/`--password`, `--token`, `--secret`, `Authorization:`, and
+`key=value` where key matches `*_TOKEN`/`*_SECRET`/`*_PASSWORD`/
+`*_KEY`) before argv_head ships; argv is bounded to the head
+(argv[0..2] or argv[0] only). Cross-link R-06 (the argv-surface
+precedent that establishes argv as operator-input-safe). This row
+remains Accepted (not Resolved) under the single-tenant model; the
+redactor test must assert against a real secret pattern, not
+length.
+**Follow-up:** BACKLOG P1.0c (Phase 4); cross-link R-06.
+
 ## Resolved risks (historical context)
 
 | ID | Area | Resolved by | Note |

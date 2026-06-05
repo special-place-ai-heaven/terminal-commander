@@ -1,0 +1,261 @@
+{
+  "posture": "Trust-contract-first remediation of six verified defects (TC-1..TC-6) in the terminal-commander Rust workspace. The governing design axiom: an LLM caller must NEVER receive an error that hides a side effect, NEVER be told to retry a non-idempotent op, and ALWAYS be able to map returned state to its intent. Error shapes, response schemas, and tool descriptions are the primary design surface; daemon internals follow from the contract. The plan is sequenced into 6 PR-sized phases, each touching <= ~10 files and each independently CI-green (both OS gates pass, fmt/clippy/-D warnings clean, nextest green, MCP grep-guards intact). ZERO new dependencies. crates/mcp/src stays free of Command/spawn/TcpListener/UdpSocket/fs (kill is forwarded to the daemon over IPC). Every new MCP tool gets a daemon-IPC integration test (TESTING.md 3.4). The live daemon on this machine is never touched: all tests bind their own sockets/data dirs. Phases are ordered by trust-criticality and by the constraint that TC-1b and TC-6 edit the SAME wait-loop body (tools.rs:655-709) so they are co-designed in one phase; TC-1a/TC-2 (the active double-spawn regression) is fixed FIRST because it is a live data-corruption hazard. No push/merge without explicit human approval; commit to a review branch and stop.",
+  "fork_decisions": [
+    {
+      "fork": "F1 — TC-1a/TC-2 ghost-spawn / double-spawn fix: (a) stop blindly retrying mutating RPCs, (b) server-honored idempotency key, (c) pre-spawn ack handshake, or combination",
+      "decision": "PRIMARY = (a) classify-and-don't-retry mutating RPCs, REINFORCED by a narrow server-side dedup guard as defense-in-depth, and FIX the remedy text. Reject (c) pre-spawn ack for this campaign (largest blast radius: rewrites start_combed spawn-failure contract command.rs:551-560, introduces a Starting-state liveness window run_and_watch/command_status must learn, and STILL double-spawns under the blind retry per research-gaps verdict). The trust-contract reason (a) is correct and was under-weighted: a 5s client timeout (client.rs:45) maps to IpcError::transport (client.rs:73); McpDaemonClient::call (daemon_client.rs:191-201) then retries ANY is_transport error once by re-sending the CLONED request; for CommandStartCombed/PtyCommandStart (mutating, non-idempotent) this re-executes a spawn the daemon already completed. The contract rule 'never tell the agent to retry a non-idempotent op' applies equally to the ADAPTER retrying on the agent's behalf. Fix: introduce IpcRequest::is_idempotent() (read-only methods true; CommandStartCombed, PtyCommandStart, PtyCommandWriteStdin, RegistryUpsert/Activate/Deactivate/ImportPack, FileWatchStart/Stop, Shutdown false) and gate the retry in daemon_client.rs:191 on `e.is_transport() && request.is_idempotent()`. Mutating RPCs that hit a transport timeout return the transport error UN-retried, surfaced as a daemon_unavailable envelope — but FIX transport_unavailable_error (tools.rs:1797-1808) so the remedy text for a non-idempotent op tells the agent to RECONCILE via runtime_state/command_status BEFORE any retry, never 'retry the tool'. Defense-in-depth dedup guard: NOT a heavy envelope idempotency-key protocol; instead a daemon-side short-TTL in-flight fingerprint = hash(argv + cwd + tag) maintained in CommandRuntime, checked at the top of start_combed (command.rs:~459, before id mint at :472); a second identical spawn arriving within a small window (e.g. 3s, expired on completion) returns the SAME job_id/bucket_id instead of spawning. This closes the residual window where a slow human/agent manual retry (not the adapter) duplicates. The fingerprint reuses the existing contentFingerprint hashing idiom (std hashing, no new dep).",
+      "rationale": "Classify-and-don't-retry is the smallest correct change, stays inside no-new-deps + the mcp grep-guard (pure logic in daemon_client.rs + a const fn on the IpcRequest enum, no spawn/fs/socket), and directly enforces the trust contract at the layer that violated it. The verified -32603 + 'retry the tool' remedy is the exact field-report error shape and the single highest-priority text fix. The daemon dedup guard is kept narrow (in-flight only, not a full persisted idempotency store) so it adds no protocol/wire change and no dependency, while making the double-spawn impossible from any source. Pre-spawn ack is recorded as a deferred future improvement, not this campaign."
+    },
+    {
+      "fork": "F2 — TC-1b recovery contract: exact partial-result shape once job_id is known",
+      "decision": "Once run_and_watch holds a job_id (after a successful start, tools.rs:630-643), ANY subsequent mid-loop RPC error (CommandStatus tools.rs:665, BucketWait tools.rs:703) MUST NOT bail with into_mcp_error. It returns a SUCCESS-shaped (isError:false) degraded payload that is a strict superset of the normal run_and_watch result so existing readers do not break: {job_id, bucket_id, state:'unknown', exit_code:null, signals:[...signals_so_far], signal_count, cursor, receipt:null, complete:false, wait_exhausted:true, degraded:true, recover_hint:'the wait was interrupted by a transient daemon condition; the job is identified and may still be running — poll command_status with job_id for the authoritative state/exit_code, do not re-run'}. The two NEW additive keys are `degraded:true` and `recover_hint`; `cursor` is also surfaced (it already exists internally) so the caller can resume a subscription/bucket_wait from the exact position. `complete`/`wait_exhausted` already exist (run_and_watch_completion, tools.rs:1768) and keep their meaning. The only case that still hard-errors is a start-time error BEFORE a job_id exists (tools.rs:642) — there is no job to preserve, so into_mcp_error is correct there.",
+      "rationale": "This is the suture the research documented but never specified. Returning isError:false with a degraded:true flag and a job_id is the contract-correct shape: it never hides a side effect (the job is named), never discards the known handle, and maps state-to-intent (recover_hint says exactly what to do). Making it a superset of the existing payload means run_and_watch.v1.json's invariants extend additively and no existing assertion breaks. Schema/fixture impact: add degraded + recover_hint + cursor to tests/fixtures/contracts/mcp-tools/run_and_watch.v1.json invariants/response_example; add a unit test asserting the degraded payload carries job_id; add an integration test that kills the wait mid-loop (transient IPC error) and asserts isError:false + degraded:true + correct job_id."
+    },
+    {
+      "fork": "F3 — TC-6 co-design: combined status+drain RPC vs slice arithmetic fix vs cap/doc change",
+      "decision": "Slice-arithmetic fix WITH a hard wall-clock deadline, co-designed in the SAME phase as TC-1b (they share tools.rs:655-709). Reject a new combined status+drain IPC RPC for this campaign (it is a new protocol method = full method_name/DISCOVERABLE_METHODS/dispatch/parity-test obligation chain for a latency optimization, disproportionate). Concrete fix: (1) compute an absolute deadline = Instant::now() + Duration::from_millis(wait_ms) BEFORE the loop; (2) before each slice and before each BucketWait, recompute remaining = deadline.saturating_duration_since(now); break if zero; (3) cap the BucketWait timeout_ms per slice to min(MAX_WAIT_SLICE_MS, remaining) instead of a flat 1000ms (tools.rs:683); (4) lower MAX_WAIT_SLICE_MS from 1000 to 500 (tools.rs:2216) so the worst-case overshoot per slice halves and the RTT tax is bounded; (5) the loop now terminates at or before the wall deadline rather than running a fixed 60 slices. Net: at wait_ms=60000 the loop returns at <= ~60s + at most one in-flight slice + 2 RTTs, and when the deadline is hit it returns the same wait_exhausted (complete:false) payload from F2 (job_id preserved). Update the run_and_watch description (tools.rs:617) and TOOL_CONTROL_SURFACE.md / REALTIME_SIGNAL_CHANNEL.md to state the cap is a wall-clock budget honored within one slice + RTT, not a per-slice multiplier.",
+      "rationale": "The wall-deadline approach is the minimal change that makes the advertised 60000ms cap a real wall-clock guarantee (the trust contract: the documented bound must be the actual bound), reuses the F2 degraded/wait_exhausted return so the two fixes share one error site, and adds no protocol surface. Co-designing in one phase prevents the two-conflicting-edits-to-one-loop hazard research-gaps flagged. A combined RPC is recorded as a deferred latency optimization."
+    },
+    {
+      "fork": "F4 — TC-3 naming/semantics: new command_stop vs SPEC-promised command_send_signal; forced-kill-only semantics",
+      "decision": "Implement a NEW MCP tool named `command_stop` (NOT command_send_signal), backed by a new daemon IpcRequest::CommandStop. Forced-kill-only semantics, explicitly documented; the `grace` field stays advisory/unused (process.rs:47) — no graceful-signal work in this campaign. Policy: gate it on the dormant PolicyAction::CommandSignal (policy.rs:62) which already has the correct deny matrix (read_only_observer denies, policy.rs:230; developer_local/repo_only/admin fall through). Daemon kill mechanism: add CommandRuntime::stop(job_id) mirroring PtyRuntime::stop (pty_command.rs:526-571) — evaluate policy.evaluate(CommandSignal) and emit an audit row BEFORE the kill (improving on PTY's ungated pattern, satisfying POLICY.md sec 8), remove the live binding, send on the retained cancel handle, then jobs.cancel(job_id) synchronously. Cancel-handle retention: add ProcessProbe::take_cancel_handle() -> Option<oneshot::Sender<()>> that takes cancel_tx (process.rs:159,268) BEFORE the probe is moved into drive_to_exit (command.rs:620); store it as a new field cancel: Option<oneshot::Sender<()>> on JobBinding (command.rs:218-231). The existing lifecycle waiter already maps ProbeOutcome::Cancelled -> jobs.cancel (command.rs:670), so stop()'s jobs.cancel + the waiter coordinate via the already-terminal check (waiter sees Cancelled state and skips a double event), exactly as PTY documents. Reject reusing the unbuilt command_send_signal name because its name implies signal-delivery breadth (SIGTERM/SIGINT) the forced-kill-only probe cannot honor; command_stop is honest about what it does.",
+      "rationale": "command_stop is the contract-honest name for a forced-kill (do not promise signal breadth the probe does not deliver). Reusing the dormant CommandSignal policy action (not inventing a new variant) honors the global rule that dormant variants are missing-implementation markers and avoids a new closed-set policy variant. Extracting cancel_tx before the move is the minimal retention that does not introduce the Arc<Mutex<Option<probe>>> lock-across-await footgun PTY documents (pty_command.rs:350) — we keep only the lightweight oneshot sender, not the whole probe. This is the largest single item (new daemon kill capability + new IPC method + full MCP surface chain), so it is its own phase. SPEC amendment records command_stop in TOOL_CONTROL_SURFACE.md (the governing runtime contract per SPEC sec 13), with a SPEC sec 8/13 cross-reference note."
+    },
+    {
+      "fork": "F5 — TC-5 host (IPC handler vs bootstrap) + bucket-litter strategy",
+      "decision": "HOST = the IPC handle_self_check (server.rs:801-818) — the path whose greenness misleads a LIVE client — converted from sync to async (dispatch arm server.rs:540-543 gains .await, matching the bucket/pty arms). BUCKET-LITTER = reuse ONE cached, immortal self-check bucket id (honoring the immortal-bucket invariant, subscriptions/source.rs:12-17), NOT a fresh bucket per call and NOT a new drop_bucket seam. Store a OnceCell/Mutex<Option<BucketId>> on DaemonState for the self-check bucket; first self_check that runs the spawn allocates it, subsequent calls reuse it. The real round-trip: spawn a trivial, always-present binary via the normal CommandRuntime path (std::env::current_exe() in a no-op/--selfcheck-noop mode is the portable choice — always present, single binary, survives command_allow_roots only if the operator allow-listed the daemon's own path; otherwise the spawn is skipped, see profile gating), poll command_status to terminal with a tight internal budget (e.g. 2s), assert exit==0, set failures>0 (and an explanatory report line) on any deviation. Profile gating (MANDATORY, never false-RED): if policy.profile is read_only_observer (denies CommandStart, policy.rs:225-238) OR repo_only with no resolvable root OR a restrictive command_allow_roots that excludes the chosen binary, the handler SKIPS the spawn and reports the existing static report with a 'spawn probe skipped: <profile reason>' line and failures:0 — a skip is not a failure. The static lines (data_dir/policy_profile/audit/audit_count) are retained and augmented.",
+      "rationale": "The IPC handler is the higher-value target: it is the surface a live client polls and the one that stays falsely green during the TC-1/TC-6 failure window. Reusing one cached bucket is the contained fix that matches the immortal-bucket invariant (a drop_bucket seam would touch BucketManager + BucketSourceTable which has no remove — larger blast radius, deferred). current_exe() --selfcheck-noop is the only cross-platform-portable always-present binary that the daemon controls. Profile-gated skip-or-assert-deny prevents the self_check from self-denying into a false RED on a healthy read_only_observer daemon. The spawn auto-emits a command_start audit row, so it is auditable for free."
+    },
+    {
+      "fork": "F6 — TC-4 argv shape reconciled with RISK_REGISTER R-06; CLI render.rs in/out of scope",
+      "decision": "ARGV SHAPE = bounded argv head, projected through the EXISTING redaction (reuse format_argv_metadata's redaction idiom, command.rs:989-1004) and capped to argv[0..2] (the binary + first arg). New ProbeListEntry fields are additive and serde(default): tag: Option<String> and argv: Option<Vec<String>> (the bounded redacted head). Source the data with ZERO new storage: argv from the job ledger (JobManager::get(job_id).config.argv, command.rs:572-582) for the Command arm, the already-returned argv for the PTY arm (stop discarding _argv at runtime.rs:67), and tag (+ path for command/pty) from the BucketSource side-table via state.sources.get(bucket_id) (source.rs:75) inside collect_probes (runtime.rs:13-86) — bucket_id is already in scope. FileWatch synthesizes argv as [\"file_watch:<path>\"] per the protocol doc. Reconcile with R-06: argv is already surfaced VERBATIM in the command_exited summary and exempted from the TC47 leak check, so a bounded+redacted argv head in runtime_state is strictly MORE conservative than existing posture — consistent, not a new leak. CLI render.rs IS IN SCOPE (it is a downstream consumer of RuntimeStateResponse): add tag/argv columns to the runtime_state render so the new fields are not silently dropped; this is part of the same phase. Also fix run_and_watch tag asymmetry: add #[serde(default)] tag: Option<String> to McpRunAndWatchParams (tools.rs:2218) and FIX into_parts() which hardcodes tag:None (tools.rs:2277) to thread self.tag — otherwise the tag is silently dropped (a fake-success path).",
+      "rationale": "Bounded+redacted argv[0..2] is the consistent posture: it reuses the project's own redaction, is more conservative than the existing verbatim command_exited summary (R-06 precedent), and avoids surfacing full secret-bearing command lines in a list view. serde(default) additive fields are the established non-breaking wire convention (protocol.rs:334-337). Sourcing from the ledger + side-table needs no new daemon storage. Including render.rs prevents the silent-drop trap. Fixing into_parts() closes the latent fake-success tag-drop."
+    },
+    {
+      "fork": "F7 — Sequencing/batching into PR-sized phases, each independently CI-green",
+      "decision": "Six phases, each a separate Conventional-Commit PR to a review branch, each <= ~10 files and independently green on both OS gates. ORDER: Phase 0 (campaign scaffolding: .planning multi-file doc + BACKLOG/RISK_REGISTER rows, docs-only, no code) -> Phase 1 (TC-1a/TC-2: don't-retry-mutating + fix remedy text + daemon in-flight dedup) -> Phase 2 (TC-1b + TC-6 co-designed in the shared wait loop) -> Phase 3 (TC-4: ProbeListEntry fields + collect_probes enrichment + run_and_watch tag + CLI render) -> Phase 4 (TC-5: real self_check spawn round-trip, async handler, cached bucket, profile gating) -> Phase 5 (TC-3: command_stop end-to-end — the largest, last, so all surface-count churn lands once). Each phase updates only the docs/fixtures/count-assertions it actually changes. Phase 5 alone touches the 5 hardcoded name lists + 3 count assertions + fixture map + system_discover fixture + minimal_tool_args arm atomically.",
+      "rationale": "TC-1a is a live double-spawn regression (data hazard) so it goes first. TC-1b+TC-6 must share one phase because they edit the same loop body (research-gaps explicit collision warning). TC-3 is last because it is the only phase that perturbs the tool-count surface (37->38) and the 5 name-lists/3 count-assertions/fixtures — isolating it means the other five phases never touch that fragile atomic set, keeping each independently green. Phase 0 first establishes the BACKLOG/RISK_REGISTER/.planning paper trail the repo doctrine requires before code lands."
+    }
+  ],
+  "phases": [
+    {
+      "name": "Phase 0 — Campaign scaffolding + risk/backlog/planning paper trail (docs-only, CI-green trivially)",
+      "defects": [
+        "Meta: repo doctrine requires BACKLOG rows, RISK_REGISTER rows, and a .planning campaign doc before corrective code lands (research-R5: BACKLOG.md has empty P0 which is now false; RISK_REGISTER forbids editing existing rows, only ADD)"
+      ],
+      "changes": [
+        "E:/project/terminal-commander/.planning/tc-bugfix-campaign/00-INDEX.md — new campaign index in the open-work multi-file shape (header Repo/branch/commit, executive-summary table TC-1..TC-6 with Priority/Status/Blocks-product-promise, mermaid dependency graph, recommended order, planning-artifacts table, Ledger/Plan corrections table superseding stale '29/32 tool' claims with file:line)",
+        ".planning/tc-bugfix-campaign/PLAN-TC1-ghost-spawn.md, PLAN-TC1b-TC6-waitloop.md, PLAN-TC3-command-stop.md, PLAN-TC4-probe-identity.md, PLAN-TC5-selfcheck-spawn.md — per-defect PLAN.md each with Symptom / Citations (fenced start:end:path) / Fix / Effort / Test-impact, mirroring .planning/open-work/B2-medium-audit/PLAN.md format",
+        "E:/project/terminal-commander/BACKLOG.md:14-17 — add P0 rows: TC-1a/TC-2 double-spawn regression, TC-1b lost-job-handle; P1 rows: TC-3 command_stop, TC-4 anonymous probe rows, TC-5 self_check false-green, TC-6 wait-cap self-violation",
+        "E:/project/terminal-commander/RISK_REGISTER.md (append only, never edit existing) — add R-07 (ghost/double-spawn from blind retry of mutating RPC), R-08 (self_check false-green: health surface never exercises spawn), R-09 (run_and_watch advertised wait cap not honored), each Active with the mitigating phase referenced; cross-link R-06 for the argv-surface precedent"
+      ],
+      "tests": [
+        "None (docs-only). Verification is fmt/clippy/nextest unchanged-green + markdown sanity."
+      ],
+      "verification": [
+        "bash scripts/linux-gate.sh (in WSL) — PASS",
+        "pwsh scripts/windows-gate.ps1 — PASS",
+        "Confirm no code files changed (git diff --stat shows only .planning/, BACKLOG.md, RISK_REGISTER.md)"
+      ],
+      "risks": [
+        "npm-binary-build.yml has no paths filter (research-R5) so docs-only PRs still run the full required gate — expected, not a blocker; all 8 required contexts must still go green"
+      ],
+      "estimated_files": 8
+    },
+    {
+      "name": "Phase 1 — TC-1a/TC-2: stop retrying mutating RPCs + fix remedy text + daemon in-flight dedup",
+      "defects": [
+        "TC-1a: client 5s timeout (client.rs:45) -> IpcError::transport (client.rs:73) -> McpDaemonClient::call blind-retries CommandStartCombed (daemon_client.rs:191-201) -> double-spawn (daemon spawns synchronously command.rs:547 before reply command.rs:711)",
+        "TC-2: no idempotency/in-flight guard anywhere (command.rs has no spawn dedup; RequestEnvelope has no key)",
+        "Sub: transport_unavailable_error (tools.rs:1797-1808) is numeric -32603 and its remedy says 'retry the tool' — fatal for a mutating op (orchestrator-verified)"
+      ],
+      "changes": [
+        "E:/project/terminal-commander/crates/ipc/src/protocol.rs — add `pub const fn is_idempotent(&self) -> bool` on IpcRequest (read-only variants true; CommandStartCombed/PtyCommandStart/PtyCommandWriteStdin/RegistryUpsert/RegistryActivate/RegistryDeactivate/RegistryImportPack/FileWatchStart/FileWatchStop/Shutdown false). Exhaustive match so a future variant forces a deliberate classification.",
+        "E:/project/terminal-commander/crates/mcp/src/daemon_client.rs:191 — change retry guard from `Err(e) if e.is_transport()` to `Err(e) if e.is_transport() && request.is_idempotent()`; update the doc comment (155-186) to state mutating RPCs are NOT auto-retried. No spawn/fs/socket added (mcp grep-guard safe).",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:1797-1808 — rewrite transport_unavailable_error remedy text: for the general transport case keep recoverable phrasing but REMOVE 'retry the tool'; replace with 'the call did not complete; before retrying a state-changing tool, reconcile via runtime_state/command_status to confirm whether the operation took effect'. (Numeric code stays internal_error/-32603 for now — see risk; the behavioral fix is the no-retry + honest remedy.)",
+        "E:/project/terminal-commander/crates/daemon/src/command.rs:~459 (before id mint at :472) — add a short-TTL in-flight fingerprint guard: a HashMap<u64, (JobId,BucketId)> on CommandRuntime keyed by hash(argv+cwd+tag), inserted at spawn start, removed on completion (in the lifecycle waiter ~command.rs:687) or TTL-expired; a duplicate within the window returns the existing job_id/bucket_id instead of spawning. Uses std hashing (no new dep)."
+      ],
+      "tests": [
+        "Unit (crates/ipc): is_idempotent classifies every variant (exhaustive; assert CommandStartCombed/PtyCommandStart false, CommandStatus/Health/RuntimeState true) — source-status: test-only",
+        "Unit (crates/mcp daemon_client tests): a transport error on a mutating request is NOT retried (inner.call invoked once); a transport error on a read-only request IS retried once — source-status: test-only",
+        "Integration (crates/daemon): two identical CommandStartCombed within the TTL window return the SAME job_id (dedup), distinct argv spawn distinct jobs — source-status: live (own socket+data dir)",
+        "Integration (crates/mcp through daemon IPC, TESTING.md 3.4): simulate a slow-spawn timeout and assert exactly ONE job exists in runtime_state afterward (no double-spawn) — source-status: live"
+      ],
+      "verification": [
+        "bash scripts/linux-gate.sh — PASS (incl. MCP guard 1+2 over crates/mcp/src)",
+        "pwsh scripts/windows-gate.ps1 — PASS (cfg(windows) spawn path touched indirectly via dedup; windows_spawn_site_coverage must stay >=1)",
+        "cargo nextest run --workspace — PASS",
+        "Manual contract check: grep transport_unavailable_error remedy text contains no 'retry the tool'"
+      ],
+      "risks": [
+        "The numeric -32603 is left intact (only behavior + remedy text fixed). If the operator wants the wire code changed too, that is a follow-up — flagged in RISK_REGISTER R-07; the no-retry fix already stops the double-spawn which is the data hazard.",
+        "The in-flight fingerprint must be removed on EVERY completion path (exit, cancel, spawn-failure) or it leaks/blocks a legitimate re-run; the lifecycle waiter at command.rs:687 and the spawn-failure path at command.rs:551-560 both need the removal.",
+        "Touches cfg(unix)/cfg(windows) spawn classification — both OS gates mandatory (AGENTS.md:9)."
+      ],
+      "estimated_files": 4
+    },
+    {
+      "name": "Phase 2 — TC-1b + TC-6 co-designed in the shared wait loop",
+      "defects": [
+        "TC-1b: wait loop (tools.rs:655-709) returns Err(into_mcp_error) on any mid-loop RPC failure (tools.rs:665, 703), discarding the known job_id/bucket_id/cursor/signals",
+        "TC-6: wait_ms=60000 cap self-violates — 60 fixed slices x (1000ms server block tools.rs:683 + 2 RTTs) = ~62-70s wall (RUN_AND_WATCH_MAX_WAIT_MS tools.rs:2208, MAX_WAIT_SLICE_MS tools.rs:2216, deadline_slices tools.rs:650)"
+      ],
+      "changes": [
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:645-709 — replace the fixed `for _ in 0..deadline_slices` with a wall-clock deadline loop: `let deadline = Instant::now() + Duration::from_millis(wait_ms)`; loop while `Instant::now() < deadline`; per-slice BucketWait timeout_ms = min(MAX_WAIT_SLICE_MS, remaining_ms) (replaces flat tools.rs:683); break when remaining hits zero.",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:665 and :703 — replace `Err(e) => return Err(into_mcp_error(&e))` with: build the F2 degraded payload (isError:false, {job_id,bucket_id,state:'unknown',exit_code:null,signals,cursor,complete:false,wait_exhausted:true,degraded:true,recover_hint:'...poll command_status with job_id...'}) and return it. Add a helper run_and_watch_degraded_result(job_id,bucket_id,cursor,signals) near run_and_watch_completion (tools.rs:1768).",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:2216 — MAX_WAIT_SLICE_MS 1000 -> 500 (halve worst-case overshoot per slice).",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:617 — update run_and_watch description: cap is a wall-clock budget honored within one slice + RTT; on interruption returns a degraded job-identified result, never a bare error.",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:711-736 — add degraded:false to the NORMAL success payload so the field is always present (consistent schema)."
+      ],
+      "tests": [
+        "Unit (crates/mcp): run_and_watch_degraded_result carries job_id + degraded:true + recover_hint and is isError:false-shaped — source-status: test-only",
+        "Unit: wall-deadline arithmetic — at wait_ms=60000 with MAX_WAIT_SLICE_MS=500, the computed per-slice timeout never exceeds remaining; loop cannot exceed deadline + one slice — source-status: test-only",
+        "Integration (crates/mcp through daemon IPC, TESTING.md 3.4): start a long-running command via run_and_watch with small wait_ms; assert wait_exhausted:true + complete:false + job_id present + measured wall time <= wait_ms + one slice + RTT margin — source-status: live",
+        "Integration: induce a transient mid-loop daemon condition after job_id known; assert isError:false + degraded:true + correct job_id (TC-1b recovery) — source-status: live"
+      ],
+      "verification": [
+        "bash scripts/linux-gate.sh — PASS",
+        "pwsh scripts/windows-gate.ps1 — PASS",
+        "cargo nextest run --workspace — PASS",
+        "Timing assertion in the long-running integration test proves wall <= advertised cap + bounded margin (TC-6 acceptance)"
+      ],
+      "risks": [
+        "Changing the loop structure risks an off-by-one that returns before draining the final signals; the terminal-state short-circuit (tools.rs:671-674) must be preserved so a fast command still returns immediately with all signals.",
+        "MAX_WAIT_SLICE_MS=500 doubles the RPC count per second; verify it does not regress the load gate (load_noise_backpressure) — run it explicitly.",
+        "Pure crates/mcp/src edits — confirm MCP grep-guards still pass (no Instant via fs/socket; tokio::time only, already a dep)."
+      ],
+      "estimated_files": 2
+    },
+    {
+      "name": "Phase 3 — TC-4: probe-row identity (argv + tag) + run_and_watch tag + CLI render",
+      "defects": [
+        "TC-4: collect_probes (runtime.rs:13-86) hardcodes path:None (runtime.rs:37,80), discards PTY _argv (runtime.rs:67); ProbeListEntry has no tag/argv (protocol.rs:1427-1457); run_and_watch into_parts hardcodes tag:None (tools.rs:2277) and McpRunAndWatchParams lacks tag (tools.rs:2218)"
+      ],
+      "changes": [
+        "E:/project/terminal-commander/crates/ipc/src/protocol.rs:1427-1457 — add `#[serde(default, skip_serializing_if=\"Option::is_none\")] pub tag: Option<String>` and `pub argv: Option<Vec<String>>` to ProbeListEntry (additive, non-breaking; matches the existing liveness/frames_suppressed serde(default) precedent at protocol.rs:1435-1439). Doc the bounded/redacted argv[0..2] shape.",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/handlers/runtime.rs:13-86 — in collect_probes: Command arm reads argv via state.command argv accessor (JobManager::get(job_id).config.argv) projected to redacted argv[0..2]; both Command and PTY arms call state.sources.get(p.bucket_id) (source.rs:75) to lift tag and path; PTY arm stops discarding _argv (runtime.rs:67) and projects it; FileWatch arm synthesizes argv=[\"file_watch:<path>\"].",
+        "E:/project/terminal-commander/crates/daemon/src/command.rs — add a small pub accessor (or extend status) returning the redacted argv head for a job, reusing the format_argv_metadata redaction idiom (command.rs:989-1004) so collect_probes does not re-implement redaction.",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:2218 — add `#[serde(default)] pub tag: Option<String>` to McpRunAndWatchParams; tools.rs:2277 — into_parts sets tag: self.tag (FIX the hardcoded None).",
+        "E:/project/terminal-commander/crates/cli/src/render.rs — render the new tag/argv columns in the runtime_state/probe_list view (downstream consumer; otherwise fields silently vanish).",
+        "tests/fixtures/contracts/mcp-tools/run_and_watch.v1.json — add tag to request_example + an invariant that run_and_watch tag routes to the probe."
+      ],
+      "tests": [
+        "Unit (crates/daemon): collect_probes emits tag+redacted argv for a command probe and a pty probe; FileWatch synthesizes file_watch:<path>; argv is bounded to [0..2] and redacted — source-status: live",
+        "Unit (crates/mcp): McpRunAndWatchParams::into_parts threads tag (regression for the silent-drop) — source-status: test-only",
+        "Integration (crates/daemon): start a tagged command, call runtime_state, assert the probe row carries the tag and a non-anonymous argv head — source-status: live",
+        "Integration (crates/mcp through daemon IPC): run_and_watch with tag -> runtime_state row shows that tag (proves end-to-end plumbing) — source-status: live",
+        "CLI render snapshot/assertion that tag/argv columns appear — source-status: live"
+      ],
+      "verification": [
+        "bash scripts/linux-gate.sh — PASS",
+        "pwsh scripts/windows-gate.ps1 — PASS (PTY arm is cfg(unix); ensure the windows build still compiles collect_probes with the cfg-gated PTY block)",
+        "cargo nextest run --workspace — PASS",
+        "Manual: runtime_state on a tagged job shows tag + argv head, no path:null for command/pty"
+      ],
+      "risks": [
+        "Argv redaction MUST go through the existing redaction (R-06 posture) — a naive full-argv exposure reintroduces a secret-leak vector; bound to [0..2] AND redact.",
+        "state.sources.get(bucket_id) per probe adds up to MAX_LIST_LIMIT=500 RwLock reads per runtime_state call; verify no lock-ordering inversion with the live-map/jobs locks already held in collect_probes (research-R4 risk).",
+        "ProbeListEntry is shared by runtime_state/probe_list/probe_status — the additive fields fix all three; confirm no struct-literal elsewhere breaks (it is constructed only in collect_probes)."
+      ],
+      "estimated_files": 6
+    },
+    {
+      "name": "Phase 4 — TC-5: real self_check spawn round-trip (async IPC handler, cached bucket, profile-gated)",
+      "defects": [
+        "TC-5: handle_self_check (server.rs:801-818) hardcodes failures:0, never spawns; dispatch arm (server.rs:540-543) is sync; buckets are immortal (source.rs:12-17, no drop_bucket)"
+      ],
+      "changes": [
+        "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:801-818 — convert handle_self_check to `async fn`; keep the static lines (data_dir/policy_profile/audit/audit_count) and ADD a real bounded command-spawn round-trip: if profile permits (see gating), spawn current_exe() --selfcheck-noop via the normal CommandRuntime path into the CACHED self-check bucket, poll command_status to terminal with a ~2s internal budget, assert exit==0; set failures>0 + an explanatory report line on any deviation. On skip, add 'spawn probe skipped: <reason>' and keep failures:0.",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:540-543 — dispatch arm becomes `handle_self_check(state).await` (matches the bucket/pty async arms).",
+        "E:/project/terminal-commander/crates/daemon/src/state.rs (DaemonState) — add a cached self-check bucket holder (Mutex<Option<BucketId>> or OnceCell) so the round-trip reuses one immortal bucket across calls (honors source.rs:12-17).",
+        "E:/project/terminal-commander/crates/daemon/src/main.rs or the bin entry — add the hidden --selfcheck-noop mode to current_exe() that exits 0 immediately (the portable always-present probe target).",
+        "E:/project/terminal-commander/crates/daemon/src/policy.rs — no new variant; reuse the existing CommandStart evaluation the spawn already routes through. Add a profile.can_exec()-style check (read_only_observer/repo_only-without-root/restrictive-allow-list) to decide spawn-vs-skip."
+      ],
+      "tests": [
+        "Integration (crates/daemon): self_check under developer_local spawns the noop, returns failures:0, report includes a 'spawn round-trip: ok' line; the self-check bucket id is reused across two self_check calls (bucket_count grows by at most 1) — source-status: live",
+        "Integration: self_check under read_only_observer SKIPS the spawn (report says skipped) and still returns failures:0 (never false-RED) — source-status: live",
+        "Integration: inject a forced spawn failure (e.g. noop returns nonzero in a test build) -> self_check returns failures>0 with an explanatory line (proves the surface goes RED when the spawn path breaks — the TC-5 acceptance) — source-status: live"
+      ],
+      "verification": [
+        "bash scripts/linux-gate.sh — PASS",
+        "pwsh scripts/windows-gate.ps1 — PASS (spawn round-trip exercises cfg(windows) CREATE_NO_WINDOW path; windows_spawn_site_coverage must stay >=1)",
+        "cargo nextest run --workspace — PASS",
+        "Manual: a daemon with a broken spawn path now reports failures>0 from self_check (previously always green)"
+      ],
+      "risks": [
+        "handle_self_check becoming async changes the dispatch arm AND the alternate-transport dispatch_envelope path (server.rs:820+) — both call sites must await; verify the named-pipe (Windows) path too.",
+        "current_exe() may hit command_allow_roots if an operator set a restrictive allow-list excluding the daemon binary — the gating must treat that as SKIP, not FAIL.",
+        "The cached bucket is immortal by design (one entry forever) — documented as the accepted trade vs a drop_bucket seam; note it in RISK_REGISTER R-08 mitigation.",
+        "self_check now does real work and emits a command_start audit row per run — confirm this does not trip the idle self-reap (self_check already bumps activity; spawn is bounded)."
+      ],
+      "estimated_files": 5
+    },
+    {
+      "name": "Phase 5 — TC-3: command_stop end-to-end (daemon kill + new IPC method + full MCP surface, atomic count churn)",
+      "defects": [
+        "TC-3: no command-job stop. CommandRuntime has no stop/cancel/kill; JobBinding (command.rs:218-231) retains no cancel handle; no CommandStop IPC method (protocol/method_name/DISCOVERABLE_METHODS/dispatch/parity); no MCP tool; PolicyAction::CommandSignal dormant (policy.rs:62)"
+      ],
+      "changes": [
+        "E:/project/terminal-commander/crates/probes/src/process.rs:294-300 — add `pub fn take_cancel_handle(&mut self) -> Option<oneshot::Sender<()>>` that takes cancel_tx (process.rs:268) so it can be retained before the probe moves into drive_to_exit.",
+        "E:/project/terminal-commander/crates/daemon/src/command.rs:218-231 — add `cancel: Option<oneshot::Sender<()>>` to JobBinding; at command.rs:~547-561 call probe.take_cancel_handle() BEFORE the drive_to_exit move (command.rs:620) and store it; add `pub fn stop(&self, job_id) -> Result<(BucketId, ProcessProbeMetrics), CommandError>` mirroring PtyRuntime::stop (pty_command.rs:526-571): policy.evaluate(CommandSignal) + audit-before-kill + remove binding + send on cancel handle + jobs.cancel(job_id) (waiter at command.rs:670 coordinates via terminal-state skip).",
+        "E:/project/terminal-commander/crates/daemon/src/policy.rs — wire CommandSignal evaluation in command.rs stop() (variant already exists with correct deny matrix policy.rs:230); no new variant.",
+        "E:/project/terminal-commander/crates/ipc/src/protocol.rs — add CommandStopParams{job_id}/CommandStopResponse{job_id,bucket_id,counters} (mirror PtyCommandStop protocol.rs:1314-1328); add IpcRequest::CommandStop + IpcResponse::CommandStop; update is_idempotent() (Phase 1) to classify CommandStop as NON-idempotent (stop is mutating but safe to retry — actually idempotent on an already-stopped job; classify true so a transport blip can retry safely returning UnknownJob/ok); re-export through ipc/mod.rs, daemon lib.rs, ipc/lib.rs.",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:414-455 method_name (+CommandStop=\"command_stop\"), :463-502 DISCOVERABLE_METHODS (+\"command_stop\"), :524 dispatch arm, all_request_variants test helper (server.rs:878), parity test length cross-check — all atomic.",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs — add #[tool] async fn command_stop forwarding to IpcRequest::CommandStop (ensure_daemon_available first; NO spawn/kill in mcp — daemon owns the kill, satisfies grep-guard); add McpCommandStopParams{job_id} (mirror McpPtyCommandStopParams tools.rs:2872); add command_stop to tool_catalogue() (tools.rs:110-296) status:Live; bump module/lib doc 37->38 (tools.rs:20,29; lib.rs:12).",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:3231-3342 — rename catalogue_lists_thirty_seven_live_tools -> _thirty_eight_ + add command_stop in catalogue order; tool_router_exposes_all_live_tools add in sorted order.",
+        "crates/mcp/tests/mcp_stdio.rs:74 + mcp_live_daemon.rs:100,213 — insert command_stop in sorted lists + bump count string 37->38.",
+        "crates/mcp/tests/daemon_unavailable_envelope.rs:215 — bump assert_eq!(checked, 36) -> 37 + comment; minimal_tool_args arm for command_stop (job_id) (may reuse the existing pty_command_stop|command_status arm at :134).",
+        "tests/fixtures/contracts/mcp-tool-fixture-map.v1.json — add command_stop to live_tools[], to daemon_unavailable_shapes (ensure_daemon_status_v1), bump counts live_tools 37->38 + covered_live; tests/fixtures/contracts/mcp-tools/command_stop.v1.json (new, copy pty_command_stop.v1.json shape); tests/fixtures/contracts/mcp-tools/system_discover.v1.json add command_stop to tools[].",
+        "docs/mcp/TOOL_CONTROL_SURFACE.md:66 — add command_stop to the Commands group + note forced-kill-only semantics; SPEC.md sec 8/sec 13 amendment note recording command_stop; RELEASE_CHECKLIST.md:312 reconcile the stale '29-tool unchanged' line."
+      ],
+      "tests": [
+        "Unit (crates/probes): take_cancel_handle returns Some once then None (idempotent) — source-status: test-only",
+        "Integration (crates/daemon): start a long-running command, command_stop -> job transitions to Cancelled, command_status reflects it, exactly one command_exited/cancel event (waiter does not double-emit) — source-status: live",
+        "Integration: command_stop under read_only_observer is DENIED (PolicyDenied) with an audit row before any kill — source-status: live",
+        "Integration (crates/mcp through daemon IPC, TESTING.md 3.4 — MANDATORY for the new tool): command_stop tool call terminates a real running job through the daemon end — source-status: live",
+        "Catalogue/router/stdio/live-daemon parity tests green at 38; fixture_catalogue_contract set+dir equality green; system_discover.v1.json mirrors catalogue — source-status: live/test-only",
+        "daemon_unavailable_envelope: command_stop returns the ensure_daemon_status_v1 shape when daemon down — source-status: live"
+      ],
+      "verification": [
+        "bash scripts/linux-gate.sh — PASS (MCP guard 1: command_stop forwards to daemon, no Command/spawn/TcpListener/UdpSocket in crates/mcp/src; guard 2: no fs)",
+        "pwsh scripts/windows-gate.ps1 — PASS (kill path is cfg-split; windows_spawn_site_coverage + windows_no_console_spawn stay >=1)",
+        "cargo nextest run --workspace — PASS (system_discover_methods_match_dispatch parity green; all 5 name-lists + 3 count assertions consistent at 38)",
+        "Manual live verify (own socket): start a sleep, command_stop, confirm process actually dies and runtime_state no longer lists it"
+      ],
+      "risks": [
+        "LARGEST phase: 5 hardcoded name lists + 3 count assertions + fixture map + system_discover fixture + minimal_tool_args arm must all change atomically or CI red (research-R3/gaps). Mitigated by isolating ALL count churn here.",
+        "Retaining cancel_tx in JobBinding: take it BEFORE the probe moves into drive_to_exit (command.rs:620); do NOT store the whole probe (avoids the PTY lock-across-await footgun pty_command.rs:350). The oneshot send is non-blocking.",
+        "stop() vs the lifecycle waiter race: both may call jobs.cancel — rely on the existing terminal-state idempotency (PTY precedent pty_command.rs:557-559); add a test for the race.",
+        "MCP grep-guard: the kill MUST be daemon-side; any accidental Command/spawn in the mcp command_stop handler fails guard 1.",
+        "Adding command_stop is a tool-surface change RELEASE_CHECKLIST/TOOL_CONTROL_SURFACE call out as locked — the SPEC sec 13 runtime-contract-wins note governs; edit TOOL_CONTROL_SURFACE.md (not SPEC sec 8 primarily).",
+        "fix:/feat: on main triggers release-please version bump — operator coordination required; commit to review branch, no merge without approval."
+      ],
+      "estimated_files": 10
+    }
+  ],
+  "explicitly_deferred": [
+    "Pre-spawn ack handshake for TC-1a (F1 option c): rejected for this campaign — rewrites the start_combed spawn-failure contract (command.rs:551-560), introduces a Starting-state liveness window run_and_watch/command_status must handle, and STILL double-spawns under a blind retry unless paired with the dedup guard. Recorded as a future improvement; the classify-and-don't-retry + in-flight dedup fix is sufficient.",
+    "Full server-honored idempotency-key protocol on RequestEnvelope (F1 option b heavy form): deferred. RequestEnvelope gains no idempotency field; the narrow daemon in-flight fingerprint covers the realistic duplicate window with zero protocol/wire change. A persisted idempotency store is out of scope.",
+    "Combined status+drain wait RPC for TC-6 (F3 alternative): deferred as a latency optimization — it is a new IPC method (full obligation chain) for a perf gain; the wall-clock-deadline + slice fix achieves the contract guarantee without new protocol surface.",
+    "Changing the numeric JSON-RPC code of transport_unavailable_error away from -32603 (tools.rs:1808): deferred. Phase 1 fixes the behavior (no retry of mutating ops) and the misleading remedy text; whether to also change the wire numeric code for clients keying off -32603 is a separate decision flagged in RISK_REGISTER R-07.",
+    "Graceful-signal stop for command jobs (SIGTERM/grace window): out of scope. command_stop is forced-kill-only; the ProcessProbeConfig.grace field stays advisory/unused (process.rs:47). A graceful path is net-new probe work.",
+    "Retrofitting policy-gating onto the existing ungated pty_command_stop (PtyRuntime::stop, pty_command.rs:526-571): noted as a symmetry/conformance follow-up (research-R2 open question), not part of TC-1..TC-6.",
+    "A real drop_bucket seam for bucket reclamation (BucketManager + BucketSourceTable.remove): deferred — TC-5 reuses one cached immortal self-check bucket instead, honoring the existing immortal-bucket invariant.",
+    "Reconciling the pervasive stale doc tool-counts (29 in README/RELEASE_CHECKLIST, 32 in TOOL_CONTROL_SURFACE) beyond the lines this campaign must touch: only the CI-gated assertions + the lines command_stop changes are updated; a broad doc-count sweep is separate.",
+    "Reconciling CONTRIBUTING.md sec1/sec7 dead branch/goal-file doctrine and the SPEC sec2a/sec6 internal Tier-1 drift: flagged in the .planning index as doc-vs-reality drift to surface, but not corrected by this defect campaign."
+  ],
+  "invariants": [
+    "ZERO new dependencies — every primitive (tokio::time for the wall deadline, std hashing for the in-flight fingerprint, existing oneshot for cancel, serde(default) for additive fields) is already in-tree; deny.toml closed allowlist must not change.",
+    "crates/mcp/src must remain free of Command::new/Command::spawn/TcpListener/UdpSocket (guard 1) and tokio::fs/std::fs/File::open/read_to_string/read_to_end (guard 2) — command_stop forwards the kill to the daemon over IPC; the retry-classification change is pure logic.",
+    "Every new MCP tool (command_stop) has at least one integration test exercising it THROUGH the daemon IPC end (TESTING.md 3.4): cargo nextest run -p terminal-commander-mcp --tests.",
+    "Both OS gates pass on every phase: bash scripts/linux-gate.sh (fmt --check, clippy --workspace --all-targets -D warnings, nextest --workspace, TC47 load gate, both MCP grep-guards, rustc==1.95.0) AND pwsh scripts/windows-gate.ps1 (windows_no_console_spawn + windows_spawn_site_coverage each >=1). Changes touch cfg(unix)/cfg(windows) spawn/kill — single-OS testing is insufficient.",
+    "Trust contract (the design axiom): no returned error hides a side effect; no agent (or adapter, on the agent's behalf) is told to retry a non-idempotent op; every returned state maps to caller intent — degraded results carry the job_id and a recover_hint, never a bare error once a job exists.",
+    "When command_stop is added, all 5 hardcoded tool-name lists (tools.rs catalogue-order, tools.rs sorted-router, mcp_stdio.rs, mcp_live_daemon.rs, system_discover.v1.json tools[]) + 3 count assertions (daemon_unavailable_envelope.rs checked-count, the catalogue_lists_thirty_*_live_tools test name, mcp_live_daemon.rs count string) + the fixture map + the minimal_tool_args arm are updated atomically in the same commit.",
+    "Adding an IPC method keeps method_name() (exhaustive match), DISCOVERABLE_METHODS, the dispatch arm, all_request_variants, and the system_discover_methods_match_dispatch parity test mutually consistent (the parity test fails in both directions otherwise).",
+    "Wire backward-compat: ProbeListEntry gains only additive Option fields with serde(default, skip_serializing_if) — an old client ignores unknown fields, an old daemon omits them; no protocol version bump (compat is purely structural).",
+    "The live daemon on this machine is never restarted or killed by any build/test — all tests bind their own TC_SOCKET + data dir.",
+    "RISK_REGISTER rows are ADDED (R-07/R-08/R-09), never edited or removed; existing rows (incl. R-06) are untouched and may only be demoted to Resolved after the fix lands WITH proof. BACKLOG gains rows; the .planning campaign uses the open-work multi-file shape.",
+    "Conventional Commits (fix: scope), Co-Authored-By: Claude Opus 4.8 footer, PR to a review branch off main; NO push/merge without explicit human approval (a fix: on main triggers release-please).",
+    "Source-status discipline (TESTING.md sec4) on every new test — explicit live/test-only/degraded label; 'unknown' is a hard commit fail."
+  ]
+}

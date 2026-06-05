@@ -12,10 +12,187 @@ Language: ASCII only.
 
 ## P0 — Beta blockers (active)
 
-None. The four original P0 items are resolved (see "Resolved P0"
-below). The remaining open items are P1/P2/P3.
+The four original P0 items are resolved (see "Resolved P0" below).
+Two new P0 trust defects were found by the TC trust-defects campaign
+(`.planning/tc-bugfix-campaign/`); both violate the "run a command
+safely" product promise at HEAD.
+
+### P0.1 — TC-1a: client-timeout blind retry double-spawns a command
+
+**Source:** TC trust-defects campaign, Phase 1
+(`.planning/tc-bugfix-campaign/PLAN-TC1-ghost-spawn.md`).
+**Evidence:** `crates/mcp/src/daemon_client.rs:191-198` re-sends a
+cloned request on any transport error
+(`Err(e) if e.is_transport()`), with no idempotency check. A >5s
+client timeout on a `CommandStartCombed` therefore re-sends a
+mutating start while the first spawn may already be running =>
+DOUBLE SPAWN. The mid-call envelope compounds it:
+`crates/mcp/src/tools.rs:1804-1805` remedy literally says
+"retry the tool", and `tools.rs:1808` routes through
+`McpError::internal_error` (numeric -32603) while the doc comment
+at `tools.rs:1790-1796` falsely claims "never a raw internal_error
+(-32603)".
+**Impact:** A timed-out start can silently run twice; the agent is
+told to retry the exact mutating op. This is a regression at HEAD
+and the highest-harm item in the campaign.
+**Proposed work:** Add `pub const fn is_idempotent(&self)` to
+`IpcRequest` (`crates/ipc/src/protocol.rs`), gate the retry on
+`request.is_idempotent()`, split self-heal from re-send, and fix
+the lying doc comment + the "retry the tool" remedy (make it
+operation-neutral). Pure logic; zero daemon state.
+**Scope:** `crates/ipc/src/protocol.rs`,
+`crates/mcp/src/daemon_client.rs`, `crates/mcp/src/tools.rs`.
+
+### P0.2 — TC-1b: run_and_watch discards a live job handle on mid-wait IPC error
+
+**Source:** TC trust-defects campaign, Phase 3
+(`.planning/tc-bugfix-campaign/PLAN-TC1b-TC6-waitloop.md`).
+**Evidence:** Once `run_and_watch` holds a job_id (the start RPC at
+`crates/mcp/src/tools.rs:630-643` succeeded), any subsequent
+in-loop RPC error returns `Err(into_mcp_error)` and discards the
+known job_id/bucket_id/cursor/signals: the CommandStatus arm at
+`tools.rs:665` and the BucketWait arm at `tools.rs:703`.
+**Impact:** The agent is told "error" with no way to recover a
+still-running job; the live job_id is thrown away (trust-destroying
+discard).
+**Proposed work:** Convert both post-job_id error arms to a
+DEGRADED isError:false result that is a strict superset of the
+existing payload (`{job_id, bucket_id, state (last-observed/UNKNOWN,
+never silently Running), cursor, signals, complete:false,
+wait_exhausted:true, degraded:true, recover_hint}`); the start-arm
+error still returns Err. Co-implemented with TC-6 in one wait-loop
+rewrite (shared body `tools.rs:650-709`).
+**Scope:** `crates/mcp/src/tools.rs`,
+`tests/fixtures/contracts/mcp-tools/run_and_watch.v1.json`.
 
 ## P1 — High priority follow-ups
+
+### P1.0a — TC-2: no in-flight dedup guard (manual-retry double-spawn)
+
+**Source:** TC trust-defects campaign, Phase 2
+(`.planning/tc-bugfix-campaign/PLAN-TC2-dedup.md`).
+**Evidence:** No idempotency/dedup guard exists anywhere in the
+daemon: `crates/daemon/src/command.rs` `start_combed` (builds from
+`CommandStartRequest` at `command.rs:572-581`) has no pre-spawn
+lookup, and `RequestEnvelope` has no key. After P0.1 removes the
+AUTOMATIC double-spawn, the residual path is a MANUAL caller/LLM
+re-call of a timed-out mutating start.
+**Impact:** A deliberate re-call still spawns a second identical
+job; trust defense-in-depth is missing.
+**Proposed work:** Add a NEW `Arc<Mutex<HashMap<u64,(JobId,BucketId,
+Instant)>>>` field on `CommandRuntime` (NOT behind the live lock),
+checked at the top of `start_combed`, keyed preferentially on a
+client nonce (`dedup_nonce`, adapter always generates one) with a
+short peer-scoped argv+cwd+tag fallback; thread `dedup_nonce`
+through `CommandStartParams` -> `CommandStartRequest` ->
+`handle_command_start_combed` (`crates/daemon/src/ipc/handlers/
+command.rs`) or it is silently dropped; evict on EVERY completion
+path (exit/cancel/spawn-failure). Never collapses two
+legitimately-distinct rapid runs.
+**Scope:** `crates/daemon/src/command.rs`,
+`crates/ipc/src/protocol.rs`,
+`crates/daemon/src/ipc/handlers/command.rs`,
+`crates/mcp/src/tools.rs`.
+
+### P1.0b — TC-3: no command-job stop tool on the MCP surface
+
+**Source:** TC trust-defects campaign, Phase 6a/6b
+(`.planning/tc-bugfix-campaign/PLAN-TC3-command-stop.md`).
+**Evidence:** A started command job cannot be stopped from the MCP
+surface; only PTY has `pty_command_stop`. `CommandRuntime` has no
+stop/cancel/kill; `JobBinding` (`crates/daemon/src/command.rs:218-230`)
+retains no cancel handle and derives `Clone`; no `CommandStop` IPC
+method; `PolicyAction::CommandSignal` is dormant
+(`crates/daemon/src/policy.rs:62`); the command waiter
+(`command.rs:668-680`) has NO terminal-state guard (contrast PTY
+`crates/daemon/src/pty_command.rs:391-400`).
+**Impact:** Advertised command-lifecycle control is incomplete; a
+long-running command job is unstoppable through the tool surface.
+**Proposed work:** Add `command_stop` / `IpcRequest::CommandStop`
+(forced-kill-only). Phase 6a: `take_cancel_handle()`
+(`crates/probes/src/process.rs`), a `cancel` field on `JobBinding`
+(remove the `Clone` derive), a command-waiter terminal-state guard,
+`CommandRuntime::stop` (policy-deny FIRST with peer-subject audit;
+check-then-set Cancelled), the IPC method + 3 re-exports + dispatch.
+Phase 6b: the MCP tool + ALL atomic count anchors (5 name lists + 3
+count assertions + fixture map + system_discover fixture +
+minimal_tool_args) bumped 37->38 + docs.
+**Scope:** ~16 files across 6a/6b (EXEMPT from the <=10-file rule;
+atomic count-anchor set).
+
+### P1.0c — TC-4: anonymous runtime_state probe rows + run_and_watch tag:None
+
+**Source:** TC trust-defects campaign, Phase 4
+(`.planning/tc-bugfix-campaign/PLAN-TC4-probe-identity.md`).
+**Evidence:** `collect_probes`
+(`crates/daemon/src/ipc/handlers/runtime.rs:13-86`) hardcodes
+`path:None` on the Command arm (~:37) and PTY arm (~:80) and
+discards PTY `_argv` (~:67); `ProbeListEntry` has no tag/argv
+field; `McpRunAndWatchParams::into_parts` hardcodes `tag:None`
+(`crates/mcp/src/tools.rs:2277`) and the struct (`tools.rs:2219`)
+lacks a tag field. NOTE: `format_argv_metadata`
+(`crates/daemon/src/command.rs:989-1004`) only TRUNCATES; it
+redacts nothing, so a NEW argv redactor is required before
+argv_head ships.
+**Impact:** Operators cannot tell which job a probe row is;
+run_and_watch cannot tag its probe (a verified fake-success path).
+**Proposed work:** Add additive `tag` + `argv_head` (serde default)
+to `ProbeListEntry`; build a NEW argv redactor (mask values after
+secret-shaped flags); lift tag in `collect_probes`; fix
+`into_parts` to thread the real tag; render the columns in
+`crates/cli/src/render.rs:164`.
+**Scope:** `crates/ipc/src/protocol.rs`,
+`crates/daemon/src/command.rs`,
+`crates/daemon/src/ipc/handlers/runtime.rs`,
+`crates/mcp/src/tools.rs`, `crates/cli/src/render.rs`,
+`tests/fixtures/contracts/mcp-tools/runtime_state.v1.json`.
+
+### P1.0d — TC-5: self_check is false-green (never spawns a command)
+
+**Source:** TC trust-defects campaign, Phase 5
+(`.planning/tc-bugfix-campaign/PLAN-TC5-selfcheck-spawn.md`).
+**Evidence:** `handle_self_check`
+(`crates/daemon/src/ipc/server.rs:801-818`) hardcodes
+`failures:0` and never spawns a command; the dispatch arm
+(`server.rs:540-543`) is sync; buckets are immortal (no
+drop_bucket). A live client polling self_check during a real
+outage gets a false GREEN.
+**Impact:** self_check lied to live clients during the TC-1/TC-6
+window; it is not a real health probe.
+**Proposed work:** Make `handle_self_check` async (add `.await` at
+the SOLE call site `server.rs:541`); add a profile-gated bounded
+real round-trip that spawns `current_exe()` as a hidden clap
+SUBCOMMAND `[exe, "selfcheck-noop"]` (NOT a flag) through the normal
+CommandRuntime path into ONE cached immortal bucket; skip-or-
+assert-deny so a healthy daemon is NEVER false-RED; failures>0 only
+on real breakage (negative test). Add a positive `selfcheck-noop`
+exits-0 test.
+**Scope:** `crates/daemon/src/ipc/server.rs`,
+`crates/daemon/src/state.rs`, `crates/daemon/src/main.rs`,
+`crates/ipc/src/protocol.rs`.
+
+### P1.0e — TC-6: run_and_watch wait_ms cap self-violation
+
+**Source:** TC trust-defects campaign, Phase 3
+(`.planning/tc-bugfix-campaign/PLAN-TC1b-TC6-waitloop.md`).
+**Evidence:** `run_and_watch` advertises a `wait_ms` cap (max
+60000) but `for _ in 0..deadline_slices`
+(`crates/mcp/src/tools.rs:650`) x per-slice BucketWait blocking up
+to `MAX_WAIT_SLICE_MS=1000` (`tools.rs:683`) + RTTs yields ~62-70s
+wall vs 60000ms advertised.
+**Impact:** Dishonest timeout: the cap the tool promises is
+exceeded.
+**Proposed work:** Rewrite the wait loop once (shared body
+`tools.rs:650-709`): wall-clock `Instant` deadline
+(`Instant::now() + Duration::from_millis(wait_ms)`); per-slice
+timeout `min(MAX_WAIT_SLICE_MS, remaining)`; keep
+`MAX_WAIT_SLICE_MS=1000` (no load-gate RPC-doubling risk);
+preserve the terminal short-circuit; final non-blocking drain on
+deadline-exit. Co-implemented with TC-1b.
+**Scope:** `crates/mcp/src/tools.rs`,
+`tests/fixtures/contracts/mcp-tools/run_and_watch.v1.json`.
+
+## P1 — Pre-existing high priority follow-ups
 
 ### P1.1 — Explicit daemon-side `frames_suppressed` counter
 
@@ -196,6 +373,23 @@ shell-driven repeatability might earn its keep.
 
 Today: Codex CLI + Claude Code. Adding templates for additional
 MCP-capable clients (Continue, Cursor, Cline, etc.) is opportunistic.
+
+## DEFERRED — TC trust-defects campaign (tracked, not dropped)
+
+Items the TC trust-defects campaign explicitly DEFERRED. The
+campaign closes the realistic double-spawn windows (P0.1 + P1.0a)
+without these; each is tracked here with file:line evidence so it
+is not lost.
+
+| ID | Item | Why deferred | Evidence (file:line) |
+|----|------|--------------|----------------------|
+| TCD-1 | Server-honored idempotency key on `RequestEnvelope` (F1-b) | With the blind retry removed (P0.1) and the in-flight dedup landed (P1.0a), both the automatic and realistic manual double-spawn windows close without a wire/protocol change. The full key protocol has unresolved design (client-id vs argv/cwd/window fingerprint, TTL, persistence). Tracked in RISK_REGISTER R-07. | `crates/ipc/src/protocol.rs` (RequestEnvelope has no key); `crates/daemon/src/command.rs:572-581` (start_combed) |
+| TCD-2 | Pre-spawn async ack handshake (F1-c) | Rewrites the spawn-failure contract (`command.rs:548-560` must flip an already-acked Starting job to Failed) and exposes a new Starting liveness at the wire boundary; research confirms it STILL double-spawns under blind retry unless paired with a dedup guard, so it is redundant once P0.1 + P1.0a exist. Highest-blast-radius machinery. Tracked in R-07. | `crates/daemon/src/command.rs:548-560` (spawn-failure early return) |
+| TCD-3 | `command_stop` graceful grace window (F4) | `ProcessProbeConfig.grace` exists but is "advisory; cancellation in MVP is forced kill only"; wiring a SIGTERM-then-SIGKILL window is net-new probe work, not tool exposure. `command_stop` ships forced-kill-only (parity with `PtyRuntime::stop`). | `crates/probes/src/process.rs:47` (grace advisory) |
+| TCD-4 | Change the numeric JSON-RPC code of `transport_unavailable_error` away from -32603 | Phase 1 fixes the BEHAVIOR (no retry of mutating ops) and the misleading remedy text; whether to also change the wire numeric code for clients keying off -32603 is a separate decision with client-compat implications. Tracked in R-07. | `crates/mcp/src/tools.rs:1808` (`McpError::internal_error`) |
+| TCD-5 | Retrofit policy-gating onto the ungated `pty_command_stop` | Out of TC-1..TC-6 scope. `command_stop` is gated correctly via the dormant `CommandSignal`; PTY symmetry is a separate conformance item. | `crates/daemon/src/pty_command.rs:526-571` (`PtyRuntime::stop` ungated) |
+| TCD-6 | A real `drop_bucket` seam (`BucketManager` + `BucketSourceTable.remove`) | TC-5 reuses ONE cached immortal self-check bucket instead, honoring the existing immortal-bucket invariant. A reclamation seam is larger blast radius and not required. | `crates/.../source.rs:12-17` (immortal-bucket invariant; no remove) |
+| TCD-7 | Full stale-doc tool-count sweep (29 in RELEASE_CHECKLIST/BACKLOG, 31 in README, 32 in TOOL_CONTROL_SURFACE) | Only the CI-gated assertions + the normative TOOL_CONTROL_SURFACE table + the lines `command_stop` must touch are reconciled (37->38). A full sweep of non-gated stale references (incl. the dead CONTRIBUTING branch/goal-file doctrine and SPEC internal Tier-1 drift) is a separate chore. | RELEASE_CHECKLIST.md:61,71,312; BACKLOG.md:78; README.md:201,292; docs/mcp/TOOL_CONTROL_SURFACE.md:61; CONTRIBUTING.md:12-26 |
 
 ## Resolved P0 (historical context)
 

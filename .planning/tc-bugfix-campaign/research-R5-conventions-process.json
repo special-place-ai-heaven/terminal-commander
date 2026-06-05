@@ -1,0 +1,185 @@
+{
+  "findings": [
+    {
+      "topic": "AGENTS.md — agent working rules",
+      "status": "new-info",
+      "evidence": [
+        "E:/project/terminal-commander/AGENTS.md:5",
+        "E:/project/terminal-commander/AGENTS.md:6-7",
+        "E:/project/terminal-commander/AGENTS.md:9"
+      ],
+      "details": "AGENTS.md is short (10 lines). Key binding rules for the fix campaign: (1) line 5 — defer to README.md/CONTRIBUTING.md/TESTING.md for routine lint/test/build commands. (2) lines 6-7 — product is local-only: daemon=`terminal-commanderd`, MCP stdio adapter=`terminal-commander-mcp`, admin CLI=`terminal-commander`; no DB/cache/Docker/network listener needed; start a manual daemon with explicit data dir + `TC_SOCKET` (e.g. `/tmp/terminal-commander-dev-data/terminal-commanderd.sock`), set `TC_IDLE_TTL_SECS=0` only for long dev sessions. (3) line 8 — npm wrapper has a stale lockfile shape; use the approved startup update script, NOT plain `npm install`. (4) line 9 (HARD RULE for this campaign) — \"When a change touches `cfg(unix)` / `cfg(windows)` / `target_os` code or any test, run the OS gates before pushing as described in CONTRIBUTING.md section 6.1.\" The ghost-job/stop-tool/timeout fixes all touch IPC client timeout + MCP tools + tests, so BOTH OS gates are mandatory."
+    },
+    {
+      "topic": "CONTRIBUTING.md — branch policy is STALE vs live git workflow",
+      "status": "changed-needs-redesign",
+      "evidence": [
+        "E:/project/terminal-commander/CONTRIBUTING.md:12-26",
+        "E:/project/terminal-commander/CONTRIBUTING.md:211-235",
+        "git branch=main",
+        "git log shows release-please PR merges + Conventional Commits"
+      ],
+      "details": "CONTRIBUTING.md section 1 says the default working branch is `feature/terminal-commander-mvp`, that `main`/`master` are PROHIBITED working branches, and section 7 mandates every behavior change trace to a goal file under `.agent/goals/terminal-commander-mvp/`. The LIVE repo has graduated past this: HEAD is on `main`; the last 25 commits are release-please-driven (`chore: release main`, `fix: release Rust crate changes`, `Merge pull request #NN from special-place-ai-heaven/release-please--branches--main`) with normal feature work landing as PRs to `main` (e.g. `feat: Subscriptions Phase 2 + Phase 3 (#83)`, `fix(windows): ... (#91)`). The campaign must follow the LIVE convention: branch -> Conventional-Commit PR -> review -> merge to main (release-please then version-bumps). It must NOT try to work on `feature/terminal-commander-mvp` or invent `.agent/goals/` files. This is a CONTRIBUTING.md section 1+7 doc-vs-reality drift the campaign should flag (possibly amend) but not obey literally. Per global/project rules, no push/PR-merge without explicit human approval."
+    },
+    {
+      "topic": "CONTRIBUTING.md / TESTING.md / gate scripts — what the PR gate actually runs",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/CONTRIBUTING.md:108-131",
+        "E:/project/terminal-commander/CONTRIBUTING.md:133-160",
+        "E:/project/terminal-commander/scripts/linux-gate.sh:37-60",
+        "E:/project/terminal-commander/scripts/windows-gate.ps1:23-39",
+        "E:/project/terminal-commander/.github/workflows/npm-binary-build.yml:103,124"
+      ],
+      "details": "The AUTHORITATIVE PR gate is the two scripts CI invokes verbatim (npm-binary-build.yml: pre-build-gates runs `bash scripts/linux-gate.sh` line 104; pre-build-gates-windows runs `./scripts/windows-gate.ps1` line 124). linux-gate.sh runs: `node scripts/release/verify-optional-dependencies.js`; `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings` (NOTE: NO `--all-features` — the 7-step block in CONTRIBUTING.md §6 / TESTING.md §2 that uses `--all-features` is ASPIRATIONAL, not the gate); `cargo nextest run --workspace` (no profile flag); the TC47 load gate (`cargo test -p terminal-commanderd --test load_noise_backpressure`, asserts >0 tests ran, refuses python3 self-skip); MCP guard 1 (no `Command::new|Command::spawn|TcpListener|UdpSocket` in crates/mcp/src) and MCP guard 2 (no `tokio::fs|std::fs|File::open|read_to_string|read_to_end` in crates/mcp/src). It also asserts rustc matches the pinned 1.95.0 and that npm-binary-build.yml's RUST_TOOLCHAIN env equals rust-toolchain.toml channel. windows-gate.ps1 runs two integration binaries by `--test` selector: `terminal-commander-probes --test windows_no_console_spawn --include-ignored` and `terminal-commanderd --test windows_spawn_site_coverage`, each asserting >=1 test passed. cargo deny/hack/machete are NOT in the gate (CONTRIBUTING §4 lines 89-91, §5 lines 129-131). Fast local inner loop (CONTRIBUTING §5): `cargo fmt --all` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo nextest run --workspace --profile default --no-fail-fast`. CRITICAL: the MCP guards mean any TC-3 stop-tool added to crates/mcp/src must NOT spawn/kill directly — it must forward an IPC request to the daemon (which owns the kill), or the gate fails."
+    },
+    {
+      "topic": "TESTING.md — test taxonomy + MCP-tool-surface obligation + source-status discipline",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/TESTING.md:112-121",
+        "E:/project/terminal-commander/TESTING.md:163-183",
+        "E:/project/terminal-commander/TESTING.md:303-314"
+      ],
+      "details": "§3.4 (MCP-tool-surface goal): every NEW MCP tool must have at least one integration test that exercises it THROUGH the daemon IPC end (not just a unit test of the MCP-side handler): `cargo nextest run -p terminal-commander-mcp --tests --profile ci`. This binds TC-3 (command-stop tool) directly. §4 source-status discipline: every test must report a source-status label (live/partial/degraded/disabled/test-only/mock/blocked); `unknown` is a HARD FAIL at commit. §10 evidence rules: every change's report must include `git branch --show-current`, files changed, PASS/FAIL per verification command, source-status notes for every behavior touched, and a risk-register row reference if it mitigates a row — a report omitting source-status notes is incomplete. §7 (ReDoS budget) is relevant only if the fix adds regex fixtures. Test categories map (§1): unit `#[cfg(test)] mod tests`, integration per-crate `tests/*.rs`, profiles for load/security/e2e."
+    },
+    {
+      "topic": "RELEASE_CHECKLIST.md — release gate + the '29-tool / no new MCP tool' constraint",
+      "status": "changed-needs-redesign",
+      "evidence": [
+        "E:/project/terminal-commander/RELEASE_CHECKLIST.md:36-55",
+        "E:/project/terminal-commander/RELEASE_CHECKLIST.md:312",
+        "E:/project/terminal-commander/RELEASE_CHECKLIST.md:185-205"
+      ],
+      "details": "Pre-flight (must pass on main, lines 38-55) is the release gate: branch==main, clean status, `git diff --check`, `cargo metadata --no-deps`, `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo nextest run --workspace`, the TC47 load regression, `bash scripts/smoke/verify-runtime-smoke.sh`, the two MCP grep guards, `cargo deny check licenses`. NOTE the doc claims 347/347 nextest and a 29-tool catalogue — STALE (see tool-count finding; code is at 37). Line 312 explicitly states the WWS chain added \"No new MCP tool added; 29-tool TC45 catalogue unchanged\" and lines 185-205 (beta limitations) say `frames_suppressed` does not exist. RELEASE_CHECKLIST is a manual operator gate that NEVER auto-publishes (line 3). For the campaign: adding TC-3's command-stop tool is a tool-surface change that this checklist's posture (and TOOL_CONTROL_SURFACE.md / the catalogue-count tests) all must be updated for; the '29-tool unchanged' line is a release-doc invariant the campaign will break and must reconcile."
+    },
+    {
+      "topic": "rust-toolchain.toml + deny.toml — toolchain pin and license constraint (ADD NO DEPS)",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/rust-toolchain.toml:14-17",
+        "E:/project/terminal-commander/deny.toml:16-28",
+        "E:/project/terminal-commander/deny.toml:31-46"
+      ],
+      "details": "Toolchain: `channel = \"1.95.0\"` active dev/CI pin (components rustfmt+clippy, profile minimal); documented MSRV floor is 1.92.0 (rmcp =1.7.0) but NOT CI-enforced (no `cargo hack --rust-version` in any workflow). linux-gate.sh asserts rustc matches 1.95.0 AND that the workflow RUST_TOOLCHAIN env agrees — so do not bump one without the other. deny.toml license allowlist is closed (PolyForm-Noncommercial-1.0.0, Apache-2.0[+LLVM-exception], MIT, BSD-2/3-Clause, ISC, Zlib, Unicode-3.0/DFS-2016, CC0-1.0); `wildcards = deny`, `unknown-registry = deny`, `unknown-git = deny`, allow-registry = crates.io only. The fixes for TC-1..TC-6 must add ZERO new dependencies (mission constraint, reinforced by the closed allowlist + the source bans); all needed primitives (tokio time, std hashing for idempotency keys, existing IPC) are already in-tree. Note cargo-deny is NOT in the PR gate (only the release-only `cargo deny check licenses`), so a stray dep would slip the PR gate but break release."
+    },
+    {
+      "topic": "BACKLOG.md — TC-1..TC-6 are NOT tracked",
+      "status": "new-info",
+      "evidence": [
+        "E:/project/terminal-commander/BACKLOG.md:13-17",
+        "E:/project/terminal-commander/BACKLOG.md:20-115",
+        "E:/project/terminal-commander/BACKLOG.md:138-198"
+      ],
+      "details": "NONE of TC-1 (ghost jobs / client request-timeout aborting a live spawn), TC-2 (idempotency / in-flight-identical-argv guard), TC-3 (command-job stop tool), TC-4 (anonymous runtime_state probe rows + run_and_watch tag), TC-5 (self_check never exercises a real command spawn round-trip), or TC-6 (run_and_watch wait_ms cap self-violation / 62-70s wall) appear in BACKLOG.md. P0 section says \"None\" (line 14-17). Existing items are unrelated: P1.1 frames_suppressed counter, P1.2-P1.5b provider smokes + npm publish, P2.1/P2.2 load tests, P2.3 system_discover beta_evidence_ref, P3.x nits, plus WWS-B1..B9 Windows-bridge follow-ups. So the campaign introduces genuinely new findings — BACKLOG.md should gain new P0/P1 rows for the ghost-job/trust defects (the existing P0 section being empty is itself now inaccurate)."
+    },
+    {
+      "topic": "RISK_REGISTER.md — TC-1..TC-6 NOT tracked; R-06 is the nearest tangential row",
+      "status": "new-info",
+      "evidence": [
+        "E:/project/terminal-commander/RISK_REGISTER.md:88-99",
+        "E:/project/terminal-commander/RISK_REGISTER.md:115-123",
+        "E:/project/terminal-commander/RISK_REGISTER.md:13-99"
+      ],
+      "details": "No risk row covers ghost jobs, client-side request-timeout aborting a live spawn, self-check honesty gap, or the timeout-cap math. The closest is R-06 (lines 88-99): the `command_exited` lifecycle event embeds argv verbatim in `summary` (and TC47 leak check exempts summary/argv/argv0/subject/summary_template/reason) — relevant to TC-4 because it shows the project already accepts argv as operator-input safe to surface, so adding argv/tag/label to anonymous runtime_state probe rows is consistent with existing trust posture, not a new leak. Risk policy (lines 115-123): active risks move to Resolved only AFTER a goal lands the fix AND tests prove the mitigation; a risk marked `accepted` needs operator acknowledgement; REMOVING a risk row is FORBIDDEN (demote to Resolved, keep the reference). The campaign should ADD new active risk rows (e.g. R-07 ghost jobs, R-08 self-check false-green) rather than editing existing ones, and only demote them after the fix lands with proof."
+    },
+    {
+      "topic": "ROADMAP.md — TC-1..TC-6 not tracked; chain has closed at TC48/WWS",
+      "status": "new-info",
+      "evidence": [
+        "E:/project/terminal-commander/ROADMAP.md:153-191",
+        "E:/project/terminal-commander/ROADMAP.md:182-191"
+      ],
+      "details": "The runtime chain (TC33-TC48) and the WWS Windows-bridge chain are both marked landed/closed. Out-of-runtime-chain deferrals (lines 182-188) list native notify/inotify, Windows ConPTY, frames_suppressed, and provider live smokes — none of which are the ghost-job/stop-tool/timeout defects. ROADMAP says \"Successor chain after TC48 is operator-driven beta exercise, not a new code chain\" (lines 190-191), i.e. there is no open code chain that already scopes these fixes; the campaign is net-new corrective work. The TCx numbering in the mission (TC-1..TC-6) is the investigation's own labeling and does NOT correspond to repo TC-goal ids (which run TC01-TC48 + WWS01-09 + NPM01-10)."
+    },
+    {
+      "topic": "SPEC.md — run_and_watch is ABSENT from the spec'd tool surface; runtime contract governs instead",
+      "status": "changed-needs-redesign",
+      "evidence": [
+        "E:/project/terminal-commander/SPEC.md:211-280",
+        "E:/project/terminal-commander/SPEC.md:398-411",
+        "E:/project/terminal-commander/docs/mcp/TOOL_CONTROL_SURFACE.md:59-71"
+      ],
+      "details": "SPEC.md section 8 (the MCP tool surface, lines 211-280) freezes the MVP tool set verbatim from README:243-266 and does NOT contain `run_and_watch`, `self_check`, `command_output_tail`, or any command-stop tool — it lists `command_send_signal` (POSIX signal to a job, line 234) as the only process-control mutation beyond stdin. BUT SPEC §13 (lines 398-411) explicitly subordinates itself: \"the locked MCP tool surface\" is `docs/mcp/TOOL_CONTROL_SURFACE.md`, and \"When this SPEC and the runtime contract conflict, the runtime contract wins for TC35-TC48; the conflict is recorded as a SPEC\" amendment. So the GOVERNING contract for run_and_watch/command lifecycle/timeouts is TOOL_CONTROL_SURFACE.md + docs/runtime/REALTIME_SIGNAL_CHANNEL.md, NOT SPEC §8. SPEC §2a (lines 29-33) now says Tier-1 is Windows-x64 native + Linux-x64 native (per docs/adr/ADR-native-tier1-runtime.md) — which CONTRADICTS SPEC §6 line 180-181 (\"Linux native + WSL2 primary. macOS / Windows-native deferred\") and the README/RELEASE_CHECKLIST 'Linux+WSL2 only' claim; the spec is internally drifted. ACTION: the campaign's spec touch should be a SPEC §8 + §13 amendment that records run_and_watch and the command-stop tool, and the run_and_watch timeout contract belongs in TOOL_CONTROL_SURFACE.md / REALTIME_SIGNAL_CHANNEL.md, not SPEC §8."
+    },
+    {
+      "topic": "TOOL_CONTROL_SURFACE.md — the LOCKED MCP contract; governs TC-3 stop tool, TC-4, TC-5, TC-6",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/docs/mcp/TOOL_CONTROL_SURFACE.md:59-71",
+        "E:/project/terminal-commander/docs/mcp/TOOL_CONTROL_SURFACE.md:81-94",
+        "E:/project/terminal-commander/docs/mcp/TOOL_CONTROL_SURFACE.md:123-145"
+      ],
+      "details": "This is the authoritative MCP tool contract (anchored by crates/mcp/src/tools.rs). Its catalogue (lines 59-71) lists 32 tools and shows PTY HAS a stop tool (`pty_command_stop`) while the Commands group has `command_start_combed`, `run_and_watch`, `command_status`, `command_output_tail` but NO command-job stop — confirming TC-3's gap at the contract level. The doc count (32) is itself STALE vs code (37 — see tool-count finding). Binding constraints for TC-3: (1) §5 (lines 123-133) — a new tool that needs a new policy action must add the closed-set variant in the SAME goal; known families include command start/stdin/signal, so a stop/kill maps to a command-control policy action that must be added. (2) §6 forbidden expansions (lines 135-145) — must not add a tool that spawns commands from the MCP crate (so stop must forward to daemon), bypasses policy, or exposes command/PTY mutation WITHOUT audit. (3) §3 anti-tools (lines 81-94) — command_read_stdout/stderr, stream_tail, shell_exec, etc. are banned; a stop tool is fine but must return ids/metadata, not raw streams. (4) §1 (lines 43-55) — every daemon-backed tool must report availability honestly and return structured `daemon_unavailable`, not raw pipe errors (directly relevant to TC-1's leaking `request timed out` -> -32603). Adding a tool requires updating the system_discover fixture tests/fixtures/contracts/mcp-tools/system_discover.v1.json and the catalogue-count assertions."
+    },
+    {
+      "topic": "MCP tool count is 37 in code — docs (29/32) are STALE; affects TC-3 anchor list",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/mcp/src/lib.rs:12",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:3232",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:3292",
+        "E:/project/terminal-commander/crates/mcp/tests/mcp_live_daemon.rs:213"
+      ],
+      "details": "Code at HEAD exposes 37 live tools: lib.rs:12 doc says \"all 37 live tools\"; the catalogue test is `catalogue_lists_thirty_seven_live_tools()` (tools.rs:3232); mcp_live_daemon.rs:213 asserts \"tool catalogue must list exactly 37 live tools (32 + subscription_open/pull/list/close/seek)\". RELEASE_CHECKLIST/README say 29; TOOL_CONTROL_SURFACE.md says 32. So adding TC-3's command-stop tool makes 38 and the campaign must update, in one change, AT LEAST: `catalogue_lists_thirty_seven_live_tools` -> thirty_eight (tools.rs:3232), `tool_router_exposes_all_live_tools` (tools.rs:3292), the assert string in mcp_live_daemon.rs:213, the doc count in lib.rs:12, TOOL_CONTROL_SURFACE.md §2 catalogue, the system_discover.v1.json fixture, plus RELEASE_CHECKLIST line 312 / README counts. Mission's TC-3 'no command stop tool on the MCP surface' is CONFIRMED at HEAD — the Commands group has no stop, only PTY does (pty_command_stop)."
+    },
+    {
+      "topic": "run_and_watch defects (TC-4 tag, TC-6 timeout cap) confirmed live at HEAD",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:617",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:2205-2214",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:2258-2279"
+      ],
+      "details": "run_and_watch is documented (tools.rs:617): \"waits up to wait_ms (default 5000, max 60000)\". Constants: `RUN_AND_WATCH_MAX_WAIT_MS = 60_000` (line 2208), a default wait, a max-signals cap, and `MAX_WAIT_SLICE_MS` per-iteration bucket_wait slice (line 2213) — the loop runs `ceil(wait_ms / slice)` iterations (deadline_slices at line 650), which is exactly the TC-6 wall-clock overrun mechanism (slices x (server bucket_wait block + 2 RTTs) exceeds 60000ms). TC-4 tag defect CONFIRMED: `McpRunAndWatchParams::into_parts()` (lines 2258-2279) hardcodes `tag: None` in the start params, while `command_start_combed`'s params carry `tag: params.tag` (lines 1201, 1286) and the per-bucket `tag: Option<String>` field exists on the start/watch/PTY param structs (lines 2174, 2806, 2859) — so run_and_watch cannot tag its probe and its runtime_state row stays anonymous. self_check exists and routes to IpcRequest::SelfCheck (tools.rs:127,137,568-573), consistent with TC-5's claim that self_check runs but does not exercise a real command spawn round-trip. (Deep client.rs/pipe_client.rs request_timeout and the wait-loop early-return for TC-1/TC-2 are in crates/ipc — out of this researcher's read scope but the MCP-side anchors above are verified.)"
+    },
+    {
+      "topic": ".planning/ directory format — the campaign's planning doc shape",
+      "status": "new-info",
+      "evidence": [
+        "E:/project/terminal-commander/.planning/open-work/00-INDEX.md:1-92",
+        "E:/project/terminal-commander/.planning/open-work/B2-medium-audit/PLAN.md:1-60",
+        "E:/project/terminal-commander/.planning/endpoint-coverage-hardening.md"
+      ],
+      "details": "Two planning shapes coexist under `.planning/`: (1) a single-file topical plan (`endpoint-coverage-hardening.md`, 32KB). (2) a campaign folder `open-work/` with `00-INDEX.md` + per-bucket subdirs each holding `PLAN.md` and `ADVERSARIAL-REVIEW.md` (buckets B1/B2/B3/D/C). 00-INDEX.md format = header (Repo/Git branch+commit/Recent commits), an Executive summary table (Bucket|Priority|Status|Blocks product promise?), a mermaid dependency graph, a recommended priority order, a Planning artifacts table linking each PLAN/REVIEW, a 'Related existing planning' list, and 'Ledger corrections'/'Plan corrections' tables (Claim|Verdict|Evidence with file:line) that supersede stale plan text. PLAN.md format (B2 example) = title + Source + Posture line, a Summary table (ID|Symptom verified|Location actual lines|Fix sketch|Effort|Test impact), then Per-item detail sections each with Symptom, Citations (fenced ```start:end:path``` code blocks), Fix, Effort/Test. Plans are evidence-first with exact file:line citations and explicit effort/test-impact columns. The campaign should add a new `.planning/<campaign-name>/00-INDEX.md` + per-defect `PLAN.md`(+ADVERSARIAL-REVIEW.md) in this style, citing exact file:line for each of TC-1..TC-6."
+    },
+    {
+      "topic": "Commit conventions — Conventional Commits + release-please + co-author footer",
+      "status": "changed-needs-redesign",
+      "evidence": [
+        "E:/project/terminal-commander/CONTRIBUTING.md:251-264",
+        "git log subjects (feat:/fix:/chore:/ci:/docs: + (#NN))",
+        "git log body footer = Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+      ],
+      "details": "CONTRIBUTING.md §8 (lines 251-264): one concise imperative subject <70 chars, no emojis, body explains why (not what), reference the goal id (e.g. `TC15: ...`), co-author footer. LIVE git log confirms strict Conventional Commits with scopes and PR suffixes: `feat: Subscriptions Phase 2 + Phase 3 (#83)`, `fix(windows): user-space AV-safety (#91)`, `fix(ci): add missing ... cargo publish job (#85)`, `docs(testing): track ... (#89)`, plus release-please bookkeeping commits (`chore: release main`, `fix: release Rust crate changes`). Conventional-Commit `feat:`/`fix:` is also the RELEASE TRIGGER (RELEASE_CHECKLIST: a feat/fix on main makes release-please open a release PR). TWO drifts the campaign must honor the LIVE form for: (a) the co-author footer in CONTRIBUTING.md §8 line 263 still says `Claude Opus 4.7 (1M context)` but live commits use `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` — use the live form. (b) the 'reference the goal id' rule presumes the dead `.agent/goals/` workflow; live commits reference PR numbers, not TCxx goal ids. So: Conventional-Commit subject with scope, body explaining why, `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` footer, land via PR to main — and choose `fix:` (these are correctness/trust bug fixes) which correctly drives a release."
+    },
+    {
+      "topic": "CI workflows — gates on PR (fmt/clippy/test) + Windows AND unix obligation",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/.github/workflows/npm-binary-build.yml:55-62,80-124",
+        "E:/project/terminal-commander/.github/workflows/npm-binary-build.yml:15-50",
+        "E:/project/terminal-commander/CONTRIBUTING.md:178-200"
+      ],
+      "details": "npm-binary-build.yml is the PR gate (triggers on pull_request to main AND push to main). It has NO `paths:` filter ON PURPOSE (lines 15-50: the main-protection ruleset marks EIGHT contexts as REQUIRED — both pre-build-gates, all five build-* legs, npm-pack — so a path filter would permanently BLOCK docs/workflow-only PRs; PR #85 already hit this). Required jobs: `pre-build-gates (linux-x64)` on ubuntu-24.04 running scripts/linux-gate.sh, and `pre-build-gates (windows-x64)` on windows-2022 running scripts/windows-gate.ps1 — so BOTH a linux gate AND a Windows gate are mandatory on every PR (no MSRV/cargo-hack matrix job exists — MSRV 1.92 is unenforced). Plus a 5-platform native build matrix (linux-x64/arm64, windows-x64, mac-x64/arm64) and npm-pack. Concurrency cancels superseded PR runs only (line 74). For this campaign: because the IPC-timeout/stop-tool/self-check fixes touch cfg(unix)/cfg(windows) spawn/kill code AND tests, AGENTS.md line 9 + CONTRIBUTING §6.1 (lines 178-200) make running BOTH gates locally before push mandatory — a single-OS `cargo test` will not compile the other OS's cfg world. Windows obligation specifically includes the two regression binaries windows_no_console_spawn and windows_spawn_site_coverage (windows-gate.ps1). No backend test suite caveat from testpilot does NOT apply here — this Rust repo has a real nextest suite (37-tool MCP tests, daemon/probes integration tests)."
+    }
+  ],
+  "risks": [
+    "DOC-vs-CODE DRIFT IS PERVASIVE: MCP tool count is 37 in code but 29 (RELEASE_CHECKLIST/README) and 32 (TOOL_CONTROL_SURFACE.md) in docs; nextest count 347 in RELEASE_CHECKLIST may also be stale. The campaign cannot trust any doc tool/test count — it must read the live assertions in crates/mcp/src/tools.rs and crates/mcp/tests/. Adding the TC-3 stop tool means touching >=7 count anchors atomically or CI red.",
+    "BRANCH/WORKFLOW DOCTRINE IS DEAD: CONTRIBUTING.md §1+§7 (feature/terminal-commander-mvp branch, .agent/goals/ goal files, main prohibited) describes a workflow the repo has abandoned for release-please PR-to-main. An agent that obeys CONTRIBUTING literally will work on the wrong branch and waste effort inventing goal files. Follow the live git convention; flag the drift.",
+    "MCP-CRATE GUARDS WILL FAIL THE GATE if TC-3's stop tool is implemented naively: linux-gate.sh MCP guard 1 forbids Command::new/spawn/TcpListener/UdpSocket and guard 2 forbids direct fs in crates/mcp/src. The stop/kill MUST forward to the daemon over IPC (daemon owns the kill via pid_belongs_to_daemon checks per .planning ledger), never spawn/kill from the MCP crate.",
+    "NEW-DEPENDENCY TEMPTATION: TC-2 idempotency, TC-6 timeout math, and TC-1 retry-safety could tempt an add of a hashing/dedup/time crate, but deny.toml has a closed license allowlist + crates.io-only source ban, and the mission says add none. cargo-deny is NOT in the PR gate (only release), so a stray dep slips PR review and breaks release later — a silent trap.",
+    "RELEASE-TRIGGER SIDE EFFECT: a `fix:`/`feat:` Conventional-Commit on main makes release-please open a release PR and (on merge) version-bumps + can publish. The campaign's commit type and merge timing have release consequences; coordinate with the operator (no push/merge without explicit human approval per global rules).",
+    "TOOL-SURFACE LOCK + SPEC SUBORDINATION: TOOL_CONTROL_SURFACE.md §5 requires the new policy action variant for a stop tool be added in the SAME change as the tool, and §6 requires audit on command mutation. SPEC §8 doesn't even list run_and_watch; SPEC §13 says the runtime contract (TOOL_CONTROL_SURFACE.md + REALTIME_SIGNAL_CHANNEL.md) wins. Editing the wrong contract file (SPEC §8 instead of the runtime contract) would be a doctrine violation.",
+    "WINDOWS/UNIX DUAL-GATE OVERHEAD: every fix touches cfg(unix)/cfg(windows) IPC + spawn/kill code and tests, so BOTH scripts/linux-gate.sh (via WSL on Windows) and scripts/windows-gate.ps1 must pass before push (AGENTS.md line 9, CONTRIBUTING §6.1). The reviewer-host is Windows; running the linux gate requires the documented one-time WSL provisioning (rustup 1.95.0, cargo-nextest, node, python3) or the load-gate self-skips/fails.",
+    "RISK-REGISTER/BACKLOG IMMUTABILITY RULES: RISK_REGISTER forbids removing risk rows (demote to Resolved only after fix+proof) and requires operator acknowledgement for `accepted` status; BACKLOG requires items be shown live + test-matched before moving to Resolved. The campaign must ADD rows for the ghost-job/self-check defects (the current empty P0 section is itself now false), not silently edit, and not prematurely mark them Resolved."
+  ],
+  "open_questions": [
+    "Does docs/runtime/REALTIME_SIGNAL_CHANNEL.md specify a run_and_watch / command-lifecycle TIMEOUT contract (e.g. an advertised wait_ms cap and the client-vs-server timeout relationship)? I confirmed run_and_watch is absent from SPEC §8 and present in TOOL_CONTROL_SURFACE.md §2, but did not read REALTIME_SIGNAL_CHANNEL.md in full — the TC-6 timeout-math fix must conform to whatever cap that runtime contract advertises (or amend it).",
+    "What is the canonical place to document the new command-stop tool and the TC-6 timeout semantics — TOOL_CONTROL_SURFACE.md + REALTIME_SIGNAL_CHANNEL.md (the runtime contract that SPEC §13 says wins), with a SPEC §8/§13 amendment cross-reference? The campaign's doc-touch needs an explicit owner-file decision to avoid editing the subordinate SPEC instead of the governing runtime contract.",
+    "Are crates/ipc/src/client.rs + pipe_client.rs's 5s request_timeout and the run_and_watch wait-loop early-return (the core TC-1/TC-2 mechanisms) still present at HEAD exactly as the prior investigation found? I verified the MCP-side anchors (run_and_watch params, cap constant, tag:None, self_check) but the deep IPC-client timeout code is in crates/ipc which another researcher should re-confirm line-by-line at HEAD.",
+    "Does the system_discover contract fixture (tests/fixtures/contracts/mcp-tools/system_discover.v1.json) hardcode the tool count/list such that adding the stop tool forces a fixture regen, and is that fixture asserted byte-exact in a test? This determines whether TC-3 needs a fixture update in the same change.",
+    "Should the new planning artifact live as `.planning/<campaign>/00-INDEX.md + per-defect PLAN.md/ADVERSARIAL-REVIEW.md` (the open-work/ shape) or as a single topical file (the endpoint-coverage-hardening.md shape)? Given six related defects with a shared root cause, the open-work multi-file campaign shape fits best, but the operator may prefer a single ghost-jobs-remediation.md.",
+    "Is there a live main-protection ruleset requirement that the campaign branch must be a non-main feature branch with PR (implied by release-please + the 8 required contexts), and what is the expected branch-name convention now that feature/terminal-commander-mvp is dead (recent PRs came from special-place-ai-heaven/* and release-please--branches--main)?"
+  ]
+}

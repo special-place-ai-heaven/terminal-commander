@@ -1,0 +1,116 @@
+{
+  "findings": [
+    {
+      "topic": "Q1a: When job_id is minted relative to spawn; is the IPC reply pre- or post-spawn",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "crates/daemon/src/command.rs:472-474",
+        "crates/daemon/src/command.rs:489-494",
+        "crates/daemon/src/command.rs:499",
+        "crates/daemon/src/command.rs:503-512",
+        "crates/daemon/src/command.rs:547-561",
+        "crates/daemon/src/command.rs:582-594",
+        "crates/daemon/src/command.rs:711-717"
+      ],
+      "details": "start_combed is a SYNCHRONOUS fn. All three ids (bucket_id=472, probe_id=473, job_id=474) are minted as pure value allocations BEFORE any side effect (comment at 469-471 confirms they are free). Order: validate_argv -> shell guard -> policy.evaluate -> mint ids (472-474) -> snapshot+merge rules + SifterRuntime::build (487-494) -> bucket_create (499) -> sources.record (503) -> ProcessProbe::spawn (547-561) -> jobs.start + mark_running + live.insert (582-594) -> audit allow (595-601) -> enqueue lifecycle waiter (619) -> return CommandStartResponse{job_id,bucket_id,probe_id,cursor:0} (711). The reply is sent AFTER the OS process spawn completes (spawn at 547 is a sync call that returns once tokio::process::Command::spawn has forked). This is the TC-1a window: if the client's 5s request_timeout (crates/ipc/src/client.rs:44, pipe_client.rs:40) fires while spawn is in progress on the daemon, the daemon proceeds to spawn+register+return, but the client already abandoned the call and never receives the job_id -> a live ghost job nobody can address."
+    },
+    {
+      "topic": "Q1b: Could the reply be sent pre-spawn (async spawn)? What state between ack and spawn-complete?",
+      "status": "changed-needs-redesign",
+      "evidence": [
+        "crates/daemon/src/command.rs:472-494",
+        "crates/core/src/job.rs:57-63",
+        "crates/core/src/job.rs:119-132",
+        "crates/daemon/src/command.rs:582-583"
+      ],
+      "details": "YES, a pre-spawn ack is feasible and is the natural ghost-fix. The ids are known before spawn (472-474), and the JobState enum already has a Starting state (job.rs:58) distinct from Running (job.rs:59). Today jobs.start() inserts at Starting (job.rs:94/119-121) and mark_running flips Starting->Running (job.rs:126-132). A redesign: (1) mint ids, (2) jobs.start at Starting + live.insert a placeholder, (3) RETURN the ack {job_id,bucket_id,probe_id} immediately, (4) spawn the probe on a tokio task that on success calls mark_running and stores the probe handle, or on spawn-failure flips the job to Failed and appends a synthetic command_failed. Between ack and spawn-complete the job sits at Starting with no probe handle yet -- command_status/run_and_watch would observe state=Starting (currently they only treat Exited/Cancelled/Failed as terminal, so Starting is correctly non-terminal). Invariants to preserve: spawn errors that today return CommandError::Spawn (command.rs:551-560) would instead need to flip the already-acked job to Failed and emit the error via the bucket/audit, since the caller already got an ack. The bucket/source side-table must be created before the ack so a subscription can attach immediately."
+    },
+    {
+      "topic": "Q2: How PTY jobs are stopped; kill semantics; audit; is there already a command-job cancel not exposed via MCP?",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "crates/daemon/src/pty_command.rs:526-571",
+        "crates/daemon/src/ipc/handlers/pty.rs:182-205",
+        "crates/ipc/src/protocol.rs:1314-1328",
+        "crates/mcp/src/tools.rs:1339-1370",
+        "crates/probes/src/process.rs:296-300",
+        "crates/probes/src/process.rs:255-262",
+        "crates/probes/src/process.rs:47",
+        "crates/core/src/job.rs:187-207",
+        "crates/daemon/src/command.rs:218-231",
+        "crates/daemon/src/command.rs:620",
+        "crates/daemon/src/command.rs:668-671"
+      ],
+      "details": "PTY stop path (the template to mirror): PtyRuntime::stop (pty_command.rs:526-571) removes the binding, snapshots probe metrics, calls probe.cancel() (540), then jobs.cancel(job_id) (559, synchronous so pty_command_list is immediately consistent), then audits 'pty_command_stop' AFTER the kill (560-569). IT DOES NOT POLICY-GATE. IPC layer handle_pty_command_stop (ipc/handlers/pty.rs:182-205) -> IpcRequest::PtyCommandStop. Protocol PtyCommandStopParams{job_id}/PtyCommandStopResponse{job_id,bucket_id,counters} (protocol.rs:1314-1328). MCP tool pty_command_stop (tools.rs:1341). KILL SEMANTICS: ProcessProbe::cancel (process.rs:296-300) sends a oneshot; the spawn task select! (255-262) does child.start_kill() then child.wait().await, returning ProcessProbeError::Cancelled. This is a FORCED kill (SIGKILL-equivalent / TerminateProcess) -- NO graceful term, and the config.grace field is explicitly advisory/unused (process.rs:47 comment 'cancellation in MVP is forced kill only'). For command jobs there is a daemon-side cancel mechanism BUT it is unreachable: JobManager::cancel (job.rs:187-207, sets JobState::Cancelled + command_failed signal=CANCELLED) is only invoked by the command lifecycle waiter when the probe ITSELF reports Cancelled (command.rs:668-671). The ProcessProbe handle is MOVED into the waiter closure via drive_to_exit(probe) (command.rs:620) and JobBinding (command.rs:218-231) retains NO probe/cancel handle. So a command_stop CANNOT be built by just exposing an existing method -- the runtime needs to RETAIN a cancel handle (clone the oneshot cancel_tx before the move, or wrap the probe in Arc<Mutex<Option<ProcessProbe>>> like PTY's binding pty_command.rs:67). JobState::Cancelled (job.rs:61) is set by JobManager::cancel only."
+    },
+    {
+      "topic": "Q3: Where the daemon stores argv for a running job; available at runtime_state assembly?",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "crates/core/src/job.rs:32-38",
+        "crates/daemon/src/command.rs:572-582",
+        "crates/daemon/src/ipc/handlers/runtime.rs:13-40",
+        "crates/daemon/src/ipc/handlers/runtime.rs:62-83",
+        "crates/daemon/src/command.rs:855-864",
+        "crates/daemon/src/command.rs:868-897"
+      ],
+      "details": "argv IS stored: JobConfig.argv (job.rs:34) is populated in start_combed (command.rs:572-581: job_cfg.argv = req.argv) and kept in the JobManager record, reachable via JobManager::get(job_id).config.argv. PTY also stores it (PtyBinding.argv pty_command.rs:64). BUT it is NOT surfaced at runtime_state assembly: collect_probes (ipc/handlers/runtime.rs:13-86) builds Command entries (25-39) from command.live_jobs() (returns only LiveJobIdentity{job_id,bucket_id,probe_id}, command.rs:855-864) + command.status() (CommandStatusResponse has no argv, command.rs:868-897), hardcoding path:None and emitting no argv/tag/label. The PTY branch explicitly discards argv as _argv (runtime.rs:67). So fixing TC-4 (anonymous probe rows) needs collect_probes to additionally pull JobManager::get(job_id).config.argv (already in DaemonState.jobs) and the bucket source tag (BucketSourceTable, recorded at command.rs:503-512 with tag) -- both available at assembly time without new plumbing -- plus new fields on ProbeListEntry."
+    },
+    {
+      "topic": "Q4: Is stopping a job policy-gated? What profile checks would a new stop method need?",
+      "status": "changed-needs-redesign",
+      "evidence": [
+        "crates/daemon/src/policy.rs:57-71",
+        "crates/daemon/src/policy.rs:226-238",
+        "crates/daemon/src/policy.rs:424-437",
+        "POLICY.md:100-114",
+        "POLICY.md:283-298",
+        "crates/daemon/src/pty_command.rs:526-571",
+        "crates/daemon/tests/security.rs:90-91"
+      ],
+      "details": "PTY stop is currently NOT policy-gated (pty_command.rs:526-571 audits but never calls policy.evaluate). HOWEVER the seam already exists: PolicyAction::CommandSignal (policy.rs:62) and CommandStdin (policy.rs:61) are DORMANT variants with NO production callers (only the policy engine's own match arms at 229-230 and 428-429, plus a test at security.rs:90-91 -- confirmed by repo-wide grep). CommandSignal already encodes the correct doctrine: read_only_observer DENIES it (policy.rs:226-238, matching POLICY.md 2.3 line 112 'denies command_send_signal'), while developer_local/repo_only/admin_debug fall through to Allow. action_path_subject returns None for CommandSignal (policy.rs:428-429), so it is correctly not subject to repo_only containment. A new command_stop SHOULD evaluate PolicyAction::CommandSignal and emit an audit row BEFORE the kill to satisfy POLICY.md section 8 conformance (every gated action goes through the engine; audit before action) -- improving on PTY's ungated pattern. No new policy variant or profile field is required; the variant is ready."
+    },
+    {
+      "topic": "Q5: Any existing idempotency / duplicate-spawn guard daemon-side? (and HEAD made it worse)",
+      "status": "changed-needs-redesign",
+      "evidence": [
+        "crates/mcp/src/daemon_client.rs:187-202",
+        "crates/ipc/src/client.rs:71-73",
+        "crates/ipc/src/pipe_client.rs:64-66",
+        "crates/ipc/src/protocol.rs:538-559",
+        "crates/mcp/src/tools.rs:1667-1727",
+        "crates/mcp/src/tools.rs:629-643",
+        "crates/mcp/src/tools.rs:2258-2280"
+      ],
+      "details": "NO idempotency / in-flight-identical-argv / duplicate-spawn guard exists anywhere (daemon or client) -- confirmed by repo-wide grep for idempotency/in_flight/dedupe-spawn/duplicate. The RequestEnvelope carries no idempotency key. WORSE AT HEAD than the prior investigation assumed: the IPC client now maps a request timeout to IpcError::transport (client.rs:73, pipe_client.rs:66) instead of a plain Internal error, and McpDaemonClient::call (daemon_client.rs:187-202) now self-heals + BLINDLY RETRIES the entire request exactly once on ANY transport error. Therefore a CommandStartCombed (or run_and_watch's internal start RPC, tools.rs:629-643) that times out client-side at 5s during a slow spawn now AUTOMATICALLY re-sends the spawn -> the daemon double-spawns (first spawn completed; retry spawns again), turning TC-1a directly into TC-2 with no LLM involvement. The retry happens BELOW the run_and_watch layer (inside call()), so a fix at the run_and_watch level is insufficient -- the daemon needs a server-side idempotency/dedup guard keyed on a client-supplied request id or an (argv,cwd,window) fingerprint so a retried identical CommandStartCombed returns the SAME job_id instead of spawning anew. into_mcp_error (tools.rs:1678-1680) now correctly surfaces surviving transport failures as a clean daemon_unavailable envelope (not -32603), which mitigates the 'agent abandons TC' symptom but does nothing for the double-spawn."
+    },
+    {
+      "topic": "TC-1b / TC-6 re-verification at HEAD",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "crates/mcp/src/tools.rs:655-709",
+        "crates/mcp/src/tools.rs:665",
+        "crates/mcp/src/tools.rs:703",
+        "crates/mcp/src/tools.rs:650",
+        "crates/mcp/src/tools.rs:683",
+        "crates/mcp/src/tools.rs:2208",
+        "crates/mcp/src/tools.rs:2216"
+      ],
+      "details": "TC-1b still present: run_and_watch's wait loop makes 2 RPCs per slice (CommandStatus at 658, BucketWait at 685); EVERY RPC error does 'return Err(into_mcp_error(&e))' (665, 703) which discards the already-known job_id and any collected signals -- a single mid-loop transport blip abandons a live, identified job. TC-6 still present: RUN_AND_WATCH_MAX_WAIT_MS=60000 (2208) with MAX_WAIT_SLICE_MS=1000 (2216) yields deadline_slices=60 (650); each non-terminal slice blocks the BucketWait up to 1000ms server-side (timeout_ms=Some(1000) at 683) plus a CommandStatus RTT plus a BucketWait RTT, so 60 iterations wall-clock to ~62-70s, exceeding the advertised 60000ms cap and common MCP-client kill thresholds."
+    }
+  ],
+  "risks": [
+    "The MCP call-layer blind retry (daemon_client.rs:191-198) means ANY ghost-fix that does not add a SERVER-SIDE idempotency guard is incomplete: even a perfect pre-spawn ack still double-spawns on a retried CommandStartCombed because the retry is a fresh request the daemon cannot recognize as a duplicate. The idempotency key must live on the request envelope / be honored in start_combed, not in run_and_watch.",
+    "A pre-spawn async ack changes the spawn-failure contract: today ProcessProbe::spawn failure returns CommandError::Spawn synchronously (command.rs:551-560) and NO job is registered. If the ack is sent before spawn, a spawn failure must instead flip an already-acked job to Failed and surface the error via bucket/audit -- callers (run_and_watch completion markers tools.rs:1768) must treat a job that never left Starting and then Failed correctly.",
+    "command_stop requires retaining a cancel handle in JobBinding, which the current design deliberately avoids (probe moved into the waiter at command.rs:620). Adding Arc<Mutex<Option<ProcessProbe>>> (PTY-style) introduces a lock the lifecycle waiter and the stop path both touch; PTY already documents this footgun (write_stdin holds the probe mutex across .await, pty_command.rs:350-354) -- mirror PTY's pattern of taking the completion/cancel handle out BEFORE moving the probe, and have stop() and the waiter coordinate via jobs.cancel() being checked-then-skipped (pty_command.rs:391-400).",
+    "The forced-kill-only semantics (process.rs:47, grace unused) mean command_stop will SIGKILL with no graceful window. If a graceful stop is desired, that is net-new probe work (the grace field exists on ProcessProbeConfig but is wired nowhere), not just exposure.",
+    "Adding command_stop touches 6+ layers that must stay in sync or the system_discover_methods_match_dispatch parity test fails: IpcRequest enum (protocol.rs:254-265 region), method_name (server.rs:442 region), DISCOVERABLE_METHODS (server.rs:463-502), dispatch arm (server.rs:682 region), the daemon handler, the protocol shapes, and the MCP tool."
+  ],
+  "open_questions": [
+    "Should command_stop reuse PolicyAction::CommandSignal as-is, or does the team want a distinct PolicyAction::CommandStop variant for clearer audit separation? CommandSignal already has the right deny matrix but its name implies signal-delivery breadth (SIGTERM/SIGINT/etc.) that the forced-kill-only implementation does not honor.",
+    "For the idempotency guard: client-supplied request-id (requires adding a field to RequestEnvelope and threading it through MCP tool params) vs daemon-computed (argv,cwd,bucket window) fingerprint (no protocol change but risks collapsing two legitimately-distinct rapid identical runs)? The fingerprint approach mirrors the existing contentFingerprint pattern but the desired dedup window/TTL is unspecified.",
+    "Should the pre-spawn ack expose the new Starting state to run_and_watch/command_status as a distinct liveness, or is mapping Starting->Running at the wire boundary acceptable? command_liveness (crate liveness.rs, referenced at runtime.rs:22 and pty_command.rs:243) was not read in this pass -- confirm how it maps JobState::Starting.",
+    "Does fixing the run_and_watch wait_ms cap (TC-6) belong with the ghost-job work, or is it independent? Lowering MAX_WAIT_SLICE_MS or shrinking the cap interacts with the per-slice double-RPC pattern that TC-1b also touches.",
+    "PtyRuntime::stop is currently ungated -- should the same campaign retrofit policy-gating onto pty_command_stop for symmetry/conformance (POLICY.md 2.3 lists command_write_stdin/command_send_signal denials that PTY does not currently enforce on stop), or is that out of scope?"
+  ]
+}

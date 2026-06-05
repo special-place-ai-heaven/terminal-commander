@@ -1,0 +1,137 @@
+{
+  "findings": [
+    {
+      "topic": "TC-4 primary fix site: runtime_state probe-row assembly (path:null root cause)",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/daemon/src/ipc/handlers/runtime.rs:13-86 (collect_probes)",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/handlers/runtime.rs:37 (Command probe: path: None)",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/handlers/runtime.rs:67,80 (PTY probe: _argv discarded, path: None)",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/handlers/runtime.rs:96 (handle_runtime_state calls collect_probes)"
+      ],
+      "details": "collect_probes() is THE assembly site for every runtime_state/probe_list/probe_status row (all three handlers funnel through it). path:null because the Command arm (line 37) and PTY arm (line 80) hardcode path: None; only the FileWatch arm (line 57) sets path because WatchRuntime::list() returns it. The rows carry NO argv and NO tag at all -- ProbeListEntry has no such fields. The fix lands here: enrich each row by (a) reading argv from the job ledger and (b) reading tag/path from the BucketSource side-table (see next findings for the data sources)."
+    },
+    {
+      "topic": "TC-4 data source for argv[0..2] -- already available daemon-side, no new storage needed",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/core/src/job.rs:32-34 (JobConfig.argv: Vec<String>)",
+        "E:/project/terminal-commander/crates/core/src/job.rs:78-79 (JobRecord.config)",
+        "E:/project/terminal-commander/crates/daemon/src/command.rs:572-581 (job_cfg stores req.argv)",
+        "E:/project/terminal-commander/crates/daemon/src/command.rs:868-872 (status(): self.jobs.get(job_id) -> rec.config, argv reachable but unused)",
+        "E:/project/terminal-commander/crates/daemon/src/command.rs:855-864 (live_jobs() returns only LiveJobIdentity {job_id,bucket_id,probe_id} -- NO argv)",
+        "E:/project/terminal-commander/crates/daemon/src/pty_command.rs:574 (PTY list() returns argv: Vec<String> -- already exposed)"
+      ],
+      "details": "Command argv is stored in JobConfig.argv and reachable via state.command's JobManager (jobs.get(job_id).config.argv) but collect_probes never reads it -- it only iterates live_jobs() which returns the slim LiveJobIdentity. PTY list() ALREADY returns argv but runtime.rs line 67 binds it to _argv and throws it away. Fix options: (1) add an argv-bearing accessor on CommandRuntime (e.g. extend live_jobs() or add a per-job argv lookup via self.jobs.get) and stop discarding PTY _argv; (2) project argv to a bounded shape (argv[0..2] / a redacted summary) since the engine already redacts via format_argv_metadata (command.rs:989-1004). FileWatch synthesizes argv as [\"file_watch:<path>\"] per the ProbeListEntry doc (protocol.rs:1424-1426)."
+    },
+    {
+      "topic": "TC-4 data source for tag -- already stored, but only in the subscriptions side-table",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/daemon/src/command.rs:503-512 (self.sources.record(... tag: req.tag.clone()))",
+        "E:/project/terminal-commander/crates/daemon/src/file_watch.rs:284-292 (watch records tag into BucketSource)",
+        "E:/project/terminal-commander/crates/daemon/src/pty_command.rs:317 (pty records tag: req.tag.clone())",
+        "E:/project/terminal-commander/crates/daemon/src/subscriptions/source.rs:33-46 (BucketSource {kind,job_id,probe_id,path,tag})",
+        "E:/project/terminal-commander/crates/daemon/src/subscriptions/source.rs:75-79 (BucketSourceTable::get(bucket_id) -> Option<BucketSource>)"
+      ],
+      "details": "tag is written ONLY into the per-bucket BucketSource side-table (DaemonState.sources), consumed solely by the subscription routing predicate (subscriptions/model.rs:151). It is NOT in JobConfig and NOT in any per-job record collect_probes reads. CRUCIAL: BucketSource ALSO holds path, job_id, probe_id, kind, and exposes a cheap get(bucket_id). So collect_probes can call state.sources.get(p.bucket_id) and lift tag (and path for command/pty) into each row WITHOUT any new daemon-side storage. runtime.rs already has each probe's bucket_id in scope (j.bucket_id at line 27, bid at 44/67). This is the lowest-risk enrichment path."
+    },
+    {
+      "topic": "TC-4 wire protocol: ProbeListEntry needs new fields; change is NON-breaking via established serde(default) pattern",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/ipc/src/protocol.rs:1427-1457 (struct ProbeListEntry -- has path:Option, NO tag, NO argv)",
+        "E:/project/terminal-commander/crates/ipc/src/protocol.rs:1435-1439,1455 (existing additive fields use #[serde(default)])",
+        "E:/project/terminal-commander/crates/ipc/src/protocol.rs:334-337 (documented compat rule: legacy daemon omits field; clients treat absence as unknown)",
+        "E:/project/terminal-commander/crates/ipc/src/protocol.rs:949 (ActivationScope scope added preserving wire compat -- precedent)",
+        "E:/project/terminal-commander/crates/ipc/src/protocol.rs:1493-1513 (RuntimeStateResponse embeds Vec<ProbeListEntry>; reused by ProbeListResponse/ProbeStatusResponse 1515-1532)"
+      ],
+      "details": "ProbeListEntry is the single row type shared by runtime_state.probes, probe_list, and probe_status, so adding fields fixes all three at once. The protocol's established backward-compat convention is additive Option fields with #[serde(default, skip_serializing_if = \"Option::is_none\")] -- already used for liveness/frames_suppressed in this very struct and documented at protocol.rs:334-337. Adding tag: Option<String> and argv: Option<Vec<String>> (or argv_head) is therefore a NON-breaking, no-version-bump change: an old client ignores unknown fields; an old daemon omits them and a new client sees None. There is no numeric protocol version gate to bump (system_discover advertises only crate version + mcp_spec '2025-11-25', server.rs:774-776); compat is purely structural via serde. NOTE: ProbeKind (protocol.rs:1369) is a closed set whose doc says adding a variant needs a goal-file amendment -- but adding FIELDS to ProbeListEntry does not touch that closed set."
+    },
+    {
+      "topic": "TC-4 part 4: tag missing from run_and_watch MCP schema (asymmetry confirmed)",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:2221-2256 (McpRunAndWatchParams -- NO tag field)",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:2269-2278 (into_parts builds McpCommandStartParams with tag: None hardcoded)",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:2171-2174 (McpCommandStartParams HAS tag)",
+        "E:/project/terminal-commander/crates/mcp/src/tools.rs:2177-2193 (McpCommandStartParams::into_ipc passes tag through)"
+      ],
+      "details": "command_start_combed's MCP params expose tag and plumb it to CommandStartParams; run_and_watch's params struct omits tag entirely and into_parts (line 2277) hardcodes tag: None. So a job started via run_and_watch can never be tagged and can never echo a tag in runtime_state, even after the row-enrichment fix. Fix: add an Option<String> tag to McpRunAndWatchParams and thread it into the synthesized McpCommandStartParams at line 2277. This is purely additive to a JsonSchema-derived input struct (#[serde(default)]); no IPC change."
+    },
+    {
+      "topic": "TC-5 primary fix site: live self_check IPC handler is a hardcoded green stub",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:801-818 (handle_self_check)",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:816 (failures: 0 hardcoded)",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:540-543 (dispatch arm)",
+        "E:/project/terminal-commander/crates/ipc/src/protocol.rs:406-410 (SelfCheckResponse {report, failures})"
+      ],
+      "details": "The LIVE self_check served over IPC (handle_self_check, server.rs:801) deliberately does NOT re-run the real bootstrap self-check; it only reads state.store.audit_count() and synthesizes 3 static lines, then returns failures: 0 UNCONDITIONALLY. It never spawns a command, never exercises CommandStartCombed/status round-trip, never touches the long-RPC path that TC-1/TC-6 break. This is exactly the TC-5 blind spot: the path that fails in production is never tested by the health surface that stays green. The fix adds a real bounded command-spawn round-trip here (start a trivial command -> poll status to terminal -> assert) and sets failures>0 when it breaks. NOTE: the OTHER self_check (runtime.rs:104 run_self_check) is the CLI/bootstrap check that runs before serving; it is richer (audit round-trip, router pipeline, policy deny) but ALSO never spawns a command (runtime.rs:184 explicitly: 'command execution: not wired'). Either could host the spawn probe, but the IPC handler is the one whose greenness misleads a live client."
+    },
+    {
+      "topic": "TC-5 design constraint: policy profile gates which binary self_check may spawn",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/daemon/src/policy.rs:82-92 (COMMANDS_DENY closed set, all profiles)",
+        "E:/project/terminal-commander/crates/daemon/src/policy.rs:224-245 (ReadOnlyObserver DENIES all CommandStart)",
+        "E:/project/terminal-commander/crates/daemon/src/policy.rs:264-295 (RepoOnly confines cwd to $REPO_ROOT)",
+        "E:/project/terminal-commander/crates/daemon/src/policy.rs:303-356 (command_allowed: opt-in allow-list; None=allow-any)",
+        "E:/project/terminal-commander/crates/daemon/src/policy.rs:51 (DeveloperLocal default)"
+      ],
+      "details": "A real spawn in self_check MUST route through state.policy / CommandRuntime, so it inherits four gates: (1) read_only_observer DENIES every CommandStart (policy.rs:225-238) -- self_check must SKIP the spawn (or assert the deny) under that profile, not fail; (2) repo_only confines cwd to $REPO_ROOT and fail-safe-denies with no root (policy.rs:270-293) -- the spawn's cwd must be inside the root or be skipped; (3) an operator-configured command_allow_roots makes the chosen binary deny-able (policy.rs:352-356); (4) COMMANDS_DENY basenames are always denied. Cross-platform safe-binary choice: there is NO universal allow-listed binary baked in (zero-config allows any). The safest portable round-trip is to spawn the daemon's OWN executable in a no-op mode (std::env::current_exe()) or a platform-split trivial command (cmd /c rem on Windows, true on unix) -- but each must survive command_allowed when an allow-list is set. Cleanest design: make the spawn probe conditional on profile.can_exec() and on no-restrictive-allow-list, and degrade to the existing static report otherwise so self_check never self-denies into a false RED."
+    },
+    {
+      "topic": "TC-5 design constraint: NO bucket cleanup exists; spawn round-trip leaves permanent litter unless mitigated",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/daemon/src/subscriptions/source.rs:12-17 (buckets are IMMORTAL; no production drop_bucket; list_bucket_ids grows monotonically)",
+        "E:/project/terminal-commander/crates/daemon/src/command.rs:499-512 (every command spawn does bucket_create + sources.record)",
+        "E:/project/terminal-commander/crates/core/src/job.rs:295-298 (JobManager::forget exists -- 'for tests or operator cleanup')",
+        "no grep hit for jobs.forget/jobs.remove anywhere in crates/daemon/src/command.rs (forget never called in production)",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/handlers/runtime.rs:122-125 (summary runs per-bucket TTL eviction; bucket id still listed)"
+      ],
+      "details": "There is NO drop_bucket / remove_bucket anywhere -- buckets are deliberately immortal and surface forever in list_bucket_ids() (and thus in runtime_state.buckets / bucket_count). A self_check spawn would therefore permanently inflate the bucket count and pollute subscription routing scans every call. Partial mitigation exists: JobManager::forget (job.rs:296) can drop the JOB ledger row, and the live-map binding can be removed, but the bucket itself cannot be reclaimed (only its events TTL-evict). Implication for the fix: either (a) accept one immortal self-check bucket and reuse it across calls (spawn into a single pre-allocated/cached bucket id rather than a fresh one each time), or (b) introduce a real drop_bucket seam (larger change, touches BucketManager + source table which has no remove, source.rs:13). Option (a) is the contained fix and matches the immortal-bucket invariant; a fresh bucket per self_check is the trap to avoid."
+    },
+    {
+      "topic": "health is a trivial ping (confirmed) -- intentionally so",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:529-535 (Health => uptime_secs + idle_secs only)",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:511-516 (Health is the ONLY request that does NOT bump_activity -- pure peek)",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:757-765 (Health is audit-free, no persistent row)",
+        "E:/project/terminal-commander/crates/ipc/src/protocol.rs:330-338 (IpcResponse::Health {uptime_secs, idle_secs})"
+      ],
+      "details": "health returns ONLY boot.elapsed uptime + idle_secs; it touches no subsystem, deliberately does not bump activity (so polling does not defeat idle self-reap), and is excluded from audit. It is a pure liveness ping with zero functional coverage -- exactly why it stays green during the TC-1/TC-6 failure window. The remediation should NOT overload health with a spawn (it must stay cheap/idle-safe); the real round-trip belongs in self_check."
+    },
+    {
+      "topic": "TC-4/TC-5 metrics/audit subsystem that new fields should feed",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "E:/project/terminal-commander/crates/store/src/audit.rs:54-61,108-109 (AuditEntry + with_metadata_json)",
+        "E:/project/terminal-commander/crates/store/src/audit.rs:28 (metadata_json byte cap)",
+        "E:/project/terminal-commander/crates/daemon/src/command.rs:595-601 (command_start audit row already carries format_argv_metadata)",
+        "E:/project/terminal-commander/crates/daemon/src/command.rs:989-1004 (format_argv_metadata builds {\"argv\":[...]})",
+        "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:757-764 (every non-health IPC request emits one audit row via emit_audit)",
+        "E:/project/terminal-commander/crates/ipc/src/protocol.rs:1578-1594 (AuditRowWire exposes metadata_json over audit_since)"
+      ],
+      "details": "The only metrics/audit subsystem is the persistent audit log (store/src/audit.rs), surfaced read-only via audit_since (AuditRowWire). It already supports a capped metadata_json blob and ALREADY records argv metadata at command_start (command.rs:600 via format_argv_metadata). Two feed-in points for the fixes: (1) TC-4 -- if a self_check or run_and_watch spawn adds a tag, the command_start audit row should include tag in its metadata_json for traceability (today tag is not audited at all -- it only reaches the source side-table); (2) TC-5 -- the self_check spawn round-trip will, via the normal command_start path, emit its own command_start audit row (allow + argv metadata) and a self_check dispatch audit row (server.rs:764), so a self_check that exercises spawn is auditable for free. There is NO separate counters/metrics subsystem (no prometheus/statsd); audit is the system of record."
+    }
+  ],
+  "risks": [
+    "TC-4 row enrichment via state.sources.get(bucket_id) adds a side-table read per probe inside collect_probes; with MAX_LIST_LIMIT=500 probes that is up to 500 RwLock reads per runtime_state call. Likely fine, but it takes a read lock on the BucketSourceTable concurrently with subscription pulls -- verify no lock-ordering inversion with the live-map/jobs locks already held.",
+    "TC-4 argv exposure is a redaction risk: argv can contain secrets (tokens, passwords on a command line). The engine already redacts elsewhere (format_argv_metadata); any argv surfaced in ProbeListEntry MUST go through the same bounded/redacted projection (argv[0..2] as the prompt suggests, not full argv) or it reintroduces the secret-leak the no-raw-output design avoids.",
+    "TC-5 spawn round-trip in self_check risks self-denial under read_only_observer / restrictive command_allow_roots / repo_only-without-root: if implemented naively it would flip self_check to RED on perfectly healthy daemons. Must be profile-gated to skip-or-assert-deny rather than fail.",
+    "TC-5 spawn litter: a fresh bucket per self_check permanently grows bucket_count (immortal buckets, no drop_bucket) and pollutes every subscription routing scan. Must reuse a single cached self-check bucket or add a real drop_bucket seam (the source side-table has NO remove, source.rs:13 -- a drop_bucket would need one added).",
+    "TC-5 spawn is async (ProcessProbe::spawn requires a tokio runtime, file_watch.rs:233 documents the same for watches); handle_self_check is currently a synchronous fn (server.rs:801). Adding a real spawn makes it async and changes the dispatch arm at server.rs:540-543 (it would need .await like the bucket/pty arms). Minor but real surface change.",
+    "Both fixes touch the protocol crate (ProbeListEntry fields) which is shared by daemon, mcp, and cli render (crates/cli/src/render.rs references runtime_state). The CLI renderer must be updated to display the new tag/argv columns or it silently ignores them -- confirm render.rs is in scope."
+  ],
+  "open_questions": [
+    "Should argv in ProbeListEntry be the full argv, a bounded argv[0..2], or a pre-redacted summary string? The prompt says 'argv[0..2] + tag'; confirm the exact bounded shape and whether it reuses format_argv_metadata's redaction (command.rs:989) to avoid surfacing secrets on the command line.",
+    "For TC-5, what binary does self_check spawn cross-platform? Candidates: std::env::current_exe() in a no-op/--version mode (always present, but may hit command_allow_roots if an operator set one), or platform-split (cmd /c rem on Windows vs /bin/true on unix). Needs a decision that survives all four policy profiles.",
+    "For TC-5 litter: reuse a single cached self-check bucket id (contained, honors immortal-bucket invariant) vs introduce a real drop_bucket seam (BucketManager + BucketSourceTable.remove, larger blast radius)? The contained option is recommended but needs sign-off since it means self_check buckets accumulate one entry, not zero.",
+    "Should the self_check spawn round-trip live in the IPC handler (handle_self_check, server.rs:801 -- the path whose greenness misleads live clients) or in the bootstrap run_self_check (runtime.rs:104 -- richer but pre-serving)? Both are blind to spawn today; the IPC handler is the higher-value target per TC-5, but bootstrap is where the existing structured SelfCheckReport lives.",
+    "Does the CLI runtime_state renderer (crates/cli/src/render.rs) need to render the new tag/argv fields, and is that file in scope for the TC-4 fix? It consumes RuntimeStateResponse and would otherwise silently drop the new columns."
+  ]
+}

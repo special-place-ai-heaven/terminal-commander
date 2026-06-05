@@ -1,0 +1,121 @@
+{
+  "findings": [
+    {
+      "topic": "rmcp tool registration: what adding a new tool (command_stop) requires in code",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "crates/mcp/src/tools.rs:435 (#[tool_router] impl block)",
+        "crates/mcp/src/tools.rs:1622 (#[tool_handler] impl ServerHandler)",
+        "crates/mcp/src/tools.rs:504-1619 (each #[tool(description=...)] async fn IS the registration; the macro auto-collects them into ToolRouter::tool_router())",
+        "crates/mcp/src/tools.rs:109-297 (tool_catalogue() const fn - the SECOND, separate source of truth for system_discover)",
+        "crates/mcp/src/tools.rs:2872 (McpPtyCommandStopParams - the closest existing param-DTO precedent)"
+      ],
+      "details": "Adding a Live MCP tool `command_stop` requires, in crates/mcp/src/tools.rs: (1) a new `#[tool(description=\"...\")] async fn command_stop(&self, Parameters(params): Parameters<McpCommandStopParams>) -> Result<CallToolResult, McpError>` inside the `#[tool_router] impl TerminalCommanderMcpServer` block (lines 435-1620). The rmcp `tool_router`/`tool_handler` macros auto-register every `#[tool]`-annotated method, so NO manual registration list exists for the router itself. (2) A new `#[derive(Debug, Clone, Deserialize, JsonSchema)] pub struct McpCommandStopParams { pub job_id: String }` (mirror McpPtyCommandStopParams at :2872). (3) A NEW entry in the hand-maintained `tool_catalogue()` const array (lines 110-296) with name/status:Live/description - this is a SEPARATE source of truth from the router and is what every contract test and system_discover read from. (4) The handler must call `self.ensure_daemon_available().await?` first (every daemon-backed tool does) and forward to a daemon IPC request. CRITICAL: there is NO existing `command_stop`/`CommandStop` IPC method (only `PtyCommandStop`; verified crates/ipc/src/protocol.rs - command family has only CommandStartCombed/CommandStatus/CommandOutputTail), and crates/daemon/src/command.rs `CommandRuntime` has NO stop/cancel/kill public fn (only file_watch.rs:364 and pty_command.rs:526 have stop()). So command_stop is NOT a thin facade over an existing method - it requires a new daemon IPC method + a new CommandRuntime stop capability end-to-end (see daemon-IPC finding)."
+    },
+    {
+      "topic": "Daemon IPC method obligations (the 1:1 forward target) - triggered if command_stop needs a new IPC method",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "crates/ipc/src/protocol.rs:~210-310 (IpcRequest enum variants)",
+        "crates/ipc/src/protocol.rs:340-379 (IpcResponse enum variants)",
+        "crates/daemon/src/ipc/server.rs:414-455 (method_name() exhaustive match - compile-forced)",
+        "crates/daemon/src/ipc/server.rs:463-502 (DISCOVERABLE_METHODS const array)",
+        "crates/daemon/src/ipc/server.rs:524-700+ (dispatch() match arm)",
+        "crates/daemon/src/ipc/server.rs:878-1037 (all_request_variants() test helper - one line per variant)",
+        "crates/daemon/src/ipc/server.rs:1045-1069 (system_discover_methods_match_dispatch parity test)",
+        "crates/mcp/src/tools.rs:1697-1726 (into_mcp_error exhaustive match on IpcErrorCode)"
+      ],
+      "details": "If command_stop needs a new IPC method `CommandStop`, the obligations are: (a) add `CommandStop(CommandStopParams)` to `IpcRequest` enum + `CommandStop(CommandStopResponse)` to `IpcResponse` enum in crates/ipc/src/protocol.rs, plus the `CommandStopParams`/`CommandStopResponse` structs. (b) add an arm to `method_name()` (server.rs:414) - this match is EXHAUSTIVE so it fails to COMPILE without it. (c) add the method name string to `DISCOVERABLE_METHODS` (server.rs:463) - the `system_discover_methods_match_dispatch` parity test (server.rs:1045) fails in BOTH directions if method_name and DISCOVERABLE_METHODS disagree. (d) add a real dispatch arm in `dispatch()` (server.rs:524). (e) add a line to `all_request_variants()` test helper (server.rs:878) or the parity test's length cross-check (server.rs:1067) fails. (f) re-export new types through crates/daemon/src/ipc/mod.rs and crates/daemon/src/lib.rs (PtyCommandStop types are re-exported at both mod.rs:62 and lib.rs:65) and crates/ipc/src/lib.rs:57. (g) if a new IpcErrorCode is needed, `into_mcp_error` (tools.rs:1697) is an EXHAUSTIVE match - it forces a deliberate classification. NOTE: existing `UnknownJob` (tools.rs:1712) already covers the unknown-job case, so no new error code is needed if command_stop reuses it. NOTE: `run_and_watch` is precedent that an MCP tool CAN exist with NO IPC method (it composes CommandStartCombed+CommandStatus+BucketWait), but a stop needs real kill behavior so composition is not viable."
+    },
+    {
+      "topic": "fixture_catalogue_contract.rs - fixtures a new tool must add",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "crates/mcp/tests/fixture_catalogue_contract.rs:54-151 (fixture_map_matches_live_tool_catalogue test)",
+        "crates/mcp/tests/fixture_catalogue_contract.rs:88-96 (daemon_unavailable_shapes must cover every live mapped tool exactly)",
+        "crates/mcp/tests/fixture_catalogue_contract.rs:180-212 (mcp-tools dir contents must EXACTLY equal mapped fixtures - no extra, no missing)",
+        "crates/mcp/tests/fixture_catalogue_contract.rs:245-330 (assert_daemon_unavailable_shape - validates the ensure_daemon_status_v1 shape)",
+        "tests/fixtures/contracts/mcp-tool-fixture-map.v1.json:19-57 (daemon_unavailable_shapes map), :58-244 (live_tools array), :246-252 (counts block)",
+        "tests/fixtures/contracts/mcp-tools/system_discover.v1.json (response_example_daemon_unavailable.tools[] must mirror catalogue exactly)",
+        "tests/fixtures/contracts/mcp-tools/pty_command_stop.v1.json (per-tool fixture format precedent)"
+      ],
+      "details": "The contract test asserts the fixture map EXACTLY equals tool_catalogue() (set equality, lines 65-86) AND that the mcp-tools/ directory contents exactly equal the union of mapped fixtures (lines 195-211 - an unmapped fixture file OR a missing one both fail). For a new tool `command_stop` you MUST: (1) Add an entry to `live_tools[]` in tests/fixtures/contracts/mcp-tool-fixture-map.v1.json with name+fixture+status. To keep status `covered_live` you also create tests/fixtures/contracts/mcp-tools/command_stop.v1.json. (Alternatively status `missing_fixture` with fixture:null, like the 4 subscription tools - but that is documented debt.) (2) Add a key to `daemon_unavailable_shapes` map (line 19) = `ensure_daemon_status_v1` (every daemon-backed tool uses this; only system_discover is `not_applicable`). The shape_names==map_names assertion (test line 93) fails otherwise. (3) Add `command_stop` to the `tools[]` array inside tests/fixtures/contracts/mcp-tools/system_discover.v1.json `response_example_daemon_unavailable.tools` (test lines 76-86 require it mirror the catalogue exactly). (4) Update the `counts` block (map lines 246-252): bump `live_tools` (37->38) and `covered_live` (33->34) - the test hard-asserts each count (lines 143-150). Fixture file format: per-tool fixture (pty_command_stop.v1.json) carries `request_example` (jsonrpc tools/call), `tool`, `_meta`{schema_anchor, fixture_id, status:\"live\", consumed_by, note}, `response_example`, `unavailable_error_example`{message:\"daemon_unavailable\", data.code, data.details.{status:\"unavailable\", reason:\"binary_not_found\", diagnostics.{endpoint.kind:\"unix_socket\", log_path, last_error, startup_attempted, startup_elapsed_ms}}}, and `invariants[]`. The assert_daemon_unavailable_shape fn (test lines 281-327) requires details.status (NOT legacy details.state), reason==binary_not_found, diagnostics.endpoint.kind==unix_socket, and keys log_path/last_error/startup_attempted/startup_elapsed_ms - copy these from pty_command_stop.v1.json verbatim."
+    },
+    {
+      "topic": "daemon_unavailable_envelope.rs and mcp_stdio.rs - per-tool test obligations",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "crates/mcp/tests/daemon_unavailable_envelope.rs:129-177 (minimal_tool_args match - new tool needs an arm if it has required params)",
+        "crates/mcp/tests/daemon_unavailable_envelope.rs:184-220 (table-driven over tool_catalogue; HARDCODED `assert_eq!(checked, 36, ...)` at lines 214-217)",
+        "crates/mcp/tests/mcp_stdio.rs:69-114 (initialize_and_list_tools_returns_full_live_set - HARDCODED sorted vec of all 37 names; alphabetical insert required)",
+        "crates/mcp/tests/mcp_live_daemon.rs:96-129+ (live_health_roundtrip_through_uds - SECOND hardcoded sorted full list)",
+        "crates/mcp/tests/instructions_contract.rs:20-48 (keyword-based, NOT per-tool - not affected by a new tool)"
+      ],
+      "details": "daemon_unavailable_envelope.rs is TABLE-DRIVEN over tool_catalogue() so a new tool is auto-iterated, BUT: (1) `minimal_tool_args(tool)` (line 129) needs a new match arm if command_stop has a required param - e.g. `\"command_stop\" => json!({\"job_id\": \"job_x\"})` (it would fall into the existing `\"command_status\" | \"pty_command_stop\" | ...` arm at line 134 if its only required field is job_id, so possibly reuse). (2) The hardcoded count `assert_eq!(checked, 36, \"expected 36 daemon-backed tools (37 catalogue minus system_discover)\")` (lines 214-217) MUST bump to 37 and its message updated. mcp_stdio.rs (lines 72-114) and mcp_live_daemon.rs (lines 98-129+) BOTH hardcode the complete SORTED list of tool names via assert_eq! - a new tool MUST be inserted in correct alphabetical position in BOTH (note `command_stop` sorts between command_status and event_context... actually after command_start_combed/command_status). instructions_contract.rs only checks keyword presence in the instructions string and is NOT broken by a new tool."
+    },
+    {
+      "topic": "Hardcoded catalogue/count tests inside tools.rs (unit tests)",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "crates/mcp/src/tools.rs:3231-3289 (catalogue_lists_thirty_seven_live_tools - test NAME + full ordered vec of 37 + not_impl empty assertion)",
+        "crates/mcp/src/tools.rs:3291-3342 (tool_router_exposes_all_live_tools - full SORTED vec of 37)",
+        "crates/mcp/src/tools.rs:3344-3347 (system_discover_tools_explain_daemon_unavailable - uses tool_catalogue().len(), auto-tracks)",
+        "crates/mcp/src/tools.rs:20,29 (module doc says \"37 live tools\" - must bump)",
+        "crates/mcp/src/lib.rs:12 (lib doc says \"37 live tools\" - must bump)"
+      ],
+      "details": "Two MORE full-list assertions inside tools.rs's own #[cfg(test)] mod: (1) `catalogue_lists_thirty_seven_live_tools` (line 3232) - the TEST NAME ITSELF encodes the count (would rename to ..._thirty_eight_...) and asserts the full ORDERED vec (catalogue order) of 37 names; add command_stop in catalogue position. Also asserts not_impl is empty. (2) `tool_router_exposes_all_live_tools` (line 3292) asserts the full SORTED vec of 37 names from the live router; add command_stop in alphabetical position. The third test `system_discover_tools_explain_daemon_unavailable` (3344) uses `tool_catalogue().len()` so it auto-tracks. Module doc comments at tools.rs:20 and :29 and lib.rs:12 hardcode \"37 live tools\" prose. This is the exact pattern the subscriptions-phase3 plan documented (docs/superpowers/plans/2026-06-03-subscriptions-phase3.md:230,366-368) when it bumped 36->37."
+    },
+    {
+      "topic": "In-process ToolSurface / system_discover catalogue registration",
+      "status": "fixed-upstream",
+      "evidence": [
+        "crates/mcp/src/lib.rs:77-87 (ToolSurface::system_discover sources tools from catalogue_tool_names())",
+        "crates/mcp/src/tools.rs:304-307 (catalogue_tool_names() helper)",
+        "crates/mcp/src/lib.rs:289-303 (discover_advertises_exactly_the_catalogue_no_drift test - both sides compared to catalogue_tool_names())",
+        "crates/mcp/tests/e2e.rs:16,20 (e2e uses ToolSurface for in-process bucket flows)",
+        "crates/daemon/src/ipc/server.rs:773-789 (handle_system_discover derives methods from DISCOVERABLE_METHODS, not the MCP catalogue)"
+      ],
+      "details": "GOOD NEWS - no manual work here. The legacy in-process `ToolSurface::system_discover()` (lib.rs:77) was refactored (Task 6 of endpoint-coverage-hardening) to source its `tools` field from `tools::catalogue_tool_names()` (lib.rs:82), which is derived from tool_catalogue(). So it AUTO-TRACKS a new tool with zero edits. The anti-drift unit test `discover_advertises_exactly_the_catalogue_no_drift` (lib.rs:290) compares both ToolSurface output and catalogue_tool_names() to the SAME source, so it stays green automatically. The `unavailable_reason` metadata lives only on the rmcp DiscoveredToolEntry (tools.rs:95-102, computed by discovered_tools() at tools.rs:346) which is fully derived from tool_catalogue() + tool_requires_daemon() + is_pty_tool() - a new non-PTY tool gets requires_daemon=true and the standard daemon_unavailable reason automatically. The daemon-side system_discover.methods (server.rs:784) is a SEPARATE list keyed off DISCOVERABLE_METHODS (the IPC-method list, not the MCP-tool list) - covered under the daemon-IPC finding."
+    },
+    {
+      "topic": "Adding a PARAM (tag on run_and_watch) - schema/golden obligations",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "crates/mcp/src/tools.rs:2218-2256 (McpRunAndWatchParams struct - has NO tag field)",
+        "crates/mcp/src/tools.rs:2258-2281 (into_parts() - explicitly sets `tag: None` at line 2277, dropping tag)",
+        "crates/mcp/src/tools.rs:2127-2194 (McpCommandStartParams - HAS tag at :2171-2174, plumbed to CommandStartParams.tag at :2191)",
+        "crates/mcp/src/tools.rs:3468-4040 (schema tests are FIELD-TARGETED via schema_for! + schema_str on specific /properties/<field>/description pointers - NO full snapshot, NO test for McpRunAndWatchParams)",
+        "tests/fixtures/contracts/mcp-tools/run_and_watch.v1.json (request_example + invariants - the per-tool fixture)"
+      ],
+      "details": "There is NO golden-schema/insta snapshot test in the repo (grep for insta/assert_json_snapshot returned nothing; all schema tests use schemars::schema_for! + targeted JSON-pointer assertions on individual field descriptions, tools.rs:3468-4040). There is NO schema test whatsoever for McpRunAndWatchParams or McpCommandStartParams. Therefore adding a `tag` field to McpRunAndWatchParams breaks NO schema-snapshot test. The actual obligations to add `tag` to run_and_watch: (1) add `#[serde(default)] pub tag: Option<String>` field to McpRunAndWatchParams (tools.rs:2218) - mirror McpCommandStartParams.tag at :2171. (2) FIX `into_parts()` (tools.rs:2260) which currently HARDCODES `tag: None` at line 2277 - set `tag: self.tag` instead. CommandStartParams already carries `tag` and command_start_combed already plumbs it (tools.rs:2191), so the daemon side needs no change. (3) RECOMMENDED (not test-forced): update tests/fixtures/contracts/mcp-tools/run_and_watch.v1.json to show `tag` in request_example and/or add an invariant, per docs/contracts/README.md drift discipline - but the fixture_catalogue_contract test does NOT inspect run_and_watch's argument fields, so this is convention, not a hard gate. (4) RECOMMENDED: a behavior test proving tag routes a subscription to the probe (no existing test forces it). This param is the LOW-obligation change; the tool addition is the HIGH-obligation change."
+    },
+    {
+      "topic": "Docs with tool-count claims / per-tool tables",
+      "status": "still-present-at-HEAD",
+      "evidence": [
+        "docs/mcp/TOOL_CONTROL_SURFACE.md:66-69 (NORMATIVE per-tool table grouped by family: Commands/buckets row, PTY row)",
+        "docs/contracts/README.md:225-244 (drift-boundary rule: catalogue/fixture changes MUST update the fixture map in the same patch)",
+        "crates/mcp/README.md (mcp crate readme - check for count)",
+        "ARCHITECTURE.md / SPEC.md / README.md (authoritative deep refs per project CLAUDE.md)",
+        ".planning/endpoint-coverage-hardening.md:5,20,37,289,619 (says '29 tools' - STALE, predates pty/subscription growth)",
+        "EVIDENCE_REPORT_RUNTIME.md:33,176 (says '29 live tools' - STALE)",
+        "docs/release/windows-wsl-bridge-contract.md:71,108,148,155 + docs/integrations/README.md:49 + docs/release/npm-distribution-final-report.md:95 (all say '29 tools' - STALE release artifacts)"
+      ],
+      "details": "The repo has MANY '29 tools' / '29 MCP tools' claims, nearly all in STALE goal-files (.agent/goals/*), release reports, and the endpoint-coverage-hardening planning doc - these predate TC44 (pty, ->26), TC45 (probes, ->29), and the subscription phases (->37) and are NOT CI-gated. The only NORMATIVE doc with a per-tool table is docs/mcp/TOOL_CONTROL_SURFACE.md (lines 66-69) which groups tools by family; a new `command_stop` should be added to the 'Commands and buckets' row (line 66) for accuracy. docs/contracts/README.md:242-244 states the binding rule: 'A live catalogue change, a system_discover fixture change, or a fixture-file addition/removal MUST update the fixture map in the same patch' - reinforcing the fixture-map obligation. The README.md/SPEC.md/ARCHITECTURE.md are flagged by project CLAUDE.md as authoritative; check them for tool counts/catalogs to update for accuracy (not test-gated). No test asserts a doc tool-count, so docs are accuracy/convention obligations, not hard CI gates - EXCEPT the fixture map which IS gated."
+    }
+  ],
+  "risks": [
+    "DOUBLE source of truth: the rmcp router (auto from #[tool] macros) and tool_catalogue() (hand-maintained const array, tools.rs:109) are SEPARATE. A new #[tool] fn that is NOT also added to tool_catalogue() will be callable but invisible to system_discover and will FAIL fixture_catalogue_contract + every hardcoded-list test. Conversely a catalogue entry with no #[tool] fn fails tool_router_exposes_all_live_tools. Both must be edited together.",
+    "command_stop is NOT a thin facade: unlike pty_command_stop (which forwards to existing PtyCommandStop IPC + pty_command.rs:526 stop()), there is NO CommandStop IPC method and NO CommandRuntime::stop() (command.rs has only start_combed/status/rebind/live_jobs). Implementing it triggers the FULL daemon-IPC obligation chain (protocol enums, method_name exhaustive match, DISCOVERABLE_METHODS, dispatch arm, all_request_variants, parity test, re-exports) PLUS a new daemon kill/cancel capability with its own tests - far larger than the original ghost-jobs framing (TC-3) implies.",
+    "FIVE separate hardcoded full-tool-name lists must all be updated consistently and in correct order for one new tool: tools.rs:3240 (catalogue order) + tools.rs:3302 (sorted) + mcp_stdio.rs:74 (sorted) + mcp_live_daemon.rs:100 (sorted) + system_discover.v1.json fixture tools[]. Plus THREE count assertions: daemon_unavailable_envelope.rs:215 (=36->37), and the test NAME catalogue_lists_thirty_seven_live_tools (tools.rs:3232) encodes the count. Missing any one is a test failure.",
+    "The hardcoded `assert_eq!(checked, 36)` in daemon_unavailable_envelope.rs:215 has a literal comment 'expected 36 daemon-backed tools (37 catalogue minus system_discover)' - both the number AND the comment math must be updated, easy to half-fix.",
+    "Stale '29 tools' claims are pervasive (>15 files) - a contributor grepping for the count to update could waste effort on non-gated goal/release docs, or update a stale doc and miss the real fixture-map gate. Only the fixture map, the 5 name-lists, and the 3 count assertions are CI-gated.",
+    "into_parts() for run_and_watch silently sets tag:None (tools.rs:2277) - a naive 'add tag field' edit that forgets to also fix into_parts() will compile and pass all tests (no test checks tag plumbing) but the tag will be silently dropped at runtime - a latent fake-success path."
+  ],
+  "open_questions": [
+    "Should command_stop be implemented as a real new daemon IPC method + CommandRuntime kill capability, or is there an intent to reuse an existing mechanism? CommandRuntime (command.rs) currently exposes no stop/cancel/kill - confirm with the team whether the command runtime even spawns killable children it can signal, or whether jobs are fire-and-forget (which would make TC-3 a deeper design item than a tool addition).",
+    "For the new command_stop fixture, should it land as status:covered_live (with a real command_stop.v1.json file) or status:missing_fixture (fixture:null, matching the 4 subscription tools' documented debt)? The 4 subscription tools shipped as missing_fixture, so there is precedent for deferring the fixture file - but covered_live is the clean path.",
+    "Does the team want the run_and_watch `tag` param fixture (run_and_watch.v1.json) updated even though no test gates it? docs/contracts/README.md implies fixtures should track the surface, but the contract test does not inspect run_and_watch argument fields.",
+    "Is there a behavior/e2e test expectation that command_stop must actually terminate a running job (proving it fixes the TC-1 ghost-jobs scenario), or is structural surface coverage (catalogue+fixture+unavailable-envelope) sufficient for this phase? No existing test would force kill-behavior verification."
+  ]
+}

@@ -1,0 +1,149 @@
+{
+  "findings": [
+    {
+      "topic": "CONTRADICTION (resolved by spot-check): Did HEAD make TC-1a a real DOUBLE-spawn, or is the retry path somehow exempt for the start call?",
+      "status": "resolved-against-HEAD: confirmed real, no exemption",
+      "evidence": [
+        "crates/ipc/src/client.rs:45 (request_timeout default = Duration::from_secs(5))",
+        "crates/ipc/src/client.rs:~73 (.map_err(|_| IpcError::transport(\"request timed out\")))",
+        "crates/mcp/src/daemon_client.rs:191-201 (call(): Err(e) if e.is_transport() => { try_self_heal; retry_id; self.inner.call(retry_id, request) })",
+        "crates/mcp/src/daemon_client.rs:155-178 (doc comment: 'RETRIES the call once' and admits it cannot distinguish daemon-gone from busy)",
+        "crates/mcp/src/tools.rs:628-643 (run_and_watch start routes through self.daemon.call(IpcRequest::CommandStartCombed(...)) -- the retrying client)",
+        "crates/daemon/src/command.rs:547-561 (ProcessProbe::spawn runs synchronously before any reply)",
+        "crates/daemon/src/command.rs:472-474 (ids minted pre-spawn) + command.rs:711 (CommandStartResponse returned post-spawn)"
+      ],
+      "details": "R1 and R2 both assert the new blind transport-retry turns TC-1a into a guaranteed double-spawn; R1 hedged it as an open question ('is the retry actually reachable for the start call?'). I confirmed it directly: run_and_watch's start call (tools.rs:632) goes through McpDaemonClient::call, whose body (daemon_client.rs:191-201) retries ANY is_transport error exactly once by re-sending the CLONED request. A 5s client timeout maps to IpcError::transport (client.rs:73), which is_transport()-true. The daemon spawns synchronously (command.rs:547) before replying (command.rs:711), so a spawn that exceeds 5s wall makes the client time out WHILE the daemon is mid-spawn, then the client re-sends the identical CommandStartCombed. There is no exemption. The contradiction is resolved in favor of R1/R2: at HEAD a single run_and_watch start whose spawn exceeds 5s can spawn the command TWICE. This is a genuine REGRESSION versus the prior 'one ghost job' behavior on the old binary, and the most important single finding for the remediation."
+    },
+    {
+      "topic": "NO daemon-side idempotency / in-flight-argv / duplicate-spawn guard (the load-bearing premise behind 'any client-level fix is insufficient')",
+      "status": "confirmed-against-HEAD",
+      "evidence": [
+        "Grep idempot|in_flight|dedup|request_id over crates/daemon/src/command.rs: only matches are shutdown-drain ('in-flight' command.rs:102,719), sifter rule-output dedup (patch_dedupe_aggregate command.rs:203-206), frames_suppressed_dedupe metric (command.rs:891) -- NONE is a spawn guard",
+        "crates/daemon/src/command.rs:547-594 (start_combed spawn->register sequence has no pre-spawn lookup of an existing identical in-flight job)",
+        "RequestEnvelope (crates/ipc/src/client.rs:68-71) carries only correlation_id + request -- no idempotency key field"
+      ],
+      "details": "R2's strongest claim ('the idempotency key must live on the request envelope / be honored in start_combed, not in run_and_watch') rests on there being no server-side guard. Confirmed: every 'dedup'/'in-flight' token in command.rs is unrelated (shutdown drain, sifter output dedup, suppression metrics). The RequestEnvelope has no idempotency field. So a retried CommandStartCombed is, to the daemon, a brand-new request and double-spawns. This means: a perfect pre-spawn ack (R2's ghost-fix) ALONE still double-spawns under the blind retry; the fix MUST add either (a) a server-honored idempotency key on the envelope, or (b) DISABLE the blind retry for non-idempotent mutating RPCs (CommandStartCombed/PtyCommandStart). The cheapest correct fix may actually be (b) -- the researchers under-weighted simply not-retrying mutating calls."
+    },
+    {
+      "topic": "CONTRADICTION: is fixing the run_and_watch wait_ms cap (TC-6) part of the ghost-job work or independent? (R2 open-question vs R1/R5 treating it as a clear separate defect)",
+      "status": "fix-design question nobody fully answered",
+      "evidence": [
+        "crates/mcp/src/tools.rs:2208 (RUN_AND_WATCH_MAX_WAIT_MS = 60_000)",
+        "crates/mcp/src/tools.rs:2216 (MAX_WAIT_SLICE_MS = 1_000)",
+        "crates/mcp/src/tools.rs:650 (deadline_slices = wait_ms.div_ceil(MAX_WAIT_SLICE_MS).max(1))",
+        "crates/mcp/src/tools.rs:683 (timeout_ms: Some(if terminal { 0 } else { MAX_WAIT_SLICE_MS }) -- server blocks up to 1000ms per non-terminal slice)"
+      ],
+      "details": "The TC-6 math is confirmed exactly as both R1 and R2 state: at the cap, 60 slices each doing a CommandStatus RTT + a BucketWait that blocks server-side up to 1000ms + its RTT, plus the start RTT, yielding ~62-70s wall against a 60000ms advertised cap. R2 flagged as an open question whether TC-6 belongs with the ghost-job campaign because lowering the slice size interacts with the per-slice double-RPC that TC-1b also touches. NOBODY answered the actual design question: TC-6 and TC-1b share the same wait-loop body (tools.rs:655-709), so they MUST be co-designed -- e.g. a single combined wait RPC (status+drain in one round trip) would shrink wall time AND give a single error site to convert into a job_id-preserving wait_exhausted return. Treating TC-6 as 'independent' (R1/R5 framing) risks two conflicting edits to the same loop. This is the most important UNANSWERED fix-design question."
+    },
+    {
+      "topic": "TC-1b fix shape: what should run_and_watch return on a mid-loop error so the job_id survives? Nobody specified the contract.",
+      "status": "fix-design question nobody answered (only the defect was confirmed)",
+      "evidence": [
+        "crates/mcp/src/tools.rs:643 (start arm: Err(e) => return Err(into_mcp_error(&e)))",
+        "crates/mcp/src/tools.rs:665 (CommandStatus arm: same)",
+        "crates/mcp/src/tools.rs:703 (BucketWait arm: same)",
+        "crates/mcp/src/tools.rs:1678-1680 (into_mcp_error short-circuits transport -> daemon_unavailable, still discards job_id)"
+      ],
+      "details": "Every researcher confirmed TC-1b discards job_id on any mid-loop error, and R1 noted even the 'clean' daemon_unavailable envelope still throws away job_id. But NO researcher proposed the recovery contract: should run_and_watch, once it HAS a job_id, convert any subsequent error into a structured partial result {job_id, bucket_id, cursor, signals_so_far, state: 'unknown', recover_hint: 'poll command_status'} instead of an MCP error? This needs a fixture and a schema decision (the result type currently has no 'interrupted/partial' shape). This is the core behavioral fix for the trust defect and it is unspecified -- the researchers documented the wound but not the suture."
+    },
+    {
+      "topic": "TC-3 command_stop is NOT a thin facade: needs a NEW daemon kill capability, not just MCP+IPC surface (R3 flags; R2 details the mechanism; R5/original framing under-scopes it)",
+      "status": "confirmed-against-HEAD; original TC-3 framing materially under-scopes the work",
+      "evidence": [
+        "Grep CommandStop|command_stop|fn stop|fn cancel|fn kill over crates/daemon/src/command.rs: NO matches (CommandRuntime exposes no stop/cancel/kill)",
+        "crates/daemon/src/command.rs:582-593 (JobBinding retains metrics/sifter/rules/bucket_id/probe_id/receipt -- NO probe or cancel handle)",
+        "crates/mcp/src/tools.rs:3232-3289 (catalogue test lists exactly 37 live tools; command family has start_combed/run_and_watch/status/output_tail, NO stop; only pty_command_stop exists)"
+      ],
+      "details": "R3's risk ('command_stop is NOT a thin facade') is the correct and most consequential scoping correction, and I confirmed it: command.rs has no stop/cancel/kill fn, and the JobBinding deliberately does not keep the probe/cancel handle (the probe is moved into drive_to_exit per R2's command.rs:620 cite). So TC-3 requires: retain a cancel handle in JobBinding (Arc<Mutex<Option<ProcessProbe>>> or clone the oneshot cancel_tx before the move), a new daemon CommandStop IPC method (protocol enums + method_name exhaustive match + DISCOVERABLE_METHODS + dispatch arm + all_request_variants + parity test), a new CommandRuntime::stop(), AND the full MCP tool-surface obligation chain (catalogue, router, 5 hardcoded name lists, 3 count assertions, fixture map, system_discover fixture). The original CONTEXT framing ('command equivalent absent') makes TC-3 sound like a one-tool add; it is the largest single item in the campaign. R3 is right; the original framing is wrong."
+    },
+    {
+      "topic": "AMBIGUOUS: does the new transport short-circuit still emit JSON-RPC -32603 numerically? (R1 says yes; this matters for whether the 'clean envelope' actually stops agent abandonment)",
+      "status": "still-ambiguous-needs-verification (not fully spot-checked this pass; R1 internally consistent)",
+      "evidence": [
+        "crates/mcp/src/tools.rs:1678-1680 (into_mcp_error returns transport_unavailable_error() for is_transport)",
+        "R1 cite: tools.rs:1790-1810 transport_unavailable_error builds via McpError::internal_error => numeric -32603 with envelope code:daemon_unavailable"
+      ],
+      "details": "R1 makes a sharp claim the others did not test: the 'clean daemon_unavailable envelope' STILL carries JSON-RPC numeric code -32603 (only the payload code string changed to daemon_unavailable), because transport_unavailable_error routes through McpError::internal_error. If true, MCP clients keying off the numeric code (not the payload) still see -32603 and may still abandon the tool -- meaning the headline 'we relabeled the ghost-job error' fix is partial at the wire level. I did NOT independently open tools.rs:1790-1810 this pass, so I flag it as the highest-value remaining verification: confirm whether transport_unavailable_error uses McpError::internal_error (-32603) vs a non-internal code. This determines whether the prior investigation's '-32603 surface' is actually gone or merely re-papered."
+    },
+    {
+      "topic": "REPO OBLIGATION nobody fully owned: the MCP-crate gate guards FORBID spawn/kill/fs in crates/mcp/src -- constrains BOTH command_stop AND any client-side timeout/retry change",
+      "status": "confirmed obligation; coverage incomplete across researchers",
+      "evidence": [
+        "R5 cite: scripts/linux-gate.sh MCP guard 1 (no Command::new|Command::spawn|TcpListener|UdpSocket in crates/mcp/src) + guard 2 (no fs in crates/mcp/src)",
+        "crates/mcp/src/daemon_client.rs:155-178 (doc explicitly notes 'No spawn/fs/socket happens here' -- the existing retry was written to respect the guard)"
+      ],
+      "details": "R5 surfaced the gate guards; R3 (tool-surface) and R2 (daemon kill) did not connect them. The binding consequence: command_stop's kill MUST be forwarded to the daemon over IPC (the daemon owns the process and the cancel handle), never executed from crates/mcp/src, or guard 1 fails CI. Equally, any TC-1/TC-2 fix that touches daemon_client.rs (e.g. disabling retry for mutating RPCs) must stay spawn/fs/socket-free -- the existing retry doc comment confirms the author knew this. This is a hard CI gate, not convention, and no single researcher tied it to all three of {command_stop, retry-disable, timeout-change}."
+    },
+    {
+      "topic": "REPO OBLIGATION partially covered: the FIVE hardcoded tool-name lists + THREE count assertions for adding command_stool (TC-3)",
+      "status": "confirmed; R3 enumerated, I verified two anchors",
+      "evidence": [
+        "crates/mcp/src/tools.rs:3232 (test name catalogue_lists_thirty_seven_live_tools encodes the count; full ORDERED 37-name vec at 3240-3278)",
+        "crates/mcp/src/tools.rs:3291-3292 (tool_router_exposes_all_live_tools: full SORTED 37-name vec)",
+        "R3/R5 cites (unverified this pass): mcp_stdio.rs sorted list, mcp_live_daemon.rs:213 sorted list + count string, daemon_unavailable_envelope.rs:~215 assert_eq!(checked, 36), system_discover.v1.json fixture tools[]"
+      ],
+      "details": "I confirmed the two in-file lists (tools.rs:3240 ordered, tools.rs:3292 sorted) and the count-encoding test name. R3's enumeration of the full obligation chain (5 name lists + 3 count assertions + fixture map + system_discover fixture + minimal_tool_args arm) is the most complete and matches what I see; the remaining 3 external test files I did not open this pass but R3+R5 independently cite them with consistent line numbers, raising confidence. The risk R3 flags -- that adding command_stop touches >=7 count anchors atomically or CI goes red -- is real and the single biggest 'easy to half-fix' trap."
+    },
+    {
+      "topic": "CONTRADICTION/GAP on TC-5: which host should run the real spawn round-trip, and how to avoid permanent bucket litter? Researchers diverge and leave it open.",
+      "status": "fix-design question nobody resolved (two open sub-questions)",
+      "evidence": [
+        "R4 cites: server.rs:801-818 handle_self_check (failures:0 hardcoded, no spawn) vs runtime.rs:104 run_self_check (richer, also 'command execution: not wired' at runtime.rs:184)",
+        "R4 cites: subscriptions/source.rs:12-17 (buckets immortal, no drop_bucket) + command.rs:499-512 (every spawn creates a bucket+source)"
+      ],
+      "details": "R4 is the only researcher on TC-5 and leaves two genuine forks unresolved: (1) put the spawn probe in the IPC handle_self_check (the path whose greenness misleads live clients) vs the bootstrap run_self_check (richer report, but pre-serving and not what a live client hits) -- R4 recommends the IPC handler but doesn't commit; (2) reuse one cached self-check bucket (honors the immortal-bucket invariant, accumulates one row) vs add a real drop_bucket seam (larger blast radius -- BucketSourceTable has no remove). Additionally R4 flags handle_self_check is currently a SYNC fn and a real spawn forces it async, changing the dispatch arm. These are unanswered design decisions that block a clean TC-5 fix; no other researcher cross-checked R4, so TC-5's design is single-sourced and unvalidated."
+    },
+    {
+      "topic": "GAP: TC-4 argv redaction shape and CLI renderer scope -- flagged by R4, not resolved, and not cross-checked",
+      "status": "open fix-design question + uncovered downstream consumer",
+      "evidence": [
+        "R4 cites: runtime.rs:13-86 collect_probes (Command arm path:None, PTY arm discards _argv); command.rs:989-1004 format_argv_metadata (existing redaction); protocol.rs:1427-1457 ProbeListEntry (no tag/argv fields)",
+        "R4 risk: crates/cli/src/render.rs consumes RuntimeStateResponse and would silently drop new tag/argv columns",
+        "RISK_REGISTER R-06 (per R5): command_exited already embeds argv verbatim in summary -- precedent that argv is operator-input safe to surface"
+      ],
+      "details": "Two TC-4 items no one closed: (1) the exact bounded/redacted argv shape (full argv vs argv[0..2] vs reuse format_argv_metadata redaction) -- R4 asks, nobody answers; R5's RISK_REGISTER R-06 finding (argv already surfaced verbatim in command_exited summary, and the TC47 leak check exempts argv) actually ARGUES the redaction concern is lower than R4 fears, but the two findings were not reconciled. (2) crates/cli/src/render.rs as a downstream consumer of the enriched ProbeListEntry -- only R4 mentions it, as a risk, and nobody confirmed whether it is in scope or whether new fields silently vanish in CLI output. The serde(default) additive-field approach (R4: protocol.rs:1435-1439 precedent) is sound and uncontested, so the WIRE change is low-risk; the redaction policy and CLI render are the unowned pieces."
+    },
+    {
+      "topic": "CONTRADICTION on process control: SPEC §8 lists command_send_signal as the process-control mutation, but it is a DORMANT policy variant with no production caller -- is command_stop a NEW tool or should it wire the existing seam?",
+      "status": "ambiguous; researchers cite both without reconciling",
+      "evidence": [
+        "R5 cite: SPEC.md:234 lists command_send_signal as the only process-control mutation beyond stdin",
+        "R2 cite: policy.rs:62 PolicyAction::CommandSignal is DORMANT (only match arms + one test security.rs:90-91, no production caller); read_only_observer denies it",
+        "R2 cite: pty_command.rs:526-571 PtyRuntime::stop is the template but is NOT policy-gated today"
+      ],
+      "details": "There is an unreconciled tension: SPEC §8 (the frozen MVP surface) names command_send_signal as THE process-control mutation, and a matching dormant PolicyAction::CommandSignal already exists with the correct deny matrix (R2). Yet the campaign proposes a NEW command_stop tool. Nobody answered: should TC-3 implement command_send_signal (the spec'd-but-never-built tool, reusing the dormant CommandSignal policy action) rather than invent command_stop? R2 raises it as an open question (CommandSignal vs distinct CommandStop variant) but frames it as a naming choice; combined with R5's SPEC finding it is actually a 'which tool does the spec already promise' question. Reusing the dormant seam (per the global rule that dormant variants are missing-implementation markers, not dead code) is arguably the conformant path and would reduce the SPEC-amendment burden. This is unresolved across researchers."
+    },
+    {
+      "topic": "Cross-researcher AGREEMENT (no contradiction) on TC-1b/TC-6 still-present and the protocol.rs diff adding no new variants",
+      "status": "confirmed-consistent across R1+R2; protocol diff = classification helpers only",
+      "evidence": [
+        "R1 + R2 both cite tools.rs:655-709 / 665 / 703 for TC-1b and 2208/2216/650/683 for TC-6 with identical line numbers",
+        "R1 cite: protocol.rs:515-559 (TRANSPORT_PREFIX, IpcError::transport(), is_transport()) + 1849-1893 (two tests) -- NO new IpcRequest/IpcResponse variants",
+        "Confirmed: catalogue at tools.rs:3240-3278 has no command_stop and no start-ack variant"
+      ],
+      "details": "R1 and R2 fully agree (same cites) that TC-1b and TC-6 are unchanged at HEAD, and R1's protocol-diff analysis (the +82 lines are purely IpcError classification helpers + 2 tests, NO start-ack handshake, NO command-stop variant, NO timeout change) is internally consistent and matches my catalogue check (no command_stop, no ack mechanism). This is the well-corroborated core: the two new commits added transport-classification + a blind retry, which (a) does NOT fix TC-1b/TC-6 and (b) actively worsens TC-1a/TC-2. No researcher contradicts this; it is the safest foundation for the remediation plan."
+    }
+  ],
+  "risks": [
+    "BIGGEST RISK the researchers under-weighted: the simplest correct TC-1a/TC-2 fix may be to NOT blindly retry mutating RPCs (CommandStartCombed/PtyCommandStart) in daemon_client.rs:191-201, rather than building a full server-side idempotency-key protocol. The researchers jumped to the heavier idempotency-token design; the lighter fix (classify mutating vs read-only RPCs and retry only the latter) should be evaluated first. Whichever is chosen, a client-only fix that leaves the blind retry in place is INCOMPLETE because the daemon has no dedup guard (confirmed).",
+    "TC-6 and TC-1b edit the SAME wait-loop body (tools.rs:655-709). Two separately-planned fixes will collide. They must be co-designed (ideally a single combined status+drain wait RPC) or the second edit silently reverts the first's error-handling intent.",
+    "TC-3 is scoped as 'add a tool' in the original CONTEXT but is actually a multi-layer change: new daemon kill capability (retain cancel handle in JobBinding, which the design deliberately drops), new IPC method (6+ sync-required surfaces incl. the system_discover_methods_match_dispatch parity test), new policy gating, full MCP surface (5 hardcoded name lists + 3 count assertions + fixture map + system_discover fixture), plus a SPEC/TOOL_CONTROL_SURFACE amendment. Estimating it as a small task will blow the phase.",
+    "The MCP-crate CI gate (no Command/spawn/TcpListener/fs in crates/mcp/src) hard-blocks any naive command_stop that kills from the MCP side AND constrains the timeout/retry fix; only R5 connected this gate to the work. A reviewer must verify every mcp-crate edit stays spawn/fs/socket-free.",
+    "The '-32603 still emitted numerically' claim (R1, unverified this pass) determines whether the headline ghost-job-error relabel actually stops agent abandonment. If transport_unavailable_error routes through McpError::internal_error, the wire code is still -32603 and the 'fix' is cosmetic for clients keying off the numeric code. This needs explicit verification before claiming the error surface is improved.",
+    "TC-5's design is single-sourced (only R4) and leaves two unresolved forks (which self_check host; reuse-bucket vs drop_bucket seam) plus a sync->async signature change to handle_self_check. No cross-check means the recommended approach is unvalidated.",
+    "TC-4 argv-redaction policy is contested: R4 fears secret leakage and wants argv[0..2]/redaction; R5's RISK_REGISTER R-06 shows argv is already surfaced verbatim in command_exited summary and exempted from the leak check. These were not reconciled -- the team could over-redact (breaking parity with existing audit/summary) or under-redact. Pick one consistent posture.",
+    "Doc-vs-code drift is pervasive (tool count 29 in README/RELEASE_CHECKLIST, 32 in TOOL_CONTROL_SURFACE.md, 37 in code; dead feature/terminal-commander-mvp branch + .agent/goals/ workflow in CONTRIBUTING). An agent trusting any doc count or branch policy will produce wrong edits. Only the live assertions in crates/mcp are authoritative.",
+    "Adding a fix:/feat: Conventional Commit to main triggers release-please to open a release PR and version-bump on merge -- the campaign's commit type/timing has release side effects requiring operator coordination (no push/merge without explicit approval)."
+  ],
+  "open_questions": [
+    "Should TC-1a/TC-2 be fixed by (a) disabling the blind retry for mutating RPCs in daemon_client.rs, (b) adding a server-honored idempotency key to RequestEnvelope, or (c) a pre-spawn ack handshake? The researchers favored (b)/(c) but did not evaluate (a), which is the smallest correct change and stays inside the no-new-deps + mcp-gate constraints. Decide before planning.",
+    "VERIFY (R1's unverified claim): does transport_unavailable_error() at tools.rs:1790-1810 route through McpError::internal_error and thus still emit JSON-RPC numeric -32603? This determines whether the ghost-job error surface is actually fixed or merely relabeled in the payload. Highest-value remaining spot-check.",
+    "Should TC-3 implement the SPEC §8-promised command_send_signal (wiring the dormant PolicyAction::CommandSignal, policy.rs:62) instead of a net-new command_stop? The dormant variant has the correct deny matrix and reusing it reduces the SPEC-amendment burden -- but the forced-kill-only probe semantics (process.rs:47, grace unused) don't honor signal-delivery breadth. Naming + semantics decision.",
+    "What is the TC-1b recovery contract? Once run_and_watch holds a job_id, should any later error become a structured partial result {job_id, bucket_id, cursor, signals_so_far, recover_hint:'poll command_status'} instead of an MCP error? This needs a new result schema + fixture and is the actual behavioral fix nobody specified.",
+    "Should TC-6 (wall-time cap) be fixed jointly with TC-1b by collapsing the per-slice CommandStatus+BucketWait double-RPC into one combined wait RPC (shrinks wall time AND yields a single job_id-preserving error site)? Or independently (risking two conflicting edits to tools.rs:655-709)?",
+    "TC-5: which host runs the real spawn round-trip (IPC handle_self_check vs bootstrap run_self_check), and does it reuse one cached immortal self-check bucket or introduce a drop_bucket seam (BucketSourceTable has no remove)? Also: handle_self_check becomes async -- confirm the dispatch arm change is acceptable.",
+    "TC-4: exact argv shape in ProbeListEntry (full vs argv[0..2] vs format_argv_metadata-redacted), reconciled against RISK_REGISTER R-06 which already surfaces argv verbatim in command_exited summary; and is crates/cli/src/render.rs in scope to render the new tag/argv columns?",
+    "Does docs/runtime/REALTIME_SIGNAL_CHANNEL.md specify a run_and_watch wait_ms cap / client-vs-server timeout contract that the TC-6 fix must conform to (or amend)? R5 did not read it in full; it is the governing runtime contract per SPEC §13.",
+    "Is the system_discover.v1.json fixture asserted byte-exact such that adding command_stop forces a fixture regen in the same change? R3 says yes (set-equality + dir-equality); confirm against fixture_catalogue_contract.rs before committing the tool add."
+  ]
+}

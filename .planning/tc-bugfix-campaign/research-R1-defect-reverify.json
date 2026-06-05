@@ -1,0 +1,81 @@
+{
+  "findings": [
+    {
+      "topic": "TC-1a — start-timeout ghost job (CommandStartCombed RPC times out client-side while daemon completes the spawn)",
+      "status": "changed-needs-redesign (root cause still present; recent commit made the double-spawn risk WORSE, not better)",
+      "evidence": [
+        "crates/ipc/src/pipe_client.rs:40 (request_timeout = Duration::from_secs(5))",
+        "crates/ipc/src/client.rs:44 (request_timeout = Duration::from_secs(5))",
+        "crates/ipc/src/pipe_client.rs:66 / crates/ipc/src/client.rs:73 (timeout maps to IpcError::transport(\"request timed out\"))",
+        "crates/mcp/src/daemon_client.rs:187-202 (call() now AUTO-RETRIES any is_transport() error once, incl. the START call)",
+        "crates/mcp/src/tools.rs:630-643 (run_and_watch start path: self.daemon.call(IpcRequest::CommandStartCombed(...)))",
+        "crates/mcp/src/daemon_client.rs:130 (McpDaemonClient::new builds inner DaemonClient::new with the 5s default — no with_timeout override in prod)",
+        "crates/daemon/src/command.rs:102,203,719 (no idempotency / in-flight-identical-argv guard exists — only shutdown-drain and patch-dedupe helpers)"
+      ],
+      "details": "The 5s per-call request timeout is UNCHANGED at HEAD. A timeout still produces an Internal-coded error; the only change is the message is now tagged with the TRANSPORT_PREFIX (IpcError::transport, protocol.rs:526-546) so is_transport() returns true. The original ghost-job mechanism is intact: the CommandStartCombed RPC can still time out at 5s client-side while the daemon completes the spawn, so the job runs and the client never receives the job_id. WORSE: the new commit's reconnect logic (daemon_client.rs:189-199) now classifies that timeout as a transport failure and AUTOMATICALLY RETRIES the start call once (try_self_heal + a second inner.call with the cloned request). Because there is STILL no idempotency / in-flight-argv guard on the daemon side (TC-2 unfixed), the retry of a timed-out-but-actually-running START double-executes the command. So at HEAD a single run_and_watch start whose spawn is slow (>5s) can spawn the command TWICE before the client ever errors. The mid-call recovery was designed for 'daemon pipe/socket genuinely gone' (ENOENT/pipe-busy), but it cannot distinguish that from 'request timed out while the daemon was busy completing my spawn' — both surface as the same transport-tagged Internal error. This is a regression in the TC-1a/TC-2 interaction.",
+      "timestamp": ""
+    },
+    {
+      "topic": "TC-1b — mid-loop IPC error in run_and_watch wait loop discards the already-known job_id and collected signals",
+      "status": "still-present-at-HEAD (unchanged)",
+      "evidence": [
+        "crates/mcp/src/tools.rs:655-709 (the for _ in 0..deadline_slices wait loop)",
+        "crates/mcp/src/tools.rs:665 (CommandStatus arm: Err(e) => return Err(into_mcp_error(&e)))",
+        "crates/mcp/src/tools.rs:703 (BucketWait arm: Err(e) => return Err(into_mcp_error(&e)))",
+        "crates/mcp/src/tools.rs:642 (start arm same pattern)",
+        "crates/mcp/src/daemon_client.rs:189-201 (retry only fires for is_transport errors; a daemon-RETURNED IpcError on the Err(e) => Err(e) branch is NOT retried)"
+      ],
+      "details": "The wait loop body is structurally identical to the prior investigation. Both in-loop RPCs (CommandStatus at tools.rs:665 and BucketWait at tools.rs:703) still do `Err(e) => return Err(into_mcp_error(&e))`, which bails out of the whole handler and DISCARDS the already-captured job_id, bucket_id, accumulated signals, exit_code, and receipt. There is no path that, on a mid-loop error, returns a wait_exhausted-style payload carrying the known job_id so the agent can poll command_status. The new daemon_client retry only masks a SUBSET of these: a transport-tagged error gets one silent retry, and if still failing surfaces as a clean daemon_unavailable envelope (into_mcp_error short-circuit at tools.rs:1678-1680) — but the job_id is STILL thrown away even in that 'clean' case, and a daemon-RETURNED IpcError (non-transport, e.g. UnknownJob, Internal from the store) is returned immediately with no retry and no job_id. TC-1b is not fixed.",
+      "timestamp": ""
+    },
+    {
+      "topic": "TC-6 — run_and_watch wait_ms=60000 cap self-violates (actual wall time exceeds advertised 60s cap and sits on common MCP-client kill thresholds)",
+      "status": "still-present-at-HEAD (unchanged; new retry path can add further latency)",
+      "evidence": [
+        "crates/mcp/src/tools.rs:2208 (RUN_AND_WATCH_MAX_WAIT_MS = 60_000)",
+        "crates/mcp/src/tools.rs:2216 (MAX_WAIT_SLICE_MS = 1_000)",
+        "crates/mcp/src/tools.rs:650 (deadline_slices = wait_ms.div_ceil(MAX_WAIT_SLICE_MS).max(1) => 60 slices at the cap)",
+        "crates/mcp/src/tools.rs:655-709 (each slice: 1 CommandStatus RPC + 1 BucketWait with timeout_ms=MAX_WAIT_SLICE_MS=1000 for non-terminal jobs, tools.rs:683)",
+        "crates/mcp/src/tools.rs:630-643 (one CommandStartCombed RPC before the loop)",
+        "crates/mcp/src/daemon_client.rs:30 (SELF_HEAL_PROBE_TIMEOUT = 750ms) + :240 (probe) + :198 (one retry) — added per-failure latency on the new transport path"
+      ],
+      "details": "The math is unchanged. At wait_ms=60000: 60 slices, each doing a CommandStatus RTT plus a BucketWait that blocks SERVER-SIDE up to 1000ms (timeout_ms = MAX_WAIT_SLICE_MS for a non-terminal job, tools.rs:683), plus the initial start RPC. So worst-case wall = start_RTT + 60 x (1000ms server block + 2 RTTs) ~= 62-70s, still exceeding the advertised 60000ms cap and landing on typical MCP-client kill thresholds (~60s). Nothing in the two new commits reduces slice count, slice duration, or the RTT-per-slice structure. The new transport-recovery path can only ADD wall time: each mid-loop transport failure now costs an extra up-to-750ms self-heal probe (daemon_client.rs:240) plus one extra inner.call retry (daemon_client.rs:198) before the slice resolves. TC-6 is unfixed and marginally aggravated.",
+      "timestamp": ""
+    },
+    {
+      "topic": "protocol.rs +82 lines — new variants relevant to start-ack / stop / timeouts",
+      "status": "new-info (no new request/response variants; only IpcError classification helpers + tests)",
+      "evidence": [
+        "crates/ipc/src/protocol.rs:515-559 (TRANSPORT_PREFIX const, IpcError::transport(), IpcError::is_transport())",
+        "crates/ipc/src/protocol.rs:1849-1893 (two new unit tests: transport classification + wire round-trip)"
+      ],
+      "details": "The +82-line protocol.rs diff adds NO new IpcRequest/IpcResponse variants. There is no start-ack handshake (nothing that would let the client recover a job_id after a start timeout), no command-job stop variant (TC-3 still absent at the protocol level), and no timeout-related protocol change. The diff is entirely: (1) IpcError::TRANSPORT_PREFIX marker constant, (2) IpcError::transport() constructor that prefixes an Internal-coded message, (3) IpcError::is_transport() classifier, and (4) two tests. This is the plumbing that powers the daemon_client.rs retry + into_mcp_error short-circuit. It does not address the structural gaps behind TC-1a/TC-1b/TC-6.",
+      "timestamp": ""
+    },
+    {
+      "topic": "into_mcp_error / -32603 surface at HEAD",
+      "status": "changed (transport errors no longer -32603; daemon-returned Internal still -32603)",
+      "evidence": [
+        "crates/mcp/src/tools.rs:1667-1727 (into_mcp_error)",
+        "crates/mcp/src/tools.rs:1678-1680 (if e.is_transport() return transport_unavailable_error())",
+        "crates/mcp/src/tools.rs:1790-1810 (transport_unavailable_error builds code:daemon_unavailable via McpError::internal_error)",
+        "crates/mcp/src/tools.rs:1697-1701 (Internal | PeerCredentialFailure | UnsupportedPlatform | ShuttingDown still => McpError::internal_error => -32603)"
+      ],
+      "details": "into_mcp_error now SHORT-CIRCUITS transport-tagged errors (timeouts, connect/write/read failures, correlation mismatch, pipe-busy-exhausted) BEFORE the code match, returning a transport_unavailable_error() envelope with code:daemon_unavailable and a remedy hint instead of a raw -32603. NOTE the JSON-RPC numeric code is STILL -32603 (transport_unavailable_error calls McpError::internal_error at tools.rs:1808), but the envelope payload carries code:daemon_unavailable and no leaked OS/ipc detail. A genuine daemon-RETURNED Internal error (no marker) keeps the old -32603 + format_ipc_error message + ipc_code data (tools.rs:1698-1701). Net effect: the specific -32603 'request timed out' surface that the prior investigation tied to the ghost-job report is now relabeled daemon_unavailable, but only AFTER one silent retry — and crucially the job_id is still discarded, so TC-1b's lost-job-handle problem is unaddressed by this relabeling.",
+      "timestamp": ""
+    }
+  ],
+  "risks": [
+    "TC-1a REGRESSION: the new mid-call transport retry (daemon_client.rs:189-199) now auto-retries a timed-out CommandStartCombed start call. With no daemon-side idempotency/in-flight-argv guard (TC-2 unfixed), a start that times out at 5s while the daemon is still spawning will be retried and DOUBLE-SPAWN the command. This is strictly worse than the prior 'one ghost job' behavior — a slow spawn can now produce two running jobs from a single run_and_watch call.",
+    "The 5s default request_timeout is unchanged and applies to EVERY RPC, including CommandStartCombed. Any command whose spawn (process creation + bucket_create + sifter setup) exceeds 5s will trip the transport-timeout path. On Windows (named pipe, AV scanning of the child binary) 5s is plausibly exceeded for cold-start or scanned executables.",
+    "into_mcp_error's transport short-circuit could mask genuine slow-but-succeeding daemon operations as 'daemon_unavailable', training agents that the daemon is flaky when it is actually just slow (>5s).",
+    "drain_lifecycle_tasks (command.rs:719, runtime.rs additions) addresses a DIFFERENT defect (D7: lost command_exited event/audit row during graceful shutdown), not any of TC-1/TC-6. It does not mitigate the ghost-job or wall-time issues and should not be conflated with them in remediation planning.",
+    "transport_unavailable_error still returns JSON-RPC -32603 numerically (only the envelope code string is daemon_unavailable). MCP clients that key off the numeric -32603 (not the payload code) will still see an internal_error and may still abandon the tool — the 'clean envelope' fix is partial at the wire-code level."
+  ],
+  "open_questions": [
+    "Does the daemon-side CommandStartCombed handler block (within the 5s window) on anything that could realistically exceed 5s under load — process spawn, bucket_create, sifter compilation? Confirm by reading the daemon handler (crates/daemon/src/command.rs start_combed path, ~line 587-716) to quantify TC-1a timeout likelihood. (Out of R1 scope — flagged for the daemon-side researcher.)",
+    "Is the new auto-retry of CommandStartCombed actually reachable in production, or is run_and_watch's start call somehow exempt? Re-read confirms it routes through self.daemon.call (tools.rs:632) which IS the retrying McpDaemonClient::call — so it is reachable. Recommend a live test: a >5s-spawning command via run_and_watch to confirm double-spawn empirically (the prior investigation only observed a SINGLE ghost on the old binary that lacked the retry).",
+    "TC-3 (command-job stop tool on the MCP surface): protocol.rs added no stop variant; need to confirm whether any non-PTY command stop exists at HEAD (out of this task's TC-1/TC-6 scope but the protocol diff confirms none was added here).",
+    "Should the request_timeout for CommandStartCombed specifically be raised or made unbounded-with-ack, decoupled from the 5s general-RPC timeout? The retry fix is the wrong layer; an idempotency token or start-ack handshake is the structural fix for TC-1a."
+  ]
+}

@@ -1,0 +1,546 @@
+[
+  {
+    "persona": "adversarial-breaker",
+    "overall_verdict": "approve-with-amendments",
+    "findings": [
+      {
+        "severity": "blocker",
+        "phase": "Phase 6 (F4 / TC-3 command_stop)",
+        "title": "The claimed 'existing terminal-state idempotency (PTY checked-then-skipped pattern)' does NOT exist in the command waiter -- command_stop will double-emit the lifecycle event and the plan's own 'exactly one cancel/command_exited event' test will fail",
+        "detail": "Phase 6 design (plan fork F4 and Phase 6 changes, plan-final.json:24,246) says command_stop fires the cancel handle then calls jobs.cancel(job_id) synchronously and 'coordinate[s] with the lifecycle waiter via the existing terminal-state idempotency (PTY checked-then-skipped pattern)'. This is false for the Command path. jobs.cancel()/finish() in crates/core/src/job.rs:154-207 have NO terminal-state guard: cancel() does `g.get_mut(&job_id)?` then UNCONDITIONALLY sets rec.state=Cancelled and returns Some(EventDraft) every call. The idempotency the PTY relies on lives in the PTY *waiter* (crates/daemon/src/pty_command.rs:391-400 explicitly `if waiter_jobs.get(job_id).is_some_and(|r| terminal) { return; }`). The COMMAND waiter (crates/daemon/src/command.rs:619-709) has NO such guard: when drive_to_exit returns ProbeOutcome::Cancelled it unconditionally calls waiter_jobs.cancel(job_id) (command.rs:670) and bucket_append (command.rs:676). So with command_stop calling jobs.cancel synchronously AND the waiter also calling jobs.cancel + bucket_append, you get TWO lifecycle drafts appended to the bucket and a doubled audit row. Concrete break: command_stop a long-running job -> stop() appends draft#1 (Cancelled) -> probe killed -> waiter returns Cancelled -> waiter appends draft#2 (Cancelled). The Phase 6 integration test 'assert ... exactly one cancel/command_exited event (waiter does not double-emit)' (plan-final.json:256) FAILS. Worse: if the job exits naturally a hair before stop()'s kill lands, the waiter calls finish() (Exited) and stop() calls cancel() -- the bucket gets BOTH a command_exited AND a command-cancelled event for one job, and the final state flips depending on ordering.",
+        "evidence": [
+          "crates/core/src/job.rs:186-207 (cancel: no terminal guard, unconditional state set + Some(draft))",
+          "crates/core/src/job.rs:154-184 (finish: same, no terminal guard)",
+          "crates/daemon/src/command.rs:668-680 (command waiter unconditionally calls finish/cancel + bucket_append, no skip-on-terminal)",
+          "crates/daemon/src/pty_command.rs:391-400 (PTY waiter DOES guard: returns early if terminal)",
+          "plan-final.json:24, plan-final.json:246, plan-final.json:256 (claims PTY idempotency precedent applies + tests one-event)"
+        ],
+        "proposed_amendment": "Add the terminal-state skip guard to the COMMAND lifecycle waiter as an explicit Phase 6 change to crates/daemon/src/command.rs: before building the receipt/draft and calling finish/cancel/bucket_append, check `if waiter_live/jobs reports the job already terminal { update metrics only, return without re-appending }` (mirror pty_command.rs:391-400 exactly). Add command.rs to Phase 6's estimated_files (it is currently only listed for the cancel-handle field, not for waiter-guard changes). Alternatively/additionally, make jobs.cancel()/finish() themselves idempotent (return None when rec.state is already terminal) in crates/core/src/job.rs -- but that is a cross-cutting change to a shared primitive and must be a deliberate, separately-tested decision since other callers (the existing command/pty waiters) currently rely on the unconditional behavior. The plan must pick one and name the file; as written Phase 6 ships a double-emit bug."
+      },
+      {
+        "severity": "blocker",
+        "phase": "Phase 5 (F5 / TC-5 self_check spawn round-trip)",
+        "title": "current_exe() --selfcheck-noop will be REJECTED by the daemon's clap parser (required subcommand + deny-unknown-args) -> child exits nonzero -> self_check goes false-RED on a HEALTHY daemon, violating the plan's own 'NEVER false-RED' invariant",
+        "detail": "Phase 5 (plan fork F5, plan-final.json:30,32,212,216) proposes spawning `std::env::current_exe()` (the daemon binary) 'in a hidden no-op/--selfcheck-noop mode' and interprets a nonzero exit as genuine breakage -> failures>0. But the daemon binary (crates/daemon/src/main.rs:28-48) is a clap `#[derive(Parser)]` with a REQUIRED `#[command(subcommand)] cmd: Cmd` (not Option) over a CLOSED set {Check, Start, PrintConfig, Update}. clap derive by default errors on unknown args AND on a missing required subcommand. Spawning `terminal-commanderd --selfcheck-noop` -> Cli::parse() (main.rs:87) prints a usage error to stderr and calls process::exit(2). So the probe child exits NONZERO on a perfectly healthy daemon -> Phase 5's logic sets failures>0 -> the self_check that was supposed to stop lying now lies in the OTHER direction (false-RED), directly violating invariant 'TC-5 self_check NEVER false-REDs a healthy daemon' (plan-final.json:303) and the F5 'NEVER false-RED' promise (plan-final.json:30). On Windows it is worse: main.rs:4 `#![cfg_attr(windows, windows_subsystem = \"windows\")]` means the binary has no console; clap's error path still exits 2. The phrase 'hidden --selfcheck-noop mode/flag' is fundamentally incompatible with this CLI shape.",
+        "evidence": [
+          "crates/daemon/src/main.rs:28-48 (clap Parser, required `cmd: Cmd` subcommand)",
+          "crates/daemon/src/main.rs:50-75 (closed Cmd enum: Check/Start/PrintConfig/Update -- no noop)",
+          "crates/daemon/src/main.rs:86-87 (Cli::parse() -> exit on parse error)",
+          "crates/daemon/src/main.rs:4 (windows_subsystem=windows, no console for stderr)",
+          "plan-final.json:30, plan-final.json:212, plan-final.json:216, plan-final.json:303 (proposes --selfcheck-noop flag, claims never-false-RED)"
+        ],
+        "proposed_amendment": "Add a real clap SUBCOMMAND (e.g. `Cmd::SelfcheckNoop` with `#[command(hide = true)]`) to crates/daemon/src/main.rs that exits 0 immediately, and spawn `current_exe()` with argv `[exe, \"selfcheck-noop\"]` (a valid subcommand), NOT a bare `--selfcheck-noop` flag. Add crates/daemon/src/main.rs's Cmd enum to Phase 5's change list explicitly (it is named at plan-final.json:216 but as 'a hidden --selfcheck-noop mode', which mis-describes the required shape). Add a positive test asserting `terminal-commanderd selfcheck-noop` exits 0 so a future clap refactor that breaks the subcommand is caught (otherwise self_check silently false-REDs the whole daemon). Confirm the windows_subsystem binary can still be spawned-and-waited for an exit code via the CommandRuntime path (it can, but the round-trip budget must tolerate process startup cost on Windows)."
+      },
+      {
+        "severity": "major",
+        "phase": "Phase 1 (F1=a / is_idempotent retry-gate)",
+        "title": "Classifying SubscriptionPull as idempotent=true makes the 'lossless' subscription LOSSY under auto-retry: the daemon commits advanced offsets server-side before replying, so a retry after a lost response silently drops the already-committed-but-undelivered events",
+        "detail": "Phase 1 changes (plan-final.json:82) explicitly classify 'SubscriptionPull/List/Seek' as idempotent (true) so they keep the one-retry self-heal. SubscriptionPull is NOT a safe-to-retry read. Unlike BucketWait (which is client-cursor-driven: the client passes `cursor`, daemon returns events > cursor, fully replayable -- confirmed safe at crates/daemon/src/ipc/handlers/bucket.rs:54-73), SubscriptionPull uses SERVER-ADVANCED per-consumer offsets that are committed server-side INSIDE the pull (crates/daemon/src/subscriptions/pull.rs:298-300,379-380 advance offsets in place; pull.rs:544 `commit(state, sub_id, &offsets, ...)`). The pull flow is: drain events -> commit advanced offsets -> serialize response. If the response is lost in transport AFTER commit (the exact transport-failure case the retry-gate fires on), the daemon_client auto-retry issues a fresh pull that starts from the already-advanced offset and the previously-drained events are gone forever. This converts the documented 'multiplexed, LOSSLESS pull' (protocol.rs:289) into a lossy one precisely on the retry path Phase 1 preserves. The plan also OMITS SubscriptionOpen (mints a sub_id + allocates a registry slot -> mutating, should be non-idempotent) and SubscriptionClose (frees a slot -> mutating) and CommandOutputTail/AuditSince (reads) from its enumerated list. Exhaustiveness will compile-force a decision on the omissions, but the *stated intent* misclassifies SubscriptionPull, which compiles cleanly and ships the data-loss bug.",
+        "evidence": [
+          "plan-final.json:82 (Phase 1 classifies SubscriptionPull/List/Seek as idempotent=true)",
+          "crates/daemon/src/subscriptions/pull.rs:298-300, 379-380, 544 (offsets advanced + committed server-side during pull)",
+          "crates/ipc/src/protocol.rs:289-294 (SubscriptionPull = 'Multiplexed, LOSSLESS pull')",
+          "crates/daemon/src/ipc/handlers/bucket.rs:54-73 (BucketWait IS client-cursor-driven, genuinely replayable -- the contrast)",
+          "crates/ipc/src/protocol.rs:284-302 (SubscriptionOpen/Close are state-mutating, omitted from the plan's list)"
+        ],
+        "proposed_amendment": "Classify SubscriptionPull as NON-idempotent (false) in is_idempotent() -- a lost-then-retried pull can drop committed events; the caller should re-pull deliberately (it is designed to be re-driven via SubscriptionSeek if it needs replay). Classify SubscriptionOpen and SubscriptionClose as non-idempotent (state-creating/freeing). Explicitly enumerate CommandOutputTail and AuditSince (idempotent reads = true) in the plan so the classification is reviewed, not just compiler-forced. Add a unit-test assertion that SubscriptionPull is_idempotent()==false with a comment citing the server-side offset commit, so the loss hazard is documented at the gate."
+      },
+      {
+        "severity": "major",
+        "phase": "Phase 3 (F2+F3 / degraded result + wall-clock deadline)",
+        "title": "The degraded-result path masks a PERMANENTLY-dead daemon: run_and_watch returns isError:false with state=Running and recover_hint 'poll command_status', but command_status will ALSO transport-fail forever -- the agent is told to poll a job whose owner is gone, with no liveness signal that polling is futile",
+        "detail": "F2 (plan-final.json:12,146) converts ANY post-job_id in-loop RPC error into a degraded SUCCESS-shaped result {state: last known (default Running), complete:false, degraded:true, recover_hint:'IPC error mid-wait; poll command_status with job_id'}. This is correct for a TRANSIENT blip, but it cannot distinguish transient from PERMANENT. Two concrete breaks: (1) The prompt's exact scenario -- run_and_watch start succeeds, then the FIRST CommandStatus (tools.rs:660) immediately transport-fails. The daemon_client already retried once and failed; the degraded result reports state=Running (the JobState::Running default at tools.rs:651) for a job that may already have exited or whose daemon is dead. The agent now polls command_status, which hits the SAME dead daemon and returns the daemon_unavailable transport envelope -- but command_status is a READ (idempotent=true) so it retries once and fails, returning an MCP error. The agent is in a loop: degraded says 'poll', poll says 'unavailable'. (2) If the daemon crashed permanently (not a blip), the job_id is meaningless -- no daemon owns it -- yet the degraded result presents it as a live, pollable handle. The plan's invariant 'NO returned error hides a side effect / EVERY returned state maps to caller intent' (plan-final.json:296) is half-met: the side effect (job started) is preserved, but the degraded result over-claims recoverability when the daemon is gone.",
+        "evidence": [
+          "plan-final.json:12, plan-final.json:146 (degraded result: state default Running, recover_hint 'poll command_status', isError:false)",
+          "crates/mcp/src/tools.rs:651 (final_state default JobState::Running)",
+          "crates/mcp/src/tools.rs:658-666 (first CommandStatus arm -- the error site that becomes degraded)",
+          "crates/mcp/src/daemon_client.rs:191-198 (transport retry already exhausted before into_mcp_error/degraded fires)",
+          "plan-final.json:296 (invariant 'every returned state maps to caller intent')"
+        ],
+        "proposed_amendment": "In the degraded result, mark the state as UNKNOWN/last-observed rather than defaulting silently to Running (the research-gaps suggestion 'state: unknown' at research-gaps.json:46 is more honest than the plan's 'default Running'); the agent must not read Running as 'confirmed still running'. Add a bounded liveness hint to recover_hint distinguishing 'daemon was reachable, the poll is for the job's terminal state' from 'daemon became unreachable; the job_id is only usable once the daemon is back -- re-establishing the daemon is a prerequisite to polling'. Cap the implied recovery: the recover_hint should tell the agent to FIRST confirm daemon liveness (health) before polling command_status in a loop, so a permanently-dead daemon is detected rather than polled forever. This keeps F2's job_id preservation while not over-promising recoverability."
+      },
+      {
+        "severity": "major",
+        "phase": "Phase 6 (F4 / command_stop oneshot-fire vs waiter race)",
+        "title": "Firing the retained oneshot cancel handle from stop() while the waiter is mid drive_to_exit is benign for the kill itself, but stop()'s synchronous jobs.cancel races the waiter's outcome classification and can mislabel a natural exit as Cancelled (or vice versa)",
+        "detail": "The cancel mechanism mechanically works: cancel_tx (the sender) can be taken out of the probe before the probe moves into drive_to_exit, because the RECEIVER (cancel_rx) is moved into the streaming task at spawn time (crates/probes/src/process.rs:226-263); firing the sender later still reaches `child.start_kill()` in the select! arm. So the prompt's 'fire the oneshot while the waiter is mid-drive' does NOT poison/deadlock the kill. The real race is the STATE classification, compounding the blocker finding above. drive_to_exit (command.rs:914-927) maps ProcessProbeError::Cancelled -> ProbeOutcome::Cancelled, but a process that exits ON ITS OWN in the same window returns Ok(status) -> ProbeOutcome::Exited. stop() fires the kill AND calls jobs.cancel(job_id) synchronously (plan-final.json:246). If the child had already exited 0 microseconds before the kill signal, the waiter's drive_to_exit returns Exited(0) and calls finish() (state=Exited), while stop() already set state=Cancelled. With no terminal guard (see the blocker), last-writer-wins on rec.state is nondeterministic. Even WITH a terminal guard added, the order matters: whichever of {stop's cancel, waiter's finish} runs first wins, so a job that exited cleanly can be reported Cancelled, or a stopped job reported Exited. The plan's test 'assert the job transitions to Cancelled' (plan-final.json:256) is then flaky.",
+        "evidence": [
+          "crates/probes/src/process.rs:226-263 (cancel_rx moved into streaming task; sender can be fired externally -- kill mechanism is sound)",
+          "crates/probes/src/process.rs:296-300 (cancel() takes cancel_tx once -- take_cancel_handle is feasible)",
+          "crates/daemon/src/command.rs:914-927 (drive_to_exit: Cancelled vs Exited classification depends on timing)",
+          "crates/daemon/src/command.rs:668-671 (waiter chooses finish vs cancel by outcome)",
+          "plan-final.json:246, plan-final.json:256 (stop() calls jobs.cancel synchronously; test asserts Cancelled)"
+        ],
+        "proposed_amendment": "Define the authoritative terminal-state ownership: have stop() set Cancelled ONLY if the job is not already terminal (check-then-set under the live/jobs write lock), and have the (newly-guarded) waiter skip if already terminal -- a single critical section decides the winner. Make the integration test tolerant: assert the job is terminal AND (Cancelled OR Exited) when stopping a job that may have self-exited, and assert STRICT Cancelled only for a guaranteed-long-running job (e.g. sleep 60) where the kill provably precedes natural exit. Document that command_stop on an already-exited job is a no-op returning the existing terminal state (not an error), matching forced-kill-only semantics."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 5 (F5 / dispatch_envelope await propagation)",
+        "title": "The plan's claim that handle_self_check going async forces a SECOND .await in 'dispatch_envelope / the alternate Windows named-pipe dispatch path' is inaccurate -- dispatch_envelope just delegates to dispatch(), so there is only ONE await site to change, not two",
+        "detail": "F5 (plan-final.json:31,214,234) repeatedly frames a 'judge graft' that making handle_self_check async forces .await propagation to BOTH 'the primary dispatch arm (server.rs:540-543) AND the alternate dispatch_envelope / Windows named-pipe dispatch path'. But dispatch_envelope (crates/daemon/src/ipc/server.rs:820-828) is a one-line passthrough: `pub async fn dispatch_envelope(...) -> ResponseEnvelope { dispatch(state, boot, req_env, peer).await }`. It does NOT contain its own SelfCheck match arm; it calls the same dispatch() that has the single `IpcRequest::SelfCheck => { let r = handle_self_check(state); ... }` arm at server.rs:540-543. So there is exactly ONE call site (server.rs:541) to add `.await` to. The 'graft' guards against a duplicate dispatch site that does not exist. This is not harmful (the plan will still compile), but it inflates the estimated blast radius and may cause an implementer to hunt for a nonexistent second arm.",
+        "evidence": [
+          "crates/daemon/src/ipc/server.rs:820-828 (dispatch_envelope = thin delegate to dispatch().await, no own SelfCheck arm)",
+          "crates/daemon/src/ipc/server.rs:540-543 (the single SelfCheck dispatch arm)",
+          "plan-final.json:31, plan-final.json:214, plan-final.json:234 (claims TWO dispatch sites need await)"
+        ],
+        "proposed_amendment": "Correct the Phase 5 description: there is ONE await site (server.rs:541) because dispatch_envelope delegates to dispatch(). Drop the 'dispatch_envelope/named-pipe path also gains .await' change item (plan-final.json:214) and the corresponding risk line (plan-final.json:234), or restate it as 'verify dispatch_envelope delegates to dispatch() so no second arm exists' to avoid a wild-goose chase. Adjust Phase 5 estimated_files if it was padded for this."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 3 (F3 / wall-clock deadline drain semantics)",
+        "title": "On deadline expiry while non-terminal, the rewritten loop can exit WITHOUT a final non-blocking drain, dropping signals that arrived in the bucket since the last cursor -- the degraded result then under-reports signals even though cursor is preserved",
+        "detail": "F3 (plan-final.json:145) rewrites the loop to `while Instant::now() < deadline` with per-iteration BucketWait timeout = min(MAX_WAIT_SLICE_MS, remaining). Consider: remaining budget shrinks to a tiny value (e.g. 5ms) on the last iteration; the BucketWait blocks up to ~5ms, returns possibly empty, advances cursor; then `Instant::now() < deadline` is false and the loop exits. Any rule-driven events that landed in the bucket AFTER that BucketWait returned but BEFORE the job is checked are not drained -- they remain at/after `cursor`. The degraded/wait_exhausted result preserves `cursor` (good -- the caller CAN resume), but the returned `signals` array is missing events that were already available, so signal_count under-reports. This is acceptable IF the contract is 'signals is best-effort up to budget; cursor is authoritative for resumption' -- but the plan does not state that, and the current code's terminal short-circuit (tools.rs:683 `timeout_ms: 0` on terminal) was specifically a non-blocking final drain that the rewrite must not lose for the NON-terminal deadline-exit case.",
+        "evidence": [
+          "plan-final.json:145 (while Instant::now() < deadline; per-iter timeout min(slice,remaining))",
+          "crates/mcp/src/tools.rs:677-704 (existing drain: BucketWait with terminal->0 timeout, then break)",
+          "crates/mcp/src/tools.rs:683 (terminal short-circuit non-blocking drain -- must be preserved for deadline-exit too)",
+          "plan-final.json:165 (risk: 'must NOT drop the final signals on a fast exit' -- only covers fast EXIT, not deadline-EXIT)"
+        ],
+        "proposed_amendment": "After the `while` loop exits due to deadline (non-terminal), do ONE final non-blocking BucketWait (timeout_ms: Some(0)) to drain any events that arrived since the last cursor before building the degraded result, mirroring the terminal short-circuit drain. Document in the run_and_watch contract that on wait_exhausted, `signals` is best-effort and `cursor` is authoritative for resuming via the subscription/bucket -- so a caller relying on completeness knows to resume from cursor. Add a test: a command emitting a signal in the final ~10ms before deadline still appears in the degraded result's signals (or is documented as resume-only)."
+      },
+      {
+        "severity": "note",
+        "phase": "Phase 2 (F1 dedup) + cross-cutting",
+        "title": "The is_idempotent retry-gate intentionally REMOVES the reconnect self-heal for mutating RPCs -- a daemon restarted/replaced between the original send and a transient blip will now surface daemon_unavailable to the caller where reads still self-heal; this is the correct trade but the asymmetry needs an explicit acceptance note and the dedup_nonce caveat",
+        "detail": "The prompt asks whether gating retry on is_idempotent breaks a legitimate reconnect path. Answer from the code: yes by design, and it is acceptable, but with a caveat the plan under-states. daemon_client.call (crates/mcp/src/daemon_client.rs:191-198) currently self-heals (re-probe Health, flip status to available) AND retries on ANY transport error. After Phase 1, a MUTATING RPC that hits a transient transport blip (e.g. the supervisor replaced a stale daemon between calls -- a real path given `Update`/ensure_or_replace in main.rs:159-192) returns daemon_unavailable to the caller WITHOUT retry, where it previously self-healed transparently. For CommandStartCombed this is the entire point (no double-spawn). But note: try_self_heal (the status flip) is bundled INTO the retry branch (daemon_client.rs:196), so gating the whole branch on is_idempotent also skips the self-heal status update for mutating RPCs -- the cached status stays Unavailable until the next READ heals it. That is benign (the next ensure_daemon_available re-probes) but means a mutating call immediately after a daemon replace fails once even when the daemon is already back. Phase 2's dedup_nonce makes a DELIBERATE caller re-issue safe, so the recommended caller behavior (reconcile via command_status, then re-issue with a nonce) is sound -- but only if the adapter actually sets dedup_nonce on the re-issue, which plan-final.json:116 makes OPTIONAL ('may optionally set').",
+        "evidence": [
+          "crates/mcp/src/daemon_client.rs:191-198 (self-heal is INSIDE the retry branch being gated off)",
+          "crates/daemon/src/main.rs:159-192 (Update/ensure_or_replace can replace a daemon between calls -- the reconnect path)",
+          "plan-final.json:83 (gate: `e.is_transport() && request.is_idempotent()`)",
+          "plan-final.json:116 (dedup_nonce is OPTIONAL on the re-issue)"
+        ],
+        "proposed_amendment": "Split the self-heal from the retry: still call try_self_heal() (the status flip / Health re-probe) on a transport error for BOTH idempotent and mutating RPCs, but only RE-SEND the request when is_idempotent() (move try_self_heal out of the gated re-send branch). This restores transparent reconnect-status recovery for mutating RPCs without re-sending them. Separately, strengthen plan-final.json:116 from 'may optionally set dedup_nonce' to 'SHOULD set dedup_nonce on any deliberate re-issue of a mutating start' so the Phase-2 dedup actually covers the manual-retry path it was built for; document the acceptance that a mutating RPC now fails-closed (daemon_unavailable) on a transient blip rather than silently double-acting."
+      }
+    ]
+  },
+  {
+    "persona": "feasibility-engineer",
+    "overall_verdict": "approve-with-amendments",
+    "findings": [
+      {
+        "severity": "major",
+        "phase": "Phase 5 (F5 / TC-5 self_check)",
+        "title": "The 'dispatch_envelope await propagation' judge-graft fixes a phantom edit: dispatch_envelope has no SelfCheck arm, it just delegates to dispatch()",
+        "detail": "The plan's F5 decision, the Phase 5 changes list, the Phase 5 risks, and the top-level posture ALL repeatedly insist that making handle_self_check async 'forces BOTH the primary dispatch arm AND the dispatch_envelope/named-pipe path to .await' and frame this as a critical correctness graft the minimal-risk draft 'missed'. This is false. handle_self_check is called in exactly ONE place: server.rs:541 inside fn dispatch. dispatch_envelope (server.rs:821) is literally `dispatch(state, boot, req_env, peer).await` (server.rs:822-828) with NO match arm of its own; the Windows named-pipe path (pipe_server.rs:361) already does `dispatch_envelope(...).await`. So making handle_self_check async requires adding `.await` at exactly ONE call site (server.rs:541) and ZERO changes to dispatch_envelope. The plan's mental model -- that two dispatch arms call handle_self_check -- is wrong. This does not make the phase unimplementable (an over-cautious plan that 'updates' a non-existent second site simply finds nothing to update), but a load-bearing 'graft' the plan congratulates itself on four times rests on a misread of the code, which undermines confidence in the surrounding F5 reasoning and wastes reviewer/implementer attention chasing a non-edit.",
+        "evidence": [
+          "plan-final.json F5 decision_short: 'await propagated to primary AND dispatch_envelope arms'",
+          "plan-final.json Phase 5 changes[2]: 'dispatch_envelope / alternate Windows named-pipe dispatch path -- ALSO gains .await for handle_self_check'",
+          "crates/daemon/src/ipc/server.rs:541 (`let r = handle_self_check(state);` -- the ONLY call site)",
+          "crates/daemon/src/ipc/server.rs:821-828 (dispatch_envelope body = `dispatch(state, boot, req_env, peer).await`, no SelfCheck arm)",
+          "crates/daemon/src/ipc/pipe_server.rs:361 (`dispatch_envelope(&state, boot, &req, &identity).await` already awaited)"
+        ],
+        "proposed_amendment": "Correct F5/Phase 5: state that handle_self_check has a SINGLE call site (server.rs:541) and that the alternate transports already await dispatch via dispatch_envelope, so no separate dispatch_envelope edit is needed. Drop the 'BOTH dispatch sites' / 'dispatch_envelope await propagation' graft language. If the intent was to guard against a future second handler, say so explicitly rather than asserting a present-tense edit that does not exist."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 2 (F1 dedup) and cross-cutting",
+        "title": "'Behind the existing live lock' for the in-flight dedup map is infeasible as literally stated; the map needs a new Arc field, with its own capture into the async waiter",
+        "detail": "Phase 2 says to put the in-flight fingerprint map 'behind the existing live lock or a dedicated Mutex on CommandRuntime'. The 'existing live lock' is `live: Arc<RwLock<HashMap<JobId, JobBinding>>>` (command.rs:276) -- a typed map keyed by JobId. The dedup map is keyed by fingerprint(u64)/nonce -> (JobId,BucketId), a DIFFERENT key/value type, so it cannot live 'behind' that RwLock without changing JobBinding's map type; in practice it must be a NEW field (the plan's 'dedicated Mutex' alternative). This matters beyond pedantry: eviction must happen on the normal-exit/cancel paths inside the `async move` lifecycle waiter (command.rs:619+, e.g. cancel at :670, live writes at :663/:687), so the dedup map must be `Arc<...>` and explicitly cloned into the waiter closure the same way `waiter_live = Arc::clone(&self.live)` is (command.rs:610). The 'behind the existing live lock' shortcut implies that capture comes for free; it does not. start_combed itself is a sync fn (command.rs:427) so the top-of-function check/insert is lock-safe, but the eviction-everywhere requirement crosses the async boundary and needs the extra Arc capture.",
+        "evidence": [
+          "plan-final.json Phase 2 changes[0]: 'HashMap<u64,(JobId,BucketId)> behind the existing live lock or a dedicated Mutex on CommandRuntime'",
+          "crates/daemon/src/command.rs:276 (`live: Arc<RwLock<HashMap<JobId, JobBinding>>>`)",
+          "crates/daemon/src/command.rs:610 (`let waiter_live = Arc::clone(&self.live);`)",
+          "crates/daemon/src/command.rs:663,687 (waiter writes through waiter_live inside the async move closure)",
+          "crates/daemon/src/command.rs:427 (start_combed is a synchronous `pub fn`)"
+        ],
+        "proposed_amendment": "Drop the 'behind the existing live lock' option. Specify a new `dedup: Arc<Mutex<HashMap<u64,(JobId,BucketId,Instant)>>>` (or RwLock) field on CommandRuntime, cloned into the lifecycle waiter (`let waiter_dedup = Arc::clone(&self.dedup);`) alongside waiter_live, with eviction at the cancel/finish branch (~command.rs:668-671) and a direct removal in the spawn-failure arm (~command.rs:551-561)."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 1 (F1 is_idempotent) and Phase 6",
+        "title": "is_idempotent() enumeration omits four EXISTING IpcRequest variants (AuditSince, SubscriptionOpen, SubscriptionClose, PtyCommandStop)",
+        "detail": "The plan's is_idempotent classification (F1 decision + Phase 1 changes[0]) lists explicit true/false sets but never mentions four variants that exist in the enum today: AuditSince (read -> true), SubscriptionOpen (mints a fresh sub_id, state-creating -> non-idempotent), SubscriptionClose (mutating -> non-idempotent), and PtyCommandStop (mutating -> non-idempotent). The plan hand-waves with '(and any other state-mutating variant)' and 'etc.'. Because the plan correctly mandates an EXHAUSTIVE match, the compiler WILL force the implementer to classify these (so it is not a blocker), but the planning guidance is incomplete and the 'idempotent (reads)' list could lead a maintainer to misclassify SubscriptionOpen/Close as reads. SubscriptionPull/List/Seek are listed; the create/close pair is conspicuously absent.",
+        "evidence": [
+          "plan-final.json F1 decision (false-list and true-list enumerations)",
+          "plan-final.json Phase 1 changes[0]",
+          "crates/ipc/src/protocol.rs:195-308 (full IpcRequest enum incl. AuditSince, SubscriptionOpen, SubscriptionClose, PtyCommandStop)"
+        ],
+        "proposed_amendment": "Explicitly classify all 38 variants: add AuditSince=true (read); SubscriptionOpen=false, SubscriptionClose=false (mutating); PtyCommandStop=false (mutating); confirm SubscriptionSeek's classification (it repositions an offset -- arguably idempotent but state-mutating; recommend false to stay conservative). Note that PtyCommandStop being non-idempotent is consistent with classifying the new CommandStop as non-idempotent."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 6 (F4 / TC-3 command_stop)",
+        "title": "take_cancel_handle requires making the `probe` binding mutable; the current binding is immutable `let probe = match ...spawn(...)`",
+        "detail": "F4/Phase 6 proposes `take_cancel_handle(&mut self) -> Option<oneshot::Sender<()>>` on ProcessProbe (mirroring cancel(&mut self) which does cancel_tx.take(), process.rs:296) and calling `probe.take_cancel_handle()` BEFORE the probe is moved into drive_to_exit. But in start_combed the probe is bound immutably: `let probe = match ProcessProbe::spawn(...) { Ok(p) => p, ... }` (command.rs:551-561). Calling a `&mut self` method requires `let mut probe = ...`. The plan does not flag this one-token-but-easy-to-miss change. Additionally the plan's anchors for this sequence drift: it says take the handle 'before the drive_to_exit(probe) move at ~:606' and store it in 'the JobBinding constructed at ~:589', but drive_to_exit(probe) is actually at command.rs:620 (inside the `self.lifecycle_tasks.lock().spawn(async move {...})` closure starting ~:619) and the JobBinding insert is at command.rs:584. The take must occur between spawn (~:551) and the async-move capture (~:619); since JobBinding is inserted at :584 (before the closure), storing the taken sender there is feasible, but the line anchors as written are off by ~14-22 lines and the probe-mutability prerequisite is unstated.",
+        "evidence": [
+          "plan-final.json Phase 6 changes[1]: 'before the drive_to_exit(probe) move at ~:606 ... JobBinding constructed at ~:589'",
+          "crates/daemon/src/command.rs:551-561 (`let probe = match ProcessProbe::spawn(...)` -- immutable binding)",
+          "crates/daemon/src/command.rs:584 (JobBinding insert via self.live.write().insert)",
+          "crates/daemon/src/command.rs:619-620 (`self.lifecycle_tasks.lock().spawn(async move { let (mut final_metrics, outcome) = drive_to_exit(probe).await;`)",
+          "crates/probes/src/process.rs:296 (`pub fn cancel(&mut self)` uses cancel_tx.take())"
+        ],
+        "proposed_amendment": "Add an explicit step: change `let probe = match ProcessProbe::spawn(...)` to `let mut probe = ...`; call `let cancel = probe.take_cancel_handle();` immediately after the spawn success arm; store `cancel` into the JobBinding at the :584 insert. Re-anchor: drive_to_exit move at command.rs:620, JobBinding insert at :584, async-move closure at :619 (not :589/:606)."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 6 (F4 / TC-3) and cross-cutting count discipline",
+        "title": "The 'all VERIFIED' atomic count list misses a second stale count in daemon_unavailable_envelope.rs (module-doc says 'all 30 daemon-backed tools')",
+        "detail": "The plan asserts (invariants + Phase 6 risks) that the atomic count set is fully enumerated and 'all VERIFIED at HEAD', listing the daemon_unavailable_envelope.rs:215 assertion+comment (36->37). But that same file has a SECOND stale number: the module doc at line 12 says '//! exercises all 30 daemon-backed tools (every tool except...)'. It is a `//!` doc comment (non-gated prose), so it will not fail CI, but it is another count reference the plan's 'complete/VERIFIED' framing overlooks -- the same optimism that the plan elsewhere (correctly) warns leads to a half-fix CI red. Since the plan's whole TC-3 thesis is atomic count discipline, claiming completeness while a count in the very file being edited is unlisted is a credibility gap.",
+        "evidence": [
+          "plan-final.json invariants[5]: '3 count assertions (daemon_unavailable_envelope.rs assert_eq!(checked,36)->37 + its comment, ...)' framed as the complete set, 'all VERIFIED at HEAD'",
+          "crates/mcp/tests/daemon_unavailable_envelope.rs:12 ('//! ... exercises all 30 daemon-backed tools')",
+          "crates/mcp/tests/daemon_unavailable_envelope.rs:215-216 (checked,36 assertion + comment)"
+        ],
+        "proposed_amendment": "Add the daemon_unavailable_envelope.rs:12 module-doc '30' to the Phase 6 update list (bump to the correct daemon-backed count, which is 37 today -> 38 after command_stop; note the doc's '30' is itself already stale vs 37 and should be reconciled to the real daemon-backed count, not blindly +1). Re-label the count set as 'gated + known prose' rather than 'all'."
+      },
+      {
+        "severity": "note",
+        "phase": "Phase 5 (F5 / TC-5)",
+        "title": "--selfcheck-noop must integrate with the existing clap Subcommand parser, not raw env::args; the daemon binary is clap-driven",
+        "detail": "Phase 5 changes[4] says to 'add the hidden --selfcheck-noop mode to current_exe() that exits 0 immediately'. The daemon binary uses clap (`use clap::{Parser, Subcommand, ValueEnum}`, main.rs:23) with a Subcommand enum (e.g. `Cmd::Check => run_self_check(cfg)`, main.rs:94). A bare `--selfcheck-noop` flag spawned via current_exe() will be parsed by clap and, if not declared, will error out (non-zero) -- which would make the self_check probe report a FALSE failure, the exact false-RED the phase is trying to avoid. The mode must be wired as a hidden clap subcommand or a hidden flag with `#[command(hide = true)]` that short-circuits to exit(0) before normal startup.",
+        "evidence": [
+          "plan-final.json Phase 5 changes[4]: 'add the hidden --selfcheck-noop mode to current_exe()'",
+          "crates/daemon/src/main.rs:23 (`use clap::{Parser, Subcommand, ValueEnum};`)",
+          "crates/daemon/src/main.rs:86-94 (fn main + `Cmd::Check => match run_self_check(cfg)`)"
+        ],
+        "proposed_amendment": "Specify the noop as a hidden clap subcommand (e.g. `Cmd::SelfcheckNoop` with `#[command(hide = true)]`) handled at the very top of main() to `return ExitCode::SUCCESS`, and spawn it via `current_exe()` with that subcommand argv, so it parses cleanly and the probe round-trip measures spawn+clean-exit rather than a clap parse error."
+      },
+      {
+        "severity": "note",
+        "phase": "Phase 1 / Phase 4 / cross-cutting",
+        "title": "Pervasive minor line-number drift in load-bearing anchors (all within ~1-22 lines); content is correct but several cited lines are off",
+        "detail": "Spot-checking confirmed the SUBSTANCE of nearly every anchor, but multiple cited line numbers are slightly off, which matters because the plan presents them as 'VERIFIED' precise anchors an implementer will navigate to. Confirmed drifts: id mint is `let job_id = JobId::new()` at command.rs:474 (plan says :472); McpRunAndWatchParams struct is at tools.rs:2221 (plan says :2219); spawn-failure early-return is command.rs:551-561 (plan says :548-560); the cancel/finish completion branch is command.rs:668-671 (plan's eviction anchor says ~:687, which is actually the second metrics write, not the cancel); the wait-loop `for _ in 0..deadline_slices` is tools.rs:655 (plan conflates with deadline_slices at :650). Anchors verified ACCURATE: daemon_client.rs:191; process.rs cancel_tx:159/set:268/cancel:296/grace:47; IpcRequest:195; JobBinding:218 (no cancel handle); transport_unavailable_error:1798 (-32603 + 'retry the tool'); into_mcp_error:1667 (no IpcRequest in scope); tools.rs error arms :643/:665/:703 and timeout :683; MAX_WAIT_SLICE_MS=1000:2216; collect_probes:13-86 path:None:37/:80 + cfg(unix):64; sources.get:77/no-remove + DaemonState.command:100/sources:109; CommandSignal dormant policy.rs:62; into_parts tag:None:2277; daemon_unavailable_envelope checked,36:215; fixture map 37/33:247-248; the alphabetical sort claim (command_output_tail<command_start_combed<command_status<command_stop) is correct.",
+        "evidence": [
+          "crates/daemon/src/command.rs:474 (job_id mint; plan F1 says ':472')",
+          "crates/mcp/src/tools.rs:2221 (struct McpRunAndWatchParams; plan F6 says ':2219')",
+          "crates/daemon/src/command.rs:551-561 (spawn-failure return; plan says ':548-560')",
+          "crates/daemon/src/command.rs:668-671 (cancel/finish branch; plan eviction anchor says '~:687')",
+          "crates/mcp/src/tools.rs:650 vs 655 (deadline_slices decl vs the for-loop)"
+        ],
+        "proposed_amendment": "Refresh the cited line numbers against HEAD before execution (cheap: re-grep each anchor at implementation time). None of the drifts change feasibility, but tightening them avoids an implementer editing the wrong line in a 1000+ line file where adjacent lines look similar (e.g. the two waiter_live.write() blocks at :663 and :687)."
+      },
+      {
+        "severity": "note",
+        "phase": "Phase 4 (F6 / TC-4)",
+        "title": "For the Command probe row, lifting `path` from BucketSource is a guaranteed no-op (start_combed records path:None for command buckets)",
+        "detail": "Phase 4 changes[2] says the Command arm should lift 'tag (+ path) from state.sources.get(bucket_id) (BucketSource)'. tag is genuinely populated (start_combed records `tag: req.tag.clone()`), but `path` for a command bucket is recorded as `None` (crates/daemon/src/command.rs sources.record(..., path: None, ...)). So '(+ path)' for the Command arm will always yield None -- harmless but dead. The PTY arm also records via sources (verify whether PTY records a path; the collect_probes PTY arm currently hardcodes path:None too). The plan should not imply path becomes meaningful for command rows.",
+        "evidence": [
+          "plan-final.json Phase 4 changes[2]: 'Command arm reads argv_head ... and lifts tag (+ path) from state.sources.get(bucket_id)'",
+          "crates/daemon/src/command.rs (sources.record BucketSource { ..., path: None, tag: req.tag.clone() }) in start_combed",
+          "crates/daemon/src/ipc/handlers/runtime.rs:37 (Command arm path: None)"
+        ],
+        "proposed_amendment": "Drop '(+ path)' for the Command arm (it is always None) or note it explicitly as future-proofing. Keep tag-lifting, which is the real win. If a meaningful command path is wanted, source it from cwd in the JobManager record instead of BucketSource.path."
+      }
+    ]
+  },
+  {
+    "persona": "scope-guardian (adversarial reviewer challenging unjustified and missing scope)",
+    "overall_verdict": "approve-with-amendments",
+    "findings": [
+      {
+        "severity": "major",
+        "phase": "Phase 5 (TC-5 self_check spawn round-trip)",
+        "title": "Phase 5 invents a non-existent second dispatch site: dispatch_envelope only delegates to dispatch(), so the 'judge graft' to .await handle_self_check on BOTH the primary arm AND the named-pipe path is fictional work",
+        "detail": "The plan repeatedly (F5 decision plan:30-32, Phase 5 change list plan:214, Phase 5 risk plan:234, and posture line plan:2) asserts that making handle_self_check async 'forces BOTH the primary dispatch arm AND the dispatch_envelope/named-pipe path to .await' and brands this a judge graft the minimal-risk draft 'missed'. The code contradicts this. handle_self_check has exactly ONE call site: server.rs:541 inside async fn dispatch(). dispatch_envelope (server.rs:821-828) is a one-line wrapper `dispatch(state, boot, req_env, peer).await` that does NOT itself call handle_self_check; the Windows named-pipe server (pipe_server.rs:361) calls dispatch_envelope, which awaits dispatch — and dispatch is ALREADY async. Therefore making handle_self_check async requires adding `.await` at exactly ONE place (server.rs:541). dispatch_envelope needs ZERO changes. The plan's code model is wrong here; an implementer following it will hunt for a second await site that does not exist, and a reviewer may flag the (correct) single-site change as an incomplete fix against the plan's own (incorrect) checklist. This is the inverse of scope creep: phantom scope baked into the contract as a hard requirement.",
+        "evidence": [
+          "crates/daemon/src/ipc/server.rs:541 (the ONLY handle_self_check call, inside dispatch)",
+          "crates/daemon/src/ipc/server.rs:821-828 (dispatch_envelope merely `dispatch(...).await`)",
+          "crates/daemon/src/ipc/pipe_server.rs:361 (named-pipe calls dispatch_envelope)",
+          "plan-final.json:214 (change: 'dispatch_envelope ... ALSO gains .await for handle_self_check')",
+          "plan-final.json:234 (risk: 'forces BOTH the primary dispatch arm AND the dispatch_envelope/named-pipe path to .await')"
+        ],
+        "proposed_amendment": "Strike the dispatch_envelope/named-pipe .await item from Phase 5's change list and the corresponding risk/rationale lines. Replace with: 'handle_self_check has a single call site (server.rs:541); add .await there. dispatch_envelope already awaits dispatch, so the named-pipe path inherits the async change with no edit. Verify the Windows path compiles, but expect ZERO source change in pipe_server.rs/dispatch_envelope.' Drop the 'judge graft: both dispatch sites' framing entirely — it is based on a misread of the delegation chain."
+      },
+      {
+        "severity": "major",
+        "phase": "Phase 2 (TC-2 nonce-keyed in-flight dedup)",
+        "title": "Phase 2 omits the CommandStartRequest + handle_command_start_combed plumbing needed to carry dedup_nonce from the wire struct into start_combed — the nonce cannot reach the dedup check as scoped",
+        "detail": "Phase 2 (plan:113-116) adds dedup_nonce to the WIRE struct CommandStartParams (crates/ipc/src/protocol.rs:752) and adds the fingerprint check inside start_combed, but start_combed does NOT receive CommandStartParams — it receives the daemon-internal CommandStartRequest (command.rs:139-161, passed at command.rs:427-430). The IPC handler handle_command_start_combed (ipc/handlers/command.rs:31-39) hand-builds CommandStartRequest field-by-field from CommandStartParams; it currently copies argv/cwd/env/bucket_config/rules/grace/tag and would silently DROP a new dedup_nonce. So the field as planned never reaches start_combed. The plan's estimated_files=4 for Phase 2 (protocol.rs, command.rs, command.rs again, tools.rs) does not budget the handler edit and the change list never names CommandStartRequest or handle_command_start_combed. This is the exact 'compiles + passes tests but silently drops the field' fake-success class the plan elsewhere (R3, into_parts tag:None) explicitly guards against — reproduced in its own new code.",
+        "evidence": [
+          "crates/daemon/src/command.rs:139-161 (CommandStartRequest struct — no nonce field)",
+          "crates/daemon/src/command.rs:427-430 (start_combed takes CommandStartRequest, not CommandStartParams)",
+          "crates/daemon/src/ipc/handlers/command.rs:31-39 (hand-built conversion; would drop an unlisted field)",
+          "plan-final.json:113-116 (Phase 2 change list — adds nonce to CommandStartParams + start_combed only)"
+        ],
+        "proposed_amendment": "Add to Phase 2's change list: '(a) add `dedup_nonce: Option<String>` to crates/daemon/src/command.rs CommandStartRequest (command.rs:139); (b) thread `dedup_nonce: params.dedup_nonce.clone()` in handle_command_start_combed (ipc/handlers/command.rs:31-39).' Bump estimated_files to 5 and add a round-trip test asserting a nonce sent over IPC is observed by start_combed's dedup path (not merely that CommandStartParams decodes it)."
+      },
+      {
+        "severity": "major",
+        "phase": "Phase 1 (is_idempotent classification)",
+        "title": "is_idempotent's enumerated classification omits SubscriptionOpen and SubscriptionClose (both mutating) and AuditSince (a read) — SubscriptionOpen auto-retry leaks a subscription slot",
+        "detail": "The IpcRequest enum (protocol.rs:195-308) has 38 variants. The plan's is_idempotent guidance (plan:82) enumerates a 'false' set and a 'true' set but classifies neither SubscriptionOpen, SubscriptionClose, nor AuditSince. The plan lists 'SubscriptionPull/List/Seek' as reads but skips Open/Close. SubscriptionOpen mints a fresh opaque sub_id with its own registry slot (protocol.rs:284-288, 'Mints a fresh opaque sub_id'); blindly retrying it after a transport timeout LEAKS a subscription slot and can trip SubscriptionLimitExceeded — a real resource-leak side effect, exactly the 'no returned error hides a side effect' axiom the plan claims to enforce. SubscriptionClose frees a slot (mutating; harmless to retry but not a read). AuditSince is a genuine read (should be true). Because the match is exhaustive the implementer is COMPILE-FORCED to classify them, but the plan's enumerated lists give wrong/absent guidance for two state-mutating variants and one read, so the 'conservative' default the plan relies on ('classify state-creating as non-idempotent') is not actually written down for these three. This is missing scope in the single most safety-critical helper of the campaign.",
+        "evidence": [
+          "crates/ipc/src/protocol.rs:284-288 (SubscriptionOpen mints a fresh sub_id — state-creating)",
+          "crates/ipc/src/protocol.rs:297-298 (SubscriptionClose frees a slot — mutating)",
+          "crates/ipc/src/protocol.rs:283 (AuditSince — read-only)",
+          "plan-final.json:82 (is_idempotent false/true lists — Open/Close/AuditSince absent)"
+        ],
+        "proposed_amendment": "Amend plan:82 to add SubscriptionOpen and SubscriptionClose to the NON-idempotent (false) set (slot-creating/slot-freeing), and AuditSince to the read (true) set. State the governing rule explicitly: 'any variant that creates or frees a server-side resource (job, watch, subscription slot, rule activation) is false; pure bounded reads are true.' Add the SubscriptionOpen-retry-leaks-a-slot case to the Phase 1 unit test table."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 1 / Phase 2 (F1 coherence: reject F1-b but add dedup_nonce)",
+        "title": "The plan's stated reason for DEFERRING F1-b (idempotency key) is the same design that Phase 2's dedup_nonce actually implements — the deferral rationale is partially self-contradictory",
+        "detail": "The brief's core challenge holds up under inspection but lands as 'minor', not 'blocker'. The plan rejects F1-b (server-honored idempotency key) citing 'unresolved design (client-id vs argv/cwd/window fingerprint, TTL/dedup-window, persistence)' (plan:7, plan:282) — then Phase 2 adds dedup_nonce: Option<String> and resolves EXACTLY those open items: client-supplied nonce keying (the 'client-id' option), an argv+cwd+tag fallback fingerprint, and a ~3s TTL window (plan:113-115). The genuine, defensible distinctions are real: (1) field on CommandStartParams not the universal RequestEnvelope (narrower blast radius — RequestEnvelope at protocol.rs:125 carries only correlation_id+request and is touched by every method), and (2) an in-flight map evicted on completion rather than a persistent TTL store. So this is coherent ENOUGH to ship. But the deferral PROSE overstates the gap: it implies the window/fingerprint design is unresolved when Phase 2 resolves it. A reader reconciling 'we rejected the idempotency protocol' with 'we added a client nonce + fingerprint + TTL' will see contradiction. Note also: with Phase 1 killing the AUTOMATIC double-spawn entirely, the residual Phase 2 closes only the MANUAL re-call window — research-gaps:128 confirms a client-only fix is 'INCOMPLETE' so SOME daemon guard is justified, but the dedup_nonce field specifically (vs a pure daemon-side argv+cwd+tag window with no wire change) is the weakest-justified new wire surface in the campaign.",
+        "evidence": [
+          "plan-final.json:7 (rejects F1-b: 'open TTL/fingerprint design the researchers left unresolved')",
+          "plan-final.json:113-115 (Phase 2 adds dedup_nonce + 3s window + argv+cwd+tag fingerprint)",
+          "plan-final.json:282 (deferred F1-b rationale)",
+          "crates/ipc/src/protocol.rs:125-128 (RequestEnvelope scope vs CommandStartParams scope)",
+          ".planning/.../research-gaps.json:128 (client-only fix INCOMPLETE without daemon guard)"
+        ],
+        "proposed_amendment": "Rewrite the F1-b deferral prose to draw the distinction honestly: 'F1-b (a key on the universal RequestEnvelope, server-honored with a PERSISTENT TTL store across all methods) is deferred. Phase 2 instead adds a NARROW, method-local dedup_nonce on CommandStartParams backed by an IN-FLIGHT (not persistent) map evicted on completion — same client-nonce concept, far smaller blast radius.' Additionally, justify the wire field over a pure daemon-side window: if the only realistic residual after Phase 1 is a human/LLM re-call (which by definition will NOT resupply the same nonce), state why the nonce path beats the argv+cwd+tag fallback alone — or drop dedup_nonce from Phase 2 and rely solely on the daemon-side argv+cwd+tag window (zero wire change), promoting the nonce to the deferred F1-b bucket where it belongs."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 5 (TC-5 --selfcheck-noop)",
+        "title": "--selfcheck-noop on the daemon binary is justified over a platform no-op, but the new CLI surface (clap subcommand/flag + help/doc) is under-documented in Phase 5's change list",
+        "detail": "Scope verdict: NOT creep. The daemon CLI is clap-based (main.rs:28-75, Cmd enum: Check/Start/PrintConfig/Update). R4 (research-R4:132) left the binary choice open between current_exe() no-op and a platform-split (/bin/true vs cmd /c rem). The plan's choice of current_exe() --selfcheck-noop is defensible: a platform-split system binary is ALSO subject to command_allow_roots denial (policy.rs:303-356, opt-in allow-list), so it buys no policy advantage, and current_exe() is guaranteed present and is the path the operator already trusts. So spawning a platform no-op is NOT clearly superior. HOWEVER: main.rs documents the binary as 'Does NOT spawn child commands by itself' (main.rs:36-37) and enumerates subcommands in the module doc (main.rs:11-18). Adding --selfcheck-noop is a new permanent CLI-contract surface. Phase 5's change list (plan:216) says only 'add the hidden --selfcheck-noop mode' without specifying: hidden flag vs subcommand, the main.rs module-doc/long_about update, or that it must NOT appear as a user-facing capability that could be policy-confusing. estimated_files=5 includes main.rs so the budget is fine; the SPEC of the new surface is thin.",
+        "evidence": [
+          "crates/daemon/src/main.rs:28-75 (clap Cli/Cmd structure)",
+          "crates/daemon/src/main.rs:36-37 ('Does NOT spawn child commands by itself' — contradicted by a self-spawn target)",
+          "crates/daemon/src/main.rs:11-18 (subcommand module doc that must be updated)",
+          ".planning/.../research-R4-observability.json:132 (binary choice left open)",
+          "plan-final.json:216 (terse '--selfcheck-noop mode' item)"
+        ],
+        "proposed_amendment": "Expand the Phase 5 main.rs item: specify a HIDDEN clap arg (e.g. `#[arg(long, hide = true)]` or a hidden subcommand) so it does not pollute --help; update the main.rs module-doc and long_about to note the internal self-probe target and reconcile the 'does not spawn by itself' line; add an acceptance note that --selfcheck-noop exits 0 with no side effects and is reachable only via current_exe() from the daemon's own self_check. Briefly record in the plan WHY current_exe() beats /bin/true+cmd (both face command_allow_roots; current_exe is always present and already-trusted) so the choice is auditable."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 4 (TC-4 CLI render.rs)",
+        "title": "render.rs IS a real consumer that would silently drop the new fields, so inclusion is justified — but 'silently dropped' is a display gap, not a correctness bug; scope is fine, framing should be precise",
+        "detail": "Verified IN SCOPE and justified, with a caveat on severity framing. crates/cli/src/render.rs::probe_rows (render.rs:164-178) prints a fixed 5-column table (KIND/JOB_ID/BUCKET_ID/FRAMES/EVENTS) and reads ProbeListEntry directly (render.rs:20, 164). New tag/argv_head fields would NOT appear in CLI output unless probe_rows is edited — so the plan's R4-derived 'fields silently dropped' risk (plan:36, plan:181, plan:201) is real for the CLI human view. BUT the additive serde fields still round-trip on the wire and through runtime_state JSON; nothing is lost programmatically — only the CLI table omits columns. The plan's invariant language ('so fields are not silently dropped') slightly overstates this as if data integrity were at stake. Including render.rs additively is correct and low-cost (Option fields degrade to blank), so this is NOT creep; the only issue is that the plan frames a cosmetic CLI-completeness item with the same urgency as a data-loss bug, which could mislead phase prioritization. Also note: probe_rows is the only render path; jobs() and probes() both funnel through it (render.rs:82, 89), so one edit covers all three CLI views — the plan's claim that the additive fields 'fix all three consumers' (plan:202) is accurate for the daemon side but the CLI side is a single shared function, worth noting for the file-count budget (estimated_files=6).",
+        "evidence": [
+          "crates/cli/src/render.rs:164-178 (probe_rows fixed 5-column table, no tag/argv)",
+          "crates/cli/src/render.rs:82,89 (jobs() and probes() both call probe_rows)",
+          "crates/cli/src/render.rs:20 (imports ProbeListEntry/RuntimeStateResponse)",
+          "plan-final.json:181,201 ('render.rs ... so fields are not silently dropped')"
+        ],
+        "proposed_amendment": "Keep render.rs in Phase 4 scope (justified). Reword the invariant from 'so fields are not silently dropped' to 'so the CLI table surfaces the new identity columns (the wire fields round-trip regardless; this is CLI display completeness, not data integrity)'. Note in the change list that probe_rows is the single shared render path (render.rs:164) covering jobs/probes/runtime-state views, so one edit suffices."
+      },
+      {
+        "severity": "note",
+        "phase": "Phase 1 (pty_command_start + command_start_combed coverage — confirmed adequate)",
+        "title": "VERIFIED adequate: Phase 1 DOES fix pty_command_start auto-retry double-spawn and command_start_combed's dishonest envelope — the brief's under-scope hypotheses do not hold",
+        "detail": "Confirming the brief's two under-scope probes resolve in the plan's favor, so they are NOT findings against it. (1) pty_command_start: the MCP tool forwards via self.daemon.call(IpcRequest::PtyCommandStart(...)) at tools.rs:1288 — the SAME daemon_client.rs:187-202 path with the blind one-retry-on-transport. PtyCommandStart IS in the plan's is_idempotent false list (plan:82), so the Phase 1 retry-gate (`request.is_idempotent()`) genuinely stops its auto double-spawn. Not under-scoped. (2) command_start_combed (the standalone tool, no wait loop): its start CAN still time out at the 5s client timeout after Phase 1 gates the retry off, and the daemon replies post-spawn (research-gaps:13-15, command.rs:711) so the command MAY have started. command_start_combed currently returns Err(into_mcp_error(&e)) at tools.rs:608 (the non-mutating remedy). Phase 1's change list (plan:85) explicitly names 'command_start_combed' as a consumer of the new mutating remedy (into_mcp_error_mutating), so its envelope becomes honest ('the command MAY have started; reconcile via command_status'). Covered. The retry-gate lives BELOW run_and_watch in call(), so it protects every mutating start tool, not just run_and_watch.",
+        "evidence": [
+          "crates/mcp/src/tools.rs:1288 (pty_command_start -> self.daemon.call(IpcRequest::PtyCommandStart))",
+          "crates/mcp/src/daemon_client.rs:191-198 (blind one-retry on transport, shared by all .call())",
+          "crates/mcp/src/tools.rs:595,608 (command_start_combed -> CommandStartCombed + into_mcp_error)",
+          "plan-final.json:82 (PtyCommandStart in is_idempotent=false set)",
+          "plan-final.json:85 ('the mutating tool arms (run_and_watch start ... and command_start_combed)')"
+        ],
+        "proposed_amendment": "No change required — record as confirmation. Optionally add a Phase 1 integration test asserting pty_command_start (not only run_and_watch) produces exactly one PTY job under an induced transport timeout, to lock the PTY path coverage the plan currently only implies via the is_idempotent table."
+      },
+      {
+        "severity": "note",
+        "phase": "Phase 1 (transport_unavailable_error / -32603 + into_mcp_error short-circuit — verified)",
+        "title": "VERIFIED: the -32603 routing, the 'retry the tool' remedy, and into_mcp_error's no-IpcRequest-in-scope short-circuit are all exactly as the plan claims",
+        "detail": "All three load-bearing Phase 1 code claims check out, so the phase's premises are sound. (1) transport_unavailable_error (tools.rs:1797-1809) builds via McpError::internal_error => numeric JSON-RPC -32603 despite the surrounding doc comment implying otherwise (tools.rs:1795 'never a raw internal_error (-32603)' is the lie the plan flags). (2) Its remedy literally says 'retry the tool' (tools.rs:1804) — fatal for a mutating op. (3) into_mcp_error (tools.rs:1667-1680) short-circuits is_transport() at line 1678 BEFORE the exhaustive code match and has no IpcRequest in scope, so the plan's into_mcp_error_mutating sibling / bool-thread approach is the correct shape. The plan correctly DEFERS changing the numeric -32603 wire code (plan:285) as a client-compat decision while fixing the behavior+remedy this phase — a defensible scope boundary, not creep.",
+        "evidence": [
+          "crates/mcp/src/tools.rs:1797-1809 (transport_unavailable_error via McpError::internal_error = -32603)",
+          "crates/mcp/src/tools.rs:1804 (remedy: 'retry the tool')",
+          "crates/mcp/src/tools.rs:1678 (into_mcp_error short-circuits transport before the code match)",
+          "plan-final.json:84-85 (Phase 1 remedy split), plan-final.json:285 (defers numeric-code change)"
+        ],
+        "proposed_amendment": "No change required — confirmation. When implementing, also correct the now-stale doc comment at tools.rs:1790-1796 (which claims the envelope is 'never a raw internal_error (-32603)') so the comment stops asserting the very falsehood TC-1a's sub-defect is about; the plan's change list should name that comment fix explicitly to avoid leaving a documented lie in place."
+      }
+    ]
+  },
+  {
+    "persona": "policy-security-reviewer",
+    "overall_verdict": "approve-with-amendments",
+    "findings": [
+      {
+        "severity": "blocker",
+        "phase": "Phase 4 (F6 / TC-4)",
+        "title": "argv_head is NOT redacted: format_argv_metadata only truncates, so argv[0..2] can leak secrets (e.g. 'curl -H Authorization:...')",
+        "detail": "The plan asserts repeatedly that argv_head is 'routed through the existing format_argv_metadata-style redaction' (fork_decisions F6, invariants line 301, Phase 4 changes 'command.rs:989-1004', risks line 199). I read crates/daemon/src/command.rs:989-1004 directly: format_argv_metadata does NOT redact anything. It maps each argv element through a 128-byte TRUNCATION and serializes {\"argv\":[...]} verbatim. A repo-wide search for redact/scrub/sanitize/mask confirms the only redaction in the tree is in crates/sifters/src/lib.rs and applies to command OUTPUT lines via per-rule capture rules, never to argv. So the plan's central safety claim for TC-4 is false. argv[0..2] is exactly the window where a secret most often sits: the SECOND element is frequently the secret itself -- 'curl -H Authorization: Bearer <tok>' (the header+token is argv[2..3], but 'psql postgres://user:pass@host', 'mysql -ppassword', 'aws --secret <k>', 'npm token <tok>' all put the secret at argv[1] or argv[2], well under 128 bytes so truncation never trips). Because argv[0..2] is the FIRST two/three tokens, bounding the head does NOT bound away secrets; it bounds away the tail (often the safe filenames) and keeps the head (often the dangerous flag+value). The R-06 justification the plan leans on is narrower than the plan's use: R-06 accepts argv verbatim ONLY in the command_exited summary delivered to the job's own client; TC-4 puts argv_head in runtime_state/probe_list, which (see separate finding) ANY local client can read with no per-peer authz. The combination (no real redaction + broader read surface) is a genuine secret-disclosure regression, not parity with R-06.",
+        "evidence": [
+          "E:/project/terminal-commander/crates/daemon/src/command.rs:989-1004 (format_argv_metadata: per-item 128-byte truncate, NO redaction)",
+          "plan-final.json fork_decisions F6 ('route through the existing format_argv_metadata redaction')",
+          "plan-final.json invariants line 301 ('via the existing format_argv_metadata redaction')",
+          "research-R4 risk line 124 + open_question 131 (research itself UNSURE whether format_argv_metadata redacts)",
+          "Grep redact|secret|scrub|sanitize|mask across crates: only crates/sifters/src/lib.rs (output-line redaction), zero argv redaction"
+        ],
+        "proposed_amendment": "Either (a) build a real argv redactor for argv_head before Phase 4 lands -- a dedicated function that masks values following secret-shaped flags (-H/--header, -p/--password, -u with embedded creds, --token, --secret, Authorization:, and key=value where key matches *_TOKEN/*_SECRET/*_PASSWORD/*_KEY, mirroring the WWS06 R-WWS-06 filter list already in crates/supervisor/src/ensure.rs) and replaces the value with <redacted>; OR (b) surface ONLY argv[0] (the program basename, the genuinely safe identifier) plus a separate non-secret tag, and drop argv[1..2] entirely. Update every plan section that claims format_argv_metadata redacts to say 'format_argv_metadata only truncates; a NEW redactor is required'. Add a daemon unit test that an argv carrying a secret-shaped token surfaces it as <redacted> in argv_head (the plan already lists this test at Phase 4 but it would FAIL against the current helper, exposing the gap). Make the test assert against a real secret pattern (Authorization header, password flag), not just length."
+      },
+      {
+        "severity": "major",
+        "phase": "Phase 2 (F1 dedup) cross-cutting with TC-4",
+        "title": "Dedup map enables cross-IPC-client job_id/bucket_id hijack by fingerprint guessing (argv+cwd+tag), and the nonce fallback window is the leak vector",
+        "detail": "The socket is a shared local UDS/named-pipe (crates/daemon/src/ipc/mod.rs:4-16) with SO_PEERCRED captured for AUDIT only -- I confirmed peer identity is passed to dispatch() (server.rs:509) but NOT to any read handler (BucketWait/BucketEventsSince/BucketSummary/EventContext take only (state,p), server.rs:544-559), so there is ZERO per-peer authorization on bucket reads today. job_id/bucket_id are UUIDv7 (crates/core/src/ids.rs:66-68): 74 random bits, NOT brute-forceable, so today a client B cannot ADDRESS client A's job without already knowing the id. The Phase 2 dedup map BREAKS that property for the fallback path: 'falling back to hash(argv+cwd+tag) ONLY within a ~3s window' (fork_decisions F1, Phase 2 changes command.rs ~:540). argv+cwd+tag is GUESSABLE/low-entropy (a sibling local client that knows or guesses what command another client is about to run -- 'cargo build' in a known repo cwd with no tag -- can submit the identical CommandStartCombed within 3s and the daemon RETURNS the SAME (job_id,bucket_id) it minted for client A). That hands client B a live job handle it can then command_stop (Phase 6) or subscribe to (reading A's command output buckets). This converts a non-guessable-id design into a guessable-fingerprint disclosure. The nonce-preferred keying does NOT fix it because the fallback (no nonce) is exactly what an unmodified/adversarial client sends.",
+        "evidence": [
+          "E:/project/terminal-commander/crates/daemon/src/ipc/mod.rs:4-16 (shared UDS, SO_PEERCRED)",
+          "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:509,544-559 (peer NOT forwarded to read handlers; no per-job ownership check)",
+          "E:/project/terminal-commander/crates/core/src/ids.rs:53-71 (UUIDv7 ids: 74 random bits, not guessable)",
+          "plan-final.json fork_decisions F1 + Phase 2 changes ('fallback on hash(argv+cwd+tag) within ~3s window' returns SAME job_id/bucket_id)",
+          "plan-final.json invariants line 302 (nonce-preferred but argv+cwd+tag fallback retained)"
+        ],
+        "proposed_amendment": "Restrict the argv+cwd+tag fallback to collapse ONLY requests from the SAME peer identity: key the dedup map on (peer_uid/peer_sid, argv, cwd, tag), not (argv,cwd,tag) alone. dispatch() already has PeerIdentity in scope (server.rs:509) and start_combed is reachable from the handler -- thread the peer cred (or a hash of it) into the fingerprint key. A request from a DIFFERENT peer with the same argv/cwd/tag then never collapses onto another peer's job (it spawns its own), eliminating the cross-client handle disclosure while preserving same-peer retry dedup. If threading peer identity into CommandRuntime::start_combed is too invasive for Phase 2, drop the argv+cwd+tag fallback entirely and dedup ONLY on an explicit client nonce (which a client only knows for its own request), accepting that no-nonce clients get no dedup (Phase 1 already kills the automatic-retry case, so the residual manual-retry window is small). Add a test: two DISTINCT peers submitting identical argv+cwd+tag within the window get DISTINCT jobs."
+      },
+      {
+        "severity": "major",
+        "phase": "Phase 6 (F4 / TC-3 command_stop)",
+        "title": "Audit-before-kill ordering is under-specified and can leak job existence to a denied caller via the persistent (locally-readable) audit log",
+        "detail": "The plan says CommandRuntime::stop should 'evaluate PolicyAction::CommandSignal, emit the audit row BEFORE the kill' (fork_decisions F4, Phase 6 changes command.rs:246) and mirrors PtyRuntime::stop. But the PTY precedent does the OPPOSITE of what a deny path needs: pty_command.rs:526-530 checks job existence FIRST (live.remove -> UnknownJob early return) and only emits its job-id-bearing audit at line 560 AFTER confirming the job exists and AFTER the kill. The plan instead inserts a policy-deny gate and an 'audit BEFORE kill' with NO specified ordering between (1) the policy deny, (2) the job-existence check, and (3) the job-id-bearing audit row. Two leaks fall out: (A) EXISTENCE ORACLE -- if stop() evaluates policy and returns PolicyDenied BEFORE looking up the job, a read_only_observer caller gets a uniform deny for any job_id (safe); but if it looks up the job first (to build the audit subject = job_id.to_wire_string() 'before the kill'), a denied caller can distinguish UnknownJob from PolicyDenied and thus confirm a job_id is live. (B) AUDIT DISCLOSURE -- the persistent audit log is readable by ANY local client via audit_since/AuditRowWire (the generic dispatch audit at server.rs:757-764 keys on peer, which is fine, but a SECOND internal audit('command_stop', job_id.to_wire_string(), 'deny') as the plan describes would write the referenced job_id into a row a sibling client can read). The plan's own POLICY.md-conformance goal (audit-before-action) must not be implemented as audit-with-job-id-before-existence-check.",
+        "evidence": [
+          "E:/project/terminal-commander/crates/daemon/src/pty_command.rs:526-571 (UnknownJob check at 527-530 BEFORE audit at 560; PTY audits job_id only after existence confirmed; PTY is NOT policy-gated)",
+          "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:757-764 + handlers/common.rs:60-70 (generic dispatch audit subject = peer uid/pid, NOT job_id -- correct; does NOT leak job)",
+          "plan-final.json Phase 6 changes command.rs:246 ('evaluate policy ... emit the audit row BEFORE the kill') with no existence/deny ordering",
+          "E:/project/terminal-commander/crates/daemon/tests/security.rs:81-99 (CommandSignal deny for read_only_observer confirmed)"
+        ],
+        "proposed_amendment": "Specify the ordering explicitly in Phase 6: (1) evaluate PolicyAction::CommandSignal FIRST; on Deny, emit a deny audit row whose SUBJECT is the peer identity (identity_audit_subject), NOT the job_id, and return PolicyDenied WITHOUT touching the live map -- so a denied caller learns nothing about whether the job exists and no job_id is written to a locally-readable audit row on the deny path. (2) Only AFTER an Allow verdict, do the live-map lookup (UnknownJob if absent), and (3) emit the job-id-bearing 'allow' audit BEFORE firing the cancel handle. Add the deny test the plan already lists (Phase 6 'command_stop under read_only_observer is DENIED with an audit row emitted BEFORE any kill') but tighten its assertion: the deny audit row subject must be the peer, must NOT contain the job_id wire string, and stop() must return the SAME error for a live job_id and a bogus job_id under read_only_observer (no existence oracle)."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 5 (F5 / TC-5 self_check spawn)",
+        "title": "self_check noop spawn is not an arbitrary-exec primitive, but the --selfcheck-noop daemon flag must be inert and the spawn must not bypass the policy/argv gates",
+        "detail": "I assessed the 'can the noop mode be abused as arbitrary-exec via TC_SOCKET' concern. It is NOT a caller-controlled exec: the self_check IPC handler hardcodes argv = [current_exe(), '--selfcheck-noop'] (Phase 5 changes server.rs:801-818); the caller of self_check supplies no argv, so a client cannot pivot self_check into running an arbitrary binary. The plan also correctly routes the spawn 'through the normal CommandRuntime path so it inherits policy + emits a command_start audit row' (fork_decisions F5), which means start_combed's structural deny set (COMMANDS_DENY), shell-interpreter guard, and policy.evaluate (command.rs:438-457) all apply -- good. Two residual risks to pin down: (1) the new hidden --selfcheck-noop mode on the daemon binary must do NOTHING but exit(0) -- it must not read TC_SOCKET, must not connect to the daemon, must not honor any other env/argv, or it becomes a re-entrancy/confused-deputy surface; the plan says 'exits 0 immediately' which is right but should be an explicit invariant + a test that the mode ignores all other args/env. (2) the plan must NOT add a bypass that lets the self_check spawn skip validate_argv/policy 'because it's internal' -- if it constructs the CommandStartParams and calls start_combed like any caller, it is safe; if it shortcuts around the gate it reintroduces an unaudited exec. The plan currently implies the safe path but does not state the no-bypass invariant.",
+        "evidence": [
+          "E:/project/terminal-commander/crates/daemon/src/command.rs:431-457 (validate_argv + shell guard + policy.evaluate run on every start_combed)",
+          "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:801-818 (handle_self_check today; Phase 5 hardcodes the noop argv -- caller supplies none)",
+          "plan-final.json fork_decisions F5 ('routed through the normal CommandRuntime path so it inherits policy + emits a command_start audit row')"
+        ],
+        "proposed_amendment": "Add a Phase 5 invariant: '--selfcheck-noop is a leaf mode that performs exactly process::exit(0) BEFORE any arg parsing, env read, socket connect, or daemon bootstrap; it ignores all other argv/env.' Add a unit/integration test that invoking the binary with --selfcheck-noop plus a hostile extra arg (e.g. --selfcheck-noop; TC_SOCKET=/evil) still exits 0 with no socket activity. Add an explicit invariant that the self_check spawn constructs a normal CommandStartParams and calls start_combed (NO gate bypass), so the spawn is policy-evaluated and audited like any other command; the negative test should confirm a command_start audit row is emitted for the probe (the plan's manual verification mentions this -- promote it to an asserted test)."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 1 (F1=a) cross-cutting Phase 2/6",
+        "title": "FileWatchStop/Shutdown/command_stop classified non-idempotent means a transport blip leaves a real stop ambiguous and un-retried -- acceptable, but the honest remedy must not imply the stop took effect",
+        "detail": "Phase 1 classifies Shutdown, FileWatchStop, and (Phase 6) CommandStop as non-idempotent, so a transport failure on them returns Err WITHOUT retry. For START operations this is exactly right (no double-spawn). But for STOP/SHUTDOWN operations, a stop is naturally idempotent in EFFECT (stopping an already-stopped job is harmless -- the plan even notes this for CommandStop in F4). By lumping stops into the non-retry bucket, a transport blip on a command_stop returns a bare-ish error and the caller does not know whether the kill landed. That is the SAFE direction (better to under-claim than to falsely claim a kill), and it matches the trust axiom, so it is not a defect -- BUT the mutating-failure remedy text (Phase 1 changes tools.rs:1798: 'the command MAY have started; call command_status/runtime_state to confirm before re-running') is written for START semantics and would be misleading on a STOP failure ('the command may have started' is nonsensical for a stop). A stop that transport-fails needs a remedy like 'the stop may or may not have taken effect; call command_status to confirm the job state before re-issuing'.",
+        "evidence": [
+          "plan-final.json fork_decisions F1 (is_idempotent false for ... FileWatchStop, Shutdown) + F4 (CommandStop classified non-idempotent)",
+          "plan-final.json Phase 1 changes tools.rs:1798 (single mutating remedy text written for start: 'the command MAY have started')",
+          "E:/project/terminal-commander/crates/mcp/src/daemon_client.rs:187-202 (blind retry applies to ALL transport errors today; gate removes retry for all non-idempotent incl. stops)"
+        ],
+        "proposed_amendment": "Differentiate the mutating-failure remedy by operation class, or make it operation-neutral: replace 'the command MAY have started' with 'this mutating operation may or may not have taken effect; call command_status/runtime_state to confirm the actual job state before re-issuing'. This wording is honest for start, stop, and shutdown alike and avoids the start-specific phrasing leaking onto stop/shutdown failures. Keep the no-retry gate as planned (correct safety posture)."
+      },
+      {
+        "severity": "note",
+        "phase": "Phase 4 (F6 / TC-4)",
+        "title": "TC-4 broadens argv read surface from per-job-client (R-06) to any-local-client (runtime_state); document the threat-model widening even after redaction",
+        "detail": "Independent of the redaction gap (separate blocker), TC-4 makes a real threat-model change the plan does not call out: R-06 accepts argv verbatim in the command_exited lifecycle event, which flows to the client that started/subscribed to that job. argv_head in ProbeListEntry is exposed via runtime_state/probe_list/probe_status, which any local client can poll (no per-peer authz, confirmed server.rs read handlers). So even a perfectly redacted argv_head still moves the program/first-arg of EVERY live job into a global local inventory readable by any sibling process on the host. For a single-tenant local daemon this is within the existing trust boundary, but it should be an explicit accepted-risk row (like R-06) rather than an unstated assumption, because it widens who can enumerate what commands are running.",
+        "evidence": [
+          "RISK_REGISTER.md R-06 lines 87-99 (argv accepted ONLY in command_exited summary, 'operator-input not raw stdout')",
+          "E:/project/terminal-commander/crates/daemon/src/ipc/server.rs:544-559 + handlers funnel through collect_probes (runtime_state/probe_list/probe_status all serve ProbeListEntry to any local caller)",
+          "research-R4 finding 'collect_probes is THE assembly site for every runtime_state/probe_list/probe_status row'"
+        ],
+        "proposed_amendment": "Add a RISK_REGISTER row in Phase 0 (e.g. R-10) recording that argv_head/tag in ProbeListEntry surfaces the program + bounded redacted head of every live job to any local IPC client (no per-peer authz), accepted under the single-tenant-local-daemon trust model, mitigated by the new argv redactor. Cross-link R-06. This makes the widening an informed acceptance, not silent scope creep, and gives the redactor a named risk to retire against."
+      }
+    ]
+  },
+  {
+    "persona": "coherence-auditor",
+    "overall_verdict": "approve-with-amendments",
+    "findings": [
+      {
+        "severity": "blocker",
+        "phase": "Phase 6 (F4 / TC-3 command_stop)",
+        "title": "Phase 6 violates the plan's own '<=10 files per phase' invariant; estimated_files:10 is wrong",
+        "detail": "The posture (line 2), F7 (line 42), and invariant (line 295) all assert every phase touches <=10 files, and Phase 6 declares estimated_files:10. But Phase 6's own change list enumerates far more EDITED files. Counting only files the change list says to modify: crates/probes/src/process.rs, crates/daemon/src/command.rs, crates/ipc/src/protocol.rs, crates/ipc/src/lib.rs (re-export), crates/daemon/src/ipc/server.rs, crates/daemon/src/ipc/mod.rs (re-export), crates/daemon/src/lib.rs (re-export), crates/mcp/src/tools.rs, crates/mcp/tests/mcp_stdio.rs, crates/mcp/tests/mcp_live_daemon.rs, crates/mcp/tests/daemon_unavailable_envelope.rs, tests/fixtures/contracts/mcp-tool-fixture-map.v1.json, tests/fixtures/contracts/mcp-tools/command_stop.v1.json (new), tests/fixtures/contracts/mcp-tools/system_discover.v1.json, docs/mcp/TOOL_CONTROL_SURFACE.md, SPEC.md, RELEASE_CHECKLIST.md = ~16-17 files. I verified the three re-export sites are real (PtyCommandStop is re-exported at crates/daemon/src/ipc/mod.rs:62, crates/daemon/src/lib.rs:65, crates/ipc/src/lib.rs:57), so CommandStop needs all three too. Even excluding the 3 docs, the code+test+fixture set alone is ~13-14. The phase as written cannot be a single <=10-file PR; either the invariant is false for this phase or the estimate is undercounted by ~60%. Because the whole point of isolating TC-3 last is 'one atomic reviewable PR' with all anchors in one commit, this is load-bearing, not cosmetic.",
+        "evidence": [
+          "plan-final.json:2 (posture: 'each <=10 files')",
+          "plan-final.json:42 (F7 'each <=10 files')",
+          "plan-final.json:278 (estimated_files:10)",
+          "plan-final.json:245-253 (Phase 6 change list)",
+          "plan-final.json:299 (invariant: re-exports ipc/lib.rs, daemon ipc/mod.rs + lib.rs)",
+          "crates/daemon/src/ipc/mod.rs:62",
+          "crates/daemon/src/lib.rs:65",
+          "crates/ipc/src/lib.rs:57"
+        ],
+        "proposed_amendment": "Either (a) correct estimated_files to the true count (~16) and explicitly exempt Phase 6 from the <=10 rule in the invariant (documenting WHY the atomic count-anchor set forces it), or (b) split Phase 6 into 6a (daemon kill capability: process.rs + command.rs + protocol.rs + re-exports + ipc server dispatch, with the IPC method landing behind no MCP tool yet) and 6b (MCP surface + fixtures + docs). Note (b) reintroduces a transient 'IPC method with no tool' state -- acceptable since run_and_watch is precedent for tool-without-method, but verify the parity test tolerates a DISCOVERABLE_METHODS entry whose name is not yet in the MCP catalogue (it should: the parity test compares method_name vs DISCOVERABLE_METHODS, not vs the MCP tool catalogue)."
+      },
+      {
+        "severity": "major",
+        "phase": "Phase 5 (F5 / TC-5 self_check)",
+        "title": "Phase 5's 'judge graft' to await BOTH dispatch sites corrects a non-existent second call site",
+        "detail": "Phase 5 asserts as a VERIFIED judge graft that making handle_self_check async 'forces BOTH the primary dispatch arm AND the dispatch_envelope/named-pipe path to .await' and that 'the minimal-risk draft missed the alternate dispatch site' (lines 214, 234, 31). The code contradicts this: handle_self_check has exactly ONE caller, dispatch() at server.rs:541. dispatch_envelope (server.rs:821-828) is a thin wrapper whose entire body is 'dispatch(state, boot, req_env, peer).await' -- it does not independently dispatch SelfCheck. The Windows named-pipe server (pipe_server.rs:361) calls dispatch_envelope, which already awaits dispatch. So only server.rs:541 needs the .await once handle_self_check becomes async; there is no second SelfCheck dispatch arm to update. Following the plan literally, an implementer will hunt for a phantom 'alternate Windows named-pipe SelfCheck dispatch' that does not exist, waste effort, and may invent a divergent structure. The plan presents a confident, sourced obligation that is factually wrong about the code.",
+        "evidence": [
+          "plan-final.json:214 (change: dispatch_envelope 'ALSO gains .await')",
+          "plan-final.json:234 (risk: 'forces BOTH ... dispatch sites')",
+          "plan-final.json:31 (F5 rationale: 'prevents a compile/await break on the Windows named-pipe path')",
+          "crates/daemon/src/ipc/server.rs:540-543 (sole handle_self_check call)",
+          "crates/daemon/src/ipc/server.rs:821-828 (dispatch_envelope just calls dispatch(...).await)",
+          "crates/daemon/src/ipc/pipe_server.rs:361 (named-pipe path calls dispatch_envelope)"
+        ],
+        "proposed_amendment": "Delete the 'dispatch_envelope / alternate Windows named-pipe dispatch path -- ALSO gains .await' change item and the corresponding risk/rationale text. Replace with: 'handle_self_check has a single caller (dispatch, server.rs:541); making it async requires adding .await only there. dispatch_envelope and the named-pipe server reach SelfCheck transitively through dispatch and need no edit.' Drop estimated_files claim impact accordingly (Phase 5 stays 5 files)."
+      },
+      {
+        "severity": "major",
+        "phase": "Phase 2 (F1 dedup) + cross-cutting",
+        "title": "The dedup nonce is 'optional / may be set' with no concrete production trigger, so the real mechanism is the argv+cwd+tag window -- but the never-collapse safety claim leans on nonces",
+        "detail": "F1 keys the in-flight guard 'PREFERENTIALLY on a client-supplied request nonce' (line 6); Phase 2 says the MCP adapter 'may optionally set dedup_nonce ... default None preserves current behavior' (line 116). The plan never specifies a concrete rule for WHEN the adapter sets a nonce -- so in practice run_and_watch/command_start_combed send None, and the operative dedup key is always the argv+cwd+tag fallback window. That undermines the plan's headline race mitigation: the never-collapse invariant (line 302) and risk mitigation (line 131) rest PRIMARILY on 'nonce-preferred keying (distinct nonces => distinct jobs)'. With no nonce in production, two legitimately-distinct rapid identical-argv/cwd/tag runs inside the ~3s window WILL be collapsed -- the exact judge-flagged correctness bug the plan claims to have fixed. Worse, the never-collapse test (line 120) proves the property by sending DISTINCT nonces, i.e. it validates a path production never exercises; the production path (no nonce, identical signature) is the one that can wrongly collapse and is only guarded by 'a very short window', which the plan leaves unquantified beyond '~3s'.",
+        "evidence": [
+          "plan-final.json:6 (F1: keyed PREFERENTIALLY on client nonce, fallback hash(argv+cwd+tag) within ~3s)",
+          "plan-final.json:116 (Phase 2: adapter 'may optionally set dedup_nonce'; default None)",
+          "plan-final.json:120 (never-collapse test uses DISTINCT nonces)",
+          "plan-final.json:131 (risk mitigated by 'nonce-preferred keying')",
+          "plan-final.json:302 (invariant: never collapse via nonce-preferred keying)"
+        ],
+        "proposed_amendment": "Either (a) make the nonce non-optional for the dedup-relevant starts: have the run_and_watch/command_start_combed adapter ALWAYS generate a per-call nonce (a fresh uuid/counter), so a genuine LLM re-issue that copies nothing gets a new nonce (distinct jobs) while the Phase-1-gated auto-retry path is the only thing that could reuse a nonce -- but note auto-retry is already removed in Phase 1, so define exactly which caller reuses a nonce, or the guard collapses nothing; OR (b) if the fallback window is the real mechanism, state that explicitly, quantify the window precisely, and add the never-collapse test for the NO-NONCE identical-signature case (two distinct rapid runs, no nonce, must NOT collapse) -- which likely forces the window to be very small (sub-second) or content-distinguished, changing the design. Resolve which mechanism is actually load-bearing before Phase 2 is implemented."
+      },
+      {
+        "severity": "major",
+        "phase": "Phase 1 (F1 is_idempotent classification)",
+        "title": "is_idempotent() enumerations omit SubscriptionOpen/SubscriptionClose/AuditSince; the omission can re-introduce a non-idempotent double-effect (SubscriptionOpen)",
+        "detail": "Phase 1 specifies is_idempotent() as an EXHAUSTIVE match and enumerates the variants (line 82): non-idempotent {CommandStartCombed, PtyCommandStart, PtyCommandWriteStdin, RegistryUpsert/Activate/Deactivate/ImportPack, FileWatchStart/FileWatchStop, Shutdown}; idempotent reads {Health, CommandStatus, BucketWait, RuntimeState, ProbeList, ProbeStatus, BucketEventsSince, BucketSummary, EventContext, RegistrySearch/Get/Test/ListActive, FileReadWindow/Search/WatchList, PtyCommandList, SubscriptionPull/List/Seek, SystemDiscover, PolicyStatus, SelfCheck}. The actual enum has 38 variants; three are NOT in either list: SubscriptionOpen, SubscriptionClose, AuditSince. SubscriptionOpen mints a fresh sub_id on every call (verified: subscriptions/model.rs:413 'each open mints a fresh opaque sub_id', registry.rs:57) and slots are bounded (SubscriptionLimitExceeded exists), so a blind transport-retry of SubscriptionOpen leaks a second subscription -- a non-idempotent side effect that exactly violates the governing axiom ('NO caller ... may retry a non-idempotent op'). The plan's only rule hint is '(and any other state-mutating variant)', but it then lists SubscriptionSeek as idempotent though seek mutates a subscription's offset -- so the actual rule is 'classify by whether retry creates a NEW/duplicated resource', not 'mutates state'. That rule is never stated crisply, and the un-enumerated mint (SubscriptionOpen) is precisely where a wrong call is harmful. Two implementers can diverge: one trusts the list (SubscriptionOpen unspecified -> guesses true -> retried -> leak); another reasons from intent -> false.",
+        "evidence": [
+          "plan-final.json:82 (the enumerated is_idempotent lists)",
+          "crates/ipc/src/protocol.rs:284-302 (SubscriptionOpen/Pull/List/Close/Seek, AuditSince variants)",
+          "crates/daemon/src/ipc/server.rs:447-451 (audit_since, subscription_open/close are real methods)",
+          "crates/daemon/src/subscriptions/model.rs:413",
+          "crates/daemon/src/subscriptions/registry.rs:57"
+        ],
+        "proposed_amendment": "State the classification RULE explicitly at the top of Phase 1: 'return false (non-idempotent, do not auto-retry) for any RPC whose retry could create or duplicate a resource or mint a fresh id; return true only for pure reads and idempotent-effect repositioning.' Then complete the enumeration: SubscriptionOpen => false (mints a fresh sub_id; verified non-idempotent), SubscriptionClose => true (idempotent-effect: closing an already-closed sub is harmless) OR false if you prefer the conservative posture (worst case is a non-retry the agent can re-issue), AuditSince => true (pure read). Re-confirm SubscriptionSeek's classification under the stated rule (idempotent-effect reposition -> true is defensible; document it). Add the missing variants to the table-driven exhaustiveness test."
+      },
+      {
+        "severity": "major",
+        "phase": "Phase 3 (F2 degraded result)",
+        "title": "'strict superset' + 'one shared builder' is internally contradictory: degraded adds `cursor`, but the normal payload is not specified to add `cursor`",
+        "detail": "F2 claims the degraded result is a STRICT SUPERSET of the existing run_and_watch payload (line 12) and that a single shared builder is used 'so the normal and degraded paths cannot drift' (lines 13, 147). But the two paths are specified with different key sets: the degraded shape lists {job_id, bucket_id, state, exit_code, signals, signal_count, cursor, receipt:null, complete:false, wait_exhausted:true, degraded:true, recover_hint} (line 12), and the change for the normal path only says 'always includes degraded:false' and 'add recover_hint:null on the normal path' (line 147) -- it does NOT add `cursor` to the normal payload, and the current normal payload (verified tools.rs:726-736) has no cursor. So degraded includes a key (cursor) the normal path lacks => it is NOT a strict superset of the normal output, and the 'one shared builder' is actually two builders (the change list even names a separate helper run_and_watch_degraded_result taking cursor as a param, line 146, alongside the unchanged normal json! literal). The receipt:null-vs-Some difference is fine (key present in both), but cursor breaks the superset/no-drift claim as written. A reader expecting cursor on the normal completion (because the plan promises 'always present, one shared builder') will be wrong.",
+        "evidence": [
+          "plan-final.json:12 (degraded shape includes cursor)",
+          "plan-final.json:13 (rationale: strict superset)",
+          "plan-final.json:147 (normal path: add degraded:false + recover_hint:null; NO cursor)",
+          "plan-final.json:146 (separate helper run_and_watch_degraded_result(...cursor...))",
+          "crates/mcp/src/tools.rs:726-736 (current normal payload has no cursor field)"
+        ],
+        "proposed_amendment": "Pick one and make the plan consistent: (a) add `cursor` to the NORMAL payload too (genuinely one builder, genuinely a superset) -- low risk since R3 verified no schema test gates run_and_watch result fields; or (b) drop the 'strict superset' + 'one shared builder' framing and instead say 'the degraded result reuses every normal field and ADDS {cursor, degraded:true, recover_hint}; the normal path adds {degraded:false, recover_hint:null} but not cursor.' Option (a) is cleaner and matches the stated drift-avoidance goal."
+      },
+      {
+        "severity": "minor",
+        "phase": "Phase 6 (F4 / TC-3) + Phase 1 wording",
+        "title": "Adding a non-Clone oneshot::Sender to JobBinding breaks its #[derive(Clone)]; the plan does not call out the required derive change",
+        "detail": "Phase 6 (line 246) says add 'cancel: Option<oneshot::Sender<()>>' to JobBinding (command.rs:218-230). JobBinding currently derives Clone (command.rs:217 '#[derive(Debug, Clone)]'). tokio::sync::oneshot::Sender is not Clone, so the derive will fail to compile. I verified JobBinding is never whole-cloned -- both read sites (command.rs:789-808 rebind, 855-864 live_jobs) access individual fields, not Clone the struct -- so dropping the Clone derive is safe, but that is an undocumented decision the plan should state (an implementer might instead reach for Arc<Mutex<Option<...>>> to preserve Clone, the heavier PTY-style pattern the plan explicitly says to avoid in line 272). Two implementers diverge on the same line.",
+        "evidence": [
+          "plan-final.json:246 (add cancel: Option<oneshot::Sender<()>> to JobBinding)",
+          "plan-final.json:272 (risk: 'do NOT store the whole probe ... avoids the PTY Arc<Mutex> footgun')",
+          "crates/daemon/src/command.rs:217-231 (JobBinding #[derive(Debug, Clone)])",
+          "crates/daemon/src/command.rs:789-808 (field-level access, no whole clone)",
+          "crates/daemon/src/command.rs:855-864 (field-level access)"
+        ],
+        "proposed_amendment": "Add to Phase 6: 'JobBinding currently derives Clone; the oneshot::Sender is not Clone. Remove the Clone derive (verified JobBinding is never whole-cloned -- rebind and live_jobs read individual fields), keeping Debug.' This pre-empts the Arc<Mutex> divergence and matches the plan's own anti-footgun guidance."
+      },
+      {
+        "severity": "minor",
+        "phase": "cross-cutting (MCP guard 2)",
+        "title": "MCP guard 2 is a substring grep with NO doc-comment exemption; new doc text in crates/mcp/src mentioning fs tokens would trip it",
+        "detail": "The invariant (line 294) asserts the mcp-crate guards are satisfied because edits 'read a bool' / 'forward an IPC request'. Guard 1 (linux-gate.sh:52-56) has a code-line filter (^...:(let|use|fn|pub|impl)) that exempts doc comments, but guard 2 (lines 57-60) is a bare 'grep -RE \"tokio::fs|std::fs|File::open|read_to_string|read_to_end\" crates/mcp/src' with NO such exemption -- ANY occurrence, including in a doc comment or recover_hint string literal, fails CI. Phases 1, 2, 3, 6 all add doc/comment/hint text to crates/mcp/src. The risk is low (the proposed texts are unlikely to contain those exact tokens) but the plan's blanket 'guard-safe' claim is overstated and the trap is non-obvious.",
+        "evidence": [
+          "plan-final.json:294 (invariant: guards satisfied)",
+          "scripts/linux-gate.sh:52-56 (guard 1 has code-line filter)",
+          "scripts/linux-gate.sh:57-60 (guard 2 bare grep, no doc exemption)",
+          "plan-final.json:83 (Phase 1 updates daemon_client.rs doc comment)",
+          "plan-final.json:146 (Phase 3 adds recover_hint text in tools.rs)"
+        ],
+        "proposed_amendment": "Add a one-line caution to the guards invariant: 'MCP guard 2 is substring-based with no doc-comment exemption; any new comment/hint/string in crates/mcp/src must avoid the literals tokio::fs/std::fs/File::open/read_to_string/read_to_end (e.g. write \"file system\" not \"std::fs\").' No design change, just an explicit constraint so a reviewer/implementer does not get a surprise red."
+      },
+      {
+        "severity": "note",
+        "phase": "Phase 0 / cross-cutting consistency",
+        "title": "Verified anchor values used by Phase 6 are accurate at HEAD (positive confirmation)",
+        "detail": "Spot-checked the load-bearing 'VERIFIED' count anchors the atomic Phase 6 commit depends on: daemon_unavailable_envelope.rs asserts checked==36 (line 215); fixture map counts are live_tools:37, covered_live:33, missing_fixture:4 (37=33+4, internally consistent; after command_stop: 38=34+4, also consistent); the catalogue test is named catalogue_lists_thirty_seven_live_tools (tools.rs:3232); alphabetical sort claim holds (command_output_tail < command_start_combed < command_status < command_stop). transport_unavailable_error's remedy literally says 'retry the tool' (tools.rs:1804) and routes through McpError::internal_error => -32603 (tools.rs:1808), confirming the Phase 1 sub-defect. into_parts hardcodes tag:None (tools.rs:2277) and McpRunAndWatchParams has no tag field, confirming F6. These do not require amendment; recording so the verdict reflects what was checked and found sound.",
+        "evidence": [
+          "crates/mcp/tests/daemon_unavailable_envelope.rs:215 (checked, 36)",
+          "tests/fixtures/contracts/mcp-tool-fixture-map.v1.json:247-250 (live_tools 37, covered_live 33, missing_fixture 4)",
+          "crates/mcp/src/tools.rs:3232",
+          "crates/daemon/src/ipc/server.rs:416-453 (method_name family order)",
+          "crates/mcp/src/tools.rs:1804,1808 (remedy text + internal_error)",
+          "crates/mcp/src/tools.rs:2277 (tag:None)"
+        ],
+        "proposed_amendment": "No change required. Keep these anchors as the single source of truth; re-verify them at the moment Phase 6 lands (they are HEAD-accurate now)."
+      }
+    ]
+  }
+]

@@ -1,0 +1,218 @@
+{
+  "posture": "root-cause-maximalist: blind transport-retry (daemon_client.rs:191-201) re-sends a slow mutating start with no daemon dedup -> double-spawn. Layered fix, 7 phases, both OS gates, zero deps.",
+  "fork_decisions": [
+    {
+      "fork": "F1",
+      "decision": "is_mutating no-retry(daemon_client.rs:187-201)+idempotency_key(client.rs:67-70)+pre-spawn ack Starting(job.rs:58)",
+      "rationale": "a first, b daemon dedup, c orphan window"
+    },
+    {
+      "fork": "F2",
+      "decision": "degraded partial keeps job_id reusing wait_exhausted(tools.rs:724)",
+      "rationale": "no abandon live job"
+    },
+    {
+      "fork": "F3",
+      "decision": "combined CommandWaitNext RPC, 1 RPC/slice under 60000ms(tools.rs:2208)",
+      "rationale": "honest cap, one error site"
+    },
+    {
+      "fork": "F4",
+      "decision": "command_stop forced-kill via dormant CommandSignal(policy.rs:62); clone cancel_tx before move(command.rs:620); audit-before-kill",
+      "rationale": "correct-deny seam, lighter than PTY"
+    },
+    {
+      "fork": "F5",
+      "decision": "async self_check(server.rs:801-818) spawn current_exe one cached immortal bucket; profile-gate skip",
+      "rationale": "fix false-green, no false RED"
+    },
+    {
+      "fork": "F6",
+      "decision": "argv head+tag ProbeListEntry(protocol.rs:1427); collect_probes(runtime.rs:13-86); CLI render.rs",
+      "rationale": "safer than R-06"
+    },
+    {
+      "fork": "F7",
+      "decision": "P0 docs..P7 command_stop last, blast-radius order",
+      "rationale": "isolate count-anchor add"
+    }
+  ],
+  "phases": [
+    {
+      "name": "P0 planning+ledger",
+      "defects": [
+        "TC-1..6 untracked"
+      ],
+      "changes": [
+        "INDEX+PLAN; BACKLOG; RISK_REGISTER R-07/08/09 add-only"
+      ],
+      "tests": [
+        "none"
+      ],
+      "verification": [
+        "gates green no code"
+      ],
+      "risks": [
+        "count drift"
+      ],
+      "estimated_files": 8
+    },
+    {
+      "name": "P1 stop retry mutating",
+      "defects": [
+        "daemon_client.rs:189-201"
+      ],
+      "changes": [
+        "is_mutating; fix remedy tools.rs:1797"
+      ],
+      "tests": [
+        "unit is_mutating"
+      ],
+      "verification": [
+        "nextest -p mcp; gates"
+      ],
+      "risks": [
+        "insufficient until P2"
+      ],
+      "estimated_files": 2
+    },
+    {
+      "name": "P2 idempotency key",
+      "defects": [
+        "client.rs:67-70 no dedup"
+      ],
+      "changes": [
+        "key; command.rs:472 TTL map; server threads"
+      ],
+      "tests": [
+        "integration same key one job"
+      ],
+      "verification": [
+        "nextest ci; no dep"
+      ],
+      "risks": [
+        "TTL distinct starts"
+      ],
+      "estimated_files": 6
+    },
+    {
+      "name": "P3 pre-spawn ack",
+      "defects": [
+        "command.rs:547,711"
+      ],
+      "changes": [
+        "Starting+ack; spawn-fail->Failed+synthetic"
+      ],
+      "tests": [
+        "integration ack+Failed"
+      ],
+      "verification": [
+        "gates spawn_site_coverage"
+      ],
+      "risks": [
+        "Starting->Failed completion"
+      ],
+      "estimated_files": 4
+    },
+    {
+      "name": "P4 CommandWaitNext+loop",
+      "defects": [
+        "tools.rs:665,703,2208"
+      ],
+      "changes": [
+        "CommandWaitNext IPC 4 surfaces parity:1045; tools.rs:649-709 1 RPC/slice degraded"
+      ],
+      "tests": [
+        "integration degraded keeps job_id"
+      ],
+      "verification": [
+        "nextest ci; gates"
+      ],
+      "risks": [
+        "atomic surfaces"
+      ],
+      "estimated_files": 5
+    },
+    {
+      "name": "P5 TC-4+tag+CLI",
+      "defects": [
+        "runtime.rs:37,67; tools.rs:2277"
+      ],
+      "changes": [
+        "argv+tag fields; read config.argv+sources.get; tag:self.tag; cli render"
+      ],
+      "tests": [
+        "integration tag+argv-head"
+      ],
+      "verification": [
+        "gates no lock inversion"
+      ],
+      "risks": [
+        "argv head R-06"
+      ],
+      "estimated_files": 4
+    },
+    {
+      "name": "P6 TC-5 self_check",
+      "defects": [
+        "server.rs:801-818 failures:0"
+      ],
+      "changes": [
+        "async dispatch+windows:821; spawn current_exe one bucket"
+      ],
+      "tests": [
+        "spawns+read_only SKIP"
+      ],
+      "verification": [
+        "gates windows spawn"
+      ],
+      "risks": [
+        "no-op both OS"
+      ],
+      "estimated_files": 5
+    },
+    {
+      "name": "P7 command_stop",
+      "defects": [
+        "no CommandStop IPC; 5 lists+3 counts"
+      ],
+      "changes": [
+        "cancel_tx; CommandStop IPC+re-exports; tool+catalogue; counts 37->38; fixtures 38/34; docs SPEC s8/s13"
+      ],
+      "tests": [
+        "integration 3.4; read_only DENIES"
+      ],
+      "verification": [
+        "nextest ci; MCP guards; cargo deny"
+      ],
+      "risks": [
+        "anchors one commit or red"
+      ],
+      "estimated_files": 10
+    }
+  ],
+  "explicitly_deferred": [
+    "raise 5s timeout client.rs:44",
+    "grace process.rs:47 unused",
+    "command_send_signal broader tool",
+    "pty_command_stop gating",
+    "numeric -32603 tools.rs:1808",
+    "drop_bucket source.rs:13",
+    "stale 29-tool docs",
+    "MSRV bump"
+  ],
+  "invariants": [
+    "zero new deps; cargo deny green",
+    "mcp/src spawn/fs/socket free; kill over IPC",
+    "both OS gates every phase (AGENTS.md:9)",
+    "new tool/IPC integration-tested (TESTING.md 3.4)",
+    "command_stop 5 lists+3 counts+fixtures atomic",
+    "new IPC method exhaustive; parity server.rs:1045",
+    "Conventional Commits fix:; no merge without approval",
+    "live daemon never killed by tests (TC_SOCKET)",
+    "RISK_REGISTER add-only; .planning open-work",
+    "source-status every test; unknown hard fail",
+    "additive serde(default) wire fields",
+    "no fake-success: P3->Failed, P6 failures>0, P4 degraded keeps job_id"
+  ]
+}
