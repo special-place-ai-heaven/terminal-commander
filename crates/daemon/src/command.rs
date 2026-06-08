@@ -465,16 +465,52 @@ impl CommandRuntime {
         let _ = self.audit.emit(&entry);
     }
 
-    /// `command_start_combed` entry point. Validates, gates on
+    /// Public `command_start_combed` entry point. Validates, gates on
     /// policy, builds a bucket + probe, spawns the child, returns a
-    /// bounded response.
+    /// bounded response. Allocates a FRESH bucket for the spawned job.
+    /// IDENTICAL external behavior to the pre-TC-5 method: every existing
+    /// caller and test reaches the same code path via
+    /// `start_combed_inner(req, None)`.
     ///
     /// MUST be called from within a tokio runtime; ProcessProbe::spawn
     /// uses tokio::process::Command.
-    #[allow(clippy::too_many_lines)] // sequential pipeline; splitting it hurts readability
     pub fn start_combed(
         &self,
         req: CommandStartRequest,
+    ) -> Result<CommandStartResponse, CommandError> {
+        self.start_combed_inner(req, None)
+    }
+
+    /// TC-5 self-check spawn entry point. Like [`Self::start_combed`]
+    /// but lets the caller REUSE an existing bucket instead of minting a
+    /// fresh one. The self-check passes `None` on its first probe (which
+    /// allocates and returns the bucket id to cache) and `Some(cached)`
+    /// on every subsequent probe, so the daemon's `bucket_count` grows by
+    /// exactly one over its whole lifetime no matter how many self-checks
+    /// run. Distinct jobs land in the SAME reused bucket with DISTINCT
+    /// `(job_id, probe_id)`; the bucket is never re-created, so the second
+    /// reuse never trips `bucket_create`'s already-exists guard.
+    pub fn start_combed_reusing(
+        &self,
+        req: CommandStartRequest,
+        reuse_bucket: Option<BucketId>,
+    ) -> Result<CommandStartResponse, CommandError> {
+        self.start_combed_inner(req, reuse_bucket)
+    }
+
+    /// Shared `command_start_combed` engine. `reuse_bucket` is `None` for
+    /// the normal public path (a fresh bucket is created + recorded) and
+    /// `Some(bid)` for the TC-5 self-check reuse path (the bucket already
+    /// exists; we MUST NOT re-create or re-record it, only spawn a new job
+    /// into it). Every other stage -- dedup guard, argv/shell validate,
+    /// policy gate, rule compile, spawn, waiter, live binding, audit, and
+    /// the response -- is IDENTICAL to the pre-TC-5 method and keyed off
+    /// the resolved `bucket_id`.
+    #[allow(clippy::too_many_lines)] // sequential pipeline; splitting it hurts readability
+    fn start_combed_inner(
+        &self,
+        req: CommandStartRequest,
+        reuse_bucket: Option<BucketId>,
     ) -> Result<CommandStartResponse, CommandError> {
         Self::validate_argv(&req.argv)?;
 
@@ -518,7 +554,7 @@ impl CommandRuntime {
                 "deny",
                 Some(format!(
                     "shell interpreter '{shell}' denied by default; \
-                     command_start_combed is not a shell bridge"
+                             command_start_combed is not a shell bridge"
                 )),
                 Some(format_argv_metadata(&req.argv)),
             );
@@ -545,7 +581,13 @@ impl CommandRuntime {
         // Allocate identifiers. These are pure value allocations (no
         // backing resource), so generating them before any side effect
         // is free and lets the scope snapshot + rule compile run first.
-        let bucket_id = BucketId::new();
+        //
+        // TC-5: when `reuse_bucket` is `Some`, the bucket already exists
+        // (a prior self-check spawn created it); reuse its id verbatim so
+        // this new job lands in the SAME immortal bucket. `BucketId` is
+        // `Copy`, so reading `reuse_bucket` here and again at the guard
+        // below is free and aliases nothing.
+        let bucket_id = reuse_bucket.unwrap_or_default();
         let probe_id = ProbeId::new();
         let job_id = JobId::new();
 
@@ -571,21 +613,31 @@ impl CommandRuntime {
 
         // Rule set compiled cleanly: now allocate the bucket. Reaching
         // here guarantees we will not orphan it on a rule-compile error.
+        //
+        // TC-5: only create + record the bucket on the fresh path. On the
+        // reuse path the bucket already exists and is already recorded in
+        // the source side-table; re-creating it would trip the Router's
+        // already-exists guard and re-recording it is redundant. The new
+        // job's source identity (job_id/probe_id) is per-job and recorded
+        // only for the bucket that owns it on first create -- the reuse
+        // path deliberately leaves the original source row intact.
         let bucket_cfg = req.bucket_config.unwrap_or_default();
-        self.router.bucket_create(bucket_id, bucket_cfg)?;
-        // Record the bucket's source identity for subscription routing
-        // (MUST-ADD #2). Bumps the side-table dirty epoch so a `sources: all`
-        // subscription picks this new bucket up on its next pull.
-        self.sources.record(
-            bucket_id,
-            crate::subscriptions::source::BucketSource {
-                kind: terminal_commander_ipc::ProbeKind::Command,
-                job_id: Some(job_id),
-                probe_id: Some(probe_id),
-                path: None,
-                tag: req.tag.clone(),
-            },
-        );
+        if reuse_bucket.is_none() {
+            self.router.bucket_create(bucket_id, bucket_cfg)?;
+            // Record the bucket's source identity for subscription routing
+            // (MUST-ADD #2). Bumps the side-table dirty epoch so a `sources: all`
+            // subscription picks this new bucket up on its next pull.
+            self.sources.record(
+                bucket_id,
+                crate::subscriptions::source::BucketSource {
+                    kind: terminal_commander_ipc::ProbeKind::Command,
+                    job_id: Some(job_id),
+                    probe_id: Some(probe_id),
+                    path: None,
+                    tag: req.tag.clone(),
+                },
+            );
+        }
         // Keep a handle for the live binding so TC42b's
         // `rebind_all_jobs` can swap this job's rule set without
         // restarting the probe.

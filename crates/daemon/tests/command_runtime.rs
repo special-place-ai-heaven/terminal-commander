@@ -847,3 +847,95 @@ fn dedup_nonceless_fallback_collapses_in_window_then_distinct_after() {
         cleanup(&data);
     });
 }
+
+// ---------------------------------------------------------------------------
+// TC-5: bucket-reuse seam (`start_combed_reusing`). These prove the self-check
+// can spawn distinct jobs into ONE reused bucket without churning a fresh bucket
+// per call, and that the normal `start_combed` path is unchanged.
+// ---------------------------------------------------------------------------
+
+/// TC-5 (a): `start_combed_reusing(req, None)` behaves exactly like
+/// `start_combed` -- it ALLOCATES a fresh bucket (one `bucket_create` audit
+/// row) and returns bounded ids. The `None` reuse argument is the public
+/// path; this guards that the refactor did not change fresh-spawn behavior.
+#[test]
+fn start_combed_reusing_none_allocates_a_fresh_bucket_like_start_combed() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("reuse-none");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let resp = state
+            .command
+            .start_combed_reusing(dedup_req(sleep_argv(1.0), Some("reuse-none-1"), None), None)
+            .expect("start ok");
+
+        // A fresh bucket was created (exactly one create audit row).
+        assert_eq!(
+            bucket_create_count(&state),
+            1,
+            "reuse=None must allocate exactly one fresh bucket"
+        );
+        // Bounded wire ids only.
+        assert!(resp.job_id.to_wire_string().starts_with("job_"));
+        assert!(resp.bucket_id.to_wire_string().starts_with("bkt_"));
+        assert!(resp.probe_id.to_wire_string().starts_with("prb_"));
+
+        wait_terminal(&state, resp.job_id);
+        cleanup(&data);
+    });
+}
+
+/// TC-5 (b): two `start_combed_reusing` calls with the SAME `Some(bid)` (the
+/// bucket id returned by the first call) both succeed, yield DISTINCT
+/// `job_id`s into the SAME `bucket_id`, and create EXACTLY ONE bucket -- the
+/// reuse path must NOT re-run `bucket_create` (no `AlreadyExists` error).
+#[test]
+fn start_combed_reusing_same_bucket_yields_distinct_jobs_one_bucket() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("reuse-same");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        // First call: None -> fresh bucket; capture its id to reuse.
+        let first = state
+            .command
+            .start_combed_reusing(dedup_req(sleep_argv(1.0), Some("reuse-same-1"), None), None)
+            .expect("first start ok");
+        let reused = first.bucket_id;
+
+        // Second call: Some(reused) -> distinct job into the SAME bucket.
+        let second = state
+            .command
+            .start_combed_reusing(
+                dedup_req(sleep_argv(1.0), Some("reuse-same-2"), None),
+                Some(reused),
+            )
+            .expect("second start must NOT error AlreadyExists");
+
+        assert_ne!(
+            first.job_id, second.job_id,
+            "reused-bucket spawns must get distinct job ids"
+        );
+        assert_eq!(
+            first.bucket_id, second.bucket_id,
+            "both jobs must land in the SAME reused bucket"
+        );
+        assert_ne!(
+            first.probe_id, second.probe_id,
+            "each spawn gets its own probe id"
+        );
+        // The crux: the reuse path created NO second bucket.
+        assert_eq!(
+            bucket_create_count(&state),
+            1,
+            "reuse must create exactly one bucket across two spawns"
+        );
+
+        wait_terminal(&state, first.job_id);
+        wait_terminal(&state, second.job_id);
+        cleanup(&data);
+    });
+}

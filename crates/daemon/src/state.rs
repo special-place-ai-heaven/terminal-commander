@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use terminal_commander_core::{BucketManager, ContextRingManager, JobManager};
+use terminal_commander_core::{BucketId, BucketManager, ContextRingManager, JobManager};
 use terminal_commander_sifters::SifterRuntime;
 use tokio::sync::watch;
 
@@ -98,6 +98,10 @@ pub struct DaemonState {
     /// Command runtime (TC38). Wires command_start_combed into the
     /// daemon. Uses the same persistent audit sink as the router.
     pub command: Arc<CommandRuntime>,
+    /// TC-5: the ONE cached immortal self-check bucket; lazily set on the
+    /// first spawn-running self_check, reused every call so bucket_count
+    /// grows by exactly 1 over the daemon lifetime.
+    pub selfcheck_bucket: parking_lot::Mutex<Option<BucketId>>,
     /// In-memory activation registry (TC42). Restored from the
     /// persistent `rule_activations` table at bootstrap; mutated by
     /// the `registry_activate` / `registry_deactivate` IPC handlers.
@@ -268,6 +272,7 @@ impl DaemonState {
             audit,
             router,
             command,
+            selfcheck_bucket: parking_lot::Mutex::new(None),
             activation,
             sources,
             subscriptions,

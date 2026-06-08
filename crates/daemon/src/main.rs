@@ -34,7 +34,10 @@ use terminal_commanderd::{
                   Initializes the persistent event store, audit log, policy engine,\n\
                   and in-memory subsystems. On Unix, binds a local UDS for the\n\
                   TC37 minimal IPC method set. Does NOT open network listeners.\n\
-                  Does NOT spawn child commands by itself."
+                  Does NOT spawn arbitrary child commands by itself; the one\n\
+                  exception is the hidden `selfcheck-noop` leaf, an inert\n\
+                  internal self-probe target the IPC self_check spawns to prove\n\
+                  the command pipeline is live."
 )]
 struct Cli {
     #[arg(long, global = true)]
@@ -72,6 +75,14 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Hidden internal self-probe target (TC-5). An inert leaf the IPC
+    /// `self_check` spawns to prove the command pipeline can launch a
+    /// real child to completion. It does ZERO arg/env/config/socket/fs/
+    /// policy work and exits 0 immediately; `fn main` short-circuits it
+    /// BEFORE `resolve_config` so a broken inherited `--config`/env can
+    /// never make the probe false-fail. Not part of the operator CLI.
+    #[command(hide = true)]
+    SelfcheckNoop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -85,6 +96,18 @@ enum StartMode {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    // TC-5: the hidden self-probe leaf is inert and MUST short-circuit
+    // BEFORE `resolve_config`. A child spawned by the IPC self_check
+    // inherits this daemon's `--config`/env; if that config were broken,
+    // running `resolve_config` here would exit nonzero and turn a healthy
+    // self-probe into a false RED. The leaf does NO arg/env/config/socket/
+    // fs/policy work -- it just exits 0 so the parent observes a clean
+    // round-trip.
+    if matches!(cli.cmd, Cmd::SelfcheckNoop) {
+        return ExitCode::SUCCESS;
+    }
+
     let cfg = match resolve_config(&cli) {
         Ok(c) => c,
         Err(code) => return code,
@@ -147,6 +170,10 @@ fn main() -> ExitCode {
             };
             rt.block_on(run_update(&cfg, force))
         }
+        // Unreachable: `SelfcheckNoop` is short-circuited above, BEFORE
+        // `resolve_config`, so control never arrives here. The arm exists
+        // only to keep the match exhaustive; it does NO config/policy work.
+        Cmd::SelfcheckNoop => unreachable!("selfcheck-noop short-circuited before resolve_config"),
     }
 }
 

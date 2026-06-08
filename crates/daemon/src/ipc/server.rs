@@ -538,7 +538,7 @@ async fn dispatch(
             IpcResult::Ok { response: r }
         }
         IpcRequest::SelfCheck => {
-            let r = handle_self_check(state);
+            let r = handle_self_check(state).await;
             IpcResult::Ok { response: r }
         }
         IpcRequest::BucketEventsSince(p) => {
@@ -798,10 +798,166 @@ fn handle_policy_status(state: &Arc<DaemonState>) -> IpcResponse {
     })
 }
 
-fn handle_self_check(state: &Arc<DaemonState>) -> IpcResponse {
+/// Outcome of the TC-5 self-check spawn probe.
+///
+/// `failed` drives the `failures` counter on the `SelfCheckResponse`;
+/// `line` is a single human-readable report line appended to the
+/// self-check report. A policy-gated SKIP is `failed: false` -- never a
+/// failure.
+pub struct SpawnProbeOutcome {
+    pub failed: bool,
+    pub line: String,
+}
+
+/// Mint a fresh, process-unique, monotonic dedup nonce for a self-check
+/// spawn probe (TC-5). Mirrors `mcp::tools::fresh_dedup_nonce` so two
+/// back-to-back self_checks get DISTINCT nonces and therefore DISTINCT
+/// jobs -- the TC-2 in-flight dedup guard must NOT collapse them. The
+/// value need not be unpredictable; it only has to differ per call.
+fn fresh_selfcheck_nonce() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NONCE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = NONCE_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("selfcheck-{}-{}", std::process::id(), seq)
+}
+
+/// TC-5 self-check spawn probe.
+///
+/// Runs a REAL, policy-gated `command_start_combed` round-trip into the
+/// daemon's ONE cached immortal self-check bucket, polled to terminal
+/// state. This is what makes `self_check` unable to return a hardcoded
+/// false-green: a broken command pipeline surfaces here as `failed: true`.
+///
+/// Extracted from [`handle_self_check`] so a test can force a failing argv
+/// directly without driving the whole IPC path.
+///
+/// Lock discipline: the `parking_lot::Mutex` guarding the cached bucket is
+/// NEVER held across an `.await`. It is read in one scoped block (the guard
+/// is dropped before any await) and written in another scoped block (also
+/// dropped before the poll loop's `.await`). The only `.await` in the poll
+/// loop is `tokio::time::sleep`, with no lock held.
+pub async fn selfcheck_spawn_probe(
+    state: &Arc<DaemonState>,
+    argv: Vec<String>,
+    cwd: std::path::PathBuf,
+) -> SpawnProbeOutcome {
+    // 1. Pre-evaluate policy. A Deny is a SKIP, never a failure: the
+    //    read_only_observer profile, repo_only without a repo_root, or an
+    //    allow-list miss must NOT turn a correct policy decision into a
+    //    false RED.
+    let verdict = state
+        .policy
+        .evaluate(&crate::policy::PolicyAction::CommandStart {
+            argv: &argv,
+            cwd: &cwd,
+        });
+    if verdict.decision == crate::policy::PolicyDecision::Deny {
+        return SpawnProbeOutcome {
+            failed: false,
+            line: format!("spawn probe skipped: {}", verdict.reason),
+        };
+    }
+
+    // 2. Read the cached bucket WITHOUT holding the lock across an await.
+    //    `Option<BucketId>` is `Copy`, so the guard is dropped at the end
+    //    of this scoped block.
+    let reuse = { *state.selfcheck_bucket.lock() };
+
+    // 3. Build the start request. A fresh nonce per call defeats the TC-2
+    //    in-flight dedup guard so two back-to-back self_checks spawn two
+    //    DISTINCT jobs.
+    let req = crate::command::CommandStartRequest {
+        argv,
+        cwd: Some(cwd),
+        env: vec![],
+        bucket_config: None,
+        rules: vec![],
+        grace: None,
+        tag: Some("selfcheck".to_owned()),
+        dedup_nonce: Some(fresh_selfcheck_nonce()),
+        peer_discriminator: None,
+    };
+
+    // 4. Spawn into the (reused-or-fresh) bucket.
+    let resp = match state.command.start_combed_reusing(req, reuse) {
+        Err(e) => {
+            return SpawnProbeOutcome {
+                failed: true,
+                line: format!("spawn probe FAILED: start error: {e}"),
+            };
+        }
+        Ok(resp) => resp,
+    };
+
+    // On the first (fresh) spawn, cache the bucket id so every later
+    // self_check reuses it and `bucket_count` grows by exactly one. The
+    // lock is held only for this scoped store and dropped BEFORE the poll
+    // loop below; the `is_none()` re-check tolerates a racing first probe.
+    if reuse.is_none() {
+        let mut s = state.selfcheck_bucket.lock();
+        if s.is_none() {
+            *s = Some(resp.bucket_id);
+        }
+    }
+
+    // 5. Poll the job to terminal state under a ~2s wall-clock budget. The
+    //    ONLY await is the sleep below; no lock is held across it.
+    let budget = std::time::Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        match state.command.status(resp.job_id) {
+            Ok(st) => {
+                use terminal_commander_core::JobState;
+                if matches!(
+                    st.state,
+                    JobState::Exited | JobState::Failed | JobState::Cancelled
+                ) {
+                    // Terminal. `JobState::Exited` is only ever reached on a
+                    // clean exit with `exit_code: Some(0)` -- the ledger maps a
+                    // nonzero code OR any signal to `Failed` (see
+                    // JobManager::finish) -- so a healthy probe is exactly an
+                    // Exited job with code 0. A Failed/Cancelled terminal or a
+                    // nonzero code is a real failure.
+                    let healthy = matches!(st.state, JobState::Exited) && st.exit_code == Some(0);
+                    if healthy {
+                        return SpawnProbeOutcome {
+                            failed: false,
+                            line: format!(
+                                "spawn probe: ok (terminal {:?} exit {:?})",
+                                st.state, st.exit_code
+                            ),
+                        };
+                    }
+                    return SpawnProbeOutcome {
+                        failed: true,
+                        line: format!(
+                            "spawn probe FAILED: terminal {:?} exit {:?}",
+                            st.state, st.exit_code
+                        ),
+                    };
+                }
+            }
+            Err(e) => {
+                return SpawnProbeOutcome {
+                    failed: true,
+                    line: format!("spawn probe FAILED: status error: {e}"),
+                };
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return SpawnProbeOutcome {
+                failed: true,
+                line: "spawn probe FAILED: not terminal within 2s".to_owned(),
+            };
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+async fn handle_self_check(state: &Arc<DaemonState>) -> IpcResponse {
     // We avoid re-running the full TC36 self-check (it boots a fresh
-    // DaemonState). Instead we synthesize a tiny report from the
-    // already-bootstrapped state.
+    // DaemonState). Instead we synthesize a report from the
+    // already-bootstrapped state AND run a REAL spawn probe (TC-5) so
+    // this can no longer return a hardcoded false-green.
     let mut lines = vec![
         format!("data_dir: {}", state.config.daemon.data_dir.display()),
         format!("policy_profile: {:?}", state.policy.profile),
@@ -811,9 +967,42 @@ fn handle_self_check(state: &Arc<DaemonState>) -> IpcResponse {
         Ok(n) => lines.push(format!("audit_count: {n}")),
         Err(e) => lines.push(format!("audit_count: error: {e}")),
     }
+
+    let mut failures = 0u32;
+
+    // TC-5: real, profile-gated command-spawn round-trip into the cached
+    // immortal self-check bucket. The probe target is THIS binary's hidden
+    // `selfcheck-noop` leaf, which exits 0 immediately. `cwd` is the
+    // repo_root when configured (so repo_only containment does not false-
+    // skip) else the daemon data dir.
+    match std::env::current_exe() {
+        Ok(exe) => {
+            let argv = vec![
+                exe.to_string_lossy().into_owned(),
+                "selfcheck-noop".to_owned(),
+            ];
+            let cwd = state
+                .config
+                .policy
+                .repo_root
+                .clone()
+                .unwrap_or_else(|| state.config.daemon.data_dir.clone());
+            let outcome = selfcheck_spawn_probe(state, argv, cwd).await;
+            if outcome.failed {
+                failures += 1;
+            }
+            lines.push(outcome.line);
+        }
+        Err(e) => {
+            // current_exe is unavailable: SKIP, never a failure -- the
+            // probe target cannot be resolved, but the daemon itself is fine.
+            lines.push(format!("spawn probe skipped: current_exe unavailable: {e}"));
+        }
+    }
+
     IpcResponse::SelfCheck(SelfCheckResponse {
         report: lines.join("\n"),
-        failures: 0,
+        failures,
     })
 }
 
