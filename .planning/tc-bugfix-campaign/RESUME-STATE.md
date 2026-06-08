@@ -19,6 +19,18 @@ without explicit human approval.
 - Phase 4b run_and_watch tag + CLI render (TC-4): c91200e -- code review APPROVE
   (0 blockers); both OS gates PASS; live MCP e2e proves a tagged run_and_watch
   surfaces the tag + redacted argv_head in runtime_state. TC-4 COMPLETE.
+- TC-5 re-plan (cached-bucket): 6af4909 -- start_combed split into a private
+  start_combed_inner(req, reuse_bucket) + start_combed (None) + start_combed_reusing,
+  the only mechanism that gives "+1 bucket over lifetime" without leaking an
+  immortal bucket per call (start_combed always minted a fresh bucket).
+- Phase 5 self_check real spawn (TC-5): d136e95 -- async handle_self_check does a
+  profile-gated REAL spawn of the hidden selfcheck-noop leaf through the normal
+  CommandRuntime path into the cached bucket, polls to terminal, failures>0 only on
+  real breakage, SKIPS (never false-RED) on policy Deny; fresh dedup_nonce per call;
+  SelfcheckNoop short-circuits before resolve_config. Code review APPROVE-WITH-NITS
+  (0 blockers). Both OS gates PASS (Windows lib 125 + subcommand; WSL nextest
+  305/305). Live: healthy spawn-ok, +1 bucket reuse, read_only SKIP, forced-broken
+  failures>0, selfcheck-noop exits 0, back-to-back distinct job_ids. TC-5 COMPLETE.
 - Gate-hygiene lint fix: bb5b41d -- pre-existing from_millis(5000)->from_secs(5) in
   a cfg(unix) mcp e2e test (clippy duration_suboptimal_units), surfaced only by the
   WSL clippy of the mcp crate (Windows clippy compiles cfg(unix) test bodies away).

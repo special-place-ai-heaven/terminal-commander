@@ -7,6 +7,68 @@ more before this phase runs); (2) correct the terminal-guard insertion point;
 (3) record the SECOND tools.rs count string + precise current count values. No
 change to the original design intent or amendments #1/#6/#8.
 
+## Post-TC-4 / TC-5 re-anchor (as_of HEAD d136e95, 2026-06-08)
+
+TC-4 (3b7e719 / 7fd0ec8 / c91200e) and TC-5 (d136e95) are landed. Every TC-3
+structural CLAIM still HOLDS, but the heavily command.rs/server.rs-anchored line
+hints below have drifted hard. Re-resolve with SymForge at 6a/6b start (loop step
+1); the corrected anchors:
+
+COMMAND.RS (re #1-#7) -- the biggest drift:
+- **`start_combed` was RENAMED to a private `start_combed_inner(&self, req,
+  reuse_bucket: Option<BucketId>)`** (TC-5; now ~510-885). Public `start_combed(req)`
+  delegates `None`; new `start_combed_reusing(req, opt)` delegates the option. ALL
+  the TC-3 anchors that the plan locates "in start_combed" (the ProcessProbe::spawn
+  match #2, the live-map JobBinding insert #3, the spawn-fail return #5, the
+  lifecycle waiter #6, the two job_id audit sites #7) now live INSIDE
+  `start_combed_inner`. The cancel-handle take, the `let mut probe`, and the
+  JobBinding cancel field all target `start_combed_inner`.
+- **`JobBinding` is now 231-249 with SEVEN fields** (TC-4 added `argv_head:
+  Vec<String>` after `receipt`): metrics, sifter, inline_rules, bucket_id, probe_id,
+  receipt, argv_head. It STILL derives `Debug, Clone` (argv_head is Clone). 6a's
+  change is unchanged in intent: ADD `cancel: Option<oneshot::Sender<()>>` and
+  REMOVE the `Clone` derive (oneshot::Sender is not Clone; the binding is never
+  whole-cloned). The live-map insert literal (~720-738) now also sets `argv_head:
+  redact_argv_head(&argv_for_meta)` -- add the `cancel` field to that 7-field literal.
+- ProcessProbe::spawn match (#2): `let probe = match ProcessProbe::spawn(...)` ~688;
+  change to `let mut probe = match` and take the handle in the Ok arm.
+- spawn-fail return (#5): `return Err(CommandError::Spawn(e))` ~700; the Phase-2
+  dedup evict on spawn-fail is `self.dedup.lock().remove(&dedup_k)` ~695.
+- drive_to_exit (#4): `drive_to_exit(probe).await` ~792 (inside the
+  `self.lifecycle_tasks.lock().spawn(async move {...})` closure). Take the cancel
+  handle BEFORE the probe is moved into the closure.
+- lifecycle WAITER terminal-guard (#6, the BLOCKER): the receipt-publish block
+  `if let Some(b) = waiter_live.write().get_mut(&job_id) { b.receipt = receipt; }`
+  is ~826-828; the draft match `let draft = match outcome {...}` is ~831. **Insert
+  the terminal-state guard BETWEEN them (after receipt-publish ~828, before the
+  draft match ~831).** The Phase-2 dedup evict `waiter_dedup.lock().remove(&dedup_k)`
+  is ~842 (AFTER draft, BEFORE bucket_append) -- UNRELATED, do not conflate.
+- audit subjects (#7): `self.audit("command_start", &job_id.to_wire_string(),
+  "allow", ...)` ~740; exit audit `AuditEntry::new(action, job_id.to_wire_string(),
+  ...)` ~870. Two sites embed the job_id wire string -> CommandRuntime::stop's deny
+  path must NOT leak it.
+
+SERVER.RS (re #14) -- shifted ~+189 by TC-5's self-check probe machinery
+(handle_self_check grew + new selfcheck_spawn_probe + fresh_selfcheck_nonce +
+SpawnProbeOutcome inserted between dispatch and the parity surfaces):
+- parity test `system_discover_methods_match_dispatch` is now **1236-1267** (was
+  1047-1078). method_name / DISCOVERABLE_METHODS / dispatch (414-771) are roughly
+  unchanged (the TC-5 `.await` at the SelfCheck arm ~541 did not shift what's above
+  it). all_request_variants + the parity test shifted ~+189. Re-resolve at exec.
+- Parity compares method_name vs DISCOVERABLE_METHODS (NOT the MCP catalogue), so
+  6a stays green with the IPC method added and NO MCP tool yet (unchanged claim).
+
+MCP/TOOLS.RS (re #15-#18) + the 37 baseline:
+- **Phase 4/5 added NO MCP tool -- the live-tool baseline is STILL 37** (4b added a
+  `tag` FIELD to run_and_watch params, not a tool; TC-5 added no MCP surface). The
+  catalogue test is still named `catalogue_lists_thirty_seven_live_tools` (now
+  3553-3610, was 3548-3605; +5 from 4b's field). RE-COUNT at 6b to confirm 37 before
+  the 37->38 churn, but expect 37. The two tools.rs doc-count strings (~20 and ~29)
+  are BEFORE the 4b field edits, so unchanged.
+- protocol.rs PtyCommandStop shapes (~1414-1427) + is_idempotent (~326-393) are
+  UNCHANGED (TC-4's ProbeListEntry additive fields are at ~1527, AFTER them).
+- The 3 re-export sites (#13) are unchanged (TC-4/5 added no re-exported IPC type).
+
 ## Drift convention (READ FIRST)
 
 This is the LAST phase -- by the time it runs, Phases 4, 5, 6a will have shifted
