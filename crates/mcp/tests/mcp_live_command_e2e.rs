@@ -663,7 +663,7 @@ async fn run_and_watch_fast_command_is_complete_and_not_degraded() {
             "recover_hint is present and null on the normal path; got: {payload}"
         );
         assert!(
-            elapsed < Duration::from_millis(5000),
+            elapsed < Duration::from_secs(5),
             "must short-circuit well before the budget; elapsed={elapsed:?}"
         );
 
