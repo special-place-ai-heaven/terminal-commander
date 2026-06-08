@@ -50,6 +50,60 @@ NEW post-TC-4 facts the Phase-5 implementer MUST honor:
   spawns -- re-introducing the false-green. TEST: two back-to-back self_checks
   within 3s each yield a DISTINCT job_id.
 
+## RE-PLAN (cached-bucket mechanism) -- as_of c91200e, 2026-06-08
+
+A deep SymForge investigation found the original plan's section-4 assumption
+("reuse ONE cached immortal bucket" via "the normal CommandRuntime path") is
+NOT achievable with the current API, and STOPPED to re-plan it (per the goal's
+anchor rule):
+- `CommandRuntime::start_combed(&self, req) -> Result<CommandStartResponse,_>`
+  (command.rs ~475-833, SYNC, returns {job_id, bucket_id, probe_id, cursor})
+  ALWAYS mints `BucketId::new()` and calls `router.bucket_create(...)`.
+- `BucketManager::create_bucket` ERRORS `AlreadyExists` on a duplicate id, and
+  there is NO `bucket_id`/reuse field on `CommandStartRequest` and NO public
+  spawn-into-existing-bucket method. So a cached id passed to today's
+  start_combed cannot be reused -- the 2nd call would error, OR a per-call fresh
+  bucket would LEAK one immortal bucket per self-check (unbounded growth; buckets
+  have no drop_bucket).
+
+DECISION (correctness/superiority): add an OPTIONAL bucket-reuse seam to the
+spawn path -- the minimal change that honors BOTH "inherit validate_argv + shell
+guard + policy.evaluate + command_start audit" AND "+1 bucket over lifetime":
+1. Add `reuse_bucket: Option<BucketId>` to `CommandStartRequest`. Update EVERY
+   existing literal to `reuse_bucket: None` (production handler + all tests).
+2. In `start_combed`: when `reuse_bucket` is `Some(bid)`, SKIP `BucketId::new()`
+   AND `router.bucket_create(...)` and reuse `bid` (source already recorded on
+   the first create; re-record idempotently if needed); when `None`, behavior is
+   byte-identical to today. The rule-compile-before-create ordering is preserved
+   for the None branch; the Some branch creates no bucket so cannot orphan one.
+3. The self-check: on the FIRST spawn-running call the cached slot is empty ->
+   call start_combed with `reuse_bucket: None`, store the returned bucket_id in
+   `DaemonState.selfcheck_bucket`; on every later call -> `reuse_bucket:
+   Some(cached)`. Net: exactly +1 bucket over the daemon lifetime; distinct
+   job_ids per call (fresh dedup_nonce).
+SCOPE NOTE: this adds `crates/daemon/src/command.rs` to TC-5's touched files
+(beyond the plan's original server.rs/state.rs/main.rs/protocol.rs). The
+start_combed reuse branch is surgical (diverges only at bucket allocation) and
+gets its own regression tests (None path unchanged; Some path reuses, no
+AlreadyExists). protocol.rs is NOT touched (the report line is built in
+server.rs; SelfCheckResponse wire is unchanged).
+
+OTHER investigation confirmations folded into the contract:
+- Gate the spawn via a single `state.policy.evaluate(&PolicyAction::CommandStart
+  { argv, cwd })` pre-check -- it subsumes ReadOnlyObserver-deny, allow-list-deny,
+  and repo_only no-root/containment-deny, yielding the precise skip `reason`.
+  Choose `cwd = repo_root` when the profile is repo_only so a healthy daemon does
+  not false-skip on containment.
+- Terminal poll: `status(job_id) -> CommandStatusResponse{state: JobState, ...}`;
+  terminal = `matches!(state, Exited|Cancelled|Failed)`; healthy = `Exited` +
+  exit_code 0/None; breakage = `Failed` or nonzero exit or never-terminal-in-2s.
+- Fresh nonce: mirror `fresh_dedup_nonce()` (mcp/src/tools.rs:2318-2323), prefix
+  `selfcheck-`.
+- `parking_lot::Mutex` already imported in state.rs:19; `BucketId` must be ADDED
+  to the `terminal_commander_core` import (state.rs:20).
+- main.rs short-circuit goes between `Cli::parse()` (:87) and `resolve_config`
+  (:88); clap 4.6.1 -> `#[command(hide = true)]`; spawn `[exe, "selfcheck-noop"]`.
+
 ## Drift convention (READ FIRST)
 
 Line numbers below are `as_of commit e76ebdc` HINTS only. They WILL drift after
