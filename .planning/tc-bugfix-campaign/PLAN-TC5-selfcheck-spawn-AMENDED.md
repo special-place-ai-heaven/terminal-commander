@@ -7,6 +7,49 @@ NEW findings from the current-code re-anchor (the `resolve_config` placement tra
 the Mutex-crate pin); (3) disambiguate the sibling `run_self_check`. No change to
 the original design intent or amendments #2/#5.
 
+## Post-TC-4 re-anchor (as_of HEAD c91200e, 2026-06-08)
+
+TC-4 (Phase 4a probe-redact `3b7e719`, audit-log redact `7fd0ec8`, Phase 4b
+mcp/cli `c91200e`, plus a lint-fix `bb5b41d`) is now landed. Re-anchor verdict
+for this plan: **ZERO line drift to every TC-5-anchored symbol.** TC-4 touched
+`crates/daemon/src/command.rs`, `crates/daemon/src/ipc/handlers/runtime.rs`,
+`crates/ipc/src/protocol.rs` (only at `ProbeListEntry` ~1527, AFTER
+`SelfCheckResponse`), `crates/mcp/src/tools.rs` (only at the `Mcp*Params` structs
+~2329+, AFTER the `self_check` relay), `crates/cli/src/render.rs`, and two fixtures
+-- NONE of the TC-5 anchor files (`server.rs`, `main.rs`, `state.rs`, `source.rs`)
+were touched, and the two shared files were edited only below the TC-5 symbols.
+Verified current ranges (all match the e76ebdc hints below):
+- `handle_self_check` server.rs **801-818** (unchanged; still SYNC, `failures:0`).
+- `dispatch_envelope` server.rs **821-828** (unchanged; one-line delegate).
+- `fn main` main.rs **86-151**; `resolve_config` called at :88 BEFORE `match cli.cmd`
+  at :93 (the placement trap from amendment finding still holds); `resolve_config`
+  **212-234** (unchanged; loads `--config`, can return `ExitCode::from(1)`).
+- `struct Cli` **39-48**; `enum Cmd` **51-75** (1-line nudge; CLOSED set
+  {Check, Start, PrintConfig, Update} -- still NO `SelfcheckNoop`).
+- `DaemonState` state.rs **54-130** (unchanged; still NO self-check bucket field;
+  `parking_lot::Mutex` import intact; `sources: Arc<BucketSourceTable>` precedent).
+- `BucketSourceTable` source.rs **53-56** (unchanged).
+- `SelfCheckResponse` protocol.rs **493-496** (unchanged; report-line add needs no
+  wire change).
+- mcp `self_check` relay tools.rs **570-582** (unchanged; only destructures
+  `{report, failures}`).
+
+NEW post-TC-4 facts the Phase-5 implementer MUST honor:
+- **`JobBinding` gained a `argv_head: Vec<String>` field (TC-4 4a)**, populated in
+  `start_combed` via `redact_argv_head(&argv_for_meta)`. The self-check spawn going
+  through `CommandRuntime` will therefore ALSO store a redacted argv_head for
+  `[exe, "selfcheck-noop"]` -- harmless (no secret in that argv), but note that
+  `JobBinding` no longer derives nothing-but-the-old-fields. `command.rs` grew
+  ~+700 lines (redactor + `format_argv_metadata` now redacts), so any residual
+  command.rs line numbers are MORE stale than the e76ebdc hints -- re-resolve with
+  SymForge at exec, do not trust command.rs line hints.
+- **Phase-2 dedup is intact and unchanged** (point #6 still applies): `dedup_nonce`
+  on `CommandStartRequest` (139-174) and `fn dedup_key` (now ~1126-1147) are
+  present. The self-check spawn MUST mint a FRESH `dedup_nonce` per call (or be
+  dedup-exempt), else two self_checks within 3s collapse and the second never
+  spawns -- re-introducing the false-green. TEST: two back-to-back self_checks
+  within 3s each yield a DISTINCT job_id.
+
 ## Drift convention (READ FIRST)
 
 Line numbers below are `as_of commit e76ebdc` HINTS only. They WILL drift after

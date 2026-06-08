@@ -7,7 +7,29 @@ without explicit human approval.
 - Phase 0 docs: commit 73b6450
 - Phase 1 retry-gate (TC-1a): commit a012fa8 -- reviewed APPROVE, both OS gates PASS
 - Phase 2 dedup guard (TC-2): commit cf43d5b -- reviewed APPROVE, both OS gates PASS
-- Phase 3 wait-loop rewrite (TC-1b + TC-6): committed -- see the fix(mcp) commit.
+- Phase 3 wait-loop rewrite (TC-1b + TC-6): cca9f06 -- APPROVE-WITH-NITS, both OS gates PASS
+- Phase 4a probe-row identity (TC-4): 3b7e719 -- code review APPROVE-WITH-NITS;
+  security review found 3 HIGH + 1 MED under-redaction leaks, all fixed, re-review
+  P1-READY; HUMAN P1 SIGN-OFF GRANTED. Both OS gates PASS; live runtime_state IPC
+  round-trip proves tag + redacted argv_head on a TEST daemon.
+- Phase 4a audit-log redaction (TC-4, P1-directed add-on): 7fd0ec8 -- the human P1
+  owner directed extending redaction to the raw-argv audit-log surface
+  (format_argv_metadata). Security-confirmed; live test proves the persisted
+  command_start audit row masks a --password value at argv index 3.
+- Phase 4b run_and_watch tag + CLI render (TC-4): c91200e -- code review APPROVE
+  (0 blockers); both OS gates PASS; live MCP e2e proves a tagged run_and_watch
+  surfaces the tag + redacted argv_head in runtime_state. TC-4 COMPLETE.
+- Gate-hygiene lint fix: bb5b41d -- pre-existing from_millis(5000)->from_secs(5) in
+  a cfg(unix) mcp e2e test (clippy duration_suboptimal_units), surfaced only by the
+  WSL clippy of the mcp crate (Windows clippy compiles cfg(unix) test bodies away).
+
+GATE-DISCIPLINE LESSON (campaign-wide): the Windows clippy gate is BLIND to
+`#![cfg(unix)]` test files (their bodies compile to nothing on Windows). The WSL
+clippy run on the touched crate is the AUTHORITATIVE linter for cfg(unix) code. Any
+phase touching a crate with cfg(unix) e2e tests MUST run WSL `clippy -p <crate>
+--all-targets -D warnings` and treat it as the real gate. Also: `nextest -p
+terminal-commander-cli` pulls in the `session_reap` drvfs-wedge test -- exclude it
+with `-E "not binary(session_reap)"` (the Phase 2-3 exemption extended to cli).
 
 ## Phase 3 summary (TC-1b lost-job-handle + TC-6 wait-cap self-violation)
 ONE wait-loop rewrite in crates/mcp/src/tools.rs::run_and_watch:
