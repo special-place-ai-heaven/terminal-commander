@@ -338,6 +338,109 @@ fn exited_command_reports_exited_liveness_from_jobstate() {
     });
 }
 
+// TC-4 LIVE VERIFY: a tagged command whose argv carries a credential yields a
+// runtime_state probe row that carries the bucket `tag` and a bounded, REDACTED
+// `argv_head` -- the secret never reaches the operator listing. `env
+// SECRET_TOKEN=<secret> sleep 1` keeps the job alive briefly and places the
+// secret at head index 1 (within the N=3 bound); `env` is not a denied shell
+// interpreter, so the DeveloperLocal profile allows it. The probe is read back
+// over a real socket via a DIRECT runtime_state IPC call against a TEST daemon.
+#[test]
+fn runtime_state_command_probe_carries_tag_and_redacted_argv_head() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(3));
+
+        let _ = client
+            .call(
+                1,
+                IpcRequest::CommandStartCombed(terminal_commanderd::CommandStartParams {
+                    environment: None,
+                    argv: vec![
+                        "env".to_owned(),
+                        "SECRET_TOKEN=topsecret123".to_owned(),
+                        "sleep".to_owned(),
+                        "1".to_owned(),
+                    ],
+                    cwd: None,
+                    env: vec![],
+                    bucket_config: None,
+                    rules: vec![],
+                    grace_ms: Some(2_000),
+                    tag: Some("verify-4a".to_owned()),
+                    dedup_nonce: None,
+                }),
+            )
+            .await
+            .expect("command_start_combed");
+
+        // The command binding is inserted synchronously at start and lingers in
+        // the live map; poll briefly to avoid any registration race. Extract
+        // owned copies of the two new fields so the test need not name the
+        // probe-entry type.
+        let mut found: Option<(Option<String>, Option<Vec<String>>)> = None;
+        for i in 2..40 {
+            let resp = client
+                .call(
+                    i,
+                    IpcRequest::RuntimeState(terminal_commanderd::ListLimitParams::default()),
+                )
+                .await
+                .expect("runtime_state");
+            let r = match resp {
+                IpcResponse::RuntimeState(r) => r,
+                other => panic!("unexpected: {other:?}"),
+            };
+            if let Some(p) = r
+                .probes
+                .iter()
+                .find(|p| matches!(p.kind, ProbeKind::Command))
+            {
+                found = Some((p.tag.clone(), p.argv_head.clone()));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let (tag, argv_head) = found.expect("command probe row present in runtime_state");
+
+        // Tag lifted from the bucket source onto the probe row (no longer anonymous).
+        assert_eq!(
+            tag.as_deref(),
+            Some("verify-4a"),
+            "tag missing from probe row"
+        );
+
+        // argv_head is present, REDACTED, and never leaks the secret.
+        let head = argv_head.expect("argv_head present on command probe");
+        let joined = head.join(" ");
+        assert!(
+            !joined.contains("topsecret123"),
+            "secret leaked into argv_head: {joined}"
+        );
+        assert!(
+            joined.contains("<redacted>"),
+            "expected a redaction marker in argv_head: {joined}"
+        );
+        assert!(
+            joined.contains("SECRET_TOKEN="),
+            "env key label should stay visible: {joined}"
+        );
+        assert!(
+            joined.contains("env"),
+            "program name should stay visible: {joined}"
+        );
+        assert!(
+            head.len() <= 3,
+            "argv_head must be bounded to <=3 items: {head:?}"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
 // Item #1: a PTY that exits naturally must report `Exited{code}` derived
 // from the job ledger (JobState), NOT `Running` from lingering live-map
 // presence. The PTY binding lingers in the live map after exit (like the

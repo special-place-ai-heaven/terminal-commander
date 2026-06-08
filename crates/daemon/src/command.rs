@@ -241,6 +241,11 @@ struct JobBinding {
     /// waiter at child exit; read by `status()`. `None` until exit, or
     /// when any rule matched.
     receipt: Option<CommandReceipt>,
+    /// Bounded, ALREADY-REDACTED argv head (TC-4 Phase 4a): program name
+    /// plus up to two tokens with credential spans masked. Computed once
+    /// at `start_combed` via `redact_argv_head`; never holds a raw secret.
+    /// `Vec<String>` is `Clone`, so the struct's `Clone` derive still holds.
+    argv_head: Vec<String>,
 }
 
 /// Identity triple for a single live job.
@@ -682,6 +687,11 @@ impl CommandRuntime {
                 bucket_id,
                 probe_id,
                 receipt: None,
+                // TC-4: store the redacted, bounded argv head so probe
+                // listings can surface it without re-touching the raw argv.
+                // Computed from the `argv_for_meta` clone (req.argv was
+                // already moved into `job_cfg.argv` above).
+                argv_head: redact_argv_head(&argv_for_meta),
             },
         );
         self.audit(
@@ -969,6 +979,12 @@ impl CommandRuntime {
             .collect()
     }
 
+    /// Returns the bounded, redacted argv head recorded for a live job, or None
+    /// if the job is not in the live map. Single read lock, never held across await.
+    pub fn argv_head(&self, job_id: JobId) -> Option<Vec<String>> {
+        self.live.read().get(&job_id).map(|b| b.argv_head.clone())
+    }
+
     /// `command_status` entry point. Returns bounded counters + the
     /// final exit state for the given job. Never returns raw text.
     pub fn status(&self, job_id: JobId) -> Result<CommandStatusResponse, CommandError> {
@@ -1146,4 +1162,714 @@ fn format_argv_metadata(argv: &[String]) -> String {
         })
         .collect();
     serde_json::json!({ "argv": v }).to_string()
+}
+
+/// Number of leading argv tokens surfaced in a redacted head: the program
+/// name plus up to two following tokens.
+const ARGV_HEAD_ITEMS: usize = 3;
+/// Per-item byte cap applied AFTER masking, on a UTF-8 char boundary.
+const ARGV_HEAD_ITEM_BYTES: usize = 128;
+/// Replacement token substituted for any masked secret span.
+const ARGV_HEAD_REDACTED: &str = "<redacted>";
+
+/// Builds a bounded, REDACTED view of a command's leading argv tokens for
+/// operator-facing probe listings.
+///
+/// SECURITY-CRITICAL (TC-4). The output is the program name plus up to two
+/// following tokens, with credential spans masked to `<redacted>` and each
+/// surviving item truncated to `ARGV_HEAD_ITEM_BYTES` on a char boundary.
+/// Masking is applied in two idempotent layers:
+///
+/// * Layer A — flag look-ahead: a known secret-value flag (e.g. `--password`,
+///   `-p`, `--token`) masks the NEXT token's value (whole token for credential
+///   flags, header rule for `-h`/`--header`, basic-auth `user:pass` for
+///   `-u`/`--user`/`--proxy-user`). `-h` is treated as `--header` (NOT
+///   `--help`); header-flag values are masked defensively, covering custom
+///   secret headers (`X-Api-Key:`, `X-Vault-Token:`) as well as
+///   `Authorization`/`Bearer`. A `-u`/`--user` value is masked only when it
+///   carries a `:` (the `user:pass` form), leaving bare usernames intact.
+/// * Layer B — per-token inline scan: every token is independently scanned for
+///   attached secret flags (`--password=`, `-p`, `-u<value>`, `--user=`),
+///   attached header flags (`--header=`), URL userinfo passwords,
+///   `Authorization`/`Bearer` header credentials, and env-style secret
+///   `KEY=VALUE` assignments. Secret-flag values are masked WHOLLY before the
+///   partial URL-userinfo rule runs, so a URL-shaped secret-flag value cannot
+///   escape with only its inner password masked.
+///
+/// Program name and flag NAMES always stay visible; only the secret SPAN is
+/// masked. Defeat-proof against casing, `=` vs space, short vs long flags,
+/// URL userinfo, and rule ordering. Never panics on empty / single-element /
+/// malformed input.
+pub(crate) fn redact_argv_head(argv: &[String]) -> Vec<String> {
+    // Bounded working copy: program + up to two tokens.
+    let mut head: Vec<String> = argv.iter().take(ARGV_HEAD_ITEMS).cloned().collect();
+
+    // LAYER A — flag look-ahead (space-separated value form). Walk the bounded
+    // head; when token[i] names a secret-value flag, mask token[i+1] if present.
+    let len = head.len();
+    for i in 0..len {
+        // Only a flag with a token AFTER it (within the bounded head) can leak
+        // a space-separated value; the `i + 1 < len` guard short-circuits the
+        // dangling-flag case without a nested `if`.
+        let key = head[i].trim().to_ascii_lowercase();
+        match key.as_str() {
+            "-p" | "--password" | "--token" | "--secret" | "--key" if i + 1 < len => {
+                // The following token is a pure secret value.
+                ARGV_HEAD_REDACTED.clone_into(&mut head[i + 1]);
+            }
+            // Basic-auth `user:pass`. Mask the WHOLE next token (username
+            // included — it is itself often sensitive here) ONLY when it
+            // carries a `:`. A bare username (no `:`) is left intact, so benign
+            // uses like `sort -u file` or `id -u` are untouched. A `uid:gid`
+            // value (e.g. `docker -u 1000:1000`) is intentionally over-redacted
+            // — a safe trade-off for an operator listing. The `:` check lives
+            // in the guard so the value-bearing case is the only match.
+            "-u" | "--user" | "--proxy-user" if i + 1 < len && head[i + 1].contains(':') => {
+                ARGV_HEAD_REDACTED.clone_into(&mut head[i + 1]);
+            }
+            "-h" | "--header" if i + 1 < len => {
+                // The following token is a header line; mask only its
+                // credential via the header rule (Layer B rule 5). `-h` is
+                // treated as `--header` here (NOT `--help`); header-flag values
+                // are masked defensively, covering custom secret headers too.
+                head[i + 1] = mask_header_credential(&head[i + 1]);
+            }
+            _ => {}
+        }
+    }
+
+    // LAYER B — per-token inline scan. Applied to EVERY token independently and
+    // idempotently (a token already masked by Layer A is unchanged here).
+    for tok in &mut head {
+        *tok = mask_token_inline(tok);
+    }
+
+    // Truncate AFTER masking, on a char boundary, so a long surviving token
+    // (e.g. a URL) cannot blow the per-item budget and cannot split UTF-8.
+    for tok in &mut head {
+        if tok.len() > ARGV_HEAD_ITEM_BYTES {
+            let mut end = ARGV_HEAD_ITEM_BYTES;
+            while end > 0 && !tok.is_char_boundary(end) {
+                end -= 1;
+            }
+            *tok = tok[..end].to_owned();
+        }
+    }
+
+    head
+}
+
+/// Rule (e) helper: decide whether an env-style `KEY=VALUE` key names a secret
+/// whose value must be masked. `key_lower` is the already-lowercased portion of
+/// the token before the first `=`. Matches a curated set of well-known bare
+/// secret keys (`password`, `token`, `apikey`, ...) plus a suffix family
+/// (`*_token`, `*_secret`, `*_password`, `*_key`, ...). Over-matching benign
+/// keys is the SAFE direction for an operator-facing display, so the lists err
+/// toward inclusion rather than precision.
+fn env_key_is_secret(key_lower: &str) -> bool {
+    const EXACT: [&str; 13] = [
+        "password",
+        "passwd",
+        "pwd",
+        "pgpassword",
+        "mysql_pwd",
+        "token",
+        "secret",
+        "apikey",
+        "api_key",
+        "access_key",
+        "secret_key",
+        "auth",
+        "authorization",
+    ];
+    const SUFFIX: [&str; 10] = [
+        "_token",
+        "_secret",
+        "_password",
+        "_passwd",
+        "_pwd",
+        "_key",
+        "_apikey",
+        "_api_key",
+        "_access_key",
+        "_secret_key",
+    ];
+    EXACT.contains(&key_lower) || SUFFIX.iter().any(|s| key_lower.ends_with(s))
+}
+
+/// Layer B per-token masking. Applies, in a SECURITY-ORDERED sequence, the
+/// attached-secret-flag, attached basic-auth, attached-header, URL-userinfo,
+/// bare-header-credential, and env-`KEY=VALUE` rules. Each rule is
+/// case-insensitive on its key/scheme/label and preserves the visible prefix
+/// (`--flag=`, `-p`, `-u`, scheme/user/host, `Authorization:`, `KEY=`) while
+/// replacing only the secret span with `<redacted>`. Idempotent.
+///
+/// Ordering invariant: a token that starts with a secret-value FLAG prefix is
+/// masked WHOLLY by the flag rules (1-3) BEFORE the partial URL-userinfo rule
+/// (4) can run. So `--password=postgres://u:pw@host` is fully opaque, never the
+/// weaker URL-only mask that would leave `--password=postgres://u:` and
+/// `@host` visible.
+fn mask_token_inline(token: &str) -> String {
+    let lower = token.to_ascii_lowercase();
+
+    // Rule (1): attached long secret flag `--password=...` etc. The value is a
+    // pure secret regardless of shape (including URL-shaped), so the ENTIRE
+    // remainder after the `--flag=` prefix is redacted. Runs BEFORE the
+    // URL-userinfo rule so a URL value cannot escape with only its inner
+    // password masked.
+    for flag in ["--password=", "--token=", "--secret=", "--key="] {
+        if lower.starts_with(flag) {
+            // Keep the literal flag prefix from the ORIGINAL token (preserves
+            // any original casing of the flag name), replace the whole value.
+            let prefix = &token[..flag.len()];
+            return format!("{prefix}{ARGV_HEAD_REDACTED}");
+        }
+    }
+
+    // Rule (2a): attached short flag `-p<value>` (e.g. `mysql -ppassw0rd`). Not
+    // `--`; lowercased starts with `-p`; length > 2 means a value is attached.
+    if token.starts_with('-')
+        && !token.starts_with("--")
+        && lower.starts_with("-p")
+        && token.len() > 2
+    {
+        let prefix = &token[..2];
+        return format!("{prefix}{ARGV_HEAD_REDACTED}");
+    }
+
+    // Rule (2b): attached short basic-auth flag `-u<value>` (e.g. curl
+    // `-ualice:s3cr3t`). Masked ONLY when the value carries a `:` (the
+    // `user:pass` form). A bare `-ualice` (no colon) is left intact, and a
+    // benign `uid:gid` (e.g. `-u1000:1000`) is intentionally over-redacted —
+    // a safe trade-off for an operator listing.
+    if token.starts_with('-')
+        && !token.starts_with("--")
+        && lower.starts_with("-u")
+        && token.len() > 2
+        && token[2..].contains(':')
+    {
+        let prefix = &token[..2];
+        return format!("{prefix}{ARGV_HEAD_REDACTED}");
+    }
+
+    // Rule (2c): attached long basic-auth flag `--user=<value>` /
+    // `--proxy-user=<value>`. Masked ONLY when the value carries a `:` (the
+    // `user:pass` form); a bare username is left intact.
+    for flag in ["--user=", "--proxy-user="] {
+        if lower.starts_with(flag) {
+            let value = &token[flag.len()..];
+            if value.contains(':') {
+                let prefix = &token[..flag.len()];
+                return format!("{prefix}{ARGV_HEAD_REDACTED}");
+            }
+        }
+    }
+
+    // Rule (3): attached header flag `--header=<value>`. The flag prefix stays
+    // visible; the value is run through the (defensive) header rule, which
+    // masks `Authorization`/`Bearer` AND custom secret headers
+    // (`X-Api-Key:`, `X-Vault-Token:`, ...).
+    if lower.starts_with("--header=") {
+        let prefix = &token[.."--header=".len()];
+        let value = &token["--header=".len()..];
+        return format!("{prefix}{}", mask_header_credential(value));
+    }
+
+    // Rule (4): URL userinfo password `scheme://user:pass@authority...` for a
+    // BARE connection string in a non-secret-flag position. Secret-flag values
+    // were already masked wholly above, so this only narrows the password span
+    // of operator-supplied bare URLs.
+    if let Some(masked) = mask_url_userinfo(token) {
+        return masked;
+    }
+
+    // Rule (5): header credential carried inline in a single bare token (e.g. a
+    // `--header`-less `Authorization: Bearer ...` token, or the bare value).
+    // Gated on a `bearer `/`authorization:` boundary so the header rule's
+    // custom-header fallback cannot trigger on generic colon-bearing tokens
+    // here — only the `-H`/`--header`/`--header=` callers reach that fallback.
+    if lower.contains("bearer ") || lower.contains("authorization:") {
+        return mask_header_credential(token);
+    }
+
+    // Rule (6): env-style `KEY=VALUE` where KEY names a secret (bare well-known
+    // key or a secret suffix). Keeps `KEY=` visible, redacts the value.
+    if let Some(eq) = token.find('=') {
+        let key_lower = token[..eq].to_ascii_lowercase();
+        if env_key_is_secret(&key_lower) {
+            let prefix = &token[..=eq]; // includes the '='
+            return format!("{prefix}{ARGV_HEAD_REDACTED}");
+        }
+    }
+
+    token.to_owned()
+}
+
+/// Rule (4) helper: mask the password span in a `scheme://user:pass@authority`
+/// URL. Keeps scheme, user, host, and path; replaces only the span between the
+/// FIRST `:` of the userinfo and the `@` that terminates the userinfo. Returns
+/// `None` when the token is not a URL with a `user:pass@` userinfo. Never
+/// panics on malformed input.
+///
+/// Per RFC 3986 the userinfo precedes the LAST `@` in the authority (a `@` may
+/// legally appear inside the password), so the boundary is `rfind('@')`. The
+/// password then starts at the FIRST `:` within that userinfo. Example:
+/// `postgres://u:pa@ss@host/db` -> `postgres://u:<redacted>@host/db`.
+fn mask_url_userinfo(token: &str) -> Option<String> {
+    let scheme_end = token.find("://")?;
+    let after_scheme = scheme_end + 3;
+    let rest = &token[after_scheme..];
+
+    // The authority runs until the first `/`, `?`, or `#`.
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+
+    // Userinfo precedes the LAST `@` in the authority (a literal `@` may appear
+    // inside the password). The FIRST `:` within that userinfo splits
+    // `user:pass`.
+    let at = authority.rfind('@')?;
+    let userinfo = &authority[..at];
+    let colon = userinfo.find(':')?;
+
+    // Reconstruct: keep everything up to and including the first `:` of the
+    // userinfo, redact the password, keep `@` + the rest of the token. Offsets
+    // are relative to `token`, so add `after_scheme` to the authority-relative
+    // `colon`/`at` positions.
+    let keep_prefix = &token[..=after_scheme + colon]; // up to and incl `:`
+    let keep_suffix = &token[after_scheme + at..]; // from the terminating `@`
+    Some(format!("{keep_prefix}{ARGV_HEAD_REDACTED}{keep_suffix}"))
+}
+
+/// Rule (5) helper: mask the credential in an HTTP header value.
+/// Case-insensitive. Prefers a `bearer ` boundary (keeps the scheme label),
+/// else falls back to an `authorization:` boundary; everything after the kept
+/// boundary is replaced with `<redacted>`, with a single separating space kept
+/// for readability.
+///
+/// Final fallback: when NEITHER `bearer ` nor `authorization:` is present but
+/// the token still contains a `:` (a custom secret header such as
+/// `X-Api-Key: SECRET` or `X-Vault-Token: hvs....`), keep the header NAME up to
+/// and including the first `:`, then redact the value (one separating space
+/// preserved). This fallback is reachable ONLY via the `-H`/`--header`/
+/// `--header=` callers — the bare Layer-B rule (5) caller gates entry on a
+/// `bearer `/`authorization:` boundary already being present, so generic
+/// colon-bearing tokens are NOT affected. It intentionally over-redacts benign
+/// custom headers (e.g. `Content-Type: application/json`) when passed via
+/// `-H`, which is a safe trade-off for an operator listing. If no boundary and
+/// no `:` are present the token is returned unchanged.
+fn mask_header_credential(token: &str) -> String {
+    let lower = token.to_ascii_lowercase();
+    if let Some(pos) = lower.find("bearer ") {
+        // Keep up to and including `bearer ` (with its trailing space); redact
+        // the credential that follows.
+        let keep_end = pos + "bearer ".len();
+        let prefix = &token[..keep_end];
+        return format!("{prefix}{ARGV_HEAD_REDACTED}");
+    }
+    if let Some(pos) = lower.find("authorization:") {
+        // Keep up to and including `authorization:`; redact everything after,
+        // re-inserting one space separator when the original had one.
+        let keep_end = pos + "authorization:".len();
+        let prefix = &token[..keep_end];
+        let sep = if token[keep_end..].starts_with(' ') {
+            " "
+        } else {
+            ""
+        };
+        return format!("{prefix}{sep}{ARGV_HEAD_REDACTED}");
+    }
+    // Fallback for custom secret headers `Name: value`. Keep up to and
+    // including the first `:`, redact the value, preserve one separating space.
+    if let Some(colon) = token.find(':') {
+        let keep_end = colon + 1; // include the `:`
+        let prefix = &token[..keep_end];
+        let sep = if token[keep_end..].starts_with(' ') {
+            " "
+        } else {
+            ""
+        };
+        return format!("{prefix}{sep}{ARGV_HEAD_REDACTED}");
+    }
+    token.to_owned()
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_argv_head;
+
+    /// Joins a redacted head into one string for substring assertions. Asserts
+    /// here are on the secret PATTERN, never on length, so a longer/shorter
+    /// `<redacted>` token can never accidentally satisfy a "secret gone" check.
+    fn joined(argv: &[&str]) -> String {
+        let owned: Vec<String> = argv.iter().map(|s| (*s).to_owned()).collect();
+        redact_argv_head(&owned).join("\u{1f}") // unit-separator: no real token contains it
+    }
+
+    #[test]
+    fn header_bearer_value_is_masked_label_kept() {
+        let out = joined(&["curl", "-H", "Authorization: Bearer abc123", "https://x"]);
+        assert!(
+            out.contains("<redacted>"),
+            "credential must be redacted: {out}"
+        );
+        assert!(
+            !out.contains("abc123"),
+            "raw bearer token must not survive: {out}"
+        );
+        assert!(out.contains("curl"), "program name stays visible: {out}");
+        assert!(out.contains("-H"), "flag name stays visible: {out}");
+        // The `Bearer` scheme label is informational, not secret — keep it.
+        assert!(
+            out.contains("Bearer"),
+            "Bearer scheme label stays visible: {out}"
+        );
+    }
+
+    #[test]
+    fn url_userinfo_password_is_masked_host_kept() {
+        let out = joined(&["psql", "postgres://u:pw@h/db"]);
+        assert!(!out.contains(":pw@"), "password span must be masked: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+        assert!(out.contains("psql"), "program name stays visible: {out}");
+        assert!(out.contains("postgres://"), "scheme stays visible: {out}");
+        assert!(out.contains("@h/db"), "host and path stay visible: {out}");
+        assert!(out.contains("u:"), "username stays visible: {out}");
+    }
+
+    #[test]
+    fn attached_short_password_flag_is_masked() {
+        let out = joined(&["mysql", "-ppassw0rd"]);
+        assert!(
+            !out.contains("passw0rd"),
+            "attached password must be masked: {out}"
+        );
+        assert!(out.contains("mysql"), "program name stays visible: {out}");
+        assert!(out.contains("-p"), "the -p flag stays visible: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn space_separated_long_password_flag_value_is_masked() {
+        let out = joined(&["app", "--password", "s3cr3t"]);
+        assert!(
+            !out.contains("s3cr3t"),
+            "following secret must be masked: {out}"
+        );
+        assert!(out.contains("--password"), "flag name stays visible: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn attached_long_token_flag_value_is_masked() {
+        let out = joined(&["app", "--token=abcd"]);
+        assert!(
+            !out.contains("abcd"),
+            "attached token value must be masked: {out}"
+        );
+        assert!(
+            out.contains("--token="),
+            "flag name + '=' stays visible: {out}"
+        );
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn env_style_password_assignment_is_masked() {
+        let out = joined(&["run", "DB_PASSWORD=hunter2"]);
+        assert!(
+            !out.contains("hunter2"),
+            "env secret value must be masked: {out}"
+        );
+        assert!(
+            out.contains("DB_PASSWORD="),
+            "env key + '=' stays visible: {out}"
+        );
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn casing_does_not_bypass_header_masking() {
+        // Lowercased flag name AND lowercased header label/scheme must still mask.
+        let out = joined(&["curl", "--HEADER", "authorization: bearer ZZZ"]);
+        assert!(
+            !out.contains("ZZZ"),
+            "casing must not bypass redaction: {out}"
+        );
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn head_is_bounded_to_three_items() {
+        let owned: Vec<String> = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let head = redact_argv_head(&owned);
+        assert_eq!(head.len(), 3, "only program + 2 tokens surface: {head:?}");
+        assert_eq!(head, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn truncation_is_char_boundary_safe_after_masking() {
+        // A surviving token longer than the per-item cap must truncate on a
+        // char boundary (no UTF-8 split, no panic).
+        let long = format!("arg{}", "é".repeat(200)); // multibyte tail
+        let head = redact_argv_head(&[long]);
+        assert!(
+            head[0].len() <= 128,
+            "item truncated to cap: {}",
+            head[0].len()
+        );
+        // If we got here without panicking, the slice respected char boundaries.
+    }
+
+    #[test]
+    fn no_panic_on_degenerate_inputs() {
+        // Empty argv.
+        assert!(redact_argv_head(&[]).is_empty());
+        // Single element.
+        assert_eq!(redact_argv_head(&["only".to_owned()]), vec!["only"]);
+        // Secret flag with NO following value (look-ahead must not panic).
+        let dangling = redact_argv_head(&["app".to_owned(), "--password".to_owned()]);
+        assert_eq!(dangling, vec!["app", "--password"]);
+        // URL with an `@` but no userinfo password (`scheme://noatuserinfo/x`
+        // has no `@` at all -> no mask, no panic).
+        let no_userinfo =
+            redact_argv_head(&["app".to_owned(), "scheme://noatuserinfo/x".to_owned()]);
+        assert_eq!(no_userinfo[1], "scheme://noatuserinfo/x");
+        // `=` with empty value must not panic and must keep the key visible.
+        let empty_val = redact_argv_head(&["run".to_owned(), "API_TOKEN=".to_owned()]);
+        assert_eq!(empty_val[1], "API_TOKEN=<redacted>");
+    }
+
+    // ---- FIX 2: bare env-secret keys (no `_suffix` required) ----
+
+    #[test]
+    fn bare_env_password_key_is_masked() {
+        let out = joined(&["app", "PASSWORD=hunter2"]);
+        assert!(!out.contains("hunter2"), "bare PASSWORD value leaks: {out}");
+        assert!(out.contains("PASSWORD="), "env key stays visible: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn bare_env_pgpassword_key_is_masked() {
+        let out = joined(&["psql", "PGPASSWORD=topsecret"]);
+        assert!(!out.contains("topsecret"), "PGPASSWORD value leaks: {out}");
+        assert!(out.contains("PGPASSWORD="), "env key stays visible: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn bare_env_mysql_pwd_key_is_masked() {
+        let out = joined(&["m", "MYSQL_PWD=abc"]);
+        assert!(!out.contains("=abc"), "MYSQL_PWD value leaks: {out}");
+        assert!(out.contains("MYSQL_PWD="), "env key stays visible: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn bare_env_token_key_is_masked() {
+        let out = joined(&["app", "TOKEN=tkn123"]);
+        assert!(!out.contains("tkn123"), "bare TOKEN value leaks: {out}");
+        assert!(out.contains("TOKEN="), "env key stays visible: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn bare_env_apikey_key_is_masked() {
+        let out = joined(&["app", "APIKEY=zzz"]);
+        assert!(!out.contains("=zzz"), "bare APIKEY value leaks: {out}");
+        assert!(out.contains("APIKEY="), "env key stays visible: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn bare_env_secret_key_is_masked() {
+        let out = joined(&["app", "SECRET=shh"]);
+        assert!(!out.contains("=shh"), "bare SECRET value leaks: {out}");
+        assert!(out.contains("SECRET="), "env key stays visible: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    // ---- FIX 3: basic-auth `-u`/`--user user:pass` ----
+
+    #[test]
+    fn space_separated_basic_auth_user_is_masked() {
+        let out = joined(&["curl", "-u", "alice:s3cr3t", "https://x"]);
+        assert!(!out.contains("s3cr3t"), "basic-auth pass leaks: {out}");
+        assert!(!out.contains("alice"), "basic-auth user leaks: {out}");
+        assert!(out.contains("curl"), "program name stays visible: {out}");
+        assert!(out.contains("-u"), "flag name stays visible: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn attached_short_basic_auth_user_is_masked() {
+        let out = joined(&["curl", "-ualice:s3cr3t"]);
+        assert!(!out.contains("s3cr3t"), "basic-auth pass leaks: {out}");
+        assert!(!out.contains("alice"), "basic-auth user leaks: {out}");
+        assert!(out.contains("-u"), "flag prefix stays visible: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn space_separated_long_user_flag_is_masked() {
+        let out = joined(&["curl", "--user", "bob:pw123"]);
+        assert!(!out.contains("pw123"), "basic-auth pass leaks: {out}");
+        assert!(out.contains("--user"), "flag name stays visible: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn attached_long_user_flag_is_masked() {
+        let out = joined(&["curl", "--user=bob:pw123"]);
+        assert!(!out.contains("pw123"), "basic-auth pass leaks: {out}");
+        assert!(
+            out.contains("--user="),
+            "flag name + '=' stays visible: {out}"
+        );
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    // ---- FIX 3: NON-over-mask sanity (bare `-u` with no colon) ----
+
+    #[test]
+    fn bare_sort_u_does_not_mask_following_arg() {
+        let out = joined(&["sort", "-u", "file.txt"]);
+        assert!(
+            out.contains("file.txt"),
+            "non-secret -u value must stay visible: {out}"
+        );
+        assert!(
+            !out.contains("<redacted>"),
+            "nothing should be masked: {out}"
+        );
+    }
+
+    #[test]
+    fn bare_id_u_does_not_panic_and_stays_visible() {
+        let out = joined(&["id", "-u"]);
+        assert!(out.contains("-u"), "dangling -u stays visible: {out}");
+        assert!(
+            !out.contains("<redacted>"),
+            "nothing should be masked: {out}"
+        );
+    }
+
+    // ---- FIX 1: secret-flag + URL value -> WHOLE value masked ----
+
+    #[test]
+    fn password_flag_url_value_is_wholly_masked() {
+        let out = joined(&["app", "--password=postgres://dbuser:pw@db.internal/prod"]);
+        assert!(!out.contains("dbuser"), "URL user leaks: {out}");
+        assert!(!out.contains("pw@"), "URL pass leaks: {out}");
+        assert!(!out.contains("db.internal"), "URL host leaks: {out}");
+        assert!(
+            out.contains("--password="),
+            "flag name + '=' stays visible: {out}"
+        );
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    // ---- FIX 4: custom header credentials ----
+
+    #[test]
+    fn custom_header_x_api_key_is_masked() {
+        let out = joined(&["curl", "-H", "X-Api-Key: SECRETKEY", "https://x"]);
+        assert!(
+            !out.contains("SECRETKEY"),
+            "custom header value leaks: {out}"
+        );
+        assert!(
+            out.contains("X-Api-Key:"),
+            "header name stays visible: {out}"
+        );
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn attached_custom_header_vault_token_is_masked() {
+        let out = joined(&["curl", "--header=X-Vault-Token: hvs.SEC"]);
+        assert!(!out.contains("hvs.SEC"), "vault token leaks: {out}");
+        assert!(
+            out.contains("X-Vault-Token:"),
+            "header name stays visible: {out}"
+        );
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    // ---- FIX 5: embedded-`@` password (last-`@` userinfo boundary) ----
+
+    #[test]
+    fn url_userinfo_with_embedded_at_in_password_is_masked() {
+        let out = joined(&["psql", "postgres://u:pa@ss@host/db"]);
+        assert!(!out.contains("pa@ss"), "embedded-@ password leaks: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+        assert!(
+            out.contains("postgres://u:"),
+            "scheme+user stay visible: {out}"
+        );
+        assert!(out.contains("@host"), "host structure stays visible: {out}");
+    }
 }

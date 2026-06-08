@@ -36,12 +36,21 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
             secret_prompt_active: false,
             path: None,
             liveness,
+            // TC-4: per-bucket tag from the source side-table, and the
+            // already-redacted argv head recorded at start (None if the job
+            // left the live map between live_jobs() and this lookup).
+            tag: state.sources.get(j.bucket_id).and_then(|s| s.tag),
+            argv_head: state.command.argv_head(j.job_id),
         });
     }
 
     // WatchRuntime: list returns (job_id, bucket_id, probe_id, path, metrics).
     // File-watch has no exit-code concept: present -> Running.
     for (wid, bid, pid, path, m) in state.watch.list() {
+        // TC-4: build the watch's argv-head label BEFORE `path` is moved into
+        // the `path: Some(path)` field below. A file watch carries no argv, so
+        // we surface a stable synthetic descriptor instead.
+        let fw_label = format!("file_watch:{}", path.display());
         out.push(ProbeListEntry {
             kind: ProbeKind::FileWatch,
             job_id: wid,
@@ -56,6 +65,8 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
             secret_prompt_active: false,
             path: Some(path),
             liveness: Liveness::Running,
+            tag: state.sources.get(bid).and_then(|s| s.tag),
+            argv_head: Some(vec![fw_label]),
         });
     }
 
@@ -64,7 +75,7 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
     // authoritative JobState from the ledger via `PtyRuntime::liveness`, NOT
     // live-map presence: a terminated PTY reports Exited{code}/Failed/Cancelled.
     #[cfg(unix)]
-    for (jid, bid, pid, _argv, m, secret) in state.pty.list() {
+    for (jid, bid, pid, argv, m, secret) in state.pty.list() {
         out.push(ProbeListEntry {
             kind: ProbeKind::Pty,
             job_id: jid,
@@ -79,6 +90,11 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
             secret_prompt_active: secret,
             path: None,
             liveness: state.pty.liveness(jid),
+            // TC-4: redact the PTY's argv head at read time (it is not stored
+            // pre-redacted like command's binding). `pty.list()` previously
+            // discarded this argv.
+            tag: state.sources.get(bid).and_then(|s| s.tag),
+            argv_head: Some(crate::command::redact_argv_head(&argv)),
         });
     }
 

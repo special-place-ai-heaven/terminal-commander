@@ -1553,6 +1553,16 @@ pub struct ProbeListEntry {
     /// payloads (pre-liveness) decode as `Running`.
     #[serde(default)]
     pub liveness: Liveness,
+    /// Optional per-bucket tag lifted from the bucket source. `#[serde(default,
+    /// skip_serializing_if)]` keeps the wire additive: old payloads decode as None,
+    /// old daemons omit it, new clients see None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// Bounded, REDACTED argv head (program + up to 2 tokens), with secret spans
+    /// masked to `<redacted>` and each item truncated to 128 bytes. None when the
+    /// source kind carries no argv. Additive: `#[serde(default, skip_serializing_if)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv_head: Option<Vec<String>>,
 }
 
 /// Bucket-level counters surfaced by `runtime_state.buckets`.
@@ -2035,6 +2045,74 @@ mod tests {
         assert!(
             !json_none.contains("dedup_nonce"),
             "a None nonce must be omitted from the wire; json: {json_none}"
+        );
+    }
+
+    // TC-4 Phase 4a: the ProbeListEntry `tag` and `argv_head` fields are
+    // additive and `#[serde(default, skip_serializing_if)]`. An OLD payload
+    // that omits both must decode (fields default to None), and a daemon that
+    // has neither set must omit both keys from the wire (skip_serializing_if).
+    #[test]
+    fn probe_list_entry_tag_and_argv_head_are_optional_and_additive() {
+        use terminal_commander_core::{BucketId, JobId, ProbeId};
+
+        // Build a fully-populated entry, then serialize it and strip the new
+        // keys to reconstruct an OLD-daemon payload deterministically (the typed
+        // ids serialize as `<prefix>_<hex>`, not raw UUIDs, so we cannot hand-
+        // write the wire form). This also exercises the live wire prefixes.
+        let populated = ProbeListEntry {
+            kind: ProbeKind::Command,
+            job_id: JobId::new(),
+            bucket_id: BucketId::new(),
+            probe_id: ProbeId::new(),
+            frames_total: 0,
+            events_emitted: 0,
+            frames_suppressed: 0,
+            frames_suppressed_progress: 0,
+            frames_suppressed_dedupe: 0,
+            secret_prompts_total: 0,
+            secret_prompt_active: false,
+            path: None,
+            liveness: Liveness::default(),
+            tag: Some("prod".to_owned()),
+            argv_head: Some(vec!["curl".to_owned(), "<redacted>".to_owned()]),
+        };
+
+        // Present values round-trip exactly.
+        let json_full = serde_json::to_string(&populated).expect("encode populated");
+        let back: ProbeListEntry =
+            serde_json::from_str(&json_full).expect("populated payload round-trips");
+        assert_eq!(back.tag.as_deref(), Some("prod"));
+        assert_eq!(
+            back.argv_head,
+            Some(vec!["curl".to_owned(), "<redacted>".to_owned()])
+        );
+
+        // skip_serializing_if: a None tag/argv_head must NOT appear on the wire,
+        // so an old daemon and a new client agree on the encoded shape.
+        let none_entry = ProbeListEntry {
+            tag: None,
+            argv_head: None,
+            ..populated
+        };
+        let json_none = serde_json::to_string(&none_entry).expect("encode none");
+        assert!(
+            !json_none.contains("\"tag\""),
+            "None tag must be omitted from the wire (skip_serializing_if)"
+        );
+        assert!(
+            !json_none.contains("\"argv_head\""),
+            "None argv_head must be omitted from the wire (skip_serializing_if)"
+        );
+
+        // Old-daemon payload shape: the encoded none_entry already omits both
+        // keys, so decoding it proves an absent tag/argv_head defaults to None.
+        let decoded: ProbeListEntry = serde_json::from_str(&json_none)
+            .expect("old payload without tag/argv_head must decode");
+        assert_eq!(decoded.tag, None, "absent tag must default to None");
+        assert_eq!(
+            decoded.argv_head, None,
+            "absent argv_head must default to None"
         );
     }
 
