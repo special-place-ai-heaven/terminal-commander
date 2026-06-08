@@ -90,6 +90,12 @@ fn high_sev_keyword_rule() -> RuleDefinition {
 
 /// A command that prints the needle keyword a few times then exits.
 fn noisy_start_params() -> CommandStartParams {
+    // TC-2: each call is a DISTINCT logical start, so it carries a fresh
+    // dedup_nonce (mirroring the real adapter). Without it, two identical
+    // nonce-less same-peer starts within the 3s fallback window would
+    // collapse to ONE job; tests here start two and expect two buckets.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     CommandStartParams {
         environment: None,
         // `printf` (NOT a shell) emits several distinct NEEDLE lines so the
@@ -107,6 +113,7 @@ fn noisy_start_params() -> CommandStartParams {
         rules: vec![high_sev_keyword_rule()],
         grace_ms: Some(2_000),
         tag: None,
+        dedup_nonce: Some(format!("sub-ipc-noisy-{n}")),
     }
 }
 

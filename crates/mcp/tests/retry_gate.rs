@@ -102,6 +102,7 @@ fn command_start() -> IpcRequest {
         rules: vec![],
         grace_ms: None,
         tag: None,
+        dedup_nonce: None,
     })
 }
 

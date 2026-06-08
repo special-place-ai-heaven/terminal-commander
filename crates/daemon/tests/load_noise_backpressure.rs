@@ -222,6 +222,7 @@ fn megabyte_scale_noisy_stdout_emits_signal_without_raw_leak() {
                     rules: vec![],
                     grace_ms: Some(30_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await
@@ -362,6 +363,7 @@ fn bucket_wait_heartbeat_respects_timeout_without_busy_poll() {
                     rules: vec![],
                     grace_ms: Some(10_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await
@@ -459,6 +461,7 @@ fn bucket_events_since_limit_clamps_to_max() {
                     rules: vec![],
                     grace_ms: Some(15_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await
@@ -584,6 +587,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
                     rules: vec![],
                     grace_ms: Some(10_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await
@@ -604,6 +608,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
                     rules: vec![],
                     grace_ms: Some(10_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await
@@ -736,7 +741,7 @@ fn runtime_state_stays_bounded_under_live_load() {
 
         // Spawn 3 concurrent noisy jobs.
         let mut probe_ids: Vec<ProbeId> = Vec::new();
-        for _ in 0..3 {
+        for i in 0..3 {
             let r = client
                 .call(
                     1,
@@ -749,6 +754,10 @@ fn runtime_state_stays_bounded_under_live_load() {
                         rules: vec![],
                         grace_ms: Some(10_000),
                         tag: None,
+                        // TC-2: each is a DISTINCT logical job; without a
+                        // distinct nonce the same-peer nonce-less fallback
+                        // would collapse all three identical starts to one.
+                        dedup_nonce: Some(format!("rt-load-{i}")),
                     }),
                 )
                 .await
@@ -842,6 +851,7 @@ fn event_context_window_stays_bounded() {
                     rules: vec![],
                     grace_ms: Some(10_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await
@@ -970,6 +980,7 @@ fn bucket_dropped_count_visible_when_retention_evicts() {
                     rules: vec![],
                     grace_ms: Some(15_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await
@@ -1091,6 +1102,7 @@ for i in range(120):
                     rules: vec![],
                     grace_ms: Some(15_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await

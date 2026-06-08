@@ -171,6 +171,10 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
                     rules: vec![],
                     grace_ms: Some(5_000),
                     tag: None,
+                    // TC-2: distinct logical starts need distinct nonces, else
+                    // the same-peer nonce-less fallback collapses these two
+                    // identical `sleep 1` jobs and only one rebind row lands.
+                    dedup_nonce: Some("rebind-job-1".to_owned()),
                 }),
             )
             .await
@@ -191,6 +195,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
                     rules: vec![],
                     grace_ms: Some(5_000),
                     tag: None,
+                    dedup_nonce: Some("rebind-job-2".to_owned()),
                 }),
             )
             .await

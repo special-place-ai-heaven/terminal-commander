@@ -865,6 +865,19 @@ pub struct CommandStartParams {
     /// Optional per-bucket tag for subscription routing (Phase 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+    /// Optional in-flight dedup hint (TC-2). A client that MAY re-send
+    /// the same logical start (e.g. a transport retry of a mutating
+    /// `command_start_combed`) SHOULD send the SAME nonce on every
+    /// re-send; the daemon collapses an in-flight duplicate to the SAME
+    /// `(job_id, bucket_id)` instead of spawning twice. Two DISTINCT
+    /// logical starts MUST use distinct nonces (or none). Additive and
+    /// non-breaking: old clients omit it and decode via serde default;
+    /// the daemon then falls back to a very short peer-scoped
+    /// signature window. This is NOT a server-honored idempotency-key
+    /// protocol (no TTL store, no envelope change) -- just an in-flight
+    /// collapse hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedup_nonce: Option<String>,
 }
 
 impl CommandStartParams {
@@ -1977,6 +1990,54 @@ mod tests {
         assert!(back.is_transport());
     }
 
+    // Source-status: test-only. TC-2: the dedup_nonce field is additive and
+    // serde(default), so an OLD client payload that omits it must still
+    // decode, and a payload carrying Some(nonce) must round-trip unchanged.
+    #[test]
+    fn command_start_params_dedup_nonce_is_optional_and_round_trips() {
+        // Old-client payload: no dedup_nonce key at all. Must decode via the
+        // serde default to None (additive, non-breaking).
+        let old_payload = r#"{"argv":["true"]}"#;
+        let decoded: CommandStartParams =
+            serde_json::from_str(old_payload).expect("old payload without dedup_nonce must decode");
+        assert_eq!(
+            decoded.dedup_nonce, None,
+            "absent dedup_nonce must default to None"
+        );
+
+        // Present nonce: serialize -> decode preserves it exactly.
+        let with_nonce = CommandStartParams {
+            environment: None,
+            argv: vec!["true".to_owned()],
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace_ms: None,
+            tag: None,
+            dedup_nonce: Some("mcp-1234-7".to_owned()),
+        };
+        let json = serde_json::to_string(&with_nonce).expect("serialize ok");
+        assert!(
+            json.contains("dedup_nonce"),
+            "a Some(nonce) must serialize the field; json: {json}"
+        );
+        let back: CommandStartParams = serde_json::from_str(&json).expect("decode ok");
+        assert_eq!(back.dedup_nonce, Some("mcp-1234-7".to_owned()));
+
+        // skip_serializing_if: a None nonce must NOT appear on the wire, so an
+        // old daemon never sees an unexpected key.
+        let without = CommandStartParams {
+            dedup_nonce: None,
+            ..with_nonce
+        };
+        let json_none = serde_json::to_string(&without).expect("serialize ok");
+        assert!(
+            !json_none.contains("dedup_nonce"),
+            "a None nonce must be omitted from the wire; json: {json_none}"
+        );
+    }
+
     // Source-status: test-only. Verifies the retry-safety classification on
     // `IpcRequest::is_idempotent`, which gates the MCP daemon-client retry so a
     // transport-failed MUTATING RPC (e.g. a >5s-spawning CommandStartCombed) is
@@ -2027,6 +2088,7 @@ mod tests {
                     rules: vec![],
                     grace_ms: None,
                     tag: None,
+                    dedup_nonce: None,
                 }),
                 false,
             ),
@@ -2281,6 +2343,7 @@ mod tests {
                 rules: vec![],
                 grace_ms: None,
                 tag: None,
+                dedup_nonce: None,
             })
             .is_idempotent(),
             "CommandStartCombed must be non-idempotent: a blind retry double-spawns"

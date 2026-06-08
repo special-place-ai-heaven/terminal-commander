@@ -245,6 +245,7 @@ mod unix_live {
             rules: vec![high_sev_keyword_rule()],
             grace_ms: Some(2_000),
             tag: None,
+            dedup_nonce: None,
         }
     }
 

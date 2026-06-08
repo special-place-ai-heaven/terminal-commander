@@ -74,6 +74,7 @@ fn small_start_params(argv: &[&str]) -> CommandStartParams {
         rules: Vec::new(),
         grace_ms: Some(2_000),
         tag: None,
+        dedup_nonce: None,
     }
 }
 
@@ -293,6 +294,66 @@ fn command_status_for_unknown_job_returns_typed_error() {
             .await
             .expect_err("unknown job must be rejected");
         assert_eq!(err.code, IpcErrorCode::UnknownJob);
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// TC-2 round-trip (amendment #7): a dedup_nonce sent OVER IPC must be
+/// OBSERVED by start_combed's dedup path, not merely decoded by serde.
+/// Proof: two CommandStartCombed calls carrying the SAME nonce over the
+/// real socket collapse to the SAME job (one process). If the nonce were
+/// dropped at the handle_command_start_combed -> CommandStartRequest hand-
+/// build (the silent-drop class amendment #7 guards against), the two
+/// distinct-correlation calls would NOT collapse and this would fail.
+/// Source-status: live.
+#[test]
+fn dedup_nonce_sent_over_ipc_is_observed_by_start_combed() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("dedup-ipc");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+
+        // A long-running command so the first job is still in flight (its
+        // dedup entry present) when the same-nonce duplicate arrives.
+        let mut params = small_start_params(&["sleep", "5"]);
+        params.dedup_nonce = Some("ipc-nonce-A".to_owned());
+
+        let first = match client
+            .call(1, IpcRequest::CommandStartCombed(params.clone()))
+            .await
+            .expect("first start")
+        {
+            IpcResponse::CommandStartCombed(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+        // Distinct correlation id, SAME dedup_nonce: a blind transport
+        // re-send of the same logical start.
+        let second = match client
+            .call(2, IpcRequest::CommandStartCombed(params))
+            .await
+            .expect("second start")
+        {
+            IpcResponse::CommandStartCombed(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        assert_eq!(
+            first.job_id, second.job_id,
+            "a nonce sent over IPC must be OBSERVED: same nonce -> same job"
+        );
+        assert_eq!(first.bucket_id, second.bucket_id);
+
+        // Exactly one process/bucket actually spawned.
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        let buckets = rows.iter().filter(|r| r.action == "bucket_create").count();
+        assert_eq!(
+            buckets, 1,
+            "the deduped duplicate must not spawn a second process"
+        );
+
         handle.shutdown().await;
         cleanup(&data);
     });

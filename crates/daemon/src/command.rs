@@ -158,6 +158,19 @@ pub struct CommandStartRequest {
     /// Optional per-bucket tag for subscription routing (Phase 3). Recorded on
     /// the bucket source so a tag predicate can AND-filter to this probe.
     pub tag: Option<String>,
+    /// Optional in-flight dedup nonce (TC-2). Threaded from
+    /// `CommandStartParams::dedup_nonce` by `handle_command_start_combed`.
+    /// When `Some`, `start_combed` collapses an in-flight duplicate carrying
+    /// the SAME nonce to the SAME `(job_id, bucket_id)` instead of spawning
+    /// twice. `None` falls back to a very short peer-scoped signature window.
+    pub dedup_nonce: Option<String>,
+    /// Optional pre-hashed peer discriminator (TC-2 peer-scoped fallback).
+    /// Computed in `handle_command_start_combed` from the dispatching
+    /// `PeerIdentity` (uid/sid). Folded into the nonce-less fallback key so a
+    /// sibling local client cannot guess another client's about-to-run command
+    /// and receive its live `(job_id, bucket_id)`. `None` for callers without
+    /// a resolvable peer (e.g. direct in-process tests).
+    pub peer_discriminator: Option<u64>,
 }
 
 // `CommandStartResponse`, `CommandReceipt`, and `CommandStatusResponse`
@@ -264,6 +277,26 @@ type RebindWork = (
     Vec<terminal_commander_core::RuleDefinition>,
 );
 
+/// One in-flight dedup entry (TC-2). Holds the REAL ids minted for the
+/// first start carrying a given fingerprint, plus the insertion instant
+/// for the short TTL backstop. A duplicate start within the window
+/// returns these ids verbatim (no fake success -- the live job they name
+/// is the one already spawned). Evicted on EVERY completion path; the TTL
+/// is only the backstop for a leaked entry.
+#[derive(Clone, Copy, Debug)]
+struct DedupEntry {
+    job_id: JobId,
+    bucket_id: BucketId,
+    probe_id: ProbeId,
+    inserted: std::time::Instant,
+}
+
+/// How long a nonce-less / fallback in-flight fingerprint stays live
+/// before the TTL backstop drops it. Deliberately short: it only needs
+/// to span a transport re-send of a single mutating start, not the whole
+/// job lifetime (eviction-on-completion is the primary mechanism).
+const DEDUP_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The command runtime owned by `DaemonState`. Single instance per
 /// daemon process.
 pub struct CommandRuntime {
@@ -296,6 +329,15 @@ pub struct CommandRuntime {
     /// without an `.await`; the drain takes the set out under the lock and
     /// joins it without holding the lock across an await.
     lifecycle_tasks: Arc<parking_lot::Mutex<tokio::task::JoinSet<()>>>,
+    /// In-flight dedup map (TC-2). A SEPARATE `parking_lot::Mutex<HashMap>`,
+    /// NOT the `live` `RwLock` (different key `u64` fingerprint and value
+    /// `DedupEntry` shape; keeping them apart avoids lock coupling). Keyed by
+    /// a `DefaultHasher` digest of either the client nonce or the peer-scoped
+    /// `(peer, argv, cwd, tag)` fallback. Cloned into the lifecycle waiter
+    /// closure (`let waiter_dedup = Arc::clone(&self.dedup);`) so eviction can
+    /// run on the completion paths alongside `waiter_live`. The lock is held
+    /// ONLY for map ops -- never across `.await`, never across the spawn.
+    dedup: Arc<parking_lot::Mutex<std::collections::HashMap<u64, DedupEntry>>>,
 }
 
 impl std::fmt::Debug for CommandRuntime {
@@ -339,6 +381,7 @@ impl CommandRuntime {
             activation,
             sources,
             lifecycle_tasks: Arc::new(parking_lot::Mutex::new(tokio::task::JoinSet::new())),
+            dedup: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::default())),
         }
     }
 
@@ -429,6 +472,34 @@ impl CommandRuntime {
         req: CommandStartRequest,
     ) -> Result<CommandStartResponse, CommandError> {
         Self::validate_argv(&req.argv)?;
+
+        // TC-2 in-flight dedup guard. BEFORE the id mint: if an identical
+        // logical start is already in flight (same client nonce, or the
+        // same peer-scoped signature within DEDUP_TTL), return the REAL
+        // ids of that job instead of spawning a second process. The lock
+        // is held ONLY for this map lookup -- released before any spawn or
+        // await. A nonce hit is honored regardless of age (the entry is
+        // evicted on completion); a nonce-less fallback hit is honored
+        // only within the TTL window. probe_id is stored in the entry so
+        // the duplicate response is identical to the original.
+        let (dedup_k, fallback_gated) = dedup_key(&req);
+        {
+            let mut map = self.dedup.lock();
+            if let Some(entry) = map.get(&dedup_k).copied() {
+                let fresh = !fallback_gated || entry.inserted.elapsed() < DEDUP_TTL;
+                if fresh {
+                    return Ok(CommandStartResponse {
+                        job_id: entry.job_id,
+                        bucket_id: entry.bucket_id,
+                        probe_id: entry.probe_id,
+                        cursor: 0,
+                    });
+                }
+                // Stale fallback entry the TTL backstop should have
+                // dropped: remove it so this start proceeds as fresh.
+                map.remove(&dedup_k);
+            }
+        }
 
         // Shell-bridge guard. Runs BEFORE the policy engine so the
         // rejection reason is precise. command_start_combed is not
@@ -539,6 +610,23 @@ impl CommandRuntime {
                 .unwrap_or(terminal_commander_probes::DEFAULT_GRACE),
         };
 
+        // TC-2: register the in-flight dedup entry NOW, BEFORE the spawn,
+        // so a duplicate retry that arrives WHILE this start is still
+        // spawning collapses to these ids (the slow-spawn window is the
+        // exact case the guard targets). The lock is held only for the
+        // insert -- never across the spawn below. The entry is evicted on
+        // the spawn-failure path just below and on every completion path
+        // in the lifecycle waiter; the TTL is only the backstop.
+        self.dedup.lock().insert(
+            dedup_k,
+            DedupEntry {
+                job_id,
+                bucket_id,
+                probe_id,
+                inserted: std::time::Instant::now(),
+            },
+        );
+
         // Spawn the probe. If this fails, we audit and bail without
         // creating a job record.
         // Windows: ProcessProbe::spawn applies CREATE_NO_WINDOW for combed runtime
@@ -549,6 +637,10 @@ impl CommandRuntime {
             {
                 Ok(p) => p,
                 Err(e) => {
+                    // Eviction-on-spawn-failure: the job never came to
+                    // life, so drop its fingerprint immediately. A leaked
+                    // entry must NEVER block a legitimate identical retry.
+                    self.dedup.lock().remove(&dedup_k);
                     self.audit(
                         "command_start",
                         &subject_for_argv(&req.argv),
@@ -609,6 +701,12 @@ impl CommandRuntime {
         let waiter_profile = self.profile_label.clone();
         let waiter_live = Arc::clone(&self.live);
         let waiter_rings = Arc::clone(&self.rings);
+        // TC-2: clone the dedup map into the waiter so the in-flight entry
+        // is evicted on EVERY terminal outcome (normal exit AND cancel --
+        // both reach `drive_to_exit` and the eviction below). The fixed
+        // `dedup_k` (a Copy `u64`) is moved in. Eviction-on-completion is
+        // the PRIMARY release; the TTL is only the backstop for a leak.
+        let waiter_dedup = Arc::clone(&self.dedup);
         // Enqueue into the lifecycle JoinSet (not a detached
         // `tokio::spawn`) so a graceful shutdown can await this waiter
         // BEFORE the store actor closes; otherwise a command exiting in
@@ -669,6 +767,14 @@ impl CommandRuntime {
                 ProbeOutcome::Exited { code, signal } => waiter_jobs.finish(job_id, code, signal),
                 ProbeOutcome::Cancelled => waiter_jobs.cancel(job_id),
             };
+
+            // TC-2 eviction-on-completion (PRIMARY release). The job is now
+            // terminal on BOTH outcomes (normal exit and cancel reach here),
+            // so the in-flight fingerprint can no longer collapse a future
+            // identical start -- drop it. A re-run AFTER completion must get
+            // a FRESH job (the never-block invariant). Lock held only for the
+            // remove.
+            waiter_dedup.lock().remove(&dedup_k);
 
             // Append the lifecycle event to the bucket (router does
             // the audit on bucket_append).
@@ -984,6 +1090,44 @@ fn subject_for_argv(argv: &[String]) -> String {
     // build a stable short label.
     let trimmed = if head.len() > 256 { &head[..256] } else { head };
     trimmed.to_owned()
+}
+
+/// Compute the in-flight dedup key for a start request (TC-2).
+///
+/// PREFERS the client nonce: when `dedup_nonce` is `Some`, the key is a
+/// `DefaultHasher` digest of just the nonce (the nonce is already
+/// client-unique, so two DISTINCT logical starts -- which the adapter
+/// gives DISTINCT nonces -- never collide). A non-empty nonce returns
+/// `(key, false)`: a nonce match is exact intent and is NOT TTL-gated
+/// beyond the eviction-on-completion backstop.
+///
+/// FALLBACK (nonce-less old-adapter blind retry): digests
+/// `(peer_discriminator, argv, cwd, tag)` and returns `(key, true)` to
+/// mark the entry as window-gated -- this low-entropy fingerprint is only
+/// honored within `DEDUP_TTL`. Peer-scoping the fallback prevents a
+/// sibling local client from guessing another client's about-to-run
+/// command and receiving its live `(job_id, bucket_id)`.
+fn dedup_key(req: &CommandStartRequest) -> (u64, bool) {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match req.dedup_nonce.as_deref() {
+        Some(nonce) if !nonce.is_empty() => {
+            // Domain-separate the nonce path from the fallback path so a
+            // nonce that happens to equal a serialized fallback can never
+            // collide.
+            0u8.hash(&mut h);
+            nonce.hash(&mut h);
+            (h.finish(), false)
+        }
+        _ => {
+            1u8.hash(&mut h);
+            req.peer_discriminator.hash(&mut h);
+            req.argv.hash(&mut h);
+            req.cwd.hash(&mut h);
+            req.tag.hash(&mut h);
+            (h.finish(), true)
+        }
+    }
 }
 
 fn format_argv_metadata(argv: &[String]) -> String {

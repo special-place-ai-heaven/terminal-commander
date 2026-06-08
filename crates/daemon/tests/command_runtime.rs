@@ -139,6 +139,8 @@ fn command_start_emits_matching_signal_into_bucket_no_raw_text() {
             rules: vec![rule],
             grace: None,
             tag: None,
+            dedup_nonce: None,
+            peer_discriminator: None,
         };
         let resp = state.command.start_combed(req).expect("start ok");
 
@@ -234,6 +236,8 @@ fn command_start_denied_for_sudo_argv() {
             rules: vec![],
             grace: None,
             tag: None,
+            dedup_nonce: None,
+            peer_discriminator: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
         assert!(matches!(err, CommandError::PolicyDenied(_)));
@@ -277,6 +281,8 @@ fn command_start_with_invalid_inline_rule_fails_fast_without_leaking_bucket() {
             rules: vec![invalid_regex_rule("test.bad")],
             grace: None,
             tag: None,
+            dedup_nonce: None,
+            peer_discriminator: None,
         };
 
         let err = state.command.start_combed(req).unwrap_err();
@@ -318,6 +324,8 @@ fn command_start_denied_for_bare_sh_argv() {
             rules: vec![],
             grace: None,
             tag: None,
+            dedup_nonce: None,
+            peer_discriminator: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
         assert!(
@@ -370,6 +378,8 @@ fn command_start_denied_for_absolute_sh_argv() {
             rules: vec![],
             grace: None,
             tag: None,
+            dedup_nonce: None,
+            peer_discriminator: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
         assert!(
@@ -429,6 +439,8 @@ fn command_start_denies_all_known_shell_interpreters() {
                 rules: vec![],
                 grace: None,
                 tag: None,
+                dedup_nonce: None,
+                peer_discriminator: None,
             };
             let err = state.command.start_combed(req).unwrap_err();
             match err {
@@ -467,6 +479,8 @@ fn nonzero_exit_produces_command_failed_event_in_bucket() {
             rules: vec![],
             grace: None,
             tag: None,
+            dedup_nonce: None,
+            peer_discriminator: None,
         };
         let resp = state.command.start_combed(req).expect("start ok");
 
@@ -520,6 +534,8 @@ fn empty_argv_is_rejected_before_spawn() {
             rules: vec![],
             grace: None,
             tag: None,
+            dedup_nonce: None,
+            peer_discriminator: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
         assert!(matches!(err, CommandError::EmptyArgv));
@@ -559,4 +575,275 @@ fn response_types_have_no_raw_stream_lane() {
         receipt: None,
     };
     assert_small_response(&s);
+}
+
+// ---------------------------------------------------------------------
+// TC-2: narrow in-flight dedup guard in start_combed.
+// Source-status: live. Each test stands up its OWN temp data dir and an
+// in-process CommandRuntime via DaemonState::bootstrap -- NEVER the
+// default/live daemon socket.
+// ---------------------------------------------------------------------
+
+/// python3 argv that sleeps for `secs` then exits 0. A non-shell program
+/// kept alive long enough that a duplicate start lands while it is still
+/// in-flight (the dedup entry is present from before-spawn until exit).
+fn sleep_argv(secs: f64) -> Vec<String> {
+    vec![
+        "python3".to_owned(),
+        "-c".to_owned(),
+        format!("import time; time.sleep({secs})"),
+    ]
+}
+
+/// Build a start request with an explicit nonce / peer discriminator so
+/// the tests drive the dedup key deterministically. argv-only, no rules.
+fn dedup_req(
+    argv: Vec<String>,
+    nonce: Option<&str>,
+    peer: Option<u64>,
+) -> terminal_commanderd::CommandStartRequest {
+    terminal_commanderd::CommandStartRequest {
+        argv,
+        cwd: None,
+        env: vec![],
+        bucket_config: None,
+        rules: vec![],
+        grace: None,
+        tag: None,
+        dedup_nonce: nonce.map(str::to_owned),
+        peer_discriminator: peer,
+    }
+}
+
+/// Count `bucket_create` audit rows. start_combed allocates exactly one
+/// bucket per REAL spawn (and audits it), so this is a precise proxy for
+/// "how many processes were actually spawned" -- a deduped duplicate
+/// never reaches `bucket_create`.
+fn bucket_create_count(state: &DaemonState) -> usize {
+    let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+    rows.iter().filter(|r| r.action == "bucket_create").count()
+}
+
+fn wait_terminal(state: &DaemonState, job_id: terminal_commander_core::JobId) {
+    for _ in 0..100 {
+        std::thread::sleep(Duration::from_millis(40));
+        if matches!(
+            state.command.job_record(job_id).map(|r| r.state),
+            Some(JobState::Exited | JobState::Failed | JobState::Cancelled)
+        ) {
+            return;
+        }
+    }
+}
+
+// (a) Two CommandStartCombed with the SAME nonce while the first is still
+// in flight collapse to the SAME (job_id, bucket_id) and spawn ONE
+// process.
+#[test]
+fn dedup_same_nonce_in_window_collapses_to_one_job() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("dedup-same-nonce");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        // Long-running so the entry is live when the duplicate arrives.
+        let first = state
+            .command
+            .start_combed(dedup_req(sleep_argv(5.0), Some("nonce-A"), Some(7)))
+            .expect("first start ok");
+        let second = state
+            .command
+            .start_combed(dedup_req(sleep_argv(5.0), Some("nonce-A"), Some(7)))
+            .expect("second start (deduped) ok");
+
+        assert_eq!(
+            first.job_id, second.job_id,
+            "same nonce in-window must return the SAME job_id"
+        );
+        assert_eq!(first.bucket_id, second.bucket_id);
+        assert_eq!(first.probe_id, second.probe_id);
+        assert_eq!(
+            bucket_create_count(&state),
+            1,
+            "exactly ONE process/bucket must be spawned for a deduped duplicate"
+        );
+        assert_eq!(
+            state.command.live_jobs().len(),
+            1,
+            "exactly one live job after a deduped duplicate"
+        );
+
+        wait_terminal(&state, first.job_id);
+        cleanup(&data);
+    });
+}
+
+// (b) Never-collapse: two starts with DISTINCT nonces but identical
+// argv/cwd/tag spawn TWO distinct jobs.
+#[test]
+fn dedup_distinct_nonces_never_collapse() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("dedup-distinct-nonce");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let a = state
+            .command
+            .start_combed(dedup_req(sleep_argv(5.0), Some("nonce-1"), Some(7)))
+            .expect("start a");
+        let b = state
+            .command
+            .start_combed(dedup_req(sleep_argv(5.0), Some("nonce-2"), Some(7)))
+            .expect("start b");
+
+        assert_ne!(
+            a.job_id, b.job_id,
+            "distinct nonces must NEVER collapse, even with identical argv"
+        );
+        assert_eq!(
+            bucket_create_count(&state),
+            2,
+            "two distinct nonces must spawn two processes"
+        );
+        assert_eq!(state.command.live_jobs().len(), 2);
+
+        wait_terminal(&state, a.job_id);
+        wait_terminal(&state, b.job_id);
+        cleanup(&data);
+    });
+}
+
+// (c) Never-block: a third identical start AFTER the first completes
+// (entry evicted on completion) gets a FRESH job.
+#[test]
+fn dedup_entry_evicted_on_completion_does_not_block_rerun() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("dedup-rerun");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        // Quick exit so the entry is evicted on completion.
+        let first = state
+            .command
+            .start_combed(dedup_req(py_argv("done", "", 0), Some("nonce-R"), Some(7)))
+            .expect("first start ok");
+        wait_terminal(&state, first.job_id);
+
+        // Same nonce, but the first job is terminal and its entry evicted:
+        // this must NOT collapse to the dead job -- it must spawn fresh.
+        let second = state
+            .command
+            .start_combed(dedup_req(py_argv("done", "", 0), Some("nonce-R"), Some(7)))
+            .expect("rerun start ok");
+        assert_ne!(
+            first.job_id, second.job_id,
+            "a re-run AFTER completion must get a FRESH job (never blocked)"
+        );
+        assert_eq!(
+            bucket_create_count(&state),
+            2,
+            "the rerun must spawn its own process"
+        );
+
+        wait_terminal(&state, second.job_id);
+        cleanup(&data);
+    });
+}
+
+// (d) Eviction-on-spawn-failure: a start that fails to spawn (bogus
+// binary) evicts its fingerprint so an immediate identical retry is NOT
+// blocked by a stale entry (it reaches the spawn again and fails again,
+// rather than wrongly collapsing to a job that never existed).
+#[test]
+fn dedup_evicts_on_spawn_failure_so_retry_is_not_blocked() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("dedup-spawn-fail");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let bogus = vec![
+            "/nonexistent/tc-dedup-bogus-binary".to_owned(),
+            "--noop".to_owned(),
+        ];
+        let first = state
+            .command
+            .start_combed(dedup_req(bogus.clone(), Some("nonce-F"), Some(7)))
+            .expect_err("bogus binary must fail to spawn");
+        assert!(
+            matches!(first, CommandError::Spawn(_)),
+            "first failure must be a spawn error, got {first:?}"
+        );
+
+        // The fingerprint was evicted on the spawn-failure path, so the
+        // identical retry must reach the spawn again (and fail again) --
+        // a stale block would instead return Ok with phantom ids.
+        let second = state
+            .command
+            .start_combed(dedup_req(bogus, Some("nonce-F"), Some(7)))
+            .expect_err("retry must also reach spawn and fail, not be blocked");
+        assert!(
+            matches!(second, CommandError::Spawn(_)),
+            "a leaked entry must never block a legitimate retry; got {second:?}"
+        );
+    });
+}
+
+// (e) Nonce-less fallback: two identical nonce-less starts from the same
+// peer within the window collapse (old-adapter protection); after the
+// window they spawn distinct jobs.
+#[test]
+fn dedup_nonceless_fallback_collapses_in_window_then_distinct_after() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("dedup-fallback");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        // In-window: identical signature (argv/cwd/tag) + same peer, no
+        // nonce. The fallback window collapses the duplicate.
+        let a = state
+            .command
+            .start_combed(dedup_req(sleep_argv(5.0), None, Some(42)))
+            .expect("start a");
+        let b = state
+            .command
+            .start_combed(dedup_req(sleep_argv(5.0), None, Some(42)))
+            .expect("start b (deduped)");
+        assert_eq!(
+            a.job_id, b.job_id,
+            "nonce-less identical same-peer start in-window must collapse (old-adapter protection)"
+        );
+        assert_eq!(
+            bucket_create_count(&state),
+            1,
+            "the in-window fallback duplicate must not spawn a second process"
+        );
+
+        // After the TTL (3s) the fallback entry is the backstop-dropped:
+        // an identical nonce-less start now spawns a distinct job. (The
+        // first job is still sleeping, so this proves the WINDOW, not
+        // completion-eviction, is what reopens the key.)
+        std::thread::sleep(Duration::from_millis(3_200));
+        let c = state
+            .command
+            .start_combed(dedup_req(sleep_argv(5.0), None, Some(42)))
+            .expect("start c after window");
+        assert_ne!(
+            a.job_id, c.job_id,
+            "after the fallback window an identical nonce-less start must spawn a DISTINCT job"
+        );
+        assert_eq!(
+            bucket_create_count(&state),
+            2,
+            "the post-window start must spawn its own process"
+        );
+
+        wait_terminal(&state, a.job_id);
+        wait_terminal(&state, c.job_id);
+        cleanup(&data);
+    });
 }

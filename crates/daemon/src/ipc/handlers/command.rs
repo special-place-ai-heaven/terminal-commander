@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use terminal_commander_supervisor::identity::PeerIdentity;
+
 use super::common::map_command_error;
 use crate::command::CommandStartRequest;
 use crate::ipc::protocol::{
@@ -15,6 +17,7 @@ use crate::state::DaemonState;
 pub(in crate::ipc::server) fn handle_command_start_combed(
     state: &Arc<DaemonState>,
     params: &CommandStartParams,
+    peer: &PeerIdentity,
 ) -> Result<IpcResponse, IpcError> {
     if params.env.len() > MAX_COMMAND_ENV_ITEMS {
         return Err(IpcError::new(
@@ -36,9 +39,44 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
         rules: params.rules.clone(),
         grace: params.grace(),
         tag: params.tag.clone(),
+        // TC-2: thread the client dedup hint end-to-end. Without this
+        // explicit assignment the field is silently dropped at this hand-
+        // built conversion (amendment #7).
+        dedup_nonce: params.dedup_nonce.clone(),
+        // TC-2 peer-scoped fallback: pre-hash the dispatching peer so the
+        // nonce-less fingerprint window only collapses a SAME-peer retry,
+        // never a sibling client guessing another peer's command.
+        peer_discriminator: Some(peer_discriminator(peer)),
     };
     let resp = state.command.start_combed(req).map_err(map_command_error)?;
     Ok(IpcResponse::CommandStartCombed(resp))
+}
+
+/// Stable per-peer discriminator for the TC-2 nonce-less dedup fallback.
+///
+/// A `DefaultHasher` digest of the peer's stable identity field (uid for
+/// Unix, sid for Windows). The pid is deliberately EXCLUDED so two
+/// connections from the same principal still dedup a retry. An unknown
+/// peer hashes to a single shared bucket -- conservative: it can only
+/// collapse with another equally-unknown peer's identical signature
+/// inside the short TTL.
+fn peer_discriminator(peer: &PeerIdentity) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match peer {
+        PeerIdentity::Unix { uid, .. } => {
+            0u8.hash(&mut h);
+            uid.hash(&mut h);
+        }
+        PeerIdentity::Windows { sid, .. } => {
+            1u8.hash(&mut h);
+            sid.hash(&mut h);
+        }
+        PeerIdentity::Unknown { .. } => {
+            2u8.hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 pub(in crate::ipc::server) fn handle_command_status(

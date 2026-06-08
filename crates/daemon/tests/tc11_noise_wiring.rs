@@ -89,6 +89,8 @@ fn progress_only_stdout_suppresses_before_evaluate() {
                 rules: vec![],
                 grace: None,
                 tag: None,
+                dedup_nonce: None,
+                peer_discriminator: None,
             })
             .expect("start ok");
 
@@ -145,6 +147,8 @@ fn dedupe_collapses_repeated_matches_within_window() {
                 rules: vec![repeat_rule()],
                 grace: None,
                 tag: None,
+                dedup_nonce: None,
+                peer_discriminator: None,
             })
             .expect("start ok");
 

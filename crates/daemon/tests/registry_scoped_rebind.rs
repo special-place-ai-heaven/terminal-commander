@@ -84,6 +84,10 @@ fn sleeper(
         rules: vec![],
         grace_ms: Some(5_000),
         tag: None,
+        // TC-2: each sleeper is a distinct logical job; key the nonce off
+        // the per-call correlation id so identical same-peer `sleep 1`
+        // starts are NOT collapsed by the nonce-less fallback window.
+        dedup_nonce: Some(format!("scoped-sleeper-{correlation}")),
     });
     async move { client.call(correlation, req).await.expect("start") }
 }

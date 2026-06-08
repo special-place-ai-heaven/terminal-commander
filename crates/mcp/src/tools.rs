@@ -2176,6 +2176,23 @@ fn parse_bucket_and_rules(
     Ok((bucket_config, resolved))
 }
 
+/// Mint a fresh, process-unique, monotonic in-flight dedup nonce for a
+/// `command_start_combed` / `run_and_watch` start (TC-2).
+///
+/// No new dependency and no random crate: a per-process counter combined
+/// with this process id and the variant tag is unique enough for an
+/// in-flight collapse hint. The value need not be unpredictable -- the
+/// daemon only uses it to recognize the SAME re-sent logical start; the
+/// real cross-client safety comes from the daemon-side peer-scoped
+/// fallback. Because every call increments the counter, two distinct
+/// tool calls get distinct nonces and never collapse.
+fn fresh_dedup_nonce() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NONCE_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = NONCE_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("mcp-{}-{}", std::process::id(), seq)
+}
+
 /// MCP-facing parameters for `command_start_combed`. Strings + ints
 /// only so the JSON Schema stays consumer-friendly. Translated to the
 /// daemon-side `CommandStartParams` in `into_ipc`.
@@ -2241,6 +2258,16 @@ impl McpCommandStartParams {
             rules,
             grace_ms: self.grace_ms,
             tag: self.tag,
+            // TC-2 dedup split: the adapter ALWAYS mints a FRESH per-call
+            // nonce. Two deliberate identical tool calls therefore get
+            // DISTINCT nonces and NEVER collapse to one job (the
+            // never-collapse invariant holds structurally for this new
+            // adapter). The daemon-side nonce-less fallback window only
+            // protects OLD adapter binaries that blind-retry a mutating
+            // start without a nonce; a same-nonce collapse here happens
+            // only on a transport-layer re-send that reuses this exact
+            // value, which this adapter no longer does after Phase 1.
+            dedup_nonce: Some(fresh_dedup_nonce()),
         })
     }
 }

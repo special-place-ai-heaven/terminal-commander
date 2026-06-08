@@ -562,7 +562,7 @@ async fn dispatch(
         IpcRequest::CommandStartCombed(p) => {
             let env = p.environment.clone().unwrap_or_default();
             if matches!(env, EnvironmentSpec::Local) {
-                match handlers::command::handle_command_start_combed(state, p) {
+                match handlers::command::handle_command_start_combed(state, p, peer) {
                     Ok(r) => IpcResult::Ok { response: r },
                     Err(e) => IpcResult::Err { error: e },
                 }
@@ -570,7 +570,7 @@ async fn dispatch(
                 match EnvironmentRouter::route_request(state, &env, &req_env.request).await {
                     Ok(RouteOutcome::RunnerResponse(r)) => IpcResult::Ok { response: *r },
                     Ok(RouteOutcome::Local) => {
-                        match handlers::command::handle_command_start_combed(state, p) {
+                        match handlers::command::handle_command_start_combed(state, p, peer) {
                             Ok(r) => IpcResult::Ok { response: r },
                             Err(e) => IpcResult::Err { error: e },
                         }
@@ -915,6 +915,7 @@ mod tests {
                 rules: vec![],
                 grace_ms: None,
                 tag: None,
+                dedup_nonce: None,
             }),
             IpcRequest::CommandStatus(CommandStatusParams {
                 job_id: JobId::new(),

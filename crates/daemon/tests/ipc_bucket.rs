@@ -117,6 +117,8 @@ fn bucket_events_since_returns_structured_events_no_raw_text() {
                 rules: vec![rule],
                 grace: None,
                 tag: None,
+                dedup_nonce: None,
+                peer_discriminator: None,
             })
             .unwrap();
 
@@ -362,6 +364,8 @@ fn event_context_returns_bounded_window_around_event_pointer() {
                 rules: vec![rule],
                 grace: None,
                 tag: None,
+                dedup_nonce: None,
+                peer_discriminator: None,
             })
             .unwrap();
 

@@ -150,6 +150,7 @@ fn draft_inline_rule_is_skipped_not_fatal_to_command_start() {
                     rules: vec![active, draft],
                     grace_ms: Some(30_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await
@@ -269,6 +270,7 @@ fn tc_signal_cost_is_orders_of_magnitude_below_raw_shell_cost() {
                     rules: vec![],
                     grace_ms: Some(30_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await

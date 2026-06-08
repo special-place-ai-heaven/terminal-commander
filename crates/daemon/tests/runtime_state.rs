@@ -119,6 +119,7 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
                     rules: vec![],
                     grace_ms: Some(2_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await
@@ -290,6 +291,7 @@ fn exited_command_reports_exited_liveness_from_jobstate() {
                     rules: vec![],
                     grace_ms: Some(2_000),
                     tag: None,
+                    dedup_nonce: None,
                 }),
             )
             .await

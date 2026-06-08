@@ -55,6 +55,13 @@ fn build_server(data: &std::path::Path) -> (Arc<DaemonState>, ServerHandle) {
 }
 
 fn sleeper_params() -> CommandStartParams {
+    // TC-2: each call is a DISTINCT logical start, so it carries a
+    // distinct dedup_nonce -- mirroring the real MCP adapter, which mints
+    // a fresh nonce per tool call. Without it, two identical nonce-less
+    // same-peer starts within the 3s fallback window would collapse to
+    // ONE job (the old-adapter protection), and these tests want two.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     CommandStartParams {
         environment: None,
         argv: vec!["sleep".to_owned(), "2".to_owned()],
@@ -64,6 +71,7 @@ fn sleeper_params() -> CommandStartParams {
         rules: Vec::new(),
         grace_ms: Some(2_000),
         tag: None,
+        dedup_nonce: Some(format!("ledger-test-{n}")),
     }
 }
 

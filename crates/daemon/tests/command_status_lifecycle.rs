@@ -53,6 +53,8 @@ fn command_status_counts_lifecycle_event_when_no_rules_match() {
                 rules: vec![],
                 grace: None,
                 tag: None,
+                dedup_nonce: None,
+                peer_discriminator: None,
             })
             .expect("start ok");
 
@@ -118,6 +120,8 @@ fn lifecycle_waiter_is_drained_before_store_close() {
                 rules: vec![],
                 grace: None,
                 tag: None,
+                dedup_nonce: None,
+                peer_discriminator: None,
             })
             .expect("start ok");
 
@@ -216,6 +220,8 @@ fn no_rule_command_returns_exit_receipt() {
                 rules: vec![],
                 grace: None,
                 tag: None,
+                dedup_nonce: None,
+                peer_discriminator: None,
             })
             .expect("start ok");
 
@@ -261,6 +267,8 @@ fn command_output_tail_returns_bounded_lines_without_a_rule() {
                 rules: vec![],
                 grace: None,
                 tag: None,
+                dedup_nonce: None,
+                peer_discriminator: None,
             })
             .expect("start ok");
 
@@ -308,6 +316,8 @@ fn command_output_tail_clamps_to_200_lines() {
                 rules: vec![],
                 grace: None,
                 tag: None,
+                dedup_nonce: None,
+                peer_discriminator: None,
             })
             .expect("start ok");
 
@@ -367,6 +377,8 @@ fn rule_match_command_has_no_receipt() {
                 rules: vec![hello_rule()],
                 grace: None,
                 tag: None,
+                dedup_nonce: None,
+                peer_discriminator: None,
             })
             .expect("start ok");
 
