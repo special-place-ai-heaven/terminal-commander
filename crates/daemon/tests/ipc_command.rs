@@ -150,6 +150,75 @@ fn command_start_combed_happy_path_returns_bounded_ids_and_audits_through_ipc() 
     });
 }
 
+// TC-4 LIVE VERIFY (audit surface): the `command_start` allow audit row records
+// the argv with credential spans REDACTED, not the raw secret. The secret sits
+// at index 3 -- BEYOND the 3-item operator-facing head -- to prove the audit
+// redaction is UNBOUNDED: `sleep 1 --password <secret>` spawns, the allow row
+// lands, and its `metadata_json` masks the value after `--password` while the
+// flag name stays visible.
+#[test]
+fn command_start_audit_metadata_redacts_argv_secret() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("audit-redact");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let secret = "s3cr3t-AUDIT-LEAK";
+        let _ = client
+            .call(
+                1,
+                IpcRequest::CommandStartCombed(small_start_params(&[
+                    "sleep",
+                    "1",
+                    "--password",
+                    secret,
+                ])),
+            )
+            .await
+            .expect("command_start_combed call");
+
+        // Poll until the runtime allow audit row lands (emitted at start, before
+        // the child exits).
+        let read_rows = || state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut rows = read_rows();
+        while !rows
+            .iter()
+            .any(|r| r.action == "command_start" && r.decision == "allow")
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            rows = read_rows();
+        }
+        let allow = rows
+            .iter()
+            .find(|r| r.action == "command_start" && r.decision == "allow")
+            .expect("command_start allow audit row must land");
+        let meta = allow
+            .metadata_json
+            .as_deref()
+            .expect("allow row must carry argv metadata_json");
+
+        assert!(
+            !meta.contains(secret),
+            "raw secret leaked into audit metadata_json: {meta}"
+        );
+        assert!(
+            meta.contains("<redacted>"),
+            "audit metadata must redact the secret span: {meta}"
+        );
+        assert!(
+            meta.contains("--password"),
+            "flag name should remain visible in audit metadata: {meta}"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
 #[test]
 fn command_start_combed_denies_shell_interpreter_and_audits() {
     let runtime = rt();

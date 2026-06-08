@@ -1146,21 +1146,18 @@ fn dedup_key(req: &CommandStartRequest) -> (u64, bool) {
     }
 }
 
+/// Builds compact JSON audit metadata for a command's FULL argv.
+///
+/// SECURITY-CRITICAL (TC-4). Reuses the security-approved `redact_argv`
+/// masking core to redact credential spans across EVERY argv item (audit
+/// forensics keep all items; only secret spans are masked to `<redacted>`),
+/// then per-item char-boundary truncates each to `ARGV_HEAD_ITEM_BYTES`. The
+/// result is capped at `MAX_AUDIT_METADATA_BYTES` on insert by the persistent
+/// audit layer. Unlike the operator-facing head, this is UNBOUNDED in item
+/// count, so a secret past the head window is still masked. The char-boundary
+/// truncation also makes this panic-free on multibyte input.
 fn format_argv_metadata(argv: &[String]) -> String {
-    // Compact JSON; capped at MAX_AUDIT_METADATA_BYTES on insert by
-    // the persistent audit layer. We pre-truncate per-item to keep
-    // the metadata small.
-    let v: Vec<String> = argv
-        .iter()
-        .map(|s| {
-            let cap = 128usize;
-            if s.len() > cap {
-                s[..cap].to_owned()
-            } else {
-                s.clone()
-            }
-        })
-        .collect();
+    let v = redact_argv(argv, None);
     serde_json::json!({ "argv": v }).to_string()
 }
 
@@ -1172,43 +1169,29 @@ const ARGV_HEAD_ITEM_BYTES: usize = 128;
 /// Replacement token substituted for any masked secret span.
 const ARGV_HEAD_REDACTED: &str = "<redacted>";
 
-/// Builds a bounded, REDACTED view of a command's leading argv tokens for
-/// operator-facing probe listings.
+/// Shared credential-redaction core for argv views (TC-4).
 ///
-/// SECURITY-CRITICAL (TC-4). The output is the program name plus up to two
-/// following tokens, with credential spans masked to `<redacted>` and each
-/// surviving item truncated to `ARGV_HEAD_ITEM_BYTES` on a char boundary.
-/// Masking is applied in two idempotent layers:
+/// Applies the SECURITY-APPROVED two-layer masking (Layer A flag look-ahead +
+/// Layer B per-token inline scan) and then a per-item char-boundary truncation
+/// to `ARGV_HEAD_ITEM_BYTES`. The `max_items` bound selects the scope:
 ///
-/// * Layer A — flag look-ahead: a known secret-value flag (e.g. `--password`,
-///   `-p`, `--token`) masks the NEXT token's value (whole token for credential
-///   flags, header rule for `-h`/`--header`, basic-auth `user:pass` for
-///   `-u`/`--user`/`--proxy-user`). `-h` is treated as `--header` (NOT
-///   `--help`); header-flag values are masked defensively, covering custom
-///   secret headers (`X-Api-Key:`, `X-Vault-Token:`) as well as
-///   `Authorization`/`Bearer`. A `-u`/`--user` value is masked only when it
-///   carries a `:` (the `user:pass` form), leaving bare usernames intact.
-/// * Layer B — per-token inline scan: every token is independently scanned for
-///   attached secret flags (`--password=`, `-p`, `-u<value>`, `--user=`),
-///   attached header flags (`--header=`), URL userinfo passwords,
-///   `Authorization`/`Bearer` header credentials, and env-style secret
-///   `KEY=VALUE` assignments. Secret-flag values are masked WHOLLY before the
-///   partial URL-userinfo rule runs, so a URL-shaped secret-flag value cannot
-///   escape with only its inner password masked.
+/// * `Some(n)` — operate on the first `n` tokens only (operator-facing head).
+/// * `None` — operate on the FULL argv (audit forensics: keep every item,
+///   mask only secret spans).
 ///
-/// Program name and flag NAMES always stay visible; only the secret SPAN is
-/// masked. Defeat-proof against casing, `=` vs space, short vs long flags,
-/// URL userinfo, and rule ordering. Never panics on empty / single-element /
-/// malformed input.
-pub(crate) fn redact_argv_head(argv: &[String]) -> Vec<String> {
-    // Bounded working copy: program + up to two tokens.
-    let mut head: Vec<String> = argv.iter().take(ARGV_HEAD_ITEMS).cloned().collect();
+/// The masking and truncation behaviour is identical in both modes; only the
+/// number of tokens considered differs. Never panics on empty / single-element
+/// / malformed / multibyte input (truncation respects UTF-8 char boundaries).
+fn redact_argv(argv: &[String], max_items: Option<usize>) -> Vec<String> {
+    // Working copy: bounded head (`Some(n)`) or the full argv (`None`).
+    let mut head: Vec<String> =
+        max_items.map_or_else(|| argv.to_vec(), |n| argv.iter().take(n).cloned().collect());
 
-    // LAYER A — flag look-ahead (space-separated value form). Walk the bounded
-    // head; when token[i] names a secret-value flag, mask token[i+1] if present.
+    // LAYER A — flag look-ahead (space-separated value form). Walk the working
+    // copy; when token[i] names a secret-value flag, mask token[i+1] if present.
     let len = head.len();
     for i in 0..len {
-        // Only a flag with a token AFTER it (within the bounded head) can leak
+        // Only a flag with a token AFTER it (within the working copy) can leak
         // a space-separated value; the `i + 1 < len` guard short-circuits the
         // dangling-flag case without a nested `if`.
         let key = head[i].trim().to_ascii_lowercase();
@@ -1257,6 +1240,38 @@ pub(crate) fn redact_argv_head(argv: &[String]) -> Vec<String> {
     }
 
     head
+}
+
+/// Builds a bounded, REDACTED view of a command's leading argv tokens for
+/// operator-facing probe listings.
+///
+/// SECURITY-CRITICAL (TC-4). The output is the program name plus up to two
+/// following tokens, with credential spans masked to `<redacted>` and each
+/// surviving item truncated to `ARGV_HEAD_ITEM_BYTES` on a char boundary.
+/// Masking is applied in two idempotent layers:
+///
+/// * Layer A — flag look-ahead: a known secret-value flag (e.g. `--password`,
+///   `-p`, `--token`) masks the NEXT token's value (whole token for credential
+///   flags, header rule for `-h`/`--header`, basic-auth `user:pass` for
+///   `-u`/`--user`/`--proxy-user`). `-h` is treated as `--header` (NOT
+///   `--help`); header-flag values are masked defensively, covering custom
+///   secret headers (`X-Api-Key:`, `X-Vault-Token:`) as well as
+///   `Authorization`/`Bearer`. A `-u`/`--user` value is masked only when it
+///   carries a `:` (the `user:pass` form), leaving bare usernames intact.
+/// * Layer B — per-token inline scan: every token is independently scanned for
+///   attached secret flags (`--password=`, `-p`, `-u<value>`, `--user=`),
+///   attached header flags (`--header=`), URL userinfo passwords,
+///   `Authorization`/`Bearer` header credentials, and env-style secret
+///   `KEY=VALUE` assignments. Secret-flag values are masked WHOLLY before the
+///   partial URL-userinfo rule runs, so a URL-shaped secret-flag value cannot
+///   escape with only its inner password masked.
+///
+/// Program name and flag NAMES always stay visible; only the secret SPAN is
+/// masked. Defeat-proof against casing, `=` vs space, short vs long flags,
+/// URL userinfo, and rule ordering. Never panics on empty / single-element /
+/// malformed input.
+pub(crate) fn redact_argv_head(argv: &[String]) -> Vec<String> {
+    redact_argv(argv, Some(ARGV_HEAD_ITEMS))
 }
 
 /// Rule (e) helper: decide whether an env-style `KEY=VALUE` key names a secret
@@ -1871,5 +1886,94 @@ mod redact_tests {
             "scheme+user stay visible: {out}"
         );
         assert!(out.contains("@host"), "host structure stays visible: {out}");
+    }
+
+    // ---- AUDIT-LOG surface (format_argv_metadata): FULL-argv redaction ----
+
+    /// Helper: owns a `&[&str]` argv and returns the audit JSON string.
+    fn audit_json(argv: &[&str]) -> String {
+        let owned: Vec<String> = argv.iter().map(|s| (*s).to_owned()).collect();
+        super::format_argv_metadata(&owned)
+    }
+
+    #[test]
+    fn format_argv_metadata_redacts_secret_at_deep_index() {
+        // The secret sits well past the 3-item operator head, proving the audit
+        // surface is UNBOUNDED in item count yet still masks deep secrets.
+        let out = audit_json(&[
+            "myprog",
+            "--verbose",
+            "--out",
+            "/tmp/x",
+            "--retries",
+            "3",
+            "--password",
+            "s3cr3t-DEEP",
+            "tail",
+        ]);
+        assert!(
+            !out.contains("s3cr3t-DEEP"),
+            "deep secret must be masked: {out}"
+        );
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+        // Non-secret items past the head window survive (unbounded coverage).
+        assert!(out.contains("myprog"), "program name stays visible: {out}");
+        assert!(
+            out.contains("--retries"),
+            "deep non-secret flag stays visible: {out}"
+        );
+        assert!(out.contains("tail"), "trailing arg stays visible: {out}");
+    }
+
+    #[test]
+    fn format_argv_metadata_masks_url_userinfo_and_env_secret_anywhere() {
+        let out = audit_json(&[
+            "run",
+            "step1",
+            "DATABASE_URL=postgres://u:pw@host/db",
+            "DB_PASSWORD=hunter2",
+        ]);
+        assert!(!out.contains(":pw@"), "URL userinfo password leaks: {out}");
+        assert!(!out.contains("hunter2"), "env secret value leaks: {out}");
+        assert!(
+            out.contains("<redacted>"),
+            "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn format_argv_metadata_no_panic_on_multibyte() {
+        // A single item far exceeding the 128-byte per-item cap, built from a
+        // multibyte char so any naive `s[..128]` slice would split UTF-8 and
+        // panic. The char-boundary truncation in `redact_argv` must keep this safe.
+        let big = "\u{1f600}".repeat(64); // 64 * 4 bytes = 256 bytes, all multibyte
+        let owned = vec!["prog".to_owned(), big];
+        let out = super::format_argv_metadata(&owned); // must not panic
+        // Result must still be parseable JSON with an `argv` array.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("audit metadata must be valid JSON");
+        assert!(
+            parsed.get("argv").and_then(|a| a.as_array()).is_some(),
+            "argv array present: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_argv_head_still_bounded_to_three() {
+        // Sanity: the operator head path is unchanged — only the first 3 items
+        // survive, so an item at index 3+ is dropped entirely (not just masked).
+        let owned: Vec<String> = ["a", "b", "c", "DROPME"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let head = redact_argv_head(&owned);
+        assert_eq!(head.len(), 3, "head bounded to ARGV_HEAD_ITEMS=3: {head:?}");
+        assert!(
+            !head.iter().any(|t| t.contains("DROPME")),
+            "4th item must be dropped by the bounded head: {head:?}"
+        );
     }
 }
