@@ -92,6 +92,29 @@ pub struct CommandStatusResponse {
     pub receipt: Option<CommandReceipt>,
 }
 
+/// Params for `command_stop` (TC-3): force-kill a running combed
+/// command by `job_id`.
+///
+/// Mirrors [`PtyCommandStopParams`] for the non-PTY runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandStopParams {
+    pub job_id: JobId,
+}
+
+/// Bounded response for `command_stop` (TC-3).
+///
+/// Mirrors [`PtyCommandStopResponse`] minus the PTY-only counters
+/// (`stdin_bytes_written`, `secret_prompts_total`), which have no
+/// meaning for a non-interactive combed command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandStopResponse {
+    pub job_id: JobId,
+    pub bucket_id: BucketId,
+    pub frames_total: u64,
+    pub events_emitted: u64,
+    pub bytes_total: u64,
+}
+
 /// Hard cap on a complete frame (length prefix + payload). Anything
 /// above this is rejected without payload parse.
 ///
@@ -217,6 +240,9 @@ pub enum IpcRequest {
     CommandStartCombed(CommandStartParams),
     /// Lifecycle + counters lookup for a previously started command.
     CommandStatus(CommandStatusParams),
+    /// Force-kill a running combed command by `job_id` (TC-3). Bounded
+    /// metadata response; never returns raw output.
+    CommandStop(CommandStopParams),
     /// Rule-free bounded read of a job's captured output tail (F1).
     CommandOutputTail(CommandOutputTailParams),
     /// FTS-backed search over persisted rule definitions.
@@ -329,6 +355,11 @@ impl IpcRequest {
             // duplicates server-side state, mints a fresh id, or advances
             // a server-held offset.
             Self::CommandStartCombed(_)
+            // Force-kill: fires a one-shot cancel + sets the job terminal.
+            // A blind re-send is a harmless no-op on an already-terminal job,
+            // but it is a server-side state MUTATION, so it is classified
+            // non-idempotent alongside the other Command*/Pty* mutators.
+            | Self::CommandStop(_)
             | Self::PtyCommandStart(_)
             | Self::PtyCommandWriteStdin(_)
             | Self::PtyCommandStop(_)
@@ -430,6 +461,7 @@ pub enum IpcResponse {
     EventContext(EventContextResponse),
     CommandStartCombed(CommandStartResponse),
     CommandStatus(CommandStatusResponse),
+    CommandStop(CommandStopResponse),
     CommandOutputTail(CommandOutputTailResponse),
     RegistrySearch(RegistrySearchResponse),
     RegistryGet(RegistryGetResponse),
@@ -2193,6 +2225,12 @@ mod tests {
             ),
             (
                 IpcRequest::PtyCommandStop(PtyCommandStopParams {
+                    job_id: JobId::new(),
+                }),
+                false,
+            ),
+            (
+                IpcRequest::CommandStop(CommandStopParams {
                     job_id: JobId::new(),
                 }),
                 false,

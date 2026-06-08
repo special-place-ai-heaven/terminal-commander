@@ -40,11 +40,12 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use terminal_commander_core::{
     ActivationScope, BucketConfig, BucketId, ContextRingManager, EventDraft, JobConfig, JobId,
-    JobManager, JobRecord, ProbeId, RuleDefinition,
+    JobManager, JobRecord, JobState, ProbeId, RuleDefinition,
 };
 use terminal_commander_probes::{EventSink, ProcessProbe, ProcessProbeConfig, ProcessProbeMetrics};
 use terminal_commander_sifters::SifterRuntime;
 use terminal_commander_store::AuditEntry;
+use tokio::sync::oneshot;
 
 use crate::activation::ActivationRegistry;
 use crate::audit::AuditSink;
@@ -227,7 +228,7 @@ impl EventSink for DaemonEventSink {
 /// rules so a global activation change can recompute the merged
 /// rule set without losing the inline rules the operator passed at
 /// `start_combed` time (TC42b).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct JobBinding {
     metrics: ProcessProbeMetrics,
     sifter: Arc<terminal_commander_sifters::SifterRuntime>,
@@ -244,8 +245,18 @@ struct JobBinding {
     /// Bounded, ALREADY-REDACTED argv head (TC-4 Phase 4a): program name
     /// plus up to two tokens with credential spans masked. Computed once
     /// at `start_combed` via `redact_argv_head`; never holds a raw secret.
-    /// `Vec<String>` is `Clone`, so the struct's `Clone` derive still holds.
     argv_head: Vec<String>,
+    /// TC-3: the probe's cancel handle, taken at spawn so `stop` can
+    /// force-kill this job; `oneshot::Sender` is not Clone, which is why
+    /// this struct dropped its Clone derive -- it is never whole-cloned.
+    cancel: Option<oneshot::Sender<()>>,
+    /// TC-3: a shared handle to the probe's LIVE metrics, cloned at spawn
+    /// before the probe is moved into its lifecycle task. `stop` snapshots
+    /// it to report the real frame/byte/event counts of a job it kills
+    /// (the `metrics` field above is only populated at exit, so it would
+    /// read zero for a still-running job). Mirrors the PTY runtime, which
+    /// reads probe-side metrics before cancellation.
+    metrics_live: Arc<parking_lot::Mutex<terminal_commander_probes::ProcessProbeMetrics>>,
 }
 
 /// Identity triple for a single live job.
@@ -689,7 +700,7 @@ impl CommandRuntime {
         // Windows: ProcessProbe::spawn applies CREATE_NO_WINDOW for combed runtime
         // spawns. JS bridge (lib/wsl/spawn.js) intentionally does NOT — WWS04 EDR
         // legitimacy ritual. See docs/release/windows-wsl-bridge-contract.md §4.4.
-        let probe =
+        let mut probe =
             match ProcessProbe::spawn(&req.argv, &probe_cfg, Arc::clone(&self.rings), sifter, sink)
             {
                 Ok(p) => p,
@@ -708,6 +719,19 @@ impl CommandRuntime {
                     return Err(CommandError::Spawn(e));
                 }
             };
+
+        // TC-3: take the probe's cancel handle out NOW, while we still own
+        // `probe` by value and BEFORE it is moved into the lifecycle closure
+        // via `drive_to_exit(probe)` below. The handle is stored in the live
+        // binding so `stop()` can fire the one-shot kill itself. `probe`
+        // retains its own `cancel()` path for in-probe teardown, but that
+        // sender has been moved here, so only `stop()` (via this handle) can
+        // trigger the kill from outside.
+        let cancel_handle = probe.take_cancel_handle();
+        // TC-3: clone the LIVE metrics handle (a shared Arc) BEFORE `probe`
+        // is moved into the lifecycle closure, so `stop()` can snapshot the
+        // real frame/byte/event counts of a job it kills.
+        let metrics_live = probe.metrics_handle();
 
         // Register the job and audit the allow decision. Consume
         // req.argv exactly once here; downstream code uses
@@ -744,6 +768,11 @@ impl CommandRuntime {
                 // Computed from the `argv_for_meta` clone (req.argv was
                 // already moved into `job_cfg.argv` above).
                 argv_head: redact_argv_head(&argv_for_meta),
+                // TC-3: the probe's cancel handle, taken just above. `stop()`
+                // fires this to force-kill the job.
+                cancel: cancel_handle,
+                // TC-3: shared handle to the probe's live metrics for `stop()`.
+                metrics_live,
             },
         );
         self.audit(
@@ -824,6 +853,27 @@ impl CommandRuntime {
                 b.receipt = receipt;
             }
 
+            // TC-3: if `stop()` already finalized this job (set it terminal under the
+            // live write lock), skip -- do not double-finish / double-append. Mirrors the
+            // PTY waiter guard. Unlike the PTY waiter, the combed runtime owns the TC-2
+            // in-flight dedup entry, so we MUST still evict it on this early-return path:
+            // `stop()` does not touch the dedup map, and a nonce-keyed entry is NOT
+            // TTL-gated (it is released ONLY on completion). Skipping the eviction here
+            // would leak a stopped job's fingerprint forever and block a future
+            // identical-nonce start (the TC-2 never-block invariant). The kill IS the
+            // completion, so evict now, then return.
+            if waiter_jobs.get(job_id).is_some_and(|r| {
+                matches!(
+                    r.state,
+                    terminal_commander_core::JobState::Exited
+                        | terminal_commander_core::JobState::Failed
+                        | terminal_commander_core::JobState::Cancelled
+                )
+            }) {
+                waiter_dedup.lock().remove(&dedup_k);
+                return;
+            }
+
             // Lifecycle draft.
             let draft = match outcome {
                 ProbeOutcome::Exited { code, signal } => waiter_jobs.finish(job_id, code, signal),
@@ -882,6 +932,99 @@ impl CommandRuntime {
             probe_id,
             cursor: 0,
         })
+    }
+
+    /// Force-kill a running combed command by `job_id` (TC-3).
+    ///
+    /// SECURITY-CRITICAL ORDERING. The steps run in this exact order so a
+    /// policy-denied caller learns nothing about job existence and the deny
+    /// audit row names the PEER, not the job:
+    ///
+    /// 1. DENY-FIRST: evaluate `CommandSignal` BEFORE any live-map lookup. A
+    ///    denied caller therefore gets NO existence oracle, and the deny
+    ///    row's subject is `peer_subject` (the caller identity), never a
+    ///    `job_id`. No live map is touched on the deny path.
+    /// 2. ALLOW: a single check-then-set critical section under the live
+    ///    write lock. This is the ONLY lock held across the
+    ///    already-terminal check, the handle take, and the `jobs.cancel`,
+    ///    so it serializes against the natural-exit waiter (which must take
+    ///    `live.write` to publish its receipt before it finishes the job).
+    ///    Setting the job Cancelled under the held `live` lock guarantees
+    ///    the waiter -- once it acquires `live.write` -- observes a terminal
+    ///    state and guards out (no double-finish / double-append).
+    /// 3. job-id-bearing ALLOW audit, then fire the one-shot kill.
+    ///
+    /// LOCK ORDERING: this nests `live.write()` THEN `jobs.cancel`
+    /// (`jobs.write`, taken and released INSIDE `cancel`). No other code
+    /// path takes these in the reverse order: the natural-exit waiter takes
+    /// `live.write`, DROPS it, then touches `jobs` -- sequential, never
+    /// nested -- so there is no `jobs -> live` nesting to deadlock against.
+    pub fn stop(
+        &self,
+        job_id: JobId,
+        peer_subject: &str,
+    ) -> Result<(BucketId, ProcessProbeMetrics), CommandError> {
+        // (1) DENY-FIRST. Evaluate the signal policy BEFORE any live-map
+        // lookup so a denied caller gets no existence oracle and the deny
+        // row's subject is the PEER, not the job_id.
+        let verdict = self.policy.evaluate(&PolicyAction::CommandSignal);
+        if verdict.decision == PolicyDecision::Deny {
+            self.audit(
+                "command_stop",
+                peer_subject,
+                "deny",
+                Some(verdict.reason.clone()),
+                None,
+            );
+            // NO live-map touch, NO job_id anywhere on this path.
+            return Err(CommandError::PolicyDenied(verdict.reason));
+        }
+
+        // (2) ALLOW: check-then-set under the live write lock -- the single
+        // critical section vs the natural-exit waiter (which must take
+        // live.write to publish its receipt before it finishes the job).
+        let (bucket_id, metrics, handle) = {
+            let mut live = self.live.write();
+            let Some(b) = live.get_mut(&job_id) else {
+                return Err(CommandError::UnknownJob(job_id));
+            };
+            let bucket_id = b.bucket_id;
+            // Snapshot the LIVE probe metrics (real frame/byte/event counts),
+            // not the binding's `metrics` field which stays default until exit.
+            let metrics = b.metrics_live.lock().clone();
+            // Already terminal -> no-op, return the terminal state. (Cosmetic
+            // race window with a natural exit, identical to the PTY design --
+            // documented.)
+            if self.jobs.get(job_id).is_some_and(|r| {
+                matches!(
+                    r.state,
+                    JobState::Exited | JobState::Failed | JobState::Cancelled
+                )
+            }) {
+                return Ok((bucket_id, metrics));
+            }
+            let handle = b.cancel.take();
+            // Set Cancelled under the held live lock so the waiter (blocked on
+            // live.write) observes terminal and guards out.
+            let _ = self.jobs.cancel(job_id);
+            (bucket_id, metrics, handle)
+        }; // live dropped here
+
+        // (3) job-id-bearing ALLOW audit BEFORE firing the kill.
+        self.audit(
+            "command_stop",
+            &job_id.to_wire_string(),
+            "allow",
+            None,
+            Some(format!(
+                "{{\"frames\":{},\"events\":{},\"bytes\":{}}}",
+                metrics.frames_total, metrics.events_emitted, metrics.bytes_total
+            )),
+        );
+        if let Some(tx) = handle {
+            let _ = tx.send(()); // fire the kill
+        }
+        Ok((bucket_id, metrics))
     }
 
     /// Await every in-flight lifecycle waiter task, bounded by

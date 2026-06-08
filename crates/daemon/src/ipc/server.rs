@@ -423,6 +423,7 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::EventContext(_) => "event_context",
         IpcRequest::CommandStartCombed(_) => "command_start_combed",
         IpcRequest::CommandStatus(_) => "command_status",
+        IpcRequest::CommandStop(_) => "command_stop",
         IpcRequest::CommandOutputTail(_) => "command_output_tail",
         IpcRequest::RegistrySearch(_) => "registry_search",
         IpcRequest::RegistryGet(_) => "registry_get",
@@ -471,6 +472,7 @@ const DISCOVERABLE_METHODS: &[&str] = &[
     "event_context",
     "command_start_combed",
     "command_status",
+    "command_stop",
     "command_output_tail",
     "registry_search",
     "registry_get",
@@ -585,6 +587,12 @@ async fn dispatch(
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
         },
+        IpcRequest::CommandStop(p) => {
+            match handlers::command::handle_command_stop(state, p, peer) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
         IpcRequest::CommandOutputTail(p) => {
             match handlers::command::handle_command_output_tail(state, p) {
                 Ok(r) => IpcResult::Ok { response: r },
@@ -1021,14 +1029,14 @@ mod tests {
     use super::*;
     use crate::ipc::protocol::{
         AuditSinceParams, BucketEventsSinceParams, BucketSummaryParams, BucketWaitParams,
-        CommandOutputTailParams, CommandStartParams, CommandStatusParams, EventContextParams,
-        FileReadWindowParams, FileSearchParams, FileWatchStartParams, FileWatchStopParams,
-        ListLimitParams, ProbeStatusParams, PtyCommandStartParams, PtyCommandStopParams,
-        PtyCommandWriteStdinParams, RegistryActivateParams, RegistryDeactivateParams,
-        RegistryGetParams, RegistryImportPackParams, RegistrySearchParams, RegistryTestParams,
-        RegistryUpsertParams, SubscriptionCloseParams, SubscriptionListParams,
-        SubscriptionOpenParams, SubscriptionPredicate, SubscriptionPullParams,
-        SubscriptionSeekParams, SubscriptionSourceSel,
+        CommandOutputTailParams, CommandStartParams, CommandStatusParams, CommandStopParams,
+        EventContextParams, FileReadWindowParams, FileSearchParams, FileWatchStartParams,
+        FileWatchStopParams, ListLimitParams, ProbeStatusParams, PtyCommandStartParams,
+        PtyCommandStopParams, PtyCommandWriteStdinParams, RegistryActivateParams,
+        RegistryDeactivateParams, RegistryGetParams, RegistryImportPackParams,
+        RegistrySearchParams, RegistryTestParams, RegistryUpsertParams, SubscriptionCloseParams,
+        SubscriptionListParams, SubscriptionOpenParams, SubscriptionPredicate,
+        SubscriptionPullParams, SubscriptionSeekParams, SubscriptionSourceSel,
     };
     use std::collections::BTreeSet;
     use terminal_commander_core::{
@@ -1107,6 +1115,9 @@ mod tests {
                 dedup_nonce: None,
             }),
             IpcRequest::CommandStatus(CommandStatusParams {
+                job_id: JobId::new(),
+            }),
+            IpcRequest::CommandStop(CommandStopParams {
                 job_id: JobId::new(),
             }),
             IpcRequest::CommandOutputTail(CommandOutputTailParams {

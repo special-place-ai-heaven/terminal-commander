@@ -45,8 +45,9 @@ pub use file_watch::{LiveWatchIdentity, WatchError, WatchRebindReport, WatchRunt
 pub use ipc::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
-    CommandStartParams, CommandStatusParams, ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT,
-    DEFAULT_BUCKET_WAIT_MS, DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES,
+    CommandStartParams, CommandStatusParams, CommandStopParams, CommandStopResponse,
+    ContextUnavailableReason, DEFAULT_BUCKET_READ_LIMIT, DEFAULT_BUCKET_WAIT_MS,
+    DEFAULT_CONTEXT_AFTER, DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES,
     DEFAULT_FILE_READ_LINES, DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES,
     DEFAULT_PULL_TIMEOUT_MS, DEFAULT_REGISTRY_SEARCH_LIMIT, DiscoverResponse, EventContextParams,
     EventContextResponse, FileLine, FileReadWindowParams, FileReadWindowResponse, FileSearchMatch,

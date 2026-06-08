@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use terminal_commander_supervisor::identity::PeerIdentity;
 
-use super::common::map_command_error;
+use super::common::{identity_audit_subject, map_command_error};
 use crate::command::CommandStartRequest;
 use crate::ipc::protocol::{
     CommandOutputTailParams, CommandOutputTailResponse, CommandStartParams, CommandStatusParams,
-    IpcError, IpcErrorCode, IpcResponse, MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES,
-    MAX_TAIL_BYTES, MAX_TAIL_LINES,
+    CommandStopParams, CommandStopResponse, IpcError, IpcErrorCode, IpcResponse,
+    MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES, MAX_TAIL_BYTES, MAX_TAIL_LINES,
 };
 use crate::state::DaemonState;
 
@@ -50,6 +50,35 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
     };
     let resp = state.command.start_combed(req).map_err(map_command_error)?;
     Ok(IpcResponse::CommandStartCombed(resp))
+}
+
+/// TC-3 `command_stop` handler: force-kill a running combed command.
+///
+/// Mirrors [`handle_command_start_combed`]'s convention: returns
+/// `Result<IpcResponse, IpcError>` and maps the runtime error via
+/// [`map_command_error`] (so `PolicyDenied -> PolicyDenied` and
+/// `UnknownJob -> UnknownJob` reach the wire with the right codes).
+///
+/// The peer is rendered to an audit subject via the SHARED
+/// [`identity_audit_subject`] helper and passed to `stop` so a
+/// policy-denied caller's deny audit row names the PEER, never the
+/// `job_id` -- the deny path inside `stop` never touches the live map.
+pub(in crate::ipc::server) fn handle_command_stop(
+    state: &Arc<DaemonState>,
+    params: &CommandStopParams,
+    peer: &PeerIdentity,
+) -> Result<IpcResponse, IpcError> {
+    let peer_subject = identity_audit_subject(peer);
+    match state.command.stop(params.job_id, &peer_subject) {
+        Ok((bucket_id, m)) => Ok(IpcResponse::CommandStop(CommandStopResponse {
+            job_id: params.job_id,
+            bucket_id,
+            frames_total: m.frames_total,
+            events_emitted: m.events_emitted,
+            bytes_total: m.bytes_total,
+        })),
+        Err(e) => Err(map_command_error(e)),
+    }
 }
 
 /// Stable per-peer discriminator for the TC-2 nonce-less dedup fallback.

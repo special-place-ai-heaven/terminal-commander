@@ -291,12 +291,29 @@ impl ProcessProbe {
         self.metrics.lock().clone()
     }
 
+    /// Clone the shared metrics handle so an owner can snapshot LIVE counters
+    /// even after the probe is moved by value into its lifecycle task. The
+    /// returned `Arc` points at the same `Mutex` the probe's run loop updates,
+    /// so a reader sees the real frame/byte/event counts at read time. Used by
+    /// `CommandRuntime::stop` to report the worked workload of a job it kills
+    /// (mirrors how the PTY runtime snapshots metrics before cancellation).
+    pub fn metrics_handle(&self) -> Arc<Mutex<ProcessProbeMetrics>> {
+        Arc::clone(&self.metrics)
+    }
+
     /// Request cancellation. Best-effort; the streaming task and
     /// child are torn down. Idempotent.
     pub fn cancel(&mut self) {
         if let Some(tx) = self.cancel_tx.take() {
             let _ = tx.send(());
         }
+    }
+
+    /// Take the cancel handle out of the probe so an OWNER (the command runtime's
+    /// `stop`) can fire the kill itself. Mirrors `cancel` but hands the sender to
+    /// the caller instead of sending. Returns None if already taken/fired.
+    pub const fn take_cancel_handle(&mut self) -> Option<tokio::sync::oneshot::Sender<()>> {
+        self.cancel_tx.take()
     }
 
     /// Await natural exit. Returns the child exit status on success;
