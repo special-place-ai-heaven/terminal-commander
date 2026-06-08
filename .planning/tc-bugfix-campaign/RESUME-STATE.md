@@ -53,17 +53,24 @@ ONE wait-loop rewrite in crates/mcp/src/tools.rs::run_and_watch:
   alone (in use by another project).
 
 ## Next steps on resume
-1. Phase 4 (TC-4): probe identity -- ProbeListEntry additive argv_head/tag,
-   collect_probes enrichment, into_parts tag fix, NEW argv redactor (mask
-   -H Authorization etc; format_argv_metadata only truncates), CLI render.rs.
-   Per PLAN-TC4-probe-identity.md.
-2. Phase 5 (TC-5): self_check spawn -- async handle_self_check, hidden clap
-   Cmd::SelfcheckNoop subcommand, one cached immortal bucket, profile-gated
-   skip-not-fail, negative test. Per PLAN-TC5-selfcheck-spawn.md.
-3. Phase 6a/6b (TC-3): command_stop -- retain cancel handle, IpcRequest::
-   CommandStop, CommandRuntime::stop with policy gate, command waiter terminal
-   guard; then command_stop MCP tool + all tool-count fixtures (37->38).
-   Per PLAN-TC3-command-stop.md.
+USE THE *-AMENDED.md plans (re-anchored 2026-06-08 vs e76ebdc; symbol-anchored so
+they survive line drift). The pre-amend originals are kept for lineage only.
+1. Phase 4a/4b (TC-4): per PLAN-TC4-probe-identity-AMENDED.md. 4a = wire fields +
+   NEW argv redactor + collect_probes (SECURITY review on the redactor); 4b = mcp
+   tag plumbing + CLI render + fixtures.
+2. Phase 5 (TC-5): per PLAN-TC5-selfcheck-spawn-AMENDED.md. Note: SelfcheckNoop
+   short-circuit MUST precede resolve_config in main(); cached bucket =
+   parking_lot/OnceCell (not tokio); do NOT touch runtime.rs run_self_check.
+3. Phase 6a/6b (TC-3): per PLAN-TC3-command-stop-AMENDED.md. Note: waiter guard
+   goes after receipt-publish, before the draft match; tools.rs has TWO count
+   strings; RE-COUNT the live-tool baseline before the 37->38 churn.
+
+## Drift convention (campaign-wide)
+Absolute line numbers re-drift after EVERY phase lands. Plans anchor on SYMBOLS;
+line numbers are `as_of <ref>` hints. MANDATORY per-phase step: at phase start,
+re-anchor every symbol via SymForge and re-verify each claim BEFORE editing; after
+a phase is coded+tested+committed, re-anchor + amend the NEXT plan (commit the
+amendment) before starting it.
 
 ## Standing rules
 - Each phase: code -> SymForge/external review -> both OS gates -> separate commit.
