@@ -78,6 +78,18 @@ at phase start.** Mandatory first execution step:
 5. **`SelfCheckResponse`** structurally unchanged; report string gains a
    spawn-probe line (no wire change).
 
+6. **Phase-2 dedup interaction (NEW -- must honor, verify at re-anchor):** the
+   self-check spawn routes through `CommandRuntime`, which since Phase 2 (cf43d5b)
+   holds an in-flight dedup guard (nonce-preferred; else peer-scoped
+   `(uid/sid, argv, cwd, tag)`; 3s TTL). The self-check argv is constant
+   (`[exe, "selfcheck-noop"]`), so two self_checks within 3s would hash-collide and
+   the SECOND would COLLAPSE into the first job -- it would NOT actually spawn,
+   silently re-introducing the false-green this phase exists to kill. The self-check
+   spawn MUST mint a FRESH `dedup_nonce` per call (the daemon-internal start path can
+   set `dedup_nonce: Some(<fresh>)` the same way the MCP adapter does), or be
+   explicitly dedup-exempt. TEST: two back-to-back self_checks within 3s each yield a
+   DISTINCT job_id (both really spawned).
+
 **Disambiguation (NEW):** do NOT edit the heavyweight `run_self_check` /
 `SelfCheckReport` in `crates/daemon/src/runtime.rs` (used by `Cmd::Check` and
 `RuntimeMode::SelfCheck`). TC-5 targets ONLY the IPC `handle_self_check` (the
