@@ -45,7 +45,9 @@
           "events_emitted": 1,
           "secret_prompts_total": 0,
           "secret_prompt_active": false,
-          "path": null
+          "path": null,
+          "tag": "build",
+          "argv_head": ["cargo", "build", "--release"]
         },
         {
           "kind": "file_watch",
@@ -56,7 +58,9 @@
           "events_emitted": 0,
           "secret_prompts_total": 0,
           "secret_prompt_active": false,
-          "path": "C:\\work\\app\\build.log"
+          "path": "C:\\work\\app\\build.log",
+          "tag": null,
+          "argv_head": ["file_watch:C:\\work\\app\\build.log"]
         },
         {
           "kind": "pty",
@@ -67,7 +71,9 @@
           "events_emitted": 0,
           "secret_prompts_total": 1,
           "secret_prompt_active": true,
-          "path": null
+          "path": null,
+          "tag": "db",
+          "argv_head": ["psql", "postgres://u:<redacted>@db/app"]
         }
       ],
       "buckets": [
@@ -131,6 +137,7 @@
     "probe kind values are snake_case",
     "bucket entries contain counters only and do not contain severity histograms",
     "probe entries contain counters and identifiers only, never raw stream frames",
+    "probe entries MAY carry an optional per-bucket tag and a bounded, REDACTED argv_head (<=3 items, secret spans masked to <redacted>); never the raw argv",
     "does not synthesize runtime state while daemon is unavailable"
   ]
 }

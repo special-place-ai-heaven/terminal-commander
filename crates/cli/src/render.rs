@@ -160,22 +160,65 @@ pub(crate) fn audit(resp: &AuditSinceResponse) {
     }
 }
 
-/// Shared probe table. Empty list prints just the header (honestly-empty).
-fn probe_rows(probes: &[terminal_commander_ipc::ProbeListEntry]) {
-    println!(
-        "{:<10} {:<36} {:<36} {:>8} {:>8}",
-        "KIND", "JOB_ID", "BUCKET_ID", "FRAMES", "EVENTS"
+/// Builds the full probe table (header + rows) as a String. Pure over its
+/// input: an empty list yields just the header (honestly-empty). Appends the
+/// TC-4 `TAG` and `ARGV_HEAD` columns after the existing columns; `argv_head`
+/// is the already-redacted projection joined on spaces and truncated to a
+/// readable width. A `None` tag/argv_head degrades to a blank cell.
+fn probe_table(probes: &[terminal_commander_ipc::ProbeListEntry]) -> String {
+    use std::fmt::Write as _;
+
+    /// Max rendered width of the `ARGV_HEAD` cell (the source value is already
+    /// bounded + redacted; this only keeps the operator table readable).
+    const ARGV_HEAD_CELL_WIDTH: usize = 48;
+    /// Max rendered width of the operator-supplied `TAG` cell. Clamped so a
+    /// long tag cannot push the `ARGV_HEAD` column out of alignment.
+    const TAG_CELL_WIDTH: usize = 12;
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<10} {:<36} {:<36} {:>8} {:>8} {:<12} {:<48}",
+        "KIND", "JOB_ID", "BUCKET_ID", "FRAMES", "EVENTS", "TAG", "ARGV_HEAD"
     );
     for p in probes {
-        println!(
-            "{:<10} {:<36} {:<36} {:>8} {:>8}",
+        let tag = truncate_chars(p.tag.as_deref().unwrap_or(""), TAG_CELL_WIDTH);
+        let argv_head = p
+            .argv_head
+            .as_deref()
+            .map(|h| truncate_chars(&h.join(" "), ARGV_HEAD_CELL_WIDTH))
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "{:<10} {:<36} {:<36} {:>8} {:>8} {:<12} {:<48}",
             probe_kind_label(p.kind),
             p.job_id,
             p.bucket_id,
             p.frames_total,
             p.events_emitted,
+            tag,
+            argv_head,
         );
     }
+    out
+}
+
+/// Truncate a string to at most `max` chars on a char boundary, appending an
+/// ellipsis marker when content was dropped. Never splits a multi-byte char.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    // Reserve one char for the ellipsis when truncating.
+    let keep = max.saturating_sub(1);
+    let mut t: String = s.chars().take(keep).collect();
+    t.push('~');
+    t
+}
+
+/// Shared probe table. Empty list prints just the header (honestly-empty).
+fn probe_rows(probes: &[terminal_commander_ipc::ProbeListEntry]) {
+    print!("{}", probe_table(probes));
 }
 
 /// Shared bucket table. Empty list prints just the header (honestly-empty).
@@ -245,5 +288,97 @@ mod tests {
             scope_label(&ActivationScope::Probe { probe_id }),
             format!("probe:{probe_id}")
         );
+    }
+
+    fn sample_probe(
+        tag: Option<&str>,
+        argv_head: Option<Vec<&str>>,
+    ) -> terminal_commander_ipc::ProbeListEntry {
+        terminal_commander_ipc::ProbeListEntry {
+            kind: ProbeKind::Command,
+            job_id: JobId::new(),
+            bucket_id: BucketId::new(),
+            probe_id: ProbeId::new(),
+            frames_total: 0,
+            events_emitted: 0,
+            frames_suppressed: 0,
+            frames_suppressed_progress: 0,
+            frames_suppressed_dedupe: 0,
+            secret_prompts_total: 0,
+            secret_prompt_active: false,
+            path: None,
+            liveness: terminal_commander_ipc::Liveness::default(),
+            tag: tag.map(str::to_string),
+            argv_head: argv_head.map(|h| h.into_iter().map(str::to_string).collect()),
+        }
+    }
+
+    #[test]
+    fn probe_table_renders_tag_and_argv_head_columns() {
+        let probe = sample_probe(Some("build"), Some(vec!["cargo", "build", "--release"]));
+        let table = probe_table(std::slice::from_ref(&probe));
+        assert!(table.contains("TAG"), "header missing TAG: {table}");
+        assert!(
+            table.contains("ARGV_HEAD"),
+            "header missing ARGV_HEAD: {table}"
+        );
+        assert!(table.contains("build"), "row missing tag: {table}");
+        assert!(
+            table.contains("cargo build --release"),
+            "row missing argv_head: {table}"
+        );
+    }
+
+    #[test]
+    fn probe_table_renders_blank_cells_when_tag_and_argv_head_absent() {
+        let probe = sample_probe(None, None);
+        let table = probe_table(std::slice::from_ref(&probe));
+        // Headers always present, even with empty optional cells.
+        assert!(table.contains("TAG"), "header missing TAG: {table}");
+        assert!(
+            table.contains("ARGV_HEAD"),
+            "header missing ARGV_HEAD: {table}"
+        );
+        // The data row renders without panicking and carries the kind label.
+        assert!(table.contains("command"), "row missing kind: {table}");
+    }
+
+    #[test]
+    fn probe_table_empty_list_is_header_only() {
+        let table = probe_table(&[]);
+        let line_count = table.lines().count();
+        assert_eq!(
+            line_count, 1,
+            "empty list must print just the header: {table}"
+        );
+        assert!(
+            table.contains("KIND") && table.contains("ARGV_HEAD"),
+            "{table}"
+        );
+    }
+
+    #[test]
+    fn truncate_chars_marks_truncation_and_preserves_short_input() {
+        assert_eq!(truncate_chars("short", 48), "short");
+        let long = "x".repeat(60);
+        let out = truncate_chars(&long, 48);
+        assert_eq!(out.chars().count(), 48);
+        assert!(out.ends_with('~'), "{out}");
+    }
+
+    #[test]
+    fn truncate_chars_never_splits_a_multibyte_char() {
+        // A mix of multi-byte chars (each > 1 byte) truncated at a boundary that,
+        // under naive byte slicing, would land mid-codepoint. Char-based truncation
+        // must keep the result valid UTF-8 and within the char budget.
+        let s = "héllo-wörld-🦀-grüße";
+        let out = truncate_chars(s, 8);
+        assert!(out.chars().count() <= 8, "char budget exceeded: {out:?}");
+        assert!(out.ends_with('~'), "truncation marker expected: {out:?}");
+        // Round-tripping through str/String proves it is valid UTF-8 (no panic, no
+        // replacement char from a split codepoint).
+        assert_eq!(out, String::from_utf8(out.clone().into_bytes()).unwrap());
+        // A multibyte string already within budget is returned unchanged.
+        assert_eq!(truncate_chars("café", 8), "café");
     }
 }

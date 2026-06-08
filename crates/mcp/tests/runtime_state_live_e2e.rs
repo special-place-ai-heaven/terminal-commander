@@ -161,6 +161,88 @@ async fn runtime_state_aggregates_two_sources_through_mcp() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_and_watch_threads_tag_and_redacts_argv_head_through_mcp() {
+    let data = tmp_data_dir("rw-tag");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        // run_and_watch a command carrying a tag and a secret in its argv.
+        // `sleep --password <secret>` exits fast on the invalid flag, but the
+        // command binding lingers in the live map so runtime_state can observe
+        // it. The secret sits at head index 2 and is masked by the
+        // `--password` look-ahead in the recorded, redacted argv head.
+        let _ = call_tool(
+            &client,
+            "run_and_watch",
+            serde_json::json!({
+                "argv": ["sleep", "--password", "E2E-SECRET-XYZ"],
+                "tag": "e2e-4b-tag",
+                "wait_ms": 300
+            }),
+        )
+        .await;
+
+        // Poll runtime_state until a command probe registers (avoid any
+        // registration race between the spawn and the live-map insert).
+        let mut command_probe: Option<serde_json::Value> = None;
+        for _ in 0..10 {
+            let payload =
+                first_text(&call_tool(&client, "runtime_state", serde_json::json!({})).await);
+            let v: serde_json::Value = serde_json::from_str(&payload).expect("runtime_state json");
+            if let Some(probes) = v["probes"].as_array()
+                && let Some(p) = probes
+                    .iter()
+                    .find(|p| p["kind"].as_str() == Some("command"))
+            {
+                command_probe = Some(p.clone());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let probe = command_probe.expect("a command probe must appear in runtime_state");
+
+        // The tag threads end-to-end through run_and_watch -> command_start.
+        assert_eq!(
+            probe["tag"].as_str(),
+            Some("e2e-4b-tag"),
+            "tag must thread through run_and_watch; probe: {probe}"
+        );
+
+        // The argv head is bounded + redacted: the secret value is masked, the
+        // program and the flag NAME stay visible, and the raw secret never
+        // appears.
+        let argv_head = probe["argv_head"]
+            .as_array()
+            .expect("command probe must carry an argv_head")
+            .iter()
+            .map(|s| s.as_str().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !argv_head.contains("E2E-SECRET-XYZ"),
+            "raw secret leaked into argv_head: {argv_head}"
+        );
+        assert!(
+            argv_head.contains("<redacted>"),
+            "argv_head must mask the secret span: {argv_head}"
+        );
+        assert!(
+            argv_head.contains("sleep"),
+            "argv_head must keep the program name: {argv_head}"
+        );
+        assert!(
+            argv_head.contains("--password"),
+            "argv_head must keep the flag name: {argv_head}"
+        );
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn probe_status_unknown_probe_returns_error_through_mcp() {
     let data = tmp_data_dir("unknown");
     let handle = spawn_live_daemon(&data);

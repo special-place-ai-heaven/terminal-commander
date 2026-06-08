@@ -2468,6 +2468,11 @@ pub struct McpRunAndWatchParams {
     /// Max signals to return. Default 50, capped at 500.
     #[serde(default)]
     pub max_signals: Option<usize>,
+    /// Optional per-bucket tag (Phase 3). Tag this probe so a subscription
+    /// opened with a matching `tag` predicate routes to it, and so the
+    /// runtime_state / probe_list rows carry it. Omit for none.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 impl McpRunAndWatchParams {
@@ -2489,7 +2494,7 @@ impl McpRunAndWatchParams {
             bucket_config_json: self.bucket_config_json,
             rules: self.rules,
             rules_json: self.rules_json,
-            tag: None,
+            tag: self.tag,
         };
         (start, wait_ms, max_signals)
     }
@@ -4400,6 +4405,43 @@ mod tests {
                 "argv teaching error missing in: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn run_and_watch_into_parts_threads_tag_through() {
+        // Regression guard for the silent `tag: None` drop (TC-4 Phase 4b):
+        // `run_and_watch` must thread its `tag` into the start params so the
+        // probe's bucket source carries it.
+        let params = McpRunAndWatchParams {
+            argv: vec!["sleep".to_string(), "1".to_string()],
+            cwd: None,
+            env: Vec::new(),
+            grace_ms: None,
+            bucket_config_json: None,
+            rules: None,
+            rules_json: None,
+            wait_ms: None,
+            max_signals: None,
+            tag: Some("X".to_string()),
+        };
+        let (start, _wait_ms, _max_signals) = params.into_parts();
+        assert_eq!(start.tag, Some("X".to_string()));
+
+        // A `None` tag must stay `None` (no fabricated tag).
+        let untagged = McpRunAndWatchParams {
+            argv: vec!["sleep".to_string(), "1".to_string()],
+            cwd: None,
+            env: Vec::new(),
+            grace_ms: None,
+            bucket_config_json: None,
+            rules: None,
+            rules_json: None,
+            wait_ms: None,
+            max_signals: None,
+            tag: None,
+        };
+        let (start, _wait_ms, _max_signals) = untagged.into_parts();
+        assert_eq!(start.tag, None);
     }
 
     #[test]

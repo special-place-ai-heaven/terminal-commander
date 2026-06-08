@@ -33,7 +33,9 @@
           "events_emitted": 1,
           "secret_prompts_total": 0,
           "secret_prompt_active": false,
-          "path": null
+          "path": null,
+          "tag": "build",
+          "argv_head": ["cargo", "build", "--release"]
         },
         {
           "kind": "file_watch",
@@ -44,7 +46,9 @@
           "events_emitted": 2,
           "secret_prompts_total": 0,
           "secret_prompt_active": false,
-          "path": "C:\\work\\app\\build.log"
+          "path": "C:\\work\\app\\build.log",
+          "tag": null,
+          "argv_head": ["file_watch:C:\\work\\app\\build.log"]
         },
         {
           "kind": "pty",
@@ -55,7 +59,9 @@
           "events_emitted": 0,
           "secret_prompts_total": 1,
           "secret_prompt_active": true,
-          "path": null
+          "path": null,
+          "tag": "db",
+          "argv_head": ["psql", "postgres://u:<redacted>@db/app"]
         }
       ]
     }
@@ -85,8 +91,8 @@
     "request has no arguments",
     "empty probes is a valid success response only when the daemon is reachable",
     "probe kind values are snake_case: command, file_watch, and pty",
-    "probe rows contain ids, counters, secret-prompt counters and flags, and optional file-watch path only",
-    "probe rows do not contain argv, bytes_total, cursor, rules, cwd, env, stdout, stderr, screen buffers, file content, or event bodies",
+    "probe rows contain ids, counters, secret-prompt counters and flags, optional file-watch path, an optional per-bucket tag, and an optional redacted argv_head only",
+    "probe rows do not contain raw argv, bytes_total, cursor, rules, cwd, env, stdout, stderr, screen buffers, file content, or event bodies; the optional argv_head is a bounded, redacted (<=3 items, secrets masked) projection of the leading argv, not the raw argv",
     "daemon unavailable is a typed daemon_unavailable error, not empty success"
   ]
 }
