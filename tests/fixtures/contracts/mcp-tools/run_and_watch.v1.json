@@ -37,7 +37,10 @@
       "tail": []
     },
     "complete": true,
-    "wait_exhausted": false
+    "wait_exhausted": false,
+    "cursor": 12,
+    "degraded": false,
+    "recover_hint": null
   },
   "response_example_wait_exhausted": {
     "job_id": "job_018f0000000000000000000000000001",
@@ -48,7 +51,24 @@
     "signal_count": 0,
     "receipt": null,
     "complete": false,
-    "wait_exhausted": true
+    "wait_exhausted": true,
+    "cursor": 12,
+    "degraded": false,
+    "recover_hint": null
+  },
+  "response_example_degraded": {
+    "job_id": "job_018f0000000000000000000000000001",
+    "bucket_id": "bkt_018f0000000000000000000000000001",
+    "state": "unknown",
+    "exit_code": null,
+    "signals": [],
+    "signal_count": 0,
+    "receipt": null,
+    "complete": false,
+    "wait_exhausted": true,
+    "cursor": 12,
+    "degraded": true,
+    "recover_hint": "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with the `health` tool, then poll command_status with this job_id for the final state and signals. Do not re-run the command."
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -80,6 +100,11 @@
     "inline rules use the typed shorthand; the minimal rule is {\"pattern\": \"...\"}",
     "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list is OVERLAID onto (added to or overrides) the inherited environment (merged, not replaced; PATH/SystemRoot are kept)",
     "an env map (e.g. {\"FOO\":\"bar\"}) is rejected with a teaching error naming the {key,value} array shape",
-    "a non-array argv is rejected with a field-prefixed teaching error naming the array-of-strings shape with an example (TB-11)"
+    "a non-array argv is rejected with a field-prefixed teaching error naming the array-of-strings shape with an example (TB-11)",
+    "wait_ms is a WALL-CLOCK budget (TC-6): total wall time is bounded by wait_ms plus at most one in-flight slice and the round-trips, never ceil(wait_ms/slice)*slice",
+    "cursor is present on EVERY result (normal, wait_exhausted, and degraded) and is authoritative for resuming the bucket via bucket_events_since/bucket_wait",
+    "degraded=true (TC-1b) means an IPC error interrupted the wait AFTER a job_id was minted: the result is success-shaped (never a bare error), carries the real job_id/bucket_id/cursor, sets complete=false and wait_exhausted=true, and reports state as the last observed value or \"unknown\" -- never a silent \"running\"",
+    "recover_hint is null on the normal path and, when degraded, instructs the agent to confirm daemon health THEN poll command_status with the job_id -- do not re-run the command",
+    "a degraded result carries receipt=null because the wait did not complete"
   ]
 }

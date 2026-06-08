@@ -550,3 +550,125 @@ async fn mcp_command_status_reports_progress_suppression() {
     handle.shutdown().await;
     cleanup(&data);
 }
+
+/// TC-6: `run_and_watch` honors `wait_ms` as a WALL-CLOCK budget.
+///
+/// A non-terminating command with `wait_ms` below the 1000ms slice multiple
+/// must return `wait_exhausted` at ~wait_ms, not the old
+/// `ceil(wait_ms / slice) * slice` overrun. `sleep 5` never exits within the
+/// 1500ms budget, so the OLD loop (ceil(1500/1000)=2 full 1000ms slices) would
+/// block ~2000ms; the wall-clock loop must return below 1900ms. The result is
+/// a clean (non-degraded) wait-exhaustion that still carries the job_id and
+/// cursor for resumption.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_and_watch_wall_clock_cap_is_honest_on_long_command() {
+    let data = tmp_data_dir("rw-wallclock");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        let started = std::time::Instant::now();
+        let payload = first_text(
+            &call_tool(
+                &client,
+                "run_and_watch",
+                serde_json::json!({
+                    "argv": ["sleep", "5"],
+                    "wait_ms": 1500,
+                }),
+            )
+            .await,
+        );
+        let elapsed = started.elapsed();
+        let v: serde_json::Value =
+            serde_json::from_str(&payload).expect("run_and_watch payload is JSON");
+
+        assert_eq!(
+            v["wait_exhausted"].as_bool(),
+            Some(true),
+            "a still-running command must report wait_exhausted; got: {payload}"
+        );
+        assert_eq!(
+            v["complete"].as_bool(),
+            Some(false),
+            "a still-running command is not complete; got: {payload}"
+        );
+        assert_eq!(
+            v["degraded"].as_bool(),
+            Some(false),
+            "a clean wait-exhaustion is not degraded; got: {payload}"
+        );
+        assert!(
+            v["job_id"].as_str().is_some_and(|s| s.starts_with("job_")),
+            "the job_id is returned so the caller can poll command_status; got: {payload}"
+        );
+        assert!(
+            v["cursor"].as_u64().is_some(),
+            "cursor is present for resumption; got: {payload}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(1400),
+            "must actually wait near the budget, not return early; elapsed={elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1900),
+            "TC-6 wall-clock cap self-violation: wait_ms=1500 overran to {elapsed:?}"
+        );
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
+/// TC-6 companion: a fast command returns immediately, complete and
+/// non-degraded, with the full superset of result keys present.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_and_watch_fast_command_is_complete_and_not_degraded() {
+    let data = tmp_data_dir("rw-fast");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        let started = std::time::Instant::now();
+        let payload = first_text(
+            &call_tool(
+                &client,
+                "run_and_watch",
+                serde_json::json!({
+                    "argv": ["true"],
+                    "wait_ms": 5000,
+                }),
+            )
+            .await,
+        );
+        let elapsed = started.elapsed();
+        let v: serde_json::Value =
+            serde_json::from_str(&payload).expect("run_and_watch payload is JSON");
+
+        assert_eq!(
+            v["complete"].as_bool(),
+            Some(true),
+            "`true` exits promptly so the call must be complete; got: {payload}"
+        );
+        assert_eq!(v["wait_exhausted"].as_bool(), Some(false), "got: {payload}");
+        assert_eq!(v["degraded"].as_bool(), Some(false), "got: {payload}");
+        // Superset keys are present on the normal path too.
+        assert!(
+            v.get("cursor").is_some(),
+            "cursor key present; got: {payload}"
+        );
+        assert!(
+            v.get("recover_hint").is_some() && v["recover_hint"].is_null(),
+            "recover_hint is present and null on the normal path; got: {payload}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(5000),
+            "must short-circuit well before the budget; elapsed={elapsed:?}"
+        );
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}

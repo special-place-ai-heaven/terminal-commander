@@ -614,7 +614,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted}. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; poll command_status with the returned job_id for the final exit_code/signals — do not treat it as finished. Argv only; shell interpreters denied. Prefer plain shell for tiny one-off commands whose full verbatim output you want."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint}. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; poll command_status with the returned job_id for the final exit_code/signals — do not treat it as finished. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then poll command_status with the job_id (see recover_hint) — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters denied. Prefer plain shell for tiny one-off commands whose full verbatim output you want."
     )]
     async fn run_and_watch(
         &self,
@@ -643,16 +643,28 @@ impl TerminalCommanderMcpServer {
         };
 
         // 2. Wait loop: drain signals until the job is terminal, the
-        //    signal cap is hit, or the wait budget is spent. Each
-        //    bucket_wait blocks up to a per-iteration slice; we stop as
-        //    soon as the command exits so a fast command returns fast.
+        //    signal cap is hit, or the wall-clock wait budget is spent.
+        //    Each bucket_wait blocks up to a per-iteration slice bounded by
+        //    the time remaining, so a fast command returns fast AND the
+        //    advertised wait_ms cap stays honest (TC-6).
         let mut signals: Vec<terminal_commander_core::SignalEvent> = Vec::new();
-        let deadline_slices = wait_ms.div_ceil(MAX_WAIT_SLICE_MS).max(1);
-        let mut final_state = JobState::Running;
+        // TC-6: a wall-clock deadline keeps total wall time bounded by wait_ms
+        // plus at most one in-flight slice and the round-trips.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        // TC-1b: track the LAST OBSERVED state -- never a silent `Running`
+        // default. A degraded result then reports what we actually know (or
+        // "unknown" if the daemon failed before the first poll), so the agent
+        // cannot mistake an unconfirmed job for a confirmed-running one.
+        let mut last_observed_state: Option<JobState> = None;
         let mut exit_code: Option<i32> = None;
-        let mut receipt: Option<serde_json::Value> = None;
+        // Deferred init: every normal loop exit assigns `receipt` first, and the
+        // degraded arms pass `None` (a degraded result carries no receipt), so a
+        // `= None` here would be a dead store under -D unused-assignments.
+        let mut receipt: Option<serde_json::Value>;
 
-        for _ in 0..deadline_slices {
+        // do-while: always poll at least once (mirrors the old `.max(1)`), so
+        // even wait_ms=0 returns a real observed state.
+        loop {
             // Poll status first so a command that already exited short-
             // circuits without burning a full wait slice.
             let status = match self
@@ -662,9 +674,24 @@ impl TerminalCommanderMcpServer {
             {
                 Ok(IpcResponse::CommandStatus(s)) => s,
                 Ok(other) => return Err(unexpected_variant(&other)),
-                Err(e) => return Err(into_mcp_error(&e)),
+                // TC-1b: the job_id is already known; a transport failure here
+                // must NOT discard it. Return a degraded, job-identified result
+                // so the agent can recover the live job instead of a bare error.
+                Err(_) => {
+                    return run_and_watch_result(
+                        job_id,
+                        bucket_id,
+                        cursor,
+                        last_observed_state,
+                        exit_code,
+                        &signals,
+                        None,
+                        true,
+                        Some(RUN_AND_WATCH_RECOVER_HINT),
+                    );
+                }
             };
-            final_state = status.state;
+            last_observed_state = Some(status.state);
             exit_code = status.exit_code;
             receipt = status.receipt.as_ref().map(|r| serde_json::json!(r));
 
@@ -673,67 +700,99 @@ impl TerminalCommanderMcpServer {
                 JobState::Exited | JobState::Cancelled | JobState::Failed
             );
 
-            // Drain any signals available since the last cursor.
+            // Per-slice wait is capped by the time left in the budget, so the
+            // loop can never overrun the deadline by more than one slice (TC-6).
+            let remaining_ms = u64::try_from(
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX);
+            let slice_ms = if terminal {
+                0
+            } else {
+                MAX_WAIT_SLICE_MS.min(remaining_ms)
+            };
+
+            // Drain any signals available since the last cursor. Only rule-
+            // driven events count as "signals"; probe-lifecycle markers (e.g.
+            // the `command_exited` meta event, which has no `rule`) are the exit
+            // indicator surfaced via exit_code/state and the receipt, not a
+            // matched signal -- see collect_rule_signals.
             let wait = BucketWaitParams {
                 bucket_id,
                 cursor,
                 severity_min: None,
                 kind_filter: None,
                 limit: Some(max_signals.saturating_sub(signals.len()).max(1)),
-                timeout_ms: Some(if terminal { 0 } else { MAX_WAIT_SLICE_MS }),
+                timeout_ms: Some(slice_ms),
             };
             match self.daemon.call(IpcRequest::BucketWait(wait)).await {
                 Ok(IpcResponse::BucketWait(r)) => {
                     cursor = r.next_cursor;
-                    for ev in r.events {
-                        // Only rule-driven events count as "signals". The
-                        // bucket also carries probe-lifecycle markers (e.g.
-                        // the `command_exited` meta event, which has no
-                        // `rule`); those are the exit indicator, surfaced
-                        // via exit_code/state and the receipt, not as a
-                        // matched signal. Counting them would defeat the
-                        // zero-signal receipt path (a quiet command would
-                        // look like it matched something).
-                        if ev.rule.is_some() && signals.len() < max_signals {
-                            signals.push(ev);
-                        }
-                    }
+                    collect_rule_signals(r.events, &mut signals, max_signals);
                 }
                 Ok(other) => return Err(unexpected_variant(&other)),
-                Err(e) => return Err(into_mcp_error(&e)),
+                // TC-1b: same as the status arm -- preserve the job handle.
+                Err(_) => {
+                    return run_and_watch_result(
+                        job_id,
+                        bucket_id,
+                        cursor,
+                        last_observed_state,
+                        exit_code,
+                        &signals,
+                        None,
+                        true,
+                        Some(RUN_AND_WATCH_RECOVER_HINT),
+                    );
+                }
             }
 
             if terminal || signals.len() >= max_signals {
                 break;
             }
+            // TC-6: stop once the wall-clock budget is spent. Before building
+            // the wait-exhausted result, do ONE final non-blocking drain so
+            // events that landed since the last cursor are not lost. On
+            // wait_exhausted the cursor stays authoritative for resumption and
+            // the signals list is best-effort.
+            if std::time::Instant::now() >= deadline {
+                let drain = BucketWaitParams {
+                    bucket_id,
+                    cursor,
+                    severity_min: None,
+                    kind_filter: None,
+                    limit: Some(max_signals.saturating_sub(signals.len()).max(1)),
+                    timeout_ms: Some(0),
+                };
+                if let Ok(IpcResponse::BucketWait(r)) =
+                    self.daemon.call(IpcRequest::BucketWait(drain)).await
+                {
+                    cursor = r.next_cursor;
+                    collect_rule_signals(r.events, &mut signals, max_signals);
+                }
+                break;
+            }
         }
 
-        // 3. Compose the response. The receipt is included only when the
-        //    command finished with zero rule signals (no-silence rule):
-        //    a quiet command yields a receipt, never an error.
-        //
-        // Completion markers (trust contract): the wait budget is bounded,
-        // so the loop can return while the job is still `Running`. The
-        // success-shaped payload (isError:false) is then ambiguous to a
-        // naive reader. `complete`/`wait_exhausted` make it unambiguous:
-        //   - `complete` is true iff the job reached a terminal state.
-        //   - `wait_exhausted` is true iff the loop returned non-terminal
-        //     (the wait budget was spent while the command was still
-        //     running). The caller MUST poll `command_status` for the
-        //     final exit_code/signals in that case.
-        let (complete, wait_exhausted) = run_and_watch_completion(final_state);
-        let include_receipt = signals.is_empty();
-        json_tool_result(&serde_json::json!({
-            "job_id": job_id,
-            "bucket_id": bucket_id,
-            "state": final_state,
-            "exit_code": exit_code,
-            "signals": signals,
-            "signal_count": signals.len(),
-            "receipt": if include_receipt { receipt } else { None },
-            "complete": complete,
-            "wait_exhausted": wait_exhausted,
-        }))
+        // 3. Compose the (non-degraded) response through the shared builder so
+        //    the normal and degraded payloads stay a strict superset of one
+        //    another. The receipt rides only the zero-signal success path
+        //    (no-silence rule): a quiet command yields a receipt, never an
+        //    error. `complete`/`wait_exhausted` disambiguate the bounded wait
+        //    (see run_and_watch_result / run_and_watch_completion).
+        run_and_watch_result(
+            job_id,
+            bucket_id,
+            cursor,
+            last_observed_state,
+            exit_code,
+            &signals,
+            receipt,
+            false,
+            None,
+        )
     }
 
     /// `command_status` — lifecycle counters + exit info for a job.
@@ -1796,6 +1855,76 @@ const fn run_and_watch_completion(state: terminal_commander_core::JobState) -> (
     (complete, !complete)
 }
 
+/// Append only rule-driven events to `signals`, never exceeding `max_signals`.
+/// Probe-lifecycle markers (no `rule`) are skipped: they are the exit indicator
+/// surfaced via exit_code/state and the receipt, not matched signals -- counting
+/// them would defeat the zero-signal receipt path.
+fn collect_rule_signals(
+    events: Vec<terminal_commander_core::SignalEvent>,
+    signals: &mut Vec<terminal_commander_core::SignalEvent>,
+    max_signals: usize,
+) {
+    for ev in events {
+        if ev.rule.is_some() && signals.len() < max_signals {
+            signals.push(ev);
+        }
+    }
+}
+
+/// Build the `run_and_watch` result payload. ONE builder for BOTH the normal
+/// and the degraded (mid-wait IPC error) paths, so the degraded result is a
+/// strict superset of the normal one and the two cannot drift.
+///
+/// `degraded` is true only when an IPC error interrupted the wait AFTER a
+/// job_id was minted (TC-1b): the job stays tracked, so the call returns an
+/// isError:false, job-identified result carrying `degraded:true` and a
+/// `recover_hint` rather than a bare error. `last_observed_state` is `None`
+/// when the daemon failed before the first status poll -- the state is then
+/// reported as "unknown", never a silent "running".
+#[allow(clippy::too_many_arguments)]
+fn run_and_watch_result(
+    job_id: terminal_commander_core::JobId,
+    bucket_id: terminal_commander_core::BucketId,
+    cursor: u64,
+    last_observed_state: Option<terminal_commander_core::JobState>,
+    exit_code: Option<i32>,
+    signals: &[terminal_commander_core::SignalEvent],
+    receipt: Option<serde_json::Value>,
+    degraded: bool,
+    recover_hint: Option<&str>,
+) -> Result<CallToolResult, McpError> {
+    // A degraded result is never "complete" (the wait was interrupted);
+    // otherwise derive completion from the last observed state.
+    let (complete, wait_exhausted) = if degraded {
+        (false, true)
+    } else {
+        last_observed_state.map_or((false, true), run_and_watch_completion)
+    };
+    // State honesty: report the last observed state, or "unknown" when we never
+    // got one -- never a silent "running".
+    let state_json = last_observed_state.map_or_else(
+        || serde_json::json!("unknown"),
+        |state| serde_json::json!(state),
+    );
+    // The receipt rides only the zero-signal success path; a degraded result
+    // carries none.
+    let include_receipt = !degraded && signals.is_empty();
+    json_tool_result(&serde_json::json!({
+        "job_id": job_id,
+        "bucket_id": bucket_id,
+        "state": state_json,
+        "exit_code": exit_code,
+        "signals": signals,
+        "signal_count": signals.len(),
+        "receipt": if include_receipt { receipt } else { None },
+        "complete": complete,
+        "wait_exhausted": wait_exhausted,
+        "cursor": cursor,
+        "degraded": degraded,
+        "recover_hint": recover_hint,
+    }))
+}
+
 /// Build a structured `daemon_unavailable` MCP error envelope.
 /// Returned by daemon-requiring tools when the supervisor reports the
 /// daemon is not reachable, so callers get a typed error instead of a
@@ -2290,9 +2419,16 @@ const RUN_AND_WATCH_DEFAULT_MAX_SIGNALS: usize = 50;
 /// Hard cap on signals returned by `run_and_watch`.
 const RUN_AND_WATCH_MAX_SIGNALS: usize = 500;
 /// Per-iteration `bucket_wait` slice for the `run_and_watch` loop, in ms.
-/// The loop runs `ceil(wait_ms / slice)` iterations; a smaller slice
-/// makes the loop exit sooner after the command becomes terminal.
+/// The loop runs against a wall-clock deadline (TC-6); each iteration waits up
+/// to `min(MAX_WAIT_SLICE_MS, remaining_budget)`, so the advertised `wait_ms`
+/// cap is honored to within one slice plus a round-trip. Kept at 1000ms: a
+/// smaller slice would double the `bucket_wait` RPC rate under load.
 const MAX_WAIT_SLICE_MS: u64 = 1_000;
+
+/// Recovery guidance attached to a degraded `run_and_watch` result (TC-1b).
+/// An IPC error interrupted the wait, but the job is still tracked by the
+/// daemon, so the agent should confirm liveness before polling -- not re-run.
+const RUN_AND_WATCH_RECOVER_HINT: &str = "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with the `health` tool, then poll command_status with this job_id for the final state and signals. Do not re-run the command.";
 
 /// MCP-facing parameters for `run_and_watch`. A superset of
 /// `command_start_combed`'s params plus the bounded wait controls.
@@ -3305,6 +3441,107 @@ mod tests {
         let (_, rules) = parse_bucket_and_rules(None, None, Some(raw.to_owned())).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].kind, RuleType::Keyword);
+    }
+
+    // --- TC-1b: run_and_watch degraded / superset result builder ---
+
+    /// Build a `run_and_watch_result` payload and return its parsed JSON. A
+    /// success-shaped result (Ok) is itself the TC-1b property: once a job_id
+    /// exists, run_and_watch never returns a bare error.
+    fn build_run_and_watch_json(
+        last_observed_state: Option<terminal_commander_core::JobState>,
+        exit_code: Option<i32>,
+        degraded: bool,
+    ) -> serde_json::Value {
+        let recover_hint = degraded.then_some(RUN_AND_WATCH_RECOVER_HINT);
+        let result = run_and_watch_result(
+            terminal_commander_core::JobId::new(),
+            terminal_commander_core::BucketId::new(),
+            7,
+            last_observed_state,
+            exit_code,
+            &[],
+            None,
+            degraded,
+            recover_hint,
+        )
+        .expect("run_and_watch_result must build an Ok (success-shaped) result");
+        for item in &result.content {
+            if let Some(text) = item.as_text() {
+                return serde_json::from_str(&text.text).expect("payload is JSON");
+            }
+        }
+        panic!("run_and_watch_result produced no text content");
+    }
+
+    #[test]
+    fn run_and_watch_degraded_without_status_is_recoverable_unknown_not_running() {
+        // TC-1b: an IPC error before the first status poll must NOT invent a
+        // "running" state nor return a bare error -- it returns a success-shaped,
+        // job-identified, degraded result the agent can recover from.
+        let v = build_run_and_watch_json(None, None, true);
+        assert_eq!(v["degraded"], serde_json::json!(true));
+        assert_eq!(
+            v["state"],
+            serde_json::json!("unknown"),
+            "degraded state is never a silent 'running'"
+        );
+        assert_eq!(v["complete"], serde_json::json!(false));
+        assert_eq!(v["wait_exhausted"], serde_json::json!(true));
+        assert!(
+            v["job_id"].as_str().is_some_and(|s| s.starts_with("job_")),
+            "the live job_id is preserved"
+        );
+        assert!(
+            v["bucket_id"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("bkt_"))
+        );
+        assert_eq!(
+            v["cursor"],
+            serde_json::json!(7),
+            "cursor is preserved and authoritative for resumption"
+        );
+        assert!(
+            v["recover_hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("command_status") && h.contains("health")),
+            "recover_hint tells the agent to confirm health, then poll status"
+        );
+        assert_eq!(
+            v["receipt"],
+            serde_json::Value::Null,
+            "a degraded result carries no receipt"
+        );
+    }
+
+    #[test]
+    fn run_and_watch_degraded_reports_last_observed_state() {
+        // TC-1b honesty: when a state WAS observed before the error, report it.
+        let v =
+            build_run_and_watch_json(Some(terminal_commander_core::JobState::Running), None, true);
+        assert_eq!(v["degraded"], serde_json::json!(true));
+        assert_eq!(v["state"], serde_json::json!("running"));
+        assert_eq!(v["complete"], serde_json::json!(false));
+        assert_eq!(v["wait_exhausted"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn run_and_watch_normal_terminal_is_complete_and_a_strict_superset() {
+        // The normal (non-degraded) payload carries the SAME degraded/recover_hint/
+        // cursor keys as the degraded one, so the two paths cannot drift apart.
+        let v = build_run_and_watch_json(
+            Some(terminal_commander_core::JobState::Exited),
+            Some(0),
+            false,
+        );
+        assert_eq!(v["degraded"], serde_json::json!(false));
+        assert_eq!(v["recover_hint"], serde_json::Value::Null);
+        assert_eq!(v["state"], serde_json::json!("exited"));
+        assert_eq!(v["complete"], serde_json::json!(true));
+        assert_eq!(v["wait_exhausted"], serde_json::json!(false));
+        assert_eq!(v["cursor"], serde_json::json!(7));
+        assert_eq!(v["exit_code"], serde_json::json!(0));
     }
 
     #[test]
