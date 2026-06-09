@@ -1364,6 +1364,37 @@ const ARGV_HEAD_ITEM_BYTES: usize = 128;
 /// Replacement token substituted for any masked secret span.
 const ARGV_HEAD_REDACTED: &str = "<redacted>";
 
+/// Flags whose VALUE is a pure secret to mask WHOLLY -- the canonical names
+/// plus common real-world aliases (an external review found `--api-key=` /
+/// `--passwd=` leaking because only the canonical four were listed). Lowercased;
+/// matching is case-insensitive. Used by BOTH the Layer-A space form (mask the
+/// next token) and the Layer-B attached `--flag=value` form, from this single
+/// source so the two layers cannot drift. `-u`/`--user`/`--proxy-user` (colon-
+/// gated) and `-h`/`--header` (header rule) are handled separately, NOT here.
+const SECRET_VALUE_FLAGS: &[&str] = &[
+    "-p",
+    "--password",
+    "--passwd",
+    "--pass",
+    "--pwd",
+    "--token",
+    "--secret",
+    "--key",
+    "--api-key",
+    "--apikey",
+    "--api_key",
+    "--access-key",
+    "--accesskey",
+    "--access_key",
+    "--secret-key",
+    "--secretkey",
+    "--auth",
+    "--authorization",
+    "--bearer",
+    "--credential",
+    "--credentials",
+];
+
 /// Shared credential-redaction core for argv views (TC-4).
 ///
 /// Applies the SECURITY-APPROVED two-layer masking (Layer A flag look-ahead +
@@ -1391,8 +1422,10 @@ fn redact_argv(argv: &[String], max_items: Option<usize>) -> Vec<String> {
         // dangling-flag case without a nested `if`.
         let key = head[i].trim().to_ascii_lowercase();
         match key.as_str() {
-            "-p" | "--password" | "--token" | "--secret" | "--key" if i + 1 < len => {
-                // The following token is a pure secret value.
+            k if i + 1 < len && SECRET_VALUE_FLAGS.contains(&k) => {
+                // The following token is a pure secret value (a canonical
+                // secret flag or a common alias -- see SECRET_VALUE_FLAGS,
+                // e.g. --api-key / --passwd).
                 ARGV_HEAD_REDACTED.clone_into(&mut head[i + 1]);
             }
             // Basic-auth `user:pass`. Mask the WHOLE next token (username
@@ -1527,11 +1560,19 @@ fn mask_token_inline(token: &str) -> String {
     // remainder after the `--flag=` prefix is redacted. Runs BEFORE the
     // URL-userinfo rule so a URL value cannot escape with only its inner
     // password masked.
-    for flag in ["--password=", "--token=", "--secret=", "--key="] {
-        if lower.starts_with(flag) {
-            // Keep the literal flag prefix from the ORIGINAL token (preserves
-            // any original casing of the flag name), replace the whole value.
-            let prefix = &token[..flag.len()];
+    // Iterates the shared SECRET_VALUE_FLAGS (canonical names + aliases like
+    // --api-key / --passwd) so the attached `--flag=value` form cannot drift
+    // from the Layer-A space form. The `= ` requirement both selects the long
+    // `--flag=` form (the short `-p<value>` form is rule (2a) below) and makes
+    // matching collision-safe: `--pass` cannot mis-fire on `--password=` since
+    // the longer flag's own arm matches the `=`.
+    for flag in SECRET_VALUE_FLAGS {
+        if let Some(after) = lower.strip_prefix(flag)
+            && after.starts_with('=')
+        {
+            // Keep the literal `--flag=` prefix from the ORIGINAL token
+            // (preserves casing), replace the whole value.
+            let prefix = &token[..=flag.len()];
             return format!("{prefix}{ARGV_HEAD_REDACTED}");
         }
     }
@@ -1761,6 +1802,70 @@ mod redact_tests {
         assert!(
             out.contains("<redacted>"),
             "redaction marker present: {out}"
+        );
+    }
+
+    #[test]
+    fn attached_api_key_alias_flag_value_is_masked() {
+        // External review: `--api-key=` must mask like `--password=` (it was leaking).
+        let head = redact_argv_head(&[
+            "curl".to_owned(),
+            "--api-key=SECRETKEY123".to_owned(),
+            "https://x".to_owned(),
+        ]);
+        let joined = head.join(" ");
+        assert!(!joined.contains("SECRETKEY123"), "secret leaked: {joined}");
+        assert!(joined.contains("--api-key="), "flag name kept: {joined}");
+        assert!(joined.contains("<redacted>"), "redaction marker: {joined}");
+    }
+
+    #[test]
+    fn attached_passwd_alias_flag_value_is_masked() {
+        let head = redact_argv_head(&["app".to_owned(), "--passwd=hunter2".to_owned()]);
+        let joined = head.join(" ");
+        assert!(!joined.contains("hunter2"), "secret leaked: {joined}");
+        assert!(joined.contains("--passwd="), "flag name kept: {joined}");
+    }
+
+    #[test]
+    fn space_separated_secret_flag_aliases_are_masked() {
+        for (flag, secret) in [
+            ("--api-key", "SECRETKEY123"),
+            ("--passwd", "hunter2"),
+            ("--access-key", "AKIA_SECRET"),
+            ("--bearer", "tok_SECRET"),
+        ] {
+            let head = redact_argv_head(&[
+                "curl".to_owned(),
+                flag.to_owned(),
+                secret.to_owned(),
+                "https://x".to_owned(),
+            ]);
+            let joined = head.join(" ");
+            assert!(
+                !joined.contains(secret),
+                "secret leaked for {flag}: {joined}"
+            );
+            assert!(joined.contains(flag), "flag kept for {flag}: {joined}");
+            assert!(
+                joined.contains("<redacted>"),
+                "redaction marker for {flag}: {joined}"
+            );
+        }
+    }
+
+    #[test]
+    fn casing_does_not_bypass_alias_flag_masking() {
+        // `--pass` must not mis-fire on the longer `--password=` either.
+        let head = redact_argv_head(&["app".to_owned(), "--API-KEY=ZZZSECRET".to_owned()]);
+        assert!(
+            !head.join(" ").contains("ZZZSECRET"),
+            "casing bypass: {head:?}"
+        );
+        let canon = redact_argv_head(&["app".to_owned(), "--password=PWSECRET".to_owned()]);
+        assert!(
+            !canon.join(" ").contains("PWSECRET"),
+            "canonical: {canon:?}"
         );
     }
 
