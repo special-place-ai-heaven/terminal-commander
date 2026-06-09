@@ -131,6 +131,10 @@ fn minimal_tool_args(tool: &str) -> serde_json::Value {
         "command_start_combed" | "pty_command_start" | "run_and_watch" => {
             serde_json::json!({ "argv": ["ls"] })
         }
+        // shell_exec requires shell_line (no default); supply one so the
+        // daemon-unavailable guard — not a missing-field schema error — is
+        // the path under test.
+        "shell_exec" => serde_json::json!({ "shell_line": "echo hi" }),
         "command_status" | "command_stop" | "pty_command_stop" | "command_output_tail" => {
             serde_json::json!({ "job_id": "job_x" })
         }
@@ -212,8 +216,8 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
         "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
     assert_eq!(
-        checked, 37,
-        "expected 37 daemon-backed tools (38 catalogue entries minus system_discover)"
+        checked, 38,
+        "expected 38 daemon-backed tools (39 catalogue entries minus system_discover)"
     );
 
     let _ = client.cancel().await;

@@ -17,7 +17,7 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 38 live
+//! [`tool_catalogue`] is the single source of truth for the 39 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry,
 //! file, PTY, aggregate runtime views, and predicate-routed
@@ -26,7 +26,7 @@
 //! daemon-independent tool; every other tool returns the structured
 //! `daemon_unavailable` envelope when the daemon is unreachable.
 //!
-//! Source-status: live; all 38 tools forward through daemon IPC.
+//! Source-status: live; all 39 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -59,7 +59,8 @@ use terminal_commanderd::ipc::protocol::{
     RegistryGetParams, RegistryGetResponse, RegistryImportPackParams, RegistryImportPackResponse,
     RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse, RegistryTestParams,
     RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
-    SelfCheckResponse, SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionListParams,
+    SelfCheckResponse, ShellExecParams, SubscriptionCloseParams, SubscriptionCloseResponse,
+    SubscriptionListParams,
     SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
     SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse,
     SubscriptionSeekParams, SubscriptionSeekResponse, SubscriptionSourceSel,
@@ -147,6 +148,11 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "command_stop",
             status: ToolStatus::Live,
             description: "Force-kill a running combed (non-PTY) command by job_id; returns final bounded counters. Never returns raw output.",
+        },
+        ToolCatalogueEntry {
+            name: "shell_exec",
+            status: ToolStatus::Live,
+            description: "Run ONE shell line (pipelines/compounds/redirects) through the comb pipeline; requires allow_shell; combed, never raw.",
         },
         ToolCatalogueEntry {
             name: "command_output_tail",
@@ -847,6 +853,45 @@ impl TerminalCommanderMcpServer {
                 "frames_total": frames_total,
                 "events_emitted": events_emitted,
                 "bytes_total": bytes_total,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
+        }
+    }
+
+    /// `shell_exec` — run ONE shell line through the gated shell lane.
+    ///
+    /// Forwards `IpcRequest::ShellExec`; the daemon spawns
+    /// `[shell, "-lc", shell_line]` ONLY on an `AllowWithAudit` verdict for
+    /// `PolicyAction::CommandShellStart` (gated by the `allow_shell`
+    /// capability, denied by default). The shell lane skips the
+    /// argv `SHELL_INTERPRETERS_DENY` guard, so its denials are
+    /// `PolicyDenied`, never `ShellInterpreterDenied`. The reply reuses the
+    /// `command_start_combed` bounded shape (`job_id`/`bucket_id`/`probe_id`/
+    /// `cursor`) and never returns raw stdout/stderr.
+    ///
+    /// MCP carries `shell_line` ONLY — capabilities are config/TOML, never an
+    /// MCP-flippable flag.
+    #[tool(
+        description = "Run ONE shell line (pipelines/compounds/redirects via [shell,-lc,line]) and get back ONLY the lines your rules match plus exit state, never the raw stream. Requires the allow_shell capability (config/TOML, denied by default); a denied daemon returns a policy error. Returns job_id, bucket_id, probe_id, initial cursor. Use command_start_combed (argv only) when you do not need shell syntax; prefer plain shell for tiny one-off commands whose full output you want verbatim."
+    )]
+    async fn shell_exec(
+        &self,
+        Parameters(params): Parameters<McpShellExecParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = params.into_params()?;
+        match self.daemon.call(IpcRequest::ShellExec(ipc)).await {
+            Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
+                job_id,
+                bucket_id,
+                probe_id,
+                cursor,
+            })) => json_tool_result(&serde_json::json!({
+                "job_id": job_id,
+                "bucket_id": bucket_id,
+                "probe_id": probe_id,
+                "cursor": cursor,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
@@ -2459,6 +2504,83 @@ pub struct McpCommandStopParams {
     pub job_id: String,
 }
 
+/// Parameters for `shell_exec` (TC49). Carries the dedicated
+/// `shell_line` ONLY — there is NO capability flag here: `allow_shell`
+/// is config/TOML, not an MCP-flippable parameter. Mirrors the IPC
+/// [`ShellExecParams`] field set, with the MCP-layer `env` array shape
+/// and `wait_ms` bounded-wait control.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct McpShellExecParams {
+    /// The shell line to run, e.g. `"echo a | wc -c"` or
+    /// `"grep -r foo . && echo done"`. Pipelines, compounds, and
+    /// redirects are allowed — this is the whole point of the shell
+    /// lane. Bounded by the daemon's `MAX_SHELL_LINE_BYTES`.
+    pub shell_line: String,
+    /// Interpreter override, e.g. `"/bin/sh"`. Omit to use the daemon's
+    /// default shell.
+    #[serde(default)]
+    pub shell: Option<String>,
+    /// Optional working directory for the spawned child.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Environment as an ARRAY of {"key":"NAME","value":"VAL"} objects
+    /// (NOT a map), e.g. `[{"key":"FOO","value":"bar"}]`.
+    /// Empty/omitted = inherit the daemon's full environment; entries
+    /// you provide are ADDED to (or override) that inherited environment
+    /// (merged, not replaced) -- PATH, SystemRoot, etc. are kept.
+    #[serde(default, deserialize_with = "deserialize_env")]
+    #[schemars(with = "Vec<EnvEntry>")]
+    pub env: Vec<EnvEntry>,
+    /// Inline rules bound to this job only — same shape as
+    /// `command_start_combed`. Minimal: `[{"pattern": "ERROR"}]`. Omit
+    /// to collect no rule signals (you still get the exit receipt).
+    #[serde(default)]
+    pub rules: Option<Vec<RuleInput>>,
+    /// Deprecated string form of `rules`: a JSON-array string of full
+    /// `RuleDefinition`s. Prefer the typed `rules` field. Omit for none.
+    #[serde(default)]
+    pub rules_json: Option<String>,
+    /// Optional per-job bucket override as a JSON object
+    /// `{ "max_events": N, "ttl": <seconds> }`. Omit for daemon defaults.
+    #[serde(default)]
+    pub bucket_config_json: Option<String>,
+    /// Optional per-bucket tag (Phase 3). Tag this probe so a
+    /// subscription opened with a matching `tag` predicate routes to it.
+    /// Omit for none.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// Reserved bounded-wait control (ms). Accepted for forward parity
+    /// with `run_and_watch`; `shell_exec` is start-only and returns
+    /// bounded start metadata immediately, so this is currently ignored.
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
+}
+
+impl McpShellExecParams {
+    /// Lower the MCP params into the IPC [`ShellExecParams`]. The
+    /// `env` array becomes `(key, value)` pairs and the inline rules are
+    /// resolved via the shared `parse_bucket_and_rules` path. There is
+    /// no dedup nonce on the shell lane: the daemon's nonce-less
+    /// fallback key `(peer, argv, cwd, tag)` already includes
+    /// `argv[2] = shell_line`, so two distinct lines never collapse.
+    fn into_params(self) -> Result<ShellExecParams, McpError> {
+        let cwd = self.cwd.map(std::path::PathBuf::from);
+        let env: Vec<(String, String)> =
+            self.env.into_iter().map(|e| (e.key, e.value)).collect();
+        let (bucket_config, rules) =
+            parse_bucket_and_rules(self.bucket_config_json, self.rules, self.rules_json)?;
+        Ok(ShellExecParams {
+            shell_line: self.shell_line,
+            shell: self.shell,
+            cwd,
+            env,
+            rules,
+            bucket_config,
+            tag: self.tag,
+        })
+    }
+}
+
 /// Default wait budget for `run_and_watch`, in milliseconds.
 const RUN_AND_WATCH_DEFAULT_WAIT_MS: u64 = 5_000;
 /// Hard cap on the `run_and_watch` wait budget, in milliseconds.
@@ -3599,7 +3721,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_thirty_eight_live_tools() {
+    fn catalogue_lists_thirty_nine_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -3616,6 +3738,7 @@ mod tests {
                 "run_and_watch",
                 "command_status",
                 "command_stop",
+                "shell_exec",
                 "command_output_tail",
                 "bucket_events_since",
                 "bucket_wait",
@@ -3703,6 +3826,7 @@ mod tests {
                 "run_and_watch".to_owned(),
                 "runtime_state".to_owned(),
                 "self_check".to_owned(),
+                "shell_exec".to_owned(),
                 "subscription_close".to_owned(),
                 "subscription_list".to_owned(),
                 "subscription_open".to_owned(),

@@ -104,6 +104,7 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "run_and_watch".to_owned(),
             "runtime_state".to_owned(),
             "self_check".to_owned(),
+            "shell_exec".to_owned(),
             "subscription_close".to_owned(),
             "subscription_list".to_owned(),
             "subscription_open".to_owned(),
