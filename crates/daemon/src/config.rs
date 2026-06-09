@@ -147,6 +147,9 @@ pub struct PolicySection {
     /// probe-kind gating is a later phase.
     #[serde(default)]
     pub probes: Option<PolicyProbesSection>,
+    /// `[policy.caps]` block (Hybrid trust model). Optional; absent == all false.
+    #[serde(default)]
+    pub caps: Option<PolicyCapsSection>,
 }
 
 /// `[policy.commands]` (POLICY.md section 4). `allow_roots` is the
@@ -160,6 +163,21 @@ pub struct PolicyCommandsSection {
     /// for both developer_local and repo_only.
     #[serde(default)]
     pub allow_roots: Vec<String>,
+}
+
+/// `[policy.caps]` (Hybrid trust model -- reconciliation Decision 1/5).
+/// Granular opt-in capabilities. ALL default false; deny-first preserved.
+/// `full_access` is the only profile whose loader preset flips these true.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PolicyCapsSection {
+    #[serde(default)]
+    pub allow_shell: bool,
+    #[serde(default)]
+    pub allow_session: bool,
+    #[serde(default)]
+    pub allow_privileged: bool,
+    #[serde(default)]
+    pub allow_remote: bool,
 }
 
 /// `[policy.paths]` (POLICY.md section 4). Forward-compat only at this
@@ -290,6 +308,7 @@ impl DaemonConfig {
                 commands: None,
                 paths: None,
                 probes: None,
+                caps: None,
             },
             retention: default_retention(),
             audit: default_audit(),
@@ -621,6 +640,26 @@ mod tests {
         let cfg = DaemonConfig::from_toml(toml).expect("must parse [policy.commands]");
         let roots = cfg.policy.commands.expect("commands present").allow_roots;
         assert_eq!(roots, vec!["cargo", "git", "npm"]);
+    }
+
+    #[test]
+    fn parses_policy_caps_block() {
+        let toml = "[daemon]\ndata_dir = \"/tmp/tc-caps\"\n\
+                    [policy]\nprofile = \"developer_local\"\n\
+                    [policy.caps]\nallow_shell = true\n";
+        let cfg = DaemonConfig::from_toml(toml).expect("must parse [policy.caps]");
+        let caps = cfg.policy.caps.as_ref().expect("caps present");
+        assert!(caps.allow_shell);
+        assert!(!caps.allow_session); // unspecified -> false
+        assert!(!caps.allow_privileged);
+        assert!(!caps.allow_remote);
+    }
+
+    #[test]
+    fn caps_absent_is_none_not_error() {
+        let toml = "[daemon]\ndata_dir = \"/tmp/tc-nocaps\"\n[policy]\nprofile = \"developer_local\"\n";
+        let cfg = DaemonConfig::from_toml(toml).expect("parse");
+        assert!(cfg.policy.caps.is_none());
     }
 
     #[test]
