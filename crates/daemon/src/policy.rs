@@ -237,6 +237,17 @@ impl PolicyEngine {
         e
     }
 
+    /// Read-only accessor: is the `allow_shell` capability set on this engine?
+    ///
+    /// The `caps` field is private (caps are inputs to [`Self::evaluate`], never
+    /// a public toggle). This accessor lets bootstrap-wiring tests confirm that
+    /// the resolved `[policy.caps]` were threaded into the engine without
+    /// exposing the full caps set or a mutation path.
+    #[must_use]
+    pub fn caps_allow_shell(&self) -> bool {
+        self.caps.allow_shell
+    }
+
     /// Default-constructed engine uses the `developer_local` profile.
     #[must_use]
     pub fn default_engine() -> Self {

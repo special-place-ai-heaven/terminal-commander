@@ -30,6 +30,7 @@ use crate::policy::PolicyEngine;
 #[cfg(unix)]
 use crate::pty_command::PtyRuntime;
 use crate::router::Router;
+use crate::shell::ShellRuntime;
 use crate::store_actor::StoreClient;
 
 /// Errors raised during daemon bootstrap.
@@ -98,6 +99,11 @@ pub struct DaemonState {
     /// Command runtime (TC38). Wires command_start_combed into the
     /// daemon. Uses the same persistent audit sink as the router.
     pub command: Arc<CommandRuntime>,
+    /// Shell runtime (TC49). The `shell_exec` lane facade over
+    /// [`CommandRuntime`]; shares the same `Arc<CommandRuntime>` so the
+    /// gated shell path reuses the comb/bucket spawn core. Gated by the
+    /// `allow_shell` capability resolved into the policy engine below.
+    pub shell: Arc<ShellRuntime>,
     /// TC-5: the ONE cached immortal self-check bucket; lazily set on the
     /// first spawn-running self_check, reused every call so bucket_count
     /// grows by exactly 1 over the daemon lifetime.
@@ -177,7 +183,7 @@ impl DaemonState {
         let sifter =
             Arc::new(SifterRuntime::build(&[]).map_err(|e| BootstrapError::Sifter(e.to_string()))?);
 
-        let policy = PolicyEngine::with_config(
+        let policy = PolicyEngine::with_config_caps(
             config.policy.profile,
             config.policy.repo_root.clone(),
             config
@@ -185,6 +191,7 @@ impl DaemonState {
                 .commands
                 .as_ref()
                 .map(|c| c.allow_roots.clone()),
+            config.resolved_caps(),
         );
 
         // Restore active rule definitions from the persistent
@@ -234,6 +241,10 @@ impl DaemonState {
             Arc::clone(&activation),
             Arc::clone(&sources),
         ));
+        // Shell runtime (TC49): a thin facade over the SAME
+        // `Arc<CommandRuntime>` so the gated `shell_exec` lane reuses the
+        // comb/bucket spawn core. No second policy engine or audit sink.
+        let shell = Arc::new(ShellRuntime::new(Arc::clone(&command)));
         let watch = Arc::new(WatchRuntime::new(
             Arc::clone(&router),
             Arc::clone(&rings),
@@ -272,6 +283,7 @@ impl DaemonState {
             audit,
             router,
             command,
+            shell,
             selfcheck_bucket: parking_lot::Mutex::new(None),
             activation,
             sources,
@@ -455,6 +467,42 @@ mod tests {
         let b = state.boot_id;
         assert_eq!(a, b, "boot_id is stable for the life of the process");
         assert!(!a.is_nil(), "boot_id must be a real (non-nil) uuid");
+        cleanup(&data);
+    }
+
+    #[test]
+    fn bootstrap_constructs_shell_runtime_and_threads_caps() {
+        use crate::policy::PolicyProfile;
+
+        let data = temp_data_dir("shell-caps");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        // `full_access` presets every cap true (base || full); this is the
+        // only profile whose loader preset flips `allow_shell` on without an
+        // explicit `[policy.caps]` block. `policy` is a non-Option section.
+        cfg.policy.profile = PolicyProfile::FullAccess;
+
+        let state = DaemonState::bootstrap(cfg).expect("bootstrap with full_access");
+
+        // The shell runtime field exists and was constructed. It shares the
+        // SAME `Arc<CommandRuntime>` as `state.command`, so the command Arc has
+        // at least two strong owners (the state field + the shell facade) —
+        // proving the facade was wired over the real command core, not a fresh
+        // one.
+        assert!(
+            Arc::strong_count(&state.command) >= 2,
+            "ShellRuntime must share the bootstrap CommandRuntime Arc \
+             (strong_count was {})",
+            Arc::strong_count(&state.command)
+        );
+
+        // The resolved caps were threaded into the policy engine via
+        // `with_config_caps(.., resolved_caps())`: under full_access the engine
+        // carries `allow_shell = true`.
+        assert!(
+            state.policy.caps_allow_shell(),
+            "full_access must thread allow_shell into the bootstrap policy engine"
+        );
+
         cleanup(&data);
     }
 }
