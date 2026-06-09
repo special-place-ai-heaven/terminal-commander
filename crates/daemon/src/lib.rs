@@ -27,6 +27,7 @@ pub mod policy;
 pub mod pty_command;
 pub mod router;
 pub mod runtime;
+pub mod shell;
 pub mod state;
 pub mod store_actor;
 pub mod subscriptions;
@@ -94,6 +95,7 @@ pub use router::Router;
 pub use runtime::{
     RuntimeError, SelfCheckReport, run_foreground_idle, run_ipc_server, run_self_check,
 };
+pub use shell::{MAX_SHELL_LINE_BYTES, ShellExecRequest, ShellRuntime};
 pub use state::{BootstrapError, DaemonState};
 pub use subscriptions::model::{Predicate, SourceSel, Subscription};
 pub use subscriptions::pull::{
