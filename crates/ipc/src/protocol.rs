@@ -245,6 +245,12 @@ pub enum IpcRequest {
     CommandStop(CommandStopParams),
     /// Rule-free bounded read of a job's captured output tail (F1).
     CommandOutputTail(CommandOutputTailParams),
+    /// Start a shell-lane command (TC49): run ONE shell line through the
+    /// comb pipeline behind the `allow_shell` capability. Denied by
+    /// default; the wire carries `shell_line` ONLY, never a cap flag.
+    /// Bounded metadata response (reuses [`CommandStartResponse`]);
+    /// never returns raw stdout/stderr.
+    ShellExec(ShellExecParams),
     /// FTS-backed search over persisted rule definitions.
     RegistrySearch(RegistrySearchParams),
     /// Fetch a specific rule definition by id and optional version.
@@ -355,6 +361,10 @@ impl IpcRequest {
             // duplicates server-side state, mints a fresh id, or advances
             // a server-held offset.
             Self::CommandStartCombed(_)
+            // Shell-lane start (TC49): spawns a fresh `[shell,"-lc",line]`
+            // child + mints a job/bucket exactly like CommandStartCombed,
+            // so a blind retry double-spawns. Non-idempotent.
+            | Self::ShellExec(_)
             // Force-kill: fires a one-shot cancel + sets the job terminal.
             // A blind re-send is a harmless no-op on an already-terminal job,
             // but it is a server-side state MUTATION, so it is classified
@@ -919,6 +929,46 @@ impl CommandStartParams {
         self.grace_ms
             .map(|ms| Duration::from_millis(ms.min(MAX_COMMAND_GRACE_MS)))
     }
+}
+
+/// Wire shape for `shell_exec` (TC49). The shell lane runs ONE shell
+/// line (pipelines / compounds / redirects) through the comb pipeline
+/// behind the `allow_shell` capability. Mirrors the daemon's
+/// `ShellExecRequest`; carries the dedicated `shell_line` ONLY — there
+/// is NO capability flag on the wire (caps are config/TOML, never
+/// MCP-flippable). Denied by default.
+///
+/// `wait_ms` is deliberately ABSENT here: like `command_start_combed`,
+/// the bounded-wait control is an MCP-layer concern (`McpShellExecParams`
+/// strips it before building the IPC start), never forwarded into the
+/// IPC start params.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellExecParams {
+    /// The shell line to run. Becomes `argv[2]` of `[shell, "-lc",
+    /// shell_line]`; bounded by the daemon's `MAX_SHELL_LINE_BYTES`.
+    pub shell_line: String,
+    /// Interpreter override. `None` -> the daemon's `default_shell`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    /// Working directory for the spawned child. `None` inherits the
+    /// daemon's cwd (the policy gate may still reject paths outside the
+    /// project root on containment profiles).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    /// Explicit environment for the child. Empty means inherit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+    /// Optional inline rule set to comb this job's output. Empty means
+    /// the daemon's empty sifter (no events emitted).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<RuleDefinition>,
+    /// Bucket configuration override (max_events / TTL). Defaults
+    /// applied if None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_config: Option<BucketConfig>,
+    /// Optional per-bucket tag for subscription routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 /// Wire shape for `command_status`. Carries just the job id.
@@ -2199,6 +2249,18 @@ mod tests {
                     grace_ms: None,
                     tag: None,
                     dedup_nonce: None,
+                }),
+                false,
+            ),
+            (
+                IpcRequest::ShellExec(ShellExecParams {
+                    shell_line: "echo a | wc -c".to_owned(),
+                    shell: None,
+                    cwd: None,
+                    env: vec![],
+                    rules: vec![],
+                    bucket_config: None,
+                    tag: None,
                 }),
                 false,
             ),

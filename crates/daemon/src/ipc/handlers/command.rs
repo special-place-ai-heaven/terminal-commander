@@ -9,9 +9,10 @@ use super::common::{identity_audit_subject, map_command_error};
 use crate::command::CommandStartRequest;
 use crate::ipc::protocol::{
     CommandOutputTailParams, CommandOutputTailResponse, CommandStartParams, CommandStatusParams,
-    CommandStopParams, CommandStopResponse, IpcError, IpcErrorCode, IpcResponse,
+    CommandStopParams, CommandStopResponse, IpcError, IpcErrorCode, IpcResponse, ShellExecParams,
     MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES, MAX_TAIL_BYTES, MAX_TAIL_LINES,
 };
+use crate::shell::ShellExecRequest;
 use crate::state::DaemonState;
 
 pub(in crate::ipc::server) fn handle_command_start_combed(
@@ -49,6 +50,51 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
         peer_discriminator: Some(peer_discriminator(peer)),
     };
     let resp = state.command.start_combed(req).map_err(map_command_error)?;
+    Ok(IpcResponse::CommandStartCombed(resp))
+}
+
+/// Handle a `shell_exec` IPC request (TC49). Mirrors
+/// [`handle_command_start_combed`] but routes through the gated shell
+/// lane: it builds a [`ShellExecRequest`] from the wire params and calls
+/// the SYNC [`ShellRuntime::exec`](crate::shell::ShellRuntime::exec),
+/// which gates on `PolicyAction::CommandShellStart` (denied by default).
+///
+/// The shell lane SKIPS the `SHELL_INTERPRETERS_DENY` guard, so it can
+/// NEVER produce [`CommandError::ShellInterpreterDenied`]; its denials are
+/// [`CommandError::PolicyDenied`], which [`map_command_error`] maps to
+/// [`IpcErrorCode::PolicyDenied`]. The reply reuses
+/// [`IpcResponse::CommandStartCombed`] — the shell lane returns the same
+/// bounded [`CommandStartResponse`](crate::ipc::protocol::CommandStartResponse)
+/// shape and never raw stdout/stderr.
+///
+/// SYNC: `exec` never awaits, so no `.await` here — the async dispatcher
+/// calls this inline.
+pub(in crate::ipc::server) fn handle_shell_exec(
+    state: &Arc<DaemonState>,
+    params: &ShellExecParams,
+) -> Result<IpcResponse, IpcError> {
+    if params.env.len() > MAX_COMMAND_ENV_ITEMS {
+        return Err(IpcError::new(
+            IpcErrorCode::ArgvInvalid,
+            format!("env entries {} exceed cap", params.env.len()),
+        ));
+    }
+    if params.rules.len() > MAX_COMMAND_INLINE_RULES {
+        return Err(IpcError::new(
+            IpcErrorCode::ArgvInvalid,
+            format!("inline rules {} exceed cap", params.rules.len()),
+        ));
+    }
+    let req = ShellExecRequest {
+        shell_line: params.shell_line.clone(),
+        shell: params.shell.clone(),
+        cwd: params.cwd.clone(),
+        env: params.env.clone(),
+        rules: params.rules.clone(),
+        bucket_config: params.bucket_config.clone(),
+        tag: params.tag.clone(),
+    };
+    let resp = state.shell.exec(req).map_err(map_command_error)?;
     Ok(IpcResponse::CommandStartCombed(resp))
 }
 

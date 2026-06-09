@@ -425,6 +425,7 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::CommandStatus(_) => "command_status",
         IpcRequest::CommandStop(_) => "command_stop",
         IpcRequest::CommandOutputTail(_) => "command_output_tail",
+        IpcRequest::ShellExec(_) => "shell_exec",
         IpcRequest::RegistrySearch(_) => "registry_search",
         IpcRequest::RegistryGet(_) => "registry_get",
         IpcRequest::RegistryUpsert(_) => "registry_upsert",
@@ -474,6 +475,7 @@ const DISCOVERABLE_METHODS: &[&str] = &[
     "command_status",
     "command_stop",
     "command_output_tail",
+    "shell_exec",
     "registry_search",
     "registry_get",
     "registry_upsert",
@@ -599,6 +601,14 @@ async fn dispatch(
                 Err(e) => IpcResult::Err { error: e },
             }
         }
+        // Shell-lane start (TC49). Local-only: the shell lane carries no
+        // `environment` (no remote routing). `handle_shell_exec` is SYNC
+        // (the gated `ShellRuntime::exec` never awaits), so it is called
+        // inline without `.await`.
+        IpcRequest::ShellExec(p) => match handlers::command::handle_shell_exec(state, p) {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
         IpcRequest::RegistrySearch(p) => match handlers::registry::handle_registry_search(state, p)
         {
             Ok(r) => IpcResult::Ok { response: r },
@@ -1034,9 +1044,10 @@ mod tests {
         FileWatchStopParams, ListLimitParams, ProbeStatusParams, PtyCommandStartParams,
         PtyCommandStopParams, PtyCommandWriteStdinParams, RegistryActivateParams,
         RegistryDeactivateParams, RegistryGetParams, RegistryImportPackParams,
-        RegistrySearchParams, RegistryTestParams, RegistryUpsertParams, SubscriptionCloseParams,
-        SubscriptionListParams, SubscriptionOpenParams, SubscriptionPredicate,
-        SubscriptionPullParams, SubscriptionSeekParams, SubscriptionSourceSel,
+        RegistrySearchParams, RegistryTestParams, RegistryUpsertParams, ShellExecParams,
+        SubscriptionCloseParams, SubscriptionListParams, SubscriptionOpenParams,
+        SubscriptionPredicate, SubscriptionPullParams, SubscriptionSeekParams,
+        SubscriptionSourceSel,
     };
     use std::collections::BTreeSet;
     use terminal_commander_core::{
@@ -1124,6 +1135,15 @@ mod tests {
                 job_id: JobId::new(),
                 max_lines: 1,
                 max_bytes: 1,
+            }),
+            IpcRequest::ShellExec(ShellExecParams {
+                shell_line: "echo a | wc -c".to_owned(),
+                shell: None,
+                cwd: None,
+                env: vec![],
+                rules: vec![],
+                bucket_config: None,
+                tag: None,
             }),
             IpcRequest::RegistrySearch(RegistrySearchParams {
                 query: "x".to_owned(),

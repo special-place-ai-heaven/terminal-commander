@@ -29,7 +29,7 @@ use std::time::Duration;
 use terminal_commander_store::AuditReadRequest;
 use terminal_commanderd::{
     CommandStartParams, CommandStatusParams, DaemonClient, DaemonConfig, DaemonState, IpcErrorCode,
-    IpcRequest, IpcResponse, IpcServer,
+    IpcRequest, IpcResponse, IpcServer, ShellExecParams,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -246,6 +246,64 @@ fn command_start_combed_denies_shell_interpreter_and_audits() {
             rows.iter()
                 .any(|r| r.action == "command_rejected" && r.decision == "deny"),
             "runtime must record a deny row for the shell attempt; rows: {rows:?}"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// TC49 shell-lane round-trip: on the default `developer_local` profile
+/// (caps off), `shell_exec` is denied by the `CommandShellStart` policy
+/// gate. The denial MUST surface as [`IpcErrorCode::PolicyDenied`] -- NOT
+/// [`IpcErrorCode::ShellInterpreterDenied`] (WI-1): the shell lane SKIPS
+/// the `SHELL_INTERPRETERS_DENY` guard, so it can never produce that code.
+/// The runtime records a `command_shell_rejected` deny row (the shell
+/// lane's label), never the argv lane's `command_rejected`.
+#[test]
+fn shell_exec_denied_on_default_profile_maps_to_policy_denied() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("shellexec-deny");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+
+        let err = client
+            .call(
+                21,
+                IpcRequest::ShellExec(ShellExecParams {
+                    shell_line: "echo a | wc -c".to_owned(),
+                    shell: None,
+                    cwd: None,
+                    env: Vec::new(),
+                    rules: Vec::new(),
+                    bucket_config: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect_err("shell_exec must be denied when allow_shell cap is off");
+
+        assert_eq!(
+            err.code,
+            IpcErrorCode::PolicyDenied,
+            "shell-lane denial must map to PolicyDenied, got {:?}: {}",
+            err.code,
+            err.message
+        );
+        assert_ne!(
+            err.code,
+            IpcErrorCode::ShellInterpreterDenied,
+            "the shell lane skips SHELL_INTERPRETERS_DENY; it can NEVER \
+             produce ShellInterpreterDenied (WI-1)"
+        );
+
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.action == "command_shell_rejected" && r.decision == "deny"),
+            "shell-lane deny must record a command_shell_rejected row (not the \
+             argv lane's command_rejected); rows: {rows:?}"
         );
 
         handle.shutdown().await;
