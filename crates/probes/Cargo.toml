@@ -31,10 +31,24 @@ pty-process = { version = "=0.5.3", features = ["async"] }
 # volume-serial / file-index accessors are unstable (`windows_by_handle`,
 # rust-lang/rust#63010), so the file probe reads the same fields via
 # `GetFileInformationByHandle` from the open handle on stable.
+#
+# Process-tree kill (process.rs): the cancel arm tears down the whole child
+# tree via a Win32 Job Object (CreateJobObjectW / SetInformationJobObject /
+# AssignProcessToJobObject / TerminateJobObject) instead of shelling out to
+# taskkill/powershell (corporate-EDR hardening, mirrors supervisor/replace.rs).
+#   * Win32_System_JobObjects — the Job Object APIs + JOBOBJECT_* structs.
+#   * Win32_System_Threading   — JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds
+#                                IO_COUNTERS, which lives behind this feature.
+#   * Win32_Security           — CreateJobObjectW's signature references
+#                                SECURITY_ATTRIBUTES, gated behind this feature
+#                                (we pass a null pointer for it).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]

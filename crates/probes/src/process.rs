@@ -150,6 +150,37 @@ impl EventSink for InMemorySink {
     }
 }
 
+/// RAII owner of a Windows Job Object handle.
+///
+/// The probe assigns its child process to this job at spawn time so the OS can
+/// tear down the ENTIRE descendant tree on `TerminateJobObject` (the cancel
+/// arm) -- not just the direct child. The handle is also configured with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so `CloseHandle` on the last `Arc`
+/// (this `Drop`) likewise kills the tree as defense-in-depth if the probe is
+/// dropped without an explicit cancel.
+///
+/// The raw `HANDLE` (`*mut c_void`) is stored as an `isize` so the wrapper is
+/// `Send + Sync` and can be shared (cloned `Arc`) into the spawned lifecycle
+/// task while the probe also keeps one for `Drop`. `CloseHandle` runs exactly
+/// once, on the last `Arc`.
+#[cfg(windows)]
+#[derive(Debug)]
+struct JobHandle(isize);
+
+#[cfg(windows)]
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        // SAFETY: `self.0` is a Job Object handle we created with
+        // `CreateJobObjectW` (stored as an `isize`) and have not closed yet.
+        // Closing it exactly once here is the paired release for that create;
+        // a failing `CloseHandle` on a handle we are discarding is ignored.
+        unsafe {
+            let _ = CloseHandle(self.0 as HANDLE);
+        }
+    }
+}
+
 /// Handle to a running probe. Drop or call `cancel` to stop the
 /// child; `wait` to await its natural exit.
 #[derive(Debug)]
@@ -161,6 +192,14 @@ pub struct ProcessProbe {
     /// Child PID captured at spawn (Windows console regression tests).
     #[cfg(windows)]
     child_pid: u32,
+    /// Job Object owning the child's whole process tree (Windows). Held so the
+    /// tree is torn down on `Drop` even without an explicit cancel
+    /// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`). Shared (`Arc`) with the
+    /// lifecycle task, which terminates the job on cancel. `None` if the job
+    /// could not be created (the cancel path then falls back to a
+    /// single-process kill).
+    #[cfg(windows)]
+    _job: Option<Arc<JobHandle>>,
 }
 
 impl ProcessProbe {
@@ -170,6 +209,17 @@ impl ProcessProbe {
     /// rest are arguments. Shell-style strings are NOT accepted
     /// (matches the POLICY.md commands.shell_passthrough=false
     /// invariant).
+    ///
+    /// Cancellation tears down the WHOLE child process tree, not just the
+    /// direct child, so grandchildren cannot orphan:
+    ///
+    /// * Unix: the child is made its own process-group leader
+    ///   (`process_group(0)`, so `pgid == child_pid`) and the cancel arm
+    ///   signals the whole group via the `kill(1)` tool with a negative pgid
+    ///   (`kill -s KILL -- -<pgid>`), mirroring `supervisor::replace`.
+    /// * Windows: the child is assigned to a Job Object at spawn and the
+    ///   cancel arm calls `TerminateJobObject`, which kills every process in
+    ///   the job (native Win32, no taskkill/powershell).
     pub fn spawn(
         argv: &[String],
         config: &ProcessProbeConfig,
@@ -205,6 +255,14 @@ impl ProcessProbe {
         for (k, v) in &config.env {
             cmd.env(k, v);
         }
+        #[cfg(unix)]
+        {
+            // Put the child in its OWN process group so its descendants share
+            // the group; the child becomes group leader, so `pgid == child_pid`.
+            // The cancel arm then signals the whole group via `kill -<pgid>`,
+            // reaping grandchildren that would otherwise orphan.
+            cmd.process_group(0);
+        }
         #[cfg(windows)]
         {
             terminal_commander_core::windows_silent(cmd.as_std_mut());
@@ -214,6 +272,20 @@ impl ProcessProbe {
         let child_pid = child
             .id()
             .expect("tokio child has pid immediately after spawn");
+        // Unix: capture the child pid (== pgid, since it is the group leader)
+        // so the cancel arm can kill the whole group without racing the child.
+        #[cfg(unix)]
+        let child_pid = child
+            .id()
+            .expect("tokio child has pid immediately after spawn");
+        // Windows: assign the child to a fresh Job Object so the OS tears down
+        // the whole descendant tree on `TerminateJobObject` (cancel) or on
+        // handle close (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, Drop). `None` if
+        // the job could not be created/assigned -- the cancel path then falls
+        // back to a single-process kill (`start_kill`).
+        #[cfg(windows)]
+        let job: Option<Arc<JobHandle>> = create_job_for_child(&child).map(Arc::new);
+
         let stdout = child.stdout.take().expect("piped stdout configured above");
         let stderr = child.stderr.take().expect("piped stderr configured above");
 
@@ -224,6 +296,11 @@ impl ProcessProbe {
         let bucket_id = config.bucket_id;
 
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
+
+        // Move a clone of the job handle (Windows) / the captured pgid (Unix)
+        // into the lifecycle task so its cancel arm can tear down the tree.
+        #[cfg(windows)]
+        let job_for_task = job.clone();
 
         let join = tokio::spawn(async move {
             let stdout_task = read_stream(
@@ -255,7 +332,11 @@ impl ProcessProbe {
             tokio::select! {
                 () = drain => child.wait().await.map_err(ProcessProbeError::Io),
                 _ = &mut cancel_rx => {
-                    let _ = child.start_kill();
+                    kill_process_tree(
+                        &mut child,
+                        #[cfg(unix)] child_pid,
+                        #[cfg(windows)] job_for_task.as_deref(),
+                    );
                     let _ = child.wait().await;
                     Err(ProcessProbeError::Cancelled)
                 }
@@ -269,6 +350,8 @@ impl ProcessProbe {
             join: Some(join),
             #[cfg(windows)]
             child_pid,
+            #[cfg(windows)]
+            _job: job,
         })
     }
 
@@ -327,6 +410,153 @@ impl ProcessProbe {
             Err(e) => Err(ProcessProbeError::Io(std::io::Error::other(e.to_string()))),
         }
     }
+}
+
+/// Tear down the cancelled child's WHOLE process tree (best-effort), then let
+/// the caller `wait()` to reap the direct child.
+///
+/// * Unix: signals the child's process group via the `kill(1)` tool with a
+///   negative pgid (`kill -s KILL -- -<pgid>`), reaping grandchildren, then
+///   issues `start_kill` on the leader as a belt-and-suspenders fallback (also
+///   covers the case where `kill` is absent). Mirrors `supervisor::replace`'s
+///   use of the `kill` tool (no `libc`). See the in-body note for why the
+///   `-s KILL -- ` form is required over the `-KILL` flag form.
+/// * Windows: terminates the Job Object (`TerminateJobObject`), killing every
+///   process in the job = the tree, with `start_kill` as a fallback when the
+///   job handle is unavailable.
+fn kill_process_tree(
+    child: &mut tokio::process::Child,
+    #[cfg(unix)] pgid: u32,
+    #[cfg(windows)] job: Option<&JobHandle>,
+) {
+    #[cfg(unix)]
+    {
+        // Signal the whole group: a LEADING MINUS on the target makes `kill`
+        // signal the process group (`-<pgid>`), so descendants sharing the
+        // group die too. We use the `-s KILL -- -<pgid>` form deliberately:
+        //
+        //   * `-s KILL` names the signal as a separate argument instead of the
+        //     `-KILL` flag form. Empirically, procps-ng `kill` (observed on
+        //     WSL2, procps-ng 4.0.4, kernel 6.6.x) MIS-PARSES the combined
+        //     `kill -KILL -<pgid>` form and delivers SIGKILL to the CALLER's
+        //     process group instead of the target group -- which would kill the
+        //     daemon itself. The `-s KILL` + `--` form parses unambiguously and
+        //     was verified to (a) reap the target group's grandchildren and
+        //     (b) leave the caller alive.
+        //   * `--` terminates option parsing so the negative `-<pgid>` target is
+        //     never treated as a flag.
+        //
+        // Best-effort like the supervisor's hard kill: stdio is silenced and
+        // the exit status is ignored. If `kill` is somehow absent (Err), the
+        // `start_kill` below still reaps the leader.
+        let _ = std::process::Command::new("kill")
+            .args(["-s", "KILL", "--", &format!("-{pgid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // Belt-and-suspenders: SIGKILL the leader directly as well.
+        let _ = child.start_kill();
+    }
+    #[cfg(windows)]
+    {
+        // SAFETY: `handle` is a live Job Object handle created by
+        // `CreateJobObjectW` and owned by `JobHandle` for the duration of this
+        // borrow. `TerminateJobObject` only reads the handle and posts the exit
+        // code to every process in the job; the BOOL result is best-effort and
+        // intentionally ignored (the `start_kill` fallback below covers it).
+        if let Some(job) = job {
+            use windows_sys::Win32::Foundation::HANDLE;
+            use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+            unsafe {
+                let _ = TerminateJobObject(job.0 as HANDLE, 1);
+            }
+        } else {
+            // No job (creation failed at spawn): fall back to killing just the
+            // direct child. Grandchildren may orphan in this degraded path.
+            let _ = child.start_kill();
+        }
+    }
+    // Platforms with neither cfg: best-effort single-process kill.
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = child.start_kill();
+    }
+}
+
+/// Create a Win32 Job Object and assign `child` to it so the OS tears down the
+/// whole descendant tree on `TerminateJobObject` / handle close.
+///
+/// Configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` so closing the handle
+/// (the `JobHandle` `Drop`) also kills the tree -- defense in depth if the
+/// probe is dropped without an explicit cancel. Returns `None` on any failure
+/// (null job handle, `SetInformationJobObject` / `AssignProcessToJobObject`
+/// failure, or no child handle); the caller then falls back to a
+/// single-process kill on cancel.
+#[cfg(windows)]
+fn create_job_for_child(child: &tokio::process::Child) -> Option<JobHandle> {
+    use std::os::windows::io::RawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    // The child's raw OS handle; `None` if it already exited (race-tight: we
+    // call this immediately after spawn, before draining).
+    let child_handle: RawHandle = child.raw_handle()?;
+
+    // SAFETY: `CreateJobObjectW` with two null pointers (default security
+    // attributes, unnamed job) returns a new Job Object handle or null on
+    // failure. We check for null before using it.
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() {
+        return None;
+    }
+
+    // Configure kill-on-close as defense in depth: closing the handle kills the
+    // whole tree even if the explicit `TerminateJobObject` never runs.
+    // SAFETY: `info` is a fully owned, zeroed `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`
+    // (a `#[repr(C)]` POD). `SetInformationJobObject` reads exactly
+    // `size_of::<...>()` bytes from `&info` into the kernel for the
+    // `JobObjectExtendedLimitInformation` class. We close `job` and bail on
+    // failure so a half-configured handle never leaks.
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let info_size = u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+        .expect("JOBOBJECT_EXTENDED_LIMIT_INFORMATION size fits in u32");
+    let set_ok = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&info).cast(),
+            info_size,
+        )
+    };
+    if set_ok == 0 {
+        // SAFETY: `job` is the handle we just created and have not closed yet;
+        // close it once before returning so it does not leak.
+        unsafe {
+            let _ = CloseHandle(job);
+        }
+        return None;
+    }
+
+    // Assign the child to the job; from here on, any process the child spawns
+    // is also in the job (jobs are inherited by descendants by default).
+    // SAFETY: `job` is our live Job Object handle and `child_handle` is the
+    // child's live OS process handle (owned by `child`, borrowed here). The
+    // BOOL result is checked; on failure we close `job` and return `None`.
+    let assign_ok = unsafe { AssignProcessToJobObject(job, child_handle as HANDLE) };
+    if assign_ok == 0 {
+        // SAFETY: same as above -- close the unassigned job handle exactly once.
+        unsafe {
+            let _ = CloseHandle(job);
+        }
+        return None;
+    }
+
+    Some(JobHandle(job as isize))
 }
 
 #[allow(clippy::too_many_arguments)]
