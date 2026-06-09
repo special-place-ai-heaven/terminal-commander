@@ -22,6 +22,15 @@
 4. **Dedup needs no code change.** The TC-2 nonce-less fallback key is `(peer, argv, cwd, tag)` (`command.rs:352`); argv includes argv[2]=`shell_line`, so two different shell lines do NOT collapse. ADD a Task-5 test: two distinct lines -> two distinct `job_id`s.
 5. **`full_access` cap semantics:** `base || full` forces all caps ON even if `[policy.caps]` lists one `false`. Intent: to run a SUBSET, use a base profile + explicit caps, not `full_access`. Note in Task 3 + POLICY.md.
 
+## Phase C tool-count anchor checklist (Cursor WI-3 — ALL must move 38->39 in Task 8, or the gate red-fails)
+
+1. `crates/mcp/tests/mcp_live_daemon.rs:213` — `live_count, 38` -> `39`; add `"shell_exec".to_owned()` to the sorted `names` vec (alphabetical: after `self_check`, before `subscription_close`); fix the `:11` + `:214` comment text.
+2. `crates/mcp/tests/daemon_unavailable_envelope.rs:216` — "expected 37 daemon-backed tools (38 catalogue entries minus system_discover)" -> 38 daemon-backed / 39 catalogue; bump the asserted count (shell_exec IS daemon-backed).
+3. `tests/fixtures/contracts/mcp-tools/system_discover.v1.json` — the `"tools": [...]` array lists EVERY tool by name; ADD a `shell_exec` entry `{"name":"shell_exec","status":"live","description":"...","requires_daemon":true,"available":false,"unavailable_reason":"daemon_unavailable"}` in the `command` group region (after `command_stop`). Contract test fails if missing.
+4. `docs/mcp/TOOL_CONTROL_SURFACE.md:61` — "38 live tools" -> "39 live tools" (cheap; do in C with the rest).
+
+**Cursor WI-1 (error mapping):** shell-lane `CommandError::PolicyDenied` MUST map to `IpcErrorCode::PolicyDenied`, NEVER `ShellInterpreterDenied` (the shell lane skips that guard, so it can never produce it). **WI-2:** `ShellRuntime::exec` stays SYNC (Round-6 #3). **WI-3 docs split:** the `system_discover` contract fixture (#3 above) ships in Phase C (gate-blocking); POLICY.md prose stays Phase D / Task 10.
+
 ---
 
 ## File structure (what changes and why)

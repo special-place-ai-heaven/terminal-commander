@@ -46,8 +46,9 @@ MVP runs without going through it.
 
 ## 2. Profile catalog
 
-MVP ships FOUR named profiles. Profile names are stable identifiers;
-goals MUST refer to them by exact name.
+MVP shipped FOUR named profiles. TC49 adds a FIFTH, `full_access`
+(section 2.5), for the trusted/unrestricted case. Profile names are
+stable identifiers; goals MUST refer to them by exact name.
 
 ### 2.1 `developer_local`
 
@@ -145,6 +146,59 @@ audit_requirements: every gated action; audit records tagged
   `profile=admin_debug` so they can be filtered in retention review.
 ```
 
+### 2.5 `full_access`
+
+Added: TC49 (Hybrid trust model -- reconciliation Decision 1).
+
+Intended for: a TRUSTED, single-operator machine where the agent is
+explicitly allowed the full capability surface (shell, session,
+privileged helper, remote). This is the convenience profile that
+bundles every opt-in capability (section 4.1) ON in one declaration,
+instead of listing each cap by hand on a base profile.
+
+```text
+permits:
+  - everything developer_local permits (it is exec-capable and shares
+    the developer_local / repo_only verdict path).
+  - the gated shell lane (shell_exec), because its loader preset turns
+    allow_shell ON.
+  - the other opt-in caps (allow_session, allow_privileged,
+    allow_remote) are preset ON for forward waves; they gate features
+    not yet shipped.
+denies (in addition to default-deny):
+  - the cross-profile closed deny set (sudo/doas/su/pkexec/kexec) as
+    argv[0] is STILL denied -- full_access does NOT remove COMMANDS_DENY.
+limits: same as developer_local.
+audit_requirements: every gated action. Capability use stays
+  AllowWithAudit (no audit-off short-circuit).
+```
+
+The five binding guardrails (Decision 1; the implementation honors
+each):
+
+1. **NEVER default.** `developer_local` stays the safe default;
+   `full_access` requires an explicit `profile = "full_access"` in
+   TOML plus a daemon restart.
+2. **TOML-only, NOT MCP-toggleable.** No MCP tool flips the profile or
+   any cap. Profile selection is config + restart, identical to the
+   other four profiles.
+3. **Bundle = all caps ON, NOT audit OFF.** Shell / session /
+   privileged / remote stay `AllowWithAudit`; the policy engine
+   (`evaluate()`) is never short-circuited. `full_access` only PRESETS
+   the cap inputs; it adds no fifth code path that bypasses the engine.
+4. **`policy_status` EXPOSES the caps.** The active profile and the
+   resolved per-call caps (`allow_shell:true`, ...) are visible via the
+   `policy_status` tool -- there is no opaque "full_access magic".
+5. **Trusted-machine / single-operator only.** Documented as a
+   trusted-host capability. Do NOT enable it on a shared, multi-tenant,
+   or untrusted host. See the residual-risk note in section 4.1.
+
+Cap semantics under `full_access`: the loader applies `base || full`,
+so EVERY cap resolves ON even if `[policy.caps]` lists one as `false`.
+To run a SUBSET of capabilities, do NOT use `full_access` -- use a
+base profile (`developer_local`) plus explicit `[policy.caps]` entries
+(section 4.1).
+
 ## 3. Profile selection
 
 A daemon instance loads exactly one profile at startup, named in
@@ -152,7 +206,8 @@ A daemon instance loads exactly one profile at startup, named in
 
 ```toml
 [policy]
-profile = "developer_local"  # or repo_only, read_only_observer, admin_debug
+profile = "developer_local"  # or repo_only, read_only_observer,
+                             # admin_debug, full_access
 profile_version = "1"
 ```
 
@@ -162,6 +217,86 @@ deliberate constraint: profile changes are easier to audit when they
 are restart boundaries.
 
 ## 4. Profile schema (informative; binding lands in TC22)
+
+### 4.1 `[policy.caps]` (Hybrid trust model; SHIPPED in TC49)
+
+Granular, opt-in CAPABILITIES that extend a base profile. The cap
+block is nested under `[policy]` (it is `[policy.caps]`, NOT a
+top-level `[caps]`), mirroring the `[policy.commands]` doctrine: caps
+are an input to the policy engine's `evaluate()` -- exactly like
+`profile` -- not a separate subsystem. The single operator-readable
+trust surface stays `[policy]`.
+
+```toml
+[policy]
+profile = "developer_local"
+
+[policy.caps]
+allow_shell      = true    # gates shell_exec (TC49). Default false.
+allow_session    = false   # gates shell_session_* (TC50; not yet live).
+allow_privileged = false   # gates the Wave-4 privileged helper, NOT
+                           #   generic sudo. (Not yet live.)
+allow_remote     = false   # gates remote federation / target_id
+                           #   (Wave 5; not yet live).
+```
+
+Rules:
+
+- **ALL four caps default `false`.** An absent `[policy.caps]` block is
+  identical to all-false. Deny-first is preserved: a capability does
+  nothing until explicitly turned on.
+- **Config / TOML ONLY.** Caps are NEVER MCP-flippable -- no tool can
+  turn a cap on or off. Changing a cap means editing TOML and
+  restarting the daemon, the same boundary as switching profiles
+  (section 3). This keeps cap changes auditable at restart boundaries.
+- **Caps are inputs to `evaluate()`.** They do not bypass the policy
+  engine. `allow_shell = true` makes `shell_exec` resolve to
+  `AllowWithAudit` (audited) on an exec-capable profile; it does NOT
+  short-circuit any check.
+- **Exec-capable profiles only.** `allow_shell` grants the shell lane
+  only on `developer_local`, `admin_debug`, or `full_access`.
+  `read_only_observer` and `repo_only` deny the shell lane even with
+  the cap on.
+- **`full_access` preset.** The `full_access` profile (section 2.5) is
+  the only profile whose loader presets all four caps ON (`base ||
+  full`). A base profile + explicit `[policy.caps]` is the way to grant
+  a SUBSET.
+- **Visibility.** The resolved per-call caps are surfaced by the
+  `policy_status` tool.
+
+**Accepted residual risk (Decision 1).** The cross-profile command
+deny set (`COMMANDS_DENY`: `sudo`, `doas`, `su`, `pkexec`, `kexec`) is
+checked on `argv[0]` ONLY. It deliberately does NOT scan the
+`shell_line` of a `shell_exec` call. Once `allow_shell` is on, a host
+where `sudo` is otherwise reachable can have `sudo ...` embedded INSIDE
+a `shell_line` (e.g. `echo x | sudo tee ...`) and the argv[0] deny will
+not catch it. This is intended and is WHY the shell lane is a
+trusted-profile capability (default-deny, opt-in, single-operator
+machine) rather than an always-on surface. It is also WHY privilege
+escalation stays a SEPARATE, closed, single-purpose helper (Wave 4,
+gated by `allow_privileged`) and is never delivered through a generic
+shell: the DEFAULT privilege path is never "run an arbitrary shell
+line". See `docs/security/PRIVILEGE_MODEL.md` and
+`docs/runtime/SHELL_RUNTIME.md`.
+
+#### Shell-lane audit actions (TC49)
+
+Every policy decision emits an audit record BEFORE the gated action
+runs (section 1). The argv command lane emits `command_start` (allow) /
+`command_rejected` (deny). The TC49 shell lane has its OWN labels so
+shell starts are filterable apart from argv starts:
+
+| Audit action | Decision | When |
+|---|---|---|
+| `command_shell_start`    | `allow_with_audit` | `shell_exec` allowed (`allow_shell` on, exec-capable profile). Emitted before spawn. |
+| `command_shell_rejected` | `deny`             | `shell_exec` denied (cap off, or profile forbids shell). |
+
+The audit `subject` for both is a REDACTED preview of the shell line,
+never the raw line: per-token secret masking plus a 128-byte cap on a
+char boundary (`redact_shell_line` in `command.rs`). Details in
+`docs/runtime/SHELL_RUNTIME.md`.
+
+### 4.2 Full profile schema (informative)
 
 ```toml
 [profile]
@@ -178,7 +313,12 @@ deny_extra  = []   # additional denies beyond default-deny list
 [commands]
 allow_roots = ["cargo", "npm", "pytest", "make", "ls", "git"]
 deny        = ["sudo", "doas", "su", "pkexec", "kexec"]
-shell_passthrough = false   # never invoke /bin/sh -c "<llm string>"
+shell_passthrough = false   # the argv command lane NEVER invokes a
+                            #   joined shell string. As of TC49, shell
+                            #   passthrough is its own gated lane
+                            #   (shell_exec) behind [policy.caps].allow_shell
+                            #   (section 4.1), default false -- NOT a flag
+                            #   on the argv lane.
 require_argv_quoting = true # MCP argv lists, not joined strings
 
 [probes]
