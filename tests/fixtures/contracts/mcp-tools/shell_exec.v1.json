@@ -1,0 +1,81 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "shell_exec",
+      "arguments": {
+        "shell_line": "echo a | wc -c",
+        "shell": "/bin/bash",
+        "cwd": "/tmp",
+        "env": [],
+        "rules": [],
+        "tag": "tc49-shell",
+        "wait_ms": 2000
+      }
+    }
+  },
+  "tool": "shell_exec",
+  "version": 1,
+  "group": "command",
+  "_meta": {
+    "schema_anchor": "TC49/mcp-tools/shell_exec-v1",
+    "fixture_id": "contracts/mcp-tools/shell_exec.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45",
+      "TC49"
+    ],
+    "note": "Gated shell lane (TC49). Runs ONE shell line (pipelines/compounds/redirects) as [shell,\"-lc\",shell_line] through the same comb/bucket pipeline as command_start_combed. Policy: CommandShellStart, gated by the [policy.caps].allow_shell capability and evaluated as AllowWithAudit on an exec-capable profile (developer_local/admin_debug/full_access); denied_by_default true (allow_shell defaults false; the MCP/IPC surface carries shell_line ONLY -- never a capability flag, caps are TOML-only). Output is combed signals + a bounded receipt; raw stdout/stderr are never returned here (observe them through bucket/event tools). The argv lane (command_start_combed) keeps SHELL_INTERPRETERS_DENY a hard deny and is unaffected."
+  },
+  "params": {
+    "shell_line": {"type": "string", "required": true},
+    "shell": {"type": "string", "required": false},
+    "cwd": {"type": "string", "required": false},
+    "env": {"type": "array", "required": false},
+    "rules": {"type": "array", "required": false},
+    "tag": {"type": "string", "required": false},
+    "wait_ms": {"type": "integer", "required": false}
+  },
+  "policy": "CommandShellStart (allow_shell cap; AllowWithAudit)",
+  "denied_by_default": true,
+  "output": "combed signals + bounded receipt; never raw stdout",
+  "response_example": {
+    "job_id": "job_018f0000000000000000000000000001",
+    "bucket_id": "bkt_018f0000000000000000000000000001",
+    "probe_id": "prb_018f0000000000000000000000000001",
+    "cursor": 0
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "shell_line is required; shell/cwd/env/rules/tag/wait_ms are optional",
+    "denied by default: the allow_shell capability defaults false, so shell_exec is denied unless [policy.caps].allow_shell is set (or the full_access profile presets it)",
+    "policy gate is CommandShellStart -> AllowWithAudit on an exec-capable profile with allow_shell; otherwise PolicyDenied, never ShellInterpreterDenied (the shell lane skips the argv shell-interpreter guard)",
+    "capability is config/TOML only; the MCP/IPC surface carries shell_line and never a capability flag",
+    "success payload contains job_id, bucket_id, probe_id, and cursor only",
+    "output is combed signals plus a bounded receipt; raw stdout/stderr are never returned here, only through bucket/event tools",
+    "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list is OVERLAID onto (merged with) the inherited environment",
+    "the argv lane (command_start_combed) keeps shell interpreters hard-denied and is unchanged by this lane"
+  ]
+}

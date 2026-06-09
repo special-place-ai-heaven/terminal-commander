@@ -100,8 +100,8 @@
     },
     {
       "name": "shell_exec",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/shell_exec.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "command_output_tail",
@@ -257,9 +257,9 @@
   "obsolete_fixtures": [],
   "counts": {
     "live_tools": 39,
-    "covered_live": 34,
+    "covered_live": 35,
     "placeholder_for_live_tool": 0,
-    "missing_fixture": 5,
+    "missing_fixture": 4,
     "obsolete_fixture_present": 0
   }
 }
