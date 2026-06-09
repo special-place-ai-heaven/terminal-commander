@@ -145,6 +145,11 @@ pub enum CommandError {
 /// Only THREE sites in `start_combed_inner` branch on this lane: the
 /// shell-interpreter guard, the policy action, and the deny/allow audit
 /// label. Everything from bucket allocation onward is shared verbatim.
+///
+/// A small reference-only enum (unit + two `&str`), so it is `Copy`:
+/// passing it by value into `start_combed_inner` aliases nothing and
+/// keeps the lane selector at the call sites readable.
+#[derive(Clone, Copy)]
 enum StartLane<'a> {
     Argv,
     Shell { shell_line: &'a str, shell: &'a str },
@@ -604,7 +609,7 @@ impl CommandRuntime {
         // assembles `argv[0]` = the chosen interpreter ON PURPOSE, so
         // this guard would self-deny it. The shell lane is instead gated
         // by `PolicyAction::CommandShellStart` (allow_shell cap) below.
-        if let StartLane::Argv = mode
+        if matches!(mode, StartLane::Argv)
             && let Some(shell) = Self::shell_interpreter_basename(&req.argv[0])
         {
             self.audit(
@@ -669,7 +674,7 @@ impl CommandRuntime {
                 "command_shell_start",
                 &redact_shell_line(shell_line),
                 "allow_with_audit",
-                Some(verdict.reason.clone()),
+                Some(verdict.reason),
                 Some(format_argv_metadata(&req.argv)),
             );
         }

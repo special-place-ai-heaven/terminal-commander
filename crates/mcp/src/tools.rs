@@ -2504,7 +2504,9 @@ pub struct McpCommandStopParams {
     pub job_id: String,
 }
 
-/// Parameters for `shell_exec` (TC49). Carries the dedicated
+/// Parameters for `shell_exec` (TC49).
+///
+/// Carries the dedicated
 /// `shell_line` ONLY — there is NO capability flag here: `allow_shell`
 /// is config/TOML, not an MCP-flippable parameter. Mirrors the IPC
 /// [`ShellExecParams`] field set, with the MCP-layer `env` array shape

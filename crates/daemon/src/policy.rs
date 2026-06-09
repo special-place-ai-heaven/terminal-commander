@@ -92,9 +92,12 @@ pub struct PolicyVerdict {
 }
 
 /// Resolved capability set fed to the engine (mirror of `[policy.caps]`).
+///
 /// All-false by default; deny-first preserved. These are INPUTS to
 /// `evaluate()`, never a bypass: a cap being on only flips a gated action
 /// from `Deny` to `AllowWithAudit` on an exec-capable profile.
+// 4 independent opt-in capability flags; a bitfield/enum would hurt the config/serde surface
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PolicyCaps {
     pub allow_shell: bool,
@@ -244,7 +247,7 @@ impl PolicyEngine {
     /// the resolved `[policy.caps]` were threaded into the engine without
     /// exposing the full caps set or a mutation path.
     #[must_use]
-    pub fn caps_allow_shell(&self) -> bool {
+    pub const fn caps_allow_shell(&self) -> bool {
         self.caps.allow_shell
     }
 
@@ -255,6 +258,9 @@ impl PolicyEngine {
     }
 
     /// Evaluate a gated action.
+    // Single linear decision tower (structural denies -> per-profile arms);
+    // splitting the security-critical gate would scatter the deny-first logic.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn evaluate(&self, action: &PolicyAction<'_>) -> PolicyVerdict {
         // First: structural denies that apply across every profile.

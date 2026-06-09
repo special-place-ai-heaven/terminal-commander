@@ -129,7 +129,7 @@ pub struct ShellRuntime {
 impl ShellRuntime {
     /// Wrap a shared [`CommandRuntime`].
     #[must_use]
-    pub fn new(command: Arc<CommandRuntime>) -> Self {
+    pub const fn new(command: Arc<CommandRuntime>) -> Self {
         Self { command }
     }
 

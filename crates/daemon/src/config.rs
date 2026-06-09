@@ -166,8 +166,11 @@ pub struct PolicyCommandsSection {
 }
 
 /// `[policy.caps]` (Hybrid trust model -- reconciliation Decision 1/5).
+///
 /// Granular opt-in capabilities. ALL default false; deny-first preserved.
 /// `full_access` is the only profile whose loader preset flips these true.
+// 4 independent opt-in capability flags; a bitfield/enum would hurt the config/serde surface
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyCapsSection {
     #[serde(default)]

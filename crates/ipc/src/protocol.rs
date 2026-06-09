@@ -931,7 +931,9 @@ impl CommandStartParams {
     }
 }
 
-/// Wire shape for `shell_exec` (TC49). The shell lane runs ONE shell
+/// Wire shape for `shell_exec` (TC49).
+///
+/// The shell lane runs ONE shell
 /// line (pipelines / compounds / redirects) through the comb pipeline
 /// behind the `allow_shell` capability. Mirrors the daemon's
 /// `ShellExecRequest`; carries the dedicated `shell_line` ONLY — there
