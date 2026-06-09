@@ -658,7 +658,7 @@ impl CommandRuntime {
                     &redact_shell_line(shell_line),
                     "deny",
                     Some(verdict.reason.clone()),
-                    Some(format_argv_metadata(&req.argv)),
+                    Some(format_shell_argv_metadata(&req.argv, shell_line)),
                 ),
             }
             return Err(CommandError::PolicyDenied(verdict.reason));
@@ -675,7 +675,7 @@ impl CommandRuntime {
                 &redact_shell_line(shell_line),
                 "allow_with_audit",
                 Some(verdict.reason),
-                Some(format_argv_metadata(&req.argv)),
+                Some(format_shell_argv_metadata(&req.argv, shell_line)),
             );
         }
 
@@ -1393,16 +1393,158 @@ fn subject_for_argv(argv: &[String]) -> String {
     trimmed.to_owned()
 }
 
-/// Audit-safe preview of a TC49 shell line. Reuses the per-token
-/// secret masker (`mask_token_inline`) over whitespace splits so the
-/// same credential spans hidden in argv audits are hidden here, then
-/// caps the joined result at 128 bytes on a char boundary (panic-free on
-/// multibyte input). This is the `subject` of the `command_shell_start`
-/// / `command_shell_rejected` audit rows — never the raw line.
+/// Byte cap on the redacted shell-line preview that becomes the audit
+/// `subject`. Matches the per-item argv head cap (`ARGV_HEAD_ITEM_BYTES`) so
+/// both audit surfaces bound a single preview to the same size.
+const SHELL_LINE_PREVIEW_BYTES: usize = ARGV_HEAD_ITEM_BYTES;
+
+/// Strip ONE surrounding pair of matching shell quotes (`'...'` or `"..."`)
+/// from a whitespace token. Only a balanced leading+trailing pair of the same
+/// quote char is removed; an unbalanced or single-char token is returned
+/// unchanged. Used before secret matching so a quoted credential value
+/// (`-H 'authorization: ...'`) is recognised on its inner text.
+fn strip_surrounding_quotes(tok: &str) -> &str {
+    let bytes = tok.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'\'' || first == b'"') && first == last {
+            return &tok[1..tok.len() - 1];
+        }
+    }
+    tok
+}
+
+/// For a `-H`/`--header` value that began with a shell quote in the RAW
+/// `line`, return the index (into the whitespace-stripped `tokens`) of the
+/// LAST token that belongs to that quoted value, so the multi-word credential
+/// (`-H 'authorization: bearer SECRET'`) is masked as one span. When the value
+/// was a single, already-closed token, returns `start` unchanged.
+///
+/// Detection reads the ORIGINAL `line` tokens (which still carry their quotes)
+/// rather than the already-stripped `tokens`, since the stripping erased the
+/// quote that marks the span boundary. Never panics on a missing close quote:
+/// an unterminated quote extends the span to the final token.
+fn header_value_span_end(line: &str, tokens: &[String], start: usize) -> usize {
+    let raw: Vec<&str> = line.split_whitespace().collect();
+    let last_idx = tokens.len().saturating_sub(1);
+
+    // The value token in the RAW line still carries its quote (if any).
+    let Some(first_raw) = raw.get(start) else {
+        return start.min(last_idx);
+    };
+    let fb = first_raw.as_bytes();
+    let quote = match fb.first() {
+        Some(&b'\'') => b'\'',
+        Some(&b'"') => b'"',
+        // Not a quoted value -> single-token value; nothing to extend.
+        _ => return start.min(last_idx),
+    };
+
+    // A balanced single token (`'X-Api-Key:SECRET'`) already closes the quote;
+    // the span is just `start`. Require len >= 2 so a lone `'` is not "closed".
+    if fb.len() >= 2 && fb.last() == Some(&quote) {
+        return start.min(last_idx);
+    }
+
+    // Walk forward until a raw token ENDS with the matching close quote.
+    let mut end = start + 1;
+    while end < raw.len() {
+        if raw[end].as_bytes().last() == Some(&quote) {
+            break;
+        }
+        end += 1;
+    }
+    end.min(last_idx)
+}
+
+/// Audit-safe preview of a TC49 shell line. The `subject` of the
+/// `command_shell_start` / `command_shell_rejected` audit rows -- never the
+/// raw line.
+///
+/// SECURITY-CRITICAL. Runs the SAME two-layer credential redaction as
+/// [`redact_argv`] over the whitespace-tokenized line, so the space-separated
+/// secret-flag forms that the argv lane masks (`--password SECRET`,
+/// `--token SECRET`, `-u user:pass`, `-H 'authorization: bearer SECRET'`) are
+/// masked here too -- the previous Layer-B-only pass leaked them because a
+/// flag and its space-separated value are distinct whitespace tokens.
+///
+/// * Each token is first stripped of one surrounding pair of shell quotes
+///   (`'...'` / `"..."`) BEFORE matching, so a quoted header value
+///   (`-H 'authorization: ...'`) is recognised.
+/// * Layer A -- flag look-ahead over the tokens: a secret-value flag
+///   (`SECRET_VALUE_FLAGS`) masks the next token wholly; `-u`/`--user`/
+///   `--proxy-user` masks the next token only when it carries a `:`;
+///   `-h`/`--header` masks the header credential of its value. A quoted
+///   header value that spans several whitespace tokens
+///   (`-H 'authorization: bearer SECRET'`) is collapsed and run through the
+///   header rule as one value, so the trailing `SECRET` token cannot escape.
+/// * Layer B -- per-token [`mask_token_inline`] over every token (catches the
+///   attached `--flag=value`, `-pVALUE`, URL-userinfo, inline-header, and
+///   env-`KEY=VALUE` forms).
+///
+/// Joined, then capped at `SHELL_LINE_PREVIEW_BYTES` on a char boundary
+/// (panic-free on multibyte input).
 fn redact_shell_line(line: &str) -> String {
-    let masked: Vec<String> = line.split_whitespace().map(mask_token_inline).collect();
-    let joined = masked.join(" ");
-    let mut end = joined.len().min(128);
+    // Whitespace-tokenize, then strip one surrounding shell-quote pair per
+    // token so a quoted secret value is matched on its inner text.
+    let mut tokens: Vec<String> = line
+        .split_whitespace()
+        .map(|t| strip_surrounding_quotes(t).to_owned())
+        .collect();
+
+    // LAYER A -- flag look-ahead over whitespace tokens. Mirrors the argv-lane
+    // Layer A (same `SECRET_VALUE_FLAGS`, same `-u`/`-h` arms) so the two
+    // lanes cannot drift, with one shell-specific addition: a header value
+    // quoted across several whitespace tokens is collapsed and masked as one.
+    let len = tokens.len();
+    let mut i = 0;
+    while i < len {
+        let key = tokens[i].trim().to_ascii_lowercase();
+        match key.as_str() {
+            k if i + 1 < len && SECRET_VALUE_FLAGS.contains(&k) => {
+                // Following token is a pure secret value.
+                ARGV_HEAD_REDACTED.clone_into(&mut tokens[i + 1]);
+            }
+            "-u" | "--user" | "--proxy-user" if i + 1 < len && tokens[i + 1].contains(':') => {
+                // Basic-auth `user:pass` value (colon-gated, like the argv lane).
+                ARGV_HEAD_REDACTED.clone_into(&mut tokens[i + 1]);
+            }
+            "-h" | "--header" if i + 1 < len => {
+                // A `-H`/`--header` value that was quoted in the ORIGINAL line
+                // can span several whitespace tokens (`-H 'authorization:
+                // bearer SECRET'`). Re-detect that span from the RAW line so
+                // the trailing value token (`SECRET'`) is included, collapse
+                // it, and mask its credential as ONE header value. When the
+                // value was a single token, this degrades to masking just
+                // `tokens[i + 1]`.
+                let span_end = header_value_span_end(line, &tokens, i + 1);
+                let value = tokens[i + 1..=span_end].join(" ");
+                tokens[i + 1] = mask_header_credential(&value);
+                // Collapse any extra value tokens that were folded into the
+                // masked value above, so they do not survive as cleartext.
+                for tok in tokens.iter_mut().take(span_end + 1).skip(i + 2) {
+                    tok.clear();
+                }
+                i = span_end;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // LAYER B -- per-token inline scan (idempotent over Layer-A output).
+    for tok in &mut tokens {
+        *tok = mask_token_inline(tok);
+    }
+
+    // Drop the emptied span fillers, then join and cap.
+    let joined = tokens
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut end = joined.len().min(SHELL_LINE_PREVIEW_BYTES);
     while end > 0 && !joined.is_char_boundary(end) {
         end -= 1;
     }
@@ -1460,6 +1602,29 @@ fn dedup_key(req: &CommandStartRequest) -> (u64, bool) {
 fn format_argv_metadata(argv: &[String]) -> String {
     let v = redact_argv(argv, None);
     serde_json::json!({ "argv": v }).to_string()
+}
+
+/// Builds audit metadata for a TC49 shell-lane argv (`[shell, "-lc",
+/// shell_line]`).
+///
+/// SECURITY-CRITICAL. The shell line lands WHOLE as `argv[2]`, a single
+/// token, so the generic per-token [`redact_argv`] core cannot apply its
+/// Layer-A flag look-ahead INSIDE it: a space-separated secret
+/// (`... --password SECRET ...`) embedded in that one token would survive.
+/// This helper first replaces `argv[2]` with its [`redact_shell_line`]
+/// preview -- which tokenizes the line and runs the SAME two-layer redaction
+/// the subject uses -- then runs the standard argv redaction over the result
+/// so `argv[0]`/`argv[1]` are still bounded and masked. Falls back to the
+/// plain argv path for any argv that is not the expected 3-item shape.
+fn format_shell_argv_metadata(argv: &[String], shell_line: &str) -> String {
+    // Only the daemon-assembled `[shell, "-lc", shell_line]` shape needs the
+    // shell-line redaction on argv[2]; anything else uses the plain path.
+    if argv.len() == 3 {
+        let mut redacted = argv.to_vec();
+        redacted[2] = redact_shell_line(shell_line);
+        return format_argv_metadata(&redacted);
+    }
+    format_argv_metadata(argv)
 }
 
 /// Number of leading argv tokens surfaced in a redacted head: the program
@@ -2381,5 +2546,134 @@ mod redact_tests {
             !head.iter().any(|t| t.contains("DROPME")),
             "4th item must be dropped by the bounded head: {head:?}"
         );
+    }
+
+    // ---- W1: shell-line subject redaction (two-layer over whitespace tokens) ----
+    //
+    // This is the regression guard for the audit SUBJECT leak: `redact_shell_line`
+    // previously ran ONLY the per-token Layer-B scan, so every SPACE-separated
+    // secret-flag form leaked its value into the `command_shell_start` /
+    // `command_shell_rejected` audit subject. Each of the six forms below is fed
+    // through `redact_shell_line` and asserted to NOT contain its cleartext secret.
+
+    /// The six secret forms that must be masked in the shell-line subject, paired
+    /// with the exact cleartext substring that MUST be absent from the output.
+    const SHELL_SECRET_FORMS: &[(&str, &str)] = &[
+        // Multi-word quoted header value (space-separated `bearer SECRET`).
+        ("curl -H 'authorization: bearer SECRET'", "SECRET"),
+        // Space-separated long secret flags (Layer-A look-ahead).
+        ("--password hunters3cret", "hunters3cret"),
+        ("--token ghp_TOPSECRET123", "ghp_TOPSECRET123"),
+        // Space-separated basic-auth (`user:pass`).
+        ("-u alice:s3cr3tpw", "s3cr3tpw"),
+        // Attached `--flag=value` forms (Layer-B).
+        ("--password=secret", "secret"),
+        ("--api-key=KEY123", "KEY123"),
+    ];
+
+    #[test]
+    fn redact_shell_line_masks_all_secret_forms_in_subject() {
+        for (line, secret) in SHELL_SECRET_FORMS {
+            let out = super::redact_shell_line(line);
+            assert!(
+                !out.contains(secret),
+                "shell-line subject leaked secret {secret:?} from {line:?}: {out}"
+            );
+            assert!(
+                out.contains("<redacted>"),
+                "redaction marker missing for {line:?}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_shell_line_keeps_visible_structure() {
+        // The masker must keep program names / flag names visible while masking
+        // only the secret span -- it is a preview, not a blackout.
+        let out = super::redact_shell_line("curl -u alice:s3cr3tpw https://api.example/x");
+        assert!(!out.contains("s3cr3tpw"), "pass leaked: {out}");
+        assert!(out.contains("curl"), "program name stays visible: {out}");
+        assert!(out.contains("-u"), "flag name stays visible: {out}");
+        assert!(
+            out.contains("https://api.example/x"),
+            "url tail stays: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_shell_line_does_not_overmask_benign_line() {
+        // A line with no secrets must survive intact (no false-positive masking).
+        let out = super::redact_shell_line("ls -la /tmp | wc -l");
+        assert!(!out.contains("<redacted>"), "benign line masked: {out}");
+        assert!(out.contains("ls -la /tmp"), "tokens preserved: {out}");
+    }
+
+    #[test]
+    fn redact_shell_line_is_byte_capped_on_char_boundary() {
+        // A long multibyte line must cap at SHELL_LINE_PREVIEW_BYTES without
+        // splitting a UTF-8 boundary (no panic) and without exceeding the cap.
+        let line = format!("echo {}", "é".repeat(200));
+        let out = super::redact_shell_line(&line);
+        assert!(out.len() <= 128, "preview exceeds cap: {} bytes", out.len());
+    }
+
+    #[test]
+    fn redact_shell_line_no_panic_on_degenerate_input() {
+        assert_eq!(super::redact_shell_line(""), "");
+        // Dangling secret flag with no value must not panic and must not invent a mask.
+        let dangling = super::redact_shell_line("--password");
+        assert_eq!(dangling, "--password");
+        // Unbalanced quote on a header value must not panic.
+        let _ = super::redact_shell_line("curl -H 'authorization: bearer SECRET");
+    }
+
+    #[test]
+    fn redact_shell_line_masks_unterminated_quoted_header() {
+        // An UNTERMINATED quote extends the span to the final token; the secret
+        // must still be masked (fail closed, never leak).
+        let out = super::redact_shell_line("curl -H 'authorization: bearer SECRET");
+        assert!(!out.contains("SECRET"), "unterminated header leaked: {out}");
+    }
+
+    // ---- W1: shell-lane audit METADATA must also redact argv[2] ----
+    //
+    // The shell argv is `[shell, "-lc", shell_line]`, so the WHOLE line lands as
+    // argv[2], one token. `format_argv_metadata` alone cannot reach a
+    // space-separated secret inside that token; `format_shell_argv_metadata`
+    // re-redacts argv[2] via the shell-line masker first. This guards that field.
+
+    #[test]
+    fn format_shell_argv_metadata_masks_all_secret_forms_in_field() {
+        for (line, secret) in SHELL_SECRET_FORMS {
+            let argv = vec!["/bin/bash".to_owned(), "-lc".to_owned(), (*line).to_owned()];
+            let out = super::format_shell_argv_metadata(&argv, line);
+            assert!(
+                !out.contains(secret),
+                "shell metadata leaked secret {secret:?} from {line:?}: {out}"
+            );
+            assert!(
+                out.contains("<redacted>"),
+                "redaction marker missing in metadata for {line:?}: {out}"
+            );
+            // Result must remain valid JSON with an `argv` array.
+            let parsed: serde_json::Value =
+                serde_json::from_str(&out).expect("shell metadata must be valid JSON");
+            assert!(
+                parsed.get("argv").and_then(|a| a.as_array()).is_some(),
+                "argv array present: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_shell_argv_metadata_falls_back_for_non_shell_shape() {
+        // A non `[shell, -lc, line]` argv must still redact via the plain path.
+        let argv = vec![
+            "app".to_owned(),
+            "--password".to_owned(),
+            "s3cr3t".to_owned(),
+        ];
+        let out = super::format_shell_argv_metadata(&argv, "ignored");
+        assert!(!out.contains("s3cr3t"), "plain-path secret leaked: {out}");
     }
 }

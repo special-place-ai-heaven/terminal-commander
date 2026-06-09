@@ -279,6 +279,15 @@ shell: the DEFAULT privilege path is never "run an arbitrary shell
 line". See `docs/security/PRIVILEGE_MODEL.md` and
 `docs/runtime/SHELL_RUNTIME.md`.
 
+For the same reason, once `allow_shell` is on the shell lane is NOT
+subject to `[policy.commands] allow_roots` nor to `repo_only`-style
+cwd-containment: the `shell_line` is passed UNSCANNED to the interpreter
+(`[shell, "-lc", shell_line]`), so allow-root prefixing and repo-root
+confinement -- which bind `argv[0]` / the cwd of the ARGV lane -- do not
+constrain what a shell line runs. This is consistent with the Decision-1
+residual risk above and is another reason the shell lane is a
+trusted-profile, opt-in capability rather than an always-on surface.
+
 #### Shell-lane audit actions (TC49)
 
 Every policy decision emits an audit record BEFORE the gated action
@@ -292,9 +301,14 @@ shell starts are filterable apart from argv starts:
 | `command_shell_rejected` | `deny`             | `shell_exec` denied (cap off, or profile forbids shell). |
 
 The audit `subject` for both is a REDACTED preview of the shell line,
-never the raw line: per-token secret masking plus a 128-byte cap on a
-char boundary (`redact_shell_line` in `command.rs`). Details in
-`docs/runtime/SHELL_RUNTIME.md`.
+never the raw line: the SAME two-layer credential masking the argv
+audits use (Layer-A flag look-ahead over whitespace tokens + Layer-B
+per-token scan), then a 128-byte cap on a char boundary
+(`redact_shell_line` in `command.rs`). The accompanying metadata
+re-redacts the line in `argv[2]` the same way
+(`format_shell_argv_metadata`). It is a best-effort PREVIEW over a shell
+line, not a full shell parse. Details and the residual limitation in
+`docs/runtime/SHELL_RUNTIME.md` section 8.
 
 ### 4.2 Full profile schema (informative)
 

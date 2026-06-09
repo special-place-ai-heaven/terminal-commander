@@ -175,17 +175,48 @@ section 4.1 and `docs/security/PRIVILEGE_MODEL.md`.
 
 Both shell-lane audit rows carry a REDACTED line as the audit
 `subject`, never the raw `shell_line`. `redact_shell_line`
-(`command.rs`):
+(`command.rs`) runs the SAME TWO-LAYER redaction the argv audits use
+(`redact_argv`), over the whitespace-tokenized line:
 
-1. splits the line on whitespace;
-2. masks each token with `mask_token_inline` -- the SAME per-token
-   secret masker used for argv audits, so credential spans hidden in
-   argv audits are hidden here too;
-3. joins and truncates to 128 bytes on a char boundary (panic-free on
-   multibyte input).
+1. splits the line on whitespace, then strips one surrounding pair of
+   shell quotes (`'...'` / `"..."`) from each token so a quoted secret
+   value is matched on its inner text;
+2. **Layer A -- flag look-ahead**: a space-separated secret-value flag
+   (`SECRET_VALUE_FLAGS`: `--password`/`--token`/`--api-key`/...) masks
+   the NEXT token wholly; `-u`/`--user`/`--proxy-user` masks the next
+   token only when it carries a `:` (`user:pass`); `-H`/`--header` masks
+   the header credential of its value, including a value quoted ACROSS
+   several whitespace tokens (`-H 'authorization: bearer SECRET'`), which
+   is collapsed and masked as one span;
+3. **Layer B -- per-token scan** (`mask_token_inline`): catches the
+   attached `--flag=value`, `-pVALUE`, `-u user:pass`, URL-userinfo,
+   inline-`Authorization:`/`Bearer`, and env-`KEY=VALUE` forms;
+4. joins and truncates to `SHELL_LINE_PREVIEW_BYTES` (128) on a char
+   boundary (panic-free on multibyte input).
 
-The full `argv` metadata (`format_argv_metadata`) accompanies the row
-as the metadata field, exactly like the argv lane.
+This closes the prior Layer-B-only gap, where a SPACE-separated secret
+(`--password SECRET`, `-u user:pass`, a quoted header value) leaked into
+the subject because the flag and its value are distinct whitespace
+tokens.
+
+The full `argv` metadata accompanies the row as the metadata field. For
+the shell lane the line lands WHOLE as `argv[2]` (`[shell, "-lc",
+shell_line]`), so the metadata is built by `format_shell_argv_metadata`,
+which re-redacts `argv[2]` via `redact_shell_line` BEFORE the standard
+per-item `redact_argv` pass -- otherwise a space-separated secret inside
+that single token would survive the per-token argv scan. The argv lane
+is unchanged and still uses `format_argv_metadata`.
+
+Residual limitation: redaction is best-effort over a SHELL line, not a
+full shell parse. It recognises space-, attached-, and single-level
+quoted forms of the known secret flags; it does not unwrap nested
+quoting, command substitution (`$(...)`), or env-var expansion. The
+metadata preview is also bounded (128 bytes/item), so a secret pushed
+far past the preview window in a very long line may be truncated away
+rather than masked. The subject/metadata are a redacted PREVIEW, not a
+guarantee that an adversarially-crafted line cannot smuggle a secret;
+the shell lane stays a trusted-profile, opt-in capability for that
+reason (section 7).
 
 ## 9. MCP surface
 
