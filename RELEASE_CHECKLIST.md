@@ -68,7 +68,7 @@ Rationale:
       using one of the `examples/provider-harness/cursor/*.json`
       configs (native Linux / inside-WSL OR Windows-to-WSL bridge).
       Transcript / screenshot MUST show Cursor `Settings -> MCP`
-      reporting `terminal-commander` connected with the 29-tool
+      reporting `terminal-commander` connected with the 38-tool
       catalogue + a tool call (e.g. `health` or `command_start_combed`
       -> `bucket_wait` -> `command_status`).
 

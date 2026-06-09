@@ -17,7 +17,7 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 37 live
+//! [`tool_catalogue`] is the single source of truth for the 38 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry,
 //! file, PTY, aggregate runtime views, and predicate-routed
@@ -26,7 +26,7 @@
 //! daemon-independent tool; every other tool returns the structured
 //! `daemon_unavailable` envelope when the daemon is unreachable.
 //!
-//! Source-status: live; all 37 tools forward through daemon IPC.
+//! Source-status: live; all 38 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -47,19 +47,19 @@ use terminal_commanderd::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
     CommandStartParams, CommandStartResponse, CommandStatusParams, CommandStatusResponse,
-    ContextUnavailableReason, DiscoverResponse, EventContextParams, EventContextResponse,
-    FileReadWindowParams, FileReadWindowResponse, FileSearchParams, FileSearchResponse,
-    FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
-    FileWatchStopResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse,
-    ListLimitParams, PolicyStatusResponse, ProbeListResponse, ProbeStatusParams,
-    ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
-    PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
-    PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
-    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
-    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
-    RegistrySearchParams, RegistrySearchResponse, RegistryTestParams, RegistryTestResponse,
-    RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
-    SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionListParams,
+    CommandStopParams, CommandStopResponse, ContextUnavailableReason, DiscoverResponse,
+    EventContextParams, EventContextResponse, FileReadWindowParams, FileReadWindowResponse,
+    FileSearchParams, FileSearchResponse, FileWatchListResponse, FileWatchStartParams,
+    FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, IpcContextFrame, IpcError,
+    IpcErrorCode, IpcRequest, IpcResponse, ListLimitParams, PolicyStatusResponse,
+    ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse,
+    PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
+    PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RegistryActivateParams,
+    RegistryActivateResponse, RegistryDeactivateParams, RegistryDeactivateResponse,
+    RegistryGetParams, RegistryGetResponse, RegistryImportPackParams, RegistryImportPackResponse,
+    RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse, RegistryTestParams,
+    RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
+    SelfCheckResponse, SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionListParams,
     SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
     SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse,
     SubscriptionSeekParams, SubscriptionSeekResponse, SubscriptionSourceSel,
@@ -142,6 +142,11 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "command_status",
             status: ToolStatus::Live,
             description: "Lifecycle + counters lookup for a previously started job.",
+        },
+        ToolCatalogueEntry {
+            name: "command_stop",
+            status: ToolStatus::Live,
+            description: "Force-kill a running combed (non-PTY) command by job_id; returns final bounded counters. Never returns raw output.",
         },
         ToolCatalogueEntry {
             name: "command_output_tail",
@@ -811,6 +816,40 @@ impl TerminalCommanderMcpServer {
             Ok(IpcResponse::CommandStatus(s)) => json_tool_result(&command_status_payload(&s)),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    #[tool(
+        name = "command_stop",
+        description = "Force-kill a running combed (non-PTY) command by job_id; returns final bounded counters. Never returns raw output."
+    )]
+    async fn command_stop(
+        &self,
+        Parameters(params): Parameters<McpCommandStopParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let job_id = parse_id::<terminal_commander_core::ids::JobIdKind>("job_id", &params.job_id)
+            .map_err(invalid_params)?;
+        match self
+            .daemon
+            .call(IpcRequest::CommandStop(CommandStopParams { job_id }))
+            .await
+        {
+            Ok(IpcResponse::CommandStop(CommandStopResponse {
+                job_id,
+                bucket_id,
+                frames_total,
+                events_emitted,
+                bytes_total,
+            })) => json_tool_result(&serde_json::json!({
+                "job_id": job_id,
+                "bucket_id": bucket_id,
+                "frames_total": frames_total,
+                "events_emitted": events_emitted,
+                "bytes_total": bytes_total,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -2410,6 +2449,16 @@ pub struct McpCommandStatusParams {
     pub job_id: String,
 }
 
+/// Parameters for the `command_stop` tool: the opaque job id of the
+/// running combed (non-PTY) command to force-kill.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpCommandStopParams {
+    /// Opaque job id returned by `command_start_combed` /
+    /// `run_and_watch` (e.g. `job_<32hex>`); copy it verbatim, not
+    /// free-form.
+    pub job_id: String,
+}
+
 /// Default wait budget for `run_and_watch`, in milliseconds.
 const RUN_AND_WATCH_DEFAULT_WAIT_MS: u64 = 5_000;
 /// Hard cap on the `run_and_watch` wait budget, in milliseconds.
@@ -3550,7 +3599,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_thirty_seven_live_tools() {
+    fn catalogue_lists_thirty_eight_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -3566,6 +3615,7 @@ mod tests {
                 "command_start_combed",
                 "run_and_watch",
                 "command_status",
+                "command_stop",
                 "command_output_tail",
                 "bucket_events_since",
                 "bucket_wait",
@@ -3627,6 +3677,7 @@ mod tests {
                 "command_output_tail".to_owned(),
                 "command_start_combed".to_owned(),
                 "command_status".to_owned(),
+                "command_stop".to_owned(),
                 "event_context".to_owned(),
                 "file_read_window".to_owned(),
                 "file_search".to_owned(),

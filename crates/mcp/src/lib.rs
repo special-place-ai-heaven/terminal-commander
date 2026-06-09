@@ -9,7 +9,7 @@
 //! Dual-surface layout:
 //! - [`tools`] plus the `terminal-commander-mcp` binary are the
 //!   **production** surface: the rmcp `ServerHandler` that advertises
-//!   all 37 live tools (see [`tools::tool_catalogue`]), each forwarded
+//!   all 38 live tools (see [`tools::tool_catalogue`]), each forwarded
 //!   to the daemon over UDS IPC.
 //! - `ToolSurface` (this file) is a **legacy in-process test facade**
 //!   used by integration tests that drive bucket/registry flows

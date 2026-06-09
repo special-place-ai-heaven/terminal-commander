@@ -1,0 +1,57 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "command_stop",
+      "arguments": {
+        "job_id": "job_018f0000000000000000000000000001"
+      }
+    }
+  },
+  "tool": "command_stop",
+  "_meta": {
+    "schema_anchor": "TC03/mcp-tools/command_stop-v1",
+    "fixture_id": "contracts/mcp-tools/command_stop.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed combed (non-PTY) force-kill. Success returns final bounded counters only; captured output remains available through bucket/event tools, not this response. TB-7: job_id carries an opaque-id format note (copy verbatim, e.g. job_<32hex>; from command_start_combed / run_and_watch) so the first call uses the right id."
+  },
+  "response_example": {
+    "job_id": "job_018f0000000000000000000000000001",
+    "bucket_id": "bkt_018f0000000000000000000000000001",
+    "frames_total": 4,
+    "events_emitted": 1,
+    "bytes_total": 256
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "job_id is required",
+    "success payload reports final counters only",
+    "success payload has no probe_id, cursor, secret_prompt_active, exit_code, signal, state, duration_ms, stdin_bytes_written, secret_prompts_total, or raw output",
+    "unknown jobs fail with a typed error instead of synthetic stop success"
+  ]
+}

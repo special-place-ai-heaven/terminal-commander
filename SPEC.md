@@ -229,6 +229,11 @@ TC23, TC24, and TC22 respectively.
   bind one or more bucket and rule selections, return a job id.
 - `command_status` - return current status of a job (running,
   exited, failed, signaled).
+- `command_stop` - force-kill a running combed (non-PTY) job by
+  job_id and return its final bounded counters (frames, events,
+  bytes); never raw output. Realizes the forced-kill control surface
+  ahead of the full `command_send_signal` (xref SPEC-8 / SPEC-13).
+  Subject to policy (CommandSignal-gated).
 - `command_write_stdin` - bounded stdin write to a running job.
   Subject to policy.
 - `command_send_signal` - send POSIX signal to a job. Subject to

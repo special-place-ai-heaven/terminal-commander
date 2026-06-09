@@ -78,6 +78,7 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "command_output_tail".to_owned(),
             "command_start_combed".to_owned(),
             "command_status".to_owned(),
+            "command_stop".to_owned(),
             "event_context".to_owned(),
             "file_read_window".to_owned(),
             "file_search".to_owned(),
