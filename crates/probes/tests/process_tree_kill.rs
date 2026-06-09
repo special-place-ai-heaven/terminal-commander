@@ -303,8 +303,7 @@ fn pid_alive_unix(pid: u32) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Resolve the first child PID of `parent_pid`. Returns `None` if it cannot be
