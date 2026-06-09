@@ -1,7 +1,17 @@
-# Campaign resume state (as_of 2026-06-08)
+# Campaign resume state (as_of 2026-06-09)
 
 Branch: fix/tc-trust-defects (base 725e223). NOTHING pushed. NO push/PR/merge
 without explicit human approval.
+
+## CAMPAIGN COMPLETE (2026-06-09)
+
+All phases done: TC-4 (3b7e719/7fd0ec8/c91200e), TC-5 (d136e95), TC-3 (d94e1c5/
+a5cdb6c/c7bcfbd). Both human security sign-offs (P1, P2) GRANTED, each with an
+added directive that was implemented (P1 -> audit-log redaction 7fd0ec8; P2 ->
+process-tree kill a5cdb6c). HEAD = c7bcfbd. Full honest record + per-phase
+evidence + known-gaps: see CAMPAIGN-RESULTS.md. Nothing pushed; awaiting the human
+to push (release-please fires on the fix/feat commits). A Cursor second-opinion
+prompt is ready at CURSOR-REVIEW-PROMPT.md (report -> cursor_review_tc456.md).
 
 ## Done (committed)
 - Phase 0 docs: commit 73b6450
