@@ -38,7 +38,7 @@ use crate::environment::{EnvironmentRouter, RouteOutcome};
 #[cfg(unix)]
 use crate::ipc::peer;
 use crate::ipc::protocol::{
-    DiscoverResponse, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult,
+    DiscoverResponse, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, PolicyCapsView,
     PolicyStatusResponse, RequestEnvelope, ResponseEnvelope, SelfCheckResponse,
 };
 #[cfg(unix)]
@@ -807,12 +807,23 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
 }
 
 fn handle_policy_status(state: &Arc<DaemonState>) -> IpcResponse {
+    let caps = state.policy.resolved_caps();
     IpcResponse::PolicyStatus(PolicyStatusResponse {
         profile: format!("{:?}", state.policy.profile),
         commands_deny_count: crate::policy::COMMANDS_DENY.len(),
         default_deny_path_suffix_count: crate::policy::DEFAULT_DENY_PATH_SUFFIXES.len(),
         file_window_bytes: state.config.limits.file_window_bytes,
         bucket_read_limit: state.config.limits.bucket_read_limit,
+        // Surface the RESOLVED per-call caps (POLICY.md section 4.1): the same
+        // four flags the engine evaluates against, including any preset ON by
+        // `full_access`. `PolicyCaps` is daemon-private; map field-for-field
+        // into the wire view.
+        caps: PolicyCapsView {
+            allow_shell: caps.allow_shell,
+            allow_session: caps.allow_session,
+            allow_privileged: caps.allow_privileged,
+            allow_remote: caps.allow_remote,
+        },
     })
 }
 

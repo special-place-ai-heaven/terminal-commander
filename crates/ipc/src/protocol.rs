@@ -517,6 +517,26 @@ pub struct DiscoverResponse {
     pub methods: Vec<String>,
 }
 
+/// The four resolved per-call capabilities (POLICY.md section 4.1).
+///
+/// Surfaced on [`PolicyStatusResponse`] so an operator can see the ACTIVE caps
+/// -- including those preset ON by `full_access` -- without reading TOML.
+/// These are the values the policy engine actually evaluates against (base
+/// profile `||` `full_access` preset), never the raw config.
+// 4 independent opt-in capability flags; a bitfield/enum would hurt the wire/serde surface
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PolicyCapsView {
+    /// Gates the `shell_exec` lane (TC49).
+    pub allow_shell: bool,
+    /// Gates the `shell_session_*` lane (TC50; not yet live).
+    pub allow_session: bool,
+    /// Gates the Wave-4 privileged helper (not yet live).
+    pub allow_privileged: bool,
+    /// Gates remote federation / `target_id` (Wave 5; not yet live).
+    pub allow_remote: bool,
+}
+
 /// `policy_status` payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyStatusResponse {
@@ -528,6 +548,11 @@ pub struct PolicyStatusResponse {
     pub file_window_bytes: usize,
     /// Per-call bucket-read cap.
     pub bucket_read_limit: usize,
+    /// Resolved per-call capabilities (POLICY.md section 4.1). Exposes the
+    /// caps the engine evaluates against -- so `full_access` (all preset ON)
+    /// and a base profile + `[policy.caps] allow_shell = true` both show the
+    /// active set, with no opaque "full_access magic".
+    pub caps: PolicyCapsView,
 }
 
 /// `self_check` payload.

@@ -15,14 +15,15 @@
 //!        -> command_shell_start audit + shared spawn core
 //! ```
 //!
-//! Caps wiring note: `DaemonState::bootstrap` does NOT yet thread
-//! `resolved_caps()` into the engine (that is TC49 Task 6). To exercise the
-//! cap-ON path here without depending on Task 6, `caps_command_runtime`
+//! Caps wiring note: `DaemonState::bootstrap` now threads
+//! `config.resolved_caps()` into the engine via `with_config_caps` (TC49
+//! Task 6, `state.rs`). To exercise the cap-ON path here deterministically
+//! WITHOUT switching the whole bootstrapped profile, `caps_command_runtime`
 //! reuses a bootstrapped state's wired Arcs (router / rings / jobs / audit /
 //! activation / sources) but builds a SEPARATE `CommandRuntime` whose policy
 //! engine has `allow_shell` flipped on via `PolicyEngine::with_config_caps`.
 //! The default-deny test goes through the real bootstrapped `state.command`
-//! (caps off), proving the default surface stays safe.
+//! (default config, caps off), proving the default surface stays safe.
 
 #![cfg(unix)]
 

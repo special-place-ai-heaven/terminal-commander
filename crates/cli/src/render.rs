@@ -89,7 +89,8 @@ pub(crate) fn probes(resp: &ProbeListResponse) {
     probe_rows(&resp.probes);
 }
 
-/// `policy`: active profile, deny counts, and the per-call caps.
+/// `policy`: active profile, deny counts, the per-call caps, and the resolved
+/// capability set (POLICY.md section 4.1).
 pub(crate) fn policy(resp: &PolicyStatusResponse) {
     println!("policy status:");
     println!("  profile                        : {}", resp.profile);
@@ -108,6 +109,24 @@ pub(crate) fn policy(resp: &PolicyStatusResponse) {
     println!(
         "  bucket_read_limit              : {}",
         resp.bucket_read_limit
+    );
+    // Resolved per-call capabilities (the values the engine evaluates against,
+    // including any preset ON by `full_access`).
+    println!(
+        "  caps.allow_shell               : {}",
+        resp.caps.allow_shell
+    );
+    println!(
+        "  caps.allow_session             : {}",
+        resp.caps.allow_session
+    );
+    println!(
+        "  caps.allow_privileged          : {}",
+        resp.caps.allow_privileged
+    );
+    println!(
+        "  caps.allow_remote              : {}",
+        resp.caps.allow_remote
     );
 }
 

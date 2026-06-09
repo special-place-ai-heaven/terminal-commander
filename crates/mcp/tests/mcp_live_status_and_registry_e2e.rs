@@ -167,6 +167,26 @@ async fn live_policy_status_reports_profile_and_caps() {
             body["bucket_read_limit"].is_number(),
             "policy_status must report a numeric bucket_read_limit cap; got {body}"
         );
+        // W2 / POLICY.md 4.1 guardrail #4: the resolved per-call caps are
+        // surfaced so an operator can see the ACTIVE set. The live daemon runs
+        // a default base profile, so all four resolve OFF.
+        let caps = &body["caps"];
+        assert!(
+            caps.is_object(),
+            "policy_status must surface a caps object; got {body}"
+        );
+        for key in [
+            "allow_shell",
+            "allow_session",
+            "allow_privileged",
+            "allow_remote",
+        ] {
+            assert_eq!(
+                caps[key].as_bool(),
+                Some(false),
+                "default profile cap {key} must be present and false; got {body}"
+            );
+        }
         let _ = client.cancel().await;
     }
     handle.shutdown().await;

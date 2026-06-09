@@ -23,7 +23,13 @@
     "commands_deny_count": 8,
     "default_deny_path_suffix_count": 12,
     "file_window_bytes": 65536,
-    "bucket_read_limit": 10000
+    "bucket_read_limit": 10000,
+    "caps": {
+      "allow_shell": false,
+      "allow_session": false,
+      "allow_privileged": false,
+      "allow_remote": false
+    }
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",

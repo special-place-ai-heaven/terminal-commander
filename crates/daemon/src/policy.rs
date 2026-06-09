@@ -251,6 +251,21 @@ impl PolicyEngine {
         self.caps.allow_shell
     }
 
+    /// Read-only accessor: the full RESOLVED capability set carried by this
+    /// engine.
+    ///
+    /// These are the caps the engine evaluates against -- the bootstrap path
+    /// feeds [`Self::with_config_caps`] with `DaemonConfig::resolved_caps()`
+    /// (`base || full_access`), so under `full_access` every cap reads ON even
+    /// when `[policy.caps]` lists one as `false`. `policy_status` surfaces this so
+    /// the active per-call caps are visible (POLICY.md section 4.1), without
+    /// exposing a mutation path -- the field stays private and `PolicyCaps` is
+    /// `Copy`, so this returns a snapshot, never an alias.
+    #[must_use]
+    pub const fn resolved_caps(&self) -> PolicyCaps {
+        self.caps
+    }
+
     /// Default-constructed engine uses the `developer_local` profile.
     #[must_use]
     pub fn default_engine() -> Self {

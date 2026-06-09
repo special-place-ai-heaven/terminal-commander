@@ -138,6 +138,50 @@ fn policy_status_reports_active_caps() {
                 assert_eq!(p.bucket_read_limit, state.config.limits.bucket_read_limit);
                 assert!(p.commands_deny_count > 0);
                 assert!(p.default_deny_path_suffix_count > 0);
+                // Default base profile carries NO caps: all four read false.
+                assert!(!p.caps.allow_shell, "default profile must not enable shell");
+                assert!(!p.caps.allow_session);
+                assert!(!p.caps.allow_privileged);
+                assert!(!p.caps.allow_remote);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn policy_status_surfaces_explicit_allow_shell_cap() {
+    // W2: a BASE profile (developer_local) + `[policy.caps] allow_shell = true`
+    // must surface `caps.allow_shell: true` via `policy_status` -- the resolved
+    // cap the engine evaluates against, not the raw config (POLICY.md 4.1).
+    use terminal_commanderd::PolicyCapsSection;
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("policy-cap-on");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.caps = Some(PolicyCapsSection {
+            allow_shell: true,
+            ..Default::default()
+        });
+        let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+        let socket = state.config.socket_path();
+        let server = IpcServer::new(Arc::clone(&state), socket);
+        let handle = server.spawn().unwrap();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        let resp = client.call(4, IpcRequest::PolicyStatus).await.unwrap();
+        match resp {
+            IpcResponse::PolicyStatus(p) => {
+                assert!(
+                    p.caps.allow_shell,
+                    "explicit [policy.caps] allow_shell=true must surface true: {:?}",
+                    p.caps
+                );
+                // The other caps stay off (only allow_shell was opted in).
+                assert!(!p.caps.allow_session);
+                assert!(!p.caps.allow_privileged);
+                assert!(!p.caps.allow_remote);
             }
             other => panic!("unexpected response: {other:?}"),
         }

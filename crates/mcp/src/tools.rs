@@ -564,12 +564,22 @@ impl TerminalCommanderMcpServer {
                 default_deny_path_suffix_count,
                 file_window_bytes,
                 bucket_read_limit,
+                caps,
             })) => json_tool_result(&serde_json::json!({
                 "profile": profile,
                 "commands_deny_count": commands_deny_count,
                 "default_deny_path_suffix_count": default_deny_path_suffix_count,
                 "file_window_bytes": file_window_bytes,
                 "bucket_read_limit": bucket_read_limit,
+                // Resolved per-call caps (POLICY.md section 4.1). Surfacing the
+                // active set keeps `full_access` and explicit `[policy.caps]`
+                // grants visible -- there is no opaque "full_access magic".
+                "caps": {
+                    "allow_shell": caps.allow_shell,
+                    "allow_session": caps.allow_session,
+                    "allow_privileged": caps.allow_privileged,
+                    "allow_remote": caps.allow_remote,
+                },
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),

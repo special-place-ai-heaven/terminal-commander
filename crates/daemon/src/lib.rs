@@ -39,8 +39,8 @@ pub use command::{
     DEFAULT_COMMAND_SEVERITY_MIN, MAX_ARGV_ITEM_BYTES, MAX_ARGV_ITEMS, SHELL_INTERPRETERS_DENY,
 };
 pub use config::{
-    ConfigError, DaemonConfig, DaemonSection, LimitsSection, PolicySection, RetentionSection,
-    RuntimeMode,
+    ConfigError, DaemonConfig, DaemonSection, LimitsSection, PolicyCapsSection, PolicySection,
+    RetentionSection, RuntimeMode,
 };
 pub use file_watch::{LiveWatchIdentity, WatchError, WatchRebindReport, WatchRuntime};
 pub use ipc::{
