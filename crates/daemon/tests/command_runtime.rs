@@ -458,6 +458,58 @@ fn command_start_denies_all_known_shell_interpreters() {
     });
 }
 
+/// TC49 Task-4 regression lock: threading `StartLane` through
+/// `start_combed_inner` MUST NOT weaken the argv lane. The default
+/// `start_combed` path (`StartLane::Argv`) still hard-denies a shell
+/// interpreter as `argv[0]` with `ShellInterpreterDenied` and still
+/// writes a `command_rejected` deny audit row — byte-for-byte the
+/// pre-TC49 behavior, BEFORE the policy engine. The shell lane's
+/// `allow_shell` gate is a separate door (`start_combed_shell`); it
+/// never relaxes this guard.
+#[test]
+fn argv_shell_interpreter_still_denied_unchanged() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("deny-argv-unchanged");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let job_count_before = state.jobs.list().len();
+        let req = CommandStartRequest {
+            argv: vec!["sh".to_owned(), "-c".to_owned(), "echo hi".to_owned()],
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            peer_discriminator: None,
+        };
+        let err = state.command.start_combed(req).unwrap_err();
+        assert!(
+            matches!(err, CommandError::ShellInterpreterDenied(ref s) if s == "sh"),
+            "argv lane must still hard-deny the shell interpreter: {err:?}"
+        );
+        // The guard runs BEFORE policy/spawn: no process started.
+        assert_eq!(state.jobs.list().len(), job_count_before);
+
+        // The deny audit row is the argv label, NOT command_shell_rejected.
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.action == "command_rejected" && r.decision == "deny"),
+            "expected a command_rejected deny row: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.action == "command_shell_rejected"),
+            "argv lane must not emit a shell-lane audit label: {rows:?}"
+        );
+
+        cleanup(&data);
+    });
+}
+
 #[test]
 fn nonzero_exit_produces_command_failed_event_in_bucket() {
     let runtime = rt();

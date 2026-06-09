@@ -134,6 +134,22 @@ pub enum CommandError {
     Io(#[from] std::io::Error),
 }
 
+/// Which lane started this combed job, threaded through
+/// [`CommandRuntime::start_combed_inner`]. `Argv` is the default
+/// command path: `argv[0]` is the program and shell interpreters are a
+/// hard deny (`SHELL_INTERPRETERS_DENY`). `Shell` is the TC49
+/// `shell_exec` lane: `argv` is the daemon-assembled `[shell, "-lc",
+/// shell_line]`, the interpreter guard is skipped, and the verdict comes
+/// from [`PolicyAction::CommandShellStart`] (gated by `allow_shell`).
+///
+/// Only THREE sites in `start_combed_inner` branch on this lane: the
+/// shell-interpreter guard, the policy action, and the deny/allow audit
+/// label. Everything from bucket allocation onward is shared verbatim.
+enum StartLane<'a> {
+    Argv,
+    Shell { shell_line: &'a str, shell: &'a str },
+}
+
 /// `command_start_combed` request shape. Plain Rust struct today;
 /// the rmcp / IPC adapter at TC41 wraps it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,7 +506,7 @@ impl CommandRuntime {
         &self,
         req: CommandStartRequest,
     ) -> Result<CommandStartResponse, CommandError> {
-        self.start_combed_inner(req, None)
+        self.start_combed_inner(req, None, StartLane::Argv)
     }
 
     /// TC-5 self-check spawn entry point. Like [`Self::start_combed`]
@@ -507,7 +523,30 @@ impl CommandRuntime {
         req: CommandStartRequest,
         reuse_bucket: Option<BucketId>,
     ) -> Result<CommandStartResponse, CommandError> {
-        self.start_combed_inner(req, reuse_bucket)
+        self.start_combed_inner(req, reuse_bucket, StartLane::Argv)
+    }
+
+    /// TC49 shell-lane entry point. The single public seam into
+    /// `StartLane::Shell`: it spawns the daemon-assembled
+    /// `req.argv` = `[shell, "-lc", shell_line]` while SKIPPING the
+    /// argv-lane shell-interpreter guard and instead gating on
+    /// [`PolicyAction::CommandShellStart`] (the `allow_shell` capability).
+    /// `shell_line` and `shell` MUST be the same strings the caller used to
+    /// build `req.argv` — they are the audit subject and the policy inputs.
+    ///
+    /// SYNC, like [`Self::start_combed`]: `start_combed_inner` never awaits,
+    /// so the `&str` borrows held in `StartLane::Shell` live only for the
+    /// duration of this call. Async IPC/MCP handlers call it inline.
+    ///
+    /// MUST be called from within a tokio runtime; `ProcessProbe::spawn`
+    /// uses `tokio::process::Command`.
+    pub fn start_combed_shell(
+        &self,
+        req: CommandStartRequest,
+        shell_line: &str,
+        shell: &str,
+    ) -> Result<CommandStartResponse, CommandError> {
+        self.start_combed_inner(req, None, StartLane::Shell { shell_line, shell })
     }
 
     /// Shared `command_start_combed` engine. `reuse_bucket` is `None` for
@@ -520,10 +559,11 @@ impl CommandRuntime {
     /// the resolved `bucket_id`.
     #[allow(clippy::too_many_lines)] // sequential pipeline; splitting it hurts readability
     fn start_combed_inner(
-        &self,
-        req: CommandStartRequest,
-        reuse_bucket: Option<BucketId>,
-    ) -> Result<CommandStartResponse, CommandError> {
+    &self,
+    req: CommandStartRequest,
+    reuse_bucket: Option<BucketId>,
+    mode: StartLane<'_>,
+) -> Result<CommandStartResponse, CommandError> {
         Self::validate_argv(&req.argv)?;
 
         // TC-2 in-flight dedup guard. BEFORE the id mint: if an identical
@@ -559,7 +599,14 @@ impl CommandRuntime {
         // a shell bridge: a future opt-in policy capability is the
         // only sanctioned path to invoke an interpreter, and TC38
         // does NOT add that capability.
-        if let Some(shell) = Self::shell_interpreter_basename(&req.argv[0]) {
+        //
+        // ARGV LANE ONLY. The TC49 shell lane (`StartLane::Shell`)
+        // assembles `argv[0]` = the chosen interpreter ON PURPOSE, so
+        // this guard would self-deny it. The shell lane is instead gated
+        // by `PolicyAction::CommandShellStart` (allow_shell cap) below.
+        if let StartLane::Argv = mode
+            && let Some(shell) = Self::shell_interpreter_basename(&req.argv[0])
+        {
             self.audit(
                 "command_rejected",
                 &subject_for_argv(&req.argv),
@@ -573,21 +620,58 @@ impl CommandRuntime {
             return Err(CommandError::ShellInterpreterDenied(shell.to_owned()));
         }
 
-        // Pre-spawn policy gate.
+        // Pre-spawn policy gate. The lane selects BOTH the policy action
+        // and the audit-row labels (a denied argv start is
+        // `command_rejected`; a denied shell start is
+        // `command_shell_rejected`). The deny path is otherwise identical
+        // across lanes.
         let cwd_for_policy = req.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
-        let verdict = self.policy.evaluate(&PolicyAction::CommandStart {
-            argv: &req.argv,
-            cwd: cwd_for_policy.as_path(),
-        });
+        let verdict = match mode {
+            StartLane::Argv => self.policy.evaluate(&PolicyAction::CommandStart {
+                argv: &req.argv,
+                cwd: cwd_for_policy.as_path(),
+            }),
+            StartLane::Shell { shell_line, shell } => {
+                self.policy.evaluate(&PolicyAction::CommandShellStart {
+                    shell_line,
+                    cwd: cwd_for_policy.as_path(),
+                    shell,
+                })
+            }
+        };
         if verdict.decision == PolicyDecision::Deny {
+            match mode {
+                StartLane::Argv => self.audit(
+                    "command_rejected",
+                    &subject_for_argv(&req.argv),
+                    "deny",
+                    Some(verdict.reason.clone()),
+                    Some(format_argv_metadata(&req.argv)),
+                ),
+                StartLane::Shell { shell_line, .. } => self.audit(
+                    "command_shell_rejected",
+                    &redact_shell_line(shell_line),
+                    "deny",
+                    Some(verdict.reason.clone()),
+                    Some(format_argv_metadata(&req.argv)),
+                ),
+            }
+            return Err(CommandError::PolicyDenied(verdict.reason));
+        }
+
+        // Shell lane: the verdict is allowed (AllowWithAudit). Emit the
+        // dedicated `command_shell_start` audit row with a redacted shell
+        // line BEFORE spawning, so the allow decision is recorded even if
+        // the spawn itself later fails. The argv lane's own
+        // `command_start` row is emitted further down the shared core.
+        if let StartLane::Shell { shell_line, .. } = mode {
             self.audit(
-                "command_rejected",
-                &subject_for_argv(&req.argv),
-                "deny",
+                "command_shell_start",
+                &redact_shell_line(shell_line),
+                "allow_with_audit",
                 Some(verdict.reason.clone()),
                 Some(format_argv_metadata(&req.argv)),
             );
-            return Err(CommandError::PolicyDenied(verdict.reason));
         }
 
         // Allocate identifiers. These are pure value allocations (no
@@ -1302,6 +1386,22 @@ fn subject_for_argv(argv: &[String]) -> String {
     // build a stable short label.
     let trimmed = if head.len() > 256 { &head[..256] } else { head };
     trimmed.to_owned()
+}
+
+/// Audit-safe preview of a TC49 shell line. Reuses the per-token
+/// secret masker (`mask_token_inline`) over whitespace splits so the
+/// same credential spans hidden in argv audits are hidden here, then
+/// caps the joined result at 128 bytes on a char boundary (panic-free on
+/// multibyte input). This is the `subject` of the `command_shell_start`
+/// / `command_shell_rejected` audit rows — never the raw line.
+fn redact_shell_line(line: &str) -> String {
+    let masked: Vec<String> = line.split_whitespace().map(mask_token_inline).collect();
+    let joined = masked.join(" ");
+    let mut end = joined.len().min(128);
+    while end > 0 && !joined.is_char_boundary(end) {
+        end -= 1;
+    }
+    joined[..end].to_owned()
 }
 
 /// Compute the in-flight dedup key for a start request (TC-2).
