@@ -262,12 +262,32 @@ Both add-ons were implemented, security-reviewed, gated, and verified.
   Exited-instead-of-Cancelled (or vice versa) in a microscopic window -- identical to the
   existing PTY design; no corruption, no security impact.
 
-## Second opinion (optional, pending)
+## Second opinion -- Cursor review (DONE)
 
-A Cursor code-review prompt is prepared at .planning/tc-bugfix-campaign/CURSOR-REVIEW-PROMPT.md
-(covers the full campaign diff 5b054cb..HEAD, emphasis on the security-critical surfaces). When
-the operator runs it, the report lands at .planning/tc-bugfix-campaign/cursor_review_tc456.md;
-any findings will be folded as follow-up commits before push.
+Cursor reviewed the full campaign diff 5b054cb..HEAD (report:
+cursor_review_tc456.md). VERDICT: NO BLOCKERS, safe to push; all 5 high-risk
+surfaces CONFIRMED-SAFE except a flag-coverage gap in the redactor. 7 findings:
+- #1 MEDIUM (redactor missed --api-key= / --passwd= aliases): FIXED -> commit
+  b46a2be (shared SECRET_VALUE_FLAGS const for both masking layers + 4 tests;
+  34/34 redact_tests green both OS).
+- #2 MEDIUM (forced command_stop appends no bucket lifecycle event): NOT changed
+  -- this deliberately mirrors PtyRuntime::stop; the cancellation IS observable
+  via runtime_state liveness=Cancelled + the command_stop/allow audit row.
+  Emitting the synthetic event would widen the stop-vs-natural-exit race into a
+  possible double bucket event. Offered to the operator to add it (guarded, for
+  both command + PTY) if a bucket lifecycle signal on stop is wanted.
+- #3 LOW (ignored cancel one-shot send): intentional -- a dead lifecycle task
+  means the child already exited; the no-op is correct.
+- #4 LOW (00-INDEX.md:118 "37 live tools"): NO change -- that row is a HISTORICAL
+  baseline-analysis entry that already states "Adding command_stop makes 38";
+  editing it would falsify the recorded baseline.
+- #5 LOW (daemon_unavailable_envelope.rs:12 "37 daemon-backed"): NO change --
+  correct math (38 live minus system_discover), already self-explained
+  ("every tool except system_discover").
+- #6/#7 NIT (-h treated as --header; unix tree-kill shells to kill(1)): both
+  intentional/acceptable, documented.
+Cursor's hard-constraint audit: zero new crates PASS, MCP guard PASS, trust
+model PASS.
 
 ## Closing
 
