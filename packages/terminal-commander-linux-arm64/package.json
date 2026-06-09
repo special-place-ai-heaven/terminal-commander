@@ -1,6 +1,6 @@
 {
   "name": "@terminal-commander/linux-arm64",
-  "version": "0.1.46",
+  "version": "0.1.47",
   "description": "Terminal Commander prebuilt Rust binaries for linux/aarch64. Internal platform package consumed by the `terminal-commander` root wrapper via optionalDependencies; do not depend on this package directly.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "author": "special-place-ai-heaven",

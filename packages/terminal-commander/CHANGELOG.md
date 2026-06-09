@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.47](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.46...v0.1.47) (2026-06-09)
+
+
+### Features
+
+* release Rust crate changes ([3e652cf](https://github.com/special-place-ai-heaven/terminal-commander/commit/3e652cf575e97ac74d86e07dc41bf24e1a731fe5))
+* release Rust crate changes ([c1581b9](https://github.com/special-place-ai-heaven/terminal-commander/commit/c1581b9a030611a191af0d82c7afe63b891715de))
+
 ## [0.1.46](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.45...v0.1.46) (2026-06-04)
 
 
