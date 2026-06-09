@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::policy::PolicyProfile;
+use crate::policy::{PolicyCaps, PolicyProfile};
 
 /// Hard cap on a single file_read_window response. Mirrors the value
 /// already exported by `terminal-commander-mcp::MAX_FILE_WINDOW_BYTES`.
@@ -178,6 +178,17 @@ pub struct PolicyCapsSection {
     pub allow_privileged: bool,
     #[serde(default)]
     pub allow_remote: bool,
+}
+
+impl From<&PolicyCapsSection> for PolicyCaps {
+    fn from(s: &PolicyCapsSection) -> Self {
+        Self {
+            allow_shell: s.allow_shell,
+            allow_session: s.allow_session,
+            allow_privileged: s.allow_privileged,
+            allow_remote: s.allow_remote,
+        }
+    }
 }
 
 /// `[policy.paths]` (POLICY.md section 4). Forward-compat only at this
@@ -333,6 +344,29 @@ impl DaemonConfig {
         let mut cfg: Self = toml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
         cfg.validate_and_clamp()?;
         Ok(cfg)
+    }
+
+    /// Resolve the effective capability set fed to the policy engine.
+    ///
+    /// Returns the explicit `[policy.caps]` block if present; for the
+    /// `full_access` profile, ANY unset cap defaults to true (`base || full`).
+    /// This is a pure derivation -- it never mutates stored TOML and never
+    /// bypasses `evaluate()`. The caps are inputs to the engine; `full_access`
+    /// only flips the inputs, leaving every gated action at `AllowWithAudit`.
+    ///
+    /// `full_access` semantics are `base || full`: it forces ALL caps on even
+    /// if `[policy.caps]` lists one false. To run a SUBSET, use a base profile
+    /// plus explicit `[policy.caps]`, not `full_access`.
+    #[must_use]
+    pub fn resolved_caps(&self) -> PolicyCaps {
+        let base: PolicyCaps = self.policy.caps.as_ref().map(PolicyCaps::from).unwrap_or_default();
+        let full = matches!(self.policy.profile, PolicyProfile::FullAccess);
+        PolicyCaps {
+            allow_shell: base.allow_shell || full,
+            allow_session: base.allow_session || full,
+            allow_privileged: base.allow_privileged || full,
+            allow_remote: base.allow_remote || full,
+        }
     }
 
     /// Resolve the database path. Always `<data_dir>/terminal-commander.db`.
@@ -660,6 +694,14 @@ mod tests {
         let toml = "[daemon]\ndata_dir = \"/tmp/tc-nocaps\"\n[policy]\nprofile = \"developer_local\"\n";
         let cfg = DaemonConfig::from_toml(toml).expect("parse");
         assert!(cfg.policy.caps.is_none());
+    }
+
+    #[test]
+    fn full_access_profile_presets_all_caps_true() {
+        let toml = "[daemon]\ndata_dir = \"/tmp/tc-fa\"\n[policy]\nprofile = \"full_access\"\n";
+        let cfg = DaemonConfig::from_toml(toml).expect("parse full_access");
+        let caps = cfg.resolved_caps();
+        assert!(caps.allow_shell && caps.allow_session && caps.allow_privileged && caps.allow_remote);
     }
 
     #[test]
