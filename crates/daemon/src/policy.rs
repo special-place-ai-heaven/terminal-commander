@@ -52,12 +52,26 @@ pub enum PolicyProfile {
     RepoOnly,
     ReadOnlyObserver,
     AdminDebug,
+    /// Convenience profile (Hybrid trust model -- reconciliation Decision 1).
+    /// Exec-capable like `developer_local`; its loader preset (`resolved_caps`)
+    /// flips ALL `[policy.caps]` true. NEVER short-circuits `evaluate()` -- it
+    /// only sets the caps inputs, so gated actions stay `AllowWithAudit`.
+    FullAccess,
 }
 
 /// Action being evaluated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyAction<'a> {
     CommandStart { argv: &'a [String], cwd: &'a Path },
+    /// Shell-lane start (TC49). `shell_line` is the dedicated shell string;
+    /// argv[0] is NOT a user-chosen interpreter here. Gated by `allow_shell`.
+    /// NOTE: `COMMANDS_DENY` is argv[0]-only and deliberately does NOT scan
+    /// `shell_line` (accepted residual risk, Decision 1).
+    CommandShellStart {
+        shell_line: &'a str,
+        cwd: &'a Path,
+        shell: &'a str,
+    },
     CommandStdin,
     CommandSignal,
     FileRead { path: &'a Path },
@@ -75,6 +89,18 @@ pub enum PolicyAction<'a> {
 pub struct PolicyVerdict {
     pub decision: PolicyDecision,
     pub reason: String,
+}
+
+/// Resolved capability set fed to the engine (mirror of `[policy.caps]`).
+/// All-false by default; deny-first preserved. These are INPUTS to
+/// `evaluate()`, never a bypass: a cap being on only flips a gated action
+/// from `Deny` to `AllowWithAudit` on an exec-capable profile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PolicyCaps {
+    pub allow_shell: bool,
+    pub allow_session: bool,
+    pub allow_privileged: bool,
+    pub allow_remote: bool,
 }
 
 /// The seven binaries that are denied across every profile per the
@@ -129,6 +155,10 @@ pub struct PolicyEngine {
     /// is authoritative and enforced for both `developer_local` and
     /// `repo_only`.
     command_allow_roots: Option<Vec<String>>,
+    /// Resolved capability set (Hybrid trust model, Decision 1). Defaults to
+    /// all-false; only `with_config_caps` (fed by `DaemonConfig::resolved_caps`)
+    /// sets it. Caps are inputs to `evaluate()`, never an `evaluate()` bypass.
+    caps: PolicyCaps,
 }
 
 impl PolicyEngine {
@@ -139,12 +169,19 @@ impl PolicyEngine {
     /// `repo_only` engine.
     #[must_use]
     pub const fn new(profile: PolicyProfile) -> Self {
-        Self {
-            profile,
-            repo_root: None,
-            command_allow_roots: None,
+            Self {
+                profile,
+                repo_root: None,
+                command_allow_roots: None,
+                // `PolicyCaps::default()` is not const; spell the all-false set out.
+                caps: PolicyCaps {
+                    allow_shell: false,
+                    allow_session: false,
+                    allow_privileged: false,
+                    allow_remote: false,
+                },
+            }
         }
-    }
 
     /// Construct an engine for a profile with an explicit repo-root.
     /// The root is canonicalized once here; if canonicalization fails
@@ -158,6 +195,7 @@ impl PolicyEngine {
             profile,
             repo_root: Some(canonical),
             command_allow_roots: None,
+            caps: PolicyCaps::default(),
         }
     }
 
@@ -179,7 +217,24 @@ impl PolicyEngine {
             profile,
             repo_root,
             command_allow_roots,
+            caps: PolicyCaps::default(),
         }
+    }
+
+    /// Build an engine carrying a resolved capability set (Hybrid trust model,
+    /// Decision 1/5). Caps are inputs to `evaluate()` -- they only flip a gated
+    /// action from `Deny` to `AllowWithAudit` on an exec-capable profile; they
+    /// NEVER short-circuit the engine.
+    #[must_use]
+    pub fn with_config_caps(
+        profile: PolicyProfile,
+        repo_root: Option<PathBuf>,
+        command_allow_roots: Option<Vec<String>>,
+        caps: PolicyCaps,
+    ) -> Self {
+        let mut e = Self::with_config(profile, repo_root, command_allow_roots);
+        e.caps = caps;
+        e
     }
 
     /// Default-constructed engine uses the `developer_local` profile.
@@ -217,6 +272,31 @@ impl PolicyEngine {
                     "path '{}' matches a default-deny sensitive suffix (SECURITY.md \u{a7}5)",
                     path.display()
                 ),
+            };
+        }
+
+        // Shell-lane gate (TC49). Evaluated BEFORE the per-profile match so a
+        // single deny-first rule covers every profile: shell_exec is allowed
+        // (AllowWithAudit) ONLY on an exec-capable profile with `allow_shell`
+        // on; otherwise denied. NOTE: COMMANDS_DENY is argv[0]-only and does
+        // NOT scan `shell_line` (accepted residual risk, Decision 1).
+        if let PolicyAction::CommandShellStart { .. } = action {
+            let exec_profile = matches!(
+                self.profile,
+                PolicyProfile::DeveloperLocal
+                    | PolicyProfile::AdminDebug
+                    | PolicyProfile::FullAccess
+            );
+            if exec_profile && self.caps.allow_shell {
+                return PolicyVerdict {
+                    decision: PolicyDecision::AllowWithAudit,
+                    reason: "shell_exec allowed by allow_shell capability (audited)".to_owned(),
+                };
+            }
+            return PolicyVerdict {
+                decision: PolicyDecision::Deny,
+                reason: "shell_exec denied: allow_shell capability is off or profile forbids shell"
+                    .to_owned(),
             };
         }
 
@@ -293,7 +373,13 @@ impl PolicyEngine {
                 }
                 self.dev_local_repo_only_verdict(action)
             }
-            PolicyProfile::DeveloperLocal => self.dev_local_repo_only_verdict(action),
+            // FullAccess is exec-capable like developer_local. Its only added
+            // power comes from caps (preset all-true by the loader), which are
+            // evaluated above (shell) and via the same shared verdict here --
+            // never an `evaluate()` bypass.
+            PolicyProfile::DeveloperLocal | PolicyProfile::FullAccess => {
+                self.dev_local_repo_only_verdict(action)
+            }
         }
     }
 
@@ -425,7 +511,11 @@ const fn action_path_subject<'a>(action: &'a PolicyAction<'a>) -> Option<&'a Pat
     match action {
         PolicyAction::CommandStart { cwd, .. } => Some(cwd),
         PolicyAction::FileRead { path } | PolicyAction::FileWatch { path } => Some(path),
-        PolicyAction::CommandStdin
+        // Shell-lane start is gated by an early return in `evaluate` (it never
+        // reaches the repo_only containment check), so it has no path subject
+        // here. Arm present only to keep the match exhaustive.
+        PolicyAction::CommandShellStart { .. }
+        | PolicyAction::CommandStdin
         | PolicyAction::CommandSignal
         | PolicyAction::ProbeCreate { .. }
         | PolicyAction::RegistryCreate
@@ -484,6 +574,80 @@ mod tests {
         let v = e.evaluate(&PolicyAction::CommandStart {
             argv: &argv,
             cwd: &cwd,
+        });
+        assert_eq!(v.decision, PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn shell_start_denied_by_default() {
+        // developer_local is exec-capable, but caps default all-false, so the
+        // shell lane is denied with no explicit opt-in.
+        let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
+        let v = e.evaluate(&PolicyAction::CommandShellStart {
+            shell_line: "echo a | wc -c",
+            cwd: Path::new("."),
+            shell: "/bin/bash",
+        });
+        assert_eq!(v.decision, PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn shell_start_allowed_with_audit_when_cap_on() {
+        let e = PolicyEngine::with_config_caps(
+            PolicyProfile::DeveloperLocal,
+            None,
+            None,
+            PolicyCaps {
+                allow_shell: true,
+                ..Default::default()
+            },
+        );
+        let v = e.evaluate(&PolicyAction::CommandShellStart {
+            shell_line: "echo a | wc -c",
+            cwd: Path::new("."),
+            shell: "/bin/bash",
+        });
+        assert_eq!(v.decision, PolicyDecision::AllowWithAudit);
+    }
+
+    #[test]
+    fn shell_start_denied_in_repo_only_even_with_cap() {
+        // repo_only is NOT exec-capable for the shell lane: even with the cap on,
+        // the early-return shell gate denies because the profile forbids shell.
+        let e = PolicyEngine::with_config_caps(
+            PolicyProfile::RepoOnly,
+            None,
+            None,
+            PolicyCaps {
+                allow_shell: true,
+                ..Default::default()
+            },
+        );
+        let v = e.evaluate(&PolicyAction::CommandShellStart {
+            shell_line: "ls",
+            cwd: Path::new("."),
+            shell: "/bin/bash",
+        });
+        assert_eq!(v.decision, PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn shell_start_denied_in_read_only_observer_even_with_cap() {
+        // read_only_observer is the strictest profile: the shell lane is denied
+        // even with allow_shell explicitly on (profile forbids shell).
+        let e = PolicyEngine::with_config_caps(
+            PolicyProfile::ReadOnlyObserver,
+            None,
+            None,
+            PolicyCaps {
+                allow_shell: true,
+                ..Default::default()
+            },
+        );
+        let v = e.evaluate(&PolicyAction::CommandShellStart {
+            shell_line: "echo a | wc -c",
+            cwd: Path::new("."),
+            shell: "/bin/bash",
         });
         assert_eq!(v.decision, PolicyDecision::Deny);
     }

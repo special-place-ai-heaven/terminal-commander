@@ -385,6 +385,7 @@ impl CommandRuntime {
             PolicyProfile::RepoOnly => "repo_only".to_owned(),
             PolicyProfile::ReadOnlyObserver => "read_only_observer".to_owned(),
             PolicyProfile::AdminDebug => "admin_debug".to_owned(),
+            PolicyProfile::FullAccess => "full_access".to_owned(),
         };
         Self {
             router,
