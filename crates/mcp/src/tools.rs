@@ -2207,6 +2207,205 @@ where
     }
 }
 
+// =====================================================================
+// TB-12: lenient option coercion for real-world MCP clients.
+//
+// schemars derives an `Option<uN>` field as the union schema
+// `{"type":["integer","null"]}` and `Option<Vec<T>>` as
+// `{"type":["array","null"]}` with `$defs` refs. Several real MCP
+// clients flatten those unions (and `$ref`s) away, leaving the param
+// UNTYPED — an untyped param is then sent as a STRING ("45000") or a
+// JSON-encoded array string, and serde rejects it with an error the
+// caller cannot act on (`invalid type: string "45000", expected u64`).
+// Two defenses are applied together on every optional field:
+//   1. `#[schemars(with = "uN")]` pins a PLAIN string `"type"` on the
+//      field schema (optionality is already expressed by the field's
+//      absence from `required[]`, so dropping the `null` union member
+//      loses nothing).
+//   2. The deserializers below additionally ACCEPT the stringified
+//      form, with a teaching error on anything unparseable.
+// =====================================================================
+
+/// Core of the lenient unsigned-integer coercion: JSON number, numeric
+/// string, or null. Everything else (and non-integer numbers) gets a
+/// teaching error naming both accepted forms.
+fn opt_u64_from_value<E: serde::de::Error>(value: serde_json::Value) -> Result<Option<u64>, E> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Number(ref n) => n.as_u64().map(Some).ok_or_else(|| {
+            E::custom(format!(
+                "expected an unsigned integer (e.g. 5000); got {n}"
+            ))
+        }),
+        serde_json::Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                return Ok(None);
+            }
+            t.parse::<u64>().map(Some).map_err(|_| {
+                E::custom(format!(
+                    "expected an unsigned integer as a number or numeric string \
+                     (e.g. 5000 or \"5000\"); got \"{s}\""
+                ))
+            })
+        }
+        other => Err(E::custom(format!(
+            "expected an unsigned integer (e.g. 5000); got {}",
+            json_type_name(&other)
+        ))),
+    }
+}
+
+/// Narrow a lenient u64 to a smaller unsigned width with a range check.
+fn opt_uint_narrow<T, E>(value: serde_json::Value) -> Result<Option<T>, E>
+where
+    T: TryFrom<u64>,
+    E: serde::de::Error,
+{
+    opt_u64_from_value::<E>(value)?.map_or_else(
+        || Ok(None),
+        |v| {
+            T::try_from(v).map(Some).map_err(|_| {
+                E::custom(format!("{v} exceeds this parameter's accepted range"))
+            })
+        },
+    )
+}
+
+fn de_opt_u64_lenient<'de, D>(de: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    opt_u64_from_value(serde_json::Value::deserialize(de)?)
+}
+
+fn de_opt_u32_lenient<'de, D>(de: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    opt_uint_narrow(serde_json::Value::deserialize(de)?)
+}
+
+fn de_opt_u16_lenient<'de, D>(de: D) -> Result<Option<u16>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    opt_uint_narrow(serde_json::Value::deserialize(de)?)
+}
+
+fn de_opt_usize_lenient<'de, D>(de: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    opt_uint_narrow(serde_json::Value::deserialize(de)?)
+}
+
+/// Lenient bool: JSON bool, `"true"`/`"false"` (ASCII case-insensitive)
+/// string, or null.
+fn de_opt_bool_lenient<'de, D>(de: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    match serde_json::Value::deserialize(de)? {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Bool(b) => Ok(Some(b)),
+        serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            "" => Ok(None),
+            other => Err(D::Error::custom(format!(
+                "expected a boolean (true/false, as a bool or string); got \"{other}\""
+            ))),
+        },
+        other => Err(D::Error::custom(format!(
+            "expected a boolean; got {}",
+            json_type_name(&other)
+        ))),
+    }
+}
+
+/// Lenient `rules`: a JSON array of rule objects, or the SAME array
+/// JSON-encoded as a string (what a client that lost the array type
+/// sends). Null/empty-string mean "no rules".
+fn de_opt_rules_lenient<'de, D>(de: D) -> Result<Option<Vec<RuleInput>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    match serde_json::Value::deserialize(de)? {
+        serde_json::Value::Null => Ok(None),
+        value @ serde_json::Value::Array(_) => {
+            serde_json::from_value(value).map(Some).map_err(|e| {
+                D::Error::custom(format!(
+                    "rules must be an array of rule objects \
+                     (minimal: [{{\"pattern\": \"ERROR\"}}]); {e}"
+                ))
+            })
+        }
+        serde_json::Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                return Ok(None);
+            }
+            serde_json::from_str::<Vec<RuleInput>>(t).map(Some).map_err(|e| {
+                D::Error::custom(format!(
+                    "rules arrived as a string; it must contain a JSON array of rule \
+                     objects (minimal: [{{\"pattern\": \"ERROR\"}}]); parse failed: {e}"
+                ))
+            })
+        }
+        other => Err(D::Error::custom(format!(
+            "rules must be an array of rule objects \
+             (minimal: [{{\"pattern\": \"ERROR\"}}]); got {}",
+            json_type_name(&other)
+        ))),
+    }
+}
+
+/// Lenient scope object: a JSON object, or the SAME object JSON-encoded
+/// as a string. Shared by the required and optional scope fields.
+fn scope_from_value<E: serde::de::Error>(
+    value: serde_json::Value,
+) -> Result<McpActivationScope, E> {
+    match value {
+        value @ serde_json::Value::Object(_) => {
+            serde_json::from_value(value).map_err(|e| {
+                E::custom(format!(
+                    "scope must be an object like {{\"kind\":\"global\"}}; {e}"
+                ))
+            })
+        }
+        serde_json::Value::String(s) => serde_json::from_str(s.trim()).map_err(|e| {
+            E::custom(format!(
+                "scope arrived as a string; it must contain a JSON object like \
+                 {{\"kind\":\"global\"}}; parse failed: {e}"
+            ))
+        }),
+        other => Err(E::custom(format!(
+            "scope must be an object like {{\"kind\":\"global\"}}; got {}",
+            json_type_name(&other)
+        ))),
+    }
+}
+
+fn de_scope_lenient<'de, D>(de: D) -> Result<McpActivationScope, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    scope_from_value(serde_json::Value::deserialize(de)?)
+}
+
+fn de_opt_scope_lenient<'de, D>(de: D) -> Result<Option<McpActivationScope>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(de)? {
+        serde_json::Value::Null => Ok(None),
+        value => scope_from_value(value).map(Some),
+    }
+}
+
 /// Lenient, LLM-friendly shorthand for an inline rule (TC erg2 P1).
 ///
 /// Every field is optional except that a rule needs SOME matcher
@@ -2242,7 +2441,8 @@ pub struct RuleInput {
     #[serde(default)]
     pub id: Option<String>,
     /// Rule version. Default 1.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
     pub version: Option<u32>,
     /// Named captures referenced by `summary_template`.
     #[serde(default)]
@@ -2301,10 +2501,18 @@ impl RuleInput {
 
         let severity = match self.severity.as_deref() {
             None => Severity::Info,
+            // Alias the names an LLM is MOST likely to guess first onto the
+            // closest live level, so the obvious first call succeeds instead
+            // of bouncing on taxonomy trivia. The canonical names still win
+            // verbatim; only unknown values error (teaching the live set).
+            Some("error" | "err") => Severity::High,
+            Some("warn" | "warning") => Severity::Medium,
+            Some("fatal") => Severity::Critical,
             Some(s) => parse_severity_filter(s).map_err(|_| {
                 format!(
                     "severity '{s}' is not valid; one of: trace, debug, info, low, medium, \
-                     high, critical"
+                     high, critical (aliases: error->high, warn/warning->medium, \
+                     fatal->critical)"
                 )
             })?,
         };
@@ -2395,6 +2603,23 @@ fn parse_bucket_and_rules(
             })
             .transpose()?
             .unwrap_or_default()
+            .into_iter()
+            .map(|mut def| {
+                // Inline rules are bound directly to this job/watch and must
+                // run immediately — exactly the reasoning RuleInput::finalize
+                // applies on the typed path. A rules_json definition without
+                // an explicit "status" deserializes to the Draft default,
+                // and the daemon's draft-poison guard then SILENTLY skips it
+                // (the command runs, zero signals fire, the receipt claims
+                // "zero rules matched"). Normalize every non-runtime-eligible
+                // inline definition to Active so passing a rule always means
+                // running it; drafts belong in registry_upsert.
+                if !def.status.is_runtime_eligible() {
+                    def.status = terminal_commander_core::RuleStatus::Active;
+                }
+                def
+            })
+            .collect()
     };
     Ok((bucket_config, resolved))
 }
@@ -2440,7 +2665,8 @@ pub struct McpCommandStartParams {
     pub env: Vec<EnvEntry>,
     /// Optional grace window between graceful and forced terminate,
     /// in milliseconds. Clamped at the daemon.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
     pub grace_ms: Option<u64>,
     /// Optional per-job bucket override as a JSON object
     /// `{ "max_events": N, "ttl": <seconds> }`. Omit for daemon defaults.
@@ -2454,7 +2680,8 @@ pub struct McpCommandStartParams {
     /// `severity` (default info), `summary_template` (default `${line}`),
     /// `event_kind`, `captures`, `stream`, `redact`, `tags`, `id`,
     /// `version`. Omit for none.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rules_lenient")]
+    #[schemars(with = "Vec<RuleInput>")]
     pub rules: Option<Vec<RuleInput>>,
     /// Deprecated string form of `rules`: a JSON-array string of full
     /// `RuleDefinition`s. Prefer the typed `rules` field. Omit for none.
@@ -2546,7 +2773,8 @@ pub struct McpShellExecParams {
     /// Inline rules bound to this job only — same shape as
     /// `command_start_combed`. Minimal: `[{"pattern": "ERROR"}]`. Omit
     /// to collect no rule signals (you still get the exit receipt).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rules_lenient")]
+    #[schemars(with = "Vec<RuleInput>")]
     pub rules: Option<Vec<RuleInput>>,
     /// Deprecated string form of `rules`: a JSON-array string of full
     /// `RuleDefinition`s. Prefer the typed `rules` field. Omit for none.
@@ -2564,7 +2792,8 @@ pub struct McpShellExecParams {
     /// Reserved bounded-wait control (ms). Accepted for forward parity
     /// with `run_and_watch`; `shell_exec` is start-only and returns
     /// bounded start metadata immediately, so this is currently ignored.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
     pub wait_ms: Option<u64>,
 }
 
@@ -2631,24 +2860,28 @@ pub struct McpRunAndWatchParams {
     #[serde(default, deserialize_with = "deserialize_env")]
     #[schemars(with = "Vec<EnvEntry>")]
     pub env: Vec<EnvEntry>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
     pub grace_ms: Option<u64>,
     #[serde(default)]
     pub bucket_config_json: Option<String>,
     /// Inline rules; see `command_start_combed`. Minimal:
     /// `[{"pattern": "ERROR"}]`. Omit to collect no rule signals (you
     /// still get the exit receipt).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rules_lenient")]
+    #[schemars(with = "Vec<RuleInput>")]
     pub rules: Option<Vec<RuleInput>>,
     /// Deprecated string form of `rules`. Prefer `rules`.
     #[serde(default)]
     pub rules_json: Option<String>,
     /// Max time to wait for signals + exit, in ms. Default 5000, capped
     /// at 60000.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
     pub wait_ms: Option<u64>,
     /// Max signals to return. Default 50, capped at 500.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
     pub max_signals: Option<usize>,
     /// Optional per-bucket tag (Phase 3). Tag this probe so a subscription
     /// opened with a matching `tag` predicate routes to it, and so the
@@ -2690,10 +2923,12 @@ pub struct McpCommandOutputTailParams {
     /// free-form.
     pub job_id: String,
     /// Maximum lines to return. Clamped to 200 server-side.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
     pub max_lines: Option<u32>,
     /// Maximum bytes to return. Clamped to 64 KiB server-side.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
     pub max_bytes: Option<u32>,
 }
 
@@ -2711,7 +2946,8 @@ pub struct McpBucketEventsSinceParams {
     pub severity_min: Option<String>,
     #[serde(default)]
     pub kind_filter: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
     pub limit: Option<usize>,
 }
 
@@ -2746,10 +2982,12 @@ pub struct McpBucketWaitParams {
     pub severity_min: Option<String>,
     #[serde(default)]
     pub kind_filter: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
     pub limit: Option<usize>,
     /// Wait timeout in milliseconds. Clamped at the daemon.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
     pub timeout_ms: Option<u64>,
 }
 
@@ -2789,11 +3027,14 @@ pub struct McpEventContextParams {
     /// Opaque event id from a bucket read (e.g. `evt_<32hex>`); copy it
     /// verbatim, not free-form.
     pub event_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
     pub before: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
     pub after: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
     pub max_bytes: Option<usize>,
 }
 
@@ -2933,7 +3174,8 @@ pub struct McpRegistrySearchParams {
     /// FTS5 query (e.g. `"apt"`, `"missing_package"`).
     pub query: String,
     /// Result cap. Clamped at the daemon.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
     pub limit: Option<usize>,
 }
 
@@ -2942,7 +3184,8 @@ pub struct McpRegistrySearchParams {
 pub struct McpRegistryGetParams {
     pub rule_id: String,
     /// Omit for the latest stored version.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
     pub version: Option<u32>,
 }
 
@@ -3002,7 +3245,8 @@ pub struct McpRegistryTestSample {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryTestParams {
     pub rule_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
     pub version: Option<u32>,
     pub samples: Vec<McpRegistryTestSample>,
 }
@@ -3012,12 +3256,14 @@ pub struct McpRegistryTestParams {
 pub struct McpRegistryActivateParams {
     pub rule_id: String,
     /// Omit to activate the latest stored version.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
     pub version: Option<u32>,
     /// REQUIRED scope (TC42c/TC42d). There is no default and it is in the
     /// schema `required[]`: an omitted scope is rejected so a rule is
     /// never silently widened to global. Use `{ "kind": "global" }` for
     /// the common single-agent case (watch every command you start).
+    #[serde(deserialize_with = "de_scope_lenient")]
     pub scope: McpActivationScope,
 }
 
@@ -3041,7 +3287,8 @@ pub struct McpRegistryImportPackParams {
     /// error, never silently widened to global). Leave it out when
     /// activate=false. `{ "kind": "global" }` is the usual choice for a
     /// single agent watching its own commands.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_scope_lenient")]
+    #[schemars(with = "McpActivationScope")]
     pub scope: Option<McpActivationScope>,
 }
 
@@ -3055,6 +3302,7 @@ pub struct McpRegistryDeactivateParams {
     /// used at activation; deactivating with a different scope will not
     /// close the previously-opened activation row. Use
     /// `{ "kind": "global" }` to close a global activation.
+    #[serde(deserialize_with = "de_scope_lenient")]
     pub scope: McpActivationScope,
 }
 
@@ -3146,14 +3394,16 @@ pub struct McpFileReadWindowParams {
     pub path: String,
     /// 1-based start line. Omit to read from line 1. A value of `0` is
     /// clamped up to `1` by the daemon (there is no line 0).
-    #[serde(default)]
-    #[schemars(extend("minimum" = 1))]
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64", extend("minimum" = 1))]
     pub start_line: Option<u64>,
     /// Max lines returned. Clamped by the daemon.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
     pub max_lines: Option<u32>,
     /// Max payload bytes returned. Clamped by the daemon.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
     pub max_bytes: Option<usize>,
 }
 
@@ -3170,11 +3420,14 @@ pub struct McpFileSearchParams {
     /// Regex metacharacters are matched literally. Use `case_insensitive`
     /// to fold ASCII case.
     pub query: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_bool_lenient")]
+    #[schemars(with = "bool")]
     pub case_insensitive: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
     pub max_matches: Option<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
     pub max_snippet_bytes: Option<usize>,
 }
 
@@ -3187,7 +3440,8 @@ pub struct McpFileWatchStartParams {
     /// resolved against the daemon's working directory.
     pub path: String,
     /// Follow from beginning (default false = follow-end / tail-like).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_bool_lenient")]
+    #[schemars(with = "bool")]
     pub follow_from_beginning: Option<bool>,
     /// Optional per-job bucket override as a JSON object
     /// `{ "max_events": N, "ttl": <seconds> }`. Omit for daemon defaults.
@@ -3196,7 +3450,8 @@ pub struct McpFileWatchStartParams {
     /// Inline rules bound to this watch only. Minimal example:
     /// `[{"pattern": "ERROR"}]`. See `command_start_combed` for the full
     /// field list. Omit for none.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rules_lenient")]
+    #[schemars(with = "Vec<RuleInput>")]
     pub rules: Option<Vec<RuleInput>>,
     /// Deprecated string form of `rules` (JSON-array string of full
     /// `RuleDefinition`s). Prefer `rules`. Omit for none.
@@ -3238,9 +3493,11 @@ pub struct McpPtyCommandStartParams {
     #[serde(default, deserialize_with = "deserialize_env")]
     #[schemars(with = "Vec<EnvEntry>")]
     pub env: Vec<EnvEntry>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u16_lenient")]
+    #[schemars(with = "u16")]
     pub rows: Option<u16>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u16_lenient")]
+    #[schemars(with = "u16")]
     pub cols: Option<u16>,
     /// Optional per-job bucket override as a JSON object
     /// `{ "max_events": N, "ttl": <seconds> }`. Omit for daemon defaults.
@@ -3249,7 +3506,8 @@ pub struct McpPtyCommandStartParams {
     /// Inline rules bound to this PTY job only. Minimal example:
     /// `[{"pattern": "ERROR"}]`. See `command_start_combed` for the full
     /// field list. Omit for none.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_rules_lenient")]
+    #[schemars(with = "Vec<RuleInput>")]
     pub rules: Option<Vec<RuleInput>>,
     /// Deprecated string form of `rules` (JSON-array string of full
     /// `RuleDefinition`s). Prefer `rules`. Omit for none.
@@ -3300,7 +3558,8 @@ pub struct McpListLimitParams {
     /// Max rows per list (each of runtime_state's three vecs bounds
     /// independently). Omit for the daemon default/cap. Over-cap sets the
     /// response `truncated` flag.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
     pub limit: Option<usize>,
 }
 
@@ -3397,12 +3656,14 @@ pub struct McpSubscriptionPullParams {
     /// Opaque sub_id from `subscription_open`; copy it verbatim.
     pub sub_id: String,
     /// Max events to return. Omit for the daemon default/cap (50).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
     pub max: Option<usize>,
     /// Blocking timeout in milliseconds. Omit for 5000; clamped to
     /// [1, 8000]. The MCP client waits longer (12 s) so an idle pull is
     /// SUCCESS empty+liveness, never a timeout error.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
     pub timeout_ms: Option<u64>,
 }
 
@@ -3411,7 +3672,8 @@ pub struct McpSubscriptionPullParams {
 pub struct McpSubscriptionListParams {
     /// Max rows. Omit for the daemon default/cap (64). Over-cap sets
     /// `truncated`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
     pub limit: Option<usize>,
 }
 
@@ -3628,6 +3890,150 @@ mod tests {
         let (_, rules) = parse_bucket_and_rules(None, None, Some(raw.to_owned())).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].kind, RuleType::Keyword);
+    }
+
+    #[test]
+    fn rules_json_without_status_normalizes_to_active() {
+        // S2 regression: a rules_json definition carries serde's Draft
+        // default when "status" is omitted, and the daemon's draft-poison
+        // guard then SILENTLY skips it (zero signals, receipt claims "zero
+        // rules matched"). Inline rules are definitionally active — the
+        // parse must normalize them so passing a rule always means running
+        // it. Failure mode asserted: the parsed rule must be runtime
+        // eligible, not Draft.
+        let raw = r#"[{"id":"x","version":1,"kind":"regex","severity":"high",
+            "event_kind":"signal","pattern":"XMARKER","summary_template":"${line}"}]"#;
+        let (_, rules) = parse_bucket_and_rules(None, None, Some(raw.to_owned())).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(
+            rules[0].status.is_runtime_eligible(),
+            "inline rules_json rule must be normalized to Active, got {:?}",
+            rules[0].status
+        );
+    }
+
+    // --- TB-12: lenient coercion for clients that lose Option types ---
+
+    #[test]
+    fn tb12_numeric_strings_coerce() {
+        // Real clients flatten {"type":["integer","null"]} to an untyped
+        // param and then send numbers as STRINGS. The exact failure this
+        // guards against: `invalid type: string "45000", expected u64`.
+        let p: McpRunAndWatchParams = serde_json::from_str(
+            r#"{"argv":["node"],"wait_ms":"45000","max_signals":"20","grace_ms":"1000"}"#,
+        )
+        .expect("stringified numerics must coerce");
+        assert_eq!(p.wait_ms, Some(45000));
+        assert_eq!(p.max_signals, Some(20));
+        assert_eq!(p.grace_ms, Some(1000));
+
+        let t: McpCommandOutputTailParams =
+            serde_json::from_str(r#"{"job_id":"job_x","max_lines":"30","max_bytes":"4096"}"#)
+                .expect("tail numerics must coerce");
+        assert_eq!(t.max_lines, Some(30));
+        assert_eq!(t.max_bytes, Some(4096));
+
+        // Native numbers still parse unchanged.
+        let n: McpRunAndWatchParams =
+            serde_json::from_str(r#"{"argv":["node"],"wait_ms":5000}"#).unwrap();
+        assert_eq!(n.wait_ms, Some(5000));
+    }
+
+    #[test]
+    fn tb12_rules_string_form_coerces() {
+        // The exact failure this guards against:
+        // `invalid type: string "[...]", expected a sequence`.
+        let p: McpRunAndWatchParams = serde_json::from_str(
+            r#"{"argv":["node"],"rules":"[{\"pattern\": \"ERROR\"}]"}"#,
+        )
+        .expect("JSON-encoded rules array must coerce");
+        let rules = p.rules.expect("rules present");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].pattern.as_deref(), Some("ERROR"));
+    }
+
+    #[test]
+    fn tb12_scope_string_form_coerces() {
+        // Same client behavior on the scope object param.
+        let p: McpRegistryDeactivateParams = serde_json::from_str(
+            r#"{"rule_id":"r","version":1,"scope":"{\"kind\": \"global\"}"}"#,
+        )
+        .expect("JSON-encoded scope object must coerce");
+        assert_eq!(p.scope.kind, "global");
+    }
+
+    #[test]
+    fn tb12_bool_string_form_coerces() {
+        let p: McpFileSearchParams = serde_json::from_str(
+            r#"{"path":"/f","query":"x","case_insensitive":"true"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.case_insensitive, Some(true));
+    }
+
+    #[test]
+    fn tb12_garbage_numeric_string_teaches() {
+        let err = serde_json::from_str::<McpRunAndWatchParams>(
+            r#"{"argv":["node"],"wait_ms":"soon"}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("unsigned integer"),
+            "teaching error must name the accepted forms; got: {err}"
+        );
+    }
+
+    #[test]
+    fn tb12_optional_param_schemas_carry_plain_types() {
+        // The schema half of the defense: every coerced optional field pins
+        // a PLAIN string "type" so clients that strip union types still see
+        // a typed param and send proper JSON in the first place.
+        let raw = schemars::schema_for!(McpRunAndWatchParams);
+        let v = raw.as_value();
+        for (ptr, want) in [
+            ("/properties/wait_ms/type", "integer"),
+            ("/properties/max_signals/type", "integer"),
+            ("/properties/grace_ms/type", "integer"),
+            ("/properties/rules/type", "array"),
+        ] {
+            let got = v.pointer(ptr).and_then(serde_json::Value::as_str);
+            assert_eq!(got, Some(want), "pointer {ptr} in run_and_watch schema");
+        }
+        let tail = schemars::schema_for!(McpCommandOutputTailParams);
+        assert_eq!(
+            tail.as_value()
+                .pointer("/properties/max_lines/type")
+                .and_then(serde_json::Value::as_str),
+            Some("integer"),
+            "command_output_tail.max_lines must be plainly typed"
+        );
+        let frw = schemars::schema_for!(McpFileReadWindowParams);
+        assert_eq!(
+            frw.as_value()
+                .pointer("/properties/start_line/type")
+                .and_then(serde_json::Value::as_str),
+            Some("integer"),
+            "file_read_window.start_line must be plainly typed"
+        );
+    }
+
+    #[test]
+    fn severity_aliases_map_to_live_levels() {
+        // S11: the names an LLM guesses first must not bounce on taxonomy.
+        for (alias, want) in [
+            ("error", Severity::High),
+            ("err", Severity::High),
+            ("warn", Severity::Medium),
+            ("warning", Severity::Medium),
+            ("fatal", Severity::Critical),
+        ] {
+            let def =
+                finalize_one(&format!(r#"{{"pattern":"x","severity":"{alias}"}}"#)).unwrap();
+            assert_eq!(def.severity, want, "alias {alias}");
+        }
+        let err = finalize_one(r#"{"pattern":"x","severity":"blah"}"#).unwrap_err();
+        assert!(err.contains("aliases"), "unknown severity must teach: {err}");
     }
 
     // --- TC-1b: run_and_watch degraded / superset result builder ---
