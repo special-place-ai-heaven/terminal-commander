@@ -1140,12 +1140,14 @@ impl TerminalCommanderMcpServer {
                 was_already_active,
                 scope,
                 jobs_rebound,
+                superseded_versions,
             })) => json_tool_result(&serde_json::json!({
                 "rule_id": rule_id,
                 "version": version,
                 "was_already_active": was_already_active,
                 "scope": scope,
                 "jobs_rebound": jobs_rebound,
+                "superseded_versions": superseded_versions,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
@@ -2232,11 +2234,10 @@ where
 fn opt_u64_from_value<E: serde::de::Error>(value: serde_json::Value) -> Result<Option<u64>, E> {
     match value {
         serde_json::Value::Null => Ok(None),
-        serde_json::Value::Number(ref n) => n.as_u64().map(Some).ok_or_else(|| {
-            E::custom(format!(
-                "expected an unsigned integer (e.g. 5000); got {n}"
-            ))
-        }),
+        serde_json::Value::Number(ref n) => n
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| E::custom(format!("expected an unsigned integer (e.g. 5000); got {n}"))),
         serde_json::Value::String(s) => {
             let t = s.trim();
             if t.is_empty() {
@@ -2265,9 +2266,9 @@ where
     opt_u64_from_value::<E>(value)?.map_or_else(
         || Ok(None),
         |v| {
-            T::try_from(v).map(Some).map_err(|_| {
-                E::custom(format!("{v} exceeds this parameter's accepted range"))
-            })
+            T::try_from(v)
+                .map(Some)
+                .map_err(|_| E::custom(format!("{v} exceeds this parameter's accepted range")))
         },
     )
 }
@@ -2348,12 +2349,14 @@ where
             if t.is_empty() {
                 return Ok(None);
             }
-            serde_json::from_str::<Vec<RuleInput>>(t).map(Some).map_err(|e| {
-                D::Error::custom(format!(
-                    "rules arrived as a string; it must contain a JSON array of rule \
+            serde_json::from_str::<Vec<RuleInput>>(t)
+                .map(Some)
+                .map_err(|e| {
+                    D::Error::custom(format!(
+                        "rules arrived as a string; it must contain a JSON array of rule \
                      objects (minimal: [{{\"pattern\": \"ERROR\"}}]); parse failed: {e}"
-                ))
-            })
+                    ))
+                })
         }
         other => Err(D::Error::custom(format!(
             "rules must be an array of rule objects \
@@ -2369,13 +2372,11 @@ fn scope_from_value<E: serde::de::Error>(
     value: serde_json::Value,
 ) -> Result<McpActivationScope, E> {
     match value {
-        value @ serde_json::Value::Object(_) => {
-            serde_json::from_value(value).map_err(|e| {
-                E::custom(format!(
-                    "scope must be an object like {{\"kind\":\"global\"}}; {e}"
-                ))
-            })
-        }
+        value @ serde_json::Value::Object(_) => serde_json::from_value(value).map_err(|e| {
+            E::custom(format!(
+                "scope must be an object like {{\"kind\":\"global\"}}; {e}"
+            ))
+        }),
         serde_json::Value::String(s) => serde_json::from_str(s.trim()).map_err(|e| {
             E::custom(format!(
                 "scope arrived as a string; it must contain a JSON object like \
@@ -3943,10 +3944,9 @@ mod tests {
     fn tb12_rules_string_form_coerces() {
         // The exact failure this guards against:
         // `invalid type: string "[...]", expected a sequence`.
-        let p: McpRunAndWatchParams = serde_json::from_str(
-            r#"{"argv":["node"],"rules":"[{\"pattern\": \"ERROR\"}]"}"#,
-        )
-        .expect("JSON-encoded rules array must coerce");
+        let p: McpRunAndWatchParams =
+            serde_json::from_str(r#"{"argv":["node"],"rules":"[{\"pattern\": \"ERROR\"}]"}"#)
+                .expect("JSON-encoded rules array must coerce");
         let rules = p.rules.expect("rules present");
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].pattern.as_deref(), Some("ERROR"));
@@ -3955,29 +3955,25 @@ mod tests {
     #[test]
     fn tb12_scope_string_form_coerces() {
         // Same client behavior on the scope object param.
-        let p: McpRegistryDeactivateParams = serde_json::from_str(
-            r#"{"rule_id":"r","version":1,"scope":"{\"kind\": \"global\"}"}"#,
-        )
-        .expect("JSON-encoded scope object must coerce");
+        let p: McpRegistryDeactivateParams =
+            serde_json::from_str(r#"{"rule_id":"r","version":1,"scope":"{\"kind\": \"global\"}"}"#)
+                .expect("JSON-encoded scope object must coerce");
         assert_eq!(p.scope.kind, "global");
     }
 
     #[test]
     fn tb12_bool_string_form_coerces() {
-        let p: McpFileSearchParams = serde_json::from_str(
-            r#"{"path":"/f","query":"x","case_insensitive":"true"}"#,
-        )
-        .unwrap();
+        let p: McpFileSearchParams =
+            serde_json::from_str(r#"{"path":"/f","query":"x","case_insensitive":"true"}"#).unwrap();
         assert_eq!(p.case_insensitive, Some(true));
     }
 
     #[test]
     fn tb12_garbage_numeric_string_teaches() {
-        let err = serde_json::from_str::<McpRunAndWatchParams>(
-            r#"{"argv":["node"],"wait_ms":"soon"}"#,
-        )
-        .unwrap_err()
-        .to_string();
+        let err =
+            serde_json::from_str::<McpRunAndWatchParams>(r#"{"argv":["node"],"wait_ms":"soon"}"#)
+                .unwrap_err()
+                .to_string();
         assert!(
             err.contains("unsigned integer"),
             "teaching error must name the accepted forms; got: {err}"
@@ -4028,12 +4024,14 @@ mod tests {
             ("warning", Severity::Medium),
             ("fatal", Severity::Critical),
         ] {
-            let def =
-                finalize_one(&format!(r#"{{"pattern":"x","severity":"{alias}"}}"#)).unwrap();
+            let def = finalize_one(&format!(r#"{{"pattern":"x","severity":"{alias}"}}"#)).unwrap();
             assert_eq!(def.severity, want, "alias {alias}");
         }
         let err = finalize_one(r#"{"pattern":"x","severity":"blah"}"#).unwrap_err();
-        assert!(err.contains("aliases"), "unknown severity must teach: {err}");
+        assert!(
+            err.contains("aliases"),
+            "unknown severity must teach: {err}"
+        );
     }
 
     // --- TC-1b: run_and_watch degraded / superset result builder ---

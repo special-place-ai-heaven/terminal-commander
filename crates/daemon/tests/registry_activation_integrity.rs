@@ -347,3 +347,100 @@ async fn deactivate_store_failure_does_not_mutate_memory() {
 
     cleanup(&data);
 }
+
+/// S5 (activate-supersedes, 2026-06-10 field review): two VERSIONS of one
+/// rule id active under the SAME scope fire one event EACH per matching
+/// frame — observed live as duplicate signals (rule v1 + v2 on a single
+/// stderr line). Activating v2 must close v1 under that scope, report it
+/// in `superseded_versions`, and the single-version state must survive a
+/// restart (store rows agree with memory).
+#[tokio::test]
+async fn activate_supersedes_other_versions_in_same_scope() {
+    let data = temp_data_dir("supersede");
+    let cfg = DaemonConfig::defaults_in(&data);
+
+    {
+        let state = Arc::new(DaemonState::bootstrap(cfg.clone()).expect("bootstrap"));
+        // Two stored versions of the same rule id.
+        upsert(&state, 1, "kw-supersede").await; // store-assigned v1
+        upsert(&state, 2, "kw-supersede").await; // store-assigned v2
+
+        // Activate v1 explicitly.
+        match dispatch(
+            &state,
+            3,
+            IpcRequest::RegistryActivate(RegistryActivateParams {
+                rule_id: "kw-supersede".to_owned(),
+                version: Some(1),
+                scope: Some(ActivationScope::Global),
+            }),
+        )
+        .await
+        {
+            IpcResult::Ok { .. } => {}
+            IpcResult::Err { error } => panic!("activate v1 failed: {error:?}"),
+        }
+        assert!(
+            state
+                .activation
+                .is_active("kw-supersede", 1, ActivationScope::Global),
+            "v1 active after explicit activate"
+        );
+
+        // Activate v2: the pinned failure mode was BOTH versions staying
+        // active (duplicate events per frame). v2 must supersede v1.
+        let superseded = match dispatch(
+            &state,
+            4,
+            IpcRequest::RegistryActivate(RegistryActivateParams {
+                rule_id: "kw-supersede".to_owned(),
+                version: Some(2),
+                scope: Some(ActivationScope::Global),
+            }),
+        )
+        .await
+        {
+            IpcResult::Ok {
+                response: IpcResponse::RegistryActivate(r),
+            } => r.superseded_versions,
+            other => panic!("activate v2: unexpected result {other:?}"),
+        };
+        assert_eq!(
+            superseded,
+            vec![1],
+            "activating v2 must report v1 as superseded"
+        );
+        assert!(
+            !state
+                .activation
+                .is_active("kw-supersede", 1, ActivationScope::Global),
+            "v1 must be closed after v2 activates in the same scope"
+        );
+        assert!(
+            state
+                .activation
+                .is_active("kw-supersede", 2, ActivationScope::Global),
+            "v2 must be active"
+        );
+    }
+
+    // Restart: only v2 re-hydrates (the supersede closed v1's store row,
+    // so memory and store agree across a daemon restart).
+    {
+        let state = Arc::new(DaemonState::bootstrap(cfg).expect("re-bootstrap"));
+        assert!(
+            !state
+                .activation
+                .is_active("kw-supersede", 1, ActivationScope::Global),
+            "superseded v1 must NOT resurrect on restart"
+        );
+        assert!(
+            state
+                .activation
+                .is_active("kw-supersede", 2, ActivationScope::Global),
+            "v2 must re-hydrate on restart"
+        );
+    }
+
+    cleanup(&data);
+}

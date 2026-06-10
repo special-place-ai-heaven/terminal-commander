@@ -374,51 +374,6 @@ async fn deactivate_wrong_scope_teaches_cross_scope_and_preserves_row() {
     let _ = std::fs::remove_file(&watch_file);
 }
 
-/// Upsert `kw_rule_v(id, def_version)` and activate it under Global,
-/// asserting the activate response binds the expected `def.version`. The
-/// verify-as-you-go assertion is the load-bearing guard: if the handler
-/// keyed on something other than `def_version`, two versions would not
-/// coexist and the caller's plural-branch premise would be a lie.
-async fn upsert_and_activate_global(
-    state: &Arc<DaemonState>,
-    base_cid: u64,
-    id: &str,
-    def_version: u32,
-) {
-    match dispatch(
-        state,
-        base_cid,
-        IpcRequest::RegistryUpsert(RegistryUpsertParams {
-            definition: kw_rule_v(id, def_version),
-        }),
-    )
-    .await
-    {
-        IpcResult::Ok { .. } => {}
-        IpcResult::Err { error } => panic!("upsert v{def_version} failed: {error:?}"),
-    }
-    match dispatch(
-        state,
-        base_cid + 1,
-        IpcRequest::RegistryActivate(RegistryActivateParams {
-            rule_id: id.to_owned(),
-            version: Some(def_version),
-            scope: Some(ActivationScope::Global),
-        }),
-    )
-    .await
-    {
-        IpcResult::Ok {
-            response: IpcResponse::RegistryActivate(r),
-        } => assert_eq!(
-            r.version, def_version,
-            "activate(version={def_version}) must bind def.version {def_version}; got {}",
-            r.version
-        ),
-        other => panic!("expected RegistryActivate ok for v{def_version}, got: {other:?}"),
-    }
-}
-
 #[tokio::test]
 async fn deactivate_unknown_version_with_two_active_teaches_plural() {
     // Cover the `else` (plural) branch of the deactivate teaching hint:
@@ -426,33 +381,36 @@ async fn deactivate_unknown_version_with_two_active_teaches_plural() {
     // deactivate of a third version must render "active versions are
     // [1, 2]" (built from active_versions_for_scope: sort/dedup/join).
     //
-    // The activation set is keyed by the *definition's* `.version` field
-    // (handle_registry_activate: `let version = def.version`), so the only
-    // way two versions of one rule coexist under one scope via this
-    // dispatch path is to upsert two defs with DISTINCT `.version` values.
-    // `kw_rule_v` does exactly that. The store row version and the
-    // definition version happen to coincide here (upsert #1 -> row 1 with
-    // def.version 1; upsert #2 -> row 2 with def.version 2), so activating
-    // version:Some(1) then version:Some(2) yields two distinct keys.
+    // Since S5 (activate-supersedes), the activate DISPATCH path can no
+    // longer create this state: activating v2 closes v1 under the same
+    // scope. The state still exists in the wild — daemons that persisted
+    // multi-version activations before S5 re-hydrate BOTH rows at
+    // bootstrap (`ActivationRegistry::from_entries`) — so the plural
+    // teaching branch stays live code. Simulate exactly that legacy
+    // re-hydration by binding both versions directly into the in-memory
+    // authority, which is what bootstrap does with persisted rows.
     let (state, data) = make_state("plural");
 
-    upsert_and_activate_global(&state, 1, "kw-multi", 1).await;
-    upsert_and_activate_global(&state, 3, "kw-multi", 2).await;
+    state
+        .activation
+        .activate(kw_rule_v("kw-multi", 1), ActivationScope::Global);
+    state
+        .activation
+        .activate(kw_rule_v("kw-multi", 2), ActivationScope::Global);
 
-    // Sanity: BOTH versions must be simultaneously active under Global.
-    // If either fails, the second activate collapsed onto the first key
-    // and the plural branch is unreachable -- the test would be a lie.
+    // Sanity: BOTH versions must be simultaneously active under Global,
+    // mirroring a pre-S5 persisted state after re-hydration.
     assert!(
         state
             .activation
             .is_active("kw-multi", 1, ActivationScope::Global),
-        "v1 must remain active after activating v2 (distinct keys)"
+        "legacy v1 must be active after direct rehydration"
     );
     assert!(
         state
             .activation
             .is_active("kw-multi", 2, ActivationScope::Global),
-        "v2 must be active alongside v1 (distinct keys)"
+        "legacy v2 must be active alongside v1"
     );
 
     // Deactivate a version that is NOT active (v3): plural teaching error

@@ -1264,6 +1264,22 @@ impl CommandRuntime {
             .collect()
     }
 
+    /// Number of jobs that are still in a NON-TERMINAL state (S4
+    /// idle-reaper guard). The live map deliberately retains exited
+    /// bindings so `status` can serve final counters, so membership
+    /// alone is not "running"; cross-check the job table state.
+    #[must_use]
+    pub fn running_job_count(&self) -> usize {
+        let g = self.live.read();
+        g.keys()
+            .filter(|jid| {
+                self.jobs
+                    .get(**jid)
+                    .is_some_and(|r| matches!(r.state, JobState::Starting | JobState::Running))
+            })
+            .count()
+    }
+
     /// Returns the bounded, redacted argv head recorded for a live job, or None
     /// if the job is not in the live map. Single read lock, never held across await.
     pub fn argv_head(&self, job_id: JobId) -> Option<Vec<String>> {
@@ -1272,16 +1288,34 @@ impl CommandRuntime {
 
     /// `command_status` entry point. Returns bounded counters + the
     /// final exit state for the given job. Never returns raw text.
+    ///
+    /// Counters are NEAR-REAL-TIME (S1 fix): for a still-running job this
+    /// snapshots the probe's shared `metrics_live` (the same handle `stop`
+    /// reads), so a poller sees frames/bytes as they are captured. The
+    /// binding's `metrics` field is only populated at child exit and stays
+    /// authoritative for terminal jobs (it is the exit-final aggregate the
+    /// lifecycle waiter wrote together with the receipt). Without this
+    /// split a mid-run `command_status` reported `bytes_total: 0` while
+    /// `command_output_tail` returned captured lines — an agent polling
+    /// status concluded "no output yet" and misjudged progress.
     pub fn status(&self, job_id: JobId) -> Result<CommandStatusResponse, CommandError> {
         let rec = self
             .jobs
             .get(job_id)
             .ok_or(CommandError::UnknownJob(job_id))?;
+        let exited = rec.exit_info.is_some();
         let (metrics, receipt) = self
             .live
             .read()
             .get(&job_id)
-            .map(|b| (b.metrics.clone(), b.receipt.clone()))
+            .map(|b| {
+                let m = if exited {
+                    b.metrics.clone()
+                } else {
+                    b.metrics_live.lock().clone()
+                };
+                (m, b.receipt.clone())
+            })
             .unwrap_or_default();
         Ok(CommandStatusResponse {
             job_id,

@@ -1180,6 +1180,13 @@ pub struct RegistryActivateResponse {
     /// Zero is valid (e.g. no commands running, or no live job
     /// matched the scope).
     pub jobs_rebound: u32,
+    /// Other versions of the SAME rule id that were active under this
+    /// scope and were closed by this activation (S5 activate-supersedes:
+    /// version stacking within one scope fires duplicate events per
+    /// frame, so activating vN deactivates the rest). Empty when nothing
+    /// was superseded. `serde(default)` keeps pre-S5 payloads decodable.
+    #[serde(default)]
+    pub superseded_versions: Vec<u32>,
 }
 
 /// Import a named, embedded rule pack into the registry.

@@ -462,6 +462,20 @@ fn spawn_idle_reaper(state: &Arc<crate::state::DaemonState>) {
         loop {
             iv.tick().await;
             if st.idle_secs() >= ttl {
+                // S4: live work vetoes the reap. A still-running command,
+                // file watch, or PTY job means an agent is waiting on this
+                // daemon even if no IPC arrived for a full TTL; reaping now
+                // would orphan the child (the lifecycle-waiter drain aborts
+                // after its ceiling without killing it) and lose the job's
+                // receipt, exit event, and audit row.
+                if st.has_live_work() {
+                    tracing::info!(
+                        "idle TTL exceeded (idle_secs={}, ttl={ttl}) but live \
+                         work exists; deferring self-reap",
+                        st.idle_secs()
+                    );
+                    continue;
+                }
                 tracing::info!(
                     "idle TTL exceeded (idle_secs={}, ttl={ttl}); triggering shutdown",
                     st.idle_secs()

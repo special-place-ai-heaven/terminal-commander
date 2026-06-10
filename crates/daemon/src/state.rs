@@ -316,6 +316,35 @@ impl DaemonState {
         self.last_activity.lock().elapsed().as_secs()
     }
 
+    /// Whether any runtime currently owns live work the idle
+    /// self-reaper must not interrupt (S4): a non-terminal combed
+    /// command, a live file watch, or (on unix) a live PTY job.
+    ///
+    /// Reaping mid-job orphans the child (the lifecycle-waiter drain
+    /// aborts after `LIFECYCLE_DRAIN_CEILING` without killing it) and
+    /// loses the job's receipt, exit event, and audit row — a silent
+    /// trust failure. A quiet agent with a long-running build is NOT
+    /// idle.
+    ///
+    /// Open subscriptions deliberately do NOT count: a subscription
+    /// with no pull for a full TTL is indistinguishable from an
+    /// abandoned one, and re-opening after a restart is the documented
+    /// `boot_id` flow.
+    #[must_use]
+    pub fn has_live_work(&self) -> bool {
+        if self.command.running_job_count() > 0 {
+            return true;
+        }
+        if !self.watch.live_watches().is_empty() {
+            return true;
+        }
+        #[cfg(unix)]
+        if !self.pty.live_jobs().is_empty() {
+            return true;
+        }
+        false
+    }
+
     /// Request a graceful shutdown (E2). Flips the sticky `watch` flag
     /// so any current and FUTURE awaiter of [`shutdown_notified`]
     /// wakes. Idempotent: a second call is a no-op flip to the same

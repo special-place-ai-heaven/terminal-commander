@@ -227,6 +227,29 @@ pub(in crate::ipc::server) fn handle_registry_activate(
     // concurrent command_start picks up the rule. `activate` is an
     // idempotent single-entry upsert keyed on (rule_id, version, scope).
     state.activation.activate(def.clone(), scope);
+    // S5: activate-supersedes. Multiple VERSIONS of one rule id active
+    // under the SAME scope each fire per matching frame — observed live
+    // as duplicate signals (v1 + v2 on one stderr line). The registry's
+    // multi-entry key exists for the same (id, version) under DISJOINT
+    // scopes, not for version stacking within one scope, so activating
+    // vN closes every OTHER version of the same id under this scope.
+    // Durability-first like deactivate: close the store row, then
+    // memory; on a store failure the error surfaces with both sides
+    // still agreeing (the old version simply stays active). The rebinds
+    // below run after the supersede so live jobs pick up the final set
+    // in one pass.
+    let mut superseded_versions: Vec<u32> = active_versions_for_scope(state, &def.id, scope)
+        .into_iter()
+        .filter(|v| *v != version)
+        .collect();
+    superseded_versions.sort_unstable();
+    for v in &superseded_versions {
+        state
+            .store
+            .deactivate_rule_scoped(&def.id, *v, scope)
+            .map_err(map_store_error)?;
+        state.activation.deactivate(&def.id, *v, scope);
+    }
     // TC42c: push the new rule set into every already-running
     // command's sifter that the scope matches. Global scope rebinds
     // every live job (TC42b behavior preserved). Scoped activations
@@ -249,6 +272,7 @@ pub(in crate::ipc::server) fn handle_registry_activate(
             .jobs_rebound
             .saturating_add(watch_report.watches_rebound)
             .saturating_add(pty_rebound),
+        superseded_versions,
     }))
 }
 

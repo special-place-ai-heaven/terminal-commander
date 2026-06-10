@@ -393,3 +393,149 @@ fn rule_match_command_has_no_receipt() {
         cleanup(&data);
     });
 }
+
+// =====================================================================
+// S1 + S4 regressions (2026-06-10 field review).
+// =====================================================================
+
+/// Child helper for the mid-run tests below, NOT a test. Spawned as
+/// `current_exe helper_child_emit_then_linger --ignored --exact
+/// --nocapture` so the child prints a few lines immediately and then
+/// lingers long enough for the parent to observe a RUNNING job with
+/// captured output. The `#[ignore]` keeps it out of normal runs.
+#[test]
+#[ignore = "child-process helper for the mid-run status tests, not a test"]
+fn helper_child_emit_then_linger() {
+    use std::io::Write as _;
+    let mut out = std::io::stdout();
+    for i in 0..3 {
+        let _ = writeln!(out, "LINGER_CHILD_LINE_{i}");
+    }
+    let _ = out.flush();
+    std::thread::sleep(Duration::from_secs(10));
+}
+
+/// Spawn the linger helper through the command runtime and return the
+/// start response. Cross-platform: the child is this very test binary.
+fn start_linger_child(state: &DaemonState) -> terminal_commander_ipc::CommandStartResponse {
+    let exe = std::env::current_exe()
+        .expect("current test binary path")
+        .to_string_lossy()
+        .into_owned();
+    state
+        .command
+        .start_combed(CommandStartRequest {
+            argv: vec![
+                exe,
+                "helper_child_emit_then_linger".to_owned(),
+                "--ignored".to_owned(),
+                "--exact".to_owned(),
+                "--nocapture".to_owned(),
+            ],
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            peer_discriminator: None,
+        })
+        .expect("start linger child")
+}
+
+/// S1: `command_status` counters must be NEAR-REAL-TIME, not exit-final.
+/// The pinned failure mode: a job that had already produced output
+/// reported `bytes_total: 0, frames_total: 0` mid-run (the binding's
+/// `metrics` field is only populated at exit), so a polling agent
+/// concluded "no output yet". The fix reads the probe's shared
+/// `metrics_live` for non-terminal jobs.
+#[test]
+fn command_status_counters_are_live_mid_run() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("live-counters");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+        let resp = start_linger_child(&state);
+
+        // Poll: we must observe nonzero counters WHILE the job is still
+        // running (no exit_code yet). The child lingers ~10 s after
+        // printing, so a healthy capture path has ample window.
+        let mut observed_live = false;
+        for _ in 0..160 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let status = state.command.status(resp.job_id).expect("status ok");
+            if status.exit_code.is_some()
+                || matches!(
+                    status.state,
+                    JobState::Exited | JobState::Failed | JobState::Cancelled
+                )
+            {
+                break;
+            }
+            if status.frames_total > 0 && status.bytes_total > 0 {
+                observed_live = true;
+                break;
+            }
+        }
+        // Reap the child promptly; the assertion below is the verdict.
+        let _ = state.command.stop(resp.job_id, "test-cleanup");
+        assert!(
+            observed_live,
+            "mid-run command_status must report captured frames/bytes \
+             (exit-final-only counters are the pinned S1 failure mode)"
+        );
+
+        cleanup(&data);
+    });
+}
+
+/// S4: live work must veto the idle self-reaper. The predicate the
+/// reaper consults (`DaemonState::has_live_work`) must be true while a
+/// command is still running and false once nothing is live — reaping
+/// mid-job orphans the child and loses its receipt/exit event.
+#[test]
+fn has_live_work_tracks_running_commands() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("live-work");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+        assert!(
+            !state.has_live_work(),
+            "fresh daemon state must report no live work"
+        );
+
+        let resp = start_linger_child(&state);
+        assert!(
+            state.has_live_work(),
+            "a just-started (running) command is live work"
+        );
+
+        let _ = state.command.stop(resp.job_id, "test-cleanup");
+        // The stop is synchronous in the job table (Cancelled is set under
+        // the live lock), so the predicate must flip without polling the
+        // child's actual teardown.
+        let mut cleared = false;
+        for _ in 0..100 {
+            if !state.has_live_work() {
+                cleared = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            cleared,
+            "has_live_work must clear after the only job is stopped"
+        );
+
+        cleanup(&data);
+    });
+}
