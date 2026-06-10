@@ -1,23 +1,179 @@
+<div align="center">
+
 ![Terminal Commander](./docs/logo.jpg)
 
 # Terminal Commander
+
+**Structured terminal signals for AI coding agents — bounded receipts, never silence, local-first.**
+
+[![npm](https://img.shields.io/npm/v/terminal-commander?label=npm&color=cb3837)](https://www.npmjs.com/package/terminal-commander)
+[![CI](https://github.com/special-place-ai-heaven/terminal-commander/actions/workflows/npm-binary-build.yml/badge.svg)](https://github.com/special-place-ai-heaven/terminal-commander/actions/workflows/npm-binary-build.yml)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](./LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.95-orange?logo=rust)](./rust-toolchain.toml)
+[![MCP](https://img.shields.io/badge/protocol-MCP-8A2BE2)](https://modelcontextprotocol.io)
+[![Platforms](https://img.shields.io/badge/platforms-win--x64%20%7C%20linux--x64%20%7C%20linux--arm64%20%7C%20mac--arm64%20%7C%20mac--x64-555)](#platform-support)
+
+[Install](#quick-start) · [Why](#why-terminal-commander) · [How It Works](#architecture) · [Tools](#mcp-tool-surface) · [Innovations](#innovations)
+
+</div>
+
+---
 
 Terminal Commander is a local MCP control plane for coding agents. It gives
 Cursor, Codex CLI, Claude Code, Claude Desktop, and other MCP clients a bounded
 tool surface for commands, files, PTYs, runtime state, and signal context.
 
-Raw terminal output stays out of the model transcript. The agent receives
-structured events, cursors, counters, and explicit context windows instead.
+Raw terminal output stays out of the model transcript. The agent defines
+keyword/regex **rules**, runs the command, and receives only the matching
+**signal events** plus the exit state. A quiet command (zero matches) returns a
+bounded **receipt** — exit code, suppressed-line count, short tail — so no
+result is ever silent or misleading.
 
-| It is | It is not |
-| --- | --- |
-| A local daemon plus MCP stdio adapter | A remote service |
-| An argv-first command and file signal channel | A generic shell bridge |
-| A harness-config writer for MCP clients | A hidden npm bootstrapper |
-| A bounded JSON tool surface for LLMs | A human terminal UI |
-| **One daemon per harness** (per-`TC_SESSION` isolation) | A single shared multi-tenant daemon |
+> [!IMPORTANT]
+> The default command lane is **argv-only**: `argv[0]` is the program, shell
+> interpreters (`sh`, `bash`, `cmd`, `powershell`, …) are denied, and there is
+> no string-concatenated shell anywhere in the path. Pipelines and redirects
+> live behind the separate `shell_exec` tool, which is disabled unless the
+> operator enables the `allow_shell` policy capability.
 
-Latest release: [GitHub Releases](https://github.com/special-place-ai-heaven/terminal-commander/releases/latest) and [npm `latest`](https://www.npmjs.com/package/terminal-commander).
+## Contents
+
+- [Why Terminal Commander](#why-terminal-commander)
+- [Innovations](#innovations)
+- [Quick Start](#quick-start)
+- [Architecture](#architecture)
+- [The Life Of A Command](#the-life-of-a-command)
+- [How LLMs Should Use It](#how-llms-should-use-it)
+- [MCP Tool Surface](#mcp-tool-surface)
+- [Per-Harness Sessions](#per-harness-sessions)
+- [Harness Configuration](#harness-configuration)
+- [Platform Support](#platform-support)
+- [Admin CLI](#admin-cli)
+- [Doctor And Repair](#doctor-and-repair)
+- [Update](#update)
+- [Environment](#environment)
+- [Local State](#local-state)
+- [Safety Posture](#safety-posture)
+- [Release Flow](#release-flow)
+- [Develop From Source](#develop-from-source)
+- [Repository Layout](#repository-layout)
+- [License](#license)
+
+## Why Terminal Commander
+
+Coding agents run terminal commands constantly, and raw terminal output is
+hostile to them: unbounded, noisy, and token-expensive. A test suite that
+prints 2,802 lines costs a context-window fortune to scroll — when the only
+information the agent needed was "exit 0" and five matched lines. That is the
+product: in real use, Terminal Commander condensed exactly such a run into a
+five-line receipt with the exit code.
+
+| Instead of | Use | Effect |
+|---|---|---|
+| Reading 2,800 lines of test scrollback | `command_start_combed` + rules + `command_status` | Matched signals + a bounded exit receipt |
+| Polling raw stdout in a loop | `bucket_wait` (long-poll with cursor) | Wake on signal, heartbeat on quiet |
+| Re-running a command to "see that error again" | `event_context` on the event pointer | Bounded context window around the line |
+| `tail -f build.log` in a terminal you can't see | `file_watch_start` + rules | Structured events as lines append |
+| One watcher loop per running job | `subscription_open` over many sources | One multiplexed pull for everything |
+| Pasting a whole file for one section | `file_read_window` / `file_search` | Bounded windows and match pointers |
+
+Three properties rank above everything else, in this order:
+
+1. **Trust** — every response is honest about state (`running`/`exited`/
+   `failed`/degraded), counters are near-real-time and never lie, receipts are
+   accurate, and errors teach the caller how to recover.
+2. **Reliability** — the daemon self-manages (idle self-reap with live-work
+   veto), processes are torn down as whole trees on stop, and degraded states
+   are disclosed loudly with a recovery path.
+3. **LLM ergonomics** — a fresh model with only the tool schemas succeeds on
+   the first call: minimal required fields, defaults that work, lenient
+   parameter coercion for real-world MCP clients, and one complete teaching
+   error instead of a guessing game.
+
+## Innovations
+
+The engineering decisions that distinguish Terminal Commander from "run a
+command over MCP".
+
+### Structured signals over raw streams
+
+Every captured line flows through the **sifter runtime**: an Aho-Corasick pass
+for keyword rules and a compiled regex-set pass for pattern rules, one event
+per matching rule per frame, with named captures, severity, tags, and a
+summary template. The agent reads events, not scrollback. Rules can be passed
+inline per command (minimal: `[{"pattern": "ERROR"}]` — everything else has a
+sane default), or persisted in a versioned **registry** and activated
+globally or scoped to one bucket/job/probe. Activating a new version of a rule
+supersedes the old one in that scope, so one line never fires twice.
+
+### Bounded receipts that never go silent
+
+A command whose output matched zero rules is not an error and not an empty
+success — it returns a **receipt**: exit code, how many lines were suppressed,
+and a short tail. The same no-silence rule runs through the whole surface:
+`command_status` for a finished quiet job carries the receipt; a stopped job
+reports its real counters (snapshotted from the live probe metrics, not
+zeroes); truncation is always flagged (`truncated_lines`, `truncated_bytes`,
+`evicted_frames`).
+
+### Degraded-state disclosure with recovery hints
+
+If an IPC error interrupts a `run_and_watch` wait, the response does not
+become a bare error — the job handle is preserved and the result arrives with
+`degraded: true`, the last observed state, and a `recover_hint` that tells the
+agent exactly how to re-attach (`command_status` with the returned `job_id`).
+Mutating RPCs are never auto-retried; idempotent ones may be. A daemon restart
+is detectable via `boot_id` on subscriptions.
+
+### Buckets, context rings, and subscriptions
+
+Signals land in per-job **buckets** read by cursor (`bucket_events_since`,
+`bucket_wait`) so nothing is lost between polls and nothing is re-sent.
+Each probe keeps a bounded **context ring** of raw frames so `event_context`
+can resolve a pointer into surrounding lines on demand — context is fetched
+when needed, never pushed. **Subscriptions** multiplex many sources behind one
+predicate (severity floor, kind allowlist, tag, source set) with per-source
+liveness in every pull, and `sources: all` auto-joins future probes.
+
+### A thin-facade adapter that cannot surprise you
+
+`terminal-commander-mcp` is a stdio adapter in which every tool forwards 1:1
+to a daemon IPC method. CI guards assert the adapter source contains no
+process spawn, no network socket, and no direct filesystem access — the policy
+gate in the daemon is the single choke point. Tool schemas are typed plainly
+(no `["integer","null"]` unions that real MCP clients strip), and parameters
+arriving as stringified numbers or JSON-encoded arrays are coerced with
+teaching errors — schema honesty for clients that aren't.
+
+### Per-session daemons with disciplined lifecycles
+
+Each harness gets its own daemon keyed by a deterministic `TC_SESSION` token —
+two harnesses never share state. An idle daemon self-reaps after
+`TC_IDLE_TTL_SECS` (default 1800 s) of no real IPC, but **live work vetoes the
+reap**: a still-running command, file watch, or PTY job keeps the daemon up so
+children are never orphaned and receipts never lost. `command_stop` kills the
+whole process tree, identity-gated so a recycled PID is never signalled.
+
+### Policy gate, audit trail, and the argv-only contract
+
+Every command start passes a policy engine (profile-based: deny lists, path
+suffix guards, per-call caps) and emits a durable audit row with
+credential-redacted argv. The shell lane (`shell_exec`) is a separate policy
+action (`allow_shell`, default off) — enabling it is an explicit operator
+decision, never an agent's.
+
+### Rule packs: expert signal extraction in one call
+
+`registry_import_pack` ships curated packs (`cargo`, `pytest`, `npm`, `gcc`,
+`apt`, `make`, `generic.terminal`, `cleanup`) so an agent gets expert rules
+without authoring JSON. Pack rules label honestly: a generic `warning:`
+matcher claims no language it cannot verify.
+
+> [!TIP]
+> Prefer **scoped** activation (`{"kind":"job", "job_id": …}`) or per-command
+> inline rules over global activation. Globally-activated rules see every
+> command's streams — a `warning:` pattern meant for cargo will also fire on
+> git's CRLF notices.
 
 ## Quick Start
 
@@ -27,14 +183,9 @@ Install from npm:
 npm install -g terminal-commander@latest
 ```
 
-The npm install is intentionally passive:
-
-- no `postinstall` bootstrap
-- no MCP config writes
-- no daemon start
-- no WSL install
-- no shell wrapper
-- no hidden-window helper spawn
+The npm install is intentionally passive: no `postinstall` bootstrap, no MCP
+config writes, no daemon start, no WSL install, no shell wrapper, no
+hidden-window helper spawn.
 
 Configure detected harnesses explicitly:
 
@@ -51,11 +202,6 @@ terminal-commander setup harness --provider claude-code
 terminal-commander setup harness --provider claude-desktop
 ```
 
-`setup harness` mints a stable, distinct **`TC_SESSION`** token per provider and
-writes it into each harness's MCP server stanza. Each harness gets its own
-daemon endpoint (a per-token Windows named pipe or unix socket); two harnesses
-on one machine never share a daemon.
-
 Verify:
 
 ```powershell
@@ -65,126 +211,10 @@ terminal-commander session list
 terminal-commander --version
 ```
 
-When a harness starts `terminal-commander-mcp`, the MCP adapter resolves the
-endpoint from the inherited `TC_SESSION` (or `TC_SOCKET` override), then uses
-local IPC to talk to `terminal-commanderd`. If the daemon is not already
-running, the adapter spawns its own session daemon and reports the result on
-stderr.
-
-## Per-Harness Sessions
-
-Each harness gets a distinct daemon, keyed by an opaque token. The token is
-minted by `setup harness` (deterministic per harness id + machine) and emitted
-as `env.TC_SESSION` in the harness's MCP stanza.
-
-**Endpoint resolution precedence** (in both the daemon at bind time and every
-client at connect time):
-
-1. `TC_SOCKET` (full path/pipe override — operator escape hatch)
-2. `TC_SESSION` (opaque token; ASCII `[A-Za-z0-9._-]`, 1–64 chars, ≥1 alphanumeric, `default` reserved)
-3. Per-user default (byte-identical to pre-session behavior; one shared daemon)
-
-Malformed `TC_SESSION` falls back to the per-user default with a stderr
-warning — it never names a kernel object.
-
-**On idle, the daemon self-reaps.** Each daemon tracks last-IPC time in memory
-and exits gracefully after `TC_IDLE_TTL_SECS` of no real IPC (default 1800
-seconds; `0` disables). Health/probe peeks never reset the idle clock. The
-shutdown path stops accepting new connections, drains in-flight requests, then
-exits 0 and removes the pidfile.
-
-**Windows → WSL forwarding.** When the Windows MCP shim re-execs the Linux MCP
-inside WSL, the bridge rebuilds `WSLENV` from a TC-only allowlist
-(`TC_SESSION/u`); ambient `WSLENV` entries are dropped to prevent forwarding
-operator credentials like `WSL_SUDO_CREDENTIAL`.
-
-**Inspect and reap sessions:**
-
-```powershell
-terminal-commander session list
-terminal-commander session reap <token>
-terminal-commander session reap --all
-```
-
-`session reap` sends a graceful `Shutdown` over IPC and waits for the endpoint
-to go unreachable. If a daemon is **wedged** (no `ShutdownAck` AND the endpoint
-still answers after the wait), it falls back to force-kill. The force path is
-**identity-gated by `pid_belongs_to_daemon`** (matches daemon image + session
-`state_dir` in the live cmdline) before `hard_kill`, and on Unix is re-checked
-**again immediately before the SIGKILL leg** after the ~800 ms grace
-(`HardKillOutcome::IdentitySkipped` when the PID was recycled mid-grace). The
-force signal is withheld in that case; `reap` exits with the `RefusedNonDaemon`
-message rather than killing an unrelated process.
-
-`doctor harness` prints one line per provider plus a `WARNING: shared daemon
-mode …` line when ≥2 harnesses are detected and ≥1 is not yet configured by
-`setup harness`.
-
-## Update
-
-Update the npm-managed install:
-
-```powershell
-terminal-commander update
-```
-
-`terminal-commander update` runs the same public npm install command:
-
-```powershell
-npm install -g terminal-commander@latest
-```
-
-On Windows, update first runs a native preflight that terminates only these
-Terminal Commander binaries when their executable path is inside the current
-npm platform package `bin` directory:
-
-- `terminal-commander.exe`
-- `terminal-commanderd.exe`
-- `terminal-commander-mcp.exe`
-
-It does not call `cmd.exe`, PowerShell, `taskkill`, hidden windows, broad
-process-name matches, or downloaded helper scripts.
-
-`terminal-commander --version` prints the installed version and, when npm is
-reachable quickly, prints a one-line update notice if a newer release exists.
-
-## Commands On PATH
-
-| Command | Role |
-| --- | --- |
-| `terminal-commander` | Admin CLI: status, doctor, setup, session, rules, buckets, jobs, probes, policy, audit, update |
-| `terminal-commander-mcp` | MCP stdio adapter launched by Cursor/Codex/Claude |
-| `terminal-commanderd` | Local daemon for IPC, probes, policy, buckets, audit, and graceful shutdown |
-
-Admin CLI subcommands (`terminal-commander <cmd>`):
-
-| Subcommand | Purpose |
-| --- | --- |
-| `status` | High-level daemon status (reachable / unavailable). |
-| `doctor harness` | Per-provider detection + configuration audit (warns on shared-daemon mode). |
-| `doctor daemon` | Native daemon diagnostics (binary, pidfile, endpoint). |
-| `doctor wsl` | WSL distro + runtime diagnostics. |
-| `setup harness [--provider <id>] [--force]` | Write MCP stanzas (mint + emit `env.TC_SESSION`). |
-| `setup daemon-autostart` | Install Linux/WSL daemon autostart (systemd/profile). |
-| `session list` | Enumerate sessions (default + seeded), columns: SESSION/PID/STATE/IDLE/ENDPOINT. |
-| `session reap [<token>] [--all] [--idle --idle-secs N]` | Graceful Shutdown-IPC; identity-gated force fallback. |
-| `rules { list \| show <id> }`, `buckets { list \| show <id> }`, `jobs`, `probes`, `policy`, `audit [--limit N]` | Daemon-backed inspection (exit 69 when daemon unavailable; no fake data). |
-| `update` | Run `npm install -g terminal-commander@latest` after a scoped Windows lock preflight. |
-
-## Platform Support
-
-| Platform | Package | IPC | Notes |
-| --- | --- | --- | --- |
-| Linux x64 | `@terminal-commander/linux-x64` | Unix domain socket | Native daemon and MCP adapter |
-| Linux arm64 | `@terminal-commander/linux-arm64` | Unix domain socket | Native daemon and MCP adapter |
-| Windows x64 | `@terminal-commander/windows-x64` | Named pipe | Native by default |
-| macOS x64 | `@terminal-commander/mac-x64` | Unix domain socket | Native package published |
-| macOS arm64 | `@terminal-commander/mac-arm64` | Unix domain socket | Native package published |
-
-The legacy Windows-to-WSL bridge is still available for operators who explicitly
-set `TC_USE_LEGACY_WSL_BRIDGE=1`. It is not the default Windows path. When the
-bridge is used, only `TC_SESSION/u` crosses into WSL via `WSLENV`; the ambient
-operator `WSLENV` is dropped.
+When a harness starts `terminal-commander-mcp`, the adapter resolves the
+endpoint from the inherited `TC_SESSION` (or `TC_SOCKET` override) and talks
+to `terminal-commanderd` over local IPC. If the daemon is not already running,
+the adapter spawns its own session daemon and reports the result on stderr.
 
 ## Architecture
 
@@ -198,7 +228,7 @@ flowchart LR
   end
 
   subgraph mcp["terminal-commander-mcp"]
-    Stdio["rmcp stdio server\n31 live tools"]
+    Stdio["rmcp stdio server\n39 live tools\n1:1 facade over IPC"]
   end
 
   subgraph sup["terminal-commander-supervisor (shared lib)"]
@@ -209,13 +239,13 @@ flowchart LR
 
   subgraph daemon["terminal-commanderd (one per session)"]
     IPC["IPC server\nUDS or named pipe"]
-    Policy["policy gate"]
+    Policy["policy gate\nargv deny · allow_shell cap"]
     Dispatch["request dispatch"]
     Router["router"]
-    Sift["sifter runtime"]
+    Sift["sifter runtime\nkeyword AC + regex set"]
     Store["SQLite store\nevents · registry · audit"]
-    Buckets["buckets + context rings"]
-    Idle["idle self-reap\nTC_IDLE_TTL_SECS"]
+    Buckets["buckets + context rings\n+ subscriptions"]
+    Idle["idle self-reap\nTC_IDLE_TTL_SECS\n(live work vetoes)"]
   end
 
   subgraph runtimes["Probe runtimes"]
@@ -250,54 +280,100 @@ flowchart LR
 ```
 
 The MCP adapter does not spawn arbitrary commands and does not open network
-sockets. It forwards tool calls to the daemon over local IPC. The daemon applies
-policy before starting argv commands or returning bounded file/context data.
+sockets — CI guards enforce this on the adapter source. It forwards tool calls
+to the daemon over local IPC; the daemon applies policy before starting argv
+commands or returning bounded file/context data.
 
-Bring-up lives in the shared `terminal-commander-supervisor` crate (used by
-the MCP adapter, admin CLI, and daemon `update` mode). On startup the adapter
-calls `ensure_daemon`, then `replace_if_stale` when spawn is allowed — a running
-daemon older than the installed adapter is swapped before tool calls proceed.
+`probe_endpoint` performs a bounded `health` IPC handshake, not a bare
+connect. A pre-bound or stale socket that does not answer with our protocol is
+rejected; `ensure_daemon` may spawn a fresh session daemon instead.
 
-`probe_endpoint` performs a bounded `health` IPC handshake, not a bare connect.
-A pre-bound or stale socket that does not answer with our protocol is rejected;
-`ensure_daemon` may spawn a fresh session daemon instead.
+## The Life Of A Command
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant M as terminal-commander-mcp
+    participant D as terminal-commanderd
+    participant P as Process probe
+
+    A->>M: run_and_watch argv=["cargo","test"] rules=[{"pattern":"FAIL"}]
+    M->>D: command_start_combed (IPC)
+    D->>D: shell-interpreter guard, policy gate, audit row
+    D->>P: spawn child (argv, no shell)
+    P-->>D: stdout/stderr frames (line-bounded)
+    D->>D: sifter combs each frame against active ∪ inline rules
+    D->>D: matches → signal events in the job's bucket
+    D->>D: non-matches → suppressed counters + context ring
+    M->>D: bucket_wait slices (cursor, bounded by wait_ms)
+    P-->>D: child exit → lifecycle event + final counters + audit
+    alt rules matched
+        M-->>A: signals[] + exit_code + state (complete:true)
+    else zero matches (quiet command)
+        M-->>A: receipt: exit code, lines_suppressed, short tail
+    else wait budget spent, still running
+        M-->>A: wait_exhausted:true + cursor → poll command_status
+    else IPC interrupted mid-wait
+        M-->>A: degraded:true + last observed state + recover_hint
+    end
+```
+
+> [!NOTE]
+> Every branch of that `alt` returns something useful. There is no path where
+> a started command yields a bare error that loses the job handle, and no path
+> where output disappears without a count of what was suppressed.
 
 ## How LLMs Should Use It
 
-Use Terminal Commander when raw terminal scrollback would waste context or hide
-the signal.
+Use Terminal Commander when raw terminal scrollback would waste context or
+hide the signal.
 
-Recommended tool flow:
+One-shot (most common):
 
 ```text
-system_discover
-command_start_combed argv=["npm","test"]
-bucket_wait bucket_id=<from command_start_combed> cursor=0 timeout_ms=10000
-event_context probe_id=<event.probe_id> anchor=<event.anchor> before=20 after=40
-command_status job_id=<from command_start_combed>
+run_and_watch argv=["npm","test"] rules=[{"pattern": "FAIL"}]
+→ signals + exit_code in one call; quiet runs return a receipt
+```
+
+Long-running, with live monitoring:
+
+```text
+command_start_combed argv=["cargo","nextest","run"] rules=[{"pattern":"^\\s+FAIL"}]
+bucket_wait bucket_id=<returned> cursor=0 timeout_ms=10000
+command_status job_id=<returned>          # near-real-time counters mid-run
+event_context bucket_id=… event_id=…      # surrounding lines for one event
+command_output_tail job_id=<returned>     # bounded tail when you don't know what to grep
+command_stop job_id=<returned>            # kills the whole process tree
 ```
 
 Agent rules:
 
-- Prefer `command_start_combed` for noninteractive commands.
-- Use `bucket_wait` instead of polling raw stdout.
-- Use `event_context` only when an event pointer needs surrounding text.
-- Use `command_status` for exit code, lifecycle state, and counters.
-- Use `command_output_tail` for one-off/exploratory commands where you don't
-  know what to grep for yet — bounded to 200 lines / 64 KiB, truncation-flagged.
+- Prefer `run_and_watch` for commands that finish within a minute; use
+  `command_start_combed` + `bucket_wait` for longer jobs.
+- A minimal rule is just `{"pattern": "ERROR"}` — id, version, kind, severity,
+  and summary default sanely. Severity accepts `error`/`warn`/`fatal` aliases.
+- Use `command_output_tail` for exploratory commands where you don't know what
+  to match yet — bounded to 200 lines / 64 KiB, truncation-flagged.
+- Use `subscription_open` + `subscription_pull` instead of N polling loops
+  when watching several jobs at once.
+- `wait_exhausted: true` means STILL RUNNING — poll `command_status`; do not
+  treat it as finished. `degraded: true` means follow the `recover_hint`.
 - Do not ask for unbounded output. Every response is intentionally capped.
 
 ## MCP Tool Surface
 
-`system_discover` advertises the live tool catalogue: **31 live tools** today,
-grouped by use. All daemon-backed tools return a structured `daemon_unavailable`
-error when the daemon is down instead of leaking raw pipe/socket errors.
+`system_discover` advertises the live tool catalogue: **39 live tools**,
+grouped by workflow. All daemon-backed tools return a structured
+`daemon_unavailable` error when the daemon is down instead of leaking raw
+pipe/socket errors, and `system_discover` itself remains callable to explain
+per-tool availability (`requires_daemon`, `available`, `unavailable_reason`).
 
 | Group | Tools |
 | --- | --- |
 | Discovery and health | `system_discover`, `health`, `policy_status`, `self_check` |
-| Commands | `command_start_combed`, `command_status`, `command_output_tail` |
+| Commands | `run_and_watch`, `command_start_combed`, `command_status`, `command_stop`, `command_output_tail`, `shell_exec` |
 | Buckets and context | `bucket_wait`, `bucket_events_since`, `bucket_summary`, `event_context` |
+| Subscriptions | `subscription_open`, `subscription_pull`, `subscription_list`, `subscription_close`, `subscription_seek` |
 | Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_import_pack`, `registry_deactivate`, `registry_list_active` |
 | Files | `file_read_window`, `file_search`, `file_watch_start`, `file_watch_stop`, `file_watch_list` |
 | PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` |
@@ -305,13 +381,59 @@ error when the daemon is down instead of leaking raw pipe/socket errors.
 
 Full contract: [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
 
-Discovery is the source of truth for availability. `system_discover` returns
-`daemon_available` plus per-tool `requires_daemon`, `available`, and
-`unavailable_reason`. It remains callable when the daemon is down.
-
 `health` is a non-bumping, audit-free **peek**: it returns `uptime_secs` plus
 optional `idle_secs` and never resets the daemon's idle timer or writes an
 audit row. All other IPC requests bump the idle clock and audit normally.
+
+> [!WARNING]
+> `shell_exec` exists for pipelines/compounds/redirects, but it is gated by
+> the `allow_shell` policy capability, which is **off by default** and lives
+> in the operator's config TOML — it is not an MCP-flippable parameter. On the
+> default profile, `shell_exec` returns `PolicyDenied`.
+
+> [!CAUTION]
+> PTY tools are live on Linux/WSL. On native Windows they are catalogued but
+> report `unavailable` (ConPTY support pending) — `system_discover` tells you,
+> per tool, before you call.
+
+## Per-Harness Sessions
+
+Each harness gets a distinct daemon, keyed by an opaque token. The token is
+minted by `setup harness` (deterministic per harness id + machine) and emitted
+as `env.TC_SESSION` in the harness's MCP stanza.
+
+**Endpoint resolution precedence** (in both the daemon at bind time and every
+client at connect time):
+
+1. `TC_SOCKET` (full path/pipe override — operator escape hatch)
+2. `TC_SESSION` (opaque token; ASCII `[A-Za-z0-9._-]`, 1–64 chars, ≥1 alphanumeric, `default` reserved)
+3. Per-user default (one shared daemon)
+
+Malformed `TC_SESSION` falls back to the per-user default with a stderr
+warning — it never names a kernel object.
+
+**On idle, the daemon self-reaps.** Each daemon tracks last-IPC time in memory
+and exits gracefully after `TC_IDLE_TTL_SECS` of no real IPC (default 1800
+seconds; `0` disables). Health/probe peeks never reset the idle clock.
+**Live work defers the reap**: a still-running command, file watch, or PTY job
+keeps the daemon alive so children are never orphaned and their receipts,
+exit events, and audit rows are never lost. The shutdown path stops accepting
+new connections, drains in-flight requests, then exits 0 and removes the
+pidfile.
+
+**Inspect and reap sessions:**
+
+```powershell
+terminal-commander session list
+terminal-commander session reap <token>
+terminal-commander session reap --all
+```
+
+`session reap` sends a graceful `Shutdown` over IPC and waits for the endpoint
+to go unreachable. If a daemon is wedged, the force path is identity-gated by
+`pid_belongs_to_daemon` (daemon image + session `state_dir` in the live
+cmdline) before any kill signal, and on Unix is re-checked again immediately
+before the SIGKILL leg — a PID recycled mid-grace is never signalled.
 
 ## Harness Configuration
 
@@ -345,21 +467,59 @@ Generated Cursor stanza (with per-harness session token):
 }
 ```
 
-Re-running `setup harness` for the same provider produces the same token (the
-mint is deterministic per harness id + machine); your daemon is not churned.
-A malformed token in the stanza is rejected at write time by both the JS
-validator and the Rust resolver — it never reaches the daemon.
+Re-running `setup harness` for the same provider produces the same token; your
+daemon is not churned. A malformed token in the stanza is rejected at write
+time by both the JS validator and the Rust resolver.
 
-Guides:
+Guides: [`docs/integrations/cursor.md`](docs/integrations/cursor.md) ·
+[`docs/integrations/codex-cli.md`](docs/integrations/codex-cli.md) ·
+[`docs/integrations/claude-code.md`](docs/integrations/claude-code.md) ·
+[`docs/integrations/README.md`](docs/integrations/README.md)
 
-- [`docs/integrations/cursor.md`](docs/integrations/cursor.md)
-- [`docs/integrations/codex-cli.md`](docs/integrations/codex-cli.md)
-- [`docs/integrations/claude-code.md`](docs/integrations/claude-code.md)
-- [`docs/integrations/README.md`](docs/integrations/README.md)
+## Platform Support
+
+| Platform | Package | IPC | Notes |
+| --- | --- | --- | --- |
+| Linux x64 | `@terminal-commander/linux-x64` | Unix domain socket | Native daemon and MCP adapter |
+| Linux arm64 | `@terminal-commander/linux-arm64` | Unix domain socket | Native daemon and MCP adapter |
+| Windows x64 | `@terminal-commander/windows-x64` | Named pipe | Native by default; PTY pending (ConPTY) |
+| macOS x64 | `@terminal-commander/mac-x64` | Unix domain socket | Native package published |
+| macOS arm64 | `@terminal-commander/mac-arm64` | Unix domain socket | Native package published |
+
+The legacy Windows-to-WSL bridge is still available for operators who
+explicitly set `TC_USE_LEGACY_WSL_BRIDGE=1`. It is not the default Windows
+path. When the bridge is used, only `TC_SESSION/u` crosses into WSL via
+`WSLENV`; the ambient operator `WSLENV` is dropped so credential-shaped vars
+cannot cross the trust boundary.
+
+## Admin CLI
+
+| Command | Role |
+| --- | --- |
+| `terminal-commander` | Admin CLI: status, doctor, setup, session, rules, jobs, probes, policy, audit, update |
+| `terminal-commander-mcp` | MCP stdio adapter launched by Cursor/Codex/Claude |
+| `terminal-commanderd` | Local daemon for IPC, probes, policy, buckets, audit, and graceful shutdown |
+
+Admin CLI subcommands (`terminal-commander <cmd>`):
+
+| Subcommand | Purpose |
+| --- | --- |
+| `status` | High-level daemon status (reachable / unavailable). |
+| `doctor harness` | Per-provider detection + configuration audit (warns on shared-daemon mode). |
+| `doctor daemon` | Native daemon diagnostics (binary, pidfile, endpoint). |
+| `doctor wsl` | WSL distro + runtime diagnostics. |
+| `setup harness [--provider <id>] [--force]` | Write MCP stanzas (mint + emit `env.TC_SESSION`). |
+| `setup daemon-autostart` | Install Linux/WSL daemon autostart (systemd/profile). |
+| `session list` | Enumerate sessions (default + seeded), columns: SESSION/PID/STATE/IDLE/ENDPOINT. |
+| `session reap [<token>] [--all] [--idle --idle-secs N]` | Graceful Shutdown-IPC; identity-gated force fallback. |
+| `rules { list \| show <id> }`, `jobs`, `probes`, `policy`, `audit [--limit N]` | Daemon-backed inspection (exit 69 when daemon unavailable; no fake data). |
+| `update` | Run `npm install -g terminal-commander@latest` after a scoped Windows lock preflight. |
+
+The Rust admin CLI does not synthesize fake daemon data. Daemon-backed
+inspection commands exit `69` with an `unavailable` message rather than
+returning empty or not-found success.
 
 ## Doctor And Repair
-
-Diagnostics:
 
 ```powershell
 terminal-commander doctor harness
@@ -368,11 +528,9 @@ terminal-commander doctor wsl
 terminal-commander session list
 ```
 
-`doctor harness` warns "shared daemon mode" when multiple harnesses are present
-and at least one is not yet configured. A fully-configured multi-harness
-install gets no nag.
-
-Repair is explicit. There is no hidden auto-repair during npm install.
+`doctor harness` warns "shared daemon mode" when multiple harnesses are
+present and at least one is not yet configured. Repair is explicit — there is
+no hidden auto-repair during npm install:
 
 ```powershell
 terminal-commander setup harness --force
@@ -380,51 +538,73 @@ terminal-commander setup daemon-autostart
 terminal-commander session reap --all
 ```
 
-`setup daemon-autostart` is for Linux/WSL operators who want the daemon at
-the user's default endpoint to survive reboots. It is independent of the
-per-session daemons each MCP spawns; the autostart daemon serves only the
-default endpoint and is harmless to session-keyed harnesses.
+## Update
 
-The Rust admin CLI does not synthesize fake daemon data. Daemon-backed
-inspection commands that are not wired to live daemon IPC exit `69` with an
-`unavailable` message rather than returning empty or not-found success.
+```powershell
+terminal-commander update
+```
+
+`update` runs the same public npm command (`npm install -g
+terminal-commander@latest`). On Windows it first runs a native preflight that
+terminates only Terminal Commander binaries whose executable path is inside
+the current npm platform package `bin` directory — no `cmd.exe`, PowerShell,
+`taskkill`, hidden windows, broad process-name matches, or downloaded helper
+scripts.
+
+On startup the adapter calls `ensure_daemon`, then `replace_if_stale` when
+spawn is allowed — a running daemon older than the installed adapter is
+swapped (identity-gated) before tool calls proceed.
+
+## Environment
+
+| Variable | Effect |
+| --- | --- |
+| `TC_SESSION` | Opaque per-harness session token; selects the endpoint and state subdir. |
+| `TC_SOCKET` | Full endpoint override (pipe name / socket path). Wins over `TC_SESSION`. |
+| `TC_DATA` | State-dir base override (default: `%LOCALAPPDATA%\terminal-commanderd\state` on Windows, `~/.local/share/terminal-commanderd` on Unix). |
+| `TC_IDLE_TTL_SECS` | Idle self-reap TTL in seconds (default 1800; `0` disables). |
+| `TC_USE_LEGACY_WSL_BRIDGE` | `1` opts into the legacy Windows→WSL bridge. |
+| `TC_WSL_DISTRO` | Selects the WSL distro for the legacy bridge. |
+| `TC_SKIP_DAEMON_AUTOSTART` | `1` skips daemon autostart during `setup harness`. |
+
+## Local State
+
+Everything lives under the per-session state dir
+(`<TC_DATA>/<TC_SESSION>` when a session token is set):
+
+| Path | Contents |
+| --- | --- |
+| `terminal-commander.db` | SQLite store: events, rule registry (versioned, FTS5), durable activations, audit rows. |
+| `logs/terminal-commanderd.log` | Daemon log (bind, self-checks, idle-reap decisions). |
+| `terminal-commanderd.pid` | Pidfile: pid, version, endpoint (the probe cross-checks it). |
+| `terminal-commanderd.lock` | Bring-up single-flight lock. |
 
 ## Safety Posture
 
-- npm install is passive.
-- Wrapper scripts use direct process spawn with `shell:false`.
-- Windows JS runtime helpers do not request hidden subprocess windows.
-- The MCP adapter speaks stdio and local IPC only.
-- The daemon uses Unix domain sockets on Unix and named pipes on Windows.
-- Command execution is argv-first and policy-gated.
-- Tool responses are bounded JSON, not raw stream dumps.
-- Config writes are explicit setup commands with atomic writes/backups where
-  the provider writer supports them.
-- Windows update lock handling is scoped to Terminal Commander binaries inside
-  the current npm platform package directory.
-- **`ensure_daemon` requires a real Health handshake** — a connectable but
+- npm install is passive; wrapper scripts use direct process spawn with
+  `shell:false`; no hidden subprocess windows.
+- The MCP adapter speaks stdio and local IPC only — CI guards assert no
+  spawn/socket/fs calls in the adapter source.
+- Command execution is argv-first and policy-gated; the shell lane is a
+  separate, default-off capability with its own audit labels.
+- Tool responses are bounded JSON, not raw stream dumps; credential-shaped
+  argv values are redacted in audit metadata and probe rows.
+- `ensure_daemon` requires a real Health handshake — a connectable but
   non-Terminal-Commander socket/pipe (squatter, stale bind, wrong process) is
   rejected, not silently accepted.
-- **Force-kill on reap is identity-gated at both signal legs**
-  (`pid_belongs_to_daemon` matches daemon image + session `state_dir` from the
-  running cmdline). The gate runs before `hard_kill`, and on Unix is re-checked
-  immediately before SIGKILL after the ~800 ms grace. If the PID is recycled
-  mid-grace, the force signal (`SIGKILL` / `taskkill /F`) is withheld and
-  `reap` reports `RefusedNonDaemon` instead of killing an unrelated process.
-  The same identity gate is applied by `replace_if_stale` before any force
-  attempt.
-- **Win→WSL forwarding is a TC-only allowlist** (`TC_SESSION/u`). Ambient
-  `WSLENV` is dropped so credential-shaped vars like `WSL_SUDO_CREDENTIAL`
-  cannot cross the trust boundary.
-- **Daemon idle self-reap** reclaims abandoned daemons without an external
-  watcher; the same path drains in-flight requests gracefully before exit.
+- Force-kill on reap/replace is identity-gated at both signal legs; a PID
+  recycled mid-grace is never signalled.
+- Win→WSL forwarding is a TC-only allowlist (`TC_SESSION/u`); ambient `WSLENV`
+  is dropped.
+- Daemon idle self-reap reclaims abandoned daemons without an external
+  watcher; live work (running commands, watches, PTYs) defers it.
 
 Security model: [`docs/security/PRIVILEGE_MODEL.md`](docs/security/PRIVILEGE_MODEL.md) and [`SECURITY.md`](SECURITY.md).
 
 ## Release Flow
 
-Conventional commits on `main` drive releases through release-please and GitHub
-Actions.
+Conventional commits on `main` drive releases through release-please and
+GitHub Actions.
 
 ```mermaid
 flowchart LR
@@ -433,7 +613,7 @@ flowchart LR
   Sync --> Tag["tag + GitHub Release"]
   Tag --> Plat["build + npm publish\n5 platform packages\nlinux · windows · mac"]
   Plat --> Root["publish root wrapper\nterminal-commander@latest"]
-  Root --> Cargo["cargo publish chain\n7 crates in dep order\ncore → sifters → probes → store\n→ supervisor → daemon → mcp"]
+  Root --> Cargo["cargo publish chain\n8 crates in dep order\ncore → sifters → probes → store\n→ supervisor → ipc → daemon → mcp"]
   Cargo --> Verify["post-publish verify\ncontainer smoke per platform"]
 ```
 
@@ -452,19 +632,22 @@ git clone https://github.com/special-place-ai-heaven/terminal-commander.git
 cd terminal-commander
 ```
 
-Useful checks:
-
-```powershell
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p terminal-commander-cli
-node --test packages/terminal-commander/test/*.test.js
-```
-
-The unix-gated daemon integration tests run on WSL/Linux:
+The PR gate CI runs is `scripts/linux-gate.sh` (plus
+`scripts/windows-gate.ps1` for Windows-only regressions) — running them
+locally is the same check that gates your PR:
 
 ```bash
-cargo test -p terminal-commanderd --features test-util
+bash scripts/linux-gate.sh        # linux/mac (or via WSL on Windows)
+pwsh scripts/windows-gate.ps1     # Windows-only regression gate
+```
+
+Fast inner loop:
+
+```powershell
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo nextest run --workspace
+node --test packages/terminal-commander/test/*.test.js
 ```
 
 Local package testing:
@@ -477,56 +660,29 @@ terminal-commander setup --help
 terminal-commander session list
 ```
 
-E2E smoke (Windows, real binaries, isolated TC_DATA, self-cleaning):
-
-```powershell
-scripts/smoke/verify-session-isolation-smoke.ps1
-```
-
-Testing doctrine: [`TESTING.md`](TESTING.md).
+Testing doctrine: [`TESTING.md`](TESTING.md). Contributor guide:
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Repository Layout
 
 ```text
-crates/                                  Rust workspace (8 crates; 7 published to crates.io)
+crates/                                  Rust workspace (9 crates; 8 published to crates.io)
   core/                                  ids, buckets, context rings, events, activation
   sifters/                               rule evaluation + noise dedupe
   probes/                                process / file / PTY probe runtimes
-  store/                                 SQLite (events, registry, audit) + FTS5
+  store/                                 SQLite (events, registry, audit) + FTS5 + rule packs
   supervisor/                            ensure_daemon, replace_if_stale, session tokens, pidfile
+  ipc/                                   wire protocol + framing + clients (UDS / named pipe)
   daemon/                                terminal-commanderd — IPC, policy, router, runtimes
-  mcp/                                   terminal-commander-mcp — rmcp stdio, 31-tool catalogue
+  mcp/                                   terminal-commander-mcp — rmcp stdio, 39-tool catalogue
   cli/                                   terminal-commander admin CLI (local only, not on crates.io)
 packages/
   terminal-commander/                    npm root wrapper (@latest)
-  terminal-commander-linux-x64/          @terminal-commander/linux-x64
-  terminal-commander-linux-arm64/        @terminal-commander/linux-arm64
-  terminal-commander-windows-x64/        @terminal-commander/windows-x64
-  terminal-commander-mac-x64/            @terminal-commander/mac-x64
-  terminal-commander-mac-arm64/          @terminal-commander/mac-arm64
-docs/                                    architecture, integrations, release docs
+  terminal-commander-{linux-x64,linux-arm64,windows-x64,mac-x64,mac-arm64}/
+docs/                                    architecture, integrations, audits, release docs
 examples/provider-harness/               copy-paste MCP config examples
 scripts/                                 CI, release, and smoke helpers
 ```
-
-## Current Status
-
-| Area | Status |
-| --- | --- |
-| Native npm install for Linux, Windows, and macOS | Live |
-| Passive install with no lifecycle bootstrap | Live |
-| Explicit `terminal-commander setup harness` (mints + emits `env.TC_SESSION`) | Live for Cursor, Codex CLI (TOML env block: follow-up), Claude Code, Claude Desktop |
-| Per-harness daemon isolation (per-`TC_SESSION` endpoint) | Live |
-| Idle daemon self-reap (`TC_IDLE_TTL_SECS`, default 1800, 0=off) | Live |
-| `terminal-commander session list` / `session reap` | Live (`session list` shows per-session idle; `session reap` selectors: `<TOKEN>` / `--all` / `--idle <SECS>`) |
-| Liveness handshake on probe (rejects squatters) | Live |
-| WSL `WSLENV` TC-only allowlist (drops ambient) | Live |
-| `doctor harness` shared-daemon-mode warning | Live |
-| Gemini and Kimi `setup harness` | Stub only until config paths are verified |
-| MCP stdio adapter and daemon auto-ensure | Live (31-tool catalogue) |
-| Local IPC | UDS on Unix, named pipe on Windows; per-session endpoints |
-| `terminal-commander update` | Live; Windows lock preflight is native and scoped |
-| Legacy Windows-to-WSL bridge | Opt-in with `TC_USE_LEGACY_WSL_BRIDGE=1` |
 
 ## License
 
