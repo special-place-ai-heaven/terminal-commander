@@ -154,17 +154,25 @@ test("setup harness provider failure emits each diagnostic once", () => {
   fs.writeFileSync(path.join(codexDir, "config.toml.bak"), "existing backup\n");
 
   const shim = path.join(PKG_ROOT, "bin", "terminal-commander.js");
+  // S9 host-env leak: TC_WSL_DISTRO / TC_USE_LEGACY_WSL_BRIDGE flip the
+  // orchestrator into the legacy WSL bootstrap lane, which emits
+  // "WSL runtime already present." instead of the native-path diagnostic
+  // this test asserts. Any WSL-equipped dev box with TC_WSL_DISTRO set
+  // failed here; strip the selectors so the DEFAULT path is under test.
+  const cleanEnv = {
+    ...process.env,
+    HOME: root,
+    USERPROFILE: root,
+    TC_SKIP_DAEMON_AUTOSTART: "1",
+  };
+  delete cleanEnv.TC_WSL_DISTRO;
+  delete cleanEnv.TC_USE_LEGACY_WSL_BRIDGE;
   const r = spawnSync(
     process.execPath,
     [shim, "setup", "harness", "--provider", "codex-cli", "--force"],
     {
       encoding: "utf8",
-      env: {
-        ...process.env,
-        HOME: root,
-        USERPROFILE: root,
-        TC_SKIP_DAEMON_AUTOSTART: "1",
-      },
+      env: cleanEnv,
       stdio: ["ignore", "pipe", "pipe"],
       shell: false,
     },

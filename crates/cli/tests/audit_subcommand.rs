@@ -62,7 +62,18 @@ struct LiveDaemon {
 impl LiveDaemon {
     fn spawn(tag: &str) -> Self {
         let base = tmp_data_dir(tag);
-        let token = "audittest";
+        // S7: unique per test process. On Windows the pipe endpoint is
+        // derived from the token ALONE, so a constant token collides
+        // across parallel tests and with stale orphans from aborted
+        // runs. See read_subcommands.rs for the full rationale.
+        let token = format!(
+            "{tag}{}x{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos())
+        );
+        let token = token.as_str();
         let state_dir = base.join(token);
 
         let daemon_bin = target_bin("terminal-commanderd");

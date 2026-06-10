@@ -452,6 +452,26 @@ fn pipe_open_error_is_busy(err: &std::io::Error) -> bool {
     err.raw_os_error() == Some(ERROR_PIPE_BUSY)
 }
 
+/// `ERROR_FILE_NOT_FOUND` on a pipe open has TWO meanings: the daemon is
+/// genuinely down (no instance ever created), or the probe hit the
+/// momentary INSTANCE GAP — after a client connects, the pipe name has
+/// ZERO free instances until the daemon's accept loop re-iterates and
+/// creates the next one, and `CreateFile` reports that gap as NOT_FOUND
+/// (not BUSY). A single-shot probe therefore misreports a live daemon as
+/// `EndpointBindFailed` under connection churn (S7 residual: CLI tests
+/// probing a freshly-bound test daemon flaked exactly here). The probe
+/// retries NOT_FOUND a bounded number of times; a genuinely-down daemon
+/// only pays `PIPE_NOT_FOUND_RETRIES x PIPE_BUSY_RETRY_DELAY_MS` extra.
+#[cfg(windows)]
+const PIPE_NOT_FOUND_RETRIES: u32 = 8;
+
+/// Classify a Windows pipe-open error as the instance-gap shape
+/// (`ERROR_FILE_NOT_FOUND`, OS error 2).
+#[cfg(windows)]
+fn pipe_open_error_is_not_found(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(2)
+}
+
 /// Minimal mirror of the daemon's `ResponseEnvelope` (TC37 wire format)
 /// sufficient to recognise a well-formed `health` reply WITHOUT taking a
 /// dependency on the daemon crate (which would create a supervisor<->daemon
@@ -605,6 +625,7 @@ pub async fn probe_endpoint_health(endpoint: &Endpoint) -> Option<ProbeHealth> {
                 // the outer PROBE_TIMEOUT still bounds the whole probe.
                 // Any other open error IS a genuine unreachable peer.
                 use tokio::net::windows::named_pipe::ClientOptions;
+                let mut not_found_left = PIPE_NOT_FOUND_RETRIES;
                 loop {
                     match ClientOptions::new().open(name.as_str()) {
                         Ok(stream) => break health_handshake(stream).await,
@@ -612,6 +633,15 @@ pub async fn probe_endpoint_health(endpoint: &Endpoint) -> Option<ProbeHealth> {
                             tokio::time::sleep(Duration::from_millis(PIPE_BUSY_RETRY_DELAY_MS))
                                 .await;
                             // Loop: the outer timeout caps total wait.
+                        }
+                        Err(e) if pipe_open_error_is_not_found(&e) && not_found_left > 0 => {
+                            // Momentary instance gap (see PIPE_NOT_FOUND_RETRIES):
+                            // a live daemon's accept loop is between "client
+                            // connected" and "next instance created". Bounded
+                            // retry so a genuinely-down daemon still fails fast.
+                            not_found_left -= 1;
+                            tokio::time::sleep(Duration::from_millis(PIPE_BUSY_RETRY_DELAY_MS))
+                                .await;
                         }
                         Err(_) => break None,
                     }

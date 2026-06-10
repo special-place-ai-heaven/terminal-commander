@@ -67,7 +67,24 @@ impl LiveDaemon {
     /// and read back the endpoint it recorded.
     fn spawn(tag: &str) -> Self {
         let base = tmp_data_dir(tag);
-        let token = "readtest";
+        // S7: the TC_SESSION token must be UNIQUE PER TEST PROCESS. On
+        // Windows the IPC endpoint is `\\.\pipe\terminal-commander-<token>`
+        // — derived from the token ALONE, not the (unique) TC_DATA dir —
+        // so a constant token made every parallel test in this file bind
+        // the SAME pipe: one test's daemon answered another test's probe,
+        // and once the owner's Drop killed it the remaining CLIs failed
+        // exit-69 EndpointBindFailed. (Unix never collided: the socket
+        // path derives from the unique state dir, which is why CI-linux
+        // stayed green.) pid+nanos also defends against a stale orphan
+        // from a previously aborted run still holding the pipe.
+        let token = format!(
+            "{tag}{}x{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos())
+        );
+        let token = token.as_str();
         let state_dir = base.join(token);
 
         let daemon_bin = target_bin("terminal-commanderd");
@@ -219,9 +236,13 @@ fn rules_show_missing_rule_exits_typed_error() {
         code.is_some() && code != Some(0),
         "rules show <missing> must exit non-zero; code={code:?}, stdout={stdout}, stderr={stderr}"
     );
+    // Require the TYPED daemon error specifically. The previous
+    // `|| stderr.contains("failed")` arm let an exit-69
+    // "unavailable: ... EndpointBindFailed" satisfy this test vacuously
+    // — exactly the daemon-never-reached failure mode S7 produced.
     assert!(
-        stderr.to_lowercase().contains("rulenotfound") || stderr.contains("failed"),
-        "missing rule must surface a typed daemon error; stderr={stderr}"
+        stderr.to_lowercase().contains("rulenotfound"),
+        "missing rule must surface the typed RuleNotFound daemon error; stderr={stderr}"
     );
     // Honesty: nothing fabricated on stdout.
     assert!(
