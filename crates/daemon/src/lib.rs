@@ -74,10 +74,10 @@ pub use ipc::{
     RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope, RuntimeActiveRule,
     RuntimeBucketSummary, RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
     ShellExecParams, SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionEvent,
-    SubscriptionListParams,
-    SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
-    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse,
-    SubscriptionSeekParams, SubscriptionSeekResponse, SubscriptionSourceSel,
+    SubscriptionListParams, SubscriptionListResponse, SubscriptionOpenParams,
+    SubscriptionOpenResponse, SubscriptionPredicate, SubscriptionPullParams,
+    SubscriptionPullResponse, SubscriptionSeekParams, SubscriptionSeekResponse,
+    SubscriptionSourceSel,
 };
 #[cfg(unix)]
 pub use ipc::{DaemonClient, IpcServer, PeerCred, ServerHandle};

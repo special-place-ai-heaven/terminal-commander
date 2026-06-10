@@ -362,7 +362,12 @@ impl DaemonConfig {
     /// plus explicit `[policy.caps]`, not `full_access`.
     #[must_use]
     pub fn resolved_caps(&self) -> PolicyCaps {
-        let base: PolicyCaps = self.policy.caps.as_ref().map(PolicyCaps::from).unwrap_or_default();
+        let base: PolicyCaps = self
+            .policy
+            .caps
+            .as_ref()
+            .map(PolicyCaps::from)
+            .unwrap_or_default();
         let full = matches!(self.policy.profile, PolicyProfile::FullAccess);
         PolicyCaps {
             allow_shell: base.allow_shell || full,
@@ -694,7 +699,8 @@ mod tests {
 
     #[test]
     fn caps_absent_is_none_not_error() {
-        let toml = "[daemon]\ndata_dir = \"/tmp/tc-nocaps\"\n[policy]\nprofile = \"developer_local\"\n";
+        let toml =
+            "[daemon]\ndata_dir = \"/tmp/tc-nocaps\"\n[policy]\nprofile = \"developer_local\"\n";
         let cfg = DaemonConfig::from_toml(toml).expect("parse");
         assert!(cfg.policy.caps.is_none());
     }
@@ -704,7 +710,9 @@ mod tests {
         let toml = "[daemon]\ndata_dir = \"/tmp/tc-fa\"\n[policy]\nprofile = \"full_access\"\n";
         let cfg = DaemonConfig::from_toml(toml).expect("parse full_access");
         let caps = cfg.resolved_caps();
-        assert!(caps.allow_shell && caps.allow_session && caps.allow_privileged && caps.allow_remote);
+        assert!(
+            caps.allow_shell && caps.allow_session && caps.allow_privileged && caps.allow_remote
+        );
     }
 
     #[test]

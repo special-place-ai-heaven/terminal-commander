@@ -60,10 +60,10 @@ use terminal_commanderd::ipc::protocol::{
     RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse, RegistryTestParams,
     RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
     SelfCheckResponse, ShellExecParams, SubscriptionCloseParams, SubscriptionCloseResponse,
-    SubscriptionListParams,
-    SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
-    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse,
-    SubscriptionSeekParams, SubscriptionSeekResponse, SubscriptionSourceSel,
+    SubscriptionListParams, SubscriptionListResponse, SubscriptionOpenParams,
+    SubscriptionOpenResponse, SubscriptionPredicate, SubscriptionPullParams,
+    SubscriptionPullResponse, SubscriptionSeekParams, SubscriptionSeekResponse,
+    SubscriptionSourceSel,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -2577,8 +2577,7 @@ impl McpShellExecParams {
     /// `argv[2] = shell_line`, so two distinct lines never collapse.
     fn into_params(self) -> Result<ShellExecParams, McpError> {
         let cwd = self.cwd.map(std::path::PathBuf::from);
-        let env: Vec<(String, String)> =
-            self.env.into_iter().map(|e| (e.key, e.value)).collect();
+        let env: Vec<(String, String)> = self.env.into_iter().map(|e| (e.key, e.value)).collect();
         let (bucket_config, rules) =
             parse_bucket_and_rules(self.bucket_config_json, self.rules, self.rules_json)?;
         Ok(ShellExecParams {

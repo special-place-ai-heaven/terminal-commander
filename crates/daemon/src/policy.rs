@@ -62,7 +62,10 @@ pub enum PolicyProfile {
 /// Action being evaluated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyAction<'a> {
-    CommandStart { argv: &'a [String], cwd: &'a Path },
+    CommandStart {
+        argv: &'a [String],
+        cwd: &'a Path,
+    },
     /// Shell-lane start (TC49). `shell_line` is the dedicated shell string;
     /// argv[0] is NOT a user-chosen interpreter here. Gated by `allow_shell`.
     /// NOTE: `COMMANDS_DENY` is argv[0]-only and deliberately does NOT scan
@@ -74,9 +77,15 @@ pub enum PolicyAction<'a> {
     },
     CommandStdin,
     CommandSignal,
-    FileRead { path: &'a Path },
-    FileWatch { path: &'a Path },
-    ProbeCreate { kind: &'a str },
+    FileRead {
+        path: &'a Path,
+    },
+    FileWatch {
+        path: &'a Path,
+    },
+    ProbeCreate {
+        kind: &'a str,
+    },
     RegistryCreate,
     RegistryActivate,
     BucketWait,
@@ -172,19 +181,19 @@ impl PolicyEngine {
     /// `repo_only` engine.
     #[must_use]
     pub const fn new(profile: PolicyProfile) -> Self {
-            Self {
-                profile,
-                repo_root: None,
-                command_allow_roots: None,
-                // `PolicyCaps::default()` is not const; spell the all-false set out.
-                caps: PolicyCaps {
-                    allow_shell: false,
-                    allow_session: false,
-                    allow_privileged: false,
-                    allow_remote: false,
-                },
-            }
+        Self {
+            profile,
+            repo_root: None,
+            command_allow_roots: None,
+            // `PolicyCaps::default()` is not const; spell the all-false set out.
+            caps: PolicyCaps {
+                allow_shell: false,
+                allow_session: false,
+                allow_privileged: false,
+                allow_remote: false,
+            },
         }
+    }
 
     /// Construct an engine for a profile with an explicit repo-root.
     /// The root is canonicalized once here; if canonicalization fails

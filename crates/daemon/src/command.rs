@@ -564,11 +564,11 @@ impl CommandRuntime {
     /// the resolved `bucket_id`.
     #[allow(clippy::too_many_lines)] // sequential pipeline; splitting it hurts readability
     fn start_combed_inner(
-    &self,
-    req: CommandStartRequest,
-    reuse_bucket: Option<BucketId>,
-    mode: StartLane<'_>,
-) -> Result<CommandStartResponse, CommandError> {
+        &self,
+        req: CommandStartRequest,
+        reuse_bucket: Option<BucketId>,
+        mode: StartLane<'_>,
+    ) -> Result<CommandStartResponse, CommandError> {
         Self::validate_argv(&req.argv)?;
 
         // TC-2 in-flight dedup guard. BEFORE the id mint: if an identical

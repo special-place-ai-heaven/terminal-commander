@@ -9,8 +9,9 @@ use super::common::{identity_audit_subject, map_command_error};
 use crate::command::CommandStartRequest;
 use crate::ipc::protocol::{
     CommandOutputTailParams, CommandOutputTailResponse, CommandStartParams, CommandStatusParams,
-    CommandStopParams, CommandStopResponse, IpcError, IpcErrorCode, IpcResponse, ShellExecParams,
+    CommandStopParams, CommandStopResponse, IpcError, IpcErrorCode, IpcResponse,
     MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES, MAX_TAIL_BYTES, MAX_TAIL_LINES,
+    ShellExecParams,
 };
 use crate::shell::ShellExecRequest;
 use crate::state::DaemonState;
