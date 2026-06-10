@@ -98,7 +98,10 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
         CommandError::ShellInterpreterDenied(shell) => IpcError::new(
             IpcErrorCode::ShellInterpreterDenied,
             format!(
-                "shell interpreter '{shell}' denied; command_start_combed is not a shell bridge"
+                "shell interpreter '{shell}' denied; the argv lane is not a shell bridge. \
+                 Remedy: invoke the program directly as argv (e.g. [\"cargo\",\"build\"] \
+                 instead of [\"{shell}\",\"-c\",\"cargo build\"]); for pipelines/redirects \
+                 use the shell_exec tool, which is gated by the allow_shell policy cap."
             ),
         ),
         CommandError::EmptyArgv => {
