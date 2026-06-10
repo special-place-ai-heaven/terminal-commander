@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.48](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.47...v0.1.48) (2026-06-10)
+
+
+### Features
+
+* release Rust crate changes ([ec9fc6d](https://github.com/special-place-ai-heaven/terminal-commander/commit/ec9fc6d6f72ea62dd060dd6da8c168c6d407d8a8))
+* release Rust crate changes ([a234f34](https://github.com/special-place-ai-heaven/terminal-commander/commit/a234f34af39a211509e61214f39858838bd776af))
+* release Rust crate changes ([b1bf11f](https://github.com/special-place-ai-heaven/terminal-commander/commit/b1bf11f6bd5c0262df0ce704bafda8105cf0f35c))
+
+
+### Bug Fixes
+
+* **tests:** unique per-process TC_SESSION tokens; probe retries pipe instance-gap; npm WSL env leak; honest cargo.warning labels (S6,S7,S9) ([fb56f26](https://github.com/special-place-ai-heaven/terminal-commander/commit/fb56f267b4349af2ee57709ff31b8f5e25c1a7fb))
+
 ## [0.1.47](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.46...v0.1.47) (2026-06-09)
 
 
