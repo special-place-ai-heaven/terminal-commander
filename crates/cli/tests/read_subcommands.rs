@@ -75,14 +75,24 @@ impl LiveDaemon {
         // and once the owner's Drop killed it the remaining CLIs failed
         // exit-69 EndpointBindFailed. (Unix never collided: the socket
         // path derives from the unique state dir, which is why CI-linux
-        // stayed green.) pid+nanos also defends against a stale orphan
-        // from a previously aborted run still holding the pipe.
+        // stayed green.)
+        //
+        // The token must also stay SHORT: on unix the endpoint is
+        // `<TC_DATA>/<token>/terminal-commanderd.sock`, and `sun_path`
+        // caps the whole socket path at ~104 bytes. A first cut embedded
+        // `{tag}{pid}{nanos}` here and pushed the path over that cap —
+        // the daemon could not bind and every spawn panicked "daemon
+        // never bound" on CI-linux. The pid alone is unique per nextest
+        // test PROCESS (one process per test); the 4 nanos hex digits
+        // defend against a stale orphan from a previously aborted run.
+        // The human-readable `tag` already lives in the TC_DATA base dir.
         let token = format!(
-            "{tag}{}x{}",
+            "t{:x}{:04x}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.subsec_nanos())
+                & 0xffff
         );
         let token = token.as_str();
         let state_dir = base.join(token);

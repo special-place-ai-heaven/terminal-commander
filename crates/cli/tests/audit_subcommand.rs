@@ -65,13 +65,16 @@ impl LiveDaemon {
         // S7: unique per test process. On Windows the pipe endpoint is
         // derived from the token ALONE, so a constant token collides
         // across parallel tests and with stale orphans from aborted
-        // runs. See read_subcommands.rs for the full rationale.
+        // runs. Kept SHORT because the unix socket path embeds the token
+        // and `sun_path` caps it at ~104 bytes. See read_subcommands.rs
+        // for the full rationale.
         let token = format!(
-            "{tag}{}x{}",
+            "t{:x}{:04x}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.subsec_nanos())
+                & 0xffff
         );
         let token = token.as_str();
         let state_dir = base.join(token);

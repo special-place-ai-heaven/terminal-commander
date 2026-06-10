@@ -49,3 +49,8 @@ tarpaulin-report.html
 
 # CI-generated artifacts
 artifacts/
+
+# Personal Claude Code / Cowork kit (installed by install-cowork-kit.ps1)
+/CLAUDE.md
+/.mcp.json
+/.claude/
