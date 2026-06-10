@@ -334,12 +334,15 @@ fn read_proc_cmdline(pid: u32) -> Option<Vec<String>> {
 ///    absolute `/opt/.../terminal-commanderd` all match, while
 ///    `terminal-commanderd.log` or `my-terminal-commanderd` (a different
 ///    binary) do not.
-/// 2. The daemon is launched as `--data-dir <state_dir>` (see
-///    `ensure_daemon`). We scan argv for a `--data-dir` flag and require its
-///    VALUE to EQUAL `state_dir` -- both the space-separated
-///    (`--data-dir`, `<value>`) and the joined (`--data-dir=<value>`) forms
-///    are accepted. Equality (not prefix / containment) means a sibling
-///    session under a longer or shorter dir is never matched.
+/// 2. When argv carries a `--data-dir` flag, its VALUE must EQUAL
+///    `state_dir` -- both the space-separated (`--data-dir`, `<value>`) and
+///    the joined (`--data-dir=<value>`) forms are accepted. Equality (not
+///    prefix / containment) means a sibling session under a longer or
+///    shorter dir is never matched. When argv carries NO data-dir (the
+///    normal env-configured TC_DATA/TC_SESSION launch shape), the image
+///    name alone decides -- the per-state_dir pidfile already selected the
+///    pid, so the only residual risk is pid recycle, exactly as on the
+///    Windows leg.
 ///
 /// Factored to take a borrowed argv so it is unit-testable from a plain
 /// `Vec<String>` without a live `/proc`.
@@ -364,10 +367,10 @@ fn unix_argv_is_our_daemon<S: AsRef<str>>(argv: &[S], state_dir: &Path) -> bool 
         return false;
     }
 
-    // Find the `--data-dir` value (space-separated or `=`-joined) and require
-    // it to equal our state_dir exactly. Path equality (not string equality)
-    // tolerates a benign trailing separator while still rejecting a sibling
-    // session's distinct directory.
+    // If a `--data-dir` value is present (space-separated or `=`-joined),
+    // require it to equal our state_dir exactly. Path equality (not string
+    // equality) tolerates a benign trailing separator while still rejecting
+    // a sibling session's distinct directory.
     let mut iter = argv.iter().skip(1);
     while let Some(arg) = iter.next() {
         let arg = arg.as_ref();
@@ -382,9 +385,27 @@ fn unix_argv_is_our_daemon<S: AsRef<str>>(argv: &[S], state_dir: &Path) -> bool 
             return std::path::Path::new(value) == state_dir;
         }
     }
-    // No `--data-dir` argument: this daemon is not bound to our state_dir by
-    // an explicit flag, so it is not ours to kill.
-    false
+    // No `--data-dir` argument. This is the NORMAL shape, not an anomaly:
+    // the documented session flow configures the daemon via TC_DATA +
+    // TC_SESSION env (the harness stanza emits env.TC_SESSION; the adapter
+    // and the CLI tests spawn `terminal-commanderd start --mode ipc-server`
+    // with env only), so the kernel argv carries no data-dir at all.
+    //
+    // Requiring the flag here classified every env-configured LIVE daemon
+    // as "not ours" on unix: sessions::list reported it !alive, `session
+    // reap` took the stale-pidfile path — deleting the pidfile and LEAVING
+    // THE DAEMON RUNNING while claiming success — and the
+    // `session_reap_token_shuts_down_the_daemon` test hung in
+    // `daemon.wait()` until the orphan's 30-minute idle self-reap (observed
+    // live on CI-linux 2026-06-10 and reproduced in WSL).
+    //
+    // Accept on the image name alone, mirroring the Windows leg's
+    // reasoning verbatim: the per-state_dir pidfile already SELECTED this
+    // pid, so the only residual risk is PID RECYCLE, and "argv[0] is the
+    // daemon executable" closes exactly that window. When a `--data-dir`
+    // flag IS present it must still match (above) — an explicitly
+    // flag-bound sibling is never mistaken for ours.
+    true
 }
 
 /// OS-query fallback: find the pid of a terminal-commanderd process
@@ -1099,11 +1120,19 @@ mod tests {
             "a daemon under <dir>/state must not match a request for <dir>"
         );
 
-        // (e) The daemon binary with NO --data-dir at all is not ours to kill.
-        let no_flag = vec!["terminal-commanderd", "start"];
+        // (e) The daemon binary with NO --data-dir at all IS ours: the
+        // documented launch shape configures the state dir via TC_DATA +
+        // TC_SESSION env, so the kernel argv carries no flag. The pidfile
+        // in OUR state_dir selected this pid; the image name closes the
+        // pid-recycle window (same reasoning as the Windows leg).
+        // Rejecting this shape classified every env-configured live daemon
+        // as a stale pidfile: `session reap` deleted the pidfile, LEFT THE
+        // DAEMON RUNNING, and reported success (CI hang, 2026-06-10).
+        let no_flag = vec!["terminal-commanderd", "start", "--mode", "ipc-server"];
         assert!(
-            !unix_argv_is_our_daemon(&no_flag, dir),
-            "a daemon without an explicit --data-dir is not bound to our dir"
+            unix_argv_is_our_daemon(&no_flag, dir),
+            "the env-configured (no --data-dir) daemon launch shape must be \
+             recognized as ours — the per-state_dir pidfile already scoped it"
         );
 
         // (f) Empty argv is rejected (mirrors an unreadable /proc entry).

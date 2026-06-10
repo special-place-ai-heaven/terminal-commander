@@ -1,0 +1,26 @@
+# nextest runner policy.
+#
+# WHY THIS EXISTS: without a terminate bound, a hung test marks SLOW
+# forever and holds the PR gate (and therefore the whole release
+# pipeline) hostage until the 6 h job timeout. Observed live on CI
+# 2026-06-10: `session_reap_token_shuts_down_the_daemon` hung 30+
+# minutes on a cloud runner (an intermittent cloud-VM-only hang inside
+# the reap CLI's IPC wait; tracked separately) while 844/845 tests had
+# already passed.
+#
+# Policy: every test gets a hard terminate ceiling. Anything that
+# legitimately needs longer belongs in a dedicated profile (load/e2e)
+# with its own explicit budget, not in the default lane.
+
+[profile.default]
+# Mark SLOW at 60 s (nextest's default), kill at 5 min. The slowest
+# honest tests in this workspace finish in well under 2 min.
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The known cloud-VM flake: kill fast and retry. An intermittent hang
+# becomes a 90 s blip + retry instead of a wedged release pipeline; a
+# persistent failure still fails the gate honestly after 3 attempts.
+[[profile.default.overrides]]
+filter = 'test(session_reap_token_shuts_down_the_daemon)'
+slow-timeout = { period = "30s", terminate-after = 3 }
+retries = 2
