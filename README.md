@@ -21,7 +21,15 @@
 
 Terminal Commander is a local MCP control plane for coding agents. It gives
 Cursor, Codex CLI, Claude Code, Claude Desktop, and other MCP clients a bounded
-tool surface for commands, files, PTYs, runtime state, and signal context.
+tool surface for commands, files, PTYs, persistent shell sessions, runtime
+state, and signal context.
+
+The goal is **omni**: an agent should never need a separate raw terminal tool.
+Across the omni program the surface grew to **49 MCP tools** spanning one-shot
+commands, one-shot shell pipelines, persistent stateful sessions, interactive
+PTYs (unix and Windows ConPTY), unknown-output rule suggestion, and
+operator-gated remote hosts. The agent's lane-selection map is
+[`docs/mcp/OMNI_PLAYBOOK.md`](docs/mcp/OMNI_PLAYBOOK.md).
 
 Raw terminal output stays out of the model transcript. The agent defines
 keyword/regex **rules**, runs the command, and receives only the matching
@@ -164,10 +172,19 @@ decision, never an agent's.
 
 ### Rule packs: expert signal extraction in one call
 
-`registry_import_pack` ships curated packs (`cargo`, `pytest`, `npm`, `gcc`,
-`apt`, `make`, `generic.terminal`, `cleanup`) so an agent gets expert rules
-without authoring JSON. Pack rules label honestly: a generic `warning:`
-matcher claims no language it cannot verify.
+`registry_import_pack` ships **25 curated packs** so an agent gets expert
+rules without authoring JSON: `ansible`, `apt`, `bundler`, `cargo`, `choco`,
+`cleanup`, `docker`, `dotnet`, `gcc`, `generic.terminal`, `git`, `go`,
+`kubectl`, `make`, `msbuild`, `npm`, `pip`, `pnpm`, `pytest`, `ssh`,
+`systemd`, `terraform`, `uv`, `winget`, `yarn`. Pack rules label honestly: a
+generic `warning:` matcher claims no language it cannot verify. When a known
+tool runs without its pack, a command-start response can carry a
+`pack_available` hint pointing at `registry_import_pack`.
+
+For output whose format you do not know yet, `registry_suggest_from_samples`
+proposes DRAFT rules from raw samples (pure-Rust heuristics). It NEVER
+auto-activates: the loop is always suggest -> `registry_test` ->
+`registry_upsert` -> `registry_activate`.
 
 > [!TIP]
 > Prefer **scoped** activation (`{"kind":"job", "job_id": …}`) or per-command
@@ -228,7 +245,7 @@ flowchart LR
   end
 
   subgraph mcp["terminal-commander-mcp"]
-    Stdio["rmcp stdio server\n39 live tools\n1:1 facade over IPC"]
+    Stdio["rmcp stdio server\n49 live tools\n1:1 facade over IPC"]
   end
 
   subgraph sup["terminal-commander-supervisor (shared lib)"]
@@ -362,11 +379,12 @@ Agent rules:
 
 ## MCP Tool Surface
 
-`system_discover` advertises the live tool catalogue: **39 live tools**,
+`system_discover` advertises the live tool catalogue: **49 live tools**,
 grouped by workflow. All daemon-backed tools return a structured
 `daemon_unavailable` error when the daemon is down instead of leaking raw
 pipe/socket errors, and `system_discover` itself remains callable to explain
 per-tool availability (`requires_daemon`, `available`, `unavailable_reason`).
+It also carries an honest `omni_status` capability matrix (see below).
 
 | Group | Tools |
 | --- | --- |
@@ -374,12 +392,29 @@ per-tool availability (`requires_daemon`, `available`, `unavailable_reason`).
 | Commands | `run_and_watch`, `command_start_combed`, `command_status`, `command_stop`, `command_output_tail`, `shell_exec` |
 | Buckets and context | `bucket_wait`, `bucket_events_since`, `bucket_summary`, `event_context` |
 | Subscriptions | `subscription_open`, `subscription_pull`, `subscription_list`, `subscription_close`, `subscription_seek` |
-| Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_import_pack`, `registry_deactivate`, `registry_list_active` |
+| Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_import_pack`, `registry_deactivate`, `registry_list_active`, `registry_suggest_from_samples` |
 | Files | `file_read_window`, `file_search`, `file_watch_start`, `file_watch_stop`, `file_watch_list` |
 | PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` |
+| Shell sessions | `shell_session_start`, `shell_session_exec`, `shell_session_status`, `shell_session_stop`, `shell_session_list` |
+| Workspace snapshots | `workspace_snapshot_create`, `workspace_snapshot_apply` |
+| Remote targets | `target_list`, `target_probe` |
 | Runtime | `runtime_state`, `probe_status`, `probe_list` |
 
+That is 49 tools: discovery/health (4), commands (6), buckets/context (4),
+subscriptions (5), registry (9), files (5), PTY (4), shell sessions (5),
+workspace snapshots (2), remote targets (2), runtime (3).
+
 Full contract: [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
+Agent lane-selection map: [`docs/mcp/OMNI_PLAYBOOK.md`](docs/mcp/OMNI_PLAYBOOK.md).
+
+**Omni capability matrix.** `system_discover.omni_status` reports, honestly
+from live state, which omni capabilities are wired on THIS host: `shell_exec`,
+`sessions` (unix-only), `pty` (with a `platform` of `posix` / `windows_conpty`
+/ `unavailable`), `remote_targets` (count + reachable), and `privileged_helper`
+-- which is always `{ available: false, reason: "threat_review_pending" }`
+because the privileged helper is plan-only (no code shipped; blocked on a
+threat review). The matrix never claims a capability that is not actually
+wired.
 
 `health` is a non-bumping, audit-free **peek**: it returns `uptime_secs` plus
 optional `idle_secs` and never resets the daemon's idle timer or writes an
@@ -392,9 +427,20 @@ audit row. All other IPC requests bump the idle clock and audit normally.
 > default profile, `shell_exec` returns `PolicyDenied`.
 
 > [!CAUTION]
-> PTY tools are live on Linux/WSL. On native Windows they are catalogued but
-> report `unavailable` (ConPTY support pending) — `system_discover` tells you,
-> per tool, before you call.
+> PTY tools are a dual backend: unix `pty-process` and Windows ConPTY
+> (`portable-pty`). `system_discover.omni_status.pty.platform` reports the
+> live backend (`posix`, `windows_conpty`, or `unavailable`) per host before
+> you call. Honest caveat: ConPTY lifecycle is live-verified on Windows, but
+> full live ConPTY child-output end-to-end remains gated behind
+> `TC_CONPTY_E2E=1` and is not yet closed on every dev host -- check
+> `system_discover` on native Windows before relying on it.
+
+> [!TIP]
+> Persistent shell sessions (`shell_session_*`) and workspace snapshots
+> (`workspace_snapshot_*`) let an agent run multi-step work that shares
+> cwd/env. They are gated by `allow_session` (default off) and are UNIX-ONLY;
+> on a non-unix daemon they return `UnsupportedPlatform`. See
+> [`docs/runtime/SHELL_SESSION.md`](docs/runtime/SHELL_SESSION.md).
 
 ## Per-Harness Sessions
 
@@ -482,9 +528,16 @@ Guides: [`docs/integrations/cursor.md`](docs/integrations/cursor.md) ·
 | --- | --- | --- | --- |
 | Linux x64 | `@terminal-commander/linux-x64` | Unix domain socket | Native daemon and MCP adapter |
 | Linux arm64 | `@terminal-commander/linux-arm64` | Unix domain socket | Native daemon and MCP adapter |
-| Windows x64 | `@terminal-commander/windows-x64` | Named pipe | Native by default; PTY pending (ConPTY) |
+| Windows x64 | `@terminal-commander/windows-x64` | Named pipe | Native by default; PTY via ConPTY (full child-output e2e gated by `TC_CONPTY_E2E=1`); shell sessions are unix-only |
 | macOS x64 | `@terminal-commander/mac-x64` | Unix domain socket | Native package published |
 | macOS arm64 | `@terminal-commander/mac-arm64` | Unix domain socket | Native package published |
+
+macOS native packages are published, but the omni platform-parity work for
+macOS is code plus a smoke script only -- it is NOT live-verified on a Mac
+host (no Mac host available to the program), so treat the macOS runtime as
+unverified until a Mac smoke run lands. Likewise, native-Windows ConPTY
+child-output e2e is gated behind `TC_CONPTY_E2E=1` and must be run on
+CI/desktop to fully close it.
 
 The legacy Windows-to-WSL bridge is still available for operators who
 explicitly set `TC_USE_LEGACY_WSL_BRIDGE=1`. It is not the default Windows
@@ -574,7 +627,7 @@ Everything lives under the per-session state dir
 
 | Path | Contents |
 | --- | --- |
-| `terminal-commander.db` | SQLite store: events, rule registry (versioned, FTS5), durable activations, audit rows. |
+| `terminal-commander.db` | SQLite store: events, rule registry (versioned, FTS5), durable activations, audit rows, workspace snapshots. |
 | `logs/terminal-commanderd.log` | Daemon log (bind, self-checks, idle-reap decisions). |
 | `terminal-commanderd.pid` | Pidfile: pid, version, endpoint (the probe cross-checks it). |
 | `terminal-commanderd.lock` | Bring-up single-flight lock. |
@@ -587,6 +640,12 @@ Everything lives under the per-session state dir
   spawn/socket/fs calls in the adapter source.
 - Command execution is argv-first and policy-gated; the shell lane is a
   separate, default-off capability with its own audit labels.
+- The omni opt-in capabilities are all default-DENY and config-only (never
+  MCP-flippable): `allow_shell` (shell_exec), `allow_session` (persistent
+  sessions, unix-only), `allow_remote` (remote targets via an operator
+  `ssh -L` forward, no public TCP). `allow_privileged` is wired but gates a
+  PLAN-ONLY helper -- no privileged code ships (blocked on a threat review;
+  see [`docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md`](docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md)).
 - Tool responses are bounded JSON, not raw stream dumps; credential-shaped
   argv values are redacted in audit metadata and probe rows.
 - `ensure_daemon` requires a real Health handshake — a connectable but
@@ -674,7 +733,7 @@ crates/                                  Rust workspace (9 crates; 8 published t
   supervisor/                            ensure_daemon, replace_if_stale, session tokens, pidfile
   ipc/                                   wire protocol + framing + clients (UDS / named pipe)
   daemon/                                terminal-commanderd — IPC, policy, router, runtimes
-  mcp/                                   terminal-commander-mcp — rmcp stdio, 39-tool catalogue
+  mcp/                                   terminal-commander-mcp — rmcp stdio, 49-tool catalogue
   cli/                                   terminal-commander admin CLI (local only, not on crates.io)
 packages/
   terminal-commander/                    npm root wrapper (@latest)

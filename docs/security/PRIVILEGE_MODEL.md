@@ -116,6 +116,56 @@ This file pre-binds the constraint so a future goal cannot quietly
 add `sudo -n ...` and call it "privileged behavior we already
 documented."
 
+## 5a. Privileged helper architecture (PLANNED -- NOT YET IMPLEMENTED)
+
+Status: PLAN-ONLY. The omni program (P4 / Wave 4) specifies a privileged
+helper but ships NO code for it. It is BLOCKED on a dedicated threat
+review (`docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md`). This section
+records the intended architecture so the constraints are fixed before
+any code is written; nothing here is live.
+
+What `system_discover` reports today:
+`omni_status.privileged_helper = { available: false, reason:
+"threat_review_pending" }`. It MUST keep reporting that until the threat
+review is signed off.
+
+The planned shape (each element gated by the review):
+
+- **Separate binary** `terminal-commander-privileged`. The MCP server
+  and the daemon stay unprivileged (section 2 is unchanged). The helper
+  is a tiny, single-purpose program installed by the OPERATOR (via an
+  explicit `setup privileged-helper`, never by npm install and never by
+  TC itself). Its privilege mechanism (setuid root vs polkit) is itself
+  a review decision, not yet made.
+- **Closed allow-list, no shell.** The helper accepts ONLY a fixed set
+  of named ops (Linux candidate v1: `apt_install`, `apt_update`,
+  `systemctl_start`, `systemctl_stop`, `systemctl_restart`,
+  `journal_read_window`; Windows v1: `winget_install`, `sc_start`,
+  `sc_stop`). It NEVER accepts a shell line or a generic command. Each
+  op validates its own typed params; the helper builds the privileged
+  argv itself. There is no generic-`sudo` path.
+- **Human-approval flow.** When enabled with `require_human_approve`,
+  the LLM gets a `pending_approval` handle; a human operator approves
+  out of band via the admin CLI (`privileged_approve`); only an
+  approval token bound to the exact op + params, single-use and
+  short-lived, authorizes execution. The LLM can request and retry but
+  can never approve.
+- **`allow_privileged` capability.** Gated by `[policy.caps]
+  allow_privileged` (default false; POLICY.md section 4.1), evaluated by
+  the same policy engine as every other action. Per-call authorization,
+  not per-session. Off-list ops are refused regardless of approval.
+- **Audit before exec.** Every privileged op emits a high-severity audit
+  record (redacted subject) BEFORE execution. The audit log stays
+  daemon-owned, `0600`, and NEVER LLM-readable (section 8).
+
+The full attack-surface analysis, the closed-allow-list rationale, the
+approval-token threat model, and the "why no generic sudo / no shell
+line" reasoning live in
+`docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md`. The capability matrix
+in section 9 still reads `Sudo / pkexec = NO` for every component,
+because that structural rule does NOT change: the helper is a closed,
+named-op surface, not a sudo bridge.
+
 ## 6. Sudo / doas / pkexec posture (MVP)
 
 The MVP `commands.deny` list in every profile (see `POLICY.md`

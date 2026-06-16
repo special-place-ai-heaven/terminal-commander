@@ -27,6 +27,11 @@ Real-Time-Active patterns (react to subscription events as they happen): see the
 The universal cross-harness pattern is a background loop over `subscription_pull`.
 
 Operational guides (not provider-specific):
+- [`omni-harness-smoke.md`](omni-harness-smoke.md) - the operator-gated
+  provider-harness smoke procedure for the omni surface (command -> wait ->
+  status, a persistent shell-session check, and the suggest-loop check)
+  across Cursor / Codex CLI / Claude Code. This is the O-14 provider-trust
+  pass, separate from the local daemon+adapter smoke.
 - [`wsl-cleanup-and-sudo.md`](wsl-cleanup-and-sudo.md) - run WSL disk/cache
   cleanup through TC; the scoped NOPASSWD sudoers discipline (no password ever
   leaks); the `cleanup` rule pack; `${name}` template syntax; and why fstrim

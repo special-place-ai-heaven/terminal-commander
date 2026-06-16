@@ -415,3 +415,81 @@ This SPEC remains the baseline; the runtime contract refines it.
 When this SPEC and the runtime contract conflict, the runtime
 contract wins for TC35-TC48; the conflict is recorded as a SPEC
 amendment in the goal that observes it.
+
+## 14. Omni completion amendment (TC49-TC74)
+
+Added: omni program (`specs/001-omni-completion/`). This section AMENDS
+the MVP baseline above; it does not erase it. Where this section and an
+earlier section conflict, this section wins for omni-program behavior,
+and the earlier text is kept for historical context (it records what the
+MVP deliberately deferred).
+
+### 14.1 Identity
+
+The product identity is now **omni**: an LLM agent should never need a
+separate raw terminal tool. The MVP signal-combing core (sections 1-13)
+is unchanged; the omni program added stateful, interactive, parsing, and
+federation lanes on top of it. The live MCP surface is **49 tools** (up
+from the MVP/runtime-chain count); the rule-pack set is **25 packs** (up
+from the section-10 seed of six). The authoritative tool list and pack
+list live in `README.md` and `docs/mcp/TOOL_CONTROL_SURFACE.md`; the
+agent lane-selection map is `docs/mcp/OMNI_PLAYBOOK.md`.
+
+### 14.2 Non-goals that the omni program REVISITS
+
+Section 3 listed these as MVP non-goals. The omni program revisits them
+with explicit, gated, honest scope. The MVP text stands as the record of
+the original boundary:
+
+- **Cross-host federation** (was a non-goal, section 3): now in scope as
+  US5 / P5, but NARROWLY. Remote daemons are reached ONLY through an
+  operator-established `ssh -L` forward to the remote daemon's LOCAL
+  socket -- there is still NO public TCP listener, and the adapter never
+  spawns ssh. Gated by `allow_remote` (default deny). `target_id` is
+  wired on the command path; it is not yet threaded through all 49
+  tools. Proven via a second-local-socket simulation; real-SSH transit
+  is not yet exercised in CI (no sshd in the smoke env).
+- **macOS support beyond build artifacts** (was tier-3, section 3): now
+  intended as platform parity (US3 / P3), but code-plus-smoke-script
+  only. It is NOT live-verified on a Mac host (none available to the
+  program). Treat the macOS runtime as unverified.
+- **Privileged installation** (was a default non-goal, section 3):
+  specified as US4 / P4 but PLAN-ONLY. No privileged code ships; it is
+  blocked on a threat review
+  (`docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md`). When it lands it
+  is a closed, named-op, human-approved helper -- never generic sudo,
+  never a shell line.
+
+### 14.3 New live behavior (amends sections 4, 8, 9, 10)
+
+- **Persistent shell sessions + workspace snapshots** (US1 / P1, LIVE,
+  UNIX-ONLY). PTY-backed sticky cwd/env sessions gated by
+  `allow_session` (default deny), plus SQLite-persisted snapshots.
+  Contract: `docs/runtime/SHELL_SESSION.md`.
+- **Rule suggestion from samples** (US2 / P2, LIVE).
+  `registry_suggest_from_samples` proposes DRAFT rules from raw output;
+  it NEVER auto-activates. Config-gated universal extractors and a
+  25-pack set extend section 10's sifter/pack story.
+- **Windows ConPTY PTY backend** (US3 / P3). The PTY lane is now dual
+  backend (unix `pty-process` + Windows ConPTY via `portable-pty`),
+  amending section 6's "POSIX only" PTY note. Honest caveat: live ConPTY
+  child-output e2e is gated behind `TC_CONPTY_E2E=1` and not yet closed
+  on every host.
+- **Honest capability matrix** (US6 / P6). `system_discover.omni_status`
+  reports, from live state, which omni capabilities are wired on the
+  host -- never claiming one that is not. The privileged helper row is
+  always `available: false, reason: "threat_review_pending"`.
+
+### 14.4 Slice status (honest)
+
+| Slice | Scope | Status |
+|---|---|---|
+| P1 (US1) | sessions + snapshots + folded field-ledger fixes | DONE (unix-only) |
+| P2 (US2) | suggest-from-samples, universal extractors, 25 packs | DONE |
+| P3 (US3) | platform parity: Windows ConPTY, event-driven watch, terminate ladder | DONE on unix/Windows-lifecycle; ConPTY child-output e2e BLOCKED on host (`TC_CONPTY_E2E=1`); macOS BLOCKED-no-Mac-host |
+| P4 (US4) | privileged helper | PLAN-ONLY, BLOCKED on threat review (no code) |
+| P5 (US5) | remote federation via ssh -L | SIM-VERIFIED (second-local-socket); real-SSH transit NOT tested |
+| P6 (US6) | certification: omni_status matrix + O-01..O-14 smokes | DONE (runnable gates pass; host-blocked gates loudly skipped) |
+
+Per-slice detail and the omni acceptance gates (O-01..O-14) live in
+`specs/001-omni-completion/` and `ROADMAP.md`.

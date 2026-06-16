@@ -162,9 +162,13 @@ permits:
     the developer_local / repo_only verdict path).
   - the gated shell lane (shell_exec), because its loader preset turns
     allow_shell ON.
-  - the other opt-in caps (allow_session, allow_privileged,
-    allow_remote) are preset ON for forward waves; they gate features
-    not yet shipped.
+  - the gated session lane (shell_session_* + workspace_snapshot_*,
+    allow_session ON; LIVE, unix-only) and remote federation
+    (target_id, allow_remote ON; LIVE via an operator ssh -L forward).
+  - allow_privileged is preset ON but gates the Wave-4 privileged
+    helper, which is PLAN-ONLY: no privileged code ships this program
+    (blocked on a threat review), so the cap currently gates nothing
+    runnable. See docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md.
 denies (in addition to default-deny):
   - the cross-profile closed deny set (sudo/doas/su/pkexec/kexec) as
     argv[0] is STILL denied -- full_access does NOT remove COMMANDS_DENY.
@@ -233,11 +237,14 @@ profile = "developer_local"
 
 [policy.caps]
 allow_shell      = true    # gates shell_exec (TC49). Default false.
-allow_session    = false   # gates shell_session_* (TC50; not yet live).
+allow_session    = true    # gates shell_session_* + workspace_snapshot_*
+                           #   (omni P1 / TC50; LIVE, unix-only). Default false.
 allow_privileged = false   # gates the Wave-4 privileged helper, NOT
-                           #   generic sudo. (Not yet live.)
-allow_remote     = false   # gates remote federation / target_id
-                           #   (Wave 5; not yet live).
+                           #   generic sudo. PLAN-ONLY; no code shipped
+                           #   (blocked on a threat review).
+allow_remote     = true    # gates remote federation / target_id
+                           #   (omni P5; LIVE via operator ssh -L forward).
+                           #   Default false.
 ```
 
 Rules:
@@ -253,10 +260,19 @@ Rules:
   engine. `allow_shell = true` makes `shell_exec` resolve to
   `AllowWithAudit` (audited) on an exec-capable profile; it does NOT
   short-circuit any check.
-- **Exec-capable profiles only.** `allow_shell` grants the shell lane
-  only on `developer_local`, `admin_debug`, or `full_access`.
-  `read_only_observer` and `repo_only` deny the shell lane even with
-  the cap on.
+- **Exec-capable profiles only.** `allow_shell` grants the shell lane,
+  and `allow_session` grants the session lane, only on
+  `developer_local`, `admin_debug`, or `full_access`.
+  `read_only_observer` and `repo_only` deny both lanes even with the cap
+  on.
+- **`allow_session` is independent of `allow_shell`.** A persistent
+  interactive session (`shell_session_*` + `workspace_snapshot_*`) is a
+  SEPARATE operator opt-in from one-shot `shell_exec`: each lane has its
+  own cap, its own `PolicyAction` (`SessionStart` vs `CommandShellStart`),
+  and its own audit label. Turning one on does not turn the other on. The
+  session lane is LIVE and UNIX-ONLY; on a non-unix daemon the session
+  tools return `UnsupportedPlatform` regardless of the cap. See
+  `docs/runtime/SHELL_SESSION.md`.
 - **`full_access` preset.** The `full_access` profile (section 2.5) is
   the only profile whose loader presets all four caps ON (`base ||
   full`). A base profile + explicit `[policy.caps]` is the way to grant
@@ -309,6 +325,52 @@ re-redacts the line in `argv[2]` the same way
 (`format_shell_argv_metadata`). It is a best-effort PREVIEW over a shell
 line, not a full shell parse. Details and the residual limitation in
 `docs/runtime/SHELL_RUNTIME.md` section 8.
+
+#### Session-lane gate + audit (omni P1 / TC50)
+
+A persistent session start is its OWN gated action,
+`PolicyAction::SessionStart { shell, cwd }`, behind the independent
+`allow_session` capability. It is evaluated with the SAME deny-first
+shape as the shell lane, before the per-profile match, so one rule
+covers every profile:
+
+```text
+SessionStart algorithm (mirrors CommandShellStart):
+
+1. exec_profile = profile in { developer_local, admin_debug, full_access }
+2. if exec_profile AND caps.allow_session:
+     -> AllowWithAudit
+        reason: "shell_session_start allowed by allow_session capability (audited)"
+3. else:
+     -> Deny
+        reason: "shell_session_start denied: allow_session capability is
+                 off or profile forbids sessions"
+```
+
+Notes that distinguish it from the shell lane:
+
+- It uses `allow_session`, NOT `allow_shell`. The two caps are
+  independent (section 4.1).
+- The gate + audit row are written by `PtyRuntime::start_session`
+  BEFORE the PTY spawn. The session runtime adds no second gate.
+- The spawn argv is daemon-assembled (`[shell, "-i"]`, never
+  caller-supplied), so the argv shell-interpreter deny list is skipped
+  here on purpose; the cap is the door. `COMMANDS_DENY` is still
+  argv[0]-only and does not scan what the interactive shell later runs
+  (same Decision-1 residual risk as the shell lane).
+- UNIX-ONLY: on a non-unix daemon the session tools return
+  `UnsupportedPlatform`, independent of the cap or profile.
+
+The session lane has its OWN audit label so session starts are
+filterable apart from argv and shell starts:
+
+| Audit action | Decision | When |
+|---|---|---|
+| `shell_session_start` | `allow_with_audit` | `shell_session_start` allowed (`allow_session` on, exec-capable profile). Emitted before spawn, keyed on the job id, with a redacted subject. |
+
+Full session model, lifecycle, config (`max_sessions` / `idle_ttl_secs`),
+and the best-effort `status.cwd` caveat are in
+`docs/runtime/SHELL_SESSION.md`.
 
 ### 4.2 Full profile schema (informative)
 

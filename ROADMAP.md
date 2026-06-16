@@ -235,3 +235,42 @@ first live npm publish via the existing NPM07 trusted-publishing
 workflow (no token, no PAT). `npm-bootstrap-publish.yml`
 remains the one-time bootstrap fallback per NPM10 and stays
 committed-but-undispatched.
+
+## Omni completion chain (TC49-TC74)
+
+Successor program `001-omni-completion`. Goal: take Terminal
+Commander from a signal-combing tool (39 MCP tools) to a 100%
+self-reliant **omni** terminal tool for LLM agents -- an agent never
+needs a separate raw shell. Delivered as six independently-shippable
+priority slices (P1-P6) mapped to omni acceptance gates O-01..O-14,
+plus folded field-ledger trust/ergonomics fixes. The live surface is
+now **49 MCP tools** and **25 rule packs**. Spec and per-gate detail
+live in `specs/001-omni-completion/`; the agent lane map is
+`docs/mcp/OMNI_PLAYBOOK.md`.
+
+Per-slice outcome and HONEST status:
+
+| Slice | Goals | Outcome | Status |
+|-------|-------|---------|--------|
+| P1 (US1) | TC49-TC52 | Persistent PTY shell sessions (sticky cwd/env), workspace snapshots (SQLite), `allow_session` cap + `SessionStart` gate + audit. Plus folded field-ledger fixes (ANSI strip default-on with raw kept, CRLF-aware normalizer, compact response mode, `wait_until:"exit"` honest cap + `poll_hint_ms`, canonical capture, SQLite job-receipt restart-marked status). | DONE -- sessions are UNIX-ONLY; non-unix returns `UnsupportedPlatform`. |
+| P2 (US2) | TC53-TC55 | `registry_suggest_from_samples` (pure-Rust heuristics; NEVER auto-activates; loop is suggest -> test -> activate), config-gated universal extractors (`sifters.universal_extractors`), rule-pack set grown 8 -> 25, `pack_available` hints. | DONE. |
+| P3 (US3) | TC56-TC58 | Platform parity: Windows ConPTY backend (`portable-pty`, dual-backend behind PtyProbe), event-driven file-watch (notify; poll retained for WSL `/mnt/c` 9P), graceful SIGTERM->SIGKILL terminate ladder shared by command/PTY/session stop. | DONE on unix + Windows lifecycle. BLOCKED: live ConPTY child-output e2e gated behind `TC_CONPTY_E2E=1` (env 0xC0000142 DLL-init on the dev host; must run on CI/desktop to close O-07). macOS parity is code + smoke script only, BLOCKED-no-Mac-host. |
+| P4 (US4) | TC61-TC65 | Operator-gated privileged helper: separate `terminal-commander-privileged` binary, closed named-op allow-list, human-approval flow, `allow_privileged` cap, audit-before-exec. | PLAN-ONLY by decision. NO code shipped. BLOCKED on a threat review (`docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md`). `omni_status.privileged_helper` reports `available:false, reason:"threat_review_pending"`. |
+| P5 (US5) | TC66-TC69 | Remote federation: `target_list` / `target_probe`, `target_id` routing on the command path, `allow_remote` cap + audit. Transport is an operator-established `ssh -L` forward to the remote daemon's LOCAL socket (NO public TCP; adapter never spawns ssh). | SIM-VERIFIED via a second-local-socket simulation. BLOCKED: real-SSH transit NOT tested (no sshd in the smoke env). `target_id` is wired on the command path, not yet all 49 tools. |
+| P6 (US6) | TC70-TC74 | Certification: `system_discover.omni_status` honest capability matrix; `scripts/smoke/verify-omni-{linux,wsl,windows,macos}` running gates O-01..O-14. | DONE -- runnable gates pass; host-blocked gates (O-06 privileged, O-07 ConPTY, O-09/O-10 remote, O-13 fault-injection) are LOUDLY skipped, not faked. |
+
+Out-of-omni-chain (deferred / blocked):
+
+- P4 privileged helper code -- blocked on threat-review sign-off.
+- Live ConPTY child-output e2e on native Windows (`TC_CONPTY_E2E=1`;
+  run on CI/desktop to close O-07).
+- macOS live runtime verification (no Mac host; closes the P3 macOS
+  gate when a Mac smoke run lands).
+- Real-SSH remote-federation transit (needs a host with sshd;
+  closes O-09/O-10).
+- `target_id` threaded through every one of the 49 tools (currently
+  on the command path).
+
+The goal-numbering above (TC61-TC74) follows the slice plans in
+`docs/plans/2026-06-09-tc-omni-wave*.md`; the canonical task list is
+`specs/001-omni-completion/tasks.md`.
