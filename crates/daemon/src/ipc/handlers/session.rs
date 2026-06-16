@@ -27,7 +27,7 @@ use crate::state::DaemonState;
 pub(in crate::ipc::server) fn session_ipc_unsupported() -> IpcError {
     IpcError::new(
         IpcErrorCode::UnsupportedPlatform,
-        "persistent shell sessions are not available on this platform yet (PTY/ConPTY pending)",
+        "persistent shell sessions are not available on this platform (unix-only; Windows session support is a separate slice)",
     )
 }
 

@@ -42,7 +42,16 @@ pty-process = { version = "=0.5.3", features = ["async"] }
 #   * Win32_Security           — CreateJobObjectW's signature references
 #                                SECURITY_ATTRIBUTES, gated behind this feature
 #                                (we pass a null pointer for it).
+# US3a (TC53): Windows ConPTY spawn behind the same abstract `PtyProbe`
+# surface the unix `pty-process` path exports. `portable-pty` wraps the
+# Win32 ConPTY API (`CreatePseudoConsole`/`ClosePseudoConsole`), which
+# requires Windows 10 1809+ (build 17763) -- the documented floor. Its
+# reads are BLOCKING and NON-CANCELLABLE, so the Windows backend drives
+# the reader on a plain `std::thread` (off tokio's blocking pool) and a
+# CANCEL = kill child + drop master (ClosePseudoConsole) to force EOF.
+# License: MIT.
 [target.'cfg(windows)'.dependencies]
+portable-pty = "0.9"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",

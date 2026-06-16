@@ -1,14 +1,24 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! Daemon-owned PTY command runtime (TC44).
+//! Daemon-owned PTY command runtime (TC44 + US3a/TC53).
 //!
-//! Unix-only implementation today. On Windows the IPC handlers return
-//! `UnsupportedPlatform` (ConPTY pending) — no runtime spawn path to flag.
-//! If a Windows PTY spawn is added later, apply the same `CREATE_NO_WINDOW`
-//! rule as `ProcessProbe::spawn` (see `docs/release/windows-wsl-bridge-contract.md` §4.4).
+//! Cross-platform: this runtime speaks ONLY the abstract
+//! `terminal_commander_probes::PtyProbe` surface, so the SAME code drives the
+//! unix `pty-process` backend and the Windows ConPTY backend (`portable-pty`).
+//! ConPTY requires Windows 10 1809+ (build 17763). On a platform with no PTY
+//! backend the module is absent and the IPC handlers return
+//! `UnsupportedPlatform`. The ConPTY child runs under its own pseudoconsole
+//! (no extra visible window), consistent with the hidden-window posture of
+//! `ProcessProbe::spawn` (see `docs/release/windows-wsl-bridge-contract.md`
+//! §4.4); `portable-pty` sets the child's std handles to the pty, not a
+//! console window.
 
-#[cfg(unix)]
+// US3a/TC53: the PTY runtime is available on every host with a PTY backend
+// (unix `pty-process` and Windows ConPTY via `portable-pty`). The runtime
+// logic here speaks ONLY the abstract `terminal_commander_probes::PtyProbe`
+// surface, so the SAME daemon code drives both backends.
+#[cfg(any(unix, windows))]
 mod runtime {
     use std::collections::HashMap;
     use std::ffi::OsString;
@@ -762,7 +772,7 @@ mod runtime {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use runtime::{
     LivePtyIdentity, PtyRebindReport, PtyRuntime, PtyRuntimeError, PtyStartRequest,
     PtyStartResponse, PtyWriteResponse,

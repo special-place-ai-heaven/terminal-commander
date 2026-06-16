@@ -377,19 +377,30 @@ fn tool_requires_daemon(name: &str) -> bool {
 /// `system_discover` must surface that platform truth so a naive client
 /// never calls a PTY tool that can only fail.
 #[must_use]
-const fn is_pty_tool(name: &str) -> bool {
+/// The four interactive PTY command tools. These are available on every host
+/// with a PTY backend: unix `pty-process` AND Windows ConPTY (US3a/TC53). On a
+/// platform with no PTY backend the daemon answers `UnsupportedPlatform` and
+/// discovery reports them `available: false`.
+const fn is_pty_command_tool(name: &str) -> bool {
     matches!(
         name.as_bytes(),
         b"pty_command_start"
             | b"pty_command_write_stdin"
             | b"pty_command_stop"
             | b"pty_command_list"
-            // Persistent sessions + workspace snapshots are PTY-backed
-            // (a session is a long-lived login-shell PTY job), so they share
-            // the PTY runtime's `#[cfg(unix)]` availability: on a non-unix
-            // host the daemon answers each with `UnsupportedPlatform`, and
-            // `system_discover` must report them `available: false` too.
-            | b"shell_session_start"
+    )
+}
+
+/// Persistent shell sessions + workspace snapshots. A session is a long-lived
+/// login-shell PTY job, but the SESSION runtime (`shell_session.rs`,
+/// `#[cfg(unix)]`, login-shell `[shell, "-i"]`) is still unix-only -- Windows
+/// session support is a SEPARATE slice. On a non-unix host the daemon answers
+/// each with `UnsupportedPlatform`, and discovery must report them
+/// `available: false`.
+const fn is_session_tool(name: &str) -> bool {
+    matches!(
+        name.as_bytes(),
+        b"shell_session_start"
             | b"shell_session_exec"
             | b"shell_session_status"
             | b"shell_session_stop"
@@ -399,40 +410,60 @@ const fn is_pty_tool(name: &str) -> bool {
     )
 }
 
-/// Whether the PTY runtime is actually available on this host.
+/// Whether the interactive PTY command runtime is available on this host.
 ///
-/// TC44's PTY runtime is gated on `#[cfg(unix)]`; ConPTY support for
-/// Windows is still pending. On a non-unix host the four `pty_*` tools
-/// can only return `UnsupportedPlatform`, so discovery must report them
-/// `available: false` rather than implying a live PTY surface.
+/// TC44's unix `pty-process` backend AND the US3a/TC53 Windows ConPTY backend
+/// (`portable-pty`) both expose the abstract `PtyProbe` surface the daemon
+/// drives, so the four `pty_command_*` tools are live on `unix` and `windows`.
+/// On any other platform the daemon answers `UnsupportedPlatform` and
+/// discovery reports them `available: false`.
 #[must_use]
-const fn pty_runtime_available() -> bool {
+const fn pty_command_available() -> bool {
+    cfg!(any(unix, windows))
+}
+
+/// Whether the persistent shell-session runtime is available on this host.
+///
+/// The session runtime (`shell_session.rs`) is still `#[cfg(unix)]` (login
+/// shell `[shell, "-i"]`); Windows session support is a separate slice. So the
+/// `shell_session_*` / `workspace_snapshot_*` tools are unix-only for now.
+#[must_use]
+const fn session_runtime_available() -> bool {
     cfg!(unix)
 }
 
-/// Reason string surfaced for PTY tools on a host without a PTY runtime.
-const PTY_UNAVAILABLE_REASON: &str = "PTY runtime unavailable on this platform (ConPTY pending)";
+/// Reason surfaced for `pty_command_*` tools on a host with no PTY backend
+/// (neither unix `pty-process` nor Windows ConPTY).
+const PTY_UNAVAILABLE_REASON: &str = "PTY runtime unavailable on this platform";
+/// Reason surfaced for session/snapshot tools on a non-unix host (the session
+/// runtime is unix-only for now; Windows sessions are a separate slice).
+const SESSION_UNAVAILABLE_REASON: &str =
+    "shell-session runtime unavailable on this platform (unix-only)";
 
 #[must_use]
 fn discovered_tools(daemon_available: bool) -> Vec<DiscoveredToolEntry> {
-    let pty_available = pty_runtime_available();
+    let pty_available = pty_command_available();
+    let session_available = session_runtime_available();
     tool_catalogue()
         .iter()
         .map(|tool| {
             let requires_daemon = tool_requires_daemon(tool.name);
             let implemented = matches!(tool.status, ToolStatus::Live);
-            // TB-1: a PTY tool is only available when the host actually
-            // has a PTY runtime. This is platform truth, evaluated even
-            // when the daemon is reachable, so the four pty_* tools never
-            // advertise `available: true` on a host that can only answer
-            // them with `UnsupportedPlatform`.
-            let platform_blocked = is_pty_tool(tool.name) && !pty_available;
+            // Platform truth, evaluated even when the daemon is reachable, so a
+            // tool never advertises `available: true` on a host that can only
+            // answer it with `UnsupportedPlatform`. PTY command tools are live
+            // on unix + Windows (ConPTY); session/snapshot tools are unix-only.
+            let pty_blocked = is_pty_command_tool(tool.name) && !pty_available;
+            let session_blocked = is_session_tool(tool.name) && !session_available;
+            let platform_blocked = pty_blocked || session_blocked;
             let available =
                 implemented && !platform_blocked && (!requires_daemon || daemon_available);
             let unavailable_reason = if !implemented {
                 Some("not_implemented")
-            } else if platform_blocked {
+            } else if pty_blocked {
                 Some(PTY_UNAVAILABLE_REASON)
+            } else if session_blocked {
+                Some(SESSION_UNAVAILABLE_REASON)
             } else if requires_daemon && !daemon_available {
                 Some("daemon_unavailable")
             } else {
@@ -4869,22 +4900,31 @@ mod tests {
                 tool.name
             );
 
-            // TB-1: a PTY tool on a host without a PTY runtime is
-            // platform-blocked; that reason takes precedence over
-            // daemon reachability since the tool can only ever return
-            // UnsupportedPlatform on this host.
-            let platform_blocked = is_pty_tool(tool.name) && !pty_runtime_available();
+            // Platform truth takes precedence over daemon reachability for a
+            // tool that can only ever return UnsupportedPlatform on this host.
+            // PTY command tools are blocked only where there is no PTY backend
+            // (neither unix nor Windows); session/snapshot tools are blocked on
+            // any non-unix host (the session runtime is unix-only).
+            let pty_blocked = is_pty_command_tool(tool.name) && !pty_command_available();
+            let session_blocked = is_session_tool(tool.name) && !session_runtime_available();
 
             if !expected_requires_daemon {
                 assert!(tool.available, "{} should remain callable", tool.name);
                 assert_eq!(tool.unavailable_reason, None);
-            } else if platform_blocked {
+            } else if pty_blocked {
                 assert!(
                     !tool.available,
                     "{} should be unavailable without a PTY runtime",
                     tool.name
                 );
                 assert_eq!(tool.unavailable_reason, Some(PTY_UNAVAILABLE_REASON));
+            } else if session_blocked {
+                assert!(
+                    !tool.available,
+                    "{} should be unavailable without a session runtime",
+                    tool.name
+                );
+                assert_eq!(tool.unavailable_reason, Some(SESSION_UNAVAILABLE_REASON));
             } else if matches!(tool.status, ToolStatus::Live) {
                 assert!(
                     !tool.available,
@@ -4911,9 +4951,13 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn pty_tools_unavailable_on_unsupported_platform() {
-        // daemon_available = true on purpose: the platform block must
-        // fire regardless of daemon reachability.
+        // daemon_available = true on purpose: a platform block must fire
+        // regardless of daemon reachability.
         let tools = discovered_tools(true);
+
+        // The four PTY command tools are platform-available wherever a PTY
+        // backend exists: unix (pty-process) AND Windows (ConPTY / US3a-TC53).
+        // On any other platform they are blocked with the PTY reason.
         let pty_names = [
             "pty_command_start",
             "pty_command_write_stdin",
@@ -4925,15 +4969,58 @@ mod tests {
                 .iter()
                 .find(|t| t.name == name)
                 .unwrap_or_else(|| panic!("{name} missing from discovered tools"));
-            assert!(
-                !tool.available,
-                "{name} must be unavailable without a PTY runtime"
-            );
-            assert_eq!(
-                tool.unavailable_reason,
-                Some(PTY_UNAVAILABLE_REASON),
-                "{name} must surface the PTY platform reason"
-            );
+            if pty_command_available() {
+                assert!(
+                    tool.available,
+                    "{name} must be available where a PTY backend exists (daemon up)"
+                );
+                assert_eq!(tool.unavailable_reason, None, "{name} must have no reason");
+            } else {
+                assert!(
+                    !tool.available,
+                    "{name} must be unavailable without a PTY runtime"
+                );
+                assert_eq!(
+                    tool.unavailable_reason,
+                    Some(PTY_UNAVAILABLE_REASON),
+                    "{name} must surface the PTY platform reason"
+                );
+            }
+        }
+
+        // The session / snapshot tools remain unix-only; on a non-unix host
+        // they must surface the session platform reason.
+        let session_names = [
+            "shell_session_start",
+            "shell_session_exec",
+            "shell_session_status",
+            "shell_session_stop",
+            "shell_session_list",
+            "workspace_snapshot_create",
+            "workspace_snapshot_apply",
+        ];
+        for name in session_names {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from discovered tools"));
+            if session_runtime_available() {
+                assert!(
+                    tool.available,
+                    "{name} must be available on a unix host with the daemon up"
+                );
+                assert_eq!(tool.unavailable_reason, None, "{name} must have no reason");
+            } else {
+                assert!(
+                    !tool.available,
+                    "{name} must be unavailable without a session runtime"
+                );
+                assert_eq!(
+                    tool.unavailable_reason,
+                    Some(SESSION_UNAVAILABLE_REASON),
+                    "{name} must surface the session platform reason"
+                );
+            }
         }
     }
 

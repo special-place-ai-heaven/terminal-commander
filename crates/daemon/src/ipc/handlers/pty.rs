@@ -7,7 +7,7 @@ use crate::ipc::protocol::{
     IpcError, IpcErrorCode, IpcResponse, IpcResult, PtyCommandStartParams, PtyCommandStopParams,
     PtyCommandWriteStdinParams,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::ipc::protocol::{
     MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES, MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES,
     PtyCommandListEntry, PtyCommandListResponse, PtyCommandStartResponse, PtyCommandStopResponse,
@@ -15,7 +15,7 @@ use crate::ipc::protocol::{
 };
 use crate::state::DaemonState;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(in crate::ipc::server) fn pty_ipc_unsupported() -> IpcError {
     IpcError::new(
         IpcErrorCode::UnsupportedPlatform,
@@ -23,7 +23,7 @@ pub(in crate::ipc::server) fn pty_ipc_unsupported() -> IpcError {
     )
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(in crate::ipc::server) fn handle_pty_command_start(
     _state: &Arc<DaemonState>,
     _params: &PtyCommandStartParams,
@@ -31,7 +31,7 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
     Err(pty_ipc_unsupported())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[allow(clippy::unused_async)] // async matches the unix signature; removed when unix impl lands
 pub(in crate::ipc::server) async fn handle_pty_command_write_stdin(
     _state: &Arc<DaemonState>,
@@ -40,7 +40,7 @@ pub(in crate::ipc::server) async fn handle_pty_command_write_stdin(
     Err(pty_ipc_unsupported())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(in crate::ipc::server) fn handle_pty_command_stop(
     _state: &Arc<DaemonState>,
     _params: &PtyCommandStopParams,
@@ -48,14 +48,14 @@ pub(in crate::ipc::server) fn handle_pty_command_stop(
     Err(pty_ipc_unsupported())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(in crate::ipc::server) fn handle_pty_command_list(
     _state: &Arc<DaemonState>,
 ) -> Result<IpcResponse, IpcError> {
     Err(pty_ipc_unsupported())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(in crate::ipc::server) fn dispatch_pty_command_list(
     state: &Arc<DaemonState>,
 ) -> (&'static str, IpcResult) {
@@ -65,7 +65,7 @@ pub(in crate::ipc::server) fn dispatch_pty_command_list(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(in crate::ipc::server) fn handle_pty_command_start(
     state: &Arc<DaemonState>,
     params: &PtyCommandStartParams,
@@ -139,7 +139,7 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(in crate::ipc::server) async fn handle_pty_command_write_stdin(
     state: &Arc<DaemonState>,
     params: &PtyCommandWriteStdinParams,
@@ -178,7 +178,7 @@ pub(in crate::ipc::server) async fn handle_pty_command_write_stdin(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(in crate::ipc::server) fn handle_pty_command_stop(
     state: &Arc<DaemonState>,
     params: &PtyCommandStopParams,
@@ -204,7 +204,7 @@ pub(in crate::ipc::server) fn handle_pty_command_stop(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(in crate::ipc::server) fn handle_pty_command_list(state: &Arc<DaemonState>) -> IpcResponse {
     let entries: Vec<PtyCommandListEntry> = state
         .pty
@@ -240,7 +240,7 @@ pub(in crate::ipc::server) fn handle_pty_command_list(state: &Arc<DaemonState>) 
     IpcResponse::PtyCommandList(PtyCommandListResponse { entries })
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(in crate::ipc::server) fn dispatch_pty_command_list(
     state: &Arc<DaemonState>,
 ) -> (&'static str, IpcResult) {

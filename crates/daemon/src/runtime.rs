@@ -523,9 +523,11 @@ fn spawn_session_reaper(state: &Arc<crate::state::DaemonState>) {
     });
 }
 
-/// No-op session reaper on non-unix (sessions are PTY-backed; unavailable).
+/// No-op session reaper on non-unix (the shell-session runtime is unix-only;
+/// Windows session support is a separate slice). The Windows PTY command lane
+/// has no idle-session concept to reap.
 #[cfg(not(unix))]
-fn spawn_session_reaper(_state: &Arc<crate::state::DaemonState>) {}
+const fn spawn_session_reaper(_state: &Arc<crate::state::DaemonState>) {}
 
 /// Write the daemon pidfile (pid + version + endpoint) so a newer
 /// install can find and replace this daemon. Non-fatal on failure.

@@ -27,7 +27,7 @@ use crate::command::CommandRuntime;
 use crate::config::DaemonConfig;
 use crate::file_watch::WatchRuntime;
 use crate::policy::PolicyEngine;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::pty_command::PtyRuntime;
 use crate::router::Router;
 use crate::shell::ShellRuntime;
@@ -127,11 +127,11 @@ pub struct DaemonState {
     /// attached to buckets. Deliberately separate from
     /// `CommandRuntime`.
     pub watch: Arc<WatchRuntime>,
-    /// PTY command runtime (TC44). Owns live `PtyProbe` handles for
-    /// interactive jobs. Linux/WSL only; on non-Unix targets the
-    /// field is absent and the IPC layer returns
-    /// `UnsupportedPlatform`.
-    #[cfg(unix)]
+    /// PTY command runtime (TC44 + US3a/TC53). Owns live `PtyProbe` handles
+    /// for interactive jobs. Available on every host with a PTY backend
+    /// (unix `pty-process` and Windows ConPTY); on a platform without one the
+    /// field is absent and the IPC layer returns `UnsupportedPlatform`.
+    #[cfg(any(unix, windows))]
     pub pty: Arc<PtyRuntime>,
     /// Persistent shell-session runtime (P1 / TC50). Built ON TOP of the
     /// SAME `Arc<PtyRuntime>` above: a session is a long-lived login-shell
@@ -282,7 +282,8 @@ impl DaemonState {
             Arc::clone(&activation),
             Arc::clone(&sources),
         ));
-        #[cfg(unix)]
+        // PTY runtime on every host with a PTY backend (unix + Windows ConPTY).
+        #[cfg(any(unix, windows))]
         let pty = Arc::new(PtyRuntime::new(
             Arc::clone(&router),
             Arc::clone(&rings),
@@ -328,7 +329,7 @@ impl DaemonState {
             sources,
             subscriptions,
             watch,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             pty,
             #[cfg(unix)]
             sessions,

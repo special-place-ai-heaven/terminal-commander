@@ -78,7 +78,9 @@ impl SuppressionCounter for crate::file::FileProbeMetrics {
     }
 }
 
-#[cfg(unix)]
+// PTY metrics exist on every host with a PTY backend (unix `pty-process`
+// and Windows ConPTY), so the suppression counter must too.
+#[cfg(any(unix, windows))]
 impl SuppressionCounter for crate::pty::PtyProbeMetrics {
     fn record_progress_suppressed(&mut self) {
         self.frames_suppressed_progress = self.frames_suppressed_progress.saturating_add(1);

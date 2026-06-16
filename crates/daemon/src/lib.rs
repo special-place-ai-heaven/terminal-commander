@@ -23,7 +23,7 @@ pub mod file_watch;
 pub mod ipc;
 pub mod liveness;
 pub mod policy;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod pty_command;
 pub mod router;
 pub mod runtime;
@@ -93,7 +93,7 @@ pub use policy::{
     COMMANDS_DENY, DEFAULT_DENY_PATH_SUFFIXES, PolicyAction, PolicyDecision, PolicyEngine,
     PolicyProfile, PolicyVerdict,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use pty_command::{
     LivePtyIdentity, PtyRebindReport, PtyRuntime, PtyRuntimeError, PtyStartRequest,
     PtyStartResponse, PtyWriteResponse,

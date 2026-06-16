@@ -44,7 +44,9 @@ pub use process::{
     ProcessProbeMetrics,
 };
 pub use pty::{AnsiNormalizer, PromptDetector, PromptKind};
-#[cfg(unix)]
+// PTY probe surface is available on every host with a PTY backend (unix
+// `pty-process` and Windows ConPTY via `portable-pty`).
+#[cfg(any(unix, windows))]
 pub use pty::{
     DEFAULT_PTY_GRACE, MAX_PTY_STDIN_BYTES, PtyExitOutcome, PtyProbe, PtyProbeConfig,
     PtyProbeError, PtyProbeMetrics, WriteStdinError,
