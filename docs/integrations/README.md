@@ -1,6 +1,6 @@
 # Provider Integration Examples - Terminal Commander
 
-Status: current public integration index for the 29-tool MCP surface.
+Status: current public integration index for the 49-tool MCP surface.
 
 Provider-neutral MCP integration recipes. NO secrets, NO machine-
 specific paths. The MCP server is launched by the LLM harness as a
@@ -51,7 +51,7 @@ requires actually running the provider against one of the configs
 above and observing tool calls in the session transcript.
 
 The rest of this page is the older provider-neutral baseline kept for historical
-context; the modern surface advertises 29 tools and the per-provider
+context; the modern surface advertises 49 tools and the per-provider
 walk-throughs above are the authoritative source.
 
 Language: ASCII only.

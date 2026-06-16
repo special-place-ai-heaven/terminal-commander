@@ -58,15 +58,17 @@ Machine-readable fixture:
 
 ## 2. Live tool catalogue
 
-The current rmcp stdio adapter exposes 39 live tools.
+The current rmcp stdio adapter exposes 49 live tools.
 
 | Group | Tools |
 |---|---|
 | Discovery and health | `system_discover`, `health`, `policy_status`, `self_check` |
 | Commands and buckets | `command_start_combed`, `run_and_watch`, `command_status`, `command_stop` (forced-kill-only; CommandSignal-gated), `shell_exec` (gated by `allow_shell`; combed, never raw), `command_output_tail`, `bucket_events_since`, `bucket_wait`, `bucket_summary`, `event_context` |
-| Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_import_pack`, `registry_deactivate`, `registry_list_active` |
+| Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_import_pack`, `registry_deactivate`, `registry_list_active`, `registry_suggest_from_samples` (proposals only; NEVER auto-activates) |
+| Sessions and workspace | `shell_session_start`, `shell_session_exec`, `shell_session_status`, `shell_session_stop`, `shell_session_list`, `workspace_snapshot_create`, `workspace_snapshot_apply` (gated by `allow_session`; unix-only; combed, never raw) |
 | Files | `file_read_window`, `file_search`, `file_watch_start`, `file_watch_stop`, `file_watch_list` |
-| PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` |
+| PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` (POSIX + Windows ConPTY) |
+| Remote | `target_list`, `target_probe` (routes to an operator-forwarded local socket; remote use gated by `allow_remote`; no public TCP) |
 | Runtime | `runtime_state`, `probe_list`, `probe_status` |
 
 Each catalogue entry returned by `system_discover.tools[]` includes:

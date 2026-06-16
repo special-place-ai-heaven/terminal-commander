@@ -10,6 +10,34 @@ prioritized against the current evidence.
 
 Language: ASCII only.
 
+## Omni completion program (as_of 2026-06-16; on review branches, NOT merged)
+
+The omni-completion program (`specs/001-omni-completion/`) landed on stacked
+per-slice review branches (paused before merge/push for human review):
+
+- P1 `feature/omni-p1-sessions` (d9b1c75, 673e0bd, eec1e38): persistent shell
+  sessions + workspace snapshots (tools 39->46) + folded ledger fixes TC-B1
+  (ANSI strip + CRLF-aware normalizer), TC-E1 (compact), TC-E4 (capture canon),
+  TC-E2 (honest wait cap), TC-B3 (job-receipt restart status). O-02 live.
+- P2 `feature/omni-p2-parse` (78f9188): registry_suggest_from_samples (never
+  auto-activates), universal extractors, 8->25 rule packs, pack hints
+  (tools 46->47). O-05 live.
+- P3 `feature/omni-p3-platform` (16fd537, 2e636b5): Windows ConPTY dual-backend
+  (lifecycle live; child-output e2e blocked-on-host TC_CONPTY_E2E), notify file
+  backend (+9P poll fallback), SIGTERM->SIGKILL grace ladder. macOS = code-only
+  (no host).
+- P5 `feature/omni-p5-remote` (b1a3dd6): target_list/target_probe + target_id
+  routing on the command path via operator-forwarded local socket, no public TCP
+  (tools 47->49). Sim-verified (second local socket); real-SSH untested (no sshd).
+- P6 `feature/omni-p6-certify` (1311cb4, 59d70fc): system_discover.omni_status
+  matrix, verify-omni-* smokes, OMNI_PLAYBOOK + README/SPEC/ROADMAP realign.
+- P4 privileged helper: PLAN-ONLY (docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md);
+  BLOCKED-ON-REVIEW, zero code.
+
+Open before a 1.0.0: merge the review branches (human-gated); close O-07
+(ConPTY child-output on a real Windows desktop/CI), O-08 (macOS host), O-09/O-10
+(SSH/container), O-14 (provider trust smokes); complete the P4 threat review.
+
 ## P0 — Beta blockers (active)
 
 The four original P0 items are resolved (see "Resolved P0" below).

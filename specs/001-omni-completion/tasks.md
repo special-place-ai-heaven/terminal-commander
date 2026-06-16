@@ -139,9 +139,9 @@ ledger fixes. Gates O-02; closes SC-001/008/009/010/011.
 **Goal**: Specify, do NOT implement. Gates O-06 (deferred). Per clarify decision,
 no privileged code lands until a dedicated threat review completes.
 
-- [ ] T044 [US4] Write `docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md`: attack surface, allow-list rationale, approval-token threat model, audit requirements; mark BLOCKED-on-review.
-- [ ] T045 [US4] Update `docs/security/PRIVILEGE_MODEL.md` section 5 with the helper architecture (closed allow-list, separate binary, no shell line, no generic sudo).
-- [ ] T046 [US4] Record the P4 contract (privileged_exec/list_ops/approve) in `contracts/mcp-tools.md` (done) and add a deferred-tasks note; NO code, NO new crate yet.
+- [X] T044 [US4] `docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md` written (attack surface, allow-list rationale, approval-token threat model, audit-before-exec); status BLOCKED-ON-REVIEW.
+- [X] T045 [US4] `docs/security/PRIVILEGE_MODEL.md` helper-architecture section added, labeled planned/not-implemented.
+- [X] T046 [US4] P4 contract recorded in `contracts/mcp-tools.md` + deferred note. NO code, NO crate (threat-review gated, per clarify decision).
 
 **Checkpoint**: P4 fully specified and threat-review-queued; zero privileged code.
 
@@ -155,16 +155,16 @@ no privileged code lands until a dedicated threat review completes.
 
 ### Tests for User Story 5 (write first)
 
-- [ ] T047 [P] [US5] Target router unit tests: default-local when `target_id` unset; SSH-forward transport selection; no TCP listener opened.
-- [ ] T048 [P] [US5] Remote e2e (loopback SSH or mock-forward to a second local socket): command -> combed signals via tunnel.
+- [X] T047 [P] [US5] Router unit tests: default-local when unset; forwarded-socket selection when set; unknown target typed error; no-TCP by construction. PASS.
+- [~] T048 [P] [US5] Remote e2e via SECOND LOCAL SOCKET simulation (faithful to ssh -L shape): routed command -> combed signals from 2nd daemon; target_probe reachable+version. Real loopback-SSH BLOCKED (no sshd on host) -> labeled, sim covers routing.
 
 ### Implementation for User Story 5
 
-- [ ] T049 [US5] `targets.toml` parsing in `crates/daemon/src/config.rs`; `RemoteTarget` model.
-- [ ] T050 [US5] Target router in the MCP adapter / daemon client: optional `target_id` on every daemon-backed tool; SSH `-L` local-forward to remote UDS; default local.
-- [ ] T051 [US5] MCP tools `target_list` + `target_probe`; gate remote use on `allow_remote` + audit.
-- [ ] T052 [US5] Update tool-count anchors (+2) + contract fixtures `target_list.v1.json`, `target_probe.v1.json`.
-- [ ] T053 [US5] Run verification gate + remote e2e; assert no public TCP; commit to `feature/omni-p5-remote`; PAUSE.
+- [X] T049 [US5] `targets.toml` parsing + `RemoteTarget` model in config.rs (TC_TARGETS_CONFIG override).
+- [~] T050 [US5] Routing in the daemon-client layer (target_router.rs): `target_id` on the COMMAND path (start/status/stop/run_and_watch); default local. ssh -L is operator-established (auto-tunnel deferred; adapter never spawns). NOTE: target_id not yet on all 49 tools (command path satisfies O-09/O-10).
+- [X] T051 [US5] `target_list` + `target_probe` tools; remote use gated by `allow_remote` + audit; listing read-only.
+- [X] T052 [US5] Tool count 47 -> 49 (+target_list, +target_probe); all anchors + 2 contract fixtures.
+- [X] T053 [US5] Verified WSL (clippy -D clean, 33 pass) + Windows clippy; no-TCP + no-spawn guards PASS. Commit b1a3dd6. PAUSED.
 
 **Checkpoint**: remote combed commands work over tunnel only.
 
@@ -174,12 +174,12 @@ no privileged code lands until a dedicated threat review completes.
 
 **Goal**: automated omni smokes, omni_status, provider smokes, docs, release. Gates O-14; SC-007.
 
-- [ ] T054 [P] [US6] Create `scripts/smoke/verify-omni-linux.sh` running O-01..O-14, non-zero on failure.
-- [ ] T055 [P] [US6] Create `verify-omni-wsl.sh`, `verify-omni-windows.ps1`, `verify-omni-macos.sh` (same sequence).
-- [ ] T056 [US6] Add `system_discover.omni_status` capability matrix payload in `crates/mcp/src/tools.rs` + daemon assembly; update fixture.
-- [ ] T057 [P] [US6] Provider trust smokes for Cursor/Codex/Claude (extend `examples/provider-harness/` + docs/integrations).
-- [ ] T058 [P] [US6] Create `docs/mcp/OMNI_PLAYBOOK.md` agent decision tree; realign `README.md`, `SPEC.md`, `ROADMAP.md` to omni identity.
-- [ ] T059 [US6] Version bump to 1.0.0 once all O-* gates green (release-please-driven; operator-gated publish); commit to `feature/omni-p6-certify`; PAUSE.
+- [X] T054 [P] [US6] `scripts/smoke/verify-omni-linux.sh` (shared omni-o-runner.py + omni-common.sh): runs runnable O-gates, exits non-zero on failure, loudly skips host-blocked. Verified exit 0: 7 ran/passed, 7 skipped.
+- [~] T055 [P] [US6] `verify-omni-wsl.sh`, `verify-omni-windows.ps1`, `verify-omni-macos.sh` written + shellcheck-clean. wsl/linux run live; windows.ps1 + macos.sh NOT run here (need their hosts) -> blocked-on-host.
+- [X] T056 [US6] `system_discover.omni_status` capability matrix (honest: privileged available:false reason:threat_review_pending; pty platform per backend; remote from targets). Commit 1311cb4; fixture updated; tool count 49.
+- [~] T057 [P] [US6] Provider smoke procedure `docs/integrations/omni-harness-smoke.md` (command->wait->status + session + suggest-loop) for Cursor/Codex/Claude. Live provider runs are operator-gated (O-14 not auto-closable).
+- [X] T058 [P] [US6] `docs/mcp/OMNI_PLAYBOOK.md` + README/SPEC/ROADMAP realigned to omni identity (49 tools, 25 packs, honest blocked/deferred). Commit 59d70fc.
+- [ ] T059 [US6] Version bump to 1.0.0: DEFERRED to operator. release-please + OIDC publish are human-gated (BACKLOG P1.5); not auto-bumped. All O-* gates are NOT yet green (O-06 deferred, O-07/08/09/10/14 host/operator-blocked), so 1.0.0 is not warranted yet.
 
 **Checkpoint**: omni promise provable per platform; release-ready.
 
@@ -187,10 +187,10 @@ no privileged code lands until a dedicated threat review completes.
 
 ## Phase 9: Polish & Cross-Cutting Concerns
 
-- [ ] T060 [P] Full stale-doc tool-count sweep (BACKLOG TCD-7): reconcile every non-gated count reference across README/SPEC/RELEASE_CHECKLIST/CONTRIBUTING.
-- [ ] T061 [P] Update `BACKLOG.md`: mark closed items; move ledger fixes + waves to Resolved with commit refs.
-- [ ] T062 Run `quickstart.md` validation end-to-end on Linux + WSL; capture evidence.
-- [ ] T063 `cargo deny`, `cargo machete`, MSRV gate, doctests (full TESTING.md seven-step pipeline) before any release tag.
+- [X] T060 [P] Normative current-surface count sweep: `docs/mcp/TOOL_CONTROL_SURFACE.md` 39->49 + new tool rows; `docs/integrations/README.md` 29->49 (x2). Historical artifacts (.agent/goals, .planning, docs/plans) intentionally LEFT as point-in-time records.
+- [~] T061 [P] BACKLOG.md: omni-program resolved note added (slices on review branches). Full per-row reconciliation deferred (separate chore, TCD-7 scope).
+- [~] T062 Quickstart validation: runnable O-gates green via verify-omni-linux.sh (O-01/02/03/04/05/11/12); host/operator-blocked gates (O-06/07/08/09/10/13/14) not run -> see omni_status + smoke skip list.
+- [~] T063 Full-workspace gate (fmt + clippy --workspace -D + nextest --workspace) run on the cumulative branch as the capstone. (cargo deny/machete/MSRV/doctests = pre-release operator pipeline, not re-run here.)
 
 ---
 
