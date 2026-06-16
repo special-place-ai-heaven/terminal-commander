@@ -223,6 +223,7 @@ fn megabyte_scale_noisy_stdout_emits_signal_without_raw_leak() {
                     grace_ms: Some(30_000),
                     tag: None,
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
             )
             .await
@@ -364,6 +365,7 @@ fn bucket_wait_heartbeat_respects_timeout_without_busy_poll() {
                     grace_ms: Some(10_000),
                     tag: None,
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
             )
             .await
@@ -462,6 +464,7 @@ fn bucket_events_since_limit_clamps_to_max() {
                     grace_ms: Some(15_000),
                     tag: None,
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
             )
             .await
@@ -588,6 +591,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
                     grace_ms: Some(10_000),
                     tag: None,
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
             )
             .await
@@ -609,6 +613,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
                     grace_ms: Some(10_000),
                     tag: None,
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
             )
             .await
@@ -758,6 +763,7 @@ fn runtime_state_stays_bounded_under_live_load() {
                         // distinct nonce the same-peer nonce-less fallback
                         // would collapse all three identical starts to one.
                         dedup_nonce: Some(format!("rt-load-{i}")),
+                        strip_ansi: true,
                     }),
                 )
                 .await
@@ -852,6 +858,7 @@ fn event_context_window_stays_bounded() {
                     grace_ms: Some(10_000),
                     tag: None,
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
             )
             .await
@@ -981,6 +988,7 @@ fn bucket_dropped_count_visible_when_retention_evicts() {
                     grace_ms: Some(15_000),
                     tag: None,
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
             )
             .await
@@ -1103,6 +1111,7 @@ for i in range(120):
                     grace_ms: Some(15_000),
                     tag: None,
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
             )
             .await

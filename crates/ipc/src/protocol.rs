@@ -90,6 +90,15 @@ pub struct CommandStatusResponse {
     /// No-silence receipt; `Some` only for a finished process command
     /// with zero rule-driven events. See [`CommandReceipt`].
     pub receipt: Option<CommandReceipt>,
+    /// TC-B3 (FR-027): `true` when this status was reconstructed from a
+    /// PERSISTED job receipt because the in-memory job is gone (a daemon
+    /// restart happened since the job ran). The terminal `state` /
+    /// `exit_code` are then authoritative-from-disk; the live counters
+    /// (`frames_*`, `bytes_total`) are zero because the in-memory probe
+    /// metrics did not survive. An honest terminal result, never a bare
+    /// error. Defaults to `false`; additive and non-breaking.
+    #[serde(default)]
+    pub restarted: bool,
 }
 
 /// Params for `command_stop` (TC-3): force-kill a running combed
@@ -953,6 +962,14 @@ pub const MAX_COMMAND_INLINE_RULES: usize = 64;
 /// dispatcher.
 pub const MAX_COMMAND_GRACE_MS: u64 = 60_000;
 
+/// Serde default for `bool` fields that default to `true` (e.g.
+/// `CommandStartParams::strip_ansi`). A bare `#[serde(default)]` would
+/// yield `false`, inverting the intended TC-B1 default; this helper keeps
+/// an omitted field meaning "strip on".
+const fn default_true() -> bool {
+    true
+}
+
 /// Wire shape for `command_start_combed`. Mirrors the daemon's
 /// `CommandStartRequest` but uses millis instead of `Duration` so the
 /// JSON form stays human-readable.
@@ -987,6 +1004,13 @@ pub struct CommandStartParams {
     /// Optional per-bucket tag for subscription routing (Phase 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+    /// Strip ANSI/CSI/OSC escapes before sifter matching and in emitted
+    /// summaries (TC-B1, FR-026). RAW bytes are always preserved in the
+    /// frame store; this affects ONLY what the sifter sees and echoes.
+    /// Defaults to `true`. Additive and non-breaking: old clients omit it
+    /// and decode via the `default_true` serde default.
+    #[serde(default = "default_true")]
+    pub strip_ansi: bool,
     /// Optional in-flight dedup hint (TC-2). A client that MAY re-send
     /// the same logical start (e.g. a transport retry of a mutating
     /// `command_start_combed`) SHOULD send the SAME nonce on every
@@ -2403,6 +2427,7 @@ mod tests {
             grace_ms: None,
             tag: None,
             dedup_nonce: Some("mcp-1234-7".to_owned()),
+            strip_ansi: true,
         };
         let json = serde_json::to_string(&with_nonce).expect("serialize ok");
         assert!(
@@ -2416,6 +2441,7 @@ mod tests {
         // old daemon never sees an unexpected key.
         let without = CommandStartParams {
             dedup_nonce: None,
+            strip_ansi: true,
             ..with_nonce
         };
         let json_none = serde_json::to_string(&without).expect("serialize ok");
@@ -2544,6 +2570,7 @@ mod tests {
                     grace_ms: None,
                     tag: None,
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
                 false,
             ),
@@ -2817,6 +2844,7 @@ mod tests {
                 grace_ms: None,
                 tag: None,
                 dedup_nonce: None,
+                strip_ansi: true,
             })
             .is_idempotent(),
             "CommandStartCombed must be non-idempotent: a blind retry double-spawns"

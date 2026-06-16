@@ -24,6 +24,7 @@
 
 pub mod audit;
 pub mod import;
+pub mod job_receipt;
 pub mod registry;
 pub mod workspace;
 pub use audit::{
@@ -34,6 +35,7 @@ pub use audit::{
 pub use import::{
     ImportResult, RULE_PACK_DFA_SIZE_LIMIT, RULE_PACK_REGEX_SIZE_LIMIT, RulePackFile, RulePackMeta,
 };
+pub use job_receipt::JobReceiptRow;
 pub use registry::{
     ActivationRecord, ActiveRuleDef, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, RuleSearchHit,
 };

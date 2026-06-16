@@ -181,6 +181,10 @@ impl ShellRuntime {
             tag: req.tag,
             dedup_nonce: None,
             peer_discriminator: None,
+            // TC-B1: the shell lane is combed output too; strip color codes
+            // so anchored rules match and summaries stay clean. Raw bytes
+            // remain in the frame store.
+            strip_ansi: true,
         };
 
         self.command

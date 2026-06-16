@@ -80,6 +80,7 @@ fn small_start_params(argv: &[&str]) -> terminal_commanderd::CommandStartParams 
         grace_ms: Some(2_000),
         tag: None,
         dedup_nonce: None,
+        strip_ansi: true,
     }
 }
 

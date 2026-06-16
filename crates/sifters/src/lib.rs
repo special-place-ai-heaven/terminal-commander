@@ -308,8 +308,15 @@ impl SifterRuntimeInner {
                     [match_index_for_pattern(pat_idx, rule_idx, &self.kw_pattern_to_rule)];
                 let mut captures = IndexMap::new();
                 captures.insert("keyword".to_owned(), kw_token.clone());
-                inject_full_match(&mut captures, text, &rule.def.redact);
-                let draft = build_draft(&rule.def, frame, bucket_id, captures, truncated_bytes);
+                let injected = inject_full_match(&mut captures, text, &rule.def.redact);
+                let draft = build_draft(
+                    &rule.def,
+                    frame,
+                    bucket_id,
+                    captures,
+                    &injected,
+                    truncated_bytes,
+                );
                 if let Some(d) = draft {
                     out.push(d);
                 }
@@ -340,8 +347,15 @@ impl SifterRuntimeInner {
                         slot.push_str("<redacted>");
                     }
                 }
-                inject_full_match(&mut named, text, &rule.def.redact);
-                let draft = build_draft(&rule.def, frame, bucket_id, named, truncated_bytes);
+                let injected = inject_full_match(&mut named, text, &rule.def.redact);
+                let draft = build_draft(
+                    &rule.def,
+                    frame,
+                    bucket_id,
+                    named,
+                    &injected,
+                    truncated_bytes,
+                );
                 if let Some(d) = draft {
                     out.push(d);
                 }
@@ -371,6 +385,15 @@ fn cap_text(text: &str) -> (&str, u32) {
 /// (`line`/`match`/`0`) so a `${line}`/`${match}`/`${0}` summary
 /// template renders the matched line (TC ergonomics Phase 2, P-ZERO).
 ///
+/// Returns the reserved keys this call actually INJECTED (those not
+/// already present as real named captures). The caller renders the
+/// summary against the full map, then collapses the injected synonyms to
+/// the single [`terminal_commander_core::CANONICAL_MATCH_KEY`] for storage
+/// (TC-E4): the historical `0`/`line`/`match` triple echoed identical
+/// bytes three times in every stored event. A real named capture that
+/// collides with a reserved key is NOT in the returned set and is never
+/// collapsed.
+///
 /// Two safety guarantees, both required:
 /// 1. **Bounded** — the value is clamped to
 ///    [`terminal_commander_core::MAX_FULL_MATCH_SUMMARY_BYTES`] so a
@@ -379,13 +402,10 @@ fn cap_text(text: &str) -> (&str, u32) {
 /// 2. **Redaction-honoring** — any already-redacted capture value in
 ///    `captures` (i.e. a slot holding `<redacted>`) corresponds to a
 ///    secret the rule author asked to hide; the raw line would re-leak
-///    it. We therefore scrub the redacted ORIGINAL substrings from the
-///    injected text. Because the redacted slot no longer holds the
-///    original value, the caller passes the `redact` name list and we
-///    refuse to inject a full match for any rule that declares
-///    `redact`, replacing it with a notice instead — the safe default
-///    (a rule that redacts cannot also echo the whole line).
-fn inject_full_match(captures: &mut Captures, text: &str, redact: &[String]) {
+///    it. We therefore refuse to inject a full match for any rule that
+///    declares `redact`, replacing it with a notice instead — the safe
+///    default (a rule that redacts cannot also echo the whole line).
+fn inject_full_match(captures: &mut Captures, text: &str, redact: &[String]) -> Vec<&'static str> {
     let value = if redact.is_empty() {
         terminal_commander_core::clamp_full_match(text)
     } else {
@@ -394,13 +414,33 @@ fn inject_full_match(captures: &mut Captures, text: &str, redact: &[String]) {
         // and say so, rather than risk leaking a secret.
         "<full match suppressed: rule declares redact>".to_owned()
     };
+    let mut injected = Vec::new();
     for key in terminal_commander_core::RESERVED_MATCH_KEYS {
         // Do not clobber a real named capture that happens to collide
         // with a reserved key (named captures win; reserved keys are a
-        // fallback for rules without them).
-        captures
-            .entry((*key).to_owned())
-            .or_insert_with(|| value.clone());
+        // fallback for rules without them). Only keys we actually insert
+        // are returned for collapse -- a real named capture stays.
+        if !captures.contains_key(*key) {
+            captures.insert((*key).to_owned(), value.clone());
+            injected.push(*key);
+        }
+    }
+    injected
+}
+
+/// Collapse the injected full-match reserved synonyms to the single
+/// canonical key (TC-E4 / FR-030). Called AFTER the summary is rendered
+/// (rendering needs all synonyms present), so the STORED event carries
+/// the matched text once under
+/// [`terminal_commander_core::CANONICAL_MATCH_KEY`] plus the rule's named
+/// captures -- not the redundant `0`/`line`/`match` triple. Only keys this
+/// run injected are removed; a real named capture colliding with a
+/// reserved name is never touched.
+fn collapse_full_match_captures(captures: &mut Captures, injected: &[&'static str]) {
+    for key in injected {
+        if *key != terminal_commander_core::CANONICAL_MATCH_KEY {
+            captures.shift_remove(*key);
+        }
     }
 }
 
@@ -441,19 +481,33 @@ fn stable_rule_id(registry_id: &str) -> terminal_commander_core::RuleId {
 
 /// Build an [`EventDraft`] from a rule match. Returns `None` if the
 /// rendered summary fails (missing capture in template, etc.).
+///
+/// `injected` lists the reserved full-match synonyms `inject_full_match`
+/// added to `captures` for this match. The summary is rendered against the
+/// FULL map (so `${line}`/`${match}`/`${0}` all resolve), then the
+/// redundant synonyms are collapsed to the single canonical key for
+/// STORAGE (TC-E4): the stored event carries the matched text once, not
+/// the historical `0`/`line`/`match` triple.
 fn build_draft(
     def: &RuleDefinition,
     frame: &SourceFrame,
     bucket_id: BucketId,
-    captures: Captures,
+    mut captures: Captures,
+    injected: &[&'static str],
     frame_truncated_bytes: u32,
 ) -> Option<EventDraft> {
     // Try to render the summary; on missing capture, fall back to
-    // the raw template (the runtime never panics).
+    // the raw template (the runtime never panics). Render BEFORE the
+    // collapse so every reserved synonym still resolves.
     let summary = match def.render_summary(&captures) {
         Ok(s) => s.0,
         Err(_) => def.summary_template.clone(),
     };
+
+    // TC-E4: collapse the injected full-match synonyms to one canonical
+    // key now that the summary is rendered. Real named captures (never in
+    // `injected`) are untouched.
+    collapse_full_match_captures(&mut captures, injected);
 
     let pointer = SourcePointer {
         frame_id: frame.frame_id,

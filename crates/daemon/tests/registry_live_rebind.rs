@@ -175,6 +175,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
                     // the same-peer nonce-less fallback collapses these two
                     // identical `sleep 1` jobs and only one rebind row lands.
                     dedup_nonce: Some("rebind-job-1".to_owned()),
+                    strip_ansi: true,
                 }),
             )
             .await
@@ -196,6 +197,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
                     grace_ms: Some(5_000),
                     tag: None,
                     dedup_nonce: Some("rebind-job-2".to_owned()),
+                    strip_ansi: true,
                 }),
             )
             .await

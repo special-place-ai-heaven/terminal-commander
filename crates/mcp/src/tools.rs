@@ -697,7 +697,13 @@ impl TerminalCommanderMcpServer {
         use terminal_commander_core::JobState;
 
         self.ensure_daemon_available().await?;
-        let (start_params, wait_ms, max_signals) = params.into_parts();
+        let (start_params, controls) = params.into_parts();
+        let RunAndWatchControls {
+            wait_ms,
+            max_signals,
+            compact,
+            wait_until_exit,
+        } = controls;
         let start_ipc = start_params.into_ipc()?;
 
         // 1. Start.
@@ -721,6 +727,11 @@ impl TerminalCommanderMcpServer {
         //    Each bucket_wait blocks up to a per-iteration slice bounded by
         //    the time remaining, so a fast command returns fast AND the
         //    advertised wait_ms cap stays honest (TC-6).
+        //
+        //    TC-E2 (wait_until_exit): the signal cap NO LONGER ends the wait
+        //    -- only a terminal state or the deadline does. Signals stop
+        //    accumulating once the cap is reached, but the loop keeps waiting
+        //    for exit, bounded by the SAME `wait_ms` cap (never exceeded).
         let mut signals: Vec<terminal_commander_core::SignalEvent> = Vec::new();
         // TC-6: a wall-clock deadline keeps total wall time bounded by wait_ms
         // plus at most one in-flight slice and the round-trips.
@@ -762,6 +773,7 @@ impl TerminalCommanderMcpServer {
                         None,
                         true,
                         Some(RUN_AND_WATCH_RECOVER_HINT),
+                        compact,
                     );
                 }
             };
@@ -775,7 +787,7 @@ impl TerminalCommanderMcpServer {
             );
 
             // Per-slice wait is capped by the time left in the budget, so the
-            // loop can never overrun the deadline by more than one slice (TC-6).
+            // advertised wait_ms is honored to within one slice + a round-trip.
             let remaining_ms = u64::try_from(
                 deadline
                     .saturating_duration_since(std::time::Instant::now())
@@ -819,11 +831,17 @@ impl TerminalCommanderMcpServer {
                         None,
                         true,
                         Some(RUN_AND_WATCH_RECOVER_HINT),
+                        compact,
                     );
                 }
             }
 
-            if terminal || signals.len() >= max_signals {
+            // TC-E2: in wait_until_exit mode the signal cap does NOT end the
+            // wait -- only a terminal state does (still bounded by the
+            // deadline below). In the default mode, a full signal buffer ends
+            // the wait as before.
+            let cap_reached = !wait_until_exit && signals.len() >= max_signals;
+            if terminal || cap_reached {
                 break;
             }
             // TC-6: stop once the wall-clock budget is spent. Before building
@@ -866,6 +884,7 @@ impl TerminalCommanderMcpServer {
             receipt,
             false,
             None,
+            compact,
         )
     }
 
@@ -2253,6 +2272,21 @@ fn collect_rule_signals(
     }
 }
 
+/// Project a [`SignalEvent`] to the compact presentation shape
+/// `{summary, stream, seq, severity}` (TC-E1 / FR-028). This is the set
+/// of load-bearing fields an agent reads in the common case; the id
+/// plumbing (`event_id`, `bucket_id`, `source`, `pointer`, ...) that
+/// dominates token cost is dropped. PRESENTATION ONLY: the event store
+/// retains the full record, re-fetchable via `bucket_events_since`.
+fn project_signal_compact(ev: &terminal_commander_core::SignalEvent) -> serde_json::Value {
+    serde_json::json!({
+        "summary": ev.summary,
+        "stream": ev.source.stream,
+        "seq": ev.seq,
+        "severity": ev.severity,
+    })
+}
+
 /// Build the `run_and_watch` result payload. ONE builder for BOTH the normal
 /// and the degraded (mid-wait IPC error) paths, so the degraded result is a
 /// strict superset of the normal one and the two cannot drift.
@@ -2274,6 +2308,7 @@ fn run_and_watch_result(
     receipt: Option<serde_json::Value>,
     degraded: bool,
     recover_hint: Option<&str>,
+    compact: bool,
 ) -> Result<CallToolResult, McpError> {
     // A degraded result is never "complete" (the wait was interrupted);
     // otherwise derive completion from the last observed state.
@@ -2291,16 +2326,40 @@ fn run_and_watch_result(
     // The receipt rides only the zero-signal success path; a degraded result
     // carries none.
     let include_receipt = !degraded && signals.is_empty();
+    // TC-E1: when compact, project each signal to the load-bearing fields
+    // only -- a presentation concern; the event store is untouched and the
+    // full records remain re-fetchable via bucket_events_since.
+    let signals_json = if compact {
+        serde_json::json!(
+            signals
+                .iter()
+                .map(project_signal_compact)
+                .collect::<Vec<_>>()
+        )
+    } else {
+        serde_json::json!(signals)
+    };
+    // TC-E2: a still-running result advertises a poll interval hint so the
+    // agent paces command_status polling instead of busy-spinning. Terminal
+    // and degraded results omit it (nothing left to poll for / recover first).
+    let poll_hint_ms = if complete || degraded {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!(RUN_AND_WATCH_POLL_HINT_MS)
+    };
     json_tool_result(&serde_json::json!({
         "job_id": job_id,
         "bucket_id": bucket_id,
         "state": state_json,
         "exit_code": exit_code,
-        "signals": signals,
+        "signals": signals_json,
         "signal_count": signals.len(),
+        "compact": compact,
         "receipt": if include_receipt { receipt } else { None },
         "complete": complete,
         "wait_exhausted": wait_exhausted,
+        "wait_cap_ms": RUN_AND_WATCH_MAX_WAIT_MS,
+        "poll_hint_ms": poll_hint_ms,
         "cursor": cursor,
         "degraded": degraded,
         "recover_hint": recover_hint,
@@ -2978,6 +3037,14 @@ pub struct McpCommandStartParams {
     /// opened with a matching `tag` predicate routes to it. Omit for none.
     #[serde(default)]
     pub tag: Option<String>,
+    /// Strip ANSI/CSI/OSC color + control escapes before rule matching and
+    /// in emitted summaries (TC-B1). RAW bytes are always preserved in the
+    /// frame store (retrievable via `command_output_tail` / `event_context`);
+    /// this affects ONLY what the sifter matches and what summaries echo.
+    /// Defaults to `true` so anchored rules (`^ERROR`) and summaries are not
+    /// silently defeated by color codes. Set `false` to match raw bytes.
+    #[serde(default = "default_true_mcp")]
+    pub strip_ansi: bool,
 }
 
 impl McpCommandStartParams {
@@ -2995,6 +3062,8 @@ impl McpCommandStartParams {
             rules,
             grace_ms: self.grace_ms,
             tag: self.tag,
+            // TC-B1: forward the strip flag to the daemon (default true).
+            strip_ansi: self.strip_ansi,
             // TC-2 dedup split: the adapter ALWAYS mints a FRESH per-call
             // nonce. Two deliberate identical tool calls therefore get
             // DISTINCT nonces and NEVER collapse to one job (the
@@ -3123,10 +3192,37 @@ const RUN_AND_WATCH_MAX_SIGNALS: usize = 500;
 /// smaller slice would double the `bucket_wait` RPC rate under load.
 const MAX_WAIT_SLICE_MS: u64 = 1_000;
 
+/// TC-E2 poll-interval hint, in ms, advertised on a still-running
+/// `run_and_watch` result so the agent paces `command_status` polling
+/// rather than busy-spinning. Matches the wait-slice cadence.
+const RUN_AND_WATCH_POLL_HINT_MS: u64 = 1_000;
+
 /// Recovery guidance attached to a degraded `run_and_watch` result (TC-1b).
 /// An IPC error interrupted the wait, but the job is still tracked by the
 /// daemon, so the agent should confirm liveness before polling -- not re-run.
 const RUN_AND_WATCH_RECOVER_HINT: &str = "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with the `health` tool, then poll command_status with this job_id for the final state and signals. Do not re-run the command.";
+
+/// Serde default for MCP `bool` params that default to `true`
+/// (`strip_ansi` on `command_start_combed` / `run_and_watch`). A bare
+/// `#[serde(default)]` would yield `false`, inverting the TC-B1 default.
+const fn default_true_mcp() -> bool {
+    true
+}
+
+/// Bounded wait + presentation controls for `run_and_watch`, split out of
+/// [`McpRunAndWatchParams`] so the wait loop reads named fields instead of a
+/// widening tuple. All caps are server-side and honored to the wire (TC-E2).
+#[derive(Debug, Clone, Copy)]
+struct RunAndWatchControls {
+    /// Clamped wall-clock wait budget, in ms (TC-6 deadline source).
+    wait_ms: u64,
+    /// Clamped max signals to return.
+    max_signals: usize,
+    /// Project each signal to `{summary, stream, seq, severity}` (TC-E1).
+    compact: bool,
+    /// Wait until the job is terminal, bounded by `wait_ms` (TC-E2).
+    wait_until_exit: bool,
+}
 
 /// MCP-facing parameters for `run_and_watch`. A superset of
 /// `command_start_combed`'s params plus the bounded wait controls.
@@ -3175,11 +3271,32 @@ pub struct McpRunAndWatchParams {
     /// runtime_state / probe_list rows carry it. Omit for none.
     #[serde(default)]
     pub tag: Option<String>,
+    /// Strip ANSI/CSI/OSC escapes before rule matching and in summaries
+    /// (TC-B1); see `command_start_combed`. Default `true`. Raw bytes stay
+    /// in the frame store.
+    #[serde(default = "default_true_mcp")]
+    pub strip_ansi: bool,
+    /// Compact projection (TC-E1): when `true`, each returned signal carries
+    /// ONLY `{summary, stream, seq, severity}` -- the load-bearing fields --
+    /// dropping the id plumbing that dominates token cost for the common
+    /// case. Default `false` (full signal records). Presentation-only; the
+    /// event store is unchanged and the same signals are re-fetchable in full.
+    #[serde(default)]
+    pub compact: bool,
+    /// Honest wait mode (TC-E2). `"exit"` waits for the job to reach a
+    /// terminal state, bounded by the SAME server-side `wait_ms` cap (never
+    /// exceeded). Any other value (or omitted) keeps the default
+    /// signal-cap-or-budget wait. The cap is advertised in the response.
+    #[serde(default)]
+    pub wait_until: Option<String>,
 }
 
 impl McpRunAndWatchParams {
-    /// Split into the start params and the (clamped) wait controls.
-    fn into_parts(self) -> (McpCommandStartParams, u64, usize) {
+    /// Split into the start params and the (clamped) wait + presentation
+    /// controls. The wait budget and signal cap are clamped to their
+    /// server-side maxima here, so the wait loop can never exceed an
+    /// advertised cap (TC-E2 / constitution VII).
+    fn into_parts(self) -> (McpCommandStartParams, RunAndWatchControls) {
         let wait_ms = self
             .wait_ms
             .unwrap_or(RUN_AND_WATCH_DEFAULT_WAIT_MS)
@@ -3188,6 +3305,13 @@ impl McpRunAndWatchParams {
             .max_signals
             .unwrap_or(RUN_AND_WATCH_DEFAULT_MAX_SIGNALS)
             .min(RUN_AND_WATCH_MAX_SIGNALS);
+        // TC-E2: only "exit" requests the terminal-state wait; any other
+        // value (or omitted) keeps the default behavior. Case-insensitive
+        // so `"Exit"` is accepted.
+        let wait_until_exit = self
+            .wait_until
+            .as_deref()
+            .is_some_and(|w| w.eq_ignore_ascii_case("exit"));
         let start = McpCommandStartParams {
             argv: self.argv,
             cwd: self.cwd,
@@ -3197,8 +3321,18 @@ impl McpRunAndWatchParams {
             rules: self.rules,
             rules_json: self.rules_json,
             tag: self.tag,
+            // TC-B1: forward the strip flag onto the underlying start.
+            strip_ansi: self.strip_ansi,
         };
-        (start, wait_ms, max_signals)
+        (
+            start,
+            RunAndWatchControls {
+                wait_ms,
+                max_signals,
+                compact: self.compact,
+                wait_until_exit,
+            },
+        )
     }
 }
 
@@ -3361,6 +3495,11 @@ fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
         // No-silence receipt (TCE-ERG-1): null unless the command
         // finished with zero rule-driven events.
         "receipt": s.receipt,
+        // TC-B3 (FR-027): true when this terminal result was reconstructed
+        // from a persisted receipt after a daemon restart (the in-memory job
+        // was gone). The state/exit_code are authoritative-from-disk; the
+        // live counters are zero. An honest terminal result, never an error.
+        "restarted": s.restarted,
     })
 }
 
@@ -4427,6 +4566,7 @@ mod tests {
             None,
             degraded,
             recover_hint,
+            false,
         )
         .expect("run_and_watch_result must build an Ok (success-shaped) result");
         for item in &result.content {
@@ -5399,8 +5539,11 @@ mod tests {
             wait_ms: None,
             max_signals: None,
             tag: Some("X".to_string()),
+            strip_ansi: true,
+            compact: false,
+            wait_until: None,
         };
-        let (start, _wait_ms, _max_signals) = params.into_parts();
+        let (start, _controls) = params.into_parts();
         assert_eq!(start.tag, Some("X".to_string()));
 
         // A `None` tag must stay `None` (no fabricated tag).
@@ -5415,8 +5558,11 @@ mod tests {
             wait_ms: None,
             max_signals: None,
             tag: None,
+            strip_ansi: true,
+            compact: false,
+            wait_until: None,
         };
-        let (start, _wait_ms, _max_signals) = untagged.into_parts();
+        let (start, _controls) = untagged.into_parts();
         assert_eq!(start.tag, None);
     }
 

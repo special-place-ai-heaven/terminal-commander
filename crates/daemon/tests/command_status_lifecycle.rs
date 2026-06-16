@@ -54,6 +54,7 @@ fn command_status_counts_lifecycle_event_when_no_rules_match() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                strip_ansi: true,
                 peer_discriminator: None,
             })
             .expect("start ok");
@@ -121,6 +122,7 @@ fn lifecycle_waiter_is_drained_before_store_close() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                strip_ansi: true,
                 peer_discriminator: None,
             })
             .expect("start ok");
@@ -221,6 +223,7 @@ fn no_rule_command_returns_exit_receipt() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                strip_ansi: true,
                 peer_discriminator: None,
             })
             .expect("start ok");
@@ -268,6 +271,7 @@ fn command_output_tail_returns_bounded_lines_without_a_rule() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                strip_ansi: true,
                 peer_discriminator: None,
             })
             .expect("start ok");
@@ -317,6 +321,7 @@ fn command_output_tail_clamps_to_200_lines() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                strip_ansi: true,
                 peer_discriminator: None,
             })
             .expect("start ok");
@@ -378,6 +383,7 @@ fn rule_match_command_has_no_receipt() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                strip_ansi: true,
                 peer_discriminator: None,
             })
             .expect("start ok");
@@ -439,6 +445,7 @@ fn start_linger_child(state: &DaemonState) -> terminal_commander_ipc::CommandSta
             grace: None,
             tag: None,
             dedup_nonce: None,
+            strip_ansi: true,
             peer_discriminator: None,
         })
         .expect("start linger child")

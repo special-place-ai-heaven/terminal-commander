@@ -120,6 +120,7 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
                     grace_ms: Some(2_000),
                     tag: None,
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
             )
             .await
@@ -292,6 +293,7 @@ fn exited_command_reports_exited_liveness_from_jobstate() {
                     grace_ms: Some(2_000),
                     tag: None,
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
             )
             .await
@@ -371,6 +373,7 @@ fn runtime_state_command_probe_carries_tag_and_redacted_argv_head() {
                     grace_ms: Some(2_000),
                     tag: Some("verify-4a".to_owned()),
                     dedup_nonce: None,
+                    strip_ansi: true,
                 }),
             )
             .await

@@ -45,6 +45,13 @@ pub struct ProcessProbeConfig {
     /// Grace window between graceful and forced termination.
     /// Currently advisory; cancellation in MVP is forced kill only.
     pub grace: Duration,
+    /// Strip ANSI/CSI/OSC escape sequences before sifter rule matching
+    /// and in emitted summaries (TC-B1, FR-026). The RAW bytes are
+    /// always preserved in the frame store regardless of this flag;
+    /// stripping affects ONLY the text the sifter sees and echoes.
+    /// Defaults to `true` so anchored rules and summaries are not
+    /// silently defeated by color codes.
+    pub strip_ansi: bool,
 }
 
 impl ProcessProbeConfig {
@@ -57,6 +64,9 @@ impl ProcessProbeConfig {
             cwd: None,
             env: Vec::new(),
             grace: DEFAULT_GRACE,
+            // TC-B1: strip ANSI by default; raw bytes still land in the
+            // frame store. A caller opts out with `strip_ansi = false`.
+            strip_ansi: true,
         }
     }
 }
@@ -220,6 +230,7 @@ impl ProcessProbe {
     /// * Windows: the child is assigned to a Job Object at spawn and the
     ///   cancel arm calls `TerminateJobObject`, which kills every process in
     ///   the job (native Win32, no taskkill/powershell).
+    #[allow(clippy::too_many_lines)] // spawn is one tightly-coupled lifecycle (mirrors PTY spawn)
     pub fn spawn(
         argv: &[String],
         config: &ProcessProbeConfig,
@@ -294,6 +305,9 @@ impl ProcessProbe {
         let noise_pipeline: SharedProbeNoisePipeline =
             Arc::new(Mutex::new(ProbeNoisePipeline::with_default_policy()));
         let bucket_id = config.bucket_id;
+        // TC-B1: snapshot the strip flag before the config borrow ends; the
+        // read tasks own it for the life of the probe.
+        let strip_ansi = config.strip_ansi;
 
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
 
@@ -313,6 +327,7 @@ impl ProcessProbe {
                 Arc::clone(&sink),
                 Arc::clone(&metrics_for_task),
                 Arc::clone(&noise_pipeline),
+                strip_ansi,
             );
             let stderr_task = read_stream(
                 stderr,
@@ -324,6 +339,7 @@ impl ProcessProbe {
                 sink,
                 metrics_for_task,
                 noise_pipeline,
+                strip_ansi,
             );
             let drain = async {
                 let _ = tokio::join!(stdout_task, stderr_task);
@@ -570,6 +586,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     sink: Arc<dyn EventSink>,
     metrics: Arc<Mutex<ProcessProbeMetrics>>,
     noise_pipeline: SharedProbeNoisePipeline,
+    strip_ansi: bool,
 ) {
     let mut reader = BufReader::new(stream);
     let mut line_no: u64 = 0;
@@ -606,7 +623,9 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
             frame.truncated_bytes = frame.truncated_bytes.saturating_add(extra);
         }
 
-        // Append to the context ring so event_context can resolve.
+        // Append the RAW frame to the context ring so event_context and the
+        // output tail can resolve the unmodified bytes (TC-B1: stripping is
+        // for matching + summaries only; the frame store keeps raw).
         let _ = rings.append_frame(probe_id, frame.clone());
 
         // Update metrics.
@@ -625,12 +644,31 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
             m.bytes_total = m.bytes_total.saturating_add(bytes);
         }
 
+        // TC-B1: feed the sifter a STRIPPED view of the frame so anchored
+        // rules (`^\[AAP\]`) match colored output and emitted summaries carry
+        // no escape bytes. The stripped frame reuses the same `frame_id`, so
+        // any emitted event's source pointer still resolves to the RAW frame
+        // already stored in the ring above. When `strip_ansi` is off (or the
+        // line had no escape byte), the original frame is sifted unchanged.
+        let sift_frame = if strip_ansi {
+            let stripped = crate::ansi::strip_ansi(&frame.text);
+            if stripped == frame.text {
+                frame
+            } else {
+                let mut f = frame;
+                f.text = stripped;
+                f
+            }
+        } else {
+            frame
+        };
+
         let mut events_emitted = metrics.lock().events_emitted;
         {
             let mut pipeline = noise_pipeline.lock();
             let mut m = metrics.lock();
             pipeline.process_frame(
-                &frame,
+                &sift_frame,
                 bucket_id,
                 &runtime,
                 sink.as_ref(),

@@ -260,6 +260,7 @@ mod unix_live {
             grace_ms: Some(2_000),
             tag: None,
             dedup_nonce: None,
+            strip_ansi: true,
         }
     }
 

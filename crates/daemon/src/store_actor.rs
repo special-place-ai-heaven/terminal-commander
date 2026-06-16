@@ -99,6 +99,22 @@ pub enum StoreOp {
     },
     /// `EventStore::get_workspace_snapshot(snapshot_id)` -> optional row
     GetWorkspaceSnapshot { snapshot_id: String },
+    /// `EventStore::ensure_job_receipts()` (P1 / TC-B3)
+    EnsureJobReceipts,
+    /// `EventStore::record_job_receipt(...)` on a terminal transition.
+    RecordJobReceipt {
+        job_id: String,
+        bucket_id: String,
+        terminal_state: String,
+        exit_code: Option<i32>,
+        final_signal_counts: String,
+    },
+    /// `EventStore::get_job_receipt(job_id)` -> optional row (post-restart
+    /// fallback read).
+    GetJobReceipt { job_id: String },
+    /// `EventStore::mark_job_receipt_restarted(job_id)` -> stamp the
+    /// restart marker on a post-restart read.
+    MarkJobReceiptRestarted { job_id: String },
     /// Drain queue, run `wal_checkpoint(FULL)`, exit thread.
     Shutdown,
 }
@@ -120,6 +136,7 @@ pub enum StoreReply {
     Bool(bool),
     SnapshotId(String),
     OptionalSnapshot(Option<terminal_commander_store::WorkspaceSnapshotRow>),
+    OptionalJobReceipt(Option<terminal_commander_store::JobReceiptRow>),
 }
 
 /// Internal envelope on the wire: an op plus the ack channel back
@@ -407,6 +424,60 @@ impl StoreClient {
             other => Err(unexpected_store_reply("GetWorkspaceSnapshot", &other)),
         }
     }
+
+    /// Ensure the job-receipt schema (V0007) exists. Idempotent. Called at
+    /// bootstrap so the post-restart status fallback read never races a
+    /// lazy migration.
+    pub fn ensure_job_receipts(&self) -> Result<(), EventStoreError> {
+        match self.call(StoreOp::EnsureJobReceipts)? {
+            StoreReply::Unit => Ok(()),
+            other => Err(unexpected_store_reply("EnsureJobReceipts", &other)),
+        }
+    }
+
+    /// Persist a job receipt on a terminal transition (TC-B3).
+    pub fn record_job_receipt(
+        &self,
+        job_id: &str,
+        bucket_id: &str,
+        terminal_state: &str,
+        exit_code: Option<i32>,
+        final_signal_counts: &str,
+    ) -> Result<(), EventStoreError> {
+        match self.call(StoreOp::RecordJobReceipt {
+            job_id: job_id.to_owned(),
+            bucket_id: bucket_id.to_owned(),
+            terminal_state: terminal_state.to_owned(),
+            exit_code,
+            final_signal_counts: final_signal_counts.to_owned(),
+        })? {
+            StoreReply::Unit => Ok(()),
+            other => Err(unexpected_store_reply("RecordJobReceipt", &other)),
+        }
+    }
+
+    /// Fetch a job receipt by id. `Ok(None)` if unknown (TC-B3 fallback).
+    pub fn get_job_receipt(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<terminal_commander_store::JobReceiptRow>, EventStoreError> {
+        match self.call(StoreOp::GetJobReceipt {
+            job_id: job_id.to_owned(),
+        })? {
+            StoreReply::OptionalJobReceipt(row) => Ok(row),
+            other => Err(unexpected_store_reply("GetJobReceipt", &other)),
+        }
+    }
+
+    /// Stamp a job receipt's restart marker on a post-restart read (TC-B3).
+    pub fn mark_job_receipt_restarted(&self, job_id: &str) -> Result<(), EventStoreError> {
+        match self.call(StoreOp::MarkJobReceiptRestarted {
+            job_id: job_id.to_owned(),
+        })? {
+            StoreReply::Unit => Ok(()),
+            other => Err(unexpected_store_reply("MarkJobReceiptRestarted", &other)),
+        }
+    }
 }
 
 fn unexpected_store_reply(op: &str, reply: &StoreReply) -> EventStoreError {
@@ -522,6 +593,28 @@ fn execute(store: &mut EventStore, op: StoreOp) -> Result<StoreReply, EventStore
         StoreOp::GetWorkspaceSnapshot { snapshot_id } => store
             .get_workspace_snapshot(&snapshot_id)
             .map(StoreReply::OptionalSnapshot),
+        StoreOp::EnsureJobReceipts => store.ensure_job_receipts().map(|()| StoreReply::Unit),
+        StoreOp::RecordJobReceipt {
+            job_id,
+            bucket_id,
+            terminal_state,
+            exit_code,
+            final_signal_counts,
+        } => store
+            .record_job_receipt(
+                &job_id,
+                &bucket_id,
+                &terminal_state,
+                exit_code,
+                &final_signal_counts,
+            )
+            .map(|()| StoreReply::Unit),
+        StoreOp::GetJobReceipt { job_id } => store
+            .get_job_receipt(&job_id)
+            .map(StoreReply::OptionalJobReceipt),
+        StoreOp::MarkJobReceiptRestarted { job_id } => store
+            .mark_job_receipt_restarted(&job_id)
+            .map(|()| StoreReply::Unit),
         StoreOp::Shutdown => Ok(StoreReply::Unit),
     }
 }

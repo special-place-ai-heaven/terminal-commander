@@ -140,6 +140,7 @@ fn command_start_emits_matching_signal_into_bucket_no_raw_text() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            strip_ansi: true,
             peer_discriminator: None,
         };
         let resp = state.command.start_combed(req).expect("start ok");
@@ -237,6 +238,7 @@ fn command_start_denied_for_sudo_argv() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            strip_ansi: true,
             peer_discriminator: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
@@ -282,6 +284,7 @@ fn command_start_with_invalid_inline_rule_fails_fast_without_leaking_bucket() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            strip_ansi: true,
             peer_discriminator: None,
         };
 
@@ -325,6 +328,7 @@ fn command_start_denied_for_bare_sh_argv() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            strip_ansi: true,
             peer_discriminator: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
@@ -379,6 +383,7 @@ fn command_start_denied_for_absolute_sh_argv() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            strip_ansi: true,
             peer_discriminator: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
@@ -440,6 +445,7 @@ fn command_start_denies_all_known_shell_interpreters() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                strip_ansi: true,
                 peer_discriminator: None,
             };
             let err = state.command.start_combed(req).unwrap_err();
@@ -484,6 +490,7 @@ fn argv_shell_interpreter_still_denied_unchanged() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            strip_ansi: true,
             peer_discriminator: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
@@ -532,6 +539,7 @@ fn nonzero_exit_produces_command_failed_event_in_bucket() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            strip_ansi: true,
             peer_discriminator: None,
         };
         let resp = state.command.start_combed(req).expect("start ok");
@@ -587,6 +595,7 @@ fn empty_argv_is_rejected_before_spawn() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            strip_ansi: true,
             peer_discriminator: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
@@ -625,6 +634,7 @@ fn response_types_have_no_raw_stream_lane() {
         signal: None,
         duration_ms: Some(0),
         receipt: None,
+        restarted: false,
     };
     assert_small_response(&s);
 }
@@ -664,6 +674,7 @@ fn dedup_req(
         tag: None,
         dedup_nonce: nonce.map(str::to_owned),
         peer_discriminator: peer,
+        strip_ansi: true,
     }
 }
 

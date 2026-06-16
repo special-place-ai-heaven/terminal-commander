@@ -53,12 +53,12 @@ pub use ids::{
 };
 pub use pointer::SourcePointer;
 pub use rule::{
-    ContextHint, MAX_CONTEXT_LINES, MAX_EXAMPLES, MAX_FULL_MATCH_SUMMARY_BYTES, MAX_PATTERN_BYTES,
-    MAX_RULE_ID_BYTES, MAX_TAG_BYTES, MAX_TAGS, MAX_TEMPLATE_BYTES, REGEX_DFA_SIZE_LIMIT,
-    REGEX_SIZE_LIMIT, RESERVED_MATCH_KEYS, RenderError, RenderedSummary, RuleDefinition, RuleError,
-    RuleExample, RuleExampleExpect, RuleHandle, RuleStatus, RuleTestRequest, RuleTestResult,
-    RuleType, clamp_full_match, compile_bounded_regex, compile_bounded_regex_set,
-    is_reserved_match_key,
+    CANONICAL_MATCH_KEY, ContextHint, MAX_CONTEXT_LINES, MAX_EXAMPLES,
+    MAX_FULL_MATCH_SUMMARY_BYTES, MAX_PATTERN_BYTES, MAX_RULE_ID_BYTES, MAX_TAG_BYTES, MAX_TAGS,
+    MAX_TEMPLATE_BYTES, REGEX_DFA_SIZE_LIMIT, REGEX_SIZE_LIMIT, RESERVED_MATCH_KEYS, RenderError,
+    RenderedSummary, RuleDefinition, RuleError, RuleExample, RuleExampleExpect, RuleHandle,
+    RuleStatus, RuleTestRequest, RuleTestResult, RuleType, clamp_full_match, compile_bounded_regex,
+    compile_bounded_regex_set, is_reserved_match_key,
 };
 pub use severity::Severity;
 pub use source::{EventSource, SourceStream, SourceType};

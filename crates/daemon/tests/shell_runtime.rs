@@ -80,6 +80,7 @@ fn caps_command_runtime(
         policy,
         Arc::clone(&state.activation),
         Arc::clone(&state.sources),
+        state.store.clone(),
     ))
 }
 

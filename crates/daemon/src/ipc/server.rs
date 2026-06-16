@@ -968,6 +968,8 @@ pub async fn selfcheck_spawn_probe(
         tag: Some("selfcheck".to_owned()),
         dedup_nonce: Some(fresh_selfcheck_nonce()),
         peer_discriminator: None,
+        // TC-B1: default-on; self_check output is trivial but consistent.
+        strip_ansi: true,
     };
 
     // 4. Spawn into the (reused-or-fresh) bucket.
@@ -1200,6 +1202,7 @@ mod tests {
                 grace_ms: None,
                 tag: None,
                 dedup_nonce: None,
+                strip_ansi: true,
             }),
             IpcRequest::CommandStatus(CommandStatusParams {
                 job_id: JobId::new(),

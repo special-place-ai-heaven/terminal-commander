@@ -88,6 +88,7 @@ fn sleeper(
         // the per-call correlation id so identical same-peer `sleep 1`
         // starts are NOT collapsed by the nonce-less fallback window.
         dedup_nonce: Some(format!("scoped-sleeper-{correlation}")),
+        strip_ansi: true,
     });
     async move { client.call(correlation, req).await.expect("start") }
 }

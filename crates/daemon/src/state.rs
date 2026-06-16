@@ -191,6 +191,11 @@ impl DaemonState {
         // spike. The migration is idempotent.
         store.ensure_registry().map_err(BootstrapError::Store)?;
 
+        // TC-B3: apply the V0007 job-receipt migration eagerly so the
+        // post-restart `command_status` fallback read never races a lazy
+        // migration on the read-only path. Idempotent.
+        store.ensure_job_receipts().map_err(BootstrapError::Store)?;
+
         let buckets = Arc::new(BucketManager::new());
         let rings = Arc::new(ContextRingManager::new());
         let jobs = Arc::new(JobManager::new());
@@ -254,6 +259,10 @@ impl DaemonState {
             policy.clone(),
             Arc::clone(&activation),
             Arc::clone(&sources),
+            // TC-B3: the command runtime persists a job receipt on every
+            // terminal transition via this clone of the single-writer
+            // store actor (the same one the audit sink uses).
+            store.clone(),
         ));
         // Shell runtime (TC49): a thin facade over the SAME
         // `Arc<CommandRuntime>` so the gated `shell_exec` lane reuses the

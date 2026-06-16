@@ -271,14 +271,20 @@ impl ShellSessionRuntime {
         // Prime the interactive shell so its combed output is CLEAN: a
         // bare prompt (`PS1=`) keeps prompts out of the signal stream,
         // `stty -onlcr -echo` stops the TTY from mapping the program's
-        // `\n` to `\r\n` and from echoing typed input (a `\r` is otherwise
-        // CR-collapsed by the probe's AnsiNormalizer, which would drop the
-        // output line that immediately precedes the newline), and disabling
+        // `\n` to `\r\n` and from echoing typed input, and disabling
         // bracketed paste removes the `\x1b[?2004h/l` noise. Each piece is
         // guarded with `2>/dev/null` so a shell lacking it is harmless.
-        // Without this, a line like `pwd` -> `/tmp\r\n` lands `/tmp` in the
-        // normalizer's overwrite buffer instead of the combed line stream,
-        // so the session would emit no signal for ordinary command output.
+        //
+        // KEPT (TC-B1): the `-onlcr` piece historically existed because the
+        // probe's `AnsiNormalizer` CR-collapse dropped the output line
+        // preceding a `\r\n` (it landed in the overwrite buffer, not the
+        // combed stream). TC-B1 made the normalizer CRLF-aware, so a
+        // single-feed `pwd` -> `/tmp\r\n` is now preserved WITHOUT `-onlcr`.
+        // The priming is retained intact as belt-and-suspenders: it still
+        // suppresses prompts/echo/bracketed-paste, covers the rarer
+        // CR/LF-split-across-PTY-reads case the single-feed fix does not, and
+        // ripping it out is not re-proven by an O-02 session test exercising
+        // that split path -- so the conservative choice is to leave it.
         // Fire-and-forget: the priming bytes are written to the PTY; the
         // bucket combs the (silent, prompt-free) result. A failure here is
         // non-fatal — the session is still usable, just noisier.

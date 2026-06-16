@@ -114,6 +114,7 @@ fn noisy_start_params() -> CommandStartParams {
         grace_ms: Some(2_000),
         tag: None,
         dedup_nonce: Some(format!("sub-ipc-noisy-{n}")),
+        strip_ansi: true,
     }
 }
 

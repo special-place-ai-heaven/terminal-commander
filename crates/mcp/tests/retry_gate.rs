@@ -103,6 +103,7 @@ fn command_start() -> IpcRequest {
         grace_ms: None,
         tag: None,
         dedup_nonce: None,
+        strip_ansi: true,
     })
 }
 

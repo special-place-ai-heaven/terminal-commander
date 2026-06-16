@@ -41,6 +41,9 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
         rules: params.rules.clone(),
         grace: params.grace(),
         tag: params.tag.clone(),
+        // TC-B1: thread the strip flag end-to-end (default true at the IPC
+        // boundary via serde `default_true`).
+        strip_ansi: params.strip_ansi,
         // TC-2: thread the client dedup hint end-to-end. Without this
         // explicit assignment the field is silently dropped at this hand-
         // built conversion (amendment #7).
@@ -159,11 +162,88 @@ pub(in crate::ipc::server) fn handle_command_status(
     state: &Arc<DaemonState>,
     params: &CommandStatusParams,
 ) -> Result<IpcResponse, IpcError> {
-    let resp = state
-        .command
-        .status(params.job_id)
-        .map_err(map_command_error)?;
-    Ok(IpcResponse::CommandStatus(resp))
+    match state.command.status(params.job_id) {
+        Ok(resp) => Ok(IpcResponse::CommandStatus(resp)),
+        // TC-B3 (FR-027): the in-memory job is gone. Before returning a bare
+        // error, consult the persisted receipt: if this job ran (and reached a
+        // terminal state) before a daemon restart, return a restart-marked
+        // terminal result instead of an error. Honest degradation
+        // (constitution VII): a known terminal outcome from disk beats a bare
+        // "unknown job".
+        Err(crate::command::CommandError::UnknownJob(job_id)) => {
+            restart_marked_status_from_receipt(state, job_id).map_or_else(
+                || {
+                    Err(map_command_error(crate::command::CommandError::UnknownJob(
+                        job_id,
+                    )))
+                },
+                |resp| Ok(IpcResponse::CommandStatus(resp)),
+            )
+        }
+        Err(e) => Err(map_command_error(e)),
+    }
+}
+
+/// TC-B3: reconstruct a restart-marked terminal [`CommandStatusResponse`]
+/// from a persisted job receipt, or `None` if no receipt exists (then the
+/// caller returns the original `UnknownJob` error). Stamps the receipt's
+/// restart marker as a side effect so the persisted row records that it was
+/// read post-restart. The live counters are zero (the in-memory probe
+/// metrics did not survive the restart); `restarted: true` tells the agent
+/// the terminal `state`/`exit_code` are authoritative-from-disk.
+fn restart_marked_status_from_receipt(
+    state: &Arc<DaemonState>,
+    job_id: terminal_commander_core::JobId,
+) -> Option<crate::ipc::protocol::CommandStatusResponse> {
+    use terminal_commander_core::{BucketId, JobState, ProbeId};
+
+    let wire = job_id.to_wire_string();
+    let row = state.store.get_job_receipt(&wire).ok().flatten()?;
+
+    let state_enum = match row.terminal_state.as_str() {
+        "exited" => JobState::Exited,
+        "cancelled" => JobState::Cancelled,
+        // Any other persisted label (incl. "failed" and the conservative
+        // fallback) maps to Failed: a terminal, non-success state.
+        _ => JobState::Failed,
+    };
+    // Recover the bucket id from the receipt; a parse failure (corrupt row)
+    // falls back to a fresh id rather than failing the whole status read.
+    let bucket_id = BucketId::parse_wire(&row.bucket_id).unwrap_or_default();
+    // The events_emitted count was persisted in the small JSON object; a
+    // parse miss is non-fatal (counts default to 0).
+    let events_emitted = serde_json::from_str::<serde_json::Value>(&row.final_signal_counts)
+        .ok()
+        .and_then(|v| v.get("events_emitted").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0);
+
+    // Best-effort: stamp the restart marker on the durable row. A failure
+    // here does not change the response we return (it already carries
+    // `restarted: true`).
+    let _ = state.store.mark_job_receipt_restarted(&wire);
+
+    Some(crate::ipc::protocol::CommandStatusResponse {
+        job_id,
+        bucket_id,
+        // The probe is gone post-restart; a fresh id is a truthful "no live
+        // probe" placeholder (context/tail reads will report not-found).
+        probe_id: ProbeId::default(),
+        state: state_enum,
+        frames_total: 0,
+        frames_stdout: 0,
+        frames_stderr: 0,
+        bytes_total: 0,
+        events_emitted,
+        frames_suppressed: 0,
+        frames_suppressed_progress: 0,
+        frames_suppressed_dedupe: 0,
+        exit_code: row.exit_code,
+        signal: None,
+        duration_ms: None,
+        // The no-silence frame tail did not survive the restart.
+        receipt: None,
+        restarted: true,
+    })
 }
 
 pub(in crate::ipc::server) fn handle_command_output_tail(

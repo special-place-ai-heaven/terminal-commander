@@ -51,6 +51,7 @@ use crate::activation::ActivationRegistry;
 use crate::audit::AuditSink;
 use crate::policy::{PolicyAction, PolicyDecision, PolicyEngine, PolicyProfile};
 use crate::router::Router;
+use crate::store_actor::StoreClient;
 
 /// Maximum argv size accepted in a single request. Prevents an
 /// operator from smuggling raw stream content as "command args".
@@ -180,6 +181,11 @@ pub struct CommandStartRequest {
     /// Optional per-bucket tag for subscription routing (Phase 3). Recorded on
     /// the bucket source so a tag predicate can AND-filter to this probe.
     pub tag: Option<String>,
+    /// Strip ANSI/CSI/OSC escapes before sifter matching and in emitted
+    /// summaries (TC-B1, FR-026). Threaded into `ProcessProbeConfig`; the
+    /// frame store always keeps the raw bytes. Defaults to `true` at the
+    /// IPC boundary.
+    pub strip_ansi: bool,
     /// Optional in-flight dedup nonce (TC-2). Threaded from
     /// `CommandStartParams::dedup_nonce` by `handle_command_start_combed`.
     /// When `Some`, `start_combed` collapses an in-flight duplicate carrying
@@ -375,6 +381,14 @@ pub struct CommandRuntime {
     /// run on the completion paths alongside `waiter_live`. The lock is held
     /// ONLY for map ops -- never across `.await`, never across the spawn.
     dedup: Arc<parking_lot::Mutex<std::collections::HashMap<u64, DedupEntry>>>,
+    /// Store client for persisting job receipts on every terminal
+    /// transition (TC-B3). Cloned into the lifecycle waiter alongside the
+    /// other `waiter_*` handles. A receipt write failure is logged-and-
+    /// dropped, never fatal to the exit path: the receipt is a durability
+    /// backstop for a post-restart status poll, not a correctness
+    /// dependency of the live job. The same single-writer actor the audit
+    /// sink uses, so receipt writes serialize with audit rows.
+    store: StoreClient,
 }
 
 impl std::fmt::Debug for CommandRuntime {
@@ -392,6 +406,7 @@ impl CommandRuntime {
     /// rules are currently active; the runtime consults it at every
     /// `start_combed` call.
     #[must_use]
+    #[allow(clippy::too_many_arguments)] // wired infra handles; a builder would obscure the seam
     pub fn new(
         router: Arc<Router>,
         rings: Arc<ContextRingManager>,
@@ -400,6 +415,7 @@ impl CommandRuntime {
         policy: PolicyEngine,
         activation: Arc<ActivationRegistry>,
         sources: Arc<crate::subscriptions::source::BucketSourceTable>,
+        store: StoreClient,
     ) -> Self {
         let profile_label = match policy.profile {
             PolicyProfile::DeveloperLocal => "developer_local".to_owned(),
@@ -420,6 +436,7 @@ impl CommandRuntime {
             sources,
             lifecycle_tasks: Arc::new(parking_lot::Mutex::new(tokio::task::JoinSet::new())),
             dedup: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::default())),
+            store,
         }
     }
 
@@ -766,6 +783,9 @@ impl CommandRuntime {
             grace: req
                 .grace
                 .unwrap_or(terminal_commander_probes::DEFAULT_GRACE),
+            // TC-B1: thread the strip flag into the probe; raw bytes still
+            // land in the frame store regardless.
+            strip_ansi: req.strip_ansi,
         };
 
         // TC-2: register the in-flight dedup entry NOW, BEFORE the spawn,
@@ -888,6 +908,13 @@ impl CommandRuntime {
         // `dedup_k` (a Copy `u64`) is moved in. Eviction-on-completion is
         // the PRIMARY release; the TTL is only the backstop for a leak.
         let waiter_dedup = Arc::clone(&self.dedup);
+        // TC-B3: clone the store actor handle into the waiter so the
+        // terminal transition persists a compact job receipt. Cheap
+        // (an Arc/sender clone); a write failure is logged-and-dropped.
+        let waiter_store = self.store.clone();
+        // Captured for the receipt's bucket_id field (req.bucket_id is not
+        // available in the waiter; reuse the bound bucket).
+        let waiter_bucket = bucket_id;
         // Enqueue into the lifecycle JoinSet (not a detached
         // `tokio::spawn`) so a graceful shutdown can await this waiter
         // BEFORE the store actor closes; otherwise a command exiting in
@@ -952,14 +979,26 @@ impl CommandRuntime {
             // would leak a stopped job's fingerprint forever and block a future
             // identical-nonce start (the TC-2 never-block invariant). The kill IS the
             // completion, so evict now, then return.
-            if waiter_jobs.get(job_id).is_some_and(|r| {
+            if let Some(state) = waiter_jobs.get(job_id).map(|r| r.state).filter(|s| {
                 matches!(
-                    r.state,
+                    s,
                     terminal_commander_core::JobState::Exited
                         | terminal_commander_core::JobState::Failed
                         | terminal_commander_core::JobState::Cancelled
                 )
             }) {
+                // TC-B3: `stop()` finalized this job. It is terminal, so persist
+                // the receipt here too (this path bypasses the finish/cancel
+                // block below). The exit code is whatever the outcome carried
+                // (a graceful stop may still have an exit code).
+                persist_job_receipt(
+                    &waiter_store,
+                    job_id,
+                    waiter_bucket,
+                    state,
+                    receipt_exit_code,
+                    rule_driven_events,
+                );
                 waiter_dedup.lock().remove(&dedup_k);
                 return;
             }
@@ -969,6 +1008,29 @@ impl CommandRuntime {
                 ProbeOutcome::Exited { code, signal } => waiter_jobs.finish(job_id, code, signal),
                 ProbeOutcome::Cancelled => waiter_jobs.cancel(job_id),
             };
+
+            // TC-B3: persist the compact job receipt on this terminal
+            // transition. The authoritative terminal state is read back from
+            // the job manager (set by finish/cancel just above); fall back to
+            // the outcome if the record vanished. A write failure is
+            // logged-and-dropped -- the receipt is a post-restart durability
+            // backstop, never a correctness dependency of the live exit path.
+            // `outcome` was moved into the draft match above; the job manager
+            // is the authoritative source for the terminal state finish/cancel
+            // just set. The fallback (record vanished) cannot normally happen
+            // because finish/cancel keep the record; `Failed` is the safe
+            // conservative default that never overstates success.
+            let terminal_state = waiter_jobs
+                .get(job_id)
+                .map_or(terminal_commander_core::JobState::Failed, |r| r.state);
+            persist_job_receipt(
+                &waiter_store,
+                job_id,
+                waiter_bucket,
+                terminal_state,
+                receipt_exit_code,
+                rule_driven_events,
+            );
 
             // TC-2 eviction-on-completion (PRIMARY release). The job is now
             // terminal on BOTH outcomes (normal exit and cancel reach here),
@@ -1334,6 +1396,9 @@ impl CommandRuntime {
             signal: rec.exit_info.as_ref().and_then(|e| e.signal.clone()),
             duration_ms: rec.exit_info.as_ref().map(|e| e.duration_ms),
             receipt,
+            // TC-B3: the live in-memory path is never a restart-reconstructed
+            // result; the persisted-receipt fallback sets this in the handler.
+            restarted: false,
         })
     }
 
@@ -1365,6 +1430,50 @@ async fn drive_to_exit(mut probe: ProcessProbe) -> (ProcessProbeMetrics, ProbeOu
         },
     };
     (probe.metrics(), outcome)
+}
+
+/// TC-B3 (FR-027): persist a compact job receipt on a terminal transition.
+///
+/// Maps the terminal [`JobState`] to a stable lowercase string, encodes the
+/// rule-driven event count as a small JSON object, and writes through the
+/// single-writer store actor. A write failure is logged-and-dropped: the
+/// receipt is a post-restart durability backstop, never a correctness
+/// dependency of the live exit path, so a store hiccup must not abort the
+/// waiter or corrupt the in-memory terminal state.
+fn persist_job_receipt(
+    store: &StoreClient,
+    job_id: JobId,
+    bucket_id: BucketId,
+    state: JobState,
+    exit_code: Option<i32>,
+    rule_driven_events: u64,
+) {
+    let terminal_state = match state {
+        JobState::Exited => "exited",
+        JobState::Cancelled => "cancelled",
+        JobState::Failed => "failed",
+        // Non-terminal states never reach a receipt-write site; record the
+        // raw label rather than fabricate a terminal one.
+        JobState::Starting => "starting",
+        JobState::Running => "running",
+    };
+    let counts = format!("{{\"events_emitted\":{rule_driven_events}}}");
+    if let Err(e) = store.record_job_receipt(
+        &job_id.to_wire_string(),
+        &bucket_id.to_wire_string(),
+        terminal_state,
+        exit_code,
+        &counts,
+    ) {
+        // Honest degradation: the live job is already terminal and tracked in
+        // memory; only the durable backstop failed. Surface it in the log,
+        // do not propagate.
+        tracing::warn!(
+            job_id = %job_id.to_wire_string(),
+            error = %e,
+            "TC-B3: failed to persist job receipt (post-restart status fallback unavailable for this job)"
+        );
+    }
 }
 
 #[cfg(unix)]

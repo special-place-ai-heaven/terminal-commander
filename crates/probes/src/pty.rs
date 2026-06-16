@@ -41,6 +41,24 @@ pub struct AnsiNormalizer {
     /// prompt detection so the secret flag still flips. Drained via
     /// `take_overwritten`.
     last_overwritten: String,
+    /// TC-B1 CRLF-awareness: a `\r` is DEFERRED rather than applied
+    /// immediately, because the very next byte decides its meaning. When
+    /// the next byte is `\n` the pair is a CRLF line terminator (the line
+    /// is pushed intact); when it is anything else the `\r` was a true
+    /// carriage-return overwrite (the line is saved to `last_overwritten`
+    /// and cleared, then the byte is processed). Without this deferral a
+    /// `\r\n`-terminated interactive line was wiped by the `\r` and the
+    /// following `\n` pushed an EMPTY line -- silently dropping the line.
+    /// A lone trailing `\r` (no following byte before a drain) keeps the
+    /// historical overwrite semantics, resolved at `flush`/`take_lines`.
+    ///
+    /// SCOPE: this resolves CRLF within a SINGLE `feed` (the dominant case --
+    /// a shell emits a whole `line\r\n` in one read). A `\r` at the very END
+    /// of a feed with the `\n` arriving in the NEXT feed is still resolved as
+    /// an overwrite by the intervening `take_lines`, matching the historical
+    /// behavior the secret-gate tests assert (M2); the single-feed fix is
+    /// what removes the dropped-interactive-line failure.
+    pending_cr: bool,
 }
 
 #[allow(clippy::missing_fields_in_debug)]
@@ -67,13 +85,30 @@ impl AnsiNormalizer {
             line: &mut self.line,
             pending: &mut self.pending,
             last_overwritten: &mut self.last_overwritten,
+            pending_cr: &mut self.pending_cr,
         };
         self.parser.advance(&mut sink, bytes);
     }
 
     /// Drain completed lines (without newline terminators).
     pub fn take_lines(&mut self) -> Vec<String> {
+        self.resolve_dangling_cr();
         std::mem::take(&mut self.pending)
+    }
+
+    /// Resolve a `\r` that was deferred at the end of a `feed` and never
+    /// followed by another byte: with no `\n` to make it a CRLF terminator,
+    /// it is a true carriage-return overwrite (the historical semantics).
+    /// Save the pre-CR content to `last_overwritten` and clear the line.
+    fn resolve_dangling_cr(&mut self) {
+        if self.pending_cr {
+            self.pending_cr = false;
+            if !self.line.is_empty() {
+                self.last_overwritten.clear();
+                self.last_overwritten.push_str(&self.line);
+            }
+            self.line.clear();
+        }
     }
 
     /// Peek the current partial-line buffer without consuming it.
@@ -90,12 +125,22 @@ impl AnsiNormalizer {
     /// non-empty line since the last drain. Used by the PTY probe to
     /// classify a `\r`-terminated secret prompt that never received a
     /// `\n` and so never reached `pending` or `peek_pending`.
+    ///
+    /// Resolves a still-deferred `\r` first (a `\r`-terminated prompt like
+    /// `[sudo] password: \r` defers its CR awaiting a possible `\n`; the
+    /// secret gate reads this drain to classify it, so the deferred CR must
+    /// be applied here -- moving the pre-CR line into `last_overwritten`).
     pub fn take_overwritten(&mut self) -> String {
+        self.resolve_dangling_cr();
         std::mem::take(&mut self.last_overwritten)
     }
 
     /// Flush whatever partial line is pending as a final line.
     pub fn flush(&mut self) -> Option<String> {
+        // A dangling deferred `\r` at flush time was a true overwrite (no
+        // following `\n` ever arrived), so it cleared the line: nothing to
+        // flush in that case.
+        self.resolve_dangling_cr();
         if self.line.is_empty() {
             None
         } else {
@@ -109,31 +154,69 @@ struct Sink<'a> {
     line: &'a mut String,
     pending: &'a mut Vec<String>,
     last_overwritten: &'a mut String,
+    /// Deferred-`\r` flag (TC-B1 CRLF-awareness). See
+    /// [`AnsiNormalizer::pending_cr`].
+    pending_cr: &'a mut bool,
+}
+
+impl Sink<'_> {
+    /// Apply a `\r` that was deferred by a prior `execute` now that the
+    /// next event has arrived and is NOT `\n` (so the pair was not a CRLF
+    /// terminator). The `\r` was therefore a true carriage-return
+    /// overwrite: save the pre-CR line to `last_overwritten` and clear it.
+    /// No-op when no CR is pending.
+    fn apply_deferred_cr_overwrite(&mut self) {
+        if *self.pending_cr {
+            *self.pending_cr = false;
+            if !self.line.is_empty() {
+                self.last_overwritten.clear();
+                self.last_overwritten.push_str(self.line);
+            }
+            self.line.clear();
+        }
+    }
 }
 
 impl vte::Perform for Sink<'_> {
     fn print(&mut self, c: char) {
+        // A printable char after a deferred `\r` means the `\r` was a true
+        // carriage-return overwrite (not a CRLF terminator): apply it, then
+        // start the new line with this char.
+        self.apply_deferred_cr_overwrite();
         self.line.push(c);
     }
     fn execute(&mut self, byte: u8) {
         match byte {
             b'\n' => {
+                // CRLF-awareness (TC-B1): if a `\r` is pending, this `\n`
+                // completes a CRLF terminator -- the `\r` was NOT an
+                // overwrite, so push the line intact. Otherwise it is a bare
+                // `\n` terminator (also push the line). Either way the
+                // deferred-CR flag is cleared and the line is taken as one
+                // completed line; a CRLF no longer wipes the line to empty.
+                *self.pending_cr = false;
                 self.pending.push(std::mem::take(self.line));
             }
             b'\r' if CR_COLLAPSE => {
-                // Carriage return: overwrite from start of line.
-                // Capture the pre-CR content first so a `\r`-terminated
-                // prompt (no `\n`) can still be classified for secret
-                // detection before it is wiped. Only retain non-empty
-                // content; the most recent overwrite wins.
-                if !self.line.is_empty() {
-                    self.last_overwritten.clear();
-                    self.last_overwritten.push_str(self.line);
-                }
-                self.line.clear();
+                // Defer the carriage return: the NEXT byte decides whether it
+                // is a CRLF terminator (`\n` follows) or a true overwrite
+                // (anything else). A second `\r` in a row resolves the first
+                // as an overwrite before deferring again, so back-to-back
+                // progress redraws still collapse.
+                self.apply_deferred_cr_overwrite();
+                *self.pending_cr = true;
             }
-            b'\t' => self.line.push('\t'),
-            _ => {}
+            b'\t' => {
+                // A tab after a deferred `\r` resolves it as an overwrite.
+                self.apply_deferred_cr_overwrite();
+                self.line.push('\t');
+            }
+            _ => {
+                // Any other control byte after a deferred `\r` resolves it as
+                // an overwrite (the `\r` was not a CRLF terminator), then the
+                // byte itself is dropped as before.
+                self.apply_deferred_cr_overwrite();
+            }
         }
     }
     // ESC sequences, CSI, OSC etc. are intentionally ignored
@@ -1047,6 +1130,38 @@ mod tests {
         n.feed(b"10%\r25%\r100%\n");
         let lines = n.take_lines();
         assert_eq!(lines, vec!["100%".to_owned()]);
+    }
+
+    #[test]
+    fn ansi_crlf_terminated_line_is_not_dropped() {
+        // TC-B1 CRLF-awareness regression: a `\r\n`-terminated line MUST be
+        // emitted intact, not wiped to empty by the `\r`. Pre-fix the `\r`
+        // cleared the buffer and the `\n` pushed an EMPTY line, silently
+        // dropping interactive output (the session priming-line workaround
+        // existed to mask exactly this).
+        let mut n = AnsiNormalizer::new();
+        n.feed(b"hello world\r\n");
+        assert_eq!(n.take_lines(), vec!["hello world".to_owned()]);
+    }
+
+    #[test]
+    fn ansi_multiple_crlf_lines_all_survive() {
+        // Several CRLF lines in one feed each survive as a distinct line.
+        let mut n = AnsiNormalizer::new();
+        n.feed(b"alpha\r\nbeta\r\ngamma\r\n");
+        assert_eq!(
+            n.take_lines(),
+            vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()]
+        );
+    }
+
+    #[test]
+    fn ansi_cr_then_text_is_still_an_overwrite() {
+        // A `\r` followed by TEXT (not `\n`) keeps the true carriage-return
+        // overwrite semantics: the post-CR text replaces the pre-CR line.
+        let mut n = AnsiNormalizer::new();
+        n.feed(b"old text\rnew\n");
+        assert_eq!(n.take_lines(), vec!["new".to_owned()]);
     }
 
     #[test]

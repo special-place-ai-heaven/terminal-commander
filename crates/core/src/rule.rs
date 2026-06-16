@@ -126,6 +126,15 @@ pub const MAX_CONTEXT_LINES: u32 = 1024;
 /// redaction-scrubbed) matched text under these keys at render time.
 pub const RESERVED_MATCH_KEYS: &[&str] = &["line", "match", "0"];
 
+/// The single canonical full-match capture key (TC-E4 / FR-030).
+///
+/// All three reserved synonyms still render in summary templates, but the
+/// sifter STORES the matched text under only this one key plus the rule's
+/// named captures -- collapsing the historical `0`/`line`/`match` triple
+/// that echoed identical bytes three times. MUST be one of
+/// [`RESERVED_MATCH_KEYS`].
+pub const CANONICAL_MATCH_KEY: &str = "match";
+
 /// Render-time byte clamp on a substituted reserved full-match value.
 ///
 /// The matched frame text is bounded upstream at `MAX_SIFT_BYTES`

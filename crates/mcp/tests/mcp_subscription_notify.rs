@@ -117,6 +117,7 @@ fn noisy_start_params() -> CommandStartParams {
         grace_ms: Some(2_000),
         tag: None,
         dedup_nonce: None,
+        strip_ansi: true,
     }
 }
 

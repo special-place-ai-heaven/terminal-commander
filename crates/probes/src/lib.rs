@@ -17,6 +17,7 @@
 //! Source-status: live (TC15) for non-interactive process probing
 //! and event emission. Job lifecycle + exit events land in TC16.
 
+pub mod ansi;
 pub mod directory;
 pub mod file;
 pub mod noise_pipeline;
@@ -29,6 +30,7 @@ pub use directory::{
     spawn_with_in_memory_sink as spawn_directory_probe_with_sink,
 };
 
+pub use ansi::strip_ansi;
 pub use file::{
     DEFAULT_POLL_INTERVAL, FileProbe, FileProbeConfig, FileProbeError, FileProbeMetrics,
     FileProbeMode, spawn_with_sink as spawn_file_probe_with_sink,
