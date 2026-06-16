@@ -895,6 +895,14 @@ mod runtime {
                 cmd = cmd.env(k, v);
             }
             let mut child = cmd.spawn(pts)?;
+            // US3b (T042): `pty_process` runs `setsid()` in the child, making
+            // it a new session AND process-group leader, so `pgid == child.id()`.
+            // The grace ladder signals that whole group (SIGTERM then SIGKILL),
+            // reaping any descendants the PTY program forked. Captured before the
+            // child moves into the streaming task; the `config.grace` window is
+            // the same advisory field commands use.
+            let child_pgid = child.id();
+            let grace = config.grace;
 
             let metrics = Arc::new(Mutex::new(PtyProbeMetrics::default()));
             // Shared secret-prompt gate. `counted_generation` tracks the
@@ -932,8 +940,20 @@ mod runtime {
                 let mut exit_outcome = PtyExitOutcome::Cancelled;
                 let outcome: Result<(), PtyProbeError> = loop {
                     if cancel_rx.try_recv().is_ok() {
-                        let _ = child.start_kill();
-                        let _ = child.wait().await;
+                        // Grace ladder (T042/FR-015): SIGTERM the PTY child's
+                        // process group, wait up to `grace` for a cooperative
+                        // exit, then escalate to SIGKILL. Shares the contract
+                        // and helper with the command probe. If the child pid
+                        // is already gone (`None`), fall back to a direct kill.
+                        if let Some(pgid) = child_pgid {
+                            crate::process::terminate_process_tree_graceful(
+                                &mut child, grace, pgid,
+                            )
+                            .await;
+                        } else {
+                            let _ = child.start_kill();
+                            let _ = child.wait().await;
+                        }
                         break Err(PtyProbeError::Cancelled);
                     }
                     // Drain any pending stdin writes.
@@ -1179,6 +1199,91 @@ mod runtime {
                 );
             });
         }
+
+        // ---- US3b (T038): PTY cancel grace ladder (shared contract) ----
+
+        #[test]
+        fn pty_cancel_sigterm_handler_exits_within_grace_no_sigkill() {
+            // T038 (PTY/session leg): a PTY child that HANDLES SIGTERM and exits must
+            // be reaped during the grace window without a SIGKILL. Mirrors the
+            // command-probe leg so the cancel contract is demonstrably shared.
+            // Session stop routes through PtyRuntime::stop -> PtyProbe::cancel, so
+            // this PTY-level test exercises the same path a session stop drives.
+            let runtime = rt();
+            runtime.block_on(async {
+                let mut cfg = PtyProbeConfig::for_bucket(BucketId::new());
+                cfg.grace = Duration::from_secs(5);
+                let rings = Arc::new(ContextRingManager::new());
+                let sifter = empty_runtime();
+                let sink: Arc<dyn EventSink> = Arc::new(InMemorySink::new());
+                // Trap TERM -> exit 0, announce readiness, then sleep far past grace.
+                let argv = sh_argv("trap 'exit 0' TERM; echo READY; sleep 30");
+                let mut probe =
+                    PtyProbe::spawn(&argv, &cfg, rings, sifter, sink).expect("spawn pty probe");
+
+                // Wait until the child has produced output (the trap is installed).
+                let ready =
+                    poll_until(&probe, |m| m.bytes_total >= 1, Duration::from_secs(10)).await;
+                assert!(ready, "pty child never produced its readiness line");
+
+                let start = std::time::Instant::now();
+                probe.cancel();
+                let outcome = probe.wait().await;
+                let elapsed = start.elapsed();
+
+                assert!(
+                    matches!(outcome, Err(PtyProbeError::Cancelled)),
+                    "pty cancel must report the terminal Cancelled state; got {outcome:?}"
+                );
+                assert!(
+                    elapsed < Duration::from_secs(3),
+                    "a SIGTERM-handling PTY child must exit during grace (no wait-for-SIGKILL); \
+                     cancel took {elapsed:?}"
+                );
+            });
+        }
+
+        #[test]
+        fn pty_cancel_sigterm_ignored_escalates_to_sigkill() {
+            // T038 (PTY/session leg): a PTY child that IGNORES SIGTERM must be
+            // escalated to SIGKILL after the grace window. Short grace keeps the test
+            // well under the nextest terminate budget.
+            let runtime = rt();
+            runtime.block_on(async {
+                let mut cfg = PtyProbeConfig::for_bucket(BucketId::new());
+                cfg.grace = Duration::from_millis(700);
+                let rings = Arc::new(ContextRingManager::new());
+                let sifter = empty_runtime();
+                let sink: Arc<dyn EventSink> = Arc::new(InMemorySink::new());
+                let argv = sh_argv("trap '' TERM; echo READY; sleep 30");
+                let mut probe =
+                    PtyProbe::spawn(&argv, &cfg, rings, sifter, sink).expect("spawn pty probe");
+
+                let ready =
+                    poll_until(&probe, |m| m.bytes_total >= 1, Duration::from_secs(10)).await;
+                assert!(ready, "pty child never produced its readiness line");
+
+                let start = std::time::Instant::now();
+                probe.cancel();
+                let outcome = probe.wait().await;
+                let elapsed = start.elapsed();
+
+                assert!(
+                    matches!(outcome, Err(PtyProbeError::Cancelled)),
+                    "pty cancel must report the terminal Cancelled state; got {outcome:?}"
+                );
+                assert!(
+                    elapsed >= Duration::from_millis(500),
+                    "a SIGTERM-ignoring PTY child must survive until grace elapses and SIGKILL \
+                     escalates; cancel took {elapsed:?}"
+                );
+                assert!(
+                    elapsed < Duration::from_secs(5),
+                    "SIGKILL escalation must reap the PTY child promptly after grace; \
+                     cancel took {elapsed:?}"
+                );
+            });
+        }
     }
 }
 
@@ -1336,6 +1441,15 @@ mod runtime_win {
 
         /// Cancel the probe. Idempotent. CANCEL = kill child (release any
         /// clients) + drop master (`ClosePseudoConsole` -> reader EOF).
+        ///
+        /// US3b (T042) asymmetry: the grace ladder's GRACEFUL step
+        /// (SIGTERM-then-wait) has no ConPTY equivalent -- Windows has no
+        /// per-process "post a graceful terminate" signal that reaches a
+        /// ConPTY child, so this is forced-kill-only (`config.grace` is not
+        /// honored here). The graceful-then-forced contract is satisfied on
+        /// the unix PTY backend; on Windows the forced kill IS the whole
+        /// ladder, matching the documented platform asymmetry in the command
+        /// probe's `terminate_process_tree_graceful`.
         pub fn cancel(&mut self) {
             self.cancelled.store(true, Ordering::Release);
             // 1. Kill the child to release it. Take the killer out from under

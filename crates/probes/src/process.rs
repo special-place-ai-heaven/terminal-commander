@@ -175,7 +175,7 @@ impl EventSink for InMemorySink {
 /// once, on the last `Arc`.
 #[cfg(windows)]
 #[derive(Debug)]
-struct JobHandle(isize);
+pub(crate) struct JobHandle(isize);
 
 #[cfg(windows)]
 impl Drop for JobHandle {
@@ -308,6 +308,10 @@ impl ProcessProbe {
         // TC-B1: snapshot the strip flag before the config borrow ends; the
         // read tasks own it for the life of the probe.
         let strip_ansi = config.strip_ansi;
+        // US3b (T042): snapshot the grace window before the borrow ends; the
+        // cancel arm waits out a SIGTERM for this long before escalating to
+        // SIGKILL.
+        let grace = config.grace;
 
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
 
@@ -348,12 +352,17 @@ impl ProcessProbe {
             tokio::select! {
                 () = drain => child.wait().await.map_err(ProcessProbeError::Io),
                 _ = &mut cancel_rx => {
-                    kill_process_tree(
+                    // Grace ladder (T042/FR-015): SIGTERM the tree, wait up to
+                    // `grace` for a cooperative exit, then escalate to SIGKILL.
+                    // On Windows the forced TerminateJobObject is the only step
+                    // (no SIGTERM equivalent -- see the helper's doc comment).
+                    terminate_process_tree_graceful(
                         &mut child,
+                        grace,
                         #[cfg(unix)] child_pid,
                         #[cfg(windows)] job_for_task.as_deref(),
-                    );
-                    let _ = child.wait().await;
+                    )
+                    .await;
                     Err(ProcessProbeError::Cancelled)
                 }
             }
@@ -425,6 +434,80 @@ impl ProcessProbe {
             Ok(r) => r,
             Err(e) => Err(ProcessProbeError::Io(std::io::Error::other(e.to_string()))),
         }
+    }
+}
+
+/// Grace-ladder cancel (US3b / T042 / FR-015): attempt a GRACEFUL terminate,
+/// wait up to `grace` for the child to exit on its own, and only then escalate
+/// to the FORCED [`kill_process_tree`]. Returns once the child has been reaped.
+///
+/// Platform semantics -- the contract is "graceful-then-forced", but the
+/// graceful step is necessarily asymmetric:
+///
+/// * Unix: send `SIGTERM` to the child's whole PROCESS GROUP (`kill -s TERM --
+///   -<pgid>`), the same negative-pgid form `kill_process_tree` uses for
+///   `SIGKILL` (see that function for why `-s SIG -- ` is required over the
+///   `-SIG` flag form). A well-behaved program runs its cleanup and exits; the
+///   grace window then observes the exit and NO `SIGKILL` is sent. A program
+///   that ignores `SIGTERM` is escalated to the process-group `SIGKILL` once
+///   `grace` elapses.
+/// * Windows: there is NO `SIGTERM` equivalent for a Job Object -- the OS has
+///   no "post a graceful close to every process in the job" primitive (console
+///   `CTRL_*` events do not reach a GUI-subsystem daemon's job, and Job Objects
+///   have no `WM_CLOSE` fan-out). The forced `TerminateJobObject` is therefore
+///   both the graceful and the forced step; the asymmetry is intentional and
+///   documented. The grace window is skipped on Windows because there is no
+///   softer signal to wait out.
+/// `pub(crate)` so the unix PTY probe in `pty.rs` shares this exact
+/// grace-ladder contract; the Windows signature references the crate-private
+/// `JobHandle`, which is also `pub(crate)`.
+pub(crate) async fn terminate_process_tree_graceful(
+    child: &mut tokio::process::Child,
+    grace: Duration,
+    #[cfg(unix)] pgid: u32,
+    #[cfg(windows)] job: Option<&JobHandle>,
+) {
+    #[cfg(unix)]
+    {
+        // Graceful step: SIGTERM the whole group. Best-effort, mirroring the
+        // SIGKILL path's stdio silencing and ignored status. If `kill` is
+        // absent the child simply never gets the graceful signal and the
+        // escalation below still reaps it via `start_kill`.
+        let _ = std::process::Command::new("kill")
+            .args(["-s", "TERM", "--", &format!("-{pgid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        // Wait up to `grace` for a cooperative exit. A child that handles
+        // SIGTERM and exits within the window is reaped HERE -- no SIGKILL is
+        // ever sent. `child.wait()` reaps the direct child (the group leader);
+        // its descendants, if any, share the group and received the same
+        // SIGTERM.
+        if tokio::time::timeout(grace, child.wait()).await.is_err() {
+            // Grace expired with no cooperative exit: escalate to the forced
+            // process-group SIGKILL, then reap. A cooperative exit inside the
+            // window (the `Ok` case) needs no further action.
+            kill_process_tree(child, pgid);
+            let _ = child.wait().await;
+        }
+    }
+    #[cfg(windows)]
+    {
+        // No graceful Job-Object signal exists (see the doc comment). The
+        // `grace` window is meaningless without a softer signal to wait out,
+        // so go straight to the forced terminate. `_ = grace` keeps the
+        // cross-platform signature honest without an unused-var warning.
+        let _ = grace;
+        kill_process_tree(child, job);
+        let _ = child.wait().await;
+    }
+    // Platforms with neither cfg: best-effort single-process kill, no grace.
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = grace;
+        kill_process_tree(child);
+        let _ = child.wait().await;
     }
 }
 
@@ -1218,5 +1301,111 @@ mod tests {
             n >= 1,
             "non-empty env must OVERLAY (no env_clear) so inherited PATH survives; events={n}"
         );
+    }
+
+    // ---- US3b (T038): grace-ladder cancel (SIGTERM-then-SIGKILL) ----
+
+    /// Spawn `sh -c <script>` as a command probe with the given grace window.
+    /// Unix-only: the grace ladder's graceful step is SIGTERM, which is a POSIX
+    /// concept. Used by the cancel-ladder tests below.
+    #[cfg(unix)]
+    fn spawn_sh_with_grace(script: &str, grace: Duration) -> ProcessProbe {
+        let rings = Arc::new(ContextRingManager::new());
+        let sifter = Arc::new(SifterRuntime::build(&[]).unwrap());
+        let sink: Arc<dyn EventSink> = Arc::new(InMemorySink::new());
+        let mut cfg = ProcessProbeConfig::for_bucket(BucketId::new());
+        cfg.grace = grace;
+        ProcessProbe::spawn(
+            &["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            &cfg,
+            rings,
+            sifter,
+            sink,
+        )
+        .expect("spawn ok")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_ladder_sigterm_handler_exits_within_grace_no_sigkill() {
+        // T038: a child that HANDLES SIGTERM and exits must be reaped during the
+        // grace window WITHOUT a SIGKILL. The child traps TERM and exits 0 on it,
+        // then sleeps far longer than the grace window. If the graceful SIGTERM
+        // works, cancellation completes in well under `grace`; if it did NOT work,
+        // the child would survive until SIGKILL at `grace` (here 5s) -- so a fast
+        // completion is the proof the SIGTERM path drove the exit.
+        let runtime = rt();
+        runtime.block_on(async {
+            let grace = Duration::from_secs(5);
+            // `trap 'exit 0' TERM` + a long sleep; `echo READY` then sleep so the
+            // trap is installed before we cancel.
+            let mut probe = spawn_sh_with_grace("trap 'exit 0' TERM; echo READY; sleep 30", grace);
+            // Give the shell a moment to install the trap.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            let start = std::time::Instant::now();
+            probe.cancel();
+            let outcome = probe.wait().await;
+            let elapsed = start.elapsed();
+
+            assert!(
+                matches!(outcome, Err(ProcessProbeError::Cancelled)),
+                "cancel must report the terminal Cancelled state; got {outcome:?}"
+            );
+            // The cooperative exit must land well inside the grace window. A
+            // generous 3s ceiling (< the 5s grace) keeps the assertion robust on
+            // a slow CI runner while still proving SIGKILL-at-grace was NOT what
+            // ended it.
+            assert!(
+                elapsed < Duration::from_secs(3),
+                "a SIGTERM-handling child must exit during grace (no wait-for-SIGKILL); \
+                 cancel took {elapsed:?}, grace was {grace:?}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_ladder_sigterm_ignored_escalates_to_sigkill() {
+        // T038: a child that IGNORES SIGTERM must be escalated to SIGKILL after
+        // the grace window. The child traps (ignores) TERM and sleeps; a SIGKILL
+        // is uncatchable, so the child can only die via the escalation. We use a
+        // short grace so the test stays well under the nextest 5-min terminate
+        // budget, and assert the child outlived the grace (proving the graceful
+        // step was attempted and waited out) yet was still reaped (proving the
+        // forced escalation fired).
+        let runtime = rt();
+        runtime.block_on(async {
+            let grace = Duration::from_millis(700);
+            // `trap '' TERM` makes SIGTERM a no-op; only SIGKILL can end it.
+            let mut probe = spawn_sh_with_grace("trap '' TERM; echo READY; sleep 30", grace);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            let start = std::time::Instant::now();
+            probe.cancel();
+            let outcome = probe.wait().await;
+            let elapsed = start.elapsed();
+
+            assert!(
+                matches!(outcome, Err(ProcessProbeError::Cancelled)),
+                "cancel must report the terminal Cancelled state; got {outcome:?}"
+            );
+            // The SIGTERM was ignored, so the child could only be reaped AFTER the
+            // grace window elapsed and SIGKILL was sent. Allow a little scheduling
+            // slack below the grace floor.
+            assert!(
+                elapsed >= Duration::from_millis(500),
+                "a SIGTERM-ignoring child must survive until the grace window \
+                 elapses and SIGKILL escalates; cancel took {elapsed:?}, grace {grace:?}"
+            );
+            // And it MUST eventually be reaped (the whole point of escalation):
+            // a generous upper bound that a hung kill would blow past, failing
+            // fast instead of wedging.
+            assert!(
+                elapsed < Duration::from_secs(5),
+                "SIGKILL escalation must reap the child promptly after grace; \
+                 cancel took {elapsed:?}"
+            );
+        });
     }
 }

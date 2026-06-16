@@ -14,6 +14,12 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# US3b (TC55/T041): event-driven file backend on native filesystems
+# (inotify/FSEvents/ReadDirectoryChangesW). WSL `/mnt/c` (9p/drvfs) is
+# detected via /proc/self/mountinfo and falls back to the re-stat poll
+# loop, because inotify is silently non-functional across the 9P boundary
+# (microsoft/WSL#4739). License: CC0-1.0 / Artistic-2.0.
+notify = { workspace = true }
 parking_lot = "0.12.5"
 terminal-commander-core.workspace = true
 terminal-commander-sifters = { version = "0.1.49", path = "../sifters" } # x-release-please-version

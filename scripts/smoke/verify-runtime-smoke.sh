@@ -42,10 +42,39 @@
 # Required external tools:
 #   - cargo (with the workspace built or buildable)
 #   - python3 (used by the JSON-RPC pump and JSON assertions)
+#
+# Platform coverage (US3b / T040): this smoke is the tier-1 daemon + MCP
+# verification on Linux/WSL AND macOS (FR-013). The POSIX runtime path
+# (UDS, pty-process, process-group cancel) is shared `cfg(unix)` code, so
+# the same script drives both. On macOS the only nuance is the toolchain
+# location: Homebrew installs cargo/python3 under /opt/homebrew/bin
+# (Apple Silicon) or /usr/local/bin (Intel), which a non-login shell may
+# not have on PATH -- the preamble below adds them when present.
 
 set -euo pipefail
 
 err() { echo "verify-runtime-smoke: $*" >&2; }
+
+# US3b / T040: on macOS, ensure Homebrew bin dirs are on PATH so a
+# non-login invocation still finds cargo / python3 / jq. No-op elsewhere
+# and harmless if the dirs are absent or already present.
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    Darwin)
+        for brew_bin in /opt/homebrew/bin /usr/local/bin; do
+            if [[ -d "$brew_bin" ]] && [[ ":$PATH:" != *":$brew_bin:"* ]]; then
+                PATH="$brew_bin:$PATH"
+            fi
+        done
+        export PATH
+        err "platform: macOS ($(uname -m)) -- tier-1 POSIX runtime smoke"
+        ;;
+    Linux)
+        err "platform: Linux/WSL -- tier-1 POSIX runtime smoke"
+        ;;
+    *)
+        err "platform: $(uname -s 2>/dev/null || echo unknown) -- attempting POSIX smoke"
+        ;;
+esac
 
 need() {
     if ! command -v "$1" >/dev/null 2>&1; then

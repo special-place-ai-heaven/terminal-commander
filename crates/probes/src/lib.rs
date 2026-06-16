@@ -7,15 +7,21 @@
 //! through an `EventSink`.
 //!
 //! Implementation note: MVP uses `tokio::process::Command` directly.
-//! `process-wrap`'s POSIX process-group integration is named in the
-//! TC15 mini-spec; the swap is recorded in the goal-file decision
-//! lock and deferred to a follow-up. Cancellation here is best-effort
-//! via `Child::start_kill` (SIGKILL on Unix, TerminateProcess on
-//! Windows); a graceful SIGTERM-first ladder lands when the
-//! process-wrap swap happens.
+//! The child is made its own process-group leader (`process_group(0)`)
+//! so cancellation can signal the whole tree.
 //!
-//! Source-status: live (TC15) for non-interactive process probing
-//! and event emission. Job lifecycle + exit events land in TC16.
+//! Cancellation is a GRACE LADDER (US3b / T042 / FR-015): SIGTERM the
+//! child's process group, wait up to `ProcessProbeConfig::grace` for a
+//! cooperative exit, then escalate to a process-group SIGKILL. On
+//! Windows there is no SIGTERM equivalent for a Job Object, so the
+//! forced `TerminateJobObject` is both steps (documented asymmetry --
+//! see `terminate_process_tree_graceful`). The same ladder backs the
+//! unix PTY probe's cancel, so command / PTY / shell-session stop share
+//! one contract.
+//!
+//! Source-status: live (TC15) for non-interactive process probing and
+//! event emission; grace-ladder cancel live on unix (US3b), Windows
+//! forced-only by platform constraint. Job lifecycle + exit events in TC16.
 
 pub mod ansi;
 pub mod directory;
@@ -33,7 +39,8 @@ pub use directory::{
 pub use ansi::strip_ansi;
 pub use file::{
     DEFAULT_POLL_INTERVAL, FileProbe, FileProbeConfig, FileProbeError, FileProbeMetrics,
-    FileProbeMode, spawn_with_sink as spawn_file_probe_with_sink,
+    FileProbeMode, FileWatchBackend, backend_from_mountinfo, select_backend_for_path,
+    spawn_with_sink as spawn_file_probe_with_sink,
 };
 pub use noise_pipeline::{
     PASSWORD_PROMPT_KIND, ProbeNoisePipeline, SharedProbeNoisePipeline, SuppressionCounter,

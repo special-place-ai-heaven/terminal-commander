@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! File probe (TC18). Polls a file path, handles create-after-start,
+//! File probe (TC18). Follows a file path, handles create-after-start,
 //! truncation, and rotation; emits normalized SourceFrame instances
 //! to the sifter runtime via the same EventSink as the process probe.
 //!
-//! Source-status: live (TC18) using a portable polling
-//! implementation. The notify/notify-debouncer-full path noted in
-//! the TC18 mini-spec is deferred to a follow-up.
+//! Source-status: live. Native filesystems use an event-driven `notify`
+//! backend (US3b / T041) so a change is observed within OS-notification
+//! latency; WSL `/mnt/c` (9p/drvfs) keeps the re-stat polling backend,
+//! because inotify is silently non-functional across the 9P boundary
+//! (microsoft/WSL#4739). The backend is chosen per-path via
+//! `/proc/self/mountinfo` (see `select_backend_for_path`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -97,6 +100,101 @@ impl FileIdentity {
 /// Default polling interval.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Which low-level mechanism the file probe uses to learn that a watched
+/// file changed.
+///
+/// US3b (T041): native filesystems get an event-driven `notify` watcher so
+/// a change is observed within OS-notification latency instead of waiting
+/// out a poll interval. WSL `/mnt/c` (9p/drvfs) keeps the re-stat poll loop:
+/// inotify is silently non-functional across the 9P boundary
+/// (microsoft/WSL#4739) -- `inotify_add_watch` succeeds but no events are
+/// ever delivered, so an event-driven watcher there would hang forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileWatchBackend {
+    /// Event-driven OS notifications (inotify / FSEvents / `ReadDirectoryChangesW`).
+    Notify,
+    /// Periodic re-stat polling. The WSL 9P fallback and the universal
+    /// platform floor.
+    Poll,
+}
+
+/// Decide the watch backend for `target` from a `/proc/self/mountinfo`-format
+/// string.
+///
+/// Pure and fixture-testable: the same longest-mount-point-prefix match the
+/// store's 9P guard uses, so a path whose owning mount is filesystem type `9p`
+/// selects [`FileWatchBackend::Poll`] and everything else selects
+/// [`FileWatchBackend::Notify`].
+///
+/// `mountinfo` lines look like:
+/// `36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue`
+/// where field index 4 is the mount point and the token immediately after
+/// the `-` separator is the filesystem type.
+#[must_use]
+pub fn backend_from_mountinfo(mountinfo: &str, target: &std::path::Path) -> FileWatchBackend {
+    let target_str = target.to_string_lossy();
+    let mut best: Option<(&str, &str)> = None;
+    for line in mountinfo.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(dash_idx) = fields.iter().position(|&f| f == "-") else {
+            continue;
+        };
+        if fields.len() < 5 || dash_idx + 1 >= fields.len() {
+            continue;
+        }
+        let mount_point = fields[4];
+        let fs_type = fields[dash_idx + 1];
+        // Longest-prefix match: a path under `/mnt/c` must bind to the
+        // `/mnt/c` 9p mount, not the `/` 9p (or ext4) root above it.
+        if path_has_mount_prefix(&target_str, mount_point) {
+            match best {
+                None => best = Some((mount_point, fs_type)),
+                Some((bmp, _)) if mount_point.len() > bmp.len() => {
+                    best = Some((mount_point, fs_type));
+                }
+                _ => {}
+            }
+        }
+    }
+    match best {
+        // WSL drvfs mounts report fs type `9p`; treat it as poll-only.
+        Some((_, "9p")) => FileWatchBackend::Poll,
+        _ => FileWatchBackend::Notify,
+    }
+}
+
+/// True when `mount_point` is a path-component prefix of `target`. Avoids
+/// the false match where `/mnt/c2` would otherwise be claimed by `/mnt/c`
+/// under a naive `starts_with`. The root mount `/` matches everything.
+fn path_has_mount_prefix(target: &str, mount_point: &str) -> bool {
+    if mount_point == "/" {
+        return true;
+    }
+    target
+        .strip_prefix(mount_point)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Choose the watch backend for `path` on this host.
+///
+/// Reads `/proc/self/mountinfo` when present (Linux/WSL) and applies
+/// [`backend_from_mountinfo`]; on every other platform there is no 9P
+/// boundary to worry about, so the native event-driven backend is used.
+#[must_use]
+pub fn select_backend_for_path(path: &std::path::Path) -> FileWatchBackend {
+    let mountinfo_path = std::path::Path::new("/proc/self/mountinfo");
+    let Ok(mountinfo) = std::fs::read_to_string(mountinfo_path) else {
+        // Not Linux/WSL (or unreadable): no 9P boundary, use notify.
+        return FileWatchBackend::Notify;
+    };
+    // Resolve to an absolute path so the mount-point prefix match is
+    // meaningful; fall back to the raw path if canonicalize fails (e.g.
+    // a watch-for-create path that does not exist yet -- its parent is
+    // what matters, and the raw absolute form still prefix-matches).
+    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    backend_from_mountinfo(&mountinfo, &abs)
+}
+
 /// File probe mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileProbeMode {
@@ -116,6 +214,11 @@ pub struct FileProbeConfig {
     pub path: PathBuf,
     pub mode: FileProbeMode,
     pub poll_interval: Duration,
+    /// Which low-level change-detection mechanism the probe drives. US3b
+    /// (T041): defaults to event-driven [`FileWatchBackend::Notify`]; the
+    /// daemon overrides it with [`select_backend_for_path`] so WSL `/mnt/c`
+    /// (9p) watches fall back to polling.
+    pub backend: FileWatchBackend,
 }
 
 impl FileProbeConfig {
@@ -128,6 +231,7 @@ impl FileProbeConfig {
             path,
             mode: FileProbeMode::FollowEnd,
             poll_interval: DEFAULT_POLL_INTERVAL,
+            backend: FileWatchBackend::Notify,
         }
     }
     /// Construct a follow-beginning config.
@@ -139,6 +243,7 @@ impl FileProbeConfig {
             path,
             mode: FileProbeMode::FollowBeginning,
             poll_interval: DEFAULT_POLL_INTERVAL,
+            backend: FileWatchBackend::Notify,
         }
     }
 }
@@ -233,7 +338,76 @@ impl FileProbe {
     }
 }
 
+/// Safety-net re-stat interval used by the event-driven backend. Even with
+/// a healthy `notify` watcher the probe still wakes this often to (a) catch
+/// the brief window before a watch-for-create directory watch is armed, (b)
+/// survive a dropped/over-flowed watcher, and (c) make the FollowEnd initial
+/// seek + first read happen without depending on an event. It is far longer
+/// than the poll interval -- events do the fast work; this is only a floor.
+const NOTIFY_SAFETY_NET_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Event-driven change signal backing [`FileWatchBackend::Notify`].
+///
+/// Owns a `notify::RecommendedWatcher` (inotify / FSEvents /
+/// `ReadDirectoryChangesW`) that watches the PARENT DIRECTORY of the target,
+/// not the file itself: a logrotate `create` / atomic-rename swaps the inode,
+/// which a file-level inotify watch loses but a directory watch still sees as
+/// a create/rename event. Every raw event is coalesced into a single readiness
+/// signal on a bounded channel -- the probe re-stats and reads on each signal,
+/// so collapsing a burst of N events into one wake-up loses nothing.
+struct FileChangeWatcher {
+    /// Held to keep the OS watch alive; dropping it stops notifications.
+    _watcher: notify::RecommendedWatcher,
+    /// Readiness signals. Capacity 1 with a non-blocking sender: a backlog
+    /// is meaningless (the probe always re-reads everything new), so extra
+    /// events are dropped rather than queued.
+    rx: tokio::sync::mpsc::Receiver<()>,
+}
+
+impl FileChangeWatcher {
+    /// Build a directory watch for `path`'s parent. Returns `None` if a
+    /// watcher cannot be created or armed (caller then falls back to the
+    /// poll wait, never failing the probe).
+    fn new(path: &std::path::Path) -> Option<Self> {
+        use notify::Watcher as _;
+
+        let (event_tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+        let mut watcher =
+            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                // Any successful event = "something changed, go re-stat".
+                // A try_send failure means a signal is already pending
+                // (capacity 1) -- exactly the coalescing we want. Errors
+                // are dropped; the safety-net interval still re-reads.
+                if res.is_ok() {
+                    let _ = event_tx.try_send(());
+                }
+            })
+            .ok()?;
+
+        // Watch the parent directory non-recursively so create / rename /
+        // modify of the target file are all observed. Fall back to watching
+        // the file's own path if it has no parent (e.g. a bare filename).
+        let watch_target = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map_or_else(|| path.to_path_buf(), std::path::Path::to_path_buf);
+        watcher
+            .watch(&watch_target, notify::RecursiveMode::NonRecursive)
+            .ok()?;
+
+        Some(Self {
+            _watcher: watcher,
+            rx,
+        })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
+// The follow loop is one tightly-coupled lifecycle (open, detect
+// rotation/truncation, read new lines, wait for the next change signal);
+// splitting it would obscure the shared `pos`/`last_size`/`last_identity`
+// state more than the length costs.
+#[allow(clippy::too_many_lines)]
 async fn run(
     config: FileProbeConfig,
     probe_id: ProbeId,
@@ -251,6 +425,15 @@ async fn run(
     // atomic-rename — is still detected and `pos` reset to 0.
     let mut last_identity: Option<FileIdentity> = None;
     let mut noise_pipeline = ProbeNoisePipeline::with_default_policy();
+
+    // US3b (T041): arm the event-driven watcher on native filesystems. On
+    // the poll backend (WSL 9P) or when a watcher cannot be created, this
+    // stays `None` and the loop uses the short re-stat tick. A `None` here
+    // is always safe -- it degrades to the existing polling behavior.
+    let mut watcher = match config.backend {
+        FileWatchBackend::Notify => FileChangeWatcher::new(&config.path),
+        FileWatchBackend::Poll => None,
+    };
 
     loop {
         if cancel_rx.try_recv().is_ok() {
@@ -366,10 +549,21 @@ async fn run(
                 }
             }
         }
-        // Wait for the next poll tick or cancellation.
-        tokio::select! {
-            () = tokio::time::sleep(config.poll_interval) => {}
-            _ = &mut cancel_rx => return Err(FileProbeError::Cancelled),
+        // Wait for the next change signal or cancellation. The event-driven
+        // backend wakes on an OS notification (within notification latency)
+        // OR a long safety-net interval OR cancel; the poll backend keeps
+        // the short re-stat tick (WSL 9P, where notify never fires).
+        if let Some(w) = watcher.as_mut() {
+            tokio::select! {
+                _ = w.rx.recv() => {}
+                () = tokio::time::sleep(NOTIFY_SAFETY_NET_INTERVAL) => {}
+                _ = &mut cancel_rx => return Err(FileProbeError::Cancelled),
+            }
+        } else {
+            tokio::select! {
+                () = tokio::time::sleep(config.poll_interval) => {}
+                _ = &mut cancel_rx => return Err(FileProbeError::Cancelled),
+            }
         }
     }
 }
@@ -793,6 +987,127 @@ mod tests {
                 "the new file's leading line must be read from the head (no dropped \
                  bytes / corrupt fragment); emitted kinds: {:?}",
                 drained.iter().map(|d| d.kind.as_str()).collect::<Vec<_>>()
+            );
+            let _ = std::fs::remove_file(&p);
+        });
+    }
+
+    // ---- US3b (T037): notify backend + 9P poll-fallback selection ----
+
+    #[test]
+    fn backend_selection_9p_mountinfo_selects_poll() {
+        // T037(b): the WSL 9P fixture must select the POLL fallback. We
+        // cannot mount a real 9P filesystem in CI, so we assert the
+        // backend-SELECTION decision against the recorded mountinfo
+        // fixture -- the same detection the daemon wires in `start`.
+        let mountinfo =
+            include_str!("../../../tests/fixtures/probes/wsl-mountinfo/wsl2-9p-drvfs.mountinfo");
+        // A path under /mnt/c (a `9p drvfs` mount in the fixture) -> Poll.
+        assert_eq!(
+            backend_from_mountinfo(mountinfo, std::path::Path::new("/mnt/c/Users/dev/app.log")),
+            FileWatchBackend::Poll,
+            "a /mnt/c path on the 9p fixture must fall back to polling"
+        );
+        // The 9P root `/` in this fixture is also `9p` -> Poll.
+        assert_eq!(
+            backend_from_mountinfo(mountinfo, std::path::Path::new("/home/dev/native.log")),
+            FileWatchBackend::Poll,
+            "a path on the 9p root mount must fall back to polling"
+        );
+    }
+
+    #[test]
+    fn backend_selection_native_mountinfo_selects_notify() {
+        // T037(b) negative: native ext4 / tmpfs roots must select the
+        // event-driven notify backend.
+        let native =
+            include_str!("../../../tests/fixtures/probes/wsl-mountinfo/native-linux.mountinfo");
+        assert_eq!(
+            backend_from_mountinfo(native, std::path::Path::new("/home/dev/app.log")),
+            FileWatchBackend::Notify,
+            "an ext4 path must use the event-driven backend"
+        );
+        let ext4 = include_str!("../../../tests/fixtures/probes/wsl-mountinfo/wsl2-ext4.mountinfo");
+        assert_eq!(
+            backend_from_mountinfo(ext4, std::path::Path::new("/home/dev/projects/app.log")),
+            FileWatchBackend::Notify,
+            "a WSL2 ext4 (Linux-native) path must use the event-driven backend"
+        );
+    }
+
+    #[test]
+    fn backend_selection_longest_prefix_not_naive_substring() {
+        // `/mnt/c` (9p) must not steal a `/mnt/c2` path (a hypothetical
+        // sibling mount). The component-aware prefix match guards this.
+        let mountinfo = "\
+    1 0 0:1 / / rw - ext4 /dev/root rw
+    2 1 0:2 / /mnt/c rw - 9p drvfs rw
+    3 1 0:3 / /mnt/c2 rw - ext4 /dev/sdc rw
+    ";
+        assert_eq!(
+            backend_from_mountinfo(mountinfo, std::path::Path::new("/mnt/c2/app.log")),
+            FileWatchBackend::Notify,
+            "/mnt/c2 (ext4) must not be captured by the /mnt/c (9p) mount"
+        );
+        assert_eq!(
+            backend_from_mountinfo(mountinfo, std::path::Path::new("/mnt/c/app.log")),
+            FileWatchBackend::Poll,
+            "/mnt/c (9p) itself must still select poll"
+        );
+    }
+
+    #[test]
+    fn notify_backend_picks_up_native_append() {
+        // T037(a): a change on a NATIVE filesystem must yield a prompt
+        // event through the event-driven `notify` backend -- no dependence
+        // on the slow poll interval. The probe is spawned with
+        // `backend = Notify` and a deliberately LONG poll_interval so a
+        // pass proves the notify path (not a poll tick) drove the read.
+        let runtime = rt();
+        runtime.block_on(async {
+            let p = temp_path("notify-append");
+            let _ = std::fs::remove_file(&p);
+            {
+                let mut f = std::fs::File::create(&p).unwrap();
+                writeln!(f, "ERROR before-start").unwrap(); // skipped (FollowEnd)
+            }
+            let rings = Arc::new(ContextRingManager::new());
+            let sifter = Arc::new(SifterRuntime::build(&[rule_error()]).unwrap());
+            let mut cfg = FileProbeConfig::follow_end(p.clone(), BucketId::new());
+            cfg.backend = FileWatchBackend::Notify;
+            // Long poll interval: if this test passes, the notify watcher
+            // (not a poll tick) is what woke the probe.
+            cfg.poll_interval = Duration::from_secs(30);
+            let (mut probe, _sink) = spawn_with_sink(cfg, rings, sifter).unwrap();
+
+            // Let the probe seek to end and arm the directory watch.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            {
+                let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+                writeln!(f, "ERROR after-start").unwrap();
+                f.flush().unwrap();
+            }
+            // Poll the probe metrics for up to ~3s; a notify-driven read
+            // completes in well under that. Far below the 30s poll tick and
+            // the nextest 5-min terminate budget, so a real failure fails
+            // fast instead of hanging.
+            let mut picked_up = false;
+            for _ in 0..30 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if probe.metrics().frames_total >= 1 {
+                    picked_up = true;
+                    break;
+                }
+            }
+            probe.cancel();
+            let _ = probe.wait().await;
+            let m = probe.metrics();
+            assert!(
+                picked_up && m.events_emitted >= 1,
+                "event-driven notify backend must pick up a native-fs append \
+                 without waiting out the poll interval; frames={}, events={}",
+                m.frames_total,
+                m.events_emitted
             );
             let _ = std::fs::remove_file(&p);
         });

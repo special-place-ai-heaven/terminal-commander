@@ -317,6 +317,13 @@ impl WatchRuntime {
         };
         cfg.probe_id = Some(probe_id);
         cfg.poll_interval = Duration::from_millis(120);
+        // US3b (T041): pick the event-driven `notify` backend on native
+        // filesystems; WSL `/mnt/c` (9p/drvfs) -- where inotify is silently
+        // non-functional (microsoft/WSL#4739) -- falls back to the poll loop.
+        // Detected via /proc/self/mountinfo, the same signal the store's 9P
+        // guard uses. The 120ms poll_interval above is retained as the WSL
+        // fallback cadence and the universal floor.
+        cfg.backend = terminal_commander_probes::select_backend_for_path(&path);
 
         let probe = FileProbe::spawn(cfg, Arc::clone(&self.rings), Arc::clone(&sifter), sink)?;
 

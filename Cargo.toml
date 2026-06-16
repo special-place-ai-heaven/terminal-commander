@@ -50,8 +50,8 @@ rmcp = { version = "=1.7.0", features = ["server", "macros", "transport-io"] }  
 uuid = { version = "1", features = ["v4"] }   # subscriptions boot_id (Phase 1)
 # rusqlite = { version = "0.39", features = ["bundled"] }    # TC12
 # refinery = { version = "0.9" }                              # TC12
-# notify = { version = "8.2" }                                # TC18
-# notify-debouncer-full = { version = "0.7" }                 # TC18
+notify = { version = "8.2" }                                  # TC18/US3b: event-driven file backend (native FS)
+# notify-debouncer-full = { version = "0.7" }                 # TC18 (unused: the probe coalesces via its own re-stat loop)
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
