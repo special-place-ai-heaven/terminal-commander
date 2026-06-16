@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "go",
+    "version": 1,
+    "description": "Go toolchain (build/test/vet) error rules."
+  },
+  "rules": [
+    {
+      "id": "go.compile-error",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "compile_error",
+      "stream": "stderr",
+      "description": "A Go compiler error with a file:line:col locator.",
+      "pattern": "^(?P<file>[A-Za-z0-9_./-]+\\.go):(?P<line>[0-9]+):(?P<col>[0-9]+): (?P<message>.+)$",
+      "captures": ["file", "line", "col", "message"],
+      "summary_template": "${file}:${line}: ${message}",
+      "tags": ["build", "go"],
+      "rate_limit_per_min": 60,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 2 }
+    },
+    {
+      "id": "go.test-fail",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "test_failed",
+      "stream": "stdout",
+      "description": "A failing Go test line.",
+      "pattern": "^--- FAIL: (?P<test>[^ ]+)",
+      "captures": ["test"],
+      "summary_template": "test failed: ${test}",
+      "tags": ["test", "go"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "go.module-error",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "command_failed",
+      "stream": "stderr",
+      "description": "A Go module resolution error.",
+      "keywords": ["cannot find module", "missing go.sum entry", "unknown revision"],
+      "captures": [],
+      "summary_template": "go module error",
+      "tags": ["build", "go"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    }
+  ]
+}

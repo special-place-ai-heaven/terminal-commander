@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "choco",
+    "version": 1,
+    "description": "Chocolatey (choco) Windows package manager error rules."
+  },
+  "rules": [
+    {
+      "id": "choco.not-found",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "missing_package",
+      "stream": "stdout",
+      "description": "Chocolatey could not find a package.",
+      "pattern": "(?P<package>[^ ]+) not installed. The package was not found",
+      "captures": ["package"],
+      "summary_template": "choco: package not found ${package}",
+      "tags": ["packaging", "windows", "choco"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "choco.install-failed",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "command_failed",
+      "stream": "stdout",
+      "description": "A Chocolatey install or upgrade failed.",
+      "keywords": ["The install of", "failed. The exit code", "Failures"],
+      "captures": [],
+      "summary_template": "choco: install failed",
+      "tags": ["packaging", "windows", "choco"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 1, "after_lines": 1 }
+    },
+    {
+      "id": "choco.checksum-error",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "integrity_error",
+      "stream": "stdout",
+      "description": "Checksum verification failed for a download.",
+      "keywords": ["checksum for", "did not meet", "Checksum failed"],
+      "captures": [],
+      "summary_template": "choco: checksum failed",
+      "tags": ["packaging", "windows", "choco"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    }
+  ]
+}

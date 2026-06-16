@@ -389,6 +389,13 @@ pub struct CommandRuntime {
     /// dependency of the live job. The same single-writer actor the audit
     /// sink uses, so receipt writes serialize with audit rows.
     store: StoreClient,
+    /// US2 (FR-009): when true, baseline LOW-severity universal
+    /// extractors are merged into a job's sifter when no tool-specific
+    /// active rule applies. Set from `[sifters] universal_extractors`
+    /// at bootstrap via [`CommandRuntime::with_universal_extractors`];
+    /// defaults false so the signal stream is exactly what the
+    /// operator opted into.
+    universal_extractors: bool,
 }
 
 impl std::fmt::Debug for CommandRuntime {
@@ -437,7 +444,18 @@ impl CommandRuntime {
             lifecycle_tasks: Arc::new(parking_lot::Mutex::new(tokio::task::JoinSet::new())),
             dedup: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::default())),
             store,
+            universal_extractors: false,
         }
+    }
+
+    /// US2 (FR-009): set whether baseline universal extractors are
+    /// merged into a job's sifter when no tool-specific rule applies.
+    /// Builder consumed at bootstrap from the `[sifters]
+    /// universal_extractors` config flag. Defaults false.
+    #[must_use]
+    pub const fn with_universal_extractors(mut self, enabled: bool) -> Self {
+        self.universal_extractors = enabled;
+        self
     }
 
     /// Validate argv shape before policy. Bounded sizes only.
@@ -491,6 +509,77 @@ impl CommandRuntime {
         // Windows would already be caught above; the loop handles
         // both cases.
         None
+    }
+
+    /// US2 (FR-011): map `argv[0]`'s basename to a known curated pack
+    /// id, or `None` if the tool is unrecognized. Static table; the
+    /// values MUST be names in the store's seed-pack set.
+    ///
+    /// Recognition is by basename only (path-tail + Windows `.exe`
+    /// stripped) so `/usr/bin/docker` and `docker.exe` both resolve.
+    fn pack_for_argv0(argv0: &str) -> Option<&'static str> {
+        let mut basename = std::path::Path::new(argv0)
+            .file_name()
+            .and_then(|os| os.to_str())
+            .unwrap_or(argv0);
+        // Strip a trailing `.exe`/`.EXE` (Windows) for the lookup.
+        if let Some(stripped) = basename
+            .strip_suffix(".exe")
+            .or_else(|| basename.strip_suffix(".EXE"))
+        {
+            basename = stripped;
+        }
+        // Static basename -> pack id map. Every value is a seed pack
+        // registered in `terminal_commander_store::SEED_PACKS`.
+        let pack = match basename {
+            "docker" => "docker",
+            "kubectl" => "kubectl",
+            "git" => "git",
+            "pip" | "pip3" => "pip",
+            "uv" => "uv",
+            "go" => "go",
+            "journalctl" | "systemctl" => "systemd",
+            "msbuild" => "msbuild",
+            "winget" => "winget",
+            "choco" => "choco",
+            "terraform" => "terraform",
+            "ansible" | "ansible-playbook" => "ansible",
+            "dotnet" => "dotnet",
+            "bundle" | "bundler" => "bundler",
+            "yarn" => "yarn",
+            "pnpm" => "pnpm",
+            "ssh" => "ssh",
+            "apt" | "apt-get" => "apt",
+            "cargo" => "cargo",
+            "npm" => "npm",
+            "pytest" => "pytest",
+            "gcc" | "g++" | "cc" => "gcc",
+            "make" => "make",
+            _ => return None,
+        };
+        Some(pack)
+    }
+
+    /// US2 (FR-011): compute the optional `pack_available` hint for a
+    /// command start. Returns `Some` only when `argv[0]` maps to a
+    /// known pack AND no currently-active rule belongs to that pack
+    /// (so an agent that already imported the pack is not nagged).
+    ///
+    /// "Pack active" is decided by rule-id prefix: a pack `docker`
+    /// owns every rule id `docker.*`. The check is over the
+    /// scope-resolved active rule set for this job.
+    fn pack_hint_for(
+        argv0: &str,
+        active: &[terminal_commander_core::RuleDefinition],
+    ) -> Option<terminal_commander_ipc::PackAvailableHint> {
+        let pack = Self::pack_for_argv0(argv0)?;
+        let prefix = format!("{pack}.");
+        let already_active = active.iter().any(|r| r.id.starts_with(&prefix));
+        if already_active {
+            None
+        } else {
+            Some(terminal_commander_ipc::PackAvailableHint::for_pack(pack))
+        }
     }
 
     /// Audit one row through the persistent sink. Best-effort: an
@@ -608,6 +697,10 @@ impl CommandRuntime {
                         bucket_id: entry.bucket_id,
                         probe_id: entry.probe_id,
                         cursor: 0,
+                        // Dedup hit returns the EXISTING job verbatim; the
+                        // pack hint (if any) was already surfaced on the
+                        // original start, so we do not re-attach it.
+                        hint: None,
                     });
                 }
                 // Stale fallback entry the TTL backstop should have
@@ -723,8 +816,23 @@ impl CommandRuntime {
         let active_for_job = self
             .activation
             .snapshot_for_job(bucket_id, job_id, probe_id);
-        let merged_rules: Vec<RuleDefinition> =
+        // US2 (FR-011): compute the pack-available hint while argv +
+        // the scoped active set are both in hand. The hint is advisory
+        // and activates nothing. `req.argv[0]` is the program for both
+        // lanes (the shell lane sets argv[0] = the interpreter, which
+        // never maps to a tool pack, so it yields None).
+        let pack_hint = Self::pack_hint_for(&req.argv[0], &active_for_job);
+        let mut merged_rules: Vec<RuleDefinition> =
             merge_active_and_inline(&active_for_job, &req.rules);
+        // US2 (FR-009): when the operator enabled universal extractors
+        // AND this command has NO tool-specific rule (no scoped active
+        // rule and no inline rule), merge the always-on LOW-severity
+        // baseline so the command still emits bounded structured signal.
+        // Universals never compete with a real pack: if any rule is
+        // already present we leave the set untouched.
+        if self.universal_extractors && merged_rules.is_empty() {
+            merged_rules = terminal_commander_sifters::universal_extractor_rules();
+        }
         let sifter = Arc::new(
             SifterRuntime::build(&merged_rules).map_err(|e| CommandError::Sifter(e.to_string()))?,
         );
@@ -1083,6 +1191,7 @@ impl CommandRuntime {
             bucket_id,
             probe_id,
             cursor: 0,
+            hint: pack_hint,
         })
     }
 

@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "yarn",
+    "version": 1,
+    "description": "Yarn (JavaScript package manager) error rules."
+  },
+  "rules": [
+    {
+      "id": "yarn.error-line",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "command_failed",
+      "stream": "stderr",
+      "description": "A yarn error line.",
+      "pattern": "^error (?P<message>.+)$",
+      "captures": ["message"],
+      "summary_template": "yarn error: ${message}",
+      "tags": ["packaging", "javascript", "yarn"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "yarn.package-not-found",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "missing_package",
+      "stream": "stderr",
+      "description": "Yarn could not find a requested package.",
+      "keywords": ["Couldn't find package", "Package not found"],
+      "captures": [],
+      "summary_template": "yarn: package not found",
+      "tags": ["packaging", "javascript", "yarn"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "yarn.lockfile-mismatch",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "medium",
+      "event_kind": "lockfile_error",
+      "stream": "stderr",
+      "description": "The lockfile needs an update but the run is frozen.",
+      "keywords": ["Your lockfile needs to be updated", "--frozen-lockfile"],
+      "captures": [],
+      "summary_template": "yarn: lockfile out of date",
+      "tags": ["packaging", "javascript", "yarn"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    }
+  ]
+}

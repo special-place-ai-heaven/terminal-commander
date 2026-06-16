@@ -434,6 +434,7 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::RegistryImportPack(_) => "registry_import_pack",
         IpcRequest::RegistryDeactivate(_) => "registry_deactivate",
         IpcRequest::RegistryListActive(_) => "registry_list_active",
+        IpcRequest::RegistrySuggestFromSamples(_) => "registry_suggest_from_samples",
         IpcRequest::FileReadWindow(_) => "file_read_window",
         IpcRequest::FileSearch(_) => "file_search",
         IpcRequest::FileWatchStart(_) => "file_watch_start",
@@ -661,6 +662,11 @@ async fn dispatch(
         }
         IpcRequest::RegistryListActive(p) => {
             let r = handlers::registry::handle_registry_list_active(state, p);
+            IpcResult::Ok { response: r }
+        }
+        IpcRequest::RegistrySuggestFromSamples(p) => {
+            // Pure heuristic suggestion; never activates/persists.
+            let r = handlers::registry::handle_registry_suggest_from_samples(p);
             IpcResult::Ok { response: r }
         }
         IpcRequest::FileReadWindow(p) => match handlers::file::handle_file_read_window(state, p) {

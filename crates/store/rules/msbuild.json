@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "msbuild",
+    "version": 1,
+    "description": "MSBuild / .NET build error and warning rules."
+  },
+  "rules": [
+    {
+      "id": "msbuild.error",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "compile_error",
+      "stream": "stdout",
+      "description": "An MSBuild error with a code and message.",
+      "pattern": ": error (?P<code>[A-Z]+[0-9]+): (?P<message>.+)$",
+      "captures": ["code", "message"],
+      "summary_template": "${code}: ${message}",
+      "tags": ["build", "dotnet", "msbuild"],
+      "rate_limit_per_min": 60,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "msbuild.warning",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "low",
+      "event_kind": "warning",
+      "stream": "stdout",
+      "description": "An MSBuild warning with a code and message.",
+      "pattern": ": warning (?P<code>[A-Z]+[0-9]+): (?P<message>.+)$",
+      "captures": ["code", "message"],
+      "summary_template": "${code}: ${message}",
+      "tags": ["build", "dotnet", "msbuild"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 0 }
+    },
+    {
+      "id": "msbuild.build-failed",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "critical",
+      "event_kind": "command_failed",
+      "stream": "stdout",
+      "description": "MSBuild reported the build failed.",
+      "keywords": ["Build FAILED.", "Build failed with"],
+      "captures": [],
+      "summary_template": "msbuild: build FAILED",
+      "tags": ["build", "dotnet", "msbuild"],
+      "rate_limit_per_min": 6,
+      "redact": [],
+      "context_hint": { "before_lines": 2, "after_lines": 0 }
+    }
+  ]
+}

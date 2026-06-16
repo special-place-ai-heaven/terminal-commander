@@ -91,20 +91,20 @@ ledger fixes. Gates O-02; closes SC-001/008/009/010/011.
 
 ### Tests for User Story 2 (write first)
 
-- [ ] T025 [P] [US2] Unit tests for suggestion heuristics in `crates/sifters/src/` (or new `suggest.rs`): error/warning/FAILED/path detection; empty-proposal case.
-- [ ] T026 [P] [US2] Closed-loop e2e `crates/mcp/tests/suggest_loop_e2e.rs`: suggest -> assert NOT activated -> test -> upsert -> activate -> re-run -> signals.
-- [ ] T027 [P] [US2] Pack import tests: docker/kubectl/git packs load and match representative fixtures under `tests/fixtures/terminal/`.
+- [X] T025 [P] [US2] Unit tests for suggestion heuristics in `crates/sifters/src/suggest.rs`: error/warning/FAILED/path/exit detection; empty + low-signal proposal case; assert every proposal is Draft (no activation side effect). 12 tests PASS.
+- [X] T026 [P] [US2] Closed-loop e2e `crates/mcp/tests/suggest_loop_e2e.rs`: suggest -> ASSERT registry_list_active empty (nothing activated) -> upsert (still empty) -> test -> activate (now 1) -> re-run -> rule-driven signal appears (O-05). PASS through live UDS daemon.
+- [X] T027 [P] [US2] Pack import + match tests `crates/daemon/tests/pack_import_match.rs`: docker/kubectl/git packs import with no skipped rules and MATCH fixtures under `tests/fixtures/terminal/` (docker-build-error.stderr, kubectl-errors.stderr, git-conflict.stdout). 4 tests PASS.
 
 ### Implementation for User Story 2
 
-- [ ] T028 [US2] Implement `registry_suggest_from_samples` heuristics (pure Rust) returning `{proposed_rules, confidence, next_steps}`; NEVER activates.
-- [ ] T029 [US2] IPC variant + daemon handler for suggest in `crates/ipc/src/protocol.rs` + `crates/daemon/src/ipc/handlers/registry.rs`.
-- [ ] T030 [US2] MCP tool `registry_suggest_from_samples` in `crates/mcp/src/tools.rs`.
-- [ ] T031 [US2] Universal extractors: config-gated always-on low-severity sifters (stderr/warning/exit/progress) in `crates/sifters/src/`; gate on `sifters.universal_extractors`.
-- [ ] T032 [P] [US2] Add rule packs JSON in `crates/store/rules/`: docker, kubectl, git (P0), then pip, uv, go, systemd/journal, msbuild, winget, choco, terraform, ansible to reach >=25; register in `crates/store/src/import.rs`.
-- [ ] T033 [US2] Pack-available hint in command-start responses (`{kind:"pack_available", pack, action}`) when a recognized tool runs without its pack.
-- [ ] T034 [US2] Update tool-count anchors (+1 suggest tool) + contract fixture `registry_suggest_from_samples.v1.json`.
-- [ ] T035 [US2] Run verification gate + e2e; record source-status; commit to `feature/omni-p2-parse`; PAUSE.
+- [X] T028 [US2] Implemented `registry_suggest_from_samples` heuristics (pure Rust, `crates/sifters/src/suggest.rs`) returning `{proposed_rules, confidence:"heuristic", next_steps, explanation}`; every proposal status=Draft; NEVER activates/persists. Source-status: live.
+- [X] T029 [US2] IPC variant `RegistrySuggestFromSamples` + `handle_registry_suggest_from_samples` (read-only, no state handle) in `crates/ipc/src/protocol.rs` + `crates/daemon/src/ipc/handlers/registry.rs` + dispatch/method_name/is_idempotent. Source-status: live.
+- [X] T030 [US2] MCP tool `registry_suggest_from_samples` in `crates/mcp/src/tools.rs` (thin forwarder; adapter no-spawn + no-fs guards stay green). Source-status: live.
+- [X] T031 [US2] Universal extractors: config-gated always-on LOW-severity sifters (universal_error/warning/exit/progress) in `crates/sifters/src/universal.rs`; gated on `[sifters] universal_extractors` (default false), wired at bootstrap; merged into the job sifter only when no tool-specific rule applies (bounded/combed). Source-status: live.
+- [X] T032 [P] [US2] Added 17 rule packs in `crates/store/rules/` (docker, kubectl, git P0; pip, uv, go, systemd, msbuild, winget, choco, terraform, ansible, dotnet, bundler, yarn, pnpm, ssh) -> 25 total; registered in `crates/store/src/import.rs`. All import with zero skipped rules. Source-status: live.
+- [X] T033 [US2] Pack-available hint `{kind:"pack_available", pack, action:"registry_import_pack"}` on `CommandStartResponse.hint` (static basename->pack map) when a recognized tool runs WITHOUT its pack active; suppressed when the pack is active or the tool is unrecognized. Source-status: live.
+- [X] T034 [US2] Tool count 46 -> 47 (+registry_suggest_from_samples). Anchors updated: tools.rs catalogue + headers + catalogue_lists_forty_seven_live_tools + tool_router_exposes_all_live_tools + tb9 (8->25 packs), lib.rs/main.rs headers, daemon_unavailable_envelope.rs (45->46 + minimal_tool_args), mcp_live_daemon.rs (46->47 + list), mcp_stdio.rs list, system_discover fixture, mcp-tool-fixture-map.v1.json (counts + entry), + new contract fixture registry_suggest_from_samples.v1.json. Source-status: live.
+- [X] T035 [US2] Verification gate GREEN: fmt --check clean; clippy --workspace --all-targets -D warnings clean; nextest -p store/sifters/daemon/mcp 613 passed / 1 skipped; adapter no-spawn + no-fs guards PASS. Committed to `feature/omni-p2-parse` review branch; PAUSED (no push/merge).
 
 **Checkpoint**: O-05 closed loop works; 25+ packs available.
 

@@ -6,12 +6,13 @@ use std::sync::Arc;
 use super::common::{map_store_error, validate_scope_against_live_jobs};
 use crate::ipc::protocol::{
     IpcError, IpcErrorCode, IpcResponse, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
-    RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
-    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
-    RegistryImportFailure, RegistryImportPackParams, RegistryImportPackResponse,
-    RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
-    RegistryTestMatch, RegistryTestParams, RegistryTestResponse, RegistryUpsertParams,
-    RegistryUpsertResponse,
+    MAX_SUGGEST_PROPOSED_RULES, MAX_SUGGEST_SAMPLES, RegistryActivateParams,
+    RegistryActivateResponse, RegistryActiveEntry, RegistryDeactivateParams,
+    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportFailure,
+    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
+    RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
+    RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse, RegistryTestMatch,
+    RegistryTestParams, RegistryTestResponse, RegistryUpsertParams, RegistryUpsertResponse,
 };
 use crate::state::DaemonState;
 
@@ -501,6 +502,52 @@ pub(in crate::ipc::server) fn handle_registry_list_active(
     let truncated = all.len() > limit;
     let entries: Vec<_> = all.into_iter().take(limit).collect();
     IpcResponse::RegistryListActive(RegistryListActiveResponse { entries, truncated })
+}
+
+/// Handle `registry_suggest_from_samples` (US2 / FR-007).
+///
+/// PURE heuristic suggestion: delegates to the deterministic sifter
+/// suggester and wraps the result in the wire response. This handler
+/// is READ-ONLY: it touches no store, no activation registry, and no
+/// live job. It NEVER activates or persists a rule (FR-008 /
+/// constitution VII) -- it cannot, because it is not given the
+/// `state` handle the mutating registry handlers receive.
+///
+/// Sample count is capped at [`MAX_SUGGEST_SAMPLES`] and the proposal
+/// count at [`MAX_SUGGEST_PROPOSED_RULES`] so the response stays
+/// bounded (constitution III).
+pub(in crate::ipc::server) fn handle_registry_suggest_from_samples(
+    params: &RegistrySuggestFromSamplesParams,
+) -> IpcResponse {
+    // Defense-in-depth: cap the sample slice the heuristics scan even
+    // though the suggester also caps internally.
+    let capped: &[String] = if params.samples.len() > MAX_SUGGEST_SAMPLES {
+        &params.samples[..MAX_SUGGEST_SAMPLES]
+    } else {
+        &params.samples
+    };
+
+    let max_rules = params
+        .max_rules
+        .map(|n| (n as usize).min(MAX_SUGGEST_PROPOSED_RULES))
+        .or(Some(MAX_SUGGEST_PROPOSED_RULES));
+
+    let set = terminal_commander_sifters::suggest_rules(capped, max_rules);
+
+    // The next-step loop is constant by design: a suggestion is never
+    // live until the operator runs test -> upsert -> activate.
+    let next_steps = vec![
+        "registry_test".to_owned(),
+        "registry_upsert".to_owned(),
+        "registry_activate".to_owned(),
+    ];
+
+    IpcResponse::RegistrySuggestFromSamples(RegistrySuggestFromSamplesResponse {
+        proposed_rules: set.proposed_rules,
+        confidence: terminal_commander_sifters::SUGGEST_CONFIDENCE.to_owned(),
+        next_steps,
+        explanation: set.explanation,
+    })
 }
 
 #[cfg(test)]

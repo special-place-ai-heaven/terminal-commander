@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "terraform",
+    "version": 1,
+    "description": "Terraform plan/apply error and status rules."
+  },
+  "rules": [
+    {
+      "id": "terraform.error",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "command_failed",
+      "stream": "stderr",
+      "description": "A Terraform error block header.",
+      "pattern": "^Error: (?P<message>.+)$",
+      "captures": ["message"],
+      "summary_template": "terraform error: ${message}",
+      "tags": ["iac", "terraform"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 3 }
+    },
+    {
+      "id": "terraform.plan-changes",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "medium",
+      "event_kind": "plan_summary",
+      "stream": "stdout",
+      "description": "Terraform plan change summary.",
+      "pattern": "Plan: (?P<add>[0-9]+) to add, (?P<change>[0-9]+) to change, (?P<destroy>[0-9]+) to destroy",
+      "captures": ["add", "change", "destroy"],
+      "summary_template": "plan: +${add} ~${change} -${destroy}",
+      "tags": ["iac", "terraform"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 0 }
+    },
+    {
+      "id": "terraform.lock-error",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "state_locked",
+      "stream": "stderr",
+      "description": "The Terraform state is locked.",
+      "keywords": ["Error acquiring the state lock", "state blob is already locked"],
+      "captures": [],
+      "summary_template": "terraform: state locked",
+      "tags": ["iac", "terraform"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 2 }
+    }
+  ]
+}

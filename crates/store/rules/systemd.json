@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "systemd",
+    "version": 1,
+    "description": "systemd / journalctl service status and error rules."
+  },
+  "rules": [
+    {
+      "id": "systemd.unit-failed",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "service_failed",
+      "stream": "stdout",
+      "description": "A systemd unit entered the failed state.",
+      "pattern": "(?P<unit>[A-Za-z0-9@._-]+\\.service): (?:Main process exited|Failed with result)",
+      "captures": ["unit"],
+      "summary_template": "unit failed: ${unit}",
+      "tags": ["service", "systemd"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 1, "after_lines": 1 }
+    },
+    {
+      "id": "systemd.journal-error",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "medium",
+      "event_kind": "log_error",
+      "stream": "stdout",
+      "description": "A journalctl line tagged error/critical priority.",
+      "pattern": "(?i:\\b(?P<level>error|critical|fatal)\\b): (?P<message>.+)$",
+      "captures": ["level", "message"],
+      "summary_template": "journal ${level}: ${message}",
+      "tags": ["service", "systemd", "journal"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "systemd.start-failed",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "service_failed",
+      "stream": "stderr",
+      "description": "A unit failed to start.",
+      "keywords": ["Failed to start", "Job for", "failed because the control process exited"],
+      "captures": [],
+      "summary_template": "systemd start failed",
+      "tags": ["service", "systemd"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 2 }
+    }
+  ]
+}

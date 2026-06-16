@@ -1,0 +1,5 @@
+#0 building with "default" instance using docker driver
+#5 [2/4] RUN apt-get update && apt-get install -y libfoo-dev
+#5 0.512 E: Unable to locate package libfoo-dev
+ERROR: failed to solve: process "/bin/sh -c apt-get install -y libfoo-dev" did not complete successfully: exit code: 100
+Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?

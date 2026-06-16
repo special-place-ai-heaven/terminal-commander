@@ -1,0 +1,77 @@
+{
+  "_meta": {
+    "pack": "docker",
+    "version": 1,
+    "description": "Docker CLI / daemon error and status rules."
+  },
+  "rules": [
+    {
+      "id": "docker.daemon-unreachable",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "critical",
+      "event_kind": "daemon_unreachable",
+      "stream": "stderr",
+      "description": "Docker CLI could not reach the daemon.",
+      "pattern": "^Cannot connect to the Docker daemon at (?P<endpoint>[^ ]+)",
+      "captures": ["endpoint"],
+      "summary_template": "docker daemon unreachable at ${endpoint}",
+      "tags": ["container", "docker"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "docker.image-not-found",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "image_not_found",
+      "stream": "stderr",
+      "description": "A referenced image or manifest was not found.",
+      "pattern": "manifest for (?P<image>[^ ]+) not found",
+      "captures": ["image"],
+      "summary_template": "image not found: ${image}",
+      "tags": ["container", "docker"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "docker.build-error",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "build_failed",
+      "stream": "stderr",
+      "description": "A buildkit step failed.",
+      "pattern": "^ERROR: (?P<message>.+)$",
+      "captures": ["message"],
+      "summary_template": "docker build error: ${message}",
+      "tags": ["container", "docker", "build"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 1, "after_lines": 2 }
+    },
+    {
+      "id": "docker.permission-denied",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "permission_denied",
+      "stream": "stderr",
+      "description": "Docker socket permission denied.",
+      "keywords": ["permission denied while trying to connect to the Docker daemon socket"],
+      "captures": [],
+      "summary_template": "docker socket permission denied",
+      "tags": ["container", "docker", "permission"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 0 }
+    }
+  ]
+}

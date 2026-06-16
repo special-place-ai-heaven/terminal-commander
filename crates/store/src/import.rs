@@ -52,7 +52,7 @@ pub struct ImportResult {
     pub skipped: Vec<String>,
 }
 
-/// The eight seed packs, embedded so the daemon needs no repo checkout
+/// The 25 seed packs, embedded so the daemon needs no repo checkout
 /// at runtime. Paths are relative to THIS source file
 /// (`crates/store/src/import.rs`; repo root is `../../../`).
 // Rules live INSIDE this crate (crates/store/rules/) so `cargo publish`
@@ -71,6 +71,27 @@ const SEED_PACKS: &[(&str, &str)] = &[
     ("gcc", include_str!("../rules/gcc.json")),
     ("make", include_str!("../rules/make.json")),
     ("cleanup", include_str!("../rules/cleanup.json")),
+    // US2 (T032): 17 additional packs to reach the >=25 built-in
+    // target. docker/kubectl/git are the P0 set (FR-010); the rest
+    // broaden coverage across package managers, build tools, IaC,
+    // and remote access.
+    ("docker", include_str!("../rules/docker.json")),
+    ("kubectl", include_str!("../rules/kubectl.json")),
+    ("git", include_str!("../rules/git.json")),
+    ("pip", include_str!("../rules/pip.json")),
+    ("uv", include_str!("../rules/uv.json")),
+    ("go", include_str!("../rules/go.json")),
+    ("systemd", include_str!("../rules/systemd.json")),
+    ("msbuild", include_str!("../rules/msbuild.json")),
+    ("winget", include_str!("../rules/winget.json")),
+    ("choco", include_str!("../rules/choco.json")),
+    ("terraform", include_str!("../rules/terraform.json")),
+    ("ansible", include_str!("../rules/ansible.json")),
+    ("dotnet", include_str!("../rules/dotnet.json")),
+    ("bundler", include_str!("../rules/bundler.json")),
+    ("yarn", include_str!("../rules/yarn.json")),
+    ("pnpm", include_str!("../rules/pnpm.json")),
+    ("ssh", include_str!("../rules/ssh.json")),
 ];
 
 /// Resolve a pack name to its embedded JSON, or `None` if unknown.
@@ -179,12 +200,23 @@ mod tests {
     }
 
     #[test]
-    fn known_pack_names_lists_all_eight() {
+    fn known_pack_names_lists_all_twenty_five() {
         let names = known_pack_names();
-        assert_eq!(names.len(), 8);
+        // US2 (T032/FR-010): the built-in pack set grew from 8 to 25.
+        assert_eq!(
+            names.len(),
+            25,
+            "expected >=25 built-in packs, got {names:?}"
+        );
+        assert!(names.len() >= 25);
+        // Original eight.
         assert!(names.contains(&"cargo"));
         assert!(names.contains(&"generic.terminal"));
         assert!(names.contains(&"cleanup"));
+        // P0 additions (FR-010 names docker/kubectl/git explicitly).
+        assert!(names.contains(&"docker"));
+        assert!(names.contains(&"kubectl"));
+        assert!(names.contains(&"git"));
     }
 
     #[test]
@@ -334,26 +366,26 @@ mod tests {
         // Rules ship inside this crate (crates/store/rules/), so they
         // resolve from CARGO_MANIFEST_DIR directly.
         let crate_root = Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
-        let packs = [
-            "rules/generic.terminal.json",
-            "rules/apt.json",
-            "rules/cargo.json",
-            "rules/npm.json",
-            "rules/pytest.json",
-            "rules/gcc.json",
-            "rules/make.json",
-        ];
+        // Every embedded pack must import cleanly with NO skipped
+        // rules (US2: a malformed pack JSON would skip a rule and is
+        // a regression).
         let mut total_imported = 0;
-        for p in packs {
-            let path = crate_root.join(p);
+        for name in known_pack_names() {
+            let path = crate_root.join(format!("rules/{name}.json"));
             let r = s.import_rule_pack(&path).unwrap_or_else(|e| {
-                panic!("import {p}: {e}");
+                panic!("import {name}: {e}");
             });
-            assert!(r.skipped.is_empty(), "pack {} skipped {:?}", p, r.skipped);
-            assert!(!r.imported.is_empty(), "pack {p} was empty");
+            assert!(
+                r.skipped.is_empty(),
+                "pack {} skipped {:?}",
+                name,
+                r.skipped
+            );
+            assert!(!r.imported.is_empty(), "pack {name} was empty");
             total_imported += r.imported.len();
         }
-        assert!(total_imported >= 12); // 7 packs, ~13 rules total
+        // 25 packs, several rules each.
+        assert!(total_imported >= 40, "got {total_imported} rules");
         // A representative search hits the apt pack.
         let hits = s.search_rules("apt", None).unwrap();
         assert!(!hits.is_empty());

@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "ansible",
+    "version": 1,
+    "description": "Ansible playbook run error and recap rules."
+  },
+  "rules": [
+    {
+      "id": "ansible.failed-task",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "task_failed",
+      "stream": "stdout",
+      "description": "A failed Ansible task line.",
+      "pattern": "^fatal: \\[(?P<host>[^\\]]+)\\]: FAILED!",
+      "captures": ["host"],
+      "summary_template": "task failed on ${host}",
+      "tags": ["automation", "ansible"],
+      "rate_limit_per_min": 60,
+      "redact": [],
+      "context_hint": { "before_lines": 1, "after_lines": 1 }
+    },
+    {
+      "id": "ansible.unreachable",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "host_unreachable",
+      "stream": "stdout",
+      "description": "An Ansible host was unreachable.",
+      "pattern": "^fatal: \\[(?P<host>[^\\]]+)\\]: UNREACHABLE!",
+      "captures": ["host"],
+      "summary_template": "host unreachable: ${host}",
+      "tags": ["automation", "ansible"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "ansible.recap-failed",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "medium",
+      "event_kind": "play_recap",
+      "stream": "stdout",
+      "description": "Play recap line carrying a non-zero failed count.",
+      "pattern": "failed=(?P<failed>[1-9][0-9]*)",
+      "captures": ["failed"],
+      "summary_template": "play recap: ${failed} failed",
+      "tags": ["automation", "ansible"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 0 }
+    }
+  ]
+}

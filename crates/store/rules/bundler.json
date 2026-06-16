@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "bundler",
+    "version": 1,
+    "description": "Ruby Bundler (bundle install) error rules."
+  },
+  "rules": [
+    {
+      "id": "bundler.could-not-find-gem",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "missing_package",
+      "stream": "stderr",
+      "description": "Bundler could not find a required gem.",
+      "pattern": "Could not find (?P<gem>[A-Za-z0-9._-]+) in any of the sources",
+      "captures": ["gem"],
+      "summary_template": "missing gem: ${gem}",
+      "tags": ["packaging", "ruby", "bundler"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "bundler.version-conflict",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "dependency_conflict",
+      "stream": "stderr",
+      "description": "Bundler reported a version conflict.",
+      "keywords": ["Bundler could not find compatible versions", "version solving has failed"],
+      "captures": [],
+      "summary_template": "bundler: version conflict",
+      "tags": ["packaging", "ruby", "bundler"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 2 }
+    },
+    {
+      "id": "bundler.install-error",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "command_failed",
+      "stream": "stderr",
+      "description": "A native gem build failed during install.",
+      "keywords": ["An error occurred while installing", "make sure that `gem install"],
+      "captures": [],
+      "summary_template": "bundler: gem install failed",
+      "tags": ["packaging", "ruby", "bundler"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    }
+  ]
+}

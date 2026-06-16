@@ -1,0 +1,4 @@
+Auto-merging crates/core/src/lib.rs
+CONFLICT (content): Merge conflict in crates/core/src/lib.rs
+Automatic merge failed; fix conflicts and then commit the result.
+fatal: Exiting because of an unresolved conflict.

@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "winget",
+    "version": 1,
+    "description": "Windows Package Manager (winget) error rules."
+  },
+  "rules": [
+    {
+      "id": "winget.no-package",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "missing_package",
+      "stream": "stdout",
+      "description": "winget found no matching package.",
+      "keywords": ["No package found matching input criteria"],
+      "captures": [],
+      "summary_template": "winget: no matching package",
+      "tags": ["packaging", "windows", "winget"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 0 }
+    },
+    {
+      "id": "winget.install-failed",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "command_failed",
+      "stream": "stdout",
+      "description": "winget installer returned a failure exit code.",
+      "pattern": "Installer failed with exit code: (?P<code>[0-9]+)",
+      "captures": ["code"],
+      "summary_template": "winget install failed (exit ${code})",
+      "tags": ["packaging", "windows", "winget"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 1, "after_lines": 0 }
+    },
+    {
+      "id": "winget.hash-mismatch",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "integrity_error",
+      "stream": "stdout",
+      "description": "Installer hash did not match the manifest.",
+      "keywords": ["Installer hash does not match", "hash mismatch"],
+      "captures": [],
+      "summary_template": "winget: installer hash mismatch",
+      "tags": ["packaging", "windows", "winget"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    }
+  ]
+}

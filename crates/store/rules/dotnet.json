@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "dotnet",
+    "version": 1,
+    "description": ".NET CLI (dotnet build/test/restore) error rules."
+  },
+  "rules": [
+    {
+      "id": "dotnet.build-error",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "compile_error",
+      "stream": "stdout",
+      "description": "A dotnet build error with a code.",
+      "pattern": "error (?P<code>[A-Z]+[0-9]+): (?P<message>.+)$",
+      "captures": ["code", "message"],
+      "summary_template": "${code}: ${message}",
+      "tags": ["build", "dotnet"],
+      "rate_limit_per_min": 60,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "dotnet.test-failed",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "test_failed",
+      "stream": "stdout",
+      "description": "A dotnet test summary reporting failures.",
+      "pattern": "Failed:\\s+(?P<failed>[1-9][0-9]*)",
+      "captures": ["failed"],
+      "summary_template": "dotnet tests: ${failed} failed",
+      "tags": ["test", "dotnet"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 0 }
+    },
+    {
+      "id": "dotnet.restore-failed",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "command_failed",
+      "stream": "stdout",
+      "description": "A dotnet restore failure.",
+      "keywords": ["Unable to load the service index", "NU1101", "Package restore failed"],
+      "captures": [],
+      "summary_template": "dotnet restore failed",
+      "tags": ["build", "dotnet", "nuget"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    }
+  ]
+}

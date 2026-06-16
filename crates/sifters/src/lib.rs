@@ -24,10 +24,14 @@
 //! activation in TC13/TC21.
 
 pub mod noise;
+pub mod suggest;
+pub mod universal;
 pub use noise::{
     DEFAULT_DEDUPE_WINDOW, Dedupe, DedupeAggregatePatch, DedupeApplyResult, NoisePolicy,
     ProgressDetector, dedupe_bypass_kind,
 };
+pub use suggest::{SUGGEST_CONFIDENCE, SuggestionSet, suggest_rules};
+pub use universal::{UNIVERSAL_PACK, universal_extractor_rules};
 
 use std::sync::Arc;
 

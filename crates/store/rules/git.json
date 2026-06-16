@@ -1,0 +1,77 @@
+{
+  "_meta": {
+    "pack": "git",
+    "version": 1,
+    "description": "Git CLI error, conflict, and status rules."
+  },
+  "rules": [
+    {
+      "id": "git.merge-conflict",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "merge_conflict",
+      "stream": "stdout",
+      "description": "A merge produced conflicts in a file.",
+      "pattern": "^CONFLICT \\([a-z/]+\\): (?P<detail>.+)$",
+      "captures": ["detail"],
+      "summary_template": "merge conflict: ${detail}",
+      "tags": ["vcs", "git"],
+      "rate_limit_per_min": 60,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "git.push-rejected",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "push_rejected",
+      "stream": "stderr",
+      "description": "A push was rejected (non-fast-forward or hook).",
+      "keywords": ["! [rejected]", "Updates were rejected"],
+      "captures": [],
+      "summary_template": "git push rejected",
+      "tags": ["vcs", "git"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 2 }
+    },
+    {
+      "id": "git.fatal",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "command_failed",
+      "stream": "stderr",
+      "description": "A fatal git error.",
+      "pattern": "^fatal: (?P<message>.+)$",
+      "captures": ["message"],
+      "summary_template": "git fatal: ${message}",
+      "tags": ["vcs", "git"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "git.auth-failed",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "permission_denied",
+      "stream": "stderr",
+      "description": "Authentication to the remote failed.",
+      "keywords": ["Authentication failed", "Permission denied (publickey)"],
+      "captures": [],
+      "summary_template": "git authentication failed",
+      "tags": ["vcs", "git", "permission"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 0 }
+    }
+  ]
+}

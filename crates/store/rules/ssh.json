@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "ssh",
+    "version": 1,
+    "description": "OpenSSH client connection and auth error rules."
+  },
+  "rules": [
+    {
+      "id": "ssh.connection-refused",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "connection_refused",
+      "stream": "stderr",
+      "description": "SSH could not establish a connection.",
+      "pattern": "(?:connect to host|ssh: connect to host) (?P<host>[^ ]+) port (?P<port>[0-9]+): (?P<reason>.+)$",
+      "captures": ["host", "port", "reason"],
+      "summary_template": "ssh ${host}:${port} ${reason}",
+      "tags": ["remote", "ssh"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "ssh.permission-denied",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "permission_denied",
+      "stream": "stderr",
+      "description": "SSH authentication was denied.",
+      "keywords": ["Permission denied (publickey", "Permission denied, please try again", "Too many authentication failures"],
+      "captures": [],
+      "summary_template": "ssh: permission denied",
+      "tags": ["remote", "ssh", "permission"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 0 }
+    },
+    {
+      "id": "ssh.host-key-changed",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "critical",
+      "event_kind": "host_key_mismatch",
+      "stream": "stderr",
+      "description": "The remote host key changed (possible MITM).",
+      "keywords": ["REMOTE HOST IDENTIFICATION HAS CHANGED", "Host key verification failed"],
+      "captures": [],
+      "summary_template": "ssh: host key verification failed",
+      "tags": ["remote", "ssh", "security"],
+      "rate_limit_per_min": 6,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 2 }
+    }
+  ]
+}

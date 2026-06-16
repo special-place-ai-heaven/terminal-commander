@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "pip",
+    "version": 1,
+    "description": "Python pip installer error rules."
+  },
+  "rules": [
+    {
+      "id": "pip.no-matching-distribution",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "missing_package",
+      "stream": "stderr",
+      "description": "pip could not find a matching distribution.",
+      "pattern": "No matching distribution found for (?P<package>[^ ]+)",
+      "captures": ["package"],
+      "summary_template": "no distribution for ${package}",
+      "tags": ["packaging", "python", "pip"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 1, "after_lines": 0 }
+    },
+    {
+      "id": "pip.resolution-error",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "dependency_conflict",
+      "stream": "stderr",
+      "description": "pip dependency resolution conflict.",
+      "keywords": ["ResolutionImpossible", "dependency conflicts"],
+      "captures": [],
+      "summary_template": "pip dependency conflict",
+      "tags": ["packaging", "python", "pip"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 2 }
+    },
+    {
+      "id": "pip.error-line",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "command_failed",
+      "stream": "stderr",
+      "description": "A pip ERROR line.",
+      "pattern": "^ERROR: (?P<message>.+)$",
+      "captures": ["message"],
+      "summary_template": "pip error: ${message}",
+      "tags": ["packaging", "python", "pip"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    }
+  ]
+}

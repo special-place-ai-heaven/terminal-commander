@@ -216,6 +216,232 @@ fn command_start_emits_matching_signal_into_bucket_no_raw_text() {
     });
 }
 
+/// US2 (T033 / FR-011): starting a recognized tool (`git`) with NO
+/// active pack attaches a `pack_available` hint to the response. The
+/// command itself need not exist on the box -- the hint is computed
+/// from argv[0] BEFORE spawn -- but we use a real benign program name
+/// argv to keep the spawn path live; `git` is the recognized tool.
+#[test]
+fn recognized_tool_without_pack_gets_pack_available_hint() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("hint-git");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let req = CommandStartRequest {
+            // argv[0] basename `git` is recognized; `--version` is a
+            // benign subcommand so the spawn succeeds where git exists
+            // and is harmless where it does not (the hint is pre-spawn).
+            argv: vec!["git".to_owned(), "--version".to_owned()],
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            strip_ansi: true,
+            peer_discriminator: None,
+        };
+        let resp = state.command.start_combed(req).expect("start ok");
+        let hint = resp.hint.expect("git start without pack must carry a hint");
+        assert_eq!(hint.kind, "pack_available");
+        assert_eq!(hint.pack, "git");
+        assert_eq!(hint.action, "registry_import_pack");
+
+        cleanup(&data);
+    });
+}
+
+/// US2 (T033 / FR-011): an UNRECOGNIZED tool gets NO hint.
+#[test]
+fn unrecognized_tool_gets_no_pack_hint() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("hint-none");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let req = CommandStartRequest {
+            argv: py_argv("hi", "", 0),
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            strip_ansi: true,
+            peer_discriminator: None,
+        };
+        let resp = state.command.start_combed(req).expect("start ok");
+        assert!(
+            resp.hint.is_none(),
+            "python3 is not a recognized pack tool; expected no hint, got {:?}",
+            resp.hint
+        );
+
+        cleanup(&data);
+    });
+}
+
+/// US2 (T031 / FR-009): with `universal_extractors` ON and NO
+/// tool-specific rule active, a command's stderr error line still
+/// produces a baseline LOW-severity signal.
+#[test]
+fn universal_extractors_emit_baseline_signal_when_enabled() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("universal-on");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.sifters.universal_extractors = true;
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        // No inline rules, no active pack: the universal baseline is
+        // the only thing that can emit. Stderr carries an error line.
+        let req = CommandStartRequest {
+            argv: py_argv("ordinary stdout", "error: something broke", 1),
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            strip_ansi: true,
+            peer_discriminator: None,
+        };
+        let resp = state.command.start_combed(req).expect("start ok");
+
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            if matches!(
+                state.command.job_record(resp.job_id).map(|r| r.state),
+                Some(JobState::Exited | JobState::Failed | JobState::Cancelled)
+            ) {
+                break;
+            }
+        }
+
+        let bread = state
+            .router
+            .bucket_events_since(resp.bucket_id, &BucketReadRequest::new(0))
+            .expect("bucket read ok");
+        let baseline = bread
+            .events
+            .iter()
+            .find(|e| e.kind == "universal_error")
+            .expect("universal extractor must emit a baseline error signal");
+        assert_eq!(
+            baseline.severity,
+            Severity::Low,
+            "universal extractor signal must be LOW severity"
+        );
+
+        cleanup(&data);
+    });
+}
+
+/// US2 (T031 / FR-009): with `universal_extractors` OFF (the default),
+/// the SAME command emits NO baseline signal -- only the lifecycle
+/// event. Proves the flag actually gates the behavior.
+#[test]
+fn universal_extractors_silent_when_disabled() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("universal-off");
+        let cfg = DaemonConfig::defaults_in(&data);
+        // Default: universal_extractors is false.
+        assert!(!cfg.sifters.universal_extractors);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let req = CommandStartRequest {
+            argv: py_argv("ordinary stdout", "error: something broke", 1),
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            strip_ansi: true,
+            peer_discriminator: None,
+        };
+        let resp = state.command.start_combed(req).expect("start ok");
+
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            if matches!(
+                state.command.job_record(resp.job_id).map(|r| r.state),
+                Some(JobState::Exited | JobState::Failed | JobState::Cancelled)
+            ) {
+                break;
+            }
+        }
+
+        let bread = state
+            .router
+            .bucket_events_since(resp.bucket_id, &BucketReadRequest::new(0))
+            .expect("bucket read ok");
+        assert!(
+            !bread.events.iter().any(|e| e.kind == "universal_error"),
+            "with the flag OFF, no universal baseline signal must appear"
+        );
+
+        cleanup(&data);
+    });
+}
+
+/// US2 (T033 / FR-011): a recognized tool whose pack IS already active
+/// gets NO hint (the agent already imported it).
+#[test]
+fn recognized_tool_with_active_pack_gets_no_hint() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("hint-active");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        // Import + activate the git pack so a `git.*` rule is live in
+        // the global scope, then start git: the hint must be suppressed.
+        let import = state
+            .store
+            .import_rule_pack_by_name("git", true)
+            .expect("import git pack active");
+        assert!(!import.imported.is_empty());
+        for rule_id in &import.imported {
+            // Activate every imported git rule under the global scope.
+            if let Ok(Some(def)) = state.store.get_latest_rule(rule_id) {
+                state
+                    .activation
+                    .activate(def, terminal_commander_core::ActivationScope::Global);
+            }
+        }
+
+        let req = CommandStartRequest {
+            argv: vec!["git".to_owned(), "--version".to_owned()],
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            strip_ansi: true,
+            peer_discriminator: None,
+        };
+        let resp = state.command.start_combed(req).expect("start ok");
+        assert!(
+            resp.hint.is_none(),
+            "git pack is active; hint must be suppressed, got {:?}",
+            resp.hint
+        );
+
+        cleanup(&data);
+    });
+}
+
 #[test]
 fn command_start_denied_for_sudo_argv() {
     let runtime = rt();
@@ -615,6 +841,7 @@ fn response_types_have_no_raw_stream_lane() {
         bucket_id: terminal_commander_core::BucketId::new(),
         probe_id: terminal_commander_core::ProbeId::new(),
         cursor: 0,
+        hint: None,
     };
     assert_small_response(&r);
     let s = CommandStatusResponse {

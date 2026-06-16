@@ -1,0 +1,3 @@
+The connection to the server 127.0.0.1:6443 was refused - did you specify the right host or port?
+Error from server (NotFound): pods "web-7f9c" not found
+Error from server (Forbidden): pods is forbidden: User "dev" cannot list resource "pods" in API group ""

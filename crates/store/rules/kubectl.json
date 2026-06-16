@@ -1,0 +1,77 @@
+{
+  "_meta": {
+    "pack": "kubectl",
+    "version": 1,
+    "description": "kubectl / Kubernetes client error and status rules."
+  },
+  "rules": [
+    {
+      "id": "kubectl.connection-refused",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "critical",
+      "event_kind": "api_unreachable",
+      "stream": "stderr",
+      "description": "kubectl could not reach the API server.",
+      "pattern": "The connection to the server (?P<endpoint>[^ ]+) was refused",
+      "captures": ["endpoint"],
+      "summary_template": "kube API unreachable at ${endpoint}",
+      "tags": ["kubernetes", "kubectl"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "kubectl.not-found",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "resource_not_found",
+      "stream": "stderr",
+      "description": "A requested resource was not found.",
+      "pattern": "^Error from server \\(NotFound\\): (?P<message>.+)$",
+      "captures": ["message"],
+      "summary_template": "not found: ${message}",
+      "tags": ["kubernetes", "kubectl"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "kubectl.forbidden",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "permission_denied",
+      "stream": "stderr",
+      "description": "RBAC denied the request.",
+      "pattern": "^Error from server \\(Forbidden\\): (?P<message>.+)$",
+      "captures": ["message"],
+      "summary_template": "forbidden: ${message}",
+      "tags": ["kubernetes", "kubectl", "permission"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "kubectl.crashloop",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "pod_unhealthy",
+      "stream": "stdout",
+      "description": "A pod is in CrashLoopBackOff.",
+      "keywords": ["CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull"],
+      "captures": [],
+      "summary_template": "pod unhealthy (backoff/imagepull)",
+      "tags": ["kubernetes", "kubectl"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 0 }
+    }
+  ]
+}

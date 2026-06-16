@@ -78,3 +78,12 @@ retention_days = 30
 # - bucket_read_limit   ceiling = 10 000  (MAX_READ_LIMIT)
 file_window_bytes = 65_536
 bucket_read_limit = 200
+
+[sifters]
+# Universal extractors (US2 / FR-009): always-on, LOW-severity
+# baseline rules (error/warning/exit/progress) that emit bounded
+# structured signal for ANY command even when no tool-specific rule
+# pack is active. Default false so the signal stream is exactly what
+# you opted into. When true, a command with no active pack still
+# surfaces a baseline (and a real pack always out-ranks it).
+universal_extractors = false

@@ -125,6 +125,7 @@ async fn live_health_roundtrip_through_uds() {
                 "registry_import_pack".to_owned(),
                 "registry_list_active".to_owned(),
                 "registry_search".to_owned(),
+                "registry_suggest_from_samples".to_owned(),
                 "registry_test".to_owned(),
                 "registry_upsert".to_owned(),
                 "run_and_watch".to_owned(),
@@ -218,8 +219,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             .filter(|t| t["status"].as_str() == Some("live"))
             .count();
         assert_eq!(
-            live_count, 46,
-            "tool catalogue must list exactly 46 live tools (39 + shell_session_start/exec/status/stop/list + workspace_snapshot_create/apply)"
+            live_count, 47,
+            "tool catalogue must list exactly 47 live tools (46 + registry_suggest_from_samples)"
         );
 
         let _ = client.cancel().await;

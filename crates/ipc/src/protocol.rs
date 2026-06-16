@@ -31,6 +31,36 @@ use terminal_commander_core::{
     Severity, SignalEvent, SourceStream,
 };
 
+/// US2 (FR-011): a non-blocking hint that a curated rule pack exists
+/// for the tool being started but is not active. Surfaced on
+/// command-start responses so an agent can self-serve the comb rules.
+///
+/// This is advisory only: it changes no behavior and activates
+/// nothing (constitution VII). The agent acts on it by calling
+/// `registry_import_pack` (named in `action`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackAvailableHint {
+    /// Always `"pack_available"`. A discriminant for forward-compat.
+    pub kind: String,
+    /// The recognized pack id (e.g. `"docker"`, `"git"`).
+    pub pack: String,
+    /// Always `"registry_import_pack"`: the tool to call to act on the
+    /// hint.
+    pub action: String,
+}
+
+impl PackAvailableHint {
+    /// Build a `pack_available` hint for the named pack.
+    #[must_use]
+    pub fn for_pack(pack: impl Into<String>) -> Self {
+        Self {
+            kind: "pack_available".to_owned(),
+            pack: pack.into(),
+            action: "registry_import_pack".to_owned(),
+        }
+    }
+}
+
 /// Bounded response shape. Carries identifiers and counters, never
 /// raw stdout/stderr.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +70,11 @@ pub struct CommandStartResponse {
     pub probe_id: terminal_commander_core::ProbeId,
     /// Initial bucket cursor: clients pass this to `bucket_events_since`.
     pub cursor: u64,
+    /// US2 (FR-011): optional hint that a curated pack exists for this
+    /// tool but is not active. Omitted (None) when the tool is
+    /// unrecognized or its pack is already active. Advisory only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<PackAvailableHint>,
 }
 
 /// No-silence exit receipt (TCE-ERG-1).
@@ -282,6 +317,13 @@ pub enum IpcRequest {
     /// Snapshot of every currently-active `(rule_id, version)`. Bounded
     /// by [`MAX_LIST_LIMIT`] / the request `limit`.
     RegistryListActive(ListLimitParams),
+    /// US2 (FR-007): suggest candidate parsing rules from bounded
+    /// output samples using PURE heuristics. Returns DRAFT proposals +
+    /// a confidence label + the explicit next-step loop. NEVER
+    /// activates or persists a rule (FR-008 / constitution VII).
+    /// Read-only: a blind retry recomputes the same deterministic
+    /// proposals, so it is idempotent.
+    RegistrySuggestFromSamples(RegistrySuggestFromSamplesParams),
     /// Bounded line/byte window read of a regular file. Never
     /// returns the whole file; the daemon clamps the window.
     FileReadWindow(FileReadWindowParams),
@@ -466,6 +508,10 @@ impl IpcRequest {
             | Self::RegistryGet(_)
             | Self::RegistryTest(_)
             | Self::RegistryListActive(_)
+            // Suggestion is a pure deterministic heuristic over the
+            // supplied samples: a retry recomputes the identical
+            // proposal set and never activates/persists anything.
+            | Self::RegistrySuggestFromSamples(_)
             | Self::SubscriptionList(_)
             // Set-position (absolute clamped offset), not advance-position,
             // so a re-send re-applies the same reposition. Caveat: the
@@ -526,6 +572,7 @@ pub enum IpcResponse {
     RegistryImportPack(RegistryImportPackResponse),
     RegistryDeactivate(RegistryDeactivateResponse),
     RegistryListActive(RegistryListActiveResponse),
+    RegistrySuggestFromSamples(RegistrySuggestFromSamplesResponse),
     FileReadWindow(FileReadWindowResponse),
     FileSearch(FileSearchResponse),
     FileWatchStart(FileWatchStartResponse),
@@ -1132,6 +1179,18 @@ pub const MAX_REGISTRY_TEST_SAMPLES: usize = 32;
 /// per-frame cap; bytes above this are truncated before evaluation.
 pub const MAX_REGISTRY_TEST_SAMPLE_BYTES: usize = 8192;
 
+/// Maximum sample lines accepted by `registry_suggest_from_samples`.
+///
+/// US2 / FR-007. Lines beyond this are ignored before the heuristics
+/// run so a huge sample set cannot blow the bounded-output budget.
+pub const MAX_SUGGEST_SAMPLES: usize = 200;
+/// Maximum bytes inspected per suggestion sample line.
+pub const MAX_SUGGEST_SAMPLE_BYTES: usize = 4096;
+/// Hard cap on the number of proposed rules returned by
+/// `registry_suggest_from_samples`, regardless of the caller's
+/// `max_rules`.
+pub const MAX_SUGGEST_PROPOSED_RULES: usize = 8;
+
 /// `registry_search` parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistrySearchParams {
@@ -1227,6 +1286,50 @@ pub struct RegistryTestResponse {
     /// Bytes dropped by per-sample truncation. Helps the operator
     /// reason about why a tail-anchored regex did not fire.
     pub truncated_bytes: u32,
+}
+
+/// `registry_suggest_from_samples` parameters (US2 / FR-007).
+///
+/// PURE heuristic suggestion: the daemon runs deterministic line-shape
+/// detectors over `samples` and returns DRAFT rule proposals. It NEVER
+/// activates or persists anything (FR-008 / constitution VII).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistrySuggestFromSamplesParams {
+    /// Raw output sample lines to analyze. Capped at
+    /// [`MAX_SUGGEST_SAMPLES`]; per-line bytes capped at
+    /// [`MAX_SUGGEST_SAMPLE_BYTES`].
+    pub samples: Vec<String>,
+    /// Optional free-text hint describing the tool/intent. Advisory
+    /// only; the heuristics are deterministic and ignore it for
+    /// matching (it is echoed back for the caller's context).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    /// Optional cap on proposals. Clamped to
+    /// [`MAX_SUGGEST_PROPOSED_RULES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rules: Option<u32>,
+}
+
+/// `registry_suggest_from_samples` response (US2 / FR-007).
+///
+/// `proposed_rules` are DRAFT [`RuleDefinition`]s. They are NOT active
+/// and NOT persisted: the caller must run the explicit
+/// `registry_test` -> `registry_upsert` -> `registry_activate` loop
+/// named in `next_steps`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistrySuggestFromSamplesResponse {
+    /// Candidate DRAFT rules. May be empty for low-signal input.
+    pub proposed_rules: Vec<RuleDefinition>,
+    /// Always `"heuristic"`. The suggestions are deterministic
+    /// line-shape heuristics, never an ML score.
+    pub confidence: String,
+    /// The explicit, ordered activation loop the caller MUST follow to
+    /// make any proposal live. Constant by design.
+    pub next_steps: Vec<String>,
+    /// Human-readable explanation of what was (or was not) detected.
+    /// For empty/low-signal input this explains why no rule was
+    /// proposed instead of fabricating one.
+    pub explanation: String,
 }
 
 /// `registry_activate` parameters.

@@ -251,19 +251,24 @@ impl DaemonState {
         // `PolicyEngine` is no longer `Copy` (TC22 Phase 1: it carries an
         // owned `repo_root`). Clone it into each runtime; the original
         // moves into the `DaemonState.policy` field below.
-        let command = Arc::new(CommandRuntime::new(
-            Arc::clone(&router),
-            Arc::clone(&rings),
-            Arc::clone(&jobs),
-            Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
-            policy.clone(),
-            Arc::clone(&activation),
-            Arc::clone(&sources),
-            // TC-B3: the command runtime persists a job receipt on every
-            // terminal transition via this clone of the single-writer
-            // store actor (the same one the audit sink uses).
-            store.clone(),
-        ));
+        let command = Arc::new(
+            CommandRuntime::new(
+                Arc::clone(&router),
+                Arc::clone(&rings),
+                Arc::clone(&jobs),
+                Arc::clone(&audit) as Arc<dyn crate::audit::AuditSink>,
+                policy.clone(),
+                Arc::clone(&activation),
+                Arc::clone(&sources),
+                // TC-B3: the command runtime persists a job receipt on every
+                // terminal transition via this clone of the single-writer
+                // store actor (the same one the audit sink uses).
+                store.clone(),
+            )
+            // US2 (FR-009): wire the operator's universal-extractors
+            // config flag into the command runtime.
+            .with_universal_extractors(config.sifters.universal_extractors),
+        );
         // Shell runtime (TC49): a thin facade over the SAME
         // `Arc<CommandRuntime>` so the gated `shell_exec` lane reuses the
         // comb/bucket spawn core. No second policy engine or audit sink.

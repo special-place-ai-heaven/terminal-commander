@@ -164,6 +164,9 @@ fn minimal_tool_args(tool: &str) -> serde_json::Value {
         "registry_import_pack" => serde_json::json!({ "pack": "cargo" }),
         "registry_upsert" => serde_json::json!({ "definition_json": "{}" }),
         "registry_test" => serde_json::json!({ "rule_id": "rule_x", "samples": [] }),
+        // samples is required (no default); supply one so the
+        // daemon-unavailable guard -- not a schema error -- is tested.
+        "registry_suggest_from_samples" => serde_json::json!({ "samples": ["error: x"] }),
         "registry_deactivate" => {
             serde_json::json!({ "rule_id": "rule_x", "version": 1, "scope": { "kind": "global" } })
         }
@@ -225,8 +228,8 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
         "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
     assert_eq!(
-        checked, 45,
-        "expected 45 daemon-backed tools (46 catalogue entries minus system_discover)"
+        checked, 46,
+        "expected 46 daemon-backed tools (47 catalogue entries minus system_discover)"
     );
 
     let _ = client.cancel().await;

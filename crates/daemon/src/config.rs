@@ -168,6 +168,25 @@ fn default_shell_session() -> ShellSessionSection {
     ShellSessionSection::default()
 }
 
+/// `[sifters]` section (US2 / FR-009): tuning for the sifter runtime.
+///
+/// `universal_extractors` (default FALSE) enables always-on,
+/// LOW-severity baseline extractors (error/warning/exit/progress) that
+/// emit bounded structured signal for ANY command even when no
+/// tool-specific rule pack is active. Off by default so the signal
+/// stream is exactly what the operator opted into; on, a command with
+/// no pack still surfaces a baseline.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SiftersSection {
+    /// Enable always-on baseline universal extractors. Default false.
+    #[serde(default)]
+    pub universal_extractors: bool,
+}
+
+fn default_sifters() -> SiftersSection {
+    SiftersSection::default()
+}
+
 /// `[policy]` section (declarative profile schema, POLICY.md section 4).
 ///
 /// The `profile` + `profile_version` keys are TC36-era; the `repo_root`,
@@ -330,6 +349,8 @@ pub struct DaemonConfig {
     pub limits: LimitsSection,
     #[serde(default = "default_shell_session")]
     pub shell_session: ShellSessionSection,
+    #[serde(default = "default_sifters")]
+    pub sifters: SiftersSection,
 }
 
 const fn default_retention() -> RetentionSection {
@@ -378,6 +399,7 @@ impl DaemonConfig {
             audit: default_audit(),
             limits: default_limits(),
             shell_session: default_shell_session(),
+            sifters: default_sifters(),
         }
     }
 
@@ -780,6 +802,22 @@ mod tests {
             .expect("read example toml");
         let cfg = DaemonConfig::from_toml(&raw).expect("example toml must parse + validate");
         assert_eq!(cfg.policy.profile, PolicyProfile::DeveloperLocal);
+    }
+
+    #[test]
+    fn sifters_section_defaults_off_and_parses_when_present() {
+        // Absent: defaults to false (US2 / FR-009).
+        let raw = "[daemon]\ndata_dir = \"/tmp/tc-sifters-default\"\n[policy]\nprofile = \"developer_local\"\nprofile_version = \"1\"\n";
+        let cfg = DaemonConfig::from_toml(raw).expect("minimal toml parses");
+        assert!(
+            !cfg.sifters.universal_extractors,
+            "universal_extractors must default OFF"
+        );
+
+        // Present + true: round-trips.
+        let raw_on = "[daemon]\ndata_dir = \"/tmp/tc-sifters-on\"\n[policy]\nprofile = \"developer_local\"\nprofile_version = \"1\"\n[sifters]\nuniversal_extractors = true\n";
+        let cfg_on = DaemonConfig::from_toml(raw_on).expect("sifters toml parses");
+        assert!(cfg_on.sifters.universal_extractors);
     }
 
     #[cfg(windows)]

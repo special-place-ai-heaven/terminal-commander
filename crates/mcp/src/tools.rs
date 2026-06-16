@@ -17,9 +17,10 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 46 live
+//! [`tool_catalogue`] is the single source of truth for the 47 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
-//! `policy_status`, `self_check`), command/bucket/event, registry,
+//! `policy_status`, `self_check`), command/bucket/event, registry
+//! (including `registry_suggest_from_samples`),
 //! file, PTY, persistent shell sessions + workspace snapshots
 //! (`shell_session_*`, `workspace_snapshot_*`), aggregate runtime views,
 //! and predicate-routed subscriptions
@@ -28,7 +29,7 @@
 //! daemon-independent tool; every other tool returns the structured
 //! `daemon_unavailable` envelope when the daemon is unreachable.
 //!
-//! Source-status: live; all 46 tools forward through daemon IPC.
+//! Source-status: live; all 47 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -59,7 +60,8 @@ use terminal_commanderd::ipc::protocol::{
     PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RegistryActivateParams,
     RegistryActivateResponse, RegistryDeactivateParams, RegistryDeactivateResponse,
     RegistryGetParams, RegistryGetResponse, RegistryImportPackParams, RegistryImportPackResponse,
-    RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse, RegistryTestParams,
+    RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse,
+    RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse, RegistryTestParams,
     RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
     SelfCheckResponse, ShellExecParams, ShellSessionExecParams, ShellSessionExecResponse,
     ShellSessionListResponse, ShellSessionStartParams, ShellSessionStartResponse,
@@ -224,6 +226,11 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "registry_list_active",
             status: ToolStatus::Live,
             description: "Snapshot of every currently-active rule (id + version + severity).",
+        },
+        ToolCatalogueEntry {
+            name: "registry_suggest_from_samples",
+            status: ToolStatus::Live,
+            description: "Suggest candidate parsing rules from raw output samples via pure heuristics. Returns DRAFT proposals + confidence + the explicit test->upsert->activate next steps. NEVER activates or persists a rule.",
         },
         ToolCatalogueEntry {
             name: "file_read_window",
@@ -672,12 +679,21 @@ impl TerminalCommanderMcpServer {
                 bucket_id,
                 probe_id,
                 cursor,
-            })) => json_tool_result(&serde_json::json!({
-                "job_id": job_id,
-                "bucket_id": bucket_id,
-                "probe_id": probe_id,
-                "cursor": cursor,
-            })),
+                hint,
+            })) => {
+                // US2 (FR-011): forward the optional pack-available hint
+                // verbatim. Omitted from the JSON when None.
+                let mut body = serde_json::json!({
+                    "job_id": job_id,
+                    "bucket_id": bucket_id,
+                    "probe_id": probe_id,
+                    "cursor": cursor,
+                });
+                if let Some(h) = hint {
+                    body["hint"] = serde_json::to_value(h).unwrap_or(serde_json::Value::Null);
+                }
+                json_tool_result(&body)
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
         }
@@ -969,6 +985,9 @@ impl TerminalCommanderMcpServer {
                 bucket_id,
                 probe_id,
                 cursor,
+                // Shell lane: argv[0] is the interpreter, never a tool
+                // pack, so the daemon never sets a hint here.
+                hint: _,
             })) => json_tool_result(&serde_json::json!({
                 "job_id": job_id,
                 "bucket_id": bucket_id,
@@ -1336,6 +1355,44 @@ impl TerminalCommanderMcpServer {
             })) => json_tool_result(&serde_json::json!({
                 "entries": entries,
                 "truncated": truncated,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `registry_suggest_from_samples` -- suggest DRAFT parsing rules from
+    /// raw output samples (US2 / FR-007). Thin forwarder: the daemon runs
+    /// the pure heuristic suggester. NEVER activates or persists a rule;
+    /// the response names the explicit test->upsert->activate loop.
+    #[tool(
+        description = "Suggest candidate parsing rules from raw output sample lines using pure deterministic heuristics (error/warning/FAILED/file:line/exit shapes). Returns DRAFT proposals, a confidence label, and the explicit registry_test->registry_upsert->registry_activate next steps. NEVER activates or persists a rule; low-signal input returns an empty proposal set with an explanation, not a junk rule."
+    )]
+    async fn registry_suggest_from_samples(
+        &self,
+        Parameters(params): Parameters<McpRegistrySuggestFromSamplesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = RegistrySuggestFromSamplesParams {
+            samples: params.samples,
+            intent: params.intent,
+            max_rules: params.max_rules,
+        };
+        match self
+            .daemon
+            .call(IpcRequest::RegistrySuggestFromSamples(ipc))
+            .await
+        {
+            Ok(IpcResponse::RegistrySuggestFromSamples(RegistrySuggestFromSamplesResponse {
+                proposed_rules,
+                confidence,
+                next_steps,
+                explanation,
+            })) => json_tool_result(&serde_json::json!({
+                "proposed_rules": proposed_rules,
+                "confidence": confidence,
+                "next_steps": next_steps,
+                "explanation": explanation,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -3677,6 +3734,21 @@ pub struct McpRegistryTestParams {
     pub samples: Vec<McpRegistryTestSample>,
 }
 
+/// MCP-facing parameters for `registry_suggest_from_samples` (US2).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRegistrySuggestFromSamplesParams {
+    /// Raw output sample lines to analyze. Bounded by the daemon
+    /// (sample count + per-line bytes); excess is ignored.
+    pub samples: Vec<String>,
+    /// Optional free-text hint about the tool/intent. Advisory only.
+    #[serde(default)]
+    pub intent: Option<String>,
+    /// Optional cap on the number of proposals. Clamped by the daemon.
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub max_rules: Option<u32>,
+}
+
 /// MCP-facing parameters for `registry_activate`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryActivateParams {
@@ -3696,10 +3768,14 @@ pub struct McpRegistryActivateParams {
 /// MCP-facing parameters for `registry_import_pack`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryImportPackParams {
-    /// Pack name. One of: generic.terminal, apt, cargo, npm, pytest,
-    /// gcc, make, cleanup.
+    /// Pack name. One of the 25 built-in seed packs: generic.terminal,
+    /// apt, cargo, npm, pytest, gcc, make, cleanup, docker, kubectl,
+    /// git, pip, uv, go, systemd, msbuild, winget, choco, terraform,
+    /// ansible, dotnet, bundler, yarn, pnpm, ssh.
     #[schemars(extend("enum" = [
-        "generic.terminal", "apt", "cargo", "npm", "pytest", "gcc", "make", "cleanup"
+        "generic.terminal", "apt", "cargo", "npm", "pytest", "gcc", "make", "cleanup",
+        "docker", "kubectl", "git", "pip", "uv", "go", "systemd", "msbuild", "winget",
+        "choco", "terraform", "ansible", "dotnet", "bundler", "yarn", "pnpm", "ssh"
     ]))]
     pub pack: String,
     /// When true, promote the pack's rules to Active and activate them
@@ -4648,7 +4724,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_forty_six_live_tools() {
+    fn catalogue_lists_forty_seven_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -4679,6 +4755,7 @@ mod tests {
                 "registry_import_pack",
                 "registry_deactivate",
                 "registry_list_active",
+                "registry_suggest_from_samples",
                 "file_read_window",
                 "file_search",
                 "file_watch_start",
@@ -4755,6 +4832,7 @@ mod tests {
                 "registry_import_pack".to_owned(),
                 "registry_list_active".to_owned(),
                 "registry_search".to_owned(),
+                "registry_suggest_from_samples".to_owned(),
                 "registry_test".to_owned(),
                 "registry_upsert".to_owned(),
                 "run_and_watch".to_owned(),
@@ -5446,10 +5524,11 @@ mod tests {
     }
 
     #[test]
-    fn tb9_import_pack_schema_enumerates_all_eight_seed_packs() {
+    fn tb9_import_pack_schema_enumerates_all_seed_packs() {
         // TB-9: the schema's pack enum must match the daemon's seed-pack
-        // set exactly (8 packs incl. cleanup), so the schema can never
-        // again list fewer packs than the daemon accepts.
+        // set exactly (25 packs incl. cleanup + the US2 additions), so
+        // the schema can never again list fewer packs than the daemon
+        // accepts.
         let schema = schemars::schema_for!(McpRegistryImportPackParams);
         let packs = schema_enum(&schema, "/properties/pack/enum");
         assert_eq!(
@@ -5463,13 +5542,37 @@ mod tests {
                 "gcc",
                 "make",
                 "cleanup",
+                "docker",
+                "kubectl",
+                "git",
+                "pip",
+                "uv",
+                "go",
+                "systemd",
+                "msbuild",
+                "winget",
+                "choco",
+                "terraform",
+                "ansible",
+                "dotnet",
+                "bundler",
+                "yarn",
+                "pnpm",
+                "ssh",
             ],
-            "import_pack schema must enumerate all eight seed packs; got {packs:?}"
+            "import_pack schema must enumerate all 25 seed packs; got {packs:?}"
         );
+        assert_eq!(packs.len(), 25);
         assert!(
             packs.iter().any(|p| p == "cleanup"),
             "TB-9: cleanup must be present in the pack enum"
         );
+        for p0 in ["docker", "kubectl", "git"] {
+            assert!(
+                packs.iter().any(|p| p == p0),
+                "TB-9: P0 pack {p0} must be present in the enum (FR-010)"
+            );
+        }
     }
 
     #[test]

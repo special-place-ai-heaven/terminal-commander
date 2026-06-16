@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "pack": "pnpm",
+    "version": 1,
+    "description": "pnpm (JavaScript package manager) error rules."
+  },
+  "rules": [
+    {
+      "id": "pnpm.err-code",
+      "version": 1,
+      "kind": "regex",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "command_failed",
+      "stream": "stderr",
+      "description": "A pnpm coded error line.",
+      "pattern": "ERR_PNPM_(?P<code>[A-Z_]+)",
+      "captures": ["code"],
+      "summary_template": "pnpm error: ${code}",
+      "tags": ["packaging", "javascript", "pnpm"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "pnpm.no-matching-version",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "high",
+      "event_kind": "missing_package",
+      "stream": "stderr",
+      "description": "pnpm could not satisfy a version range.",
+      "keywords": ["No matching version found for", "is not in the npm registry"],
+      "captures": [],
+      "summary_template": "pnpm: no matching version",
+      "tags": ["packaging", "javascript", "pnpm"],
+      "rate_limit_per_min": 30,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    },
+    {
+      "id": "pnpm.peer-conflict",
+      "version": 1,
+      "kind": "keyword",
+      "status": "draft",
+      "severity": "medium",
+      "event_kind": "dependency_conflict",
+      "stream": "stderr",
+      "description": "An unmet peer dependency conflict.",
+      "keywords": ["unmet peer", "peer dependencies that it requires"],
+      "captures": [],
+      "summary_template": "pnpm: peer dependency conflict",
+      "tags": ["packaging", "javascript", "pnpm"],
+      "rate_limit_per_min": 12,
+      "redact": [],
+      "context_hint": { "before_lines": 0, "after_lines": 1 }
+    }
+  ]
+}

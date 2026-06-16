@@ -1,0 +1,86 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "registry_suggest_from_samples",
+      "arguments": {
+        "samples": [
+          "error[E0432]: unresolved import `crate::missing_module`",
+          "warning: unused variable `x`",
+          "src/main.rs:42:7: something went wrong",
+          "process exited with code 137"
+        ],
+        "intent": "parse cargo build output",
+        "max_rules": 4
+      }
+    }
+  },
+  "tool": "registry_suggest_from_samples",
+  "_meta": {
+    "schema_anchor": "US2/mcp-tools/registry_suggest_from_samples-v1",
+    "fixture_id": "contracts/mcp-tools/registry_suggest_from_samples.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "US2"
+    ],
+    "note": "Pure-Rust heuristic rule suggestion from bounded output samples. Returns DRAFT proposals plus a confidence label and the explicit test->upsert->activate next steps. NEVER activates or persists a rule (FR-008); low-signal input returns an empty proposal set with an explanation instead of a junk rule."
+  },
+  "response_example": {
+    "proposed_rules": [
+      {
+        "id": "suggest.coded-error",
+        "version": 1,
+        "kind": "regex",
+        "status": "draft",
+        "severity": "high",
+        "event_kind": "compile_error",
+        "stream": "stderr",
+        "description": "Coded diagnostic prefix (e.g. E0432, TS2304).",
+        "pattern": "^(?P<code>[A-Z]+[0-9]{2,5}): (?P<message>.+)$",
+        "captures": ["code", "message"],
+        "summary_template": "${code}: ${message}",
+        "tags": ["suggested"],
+        "rate_limit_per_min": 30,
+        "redact": [],
+        "context_hint": { "before_lines": 0, "after_lines": 2 }
+      }
+    ],
+    "confidence": "heuristic",
+    "next_steps": [
+      "registry_test",
+      "registry_upsert",
+      "registry_activate"
+    ],
+    "explanation": "scanned 4 line(s); detected candidate shape(s). These are DRAFT proposals only -- test then explicitly activate."
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "samples is required",
+    "proposed_rules are always status=draft; the tool never activates or persists",
+    "confidence is always the constant \"heuristic\"",
+    "next_steps is always [registry_test, registry_upsert, registry_activate]",
+    "empty or low-signal input returns an empty proposal set with an explanation, not a junk rule"
+  ]
+}
