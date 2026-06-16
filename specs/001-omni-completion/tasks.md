@@ -58,26 +58,26 @@ ledger fixes. Gates O-02; closes SC-001/008/009/010/011.
 
 ### Tests for User Story 1 (write first, must fail)
 
-- [ ] T008 [P] [US1] Integration test `crates/daemon/tests/shell_session_ipc.rs`: start -> exec `cd /tmp` -> exec `pwd` -> signal contains `/tmp`; status returns cwd/env; stop is graceful.
-- [ ] T009 [P] [US1] Live e2e `crates/mcp/tests/shell_session_live_e2e.rs`: full session flow through the MCP adapter; default-deny denial when cap off.
-- [ ] T010 [P] [US1] Test `crates/probes/tests/ansi_strip.rs` (TC-B1): colored output + `^`-anchored rule matches; summary has no escape bytes; raw bytes retrievable from frame store.
-- [ ] T011 [P] [US1] Test in `crates/mcp/tests/` for TC-E1 compact projection (`{summary,stream,seq,severity}` only) and TC-E4 single canonical capture field.
-- [ ] T012 [P] [US1] Test for TC-E2 (`wait_until:"exit"` wall-time <= advertised cap) and TC-B3 (restart -> `command_status` returns restart-marked terminal result).
+- [X] T008 [P] [US1] Integration test `crates/daemon/tests/shell_session_ipc.rs`: start -> exec `cd /tmp` -> exec `pwd` -> signal contains `/tmp`; status returns cwd/env; stop is graceful. (O-02 PASS live via IPC.)
+- [X] T009 [P] [US1] Live e2e `crates/mcp/tests/shell_session_live_e2e.rs`: full session flow through the MCP adapter; default-deny denial when cap off. (O-02 PASS live via adapter.)
+- [X] T010 [P] [US1] Test `crates/probes/tests/ansi_strip.rs` (TC-B1) + CRLF-normalizer tests: anchored rule matches stripped output; no escape bytes in summary; raw bytes retrievable; UTF-8 safe.
+- [X] T011 [P] [US1] `crates/mcp/tests/ledger_compact_wait_restart.rs`: compact projection (4 fields only) + single canonical capture field.
+- [X] T012 [P] [US1] Same file: TC-E2 wait_until:"exit" wall-time <= cap (1.6s vs 30s sleep); TC-B3 restart -> restart-marked terminal result.
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Create `crates/daemon/src/shell_session.rs`: `ShellSessionRuntime` over `pty_command.rs` PTY infra; long-lived login shell; sticky cwd/env; terminal-state guard; idle reaper hook; `max_sessions` cap.
-- [ ] T014 [US1] Add IPC protocol variants in `crates/ipc/src/protocol.rs`: `ShellSessionStart/Exec/Status/Stop/List`, `WorkspaceSnapshotCreate/Apply`; request/response types per `contracts/mcp-tools.md`.
-- [ ] T015 [US1] Add handlers in `crates/daemon/src/ipc/handlers/` (new `session.rs`) + dispatch in `crates/daemon/src/ipc/server.rs`; policy-check (SessionStart) + audit before spawn.
-- [ ] T016 [US1] Wire `ShellSessionRuntime` into `crates/daemon/src/state.rs` bootstrap + `runtime.rs`.
-- [ ] T017 [US1] Workspace snapshot persistence (cwd + bounded env) in SQLite; create/apply handlers.
-- [ ] T018 [US1] MCP tools in `crates/mcp/src/tools.rs`: `shell_session_start/exec/status/stop/list`, `workspace_snapshot_create/apply` (thin forwarders, no spawn).
-- [ ] T019 [US1] TC-B1: call the T002 stripper before sift + in summaries on `crates/probes/src/process.rs`; add `strip_ansi` (default true) threaded through `command_start_combed`/`run_and_watch` params.
-- [ ] T020 [US1] TC-E1 + TC-E4: add `compact: bool` to signal-returning tool params in `crates/mcp/src/tools.rs` (projection); collapse capture echo to one canonical field + named captures at the sifter emit site in `crates/sifters/src/`.
-- [ ] T021 [US1] TC-E2: add `wait_until:"exit"` + server cap and `poll_hint_ms` in running responses (reuse the wall-clock `Instant` deadline pattern in `crates/mcp/src/tools.rs`); TC-B3: post-restart `command_status` reads the T007 receipt.
-- [ ] T022 [US1] Update tool-count anchors 39 -> 46 (5 name lists + count assertions + `system_discover` fixture + `minimal_tool_args` + `mcp/src/main.rs` header + docs) and contract fixtures `tests/fixtures/contracts/mcp-tools/shell_session_*.v1.json`, `workspace_snapshot_*.v1.json`.
-- [ ] T023 [US1] Docs: create `docs/runtime/SHELL_SESSION.md`; update `POLICY.md` (SessionStart algorithm + `[policy.caps] allow_session`).
-- [ ] T024 [US1] Run verification gate + `--profile security` (policy) + the US1 e2e; record source-status labels; commit to `feature/omni-p1-sessions`; PAUSE before merge/push.
+- [X] T013 [US1] `crates/daemon/src/shell_session.rs`: `ShellSessionRuntime` over PtyRuntime; long-lived login shell; sticky cwd/env; terminal-state guard; idle reaper; `max_sessions` cap.
+- [X] T014 [US1] IPC protocol variants in `crates/ipc/src/protocol.rs`: ShellSession Start/Exec/Status/Stop/List, WorkspaceSnapshot Create/Apply + error codes.
+- [X] T015 [US1] Handlers `crates/daemon/src/ipc/handlers/session.rs` + dispatch in `ipc/server.rs`; SessionStart policy-check + audit before spawn.
+- [X] T016 [US1] Wired `ShellSessionRuntime` into `state.rs` bootstrap + `runtime.rs` + `config.rs` `[shell_session]`.
+- [X] T017 [US1] Workspace snapshot persistence (SQLite migration V0006 + `store/src/workspace.rs`); create/apply handlers.
+- [X] T018 [US1] 7 MCP forwarder tools in `crates/mcp/src/tools.rs` (adapter no-spawn guard PASS).
+- [X] T019 [US1] TC-B1: `crates/probes/src/ansi.rs` strip before sift + in summaries on process path; raw kept in ring; `strip_ansi` default true; AnsiNormalizer made CRLF-aware.
+- [X] T020 [US1] TC-E1 compact projection in MCP layer + TC-E4 canonical capture key at sifter emit site.
+- [X] T021 [US1] TC-E2 wait_until:"exit" + poll_hint_ms (cap honored to the wire) + TC-B3 SQLite job-receipt (migration V0007) restart-marked status fallback.
+- [X] T022 [US1] Tool-count anchors 39 -> 46 across all anchor files + 7 contract fixtures + system_discover fixture.
+- [ ] T023 [US1] Docs: `docs/runtime/SHELL_SESSION.md` + `POLICY.md` SessionStart algorithm. DEFERRED to the US6 documentation pass (T058) to batch all doc realignment; tracked, not dropped.
+- [X] T024 [US1] Verified in WSL (fmt + clippy -D + nextest 651 passed/1 skipped); 3 commits on `feature/omni-p1-sessions` (d9b1c75 policy, 673e0bd sessions, eec1e38 ledger). PAUSED before merge/push.
 
 **Checkpoint**: O-02 passes; ledger fixes verified; MVP shippable.
 
