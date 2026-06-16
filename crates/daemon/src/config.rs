@@ -970,7 +970,8 @@ mod tests {
         // Path is relative to the daemon crate root (where tests run).
         let raw = std::fs::read_to_string("../../config/targets.example.toml")
             .expect("read targets example toml");
-        let cfg = TargetsConfig::from_toml(&raw).expect("targets example toml must parse + validate");
+        let cfg =
+            TargetsConfig::from_toml(&raw).expect("targets example toml must parse + validate");
         let t = cfg.get("build-01").expect("example target present");
         assert_eq!(t.transport, RemoteTransport::SshForward);
         assert_eq!(

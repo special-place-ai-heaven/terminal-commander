@@ -225,10 +225,85 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             "tool catalogue must list exactly 49 live tools (47 + P5 target_list + target_probe)"
         );
 
+        // US6/T056 (FR-023): the payload carries the read-only omni capability
+        // matrix. Assert its shape AND its honesty invariants against this
+        // live, local-only daemon.
+        assert_omni_status_honest(&body);
+
         let _ = client.cancel().await;
     }
     handle.shutdown().await;
     cleanup(&data);
+}
+
+/// US6/T056 (FR-023): assert the omni capability matrix is present and HONEST
+/// for a live, local-only daemon. Extracted from the discover test so the test
+/// stays under the clippy `too_many_lines` cap.
+fn assert_omni_status_honest(body: &serde_json::Value) {
+    let omni = body
+        .get("omni_status")
+        .expect("system_discover payload must carry omni_status (US6/T056)");
+    assert_eq!(
+        omni["program_version"].as_str(),
+        Some(env!("CARGO_PKG_VERSION")),
+        "omni_status.program_version must be the program package version; got {omni}"
+    );
+    let matrix = &omni["matrix"];
+    // Daemon is UP here, so daemon-gated lanes report available iff this host's
+    // platform backend exists. The shell_exec lane is always wired (capability
+    // presence), so available == daemon-up == true.
+    assert_eq!(
+        matrix["shell_exec"]["available"].as_bool(),
+        Some(true),
+        "shell_exec capability is wired + daemon up => available:true; got {matrix}"
+    );
+    // sessions are unix-only; pty is unix(posix)/windows(conpty).
+    let sessions_available = matrix["sessions"]["available"]
+        .as_bool()
+        .expect("sessions.available bool");
+    let pty_available = matrix["pty"]["available"]
+        .as_bool()
+        .expect("pty.available bool");
+    let pty_platform = matrix["pty"]["platform"]
+        .as_str()
+        .expect("pty.platform string");
+    if cfg!(unix) {
+        assert!(sessions_available, "sessions must be available on unix");
+        assert!(pty_available, "pty must be available on unix");
+        assert_eq!(pty_platform, "posix", "unix pty platform is posix");
+    } else if cfg!(windows) {
+        assert!(
+            !sessions_available,
+            "sessions are unix-only => unavailable on windows; got {matrix}"
+        );
+        assert!(pty_available, "pty (ConPTY) must be available on windows");
+        assert_eq!(
+            pty_platform, "windows_conpty",
+            "windows pty platform is windows_conpty"
+        );
+    }
+    // Privileged helper is plan-only (P4): NEVER available, stable reason.
+    assert_eq!(
+        matrix["privileged_helper"]["available"].as_bool(),
+        Some(false),
+        "privileged_helper must NEVER be available (P4 plan-only); got {matrix}"
+    );
+    assert_eq!(
+        matrix["privileged_helper"]["reason"].as_str(),
+        Some("threat_review_pending"),
+        "privileged_helper reason must be threat_review_pending; got {matrix}"
+    );
+    // Local-only daemon: no targets loaded.
+    assert_eq!(
+        matrix["remote_targets"]["count"].as_u64(),
+        Some(0),
+        "local-only daemon must report 0 remote targets; got {matrix}"
+    );
+    assert_eq!(
+        matrix["remote_targets"]["reachable"].as_u64(),
+        Some(0),
+        "local-only daemon must report 0 reachable targets; got {matrix}"
+    );
 }
 
 fn first_text_content(result: &rmcp::model::CallToolResult) -> String {

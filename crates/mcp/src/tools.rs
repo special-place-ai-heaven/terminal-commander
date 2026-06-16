@@ -456,6 +456,24 @@ const fn session_runtime_available() -> bool {
     cfg!(unix)
 }
 
+/// The PTY backend label for the omni capability matrix (US6/T056).
+///
+/// Honest platform truth, evaluated at compile time from the same `cfg!`
+/// gates that drive [`pty_command_available`]: `"posix"` for the unix
+/// `pty-process` backend (Linux/WSL/macOS), `"windows_conpty"` for the
+/// US3a/TC53 Windows ConPTY backend (`portable-pty`), and `"unavailable"`
+/// on any host with no PTY backend at all (matching `available: false`).
+#[must_use]
+const fn pty_platform() -> &'static str {
+    if cfg!(windows) {
+        "windows_conpty"
+    } else if cfg!(unix) {
+        "posix"
+    } else {
+        "unavailable"
+    }
+}
+
 /// Reason surfaced for `pty_command_*` tools on a host with no PTY backend
 /// (neither unix `pty-process` nor Windows ConPTY).
 const PTY_UNAVAILABLE_REASON: &str = "PTY runtime unavailable on this platform";
@@ -463,6 +481,14 @@ const PTY_UNAVAILABLE_REASON: &str = "PTY runtime unavailable on this platform";
 /// runtime is unix-only for now; Windows sessions are a separate slice).
 const SESSION_UNAVAILABLE_REASON: &str =
     "shell-session runtime unavailable on this platform (unix-only)";
+
+/// Reason surfaced for the privileged helper in the omni capability matrix
+/// (US6/T056, P4). The privileged helper (`terminal-commander-privileged`) is
+/// PLAN-ONLY this program: no code lands until a dedicated threat review
+/// completes (research R-9 / tasks.md US6 note). The matrix MUST report it
+/// `available: false` with this reason -- never `true` -- so discovery does
+/// not claim a capability that is not wired.
+const PRIVILEGED_HELPER_UNAVAILABLE_REASON: &str = "threat_review_pending";
 
 #[must_use]
 fn discovered_tools(daemon_available: bool) -> Vec<DiscoveredToolEntry> {
@@ -514,6 +540,92 @@ pub struct SystemDiscoverPayload {
     pub daemon: Option<DiscoverResponse>,
     pub daemon_error: Option<String>,
     pub tools: Vec<DiscoveredToolEntry>,
+    /// US6/T056: read-only omni capability matrix. Assembled honestly from
+    /// live runtime + config state -- platform `cfg!` truth, daemon
+    /// reachability, and the loaded `targets.toml`. NEVER claims a capability
+    /// `available: true` that is not actually wired (the privileged helper is
+    /// always `false`; PTY/session reflect this host's real backends).
+    pub omni_status: OmniStatus,
+}
+
+/// US6/T056 (FR-023): the omni capability matrix surfaced via discovery.
+///
+/// "Omni" is the program promise that an LLM never needs a separate terminal
+/// tool. This matrix is the HONEST, machine-readable proof of what that holds
+/// for on THIS host right now: each capability is reported from live runtime
+/// state (compile-time platform `cfg!`, daemon reachability, loaded targets),
+/// and any unavailable capability carries the reason it is off. It is a
+/// READ-ONLY discovery addition -- no new tool, no behavior change.
+#[derive(Debug, Clone, Serialize)]
+pub struct OmniStatus {
+    /// The omni program version (the adapter/workspace package version). Not a
+    /// claim that every gate is green -- just which build emitted the matrix.
+    pub program_version: &'static str,
+    pub matrix: OmniMatrix,
+}
+
+/// The capability matrix rows. Shape pinned by `contracts/mcp-tools.md` (P6).
+#[derive(Debug, Clone, Serialize)]
+pub struct OmniMatrix {
+    pub shell_exec: ShellExecStatus,
+    pub sessions: SessionsStatus,
+    pub pty: PtyStatus,
+    pub privileged_helper: PrivilegedHelperStatus,
+    pub remote_targets: RemoteTargetsStatus,
+}
+
+/// Shell-lane capability presence (US1/TC49).
+///
+/// `available` reports that the gated shell lane is WIRED (the `shell_exec`
+/// tool is live and the daemon is reachable) -- it is capability PRESENCE, not
+/// the `allow_shell` cap value. A deny-by-default profile still reports
+/// `available: true` here because the lane exists; the cap gate is reported
+/// separately by `policy_status`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ShellExecStatus {
+    pub available: bool,
+}
+
+/// Persistent shell-session runtime (US2/TC50).
+///
+/// Unix-only for now: the session runtime is `#[cfg(unix)]`, so `available`
+/// mirrors [`session_runtime_available`] AND daemon reachability.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionsStatus {
+    pub available: bool,
+}
+
+/// PTY backend (US3/TC53).
+///
+/// `available` reflects the real dual backend: unix `pty-process` OR Windows
+/// ConPTY; `platform` is `"posix"`, `"windows_conpty"`, or `"unavailable"`.
+/// Mirrors [`pty_command_available`] AND daemon reachability.
+#[derive(Debug, Clone, Serialize)]
+pub struct PtyStatus {
+    pub available: bool,
+    pub platform: &'static str,
+}
+
+/// Privileged helper (US4/P4).
+///
+/// ALWAYS `available: false` this program: P4 is plan-only and no code lands
+/// until a dedicated threat review completes. The reason is the stable
+/// `"threat_review_pending"` label.
+#[derive(Debug, Clone, Serialize)]
+pub struct PrivilegedHelperStatus {
+    pub available: bool,
+    pub reason: &'static str,
+}
+
+/// Remote federation targets (US5/P5).
+///
+/// `count` is the number of targets loaded from `targets.toml`; `reachable` is
+/// how many answered a short bounded probe over their operator-forwarded LOCAL
+/// socket. Local-only hosts report `{count: 0, reachable: 0}`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteTargetsStatus {
+    pub count: usize,
+    pub reachable: usize,
 }
 
 /// Long-poll client timeout for `subscription_pull`. STRICTLY ABOVE the
@@ -755,6 +867,9 @@ impl TerminalCommanderMcpServer {
             Err(e) => (None, Some(format_ipc_error(&e))),
         };
         let daemon_available = daemon.is_some() && daemon_error.is_none();
+        // US6/T056: read-only omni capability matrix, assembled before we move
+        // `daemon`/`daemon_error` into the payload. Honest from live state.
+        let omni_status = self.omni_status(daemon_available).await;
         let payload = SystemDiscoverPayload {
             adapter_version: ADAPTER_VERSION,
             mcp_spec: MCP_SPEC_REVISION,
@@ -762,8 +877,71 @@ impl TerminalCommanderMcpServer {
             daemon,
             daemon_error,
             tools: discovered_tools(daemon_available),
+            omni_status,
         };
         json_tool_result(&payload)
+    }
+
+    /// Assemble the US6/T056 omni capability matrix HONESTLY from live state.
+    ///
+    /// READ-ONLY: this never starts a job, opens a file, or mutates anything.
+    /// It reads compile-time platform truth (the same `cfg!` gates that drive
+    /// tool availability), the passed daemon reachability, and the loaded
+    /// `targets.toml` registry. Remote reachability is measured with the same
+    /// short bounded probe `target_list` uses (a down target is not an error).
+    ///
+    /// Invariant: no row may claim `available: true` for a capability that is
+    /// not actually wired. The privileged helper is always `false`
+    /// (`threat_review_pending`); PTY/session reflect this host's real backend.
+    async fn omni_status(&self, daemon_available: bool) -> OmniStatus {
+        // Shell lane (US1): capability PRESENCE, not the `allow_shell` cap
+        // value. The lane exists iff the `shell_exec` tool is live and the
+        // daemon is reachable to run it. The policy cap is reported by
+        // `policy_status`, never conflated into "availability" here.
+        let shell_exec_live = tool_catalogue()
+            .iter()
+            .any(|t| t.name == "shell_exec" && matches!(t.status, ToolStatus::Live));
+        let shell_exec_available = shell_exec_live && daemon_available;
+
+        // Sessions (US2): unix-only runtime AND a reachable daemon.
+        let sessions_available = session_runtime_available() && daemon_available;
+
+        // PTY (US3): dual backend (unix pty-process / Windows ConPTY) AND a
+        // reachable daemon. `platform` is honest even when the daemon is down.
+        let pty_available = pty_command_available() && daemon_available;
+
+        // Remote targets (US5): count from the loaded config; reachable from a
+        // bounded probe of each operator-forwarded LOCAL socket.
+        let targets = self.target_router.targets();
+        let count = targets.len();
+        let mut reachable = 0_usize;
+        for t in targets {
+            if self.probe_target(t).await.is_some() {
+                reachable += 1;
+            }
+        }
+
+        OmniStatus {
+            program_version: ADAPTER_VERSION,
+            matrix: OmniMatrix {
+                shell_exec: ShellExecStatus {
+                    available: shell_exec_available,
+                },
+                sessions: SessionsStatus {
+                    available: sessions_available,
+                },
+                pty: PtyStatus {
+                    available: pty_available,
+                    platform: pty_platform(),
+                },
+                // P4 is plan-only: NEVER available this program.
+                privileged_helper: PrivilegedHelperStatus {
+                    available: false,
+                    reason: PRIVILEGED_HELPER_UNAVAILABLE_REASON,
+                },
+                remote_targets: RemoteTargetsStatus { count, reachable },
+            },
+        }
     }
 
     /// `health` — daemon liveness check. Returns uptime when reachable
