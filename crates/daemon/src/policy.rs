@@ -75,6 +75,14 @@ pub enum PolicyAction<'a> {
         cwd: &'a Path,
         shell: &'a str,
     },
+    /// Persistent shell-session start (P1 / TC50). Mirrors `CommandShellStart`
+    /// gating but behind the independent `allow_session` capability: a session
+    /// is a longer-lived interactive shell and gets its own operator switch.
+    /// `shell` is the resolved interpreter; argv[0] is NOT user-chosen here.
+    SessionStart {
+        shell: &'a str,
+        cwd: &'a Path,
+    },
     CommandStdin,
     CommandSignal,
     FileRead {
@@ -260,6 +268,15 @@ impl PolicyEngine {
         self.caps.allow_shell
     }
 
+    /// Read-only accessor mirroring [`Self::caps_allow_shell`] for the
+    /// `allow_session` capability (P1 session lane). Lets bootstrap-wiring
+    /// tests confirm the resolved cap was threaded without exposing a mutation
+    /// path.
+    #[must_use]
+    pub const fn caps_allow_session(&self) -> bool {
+        self.caps.allow_session
+    }
+
     /// Read-only accessor: the full RESOLVED capability set carried by this
     /// engine.
     ///
@@ -338,6 +355,31 @@ impl PolicyEngine {
                 decision: PolicyDecision::Deny,
                 reason: "shell_exec denied: allow_shell capability is off or profile forbids shell"
                     .to_owned(),
+            };
+        }
+
+        // Session-lane gate (P1 / TC50). Same deny-first shape as the shell
+        // lane, but gated by the independent `allow_session` capability so a
+        // persistent session is a separate operator opt-in from one-shot shell.
+        if let PolicyAction::SessionStart { .. } = action {
+            let exec_profile = matches!(
+                self.profile,
+                PolicyProfile::DeveloperLocal
+                    | PolicyProfile::AdminDebug
+                    | PolicyProfile::FullAccess
+            );
+            if exec_profile && self.caps.allow_session {
+                return PolicyVerdict {
+                    decision: PolicyDecision::AllowWithAudit,
+                    reason: "shell_session_start allowed by allow_session capability (audited)"
+                        .to_owned(),
+                };
+            }
+            return PolicyVerdict {
+                decision: PolicyDecision::Deny,
+                reason:
+                    "shell_session_start denied: allow_session capability is off or profile forbids sessions"
+                        .to_owned(),
             };
         }
 
@@ -552,10 +594,12 @@ const fn action_path_subject<'a>(action: &'a PolicyAction<'a>) -> Option<&'a Pat
     match action {
         PolicyAction::CommandStart { cwd, .. } => Some(cwd),
         PolicyAction::FileRead { path } | PolicyAction::FileWatch { path } => Some(path),
-        // Shell-lane start is gated by an early return in `evaluate` (it never
-        // reaches the repo_only containment check), so it has no path subject
-        // here. Arm present only to keep the match exhaustive.
+        // Shell-lane and session-lane starts are gated by an early return in
+        // `evaluate` (they never reach the repo_only containment check), so they
+        // have no path subject here. Arms present only to keep the match
+        // exhaustive.
         PolicyAction::CommandShellStart { .. }
+        | PolicyAction::SessionStart { .. }
         | PolicyAction::CommandStdin
         | PolicyAction::CommandSignal
         | PolicyAction::ProbeCreate { .. }
@@ -689,6 +733,96 @@ mod tests {
             shell_line: "echo a | wc -c",
             cwd: Path::new("."),
             shell: "/bin/bash",
+        });
+        assert_eq!(v.decision, PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn session_start_denied_by_default() {
+        // developer_local is exec-capable, but caps default all-false, so the
+        // session lane is denied with no explicit opt-in.
+        let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
+        let v = e.evaluate(&PolicyAction::SessionStart {
+            shell: "/bin/bash",
+            cwd: Path::new("."),
+        });
+        assert_eq!(v.decision, PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn session_start_allowed_with_audit_when_cap_on() {
+        let e = PolicyEngine::with_config_caps(
+            PolicyProfile::DeveloperLocal,
+            None,
+            None,
+            PolicyCaps {
+                allow_session: true,
+                ..Default::default()
+            },
+        );
+        let v = e.evaluate(&PolicyAction::SessionStart {
+            shell: "/bin/bash",
+            cwd: Path::new("."),
+        });
+        assert_eq!(v.decision, PolicyDecision::AllowWithAudit);
+    }
+
+    #[test]
+    fn session_start_denied_in_repo_only_even_with_cap() {
+        // repo_only is NOT exec-capable for the session lane: even with the cap
+        // on, the early-return session gate denies (profile forbids sessions).
+        let e = PolicyEngine::with_config_caps(
+            PolicyProfile::RepoOnly,
+            None,
+            None,
+            PolicyCaps {
+                allow_session: true,
+                ..Default::default()
+            },
+        );
+        let v = e.evaluate(&PolicyAction::SessionStart {
+            shell: "/bin/bash",
+            cwd: Path::new("."),
+        });
+        assert_eq!(v.decision, PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn session_start_denied_in_read_only_observer_even_with_cap() {
+        // read_only_observer is the strictest profile: the session lane is
+        // denied even with allow_session explicitly on.
+        let e = PolicyEngine::with_config_caps(
+            PolicyProfile::ReadOnlyObserver,
+            None,
+            None,
+            PolicyCaps {
+                allow_session: true,
+                ..Default::default()
+            },
+        );
+        let v = e.evaluate(&PolicyAction::SessionStart {
+            shell: "/bin/bash",
+            cwd: Path::new("."),
+        });
+        assert_eq!(v.decision, PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn session_cap_independent_of_shell_cap() {
+        // allow_shell on but allow_session off -> session denied (caps are
+        // independent opt-ins, not a shared exec switch).
+        let e = PolicyEngine::with_config_caps(
+            PolicyProfile::DeveloperLocal,
+            None,
+            None,
+            PolicyCaps {
+                allow_shell: true,
+                ..Default::default()
+            },
+        );
+        let v = e.evaluate(&PolicyAction::SessionStart {
+            shell: "/bin/bash",
+            cwd: Path::new("."),
         });
         assert_eq!(v.decision, PolicyDecision::Deny);
     }
