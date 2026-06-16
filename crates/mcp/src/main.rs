@@ -9,7 +9,7 @@
 //! - does NOT spawn child commands (`Command::spawn` is forbidden),
 //! - does NOT open network sockets (`TcpListener`/`UdpSocket` forbidden),
 //! - does NOT open files outside its own config / daemon IPC path,
-//! - exposes the full daemon tool surface (47 tools), each forwarded
+//! - exposes the full daemon tool surface (49 tools), each forwarded
 //!   1:1 to a daemon IPC method.
 //!
 //! Platform: Unix (UDS) and Windows (named pipe). Both transports are
@@ -188,7 +188,23 @@ fn main() -> ExitCode {
 
         let status_handle = DaemonStatusHandle::new(status);
         let daemon = McpDaemonClient::with_status(socket_path, status_handle);
-        let server = TerminalCommanderMcpServer::new(daemon);
+        // P5: load the remote-federation target registry (targets.toml). The
+        // fs read lives in the daemon crate (`terminal_commanderd::load_targets`),
+        // NOT in crates/mcp/src, so the adapter no-fs grep guard stays green.
+        // A missing file => local-only (default). A malformed file degrades to
+        // local-only with a loud stderr warning rather than crashing the
+        // adapter -- federation is opt-in and must never block the base surface.
+        let targets = match terminal_commanderd::load_targets() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "terminal-commander-mcp: targets.toml failed to load ({e}); \
+                     continuing local-only (remote federation disabled)"
+                );
+                terminal_commanderd::TargetsConfig::default()
+            }
+        };
+        let server = TerminalCommanderMcpServer::with_targets(daemon, targets);
 
         let service = match server.serve(stdio()).await {
             Ok(svc) => svc,

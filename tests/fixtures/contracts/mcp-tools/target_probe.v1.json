@@ -1,0 +1,60 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "target_probe",
+      "arguments": {
+        "target_id": "build-01"
+      }
+    }
+  },
+  "tool": "target_probe",
+  "_meta": {
+    "schema_anchor": "TC-P5/mcp-tools/target_probe-v1",
+    "fixture_id": "contracts/mcp-tools/target_probe.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC-P5"
+    ],
+    "note": "Single remote-target health probe (P5 / FR-021). Dials the named target's operator-forwarded LOCAL socket and returns { reachable, daemon_version }. A target whose tunnel is down reports reachable=false (not an error). Gated on the operator's allow_remote cap: probing reaches off-host through the tunnel, so the adapter first confirms allow_remote on the LOCAL daemon, which means a down local daemon yields the canonical daemon_unavailable envelope. Constitution IV: only a LOCAL socket path is dialed; no public network port is opened."
+  },
+  "response_example": {
+    "target_id": "build-01",
+    "reachable": true,
+    "daemon_version": "0.1.49"
+  },
+  "response_example_unreachable": {
+    "target_id": "build-01",
+    "reachable": false,
+    "daemon_version": null
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "requires_daemon=true in system_discover (confirms allow_remote on the local daemon)",
+    "a down/unforwarded target reports reachable=false, never an error body",
+    "gated on allow_remote; never opens a public network port",
+    "only a LOCAL forward socket path is dialed (constitution IV)"
+  ]
+}

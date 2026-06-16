@@ -1,0 +1,67 @@
+# Example remote-federation target registry for Terminal Commander (P5).
+#
+# Copy to ~/.config/terminal-commander/targets.toml and edit as needed.
+# SAFE TO COMMIT (no secrets: identity_file is a PATH, not a key).
+#
+# Loaded by the MCP adapter at startup (override the path for tests with
+# the TC_TARGETS_CONFIG env var). A MISSING file means NO targets =
+# local-only: every daemon-backed tool runs on the local daemon exactly
+# as before, with no behaviour change. Remote federation is fully opt-in.
+#
+# ---------------------------------------------------------------------------
+# How remote reach works (constitution IV: local-only, no public TCP)
+# ---------------------------------------------------------------------------
+# Terminal Commander NEVER opens a public network port and the MCP adapter
+# NEVER spawns a process. A remote daemon is reached ONLY by dialing a LOCAL
+# socket path that an OPERATOR-ESTABLISHED tunnel forwards to the remote
+# daemon's UDS. The supported transport is `ssh_forward`:
+#
+#   1. The remote host runs `terminal-commanderd` bound to its LOCAL UDS,
+#      e.g. /run/user/1000/terminal-commanderd.sock (remote_socket below).
+#   2. The OPERATOR establishes an SSH local-forward from THIS host:
+#
+#          ssh -N -L /tmp/tc-fwd-build-01.sock:/run/user/1000/terminal-commanderd.sock build-01
+#
+#      (an `ssh -L <local>:<remote>` UDS forward; the operator owns the
+#      tunnel lifecycle, keys, and host verification).
+#   3. Terminal Commander dials `local_forward_socket` (/tmp/tc-fwd-build-01.sock).
+#      It cannot tell a forwarded socket from a local one -- it only ever
+#      connects to a local PATH, never a host:port.
+#
+# AUTO-TUNNEL IS DEFERRED-TO-OPERATOR ON PURPOSE: the adapter does NOT spawn
+# `ssh` (constitution I: the adapter never spawns). Auto-establishing the
+# `ssh -L` forward from inside Terminal Commander is intentionally out of
+# scope for this slice; the operator establishes and tears down the tunnel.
+#
+# Routing a tool to a target requires the operator's `allow_remote` cap on
+# the LOCAL daemon ([policy.caps] allow_remote = true). The REMOTE daemon
+# evaluates and AUDITS the actual command under its own policy, so combing,
+# bounded output, and audit are identical on both ends. Listing targets
+# (target_list) is read-only and not gated.
+
+[[targets]]
+# Stable id referenced by the optional `target_id` field on daemon-backed
+# tools (and by target_probe). Must be unique.
+target_id = "build-01"
+
+# Transport. Only "ssh_forward" is supported: the operator forwards the
+# remote daemon's UDS to local_forward_socket via `ssh -L`.
+transport = "ssh_forward"
+
+# Human-facing host label. Informational only -- the adapter never dials
+# this; it dials local_forward_socket.
+host = "build-01.internal"
+
+# Optional: the SSH identity file the OPERATOR uses to establish the
+# forward. Recorded for documentation/tooling; Terminal Commander never
+# reads it or spawns ssh.
+# identity_file = "${HOME}/.ssh/id_ed25519"
+
+# Optional: the remote-side UDS path the operator's `ssh -L` forwards TO.
+# Documentation only; not dialed locally.
+# remote_socket = "/run/user/1000/terminal-commanderd.sock"
+
+# REQUIRED: the LOCAL socket path this host dials to reach the remote
+# daemon. An operator-established forward must terminate here. This is the
+# only field the adapter actually connects to.
+local_forward_socket = "/tmp/tc-fwd-build-01.sock"

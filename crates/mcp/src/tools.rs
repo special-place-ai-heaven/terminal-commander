@@ -17,19 +17,27 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 47 live
+//! [`tool_catalogue`] is the single source of truth for the 49 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry
 //! (including `registry_suggest_from_samples`),
 //! file, PTY, persistent shell sessions + workspace snapshots
 //! (`shell_session_*`, `workspace_snapshot_*`), aggregate runtime views,
-//! and predicate-routed subscriptions
-//! (`subscription_open/pull/list/close/seek`). Each maps 1:1
-//! to a daemon IPC method. `system_discover` is the only
-//! daemon-independent tool; every other tool returns the structured
-//! `daemon_unavailable` envelope when the daemon is unreachable.
+//! predicate-routed subscriptions
+//! (`subscription_open/pull/list/close/seek`), and remote federation
+//! (`target_list`, `target_probe`). Each daemon-backed tool maps 1:1 to a
+//! daemon IPC method. `system_discover` and `target_list` are
+//! local-daemon-independent (they answer from adapter-side state); every
+//! other tool returns the structured `daemon_unavailable` envelope when
+//! the daemon is unreachable.
 //!
-//! Source-status: live; all 47 tools forward through daemon IPC.
+//! P5 remote federation: every daemon-backed command tool accepts an
+//! optional `target_id` (default = local). When set, the request routes
+//! to that target's daemon over an operator-forwarded LOCAL socket
+//! (constitution IV: no public TCP; constitution I: the adapter never
+//! spawns -- the `ssh -L` tunnel is the OPERATOR's, not ours).
+//!
+//! Source-status: live; all 49 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -75,7 +83,9 @@ use terminal_commanderd::ipc::protocol::{
 };
 
 use crate::daemon_client::McpDaemonClient;
+use crate::target_router::{TargetRouteError, TargetRouter};
 use terminal_commander_supervisor::ensure::EnsureDaemonStatus;
+use terminal_commanderd::{RemoteTarget, TargetsConfig};
 
 /// Wire-stable tool-status enum advertised by `system_discover`.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -352,6 +362,16 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             status: ToolStatus::Live,
             description: "Reposition a subscription's offset for one bucket (explicit re-read). The requested seq is clamped to the bucket's live range (never an error); lagged flags an evicted request.",
         },
+        ToolCatalogueEntry {
+            name: "target_list",
+            status: ToolStatus::Live,
+            description: "List registered remote-federation targets + reachability (from targets.toml; default none = local-only). Read-only; reachability probed over the operator-forwarded LOCAL socket, never a public network port.",
+        },
+        ToolCatalogueEntry {
+            name: "target_probe",
+            status: ToolStatus::Live,
+            description: "Probe ONE target's health over its operator-forwarded LOCAL socket; returns reachable + daemon_version. Requires allow_remote; never opens a public network port.",
+        },
     ]
 }
 
@@ -367,7 +387,11 @@ pub fn catalogue_tool_names() -> Vec<&'static str> {
 
 #[must_use]
 fn tool_requires_daemon(name: &str) -> bool {
-    name != "system_discover"
+    // `system_discover` answers from adapter metadata; `target_list` answers
+    // from the adapter-side targets.toml registry (P5). Both are reportable
+    // even when the local daemon is down. `target_probe` DOES require the
+    // local daemon (it confirms allow_remote before dialing off-host).
+    !matches!(name, "system_discover" | "target_list")
 }
 
 /// Whether a tool name belongs to the PTY command family.
@@ -499,6 +523,12 @@ pub struct SystemDiscoverPayload {
 /// DRAIN_CEILING (10 s) < this MCP pull client timeout (12 s).
 const SUBSCRIPTION_PULL_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 
+/// Bound on a `target_probe` / `target_list` reachability dial (P5). Short
+/// on purpose: probing a target whose tunnel is down must fail fast and
+/// report `reachable: false`, never hang a tool. A live forwarded UDS
+/// round trip is sub-millisecond; this only caps the failure case.
+const TARGET_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// MCP server handler. Holds the daemon client and the tool router.
 #[derive(Clone)]
 pub struct TerminalCommanderMcpServer {
@@ -513,6 +543,12 @@ pub struct TerminalCommanderMcpServer {
     /// `subscription_pull` batch emits a `notifications/message` nudge as a
     /// hint; delivery of events is ALWAYS the pull, never this notification.
     notify: bool,
+    /// P5 remote-target router. Resolves an optional `target_id` to the
+    /// local daemon client (default) or a target's operator-forwarded
+    /// LOCAL socket. Local-only (no targets) when the server is built via
+    /// `new` / `with_notify`; populated from `targets.toml` via
+    /// `with_targets`. Never spawns, never opens TCP, never reads fs.
+    target_router: TargetRouter,
     /// Tool router populated by the rmcp `#[tool_router]` macro. The
     /// router is read by the rmcp service layer, not by us directly,
     /// so the dead-code lint trips here; suppressed below.
@@ -552,6 +588,31 @@ impl TerminalCommanderMcpServer {
     /// `notifications/message` nudge without mutating process-global env.
     #[must_use]
     pub fn with_notify(daemon: McpDaemonClient, notify: bool) -> Self {
+        // Default surface is LOCAL-ONLY: no remote targets registered, so
+        // every tool routes to the local daemon exactly as before P5. Remote
+        // federation is opt-in via `with_targets`.
+        let router = TargetRouter::local_only(daemon.clone());
+        Self::with_targets_and_notify(daemon, router, notify)
+    }
+
+    /// Construct a server wired to a target router loaded from `targets.toml`
+    /// (P5). When the router has no targets this is identical to `new`. The
+    /// router's local client MUST be the same `daemon` passed here so the
+    /// default (no-`target_id`) path and the explicit-local path agree.
+    #[must_use]
+    pub fn with_targets(daemon: McpDaemonClient, targets: TargetsConfig) -> Self {
+        let router = TargetRouter::new(daemon.clone(), targets);
+        Self::with_targets_and_notify(daemon, router, notify_enabled())
+    }
+
+    /// Shared constructor: wire the local client, the long-poll client, the
+    /// notification opt-in, and the P5 target router.
+    #[must_use]
+    fn with_targets_and_notify(
+        daemon: McpDaemonClient,
+        target_router: TargetRouter,
+        notify: bool,
+    ) -> Self {
         // Dedicated long-poll client for `subscription_pull` (MUST-ADD #7):
         // same socket + status handle, but a 12 s per-CLIENT timeout so an
         // idle ~8 s pull returns SUCCESS empty+liveness, never a -32603.
@@ -562,6 +623,7 @@ impl TerminalCommanderMcpServer {
             daemon,
             pull_daemon,
             notify,
+            target_router,
             tool_router: Self::tool_router(),
         }
     }
@@ -597,6 +659,81 @@ impl TerminalCommanderMcpServer {
         }
 
         Err(daemon_unavailable_error(&status.current()))
+    }
+
+    /// Resolve the daemon client a tool should dial for an optional
+    /// `target_id` (P5 / T050).
+    ///
+    /// - `None` => the LOCAL client (default; identical to pre-P5 behaviour).
+    ///   The caller is expected to have already run
+    ///   [`Self::ensure_daemon_available`].
+    /// - `Some(id)` => REMOTE routing. Gated by the operator's `allow_remote`
+    ///   cap on the LOCAL daemon (constitution II, default-deny): the adapter
+    ///   reads the live `policy_status` and refuses with a typed
+    ///   `remote_denied` error unless `allow_remote` is set. On grant, the
+    ///   request routes to the target's operator-forwarded LOCAL socket
+    ///   ([`TargetRouter::resolve`]); the REMOTE daemon then evaluates and
+    ///   AUDITS the actual action under its own policy, so combing + audit +
+    ///   bounded output are identical on both ends. An unknown id is a typed
+    ///   `unknown_target` error.
+    ///
+    /// Constitution IV: the returned client only ever dials a local socket
+    /// PATH; no public TCP listener or network address is constructed.
+    async fn daemon_for_target(
+        &self,
+        target_id: Option<&str>,
+    ) -> Result<McpDaemonClient, McpError> {
+        let Some(id) = target_id else {
+            return Ok(self.daemon.clone());
+        };
+
+        // Remote use is opt-in: confirm the operator enabled `allow_remote`
+        // on the local daemon BEFORE routing anything off-host.
+        self.ensure_remote_allowed(id).await?;
+
+        self.target_router
+            .resolve(Some(id))
+            .map_err(|e| route_error_to_mcp(&e))
+    }
+
+    /// Enforce the `allow_remote` cap before any remote routing (T051).
+    ///
+    /// Reads the LIVE policy from the local daemon. A daemon that is itself
+    /// unreachable surfaces the standard `daemon_unavailable` envelope (we
+    /// cannot prove the operator opted in). When `allow_remote` is false the
+    /// remote request is refused with a typed, teaching `remote_denied`
+    /// error -- the default-deny posture for federation.
+    async fn ensure_remote_allowed(&self, target_id: &str) -> Result<(), McpError> {
+        self.ensure_daemon_available().await?;
+        match self.daemon.call(IpcRequest::PolicyStatus).await {
+            Ok(IpcResponse::PolicyStatus(status)) => {
+                if status.caps.allow_remote {
+                    Ok(())
+                } else {
+                    Err(remote_denied_error(target_id))
+                }
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// Probe a single target's forwarded LOCAL socket (P5 / T051).
+    ///
+    /// Dials the operator-forwarded socket with a SHORT bounded timeout and
+    /// issues one `SystemDiscover`. Returns `Some(daemon_version)` when the
+    /// remote daemon answers, `None` when the socket is unreachable or the
+    /// timeout elapses (a down/unforwarded target is NOT an error here -- the
+    /// caller reports `reachable: false`). Never spawns, never opens TCP.
+    async fn probe_target(&self, target: &RemoteTarget) -> Option<String> {
+        let client = self
+            .target_router
+            .client_for(target)
+            .with_timeout(TARGET_PROBE_TIMEOUT);
+        match client.call(IpcRequest::SystemDiscover).await {
+            Ok(IpcResponse::SystemDiscover(d)) => Some(d.version),
+            _ => None,
+        }
     }
 
     /// `system_discover` — adapter metadata + tool catalogue.
@@ -693,6 +830,61 @@ impl TerminalCommanderMcpServer {
         }
     }
 
+    /// `target_list` — registered remote-federation targets + reachability
+    /// (P5 / T051). READ-ONLY: lists the targets parsed from `targets.toml`
+    /// (default empty = local-only) and probes each one's
+    /// operator-forwarded LOCAL socket for liveness. Listing is not gated by
+    /// `allow_remote` (it reveals no remote data, only configuration);
+    /// ACTUALLY routing a tool to a target is gated separately.
+    #[tool(
+        description = "List registered remote-federation targets and whether each is reachable. Targets come from targets.toml (default: none = local-only). Reachability is probed over the operator-established LOCAL forward socket; no public network port is opened. Use target_probe for a single target's daemon_version. Routing a tool to a target requires the operator's allow_remote cap."
+    )]
+    async fn target_list(&self) -> Result<CallToolResult, McpError> {
+        let mut targets = Vec::new();
+        for t in self.target_router.targets() {
+            let reachable = self.probe_target(t).await.is_some();
+            targets.push(serde_json::json!({
+                "target_id": t.target_id,
+                "host": t.host,
+                "transport": t.transport,
+                "local_forward_socket": t.local_forward_socket.to_string_lossy(),
+                "reachable": reachable,
+            }));
+        }
+        json_tool_result(&serde_json::json!({ "targets": targets }))
+    }
+
+    /// `target_probe` — dial ONE target's forwarded LOCAL socket and report
+    /// reachability + the remote daemon version (P5 / T051).
+    ///
+    /// Gated by `allow_remote` (probing a target reaches off-host through the
+    /// tunnel). Returns `{ target_id, reachable, daemon_version? }`. A down or
+    /// unforwarded target reports `reachable: false` rather than erroring, so
+    /// an agent can poll readiness. An unknown `target_id` is a typed error.
+    #[tool(
+        description = "Probe ONE registered target's health: dials its operator-forwarded LOCAL socket and returns { reachable, daemon_version }. A target whose tunnel is down reports reachable=false (not an error). Requires the operator's allow_remote cap; never opens a public network port."
+    )]
+    async fn target_probe(
+        &self,
+        Parameters(params): Parameters<McpTargetProbeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Gate remote reach on allow_remote (also validates the local daemon is
+        // up, since the cap lives there) before dialing off-host.
+        self.ensure_remote_allowed(&params.target_id).await?;
+        let target = self
+            .target_router
+            .target(&params.target_id)
+            .ok_or_else(|| {
+                route_error_to_mcp(&TargetRouteError::UnknownTarget(params.target_id.clone()))
+            })?;
+        let daemon_version = self.probe_target(target).await;
+        json_tool_result(&serde_json::json!({
+            "target_id": target.target_id,
+            "reachable": daemon_version.is_some(),
+            "daemon_version": daemon_version,
+        }))
+    }
+
     /// `command_start_combed` — start a non-PTY argv command on the
     /// daemon and return bounded metadata. Never returns raw output.
     #[tool(
@@ -703,8 +895,12 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpCommandStartParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
+        // P5: route to the optional target_id (None => local). Resolve BEFORE
+        // consuming params; remote use is gated on allow_remote + dialed via
+        // the target's operator-forwarded LOCAL socket.
+        let daemon = self.daemon_for_target(params.target_id.as_deref()).await?;
         let ipc = params.into_ipc()?;
-        match self.daemon.call(IpcRequest::CommandStartCombed(ipc)).await {
+        match daemon.call(IpcRequest::CommandStartCombed(ipc)).await {
             Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
                 job_id,
                 bucket_id,
@@ -751,23 +947,27 @@ impl TerminalCommanderMcpServer {
             compact,
             wait_until_exit,
         } = controls;
+        // P5: resolve the daemon client for the optional target_id. None =>
+        // local (default). A remote target is gated by allow_remote + dialed
+        // through its operator-forwarded LOCAL socket; the whole one-shot
+        // (start + wait + status) runs against that ONE resolved client so
+        // signals are combed by the SAME daemon that ran the command.
+        let target_id = start_params.target_id.clone();
+        let daemon = self.daemon_for_target(target_id.as_deref()).await?;
         let start_ipc = start_params.into_ipc()?;
 
         // 1. Start.
-        let (job_id, bucket_id, mut cursor) = match self
-            .daemon
-            .call(IpcRequest::CommandStartCombed(start_ipc))
-            .await
-        {
-            Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
-                job_id,
-                bucket_id,
-                cursor,
-                ..
-            })) => (job_id, bucket_id, cursor),
-            Ok(other) => return Err(unexpected_variant(&other)),
-            Err(e) => return Err(into_mcp_error_for(false, &e)),
-        };
+        let (job_id, bucket_id, mut cursor) =
+            match daemon.call(IpcRequest::CommandStartCombed(start_ipc)).await {
+                Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
+                    job_id,
+                    bucket_id,
+                    cursor,
+                    ..
+                })) => (job_id, bucket_id, cursor),
+                Ok(other) => return Err(unexpected_variant(&other)),
+                Err(e) => return Err(into_mcp_error_for(false, &e)),
+            };
 
         // 2. Wait loop: drain signals until the job is terminal, the
         //    signal cap is hit, or the wall-clock wait budget is spent.
@@ -799,8 +999,7 @@ impl TerminalCommanderMcpServer {
         loop {
             // Poll status first so a command that already exited short-
             // circuits without burning a full wait slice.
-            let status = match self
-                .daemon
+            let status = match daemon
                 .call(IpcRequest::CommandStatus(CommandStatusParams { job_id }))
                 .await
             {
@@ -860,7 +1059,7 @@ impl TerminalCommanderMcpServer {
                 limit: Some(max_signals.saturating_sub(signals.len()).max(1)),
                 timeout_ms: Some(slice_ms),
             };
-            match self.daemon.call(IpcRequest::BucketWait(wait)).await {
+            match daemon.call(IpcRequest::BucketWait(wait)).await {
                 Ok(IpcResponse::BucketWait(r)) => {
                     cursor = r.next_cursor;
                     collect_rule_signals(r.events, &mut signals, max_signals);
@@ -906,7 +1105,7 @@ impl TerminalCommanderMcpServer {
                     timeout_ms: Some(0),
                 };
                 if let Ok(IpcResponse::BucketWait(r)) =
-                    self.daemon.call(IpcRequest::BucketWait(drain)).await
+                    daemon.call(IpcRequest::BucketWait(drain)).await
                 {
                     cursor = r.next_cursor;
                     collect_rule_signals(r.events, &mut signals, max_signals);
@@ -944,10 +1143,11 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpCommandStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
+        let daemon = self.daemon_for_target(params.target_id.as_deref()).await?;
         let job_id = parse_id::<terminal_commander_core::ids::JobIdKind>("job_id", &params.job_id)
             .map_err(invalid_params)?;
         let ipc = CommandStatusParams { job_id };
-        match self.daemon.call(IpcRequest::CommandStatus(ipc)).await {
+        match daemon.call(IpcRequest::CommandStatus(ipc)).await {
             Ok(IpcResponse::CommandStatus(s)) => json_tool_result(&command_status_payload(&s)),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -963,10 +1163,10 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpCommandStopParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
+        let daemon = self.daemon_for_target(params.target_id.as_deref()).await?;
         let job_id = parse_id::<terminal_commander_core::ids::JobIdKind>("job_id", &params.job_id)
             .map_err(invalid_params)?;
-        match self
-            .daemon
+        match daemon
             .call(IpcRequest::CommandStop(CommandStopParams { job_id }))
             .await
         {
@@ -2467,6 +2667,49 @@ fn daemon_unavailable_error(status: &EnsureDaemonStatus) -> McpError {
     McpError::internal_error("daemon_unavailable", Some(payload))
 }
 
+/// Map a [`TargetRouteError`] to a typed MCP error (P5 / T050).
+///
+/// An unknown `target_id` is a caller-fixable input problem, so it routes
+/// through `invalid_params` (JSON-RPC -32602), carrying the offending id and
+/// a remedy pointing at `target_list`.
+fn route_error_to_mcp(err: &TargetRouteError) -> McpError {
+    match err {
+        TargetRouteError::UnknownTarget(id) => {
+            let payload = serde_json::json!({
+                "code": "unknown_target",
+                "message": format!("unknown target_id '{id}'"),
+                "details": {
+                    "target_id": id,
+                    "remedy": "call target_list to see registered target_ids, or omit target_id to run locally",
+                },
+            });
+            McpError::invalid_params(
+                Cow::Owned(format!("unknown target_id '{id}'")),
+                Some(payload),
+            )
+        }
+    }
+}
+
+/// Build the typed `remote_denied` error returned when a tool is invoked
+/// with a `target_id` but the local daemon has `allow_remote = false`
+/// (constitution II default-deny; T051).
+fn remote_denied_error(target_id: &str) -> McpError {
+    let payload = serde_json::json!({
+        "code": "remote_denied",
+        "message": "remote federation is disabled by policy (allow_remote = false)",
+        "details": {
+            "target_id": target_id,
+            "cap": "allow_remote",
+            "remedy": "the operator must enable [policy.caps] allow_remote = true on the local daemon to route tools to a remote target",
+        },
+    });
+    McpError::invalid_params(
+        Cow::Borrowed("remote_denied: allow_remote cap is not enabled"),
+        Some(payload),
+    )
+}
+
 /// Build the `daemon_unavailable` envelope for a MID-CALL transport failure
 /// (see [`crate::daemon_client::McpDaemonClient::call`]).
 ///
@@ -3133,6 +3376,15 @@ pub struct McpCommandStartParams {
     /// silently defeated by color codes. Set `false` to match raw bytes.
     #[serde(default = "default_true_mcp")]
     pub strip_ansi: bool,
+    /// P5 remote federation: optional registered `target_id`. Omitted/None
+    /// (the default) runs LOCALLY -- exact backward compatibility. When set,
+    /// the command runs on that target's daemon, reached ONLY through the
+    /// operator-forwarded LOCAL socket (no public TCP). Requires the
+    /// operator to have enabled `allow_remote`; an unknown id is rejected.
+    /// Combing + bounded output are identical local vs remote. Adapter-side
+    /// routing only -- never forwarded into the IPC request.
+    #[serde(default)]
+    pub target_id: Option<String>,
 }
 
 impl McpCommandStartParams {
@@ -3166,6 +3418,15 @@ impl McpCommandStartParams {
     }
 }
 
+/// Params for `target_probe` (P5 / T051).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpTargetProbeParams {
+    /// Registered `target_id` to probe (see `target_list`). The adapter
+    /// dials this target's operator-forwarded LOCAL socket; it never
+    /// contacts a network address.
+    pub target_id: String,
+}
+
 /// MCP-facing parameters for `command_status`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpCommandStatusParams {
@@ -3173,6 +3434,10 @@ pub struct McpCommandStatusParams {
     /// `run_and_watch` (e.g. `job_<32hex>`); copy it verbatim, not
     /// free-form.
     pub job_id: String,
+    /// P5: optional `target_id` of the daemon that owns this job. Must
+    /// match the target the job was started on. Omit for a local job.
+    #[serde(default)]
+    pub target_id: Option<String>,
 }
 
 /// Parameters for the `command_stop` tool: the opaque job id of the
@@ -3183,6 +3448,10 @@ pub struct McpCommandStopParams {
     /// `run_and_watch` (e.g. `job_<32hex>`); copy it verbatim, not
     /// free-form.
     pub job_id: String,
+    /// P5: optional `target_id` of the daemon that owns this job. Must
+    /// match the target the job was started on. Omit for a local job.
+    #[serde(default)]
+    pub target_id: Option<String>,
 }
 
 /// Parameters for `shell_exec` (TC49).
@@ -3377,6 +3646,13 @@ pub struct McpRunAndWatchParams {
     /// signal-cap-or-budget wait. The cap is advertised in the response.
     #[serde(default)]
     pub wait_until: Option<String>,
+    /// P5 remote federation: optional registered `target_id`. Omitted/None
+    /// runs LOCALLY (default; exact backward compatibility). When set, the
+    /// whole one-shot runs on that target's daemon, reached ONLY through the
+    /// operator-forwarded LOCAL socket; combed signals come back from THAT
+    /// daemon. Requires `allow_remote`; an unknown id is rejected.
+    #[serde(default)]
+    pub target_id: Option<String>,
 }
 
 impl McpRunAndWatchParams {
@@ -3411,6 +3687,9 @@ impl McpRunAndWatchParams {
             tag: self.tag,
             // TC-B1: forward the strip flag onto the underlying start.
             strip_ansi: self.strip_ansi,
+            // P5: carry the target_id onto the start params so run_and_watch
+            // resolves the same daemon client for the whole one-shot.
+            target_id: self.target_id,
         };
         (
             start,
@@ -4755,7 +5034,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_forty_seven_live_tools() {
+    fn catalogue_lists_forty_nine_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -4811,6 +5090,8 @@ mod tests {
                 "subscription_list",
                 "subscription_close",
                 "subscription_seek",
+                "target_list",
+                "target_probe",
             ]
         );
         let not_impl: Vec<_> = tool_catalogue()
@@ -4881,6 +5162,8 @@ mod tests {
                 "subscription_pull".to_owned(),
                 "subscription_seek".to_owned(),
                 "system_discover".to_owned(),
+                "target_list".to_owned(),
+                "target_probe".to_owned(),
                 "workspace_snapshot_apply".to_owned(),
                 "workspace_snapshot_create".to_owned(),
             ]
@@ -4893,7 +5176,11 @@ mod tests {
         assert_eq!(tools.len(), tool_catalogue().len());
 
         for tool in &tools {
-            let expected_requires_daemon = tool.name != "system_discover";
+            // system_discover and target_list (P5) answer from adapter-side
+            // state, so neither requires the local daemon; every other tool
+            // does. target_probe DOES require the local daemon (confirms
+            // allow_remote before dialing off-host).
+            let expected_requires_daemon = !matches!(tool.name, "system_discover" | "target_list");
             assert_eq!(
                 tool.requires_daemon, expected_requires_daemon,
                 "{} requires_daemon mismatch",
@@ -5732,6 +6019,7 @@ mod tests {
             strip_ansi: true,
             compact: false,
             wait_until: None,
+            target_id: None,
         };
         let (start, _controls) = params.into_parts();
         assert_eq!(start.tag, Some("X".to_string()));
@@ -5751,6 +6039,7 @@ mod tests {
             strip_ansi: true,
             compact: false,
             wait_until: None,
+            target_id: None,
         };
         let (start, _controls) = untagged.into_parts();
         assert_eq!(start.tag, None);

@@ -42,7 +42,8 @@ pub use command::{
 };
 pub use config::{
     ConfigError, DaemonConfig, DaemonSection, LimitsSection, PolicyCapsSection, PolicySection,
-    RetentionSection, RuntimeMode, ShellSessionSection,
+    RemoteTarget, RemoteTransport, RetentionSection, RuntimeMode, ShellSessionSection,
+    TargetsConfig, default_targets_config_path, load_targets,
 };
 pub use file_watch::{LiveWatchIdentity, WatchError, WatchRebindReport, WatchRuntime};
 pub use ipc::{

@@ -1,0 +1,41 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "target_list",
+      "arguments": {}
+    }
+  },
+  "tool": "target_list",
+  "_meta": {
+    "schema_anchor": "TC-P5/mcp-tools/target_list-v1",
+    "fixture_id": "contracts/mcp-tools/target_list.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC-P5"
+    ],
+    "note": "Remote-federation target listing (P5 / FR-021). Read-only: enumerates the targets parsed from targets.toml (default: none = local-only) and probes each one's operator-forwarded LOCAL socket for liveness. Answers from adapter-side state, so it is NOT gated on local-daemon reachability and never returns a daemon_unavailable envelope. Constitution IV: reachability is probed over a LOCAL socket path only; no public network port is opened. Listing is read-only and not gated by allow_remote; ACTUALLY routing a tool to a target is gated separately on allow_remote + audited on the remote daemon."
+  },
+  "response_example": {
+    "targets": [
+      {
+        "target_id": "build-01",
+        "host": "build-01.internal",
+        "transport": "ssh_forward",
+        "local_forward_socket": "/run/user/1000/tc-fwd-build-01.sock",
+        "reachable": true
+      }
+    ]
+  },
+  "response_example_empty": {
+    "targets": []
+  },
+  "invariants": [
+    "requires_daemon=false in system_discover (adapter-side registry)",
+    "default (no targets.toml) returns an empty targets array, never an error",
+    "reachability is probed over a LOCAL forward socket path; no public TCP port is opened",
+    "listing is read-only and not gated by allow_remote"
+  ]
+}

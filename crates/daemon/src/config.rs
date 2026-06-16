@@ -561,6 +561,166 @@ pub fn to_toml(cfg: &DaemonConfig) -> String {
     toml::to_string(cfg).unwrap_or_else(|e| format!("# serialization error: {e}\n"))
 }
 
+/// Transport used to reach a remote daemon (P5, FR-019..FR-021).
+///
+/// Constitution IV: the daemon binds a LOCAL endpoint only; remote reach
+/// is achieved by tunnelling to an existing local socket, never by
+/// opening a public TCP listener. The only transport variant is
+/// `ssh_forward`: the OPERATOR establishes an `ssh -L` local-forward from
+/// `local_forward_socket` (a path on this host) to the remote daemon's
+/// UDS. Terminal Commander then dials that purely-local socket path -- it
+/// never speaks SSH or TCP itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteTransport {
+    /// Operator-established SSH local-forward to the remote daemon's UDS.
+    /// The adapter dials `local_forward_socket` (a local path); the SSH
+    /// tunnel is owned by the operator, NOT spawned by Terminal Commander.
+    SshForward,
+}
+
+/// A registered remote federation target (P5, FR-019).
+///
+/// Parsed from `targets.toml`. `local_forward_socket` is a path on THIS
+/// host that an operator-run `ssh -L` (or equivalent) has forwarded to the
+/// remote daemon's UDS. Routing a tool with `target_id` set dials that
+/// local socket path; combing still happens on the remote daemon, so the
+/// bounded/structured signal contract is identical local vs remote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteTarget {
+    /// Stable operator-chosen id, referenced by the `target_id` tool field.
+    pub target_id: String,
+    /// Transport. Only `ssh_forward` is supported (see [`RemoteTransport`]).
+    pub transport: RemoteTransport,
+    /// Human-facing host label (e.g. `build-01.internal`). Informational;
+    /// the adapter never dials this -- it dials `local_forward_socket`.
+    pub host: String,
+    /// Optional SSH identity file the OPERATOR uses to establish the
+    /// forward. Recorded for documentation / tooling only; Terminal
+    /// Commander never reads it or spawns ssh.
+    #[serde(default)]
+    pub identity_file: Option<PathBuf>,
+    /// Optional remote-side UDS path (documentation: what the operator's
+    /// `ssh -L` forwards TO on the remote host). Not dialed locally.
+    #[serde(default)]
+    pub remote_socket: Option<PathBuf>,
+    /// The LOCAL socket path this host dials to reach the remote daemon.
+    /// An operator-established forward must terminate here. This is the
+    /// only field the adapter actually connects to.
+    pub local_forward_socket: PathBuf,
+}
+
+/// Parsed `targets.toml`. Default (no file / empty file) = NO targets =
+/// local-only, preserving exact backward compatibility.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetsConfig {
+    /// Registered remote targets. Empty by default.
+    #[serde(default)]
+    pub targets: Vec<RemoteTarget>,
+}
+
+impl TargetsConfig {
+    /// Parse a `targets.toml` from an in-memory string. Validates that
+    /// `target_id`s are non-empty and unique and that no two targets share
+    /// a `local_forward_socket`.
+    pub fn from_toml(s: &str) -> Result<Self> {
+        let cfg: Self = toml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Load `targets.toml` from disk.
+    ///
+    /// A MISSING file is NOT an error: it resolves to an empty
+    /// (local-only) config, since remote federation is opt-in. Any other
+    /// IO error (permission denied, etc.) is surfaced.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let p = path.as_ref();
+        match std::fs::read_to_string(p) {
+            Ok(raw) => Self::from_toml(&raw),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(source) => Err(ConfigError::Io {
+                path: p.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
+    /// Look up a target by id.
+    #[must_use]
+    pub fn get(&self, target_id: &str) -> Option<&RemoteTarget> {
+        self.targets.iter().find(|t| t.target_id == target_id)
+    }
+
+    /// True when no targets are registered (the default local-only state).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    fn validate(&self) -> Result<()> {
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut seen_sockets = std::collections::HashSet::new();
+        for t in &self.targets {
+            if t.target_id.trim().is_empty() {
+                return Err(ConfigError::Validate(
+                    "remote target has an empty target_id".to_owned(),
+                ));
+            }
+            if !seen_ids.insert(t.target_id.as_str()) {
+                return Err(ConfigError::Validate(format!(
+                    "duplicate remote target_id: {}",
+                    t.target_id
+                )));
+            }
+            if t.local_forward_socket.as_os_str().is_empty() {
+                return Err(ConfigError::Validate(format!(
+                    "remote target '{}' has an empty local_forward_socket",
+                    t.target_id
+                )));
+            }
+            if !seen_sockets.insert(t.local_forward_socket.clone()) {
+                return Err(ConfigError::Validate(format!(
+                    "remote target '{}' reuses a local_forward_socket already bound to another target",
+                    t.target_id
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Resolve the default `targets.toml` path:
+/// `<XDG_CONFIG_HOME or ~/.config>/terminal-commander/targets.toml`.
+///
+/// Honors `TC_TARGETS_CONFIG` (full path override, used by tests) first.
+#[must_use]
+pub fn default_targets_config_path() -> PathBuf {
+    if let Ok(explicit) = std::env::var("TC_TARGETS_CONFIG")
+        && !explicit.is_empty()
+    {
+        return PathBuf::from(explicit);
+    }
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|h| PathBuf::from(h).join(".config"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".config"));
+    base.join("terminal-commander").join("targets.toml")
+}
+
+/// Load the targets registry from the default (or `TC_TARGETS_CONFIG`)
+/// path. A missing file resolves to an empty (local-only) registry.
+pub fn load_targets() -> Result<TargetsConfig> {
+    TargetsConfig::load(default_targets_config_path())
+}
+
 /// The daemon's default data dir when no `--config`/`--data-dir`/`TC_DATA`
 /// is supplied (F5).
 ///
@@ -805,6 +965,21 @@ mod tests {
     }
 
     #[test]
+    fn committed_targets_example_toml_parses() {
+        // P5: the shipped targets.toml example must always load + validate.
+        // Path is relative to the daemon crate root (where tests run).
+        let raw = std::fs::read_to_string("../../config/targets.example.toml")
+            .expect("read targets example toml");
+        let cfg = TargetsConfig::from_toml(&raw).expect("targets example toml must parse + validate");
+        let t = cfg.get("build-01").expect("example target present");
+        assert_eq!(t.transport, RemoteTransport::SshForward);
+        assert_eq!(
+            t.local_forward_socket,
+            PathBuf::from("/tmp/tc-fwd-build-01.sock")
+        );
+    }
+
+    #[test]
     fn sifters_section_defaults_off_and_parses_when_present() {
         // Absent: defaults to false (US2 / FR-009).
         let raw = "[daemon]\ndata_dir = \"/tmp/tc-sifters-default\"\n[policy]\nprofile = \"developer_local\"\nprofile_version = \"1\"\n";
@@ -818,6 +993,131 @@ mod tests {
         let raw_on = "[daemon]\ndata_dir = \"/tmp/tc-sifters-on\"\n[policy]\nprofile = \"developer_local\"\nprofile_version = \"1\"\n[sifters]\nuniversal_extractors = true\n";
         let cfg_on = DaemonConfig::from_toml(raw_on).expect("sifters toml parses");
         assert!(cfg_on.sifters.universal_extractors);
+    }
+
+    // ---- P5 (T049): targets.toml / RemoteTarget parsing ----
+
+    #[test]
+    fn targets_default_is_empty_local_only() {
+        // The whole point of the default: no targets => local-only, exact
+        // backward compatibility for every existing tool.
+        let cfg = TargetsConfig::default();
+        assert!(cfg.is_empty());
+        assert!(cfg.targets.is_empty());
+        assert!(cfg.get("anything").is_none());
+    }
+
+    #[test]
+    fn targets_empty_toml_parses_to_no_targets() {
+        let cfg = TargetsConfig::from_toml("").expect("empty targets.toml parses");
+        assert!(cfg.is_empty());
+    }
+
+    #[test]
+    fn targets_parse_ssh_forward_target() {
+        let raw = r#"
+    [[targets]]
+    target_id = "build-01"
+    transport = "ssh_forward"
+    host = "build-01.internal"
+    identity_file = "/home/op/.ssh/id_ed25519"
+    remote_socket = "/run/user/1000/terminal-commanderd.sock"
+    local_forward_socket = "/tmp/tc-fwd-build-01.sock"
+    "#;
+        let cfg = TargetsConfig::from_toml(raw).expect("ssh_forward target parses");
+        assert_eq!(cfg.targets.len(), 1);
+        let t = cfg.get("build-01").expect("target present");
+        assert_eq!(t.transport, RemoteTransport::SshForward);
+        assert_eq!(t.host, "build-01.internal");
+        assert_eq!(
+            t.identity_file.as_deref(),
+            Some(Path::new("/home/op/.ssh/id_ed25519"))
+        );
+        assert_eq!(
+            t.local_forward_socket,
+            PathBuf::from("/tmp/tc-fwd-build-01.sock")
+        );
+    }
+
+    #[test]
+    fn targets_optional_fields_default_to_none() {
+        let raw = r#"
+    [[targets]]
+    target_id = "minimal"
+    transport = "ssh_forward"
+    host = "h"
+    local_forward_socket = "/tmp/tc-fwd-minimal.sock"
+    "#;
+        let cfg = TargetsConfig::from_toml(raw).expect("minimal target parses");
+        let t = cfg.get("minimal").expect("target present");
+        assert!(t.identity_file.is_none());
+        assert!(t.remote_socket.is_none());
+    }
+
+    #[test]
+    fn targets_reject_duplicate_target_id() {
+        let raw = r#"
+    [[targets]]
+    target_id = "dup"
+    transport = "ssh_forward"
+    host = "a"
+    local_forward_socket = "/tmp/tc-a.sock"
+    [[targets]]
+    target_id = "dup"
+    transport = "ssh_forward"
+    host = "b"
+    local_forward_socket = "/tmp/tc-b.sock"
+    "#;
+        let err = TargetsConfig::from_toml(raw).expect_err("duplicate id rejected");
+        assert!(matches!(err, ConfigError::Validate(_)));
+    }
+
+    #[test]
+    fn targets_reject_duplicate_forward_socket() {
+        let raw = r#"
+    [[targets]]
+    target_id = "a"
+    transport = "ssh_forward"
+    host = "a"
+    local_forward_socket = "/tmp/tc-shared.sock"
+    [[targets]]
+    target_id = "b"
+    transport = "ssh_forward"
+    host = "b"
+    local_forward_socket = "/tmp/tc-shared.sock"
+    "#;
+        let err = TargetsConfig::from_toml(raw).expect_err("duplicate socket rejected");
+        assert!(matches!(err, ConfigError::Validate(_)));
+    }
+
+    #[test]
+    fn targets_reject_empty_target_id() {
+        let raw = r#"
+    [[targets]]
+    target_id = ""
+    transport = "ssh_forward"
+    host = "a"
+    local_forward_socket = "/tmp/tc-a.sock"
+    "#;
+        let err = TargetsConfig::from_toml(raw).expect_err("empty id rejected");
+        assert!(matches!(err, ConfigError::Validate(_)));
+    }
+
+    #[test]
+    fn targets_load_missing_file_is_local_only_not_error() {
+        // Remote federation is opt-in: a missing targets.toml must resolve to
+        // the empty (local-only) registry, NOT a hard error.
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "tc-targets-absent-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        assert!(!p.exists());
+        let cfg = TargetsConfig::load(&p).expect("missing file => empty config");
+        assert!(cfg.is_empty());
     }
 
     #[cfg(windows)]

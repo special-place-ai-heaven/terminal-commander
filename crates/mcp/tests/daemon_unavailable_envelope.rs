@@ -176,6 +176,10 @@ fn minimal_tool_args(tool: &str) -> serde_json::Value {
         "file_search" => serde_json::json!({ "path": "/tmp/tc-unavail", "query": "q" }),
         "file_watch_stop" => serde_json::json!({ "watch_id": "job_x" }),
         "probe_status" => serde_json::json!({ "probe_id": "prb_x" }),
+        // target_probe requires target_id (no default); supply one so the
+        // daemon-unavailable guard (ensure_remote_allowed -> ensure_daemon_available)
+        // is the path under test, not a missing-field schema error.
+        "target_probe" => serde_json::json!({ "target_id": "tgt_x" }),
         // subscription_pull / subscription_close require a sub_id (no default);
         // supply one so the daemon-unavailable guard — not a missing-field
         // schema error — is the path under test.
@@ -204,7 +208,13 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
     let mut checked = 0usize;
     for entry in tool_catalogue() {
         let tool = entry.name;
-        if tool == "system_discover" {
+        // system_discover and target_list answer from adapter-side state and
+        // are deliberately NOT gated on local-daemon reachability (P5: target_list
+        // lists targets.toml config; reachability of an unforwarded target is just
+        // reachable=false, never a daemon_unavailable envelope). target_probe IS
+        // gated: it must confirm the operator's allow_remote on the local daemon
+        // before dialing off-host, so a down local daemon yields daemon_unavailable.
+        if tool == "system_discover" || tool == "target_list" {
             continue;
         }
         checked += 1;
@@ -228,8 +238,8 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
         "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
     assert_eq!(
-        checked, 46,
-        "expected 46 daemon-backed tools (47 catalogue entries minus system_discover)"
+        checked, 47,
+        "expected 47 daemon-backed tools (49 catalogue entries minus system_discover and target_list)"
     );
 
     let _ = client.cancel().await;
@@ -271,7 +281,9 @@ async fn system_discover_succeeds_when_daemon_unavailable() {
         let name = tool["name"]
             .as_str()
             .expect("tool entry should include a name");
-        let requires_daemon = name != "system_discover";
+        // system_discover and target_list (P5) answer from adapter-side state
+        // and stay available + reason-less even when the local daemon is down.
+        let requires_daemon = !matches!(name, "system_discover" | "target_list");
         assert_eq!(
             tool["requires_daemon"], requires_daemon,
             "{name} requires_daemon mismatch"

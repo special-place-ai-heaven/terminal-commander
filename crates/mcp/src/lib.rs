@@ -9,17 +9,21 @@
 //! Dual-surface layout:
 //! - [`tools`] plus the `terminal-commander-mcp` binary are the
 //!   **production** surface: the rmcp `ServerHandler` that advertises
-//!   all 47 live tools (see [`tools::tool_catalogue`]), each forwarded
+//!   all 49 live tools (see [`tools::tool_catalogue`]), each forwarded
 //!   to the daemon over UDS IPC.
 //! - `ToolSurface` (this file) is a **legacy in-process test facade**
 //!   used by integration tests that drive bucket/registry flows
 //!   directly without stdio or rmcp. It is NOT the product surface and
 //!   its tool list must not be read as the advertised catalogue.
 //! - [`daemon_client`] — UDS client wrapper shared by both surfaces.
+//! - [`target_router`] — P5 remote-federation routing: resolves an
+//!   optional `target_id` to the local daemon (default) or a target's
+//!   operator-forwarded LOCAL socket. No spawn, no TCP, no fs.
 //!
 //! Source-status: live.
 
 pub mod daemon_client;
+pub mod target_router;
 pub mod tools;
 
 use std::sync::Arc;

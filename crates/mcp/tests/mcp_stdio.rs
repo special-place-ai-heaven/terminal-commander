@@ -117,10 +117,12 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "subscription_pull".to_owned(),
             "subscription_seek".to_owned(),
             "system_discover".to_owned(),
+            "target_list".to_owned(),
+            "target_probe".to_owned(),
             "workspace_snapshot_apply".to_owned(),
             "workspace_snapshot_create".to_owned(),
         ],
-        "TC45 set plus aggregate runtime view plus predicate-routed subscriptions plus P1 sessions"
+        "TC45 set plus aggregate runtime view plus predicate-routed subscriptions plus P1 sessions plus P5 federation"
     );
 
     let _ = client.cancel().await;

@@ -325,6 +325,21 @@ fn assert_daemon_unavailable_shape(
                 );
             }
         }
+        "target_local_independent" => {
+            // P5: target_list answers from the adapter-side targets.toml
+            // registry, so (like system_discover) it carries no
+            // daemon_unavailable error fixture. Unlike `not_applicable` this
+            // shape is reserved for remote-federation listing tools, not
+            // system_discover.
+            assert_eq!(
+                tool_name, "target_list",
+                "only target_list may use the target_local_independent shape"
+            );
+            assert!(
+                parsed.get("unavailable_error_example").is_none(),
+                "target_local_independent tool {tool_name} must not carry a daemon_unavailable error fixture"
+            );
+        }
         other => panic!("unexpected daemon_unavailable shape {other:?} for {tool_name}"),
     }
 }

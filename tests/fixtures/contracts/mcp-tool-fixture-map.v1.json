@@ -14,7 +14,8 @@
   "daemon_unavailable_shape_statuses": {
     "not_applicable": "Tool is daemon-independent and does not return the daemon_unavailable error envelope.",
     "ensure_daemon_status_v1": "unavailable_error_example.data.details is the serialized EnsureDaemonStatus::Unavailable shape.",
-    "legacy_state_unavailable": "Known debt: unavailable_error_example.data.details still uses the old state=unavailable placeholder shape."
+    "legacy_state_unavailable": "Known debt: unavailable_error_example.data.details still uses the old state=unavailable placeholder shape.",
+    "target_local_independent": "P5 remote-federation listing tool (target_list) that answers from the adapter-side targets.toml registry; like not_applicable it carries no daemon_unavailable error fixture, but it is a remote-federation tool, not system_discover."
   },
   "daemon_unavailable_shapes": {
     "system_discover": "not_applicable",
@@ -63,7 +64,9 @@
     "subscription_pull": "ensure_daemon_status_v1",
     "subscription_list": "ensure_daemon_status_v1",
     "subscription_close": "ensure_daemon_status_v1",
-    "subscription_seek": "ensure_daemon_status_v1"
+    "subscription_seek": "ensure_daemon_status_v1",
+    "target_list": "target_local_independent",
+    "target_probe": "ensure_daemon_status_v1"
   },
   "live_tools": [
     {
@@ -300,12 +303,22 @@
       "name": "subscription_seek",
       "fixture": "mcp-tools/subscription_seek.v1.json",
       "status": "covered_live"
+    },
+    {
+      "name": "target_list",
+      "fixture": "mcp-tools/target_list.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "target_probe",
+      "fixture": "mcp-tools/target_probe.v1.json",
+      "status": "covered_live"
     }
   ],
   "obsolete_fixtures": [],
   "counts": {
-    "live_tools": 47,
-    "covered_live": 43,
+    "live_tools": 49,
+    "covered_live": 45,
     "placeholder_for_live_tool": 0,
     "missing_fixture": 4,
     "obsolete_fixture_present": 0

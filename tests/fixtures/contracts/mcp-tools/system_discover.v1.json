@@ -72,7 +72,9 @@
       {"name": "subscription_pull", "status": "live", "description": "Blocking multiplexed pull of matched events + per-source liveness. Idle returns SUCCESS empty+liveness.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
       {"name": "subscription_list", "status": "live", "description": "Bounded snapshot of open subscriptions.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
       {"name": "subscription_close", "status": "live", "description": "Close a subscription by sub_id; idempotent.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
-      {"name": "subscription_seek", "status": "live", "description": "Reposition a subscription's offset for one bucket (explicit re-read); clamped, never an error.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"}
+      {"name": "subscription_seek", "status": "live", "description": "Reposition a subscription's offset for one bucket (explicit re-read); clamped, never an error.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"},
+      {"name": "target_list", "status": "live", "description": "List registered remote-federation targets + reachability (from targets.toml; default none = local-only). Read-only; answers from adapter-side state, so it stays available when the local daemon is down.", "requires_daemon": false, "available": true, "unavailable_reason": null},
+      {"name": "target_probe", "status": "live", "description": "Probe ONE target's health over its operator-forwarded LOCAL socket; returns reachable + daemon_version. Requires the local daemon (confirms allow_remote) so reports daemon_unavailable while the daemon is down.", "requires_daemon": true, "available": false, "unavailable_reason": "daemon_unavailable"}
     ]
   },
   "availability_invariants": {
