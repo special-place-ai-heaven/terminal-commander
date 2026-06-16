@@ -118,17 +118,17 @@ ledger fixes. Gates O-02; closes SC-001/008/009/010/011.
 
 ### Tests for User Story 3 (write first)
 
-- [ ] T036 [P] [US3] Windows PTY live e2e (cfg(windows)) driving a REPL with bounded combed output.
-- [ ] T037 [P] [US3] File backend test: native-FS event-driven signal latency + WSL 9P poll-fallback selection (reuse `tests/fixtures/probes/wsl-mountinfo/`).
-- [ ] T038 [P] [US3] Cancel-ladder test: SIGTERM-then-SIGKILL across command/PTY/session; terminal state reported.
+- [~] T036 [P] [US3] Windows PTY e2e: ConPTY spawn/cancel/EOF lifecycle + neutral secret-gate (M1/M2/decoy) PASS live on Windows. Child-OUTPUT e2e (REPL echo / live secret prompt) BLOCKED on this host (0xC0000142 ConPTY DLL-init, reproduced standalone; gated behind TC_CONPTY_E2E=1) -> run on CI/desktop to fully close O-07.
+- [X] T037 [P] [US3] File backend: notify native-append test (0.43s) + 9P-mountinfo selects poll. PASS WSL+Windows.
+- [X] T038 [P] [US3] Cancel-ladder: SIGTERM-handler-exits-no-SIGKILL vs ignored-escalates, for command AND PTY (unix). PASS.
 
 ### Implementation for User Story 3
 
-- [ ] T039 [US3] Add `portable-pty` and implement Windows ConPTY path behind `pty_command_*` in `crates/daemon/src/pty_command.rs` (feature/cfg-gated); update `system_discover` PTY/platform fields.
-- [ ] T040 [US3] macOS tier-1: ensure POSIX PTY path + daemon/MCP smoke; add `scripts/smoke/verify-runtime-smoke` macOS coverage.
-- [ ] T041 [US3] Add `notify` event-driven file backend in `crates/probes/src/file.rs`; keep 9P poll fallback (mountinfo detection); wire in `crates/daemon/src/file_watch.rs`.
-- [ ] T042 [US3] Process-group SIGTERM-then-SIGKILL grace ladder in `crates/probes/src/process.rs`; align command/PTY/session stop contracts.
-- [ ] T043 [US3] Run verification gate (+ platform-specific where runnable); record source-status incl `blocked` for any platform not runnable on the dev host; commit to `feature/omni-p3-platform`; PAUSE.
+- [X] T039 [US3] portable-pty 0.9 Windows ConPTY behind PtyProbe (dual-backend, shared pty_core, researcher Option A + 4 corrections); system_discover platform fields updated. Commit 16fd537.
+- [~] T040 [US3] macOS tier-1: POSIX paths compile cfg(unix); smoke macOS entry (Homebrew PATH) added. BLOCKED-no-Mac-host (code + script only; not live-run).
+- [X] T041 [US3] notify event-driven file backend (inotify/RDCW/FSEvents); 9P poll fallback via mountinfo; wired in file_watch.rs. Commit 2e636b5.
+- [X] T042 [US3] SIGTERM->SIGKILL grace ladder shared by command/PTY/session; Windows forced-TerminateJobObject asymmetry documented. Commit 2e636b5.
+- [X] T043 [US3] Verified WSL (clippy -D clean, 55 pass) + Windows-native (clippy clean, 33 pass). 2 commits on feature/omni-p3-platform. PAUSED. (O-03/O-08 macOS + O-07 ConPTY-output: blocked-on-host, queued for CI.)
 
 **Checkpoint**: PTY parity on tier-1 platforms; responsive file signals.
 
