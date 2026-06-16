@@ -1,0 +1,76 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "shell_session_exec",
+      "arguments": {
+        "session_id": "ses_018f0000000000000000000000000003",
+        "line": "pwd",
+        "cursor": 0,
+        "wait_ms": 500
+      }
+    }
+  },
+  "tool": "shell_session_exec",
+  "_meta": {
+    "schema_anchor": "TC50/mcp-tools/shell_session_exec-v1",
+    "fixture_id": "contracts/mcp-tools/shell_session_exec.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC50"
+    ],
+    "note": "Daemon-backed session line execution (omni P1). The line runs in the session's sticky cwd/env (set by prior lines such as `cd /tmp`). The daemon writes the line to the persistent shell and returns the combed signals it produced (read from the session bucket via a bounded wait), plus the next cursor for the following exec. Never a raw screen buffer or stdout dump. TB-7: session_id is opaque (copy verbatim, e.g. ses_<32hex>; from shell_session_start)."
+  },
+  "response_example": {
+    "session_id": "ses_018f0000000000000000000000000003",
+    "bucket_id": "bkt_018f0000000000000000000000000003",
+    "bytes_written": 4,
+    "cursor_in": 0,
+    "next_cursor": 1,
+    "has_more": false,
+    "dropped_count": 0,
+    "events": []
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "unsupported_platform_error_example": {
+    "message": "daemon ipc error [UnsupportedPlatform]: persistent shell sessions are not available on this platform yet (PTY/ConPTY pending)",
+    "data": {
+      "ipc_code": "UnsupportedPlatform"
+    }
+  },
+  "session_not_live_error_example": {
+    "message": "daemon ipc error [SessionNotLive]: session ses_018f0000000000000000000000000003 is not live (state observed terminal)",
+    "data": {
+      "ipc_code": "SessionNotLive"
+    }
+  },
+  "invariants": [
+    "session_id and line are required; the daemon appends the trailing newline (do NOT include one)",
+    "a send to a non-live session fails loudly with SessionNotLive, never hangs (terminal-state guard)",
+    "the line bytes are never echoed in the response; only the combed signals it produced are returned",
+    "success payload reports combed events + the next cursor; never raw stdout/stderr",
+    "while a secret prompt is active on the session shell, the write is denied (SecretInputDenied)"
+  ]
+}

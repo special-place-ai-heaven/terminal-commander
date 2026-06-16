@@ -1,0 +1,64 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "shell_session_list",
+      "arguments": {}
+    }
+  },
+  "tool": "shell_session_list",
+  "_meta": {
+    "schema_anchor": "TC50/mcp-tools/shell_session_list-v1",
+    "fixture_id": "contracts/mcp-tools/shell_session_list.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC50"
+    ],
+    "note": "Daemon-backed session list (omni P1). Bounded snapshot of every tracked session with its id, lifecycle state, best-known cwd, and last-active timestamp. Read-only; never raw shell output."
+  },
+  "response_example": {
+    "sessions": [
+      {
+        "session_id": "ses_018f0000000000000000000000000003",
+        "bucket_id": "bkt_018f0000000000000000000000000003",
+        "state": "live",
+        "cwd": "/tmp",
+        "last_active_at": 1750000000
+      }
+    ]
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "unsupported_platform_error_example": {
+    "message": "daemon ipc error [UnsupportedPlatform]: persistent shell sessions are not available on this platform yet (PTY/ConPTY pending)",
+    "data": {
+      "ipc_code": "UnsupportedPlatform"
+    }
+  },
+  "invariants": [
+    "takes no required arguments",
+    "success payload is a bounded list of sessions with id, state, cwd, and last_active_at",
+    "no raw shell output is carried in the response"
+  ]
+}

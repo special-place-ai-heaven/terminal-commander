@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use terminal_commander_core::{
-    ActivationScope, BucketConfig, BucketId, EventId, JobId, RuleDefinition, RuleStatus, Severity,
-    SignalEvent, SourceStream,
+    ActivationScope, BucketConfig, BucketId, EventId, JobId, RuleDefinition, RuleStatus, SessionId,
+    Severity, SignalEvent, SourceStream,
 };
 
 /// Bounded response shape. Carries identifiers and counters, never
@@ -297,6 +297,28 @@ pub enum IpcRequest {
     PtyCommandStop(PtyCommandStopParams),
     /// Snapshot of every currently-live PTY job.
     PtyCommandList,
+    /// Start a persistent shell session (P1 / TC50): a long-lived
+    /// login-shell PTY behind the `allow_session` capability. Denied by
+    /// default; policy-checked + audited before spawn. Bounded metadata
+    /// response (`session_id`/`bucket_id`/`state`); never raw output.
+    ShellSessionStart(ShellSessionStartParams),
+    /// Send ONE line to a live session shell and read back the combed
+    /// signals it produced. Output is read from the session bucket; never
+    /// a raw stream. A send to a non-live session fails loudly.
+    ShellSessionExec(ShellSessionExecParams),
+    /// Query a session's lifecycle state, current cwd, and bounded env
+    /// snapshot.
+    ShellSessionStatus(ShellSessionStatusParams),
+    /// Stop a session (graceful then forced) and report the terminal
+    /// state.
+    ShellSessionStop(ShellSessionStopParams),
+    /// Snapshot of every currently-live session.
+    ShellSessionList,
+    /// Persist a session's cwd + bounded env as a restorable workspace
+    /// snapshot (SQLite). Read-once of session state + a DB write.
+    WorkspaceSnapshotCreate(WorkspaceSnapshotCreateParams),
+    /// Restore a workspace snapshot's cwd/env into a (live) session.
+    WorkspaceSnapshotApply(WorkspaceSnapshotApplyParams),
     /// TC45: bounded aggregate snapshot across every daemon runtime
     /// (command, file watch, PTY) plus active rule scopes and
     /// bucket counters. Read-only. Each of its three vecs is bounded
@@ -373,6 +395,17 @@ impl IpcRequest {
             | Self::PtyCommandStart(_)
             | Self::PtyCommandWriteStdin(_)
             | Self::PtyCommandStop(_)
+            // Session lane (P1 / TC50): start spawns a fresh session
+            // shell + mints ids; exec writes stdin + advances the read
+            // cursor server-side; stop fires a one-shot cancel; the
+            // workspace snapshot create/apply mutate persisted state or
+            // re-inject cwd/env into the session shell. All non-idempotent
+            // alongside the PTY mutators.
+            | Self::ShellSessionStart(_)
+            | Self::ShellSessionExec(_)
+            | Self::ShellSessionStop(_)
+            | Self::WorkspaceSnapshotCreate(_)
+            | Self::WorkspaceSnapshotApply(_)
             | Self::RegistryUpsert(_)
             | Self::RegistryActivate(_)
             | Self::RegistryDeactivate(_)
@@ -414,6 +447,9 @@ impl IpcRequest {
             | Self::ProbeList(_)
             | Self::ProbeStatus(_)
             | Self::PtyCommandList
+            // Session read-only lookups: pure bounded reads, replayable.
+            | Self::ShellSessionStatus(_)
+            | Self::ShellSessionList
             | Self::FileReadWindow(_)
             | Self::FileSearch(_)
             | Self::FileWatchList
@@ -490,6 +526,13 @@ pub enum IpcResponse {
     PtyCommandWriteStdin(PtyCommandWriteStdinResponse),
     PtyCommandStop(PtyCommandStopResponse),
     PtyCommandList(PtyCommandListResponse),
+    ShellSessionStart(ShellSessionStartResponse),
+    ShellSessionExec(ShellSessionExecResponse),
+    ShellSessionStatus(ShellSessionStatusResponse),
+    ShellSessionStop(ShellSessionStopResponse),
+    ShellSessionList(ShellSessionListResponse),
+    WorkspaceSnapshotCreate(WorkspaceSnapshotCreateResponse),
+    WorkspaceSnapshotApply(WorkspaceSnapshotApplyResponse),
     RuntimeState(RuntimeStateResponse),
     ProbeList(ProbeListResponse),
     ProbeStatus(ProbeStatusResponse),
@@ -652,6 +695,18 @@ pub enum IpcErrorCode {
     /// `subscription_open` exceeded the max-subscriptions cap. Caller frees
     /// a slot (subscription_close) and retries. Approved 2026-06-02.
     SubscriptionLimitExceeded,
+    /// `shell_session_*` referenced a `session_id` the daemon does not
+    /// know (never started, already reaped, or reset by a daemon
+    /// restart). P1 / TC50 (omni spec 001).
+    UnknownSession,
+    /// `shell_session_exec` (or a snapshot apply) targeted a session that
+    /// is not in the `Live` state. The terminal-state guard refuses the
+    /// send loudly instead of hanging on a dead shell. P1 / TC50.
+    SessionNotLive,
+    /// `shell_session_start` was refused because the configured
+    /// `max_sessions` cap is already reached. Caller stops a session and
+    /// retries. P1 / TC50.
+    SessionLimitExceeded,
     /// Returned to a new request that arrives while the daemon is draining for
     /// shutdown. Retryable: the client should cold-spawn a fresh daemon.
     ShuttingDown,
@@ -1559,6 +1614,212 @@ pub struct PtyCommandListEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtyCommandListResponse {
     pub entries: Vec<PtyCommandListEntry>,
+}
+
+// =====================================================================
+// P1 (TC50): persistent shell sessions + workspace snapshots.
+//
+// A session is a long-lived login-shell PTY job: sticky cwd/env come
+// for free from the persistent shell process. The wire mirrors the
+// PTY surface in style. Session output is ALWAYS combed (read from the
+// session bucket via cursor); the wire never carries a raw stream.
+// Session start is gated by `PolicyAction::SessionStart` behind the
+// `allow_session` capability (default deny) and audited before spawn.
+// =====================================================================
+
+/// Maximum byte length of a single `shell_session_exec` line.
+///
+/// A session line is written to the shell PTY as `line + "\n"`. Bounded
+/// well under the PTY stdin cap (`MAX_PTY_STDIN_BYTES`) so the appended
+/// newline can never push a max-length line over the probe's write cap.
+pub const MAX_SESSION_LINE_BYTES: usize = 4000;
+
+/// Maximum number of `(key, value)` pairs returned in a session/snapshot
+/// bounded env snapshot. Keeps the status/list/snapshot responses small.
+pub const MAX_SESSION_ENV_ITEMS: usize = 256;
+
+/// Lifecycle state of a shell session.
+///
+/// Mirrors the data-model `Starting | Live | Exited | Failed` set. `Live`
+/// is the only state in which `shell_session_exec` is accepted; a send to
+/// any other state fails loudly (terminal-state guard), never hangs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionState {
+    Starting,
+    Live,
+    Exited,
+    Failed,
+}
+
+/// `shell_session_start` request.
+///
+/// `shell` is the interpreter override (`None` -> the daemon's default
+/// login shell); argv[0] is NOT a user-chosen interpreter on this lane (it
+/// is assembled by the daemon), so the argv shell-interpreter guard is
+/// intentionally skipped here and the `SessionStart` cap gates instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSessionStartParams {
+    /// Interpreter override. `None` -> the daemon's default login shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    /// Initial working directory for the session shell. `None` inherits
+    /// the daemon's cwd (the policy gate still applies on containment
+    /// profiles).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    /// Environment overlay applied to the session shell. Bounded by
+    /// [`MAX_SESSION_ENV_ITEMS`]. Empty = inherit unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+    /// Optional inline rules bound to the session bucket so the session's
+    /// combed output emits structured signals. Empty = the daemon's empty
+    /// sifter (only lifecycle events appear).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<RuleDefinition>,
+    /// Bucket configuration override (max_events / TTL). Defaults applied
+    /// if `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_config: Option<BucketConfig>,
+    /// Optional per-bucket tag for subscription routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+/// `shell_session_start` response: the stable session id, its signal
+/// bucket, and the initial lifecycle state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSessionStartResponse {
+    pub session_id: SessionId,
+    pub bucket_id: BucketId,
+    pub state: SessionState,
+}
+
+/// `shell_session_exec` request: send ONE line to a live session shell.
+///
+/// The line is bounded by [`MAX_SESSION_LINE_BYTES`]; a trailing newline
+/// is appended by the daemon (do NOT include it). Output is read back as
+/// combed signals from the session bucket via the cursor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSessionExecParams {
+    pub session_id: SessionId,
+    /// The shell line to run (no trailing newline). Bounded by
+    /// [`MAX_SESSION_LINE_BYTES`].
+    pub line: String,
+    /// Cursor into the session bucket to read combed signals from. Omit /
+    /// `0` to read from the bucket head. The response returns the next
+    /// cursor for the following exec.
+    #[serde(default)]
+    pub cursor: u64,
+    /// Bounded wait (ms) for combed signals to appear after the line is
+    /// written, clamped server-side to [`MAX_BUCKET_WAIT_MS`]. Omit for
+    /// the default settle window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
+}
+
+/// `shell_session_exec` response: combed signals appended to the session
+/// bucket after the line ran, plus the next cursor. Never a raw stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSessionExecResponse {
+    pub session_id: SessionId,
+    pub bucket_id: BucketId,
+    pub bytes_written: u64,
+    pub cursor_in: u64,
+    pub next_cursor: u64,
+    pub has_more: bool,
+    pub dropped_count: u64,
+    pub events: Vec<SignalEvent>,
+}
+
+/// `shell_session_status` request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSessionStatusParams {
+    pub session_id: SessionId,
+}
+
+/// `shell_session_status` response: lifecycle state, current cwd, a
+/// bounded env snapshot, and the last-active timestamp (epoch seconds).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSessionStatusResponse {
+    pub session_id: SessionId,
+    pub bucket_id: BucketId,
+    pub state: SessionState,
+    /// Best-known current working directory. Tracked from the requested
+    /// start cwd and from `cd`-shaped session lines (see SHELL_SESSION
+    /// runtime docs); a value the daemon has not observed reports the
+    /// start cwd. Bounded.
+    pub cwd: Option<String>,
+    /// Bounded env snapshot captured at start (overlay entries), capped at
+    /// [`MAX_SESSION_ENV_ITEMS`].
+    pub env_snapshot: Vec<(String, String)>,
+    /// Seconds since the unix epoch of the last exec/status touch.
+    pub last_active_at: u64,
+}
+
+/// `shell_session_stop` request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSessionStopParams {
+    pub session_id: SessionId,
+}
+
+/// `shell_session_stop` response. The session shell is terminated
+/// (graceful then forced) and the state moves to [`SessionState::Exited`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSessionStopResponse {
+    pub session_id: SessionId,
+    pub state: SessionState,
+    /// Short bounded reason for the terminal transition (e.g. "stopped"
+    /// or "already terminal").
+    pub terminal_reason: String,
+}
+
+/// One entry in `shell_session_list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSessionListEntry {
+    pub session_id: SessionId,
+    pub bucket_id: BucketId,
+    pub state: SessionState,
+    pub cwd: Option<String>,
+    pub last_active_at: u64,
+}
+
+/// `shell_session_list` response: a bounded snapshot of live sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSessionListResponse {
+    pub sessions: Vec<ShellSessionListEntry>,
+}
+
+/// `workspace_snapshot_create` request: persist the current cwd + bounded
+/// env of a session as a restorable workspace snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSnapshotCreateParams {
+    pub session_id: SessionId,
+    /// Optional human-friendly label stored alongside the snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// `workspace_snapshot_create` response: the new snapshot id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSnapshotCreateResponse {
+    pub snapshot_id: String,
+}
+
+/// `workspace_snapshot_apply` request: restore a snapshot's cwd/env into
+/// the given (live) session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSnapshotApplyParams {
+    pub snapshot_id: String,
+    pub session_id: SessionId,
+}
+
+/// `workspace_snapshot_apply` response: the restored cwd echoed back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSnapshotApplyResponse {
+    pub applied: bool,
+    pub session_id: SessionId,
+    pub cwd: Option<String>,
 }
 
 // =====================================================================

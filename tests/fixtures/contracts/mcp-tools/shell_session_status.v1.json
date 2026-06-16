@@ -1,0 +1,70 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "shell_session_status",
+      "arguments": {
+        "session_id": "ses_018f0000000000000000000000000003"
+      }
+    }
+  },
+  "tool": "shell_session_status",
+  "_meta": {
+    "schema_anchor": "TC50/mcp-tools/shell_session_status-v1",
+    "fixture_id": "contracts/mcp-tools/shell_session_status.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC50"
+    ],
+    "note": "Daemon-backed session status (omni P1). Returns the session lifecycle state, best-known current working directory, and a bounded environment snapshot. The cwd is tracked from the start cwd + recognisable `cd` lines; `pwd` via shell_session_exec returns the authoritative directory as a combed signal. TB-7: session_id is opaque (copy verbatim, e.g. ses_<32hex>)."
+  },
+  "response_example": {
+    "session_id": "ses_018f0000000000000000000000000003",
+    "bucket_id": "bkt_018f0000000000000000000000000003",
+    "state": "live",
+    "cwd": "/tmp",
+    "env_snapshot": [],
+    "last_active_at": 1750000000
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "unsupported_platform_error_example": {
+    "message": "daemon ipc error [UnsupportedPlatform]: persistent shell sessions are not available on this platform yet (PTY/ConPTY pending)",
+    "data": {
+      "ipc_code": "UnsupportedPlatform"
+    }
+  },
+  "unknown_session_error_example": {
+    "message": "daemon ipc error [UnknownSession]: unknown session id: ses_018f0000000000000000000000000099",
+    "data": {
+      "ipc_code": "UnknownSession"
+    }
+  },
+  "invariants": [
+    "session_id is required",
+    "success payload reports state, cwd, a bounded env_snapshot, and last_active_at only",
+    "an unknown session fails with UnknownSession, never a synthetic empty status",
+    "env_snapshot is bounded and never includes the inherited host environment (no unredacted secrets)"
+  ]
+}

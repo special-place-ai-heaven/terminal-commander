@@ -337,6 +337,8 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     // least `idle_ttl_secs`. The select! below picks it up via
     // `state.shutdown_notified()` and drains cleanly. ttl=0 disables.
     spawn_idle_reaper(&state);
+    // P1 / TC50: reclaim sessions idle past their per-session TTL.
+    spawn_session_reaper(&state);
 
     // Two shutdown sources: an OS signal (SIGINT/SIGTERM) or an
     // internal `Shutdown` IPC request that flipped the state trigger.
@@ -403,6 +405,8 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
 
     // F1 idle self-reap: see the Unix branch for rationale. ttl=0 disables.
     spawn_idle_reaper(&state);
+    // Session idle-reap (no-op on non-unix; sessions are PTY-backed).
+    spawn_session_reaper(&state);
 
     // Two shutdown sources, mirroring the Unix arm: an OS signal
     // (Ctrl-C) or an internal `Shutdown` IPC request that flipped the
@@ -486,6 +490,42 @@ fn spawn_idle_reaper(state: &Arc<crate::state::DaemonState>) {
         }
     });
 }
+
+/// Spawn the per-session idle-TTL reaper (P1 / TC50).
+///
+/// Unix-only: sessions are PTY-backed. Ticks on a bounded interval and
+/// calls [`ShellSessionRuntime::reap_idle`](crate::shell_session::ShellSessionRuntime::reap_idle),
+/// which tears down sessions idle past `[shell_session] idle_ttl_secs` (and
+/// any already-terminal entry) so their PTY children + bucket resources are
+/// reclaimed. A zero TTL disables the idle path; terminal entries are still
+/// reaped on the next session start. The task lives for the daemon's life
+/// (it shares the process exit; the IPC server's shutdown drops everything).
+#[cfg(unix)]
+fn spawn_session_reaper(state: &Arc<crate::state::DaemonState>) {
+    let ttl = state.config.shell_session.idle_ttl_secs;
+    if ttl == 0 {
+        tracing::info!("session idle-reap disabled (shell_session.idle_ttl_secs=0)");
+        return;
+    }
+    let tick = (ttl / 2).clamp(1, 60);
+    tracing::info!("session idle-reap enabled: idle_ttl_secs={ttl} tick={tick}s");
+    let st = Arc::clone(state);
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(std::time::Duration::from_secs(tick));
+        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            iv.tick().await;
+            let reaped = st.sessions.reap_idle();
+            if reaped > 0 {
+                tracing::info!("session idle-reap: reclaimed {reaped} session(s)");
+            }
+        }
+    });
+}
+
+/// No-op session reaper on non-unix (sessions are PTY-backed; unavailable).
+#[cfg(not(unix))]
+fn spawn_session_reaper(_state: &Arc<crate::state::DaemonState>) {}
 
 /// Write the daemon pidfile (pid + version + endpoint) so a newer
 /// install can find and replace this daemon. Non-fatal on failure.

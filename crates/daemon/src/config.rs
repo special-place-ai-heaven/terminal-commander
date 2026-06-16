@@ -59,6 +59,18 @@ pub const DEFAULT_AUDIT_RETENTION_DAYS: u32 = 30;
 /// `trigger_shutdown`. `0` disables the idle-timer entirely.
 pub const DEFAULT_IDLE_TTL_SECS: u64 = 1800;
 
+/// Default maximum number of concurrent persistent shell sessions
+/// (P1 / TC50). Bounds resource use; sessions past this cap are refused
+/// with a bounded explanatory error, never a silent hang.
+pub const DEFAULT_MAX_SESSIONS: usize = 16;
+
+/// Default per-session idle TTL in seconds (P1 / TC50).
+///
+/// A session with no exec/status activity for longer than this is reaped
+/// (its shell torn down, resources reclaimed). `0` disables the
+/// per-session reaper.
+pub const DEFAULT_SESSION_IDLE_TTL_SECS: u64 = 900;
+
 /// Closed set of runtime modes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,6 +130,42 @@ pub struct DaemonSection {
 
 const fn default_idle_ttl_secs() -> u64 {
     DEFAULT_IDLE_TTL_SECS
+}
+
+/// `[shell_session]` section (P1 / TC50): bounds on persistent shell sessions.
+///
+/// The capability itself is gated separately by `[policy.caps]
+/// allow_session` (default false); this section only sizes the runtime
+/// once sessions are permitted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSessionSection {
+    /// Maximum concurrent live sessions. Enforced BEFORE spawn.
+    #[serde(default = "default_max_sessions")]
+    pub max_sessions: usize,
+    /// Per-session idle TTL (seconds). `0` disables the reaper.
+    #[serde(default = "default_session_idle_ttl_secs")]
+    pub idle_ttl_secs: u64,
+}
+
+impl Default for ShellSessionSection {
+    fn default() -> Self {
+        Self {
+            max_sessions: DEFAULT_MAX_SESSIONS,
+            idle_ttl_secs: DEFAULT_SESSION_IDLE_TTL_SECS,
+        }
+    }
+}
+
+const fn default_max_sessions() -> usize {
+    DEFAULT_MAX_SESSIONS
+}
+
+const fn default_session_idle_ttl_secs() -> u64 {
+    DEFAULT_SESSION_IDLE_TTL_SECS
+}
+
+fn default_shell_session() -> ShellSessionSection {
+    ShellSessionSection::default()
 }
 
 /// `[policy]` section (declarative profile schema, POLICY.md section 4).
@@ -280,6 +328,8 @@ pub struct DaemonConfig {
     pub audit: AuditSection,
     #[serde(default = "default_limits")]
     pub limits: LimitsSection,
+    #[serde(default = "default_shell_session")]
+    pub shell_session: ShellSessionSection,
 }
 
 const fn default_retention() -> RetentionSection {
@@ -327,6 +377,7 @@ impl DaemonConfig {
             retention: default_retention(),
             audit: default_audit(),
             limits: default_limits(),
+            shell_session: default_shell_session(),
         }
     }
 

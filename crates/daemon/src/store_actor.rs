@@ -87,6 +87,18 @@ pub enum StoreOp {
         version: u32,
         scope: ActivationScope,
     },
+    /// `EventStore::ensure_workspace()` (P1 / TC50)
+    EnsureWorkspace,
+    /// `EventStore::create_workspace_snapshot(...)` -> snapshot id
+    CreateWorkspaceSnapshot {
+        snapshot_id: String,
+        name: Option<String>,
+        source_session_id: Option<String>,
+        cwd: Option<String>,
+        env: Vec<(String, String)>,
+    },
+    /// `EventStore::get_workspace_snapshot(snapshot_id)` -> optional row
+    GetWorkspaceSnapshot { snapshot_id: String },
     /// Drain queue, run `wal_checkpoint(FULL)`, exit thread.
     Shutdown,
 }
@@ -106,6 +118,8 @@ pub enum StoreReply {
     Version(u32),
     Import(ImportResult),
     Bool(bool),
+    SnapshotId(String),
+    OptionalSnapshot(Option<terminal_commander_store::WorkspaceSnapshotRow>),
 }
 
 /// Internal envelope on the wire: an op plus the ack channel back
@@ -149,6 +163,7 @@ impl StoreClient {
         // bootstrap discipline in `state.rs`.
         store.ensure_audit()?;
         store.ensure_registry()?;
+        store.ensure_workspace()?;
         Self::spawn_with_store(store)
     }
 
@@ -350,6 +365,48 @@ impl StoreClient {
             other => Err(unexpected_store_reply("DeactivateRuleScoped", &other)),
         }
     }
+
+    /// Ensure the workspace-snapshot schema (V0006) exists. Idempotent.
+    pub fn ensure_workspace(&self) -> Result<(), EventStoreError> {
+        match self.call(StoreOp::EnsureWorkspace)? {
+            StoreReply::Unit => Ok(()),
+            other => Err(unexpected_store_reply("EnsureWorkspace", &other)),
+        }
+    }
+
+    /// Persist a workspace snapshot (P1 / TC50). Returns the snapshot id.
+    pub fn create_workspace_snapshot(
+        &self,
+        snapshot_id: &str,
+        name: Option<&str>,
+        source_session_id: Option<&str>,
+        cwd: Option<&str>,
+        env: &[(String, String)],
+    ) -> Result<String, EventStoreError> {
+        match self.call(StoreOp::CreateWorkspaceSnapshot {
+            snapshot_id: snapshot_id.to_owned(),
+            name: name.map(ToOwned::to_owned),
+            source_session_id: source_session_id.map(ToOwned::to_owned),
+            cwd: cwd.map(ToOwned::to_owned),
+            env: env.to_vec(),
+        })? {
+            StoreReply::SnapshotId(id) => Ok(id),
+            other => Err(unexpected_store_reply("CreateWorkspaceSnapshot", &other)),
+        }
+    }
+
+    /// Fetch a workspace snapshot by id. `Ok(None)` if unknown.
+    pub fn get_workspace_snapshot(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<terminal_commander_store::WorkspaceSnapshotRow>, EventStoreError> {
+        match self.call(StoreOp::GetWorkspaceSnapshot {
+            snapshot_id: snapshot_id.to_owned(),
+        })? {
+            StoreReply::OptionalSnapshot(row) => Ok(row),
+            other => Err(unexpected_store_reply("GetWorkspaceSnapshot", &other)),
+        }
+    }
 }
 
 fn unexpected_store_reply(op: &str, reply: &StoreReply) -> EventStoreError {
@@ -446,6 +503,25 @@ fn execute(store: &mut EventStore, op: StoreOp) -> Result<StoreReply, EventStore
         } => store
             .deactivate_rule_scoped(&rule_id, version, scope)
             .map(StoreReply::Bool),
+        StoreOp::EnsureWorkspace => store.ensure_workspace().map(|()| StoreReply::Unit),
+        StoreOp::CreateWorkspaceSnapshot {
+            snapshot_id,
+            name,
+            source_session_id,
+            cwd,
+            env,
+        } => store
+            .create_workspace_snapshot(
+                &snapshot_id,
+                name.as_deref(),
+                source_session_id.as_deref(),
+                cwd.as_deref(),
+                &env,
+            )
+            .map(StoreReply::SnapshotId),
+        StoreOp::GetWorkspaceSnapshot { snapshot_id } => store
+            .get_workspace_snapshot(&snapshot_id)
+            .map(StoreReply::OptionalSnapshot),
         StoreOp::Shutdown => Ok(StoreReply::Unit),
     }
 }

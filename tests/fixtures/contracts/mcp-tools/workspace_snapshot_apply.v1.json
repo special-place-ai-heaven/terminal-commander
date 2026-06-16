@@ -1,0 +1,68 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "workspace_snapshot_apply",
+      "arguments": {
+        "snapshot_id": "snap_018f00000000000000000000000003ab",
+        "session_id": "ses_018f0000000000000000000000000007"
+      }
+    }
+  },
+  "tool": "workspace_snapshot_apply",
+  "_meta": {
+    "schema_anchor": "TC50/mcp-tools/workspace_snapshot_apply-v1",
+    "fixture_id": "contracts/mcp-tools/workspace_snapshot_apply.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC50"
+    ],
+    "note": "Daemon-backed workspace snapshot apply (omni P1). Restores a persisted snapshot's cwd + bounded env into a live session by running `export K=V` then `cd <cwd>` through the session shell (the terminal-state + secret guards apply). Returns the restored cwd. TB-7: snapshot_id and session_id are opaque (copy verbatim)."
+  },
+  "response_example": {
+    "applied": true,
+    "session_id": "ses_018f0000000000000000000000000007",
+    "cwd": "/tmp"
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "unsupported_platform_error_example": {
+    "message": "daemon ipc error [UnsupportedPlatform]: persistent shell sessions are not available on this platform yet (PTY/ConPTY pending)",
+    "data": {
+      "ipc_code": "UnsupportedPlatform"
+    }
+  },
+  "session_not_live_error_example": {
+    "message": "daemon ipc error [SessionNotLive]: session ses_018f0000000000000000000000000007 is not live (state observed terminal)",
+    "data": {
+      "ipc_code": "SessionNotLive"
+    }
+  },
+  "invariants": [
+    "snapshot_id and session_id are required",
+    "an unknown snapshot fails with FileNotFound; a non-live target session fails with SessionNotLive (terminal-state guard)",
+    "restoration runs through the session shell so cwd/env become sticky for subsequent shell_session_exec lines",
+    "success payload reports applied + the restored cwd; never a raw stream"
+  ]
+}

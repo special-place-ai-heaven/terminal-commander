@@ -139,6 +139,15 @@ fn minimal_tool_args(tool: &str) -> serde_json::Value {
             serde_json::json!({ "job_id": "job_x" })
         }
         "pty_command_write_stdin" => serde_json::json!({ "job_id": "job_x", "bytes": "x" }),
+        // shell_session_exec requires session_id + line (no defaults) so the
+        // daemon-unavailable guard — not a schema error — is the path tested.
+        "shell_session_exec" => serde_json::json!({ "session_id": "ses_x", "line": "pwd" }),
+        "shell_session_status" | "shell_session_stop" | "workspace_snapshot_create" => {
+            serde_json::json!({ "session_id": "ses_x" })
+        }
+        "workspace_snapshot_apply" => {
+            serde_json::json!({ "snapshot_id": "snap_x", "session_id": "ses_x" })
+        }
         "bucket_events_since" | "bucket_wait" => {
             serde_json::json!({ "bucket_id": "bkt_x", "cursor": 0 })
         }
@@ -216,8 +225,8 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
         "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
     assert_eq!(
-        checked, 38,
-        "expected 38 daemon-backed tools (39 catalogue entries minus system_discover)"
+        checked, 45,
+        "expected 45 daemon-backed tools (46 catalogue entries minus system_discover)"
     );
 
     let _ = client.cancel().await;

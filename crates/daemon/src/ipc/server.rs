@@ -443,6 +443,13 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::PtyCommandWriteStdin(_) => "pty_command_write_stdin",
         IpcRequest::PtyCommandStop(_) => "pty_command_stop",
         IpcRequest::PtyCommandList => "pty_command_list",
+        IpcRequest::ShellSessionStart(_) => "shell_session_start",
+        IpcRequest::ShellSessionExec(_) => "shell_session_exec",
+        IpcRequest::ShellSessionStatus(_) => "shell_session_status",
+        IpcRequest::ShellSessionStop(_) => "shell_session_stop",
+        IpcRequest::ShellSessionList => "shell_session_list",
+        IpcRequest::WorkspaceSnapshotCreate(_) => "workspace_snapshot_create",
+        IpcRequest::WorkspaceSnapshotApply(_) => "workspace_snapshot_apply",
         IpcRequest::RuntimeState(_) => "runtime_state",
         IpcRequest::ProbeList(_) => "probe_list",
         IpcRequest::ProbeStatus(_) => "probe_status",
@@ -493,6 +500,13 @@ const DISCOVERABLE_METHODS: &[&str] = &[
     "pty_command_write_stdin",
     "pty_command_stop",
     "pty_command_list",
+    "shell_session_start",
+    "shell_session_exec",
+    "shell_session_status",
+    "shell_session_stop",
+    "shell_session_list",
+    "workspace_snapshot_create",
+    "workspace_snapshot_apply",
     "runtime_state",
     "probe_list",
     "probe_status",
@@ -709,6 +723,55 @@ async fn dispatch(
             // authority above wins.
             let (_name, r) = handlers::pty::dispatch_pty_command_list(state);
             r
+        }
+        // Session lane (P1 / TC50). `_start` carries the peer so the
+        // handler can resolve a redacted audit subject before the PTY
+        // runtime's `start_session` writes the `shell_session_start` audit
+        // row + spawns behind the `SessionStart` policy gate. On non-unix
+        // the handlers are stubs that return `UnsupportedPlatform`.
+        IpcRequest::ShellSessionStart(p) => {
+            #[cfg(unix)]
+            let r = handlers::session::handle_shell_session_start(state, p, peer);
+            #[cfg(not(unix))]
+            let r = handlers::session::handle_shell_session_start(state, p);
+            match r {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::ShellSessionExec(p) => {
+            match handlers::session::handle_shell_session_exec(state, p).await {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::ShellSessionStatus(p) => {
+            match handlers::session::handle_shell_session_status(state, p) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::ShellSessionStop(p) => {
+            match handlers::session::handle_shell_session_stop(state, p) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::ShellSessionList => match handlers::session::handle_shell_session_list(state) {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
+        IpcRequest::WorkspaceSnapshotCreate(p) => {
+            match handlers::session::handle_workspace_snapshot_create(state, p) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::WorkspaceSnapshotApply(p) => {
+            match handlers::session::handle_workspace_snapshot_apply(state, p).await {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
         }
         IpcRequest::RuntimeState(p) => {
             let r = handlers::runtime::handle_runtime_state(state, p);
@@ -1056,9 +1119,11 @@ mod tests {
         PtyCommandStopParams, PtyCommandWriteStdinParams, RegistryActivateParams,
         RegistryDeactivateParams, RegistryGetParams, RegistryImportPackParams,
         RegistrySearchParams, RegistryTestParams, RegistryUpsertParams, ShellExecParams,
-        SubscriptionCloseParams, SubscriptionListParams, SubscriptionOpenParams,
-        SubscriptionPredicate, SubscriptionPullParams, SubscriptionSeekParams,
-        SubscriptionSourceSel,
+        ShellSessionExecParams, ShellSessionStartParams, ShellSessionStatusParams,
+        ShellSessionStopParams, SubscriptionCloseParams, SubscriptionListParams,
+        SubscriptionOpenParams, SubscriptionPredicate, SubscriptionPullParams,
+        SubscriptionSeekParams, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
+        WorkspaceSnapshotCreateParams,
     };
     use std::collections::BTreeSet;
     use terminal_commander_core::{
@@ -1231,6 +1296,35 @@ mod tests {
                 job_id: JobId::new(),
             }),
             IpcRequest::PtyCommandList,
+            IpcRequest::ShellSessionStart(ShellSessionStartParams {
+                shell: None,
+                cwd: None,
+                env: vec![],
+                rules: vec![],
+                bucket_config: None,
+                tag: None,
+            }),
+            IpcRequest::ShellSessionExec(ShellSessionExecParams {
+                session_id: terminal_commander_core::SessionId::new(),
+                line: "pwd".to_owned(),
+                cursor: 0,
+                wait_ms: None,
+            }),
+            IpcRequest::ShellSessionStatus(ShellSessionStatusParams {
+                session_id: terminal_commander_core::SessionId::new(),
+            }),
+            IpcRequest::ShellSessionStop(ShellSessionStopParams {
+                session_id: terminal_commander_core::SessionId::new(),
+            }),
+            IpcRequest::ShellSessionList,
+            IpcRequest::WorkspaceSnapshotCreate(WorkspaceSnapshotCreateParams {
+                session_id: terminal_commander_core::SessionId::new(),
+                name: None,
+            }),
+            IpcRequest::WorkspaceSnapshotApply(WorkspaceSnapshotApplyParams {
+                snapshot_id: "snap_x".to_owned(),
+                session_id: terminal_commander_core::SessionId::new(),
+            }),
             IpcRequest::RuntimeState(ListLimitParams { limit: None }),
             IpcRequest::ProbeList(ListLimitParams { limit: None }),
             IpcRequest::ProbeStatus(ProbeStatusParams {

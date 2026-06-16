@@ -131,14 +131,21 @@ async fn live_health_roundtrip_through_uds() {
                 "runtime_state".to_owned(),
                 "self_check".to_owned(),
                 "shell_exec".to_owned(),
+                "shell_session_exec".to_owned(),
+                "shell_session_list".to_owned(),
+                "shell_session_start".to_owned(),
+                "shell_session_status".to_owned(),
+                "shell_session_stop".to_owned(),
                 "subscription_close".to_owned(),
                 "subscription_list".to_owned(),
                 "subscription_open".to_owned(),
                 "subscription_pull".to_owned(),
                 "subscription_seek".to_owned(),
                 "system_discover".to_owned(),
+                "workspace_snapshot_apply".to_owned(),
+                "workspace_snapshot_create".to_owned(),
             ],
-            "live daemon must expose the full TC45 tool set + subscriptions"
+            "live daemon must expose the full TC45 tool set + subscriptions + P1 sessions"
         );
 
         let result = client
@@ -211,8 +218,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             .filter(|t| t["status"].as_str() == Some("live"))
             .count();
         assert_eq!(
-            live_count, 39,
-            "tool catalogue must list exactly 39 live tools (33 + subscription_open/pull/list/close/seek + shell_exec)"
+            live_count, 46,
+            "tool catalogue must list exactly 46 live tools (39 + shell_session_start/exec/status/stop/list + workspace_snapshot_create/apply)"
         );
 
         let _ = client.cancel().await;

@@ -17,16 +17,18 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 39 live
+//! [`tool_catalogue`] is the single source of truth for the 46 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry,
-//! file, PTY, aggregate runtime views, and predicate-routed
-//! subscriptions (`subscription_open/pull/list/close/seek`). Each maps 1:1
+//! file, PTY, persistent shell sessions + workspace snapshots
+//! (`shell_session_*`, `workspace_snapshot_*`), aggregate runtime views,
+//! and predicate-routed subscriptions
+//! (`subscription_open/pull/list/close/seek`). Each maps 1:1
 //! to a daemon IPC method. `system_discover` is the only
 //! daemon-independent tool; every other tool returns the structured
 //! `daemon_unavailable` envelope when the daemon is unreachable.
 //!
-//! Source-status: live; all 39 tools forward through daemon IPC.
+//! Source-status: live; all 46 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -59,11 +61,15 @@ use terminal_commanderd::ipc::protocol::{
     RegistryGetParams, RegistryGetResponse, RegistryImportPackParams, RegistryImportPackResponse,
     RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse, RegistryTestParams,
     RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
-    SelfCheckResponse, ShellExecParams, SubscriptionCloseParams, SubscriptionCloseResponse,
+    SelfCheckResponse, ShellExecParams, ShellSessionExecParams, ShellSessionExecResponse,
+    ShellSessionListResponse, ShellSessionStartParams, ShellSessionStartResponse,
+    ShellSessionStatusParams, ShellSessionStatusResponse, ShellSessionStopParams,
+    ShellSessionStopResponse, SubscriptionCloseParams, SubscriptionCloseResponse,
     SubscriptionListParams, SubscriptionListResponse, SubscriptionOpenParams,
     SubscriptionOpenResponse, SubscriptionPredicate, SubscriptionPullParams,
     SubscriptionPullResponse, SubscriptionSeekParams, SubscriptionSeekResponse,
-    SubscriptionSourceSel,
+    SubscriptionSourceSel, WorkspaceSnapshotApplyParams, WorkspaceSnapshotApplyResponse,
+    WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -265,6 +271,41 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             description: "Snapshot of every currently-live PTY job (including secret_prompt_active).",
         },
         ToolCatalogueEntry {
+            name: "shell_session_start",
+            status: ToolStatus::Live,
+            description: "Start a persistent shell session (sticky cwd/env across sends). Requires allow_session; denied by default; combed output only.",
+        },
+        ToolCatalogueEntry {
+            name: "shell_session_exec",
+            status: ToolStatus::Live,
+            description: "Run ONE line in a session shell; returns the combed signals it produced. Sticky cwd/env from the prior lines; never a raw stream.",
+        },
+        ToolCatalogueEntry {
+            name: "shell_session_status",
+            status: ToolStatus::Live,
+            description: "Session lifecycle state, current cwd, and a bounded env snapshot.",
+        },
+        ToolCatalogueEntry {
+            name: "shell_session_stop",
+            status: ToolStatus::Live,
+            description: "Stop a session (graceful then forced); reports the terminal state.",
+        },
+        ToolCatalogueEntry {
+            name: "shell_session_list",
+            status: ToolStatus::Live,
+            description: "Snapshot of every currently-live session (id, state, cwd, last_active).",
+        },
+        ToolCatalogueEntry {
+            name: "workspace_snapshot_create",
+            status: ToolStatus::Live,
+            description: "Save a session's cwd + bounded env as a restorable workspace snapshot.",
+        },
+        ToolCatalogueEntry {
+            name: "workspace_snapshot_apply",
+            status: ToolStatus::Live,
+            description: "Restore a workspace snapshot's cwd/env into a session.",
+        },
+        ToolCatalogueEntry {
             name: "runtime_state",
             status: ToolStatus::Live,
             description: "Bounded aggregate runtime snapshot: probes, buckets, active rule scopes.",
@@ -336,6 +377,18 @@ const fn is_pty_tool(name: &str) -> bool {
             | b"pty_command_write_stdin"
             | b"pty_command_stop"
             | b"pty_command_list"
+            // Persistent sessions + workspace snapshots are PTY-backed
+            // (a session is a long-lived login-shell PTY job), so they share
+            // the PTY runtime's `#[cfg(unix)]` availability: on a non-unix
+            // host the daemon answers each with `UnsupportedPlatform`, and
+            // `system_discover` must report them `available: false` too.
+            | b"shell_session_start"
+            | b"shell_session_exec"
+            | b"shell_session_status"
+            | b"shell_session_stop"
+            | b"shell_session_list"
+            | b"workspace_snapshot_create"
+            | b"workspace_snapshot_apply"
     )
 }
 
@@ -1537,6 +1590,233 @@ impl TerminalCommanderMcpServer {
         }
     }
 
+    /// `shell_session_start` — start a persistent shell session.
+    ///
+    /// Thin forwarder: the adapter NEVER spawns (constitution I). The
+    /// daemon's session runtime performs the `SessionStart` policy gate +
+    /// audit BEFORE the shell PTY is spawned. Denied by default
+    /// (`allow_session` off). Returns bounded start metadata only.
+    #[tool(
+        description = "Start a persistent shell session: a long-lived login shell whose cwd/env stay sticky across shell_session_exec lines. Requires the allow_session capability; denied by default. Combed output only, never a raw stream."
+    )]
+    async fn shell_session_start(
+        &self,
+        Parameters(params): Parameters<McpShellSessionStartParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let env: Vec<(String, String)> = params.env.into_iter().map(|e| (e.key, e.value)).collect();
+        let (bucket_config, rules) =
+            parse_bucket_and_rules(params.bucket_config_json, params.rules, params.rules_json)?;
+        let ipc = ShellSessionStartParams {
+            shell: params.shell,
+            cwd: params.cwd.map(std::path::PathBuf::from),
+            env,
+            rules,
+            bucket_config,
+            tag: params.tag,
+        };
+        match self.daemon.call(IpcRequest::ShellSessionStart(ipc)).await {
+            Ok(IpcResponse::ShellSessionStart(ShellSessionStartResponse {
+                session_id,
+                bucket_id,
+                state,
+            })) => json_tool_result(&serde_json::json!({
+                "session_id": session_id,
+                "bucket_id": bucket_id,
+                "state": state,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
+        }
+    }
+
+    /// `shell_session_exec` — run ONE line in a session shell.
+    ///
+    /// Thin forwarder. The daemon writes the line to the persistent shell
+    /// and returns the combed signals the line produced (read from the
+    /// session bucket via a bounded wait). A send to a non-live session
+    /// fails loudly; never a raw stream.
+    #[tool(
+        description = "Run ONE shell line inside a persistent session. The line executes in the session's sticky cwd/env (set by prior lines). Returns the combed signals the line produced plus the next cursor; never a raw stream."
+    )]
+    async fn shell_session_exec(
+        &self,
+        Parameters(params): Parameters<McpShellSessionExecParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        use terminal_commander_core::ids::SessionIdKind;
+        let session_id =
+            parse_id::<SessionIdKind>("session_id", &params.session_id).map_err(invalid_params)?;
+        let ipc = ShellSessionExecParams {
+            session_id,
+            line: params.line,
+            cursor: params.cursor.unwrap_or(0),
+            wait_ms: params.wait_ms,
+        };
+        match self.daemon.call(IpcRequest::ShellSessionExec(ipc)).await {
+            Ok(IpcResponse::ShellSessionExec(ShellSessionExecResponse {
+                session_id,
+                bucket_id,
+                bytes_written,
+                cursor_in,
+                next_cursor,
+                has_more,
+                dropped_count,
+                events,
+            })) => json_tool_result(&serde_json::json!({
+                "session_id": session_id,
+                "bucket_id": bucket_id,
+                "bytes_written": bytes_written,
+                "cursor_in": cursor_in,
+                "next_cursor": next_cursor,
+                "has_more": has_more,
+                "dropped_count": dropped_count,
+                "events": events,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
+        }
+    }
+
+    /// `shell_session_status` — session state, cwd, bounded env snapshot.
+    #[tool(
+        description = "Report a session's lifecycle state, current working directory, and a bounded environment snapshot."
+    )]
+    async fn shell_session_status(
+        &self,
+        Parameters(params): Parameters<McpShellSessionRefParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        use terminal_commander_core::ids::SessionIdKind;
+        let session_id =
+            parse_id::<SessionIdKind>("session_id", &params.session_id).map_err(invalid_params)?;
+        let ipc = ShellSessionStatusParams { session_id };
+        match self.daemon.call(IpcRequest::ShellSessionStatus(ipc)).await {
+            Ok(IpcResponse::ShellSessionStatus(ShellSessionStatusResponse {
+                session_id,
+                bucket_id,
+                state,
+                cwd,
+                env_snapshot,
+                last_active_at,
+            })) => json_tool_result(&serde_json::json!({
+                "session_id": session_id,
+                "bucket_id": bucket_id,
+                "state": state,
+                "cwd": cwd,
+                "env_snapshot": env_snapshot,
+                "last_active_at": last_active_at,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
+        }
+    }
+
+    /// `shell_session_stop` — terminate a session (graceful then forced).
+    #[tool(
+        description = "Stop a persistent session: terminate its shell (graceful then forced) and report the terminal state."
+    )]
+    async fn shell_session_stop(
+        &self,
+        Parameters(params): Parameters<McpShellSessionRefParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        use terminal_commander_core::ids::SessionIdKind;
+        let session_id =
+            parse_id::<SessionIdKind>("session_id", &params.session_id).map_err(invalid_params)?;
+        let ipc = ShellSessionStopParams { session_id };
+        match self.daemon.call(IpcRequest::ShellSessionStop(ipc)).await {
+            Ok(IpcResponse::ShellSessionStop(ShellSessionStopResponse {
+                session_id,
+                state,
+                terminal_reason,
+            })) => json_tool_result(&serde_json::json!({
+                "session_id": session_id,
+                "state": state,
+                "terminal_reason": terminal_reason,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
+        }
+    }
+
+    /// `shell_session_list` — snapshot of every live session.
+    #[tool(description = "Snapshot of every currently-live session (id, state, cwd, last_active).")]
+    async fn shell_session_list(&self) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        match self.daemon.call(IpcRequest::ShellSessionList).await {
+            Ok(IpcResponse::ShellSessionList(ShellSessionListResponse { sessions })) => {
+                json_tool_result(&serde_json::json!({ "sessions": sessions }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `workspace_snapshot_create` — persist a session's cwd + bounded env.
+    #[tool(
+        description = "Save a session's current working directory and bounded environment as a restorable workspace snapshot. Returns the snapshot id."
+    )]
+    async fn workspace_snapshot_create(
+        &self,
+        Parameters(params): Parameters<McpWorkspaceSnapshotCreateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        use terminal_commander_core::ids::SessionIdKind;
+        let session_id =
+            parse_id::<SessionIdKind>("session_id", &params.session_id).map_err(invalid_params)?;
+        let ipc = WorkspaceSnapshotCreateParams {
+            session_id,
+            name: params.name,
+        };
+        match self
+            .daemon
+            .call(IpcRequest::WorkspaceSnapshotCreate(ipc))
+            .await
+        {
+            Ok(IpcResponse::WorkspaceSnapshotCreate(WorkspaceSnapshotCreateResponse {
+                snapshot_id,
+            })) => json_tool_result(&serde_json::json!({ "snapshot_id": snapshot_id })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
+        }
+    }
+
+    /// `workspace_snapshot_apply` — restore a snapshot's cwd/env into a session.
+    #[tool(
+        description = "Restore a saved workspace snapshot's cwd + bounded env into a session. Returns the restored cwd."
+    )]
+    async fn workspace_snapshot_apply(
+        &self,
+        Parameters(params): Parameters<McpWorkspaceSnapshotApplyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        use terminal_commander_core::ids::SessionIdKind;
+        let session_id =
+            parse_id::<SessionIdKind>("session_id", &params.session_id).map_err(invalid_params)?;
+        let ipc = WorkspaceSnapshotApplyParams {
+            snapshot_id: params.snapshot_id,
+            session_id,
+        };
+        match self
+            .daemon
+            .call(IpcRequest::WorkspaceSnapshotApply(ipc))
+            .await
+        {
+            Ok(IpcResponse::WorkspaceSnapshotApply(WorkspaceSnapshotApplyResponse {
+                applied,
+                session_id,
+                cwd,
+            })) => json_tool_result(&serde_json::json!({
+                "applied": applied,
+                "session_id": session_id,
+                "cwd": cwd,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
+        }
+    }
+
     /// `runtime_state` — bounded aggregate runtime snapshot.
     #[tool(
         description = "Bounded aggregate runtime snapshot across all runtimes. Read-only; never returns raw stream content."
@@ -1887,7 +2167,13 @@ pub fn into_mcp_error_for(request_is_idempotent: bool, e: &IpcError) -> McpError
         | IpcErrorCode::UnknownProbe
         | IpcErrorCode::RuleNotActive
         | IpcErrorCode::UnknownSubscription
-        | IpcErrorCode::SubscriptionLimitExceeded => McpError::invalid_params(message, Some(data)),
+        | IpcErrorCode::SubscriptionLimitExceeded
+        // Session lane (P1 / TC50): all caller-fixable. UnknownSession ->
+        // re-start; SessionNotLive -> the shell is dead, start a new one;
+        // SessionLimitExceeded -> stop a session and retry.
+        | IpcErrorCode::UnknownSession
+        | IpcErrorCode::SessionNotLive
+        | IpcErrorCode::SessionLimitExceeded => McpError::invalid_params(message, Some(data)),
     }
 }
 
@@ -3537,6 +3823,92 @@ pub struct McpPtyCommandStopParams {
 }
 
 // =====================================================================
+// P1 (TC50): persistent shell session + workspace snapshot MCP DTOs.
+// =====================================================================
+
+/// `shell_session_start` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpShellSessionStartParams {
+    /// Interpreter override (e.g. `/bin/bash`). Omit for the daemon's
+    /// default login shell.
+    #[serde(default)]
+    pub shell: Option<String>,
+    /// Initial working directory for the session shell. Omit to inherit
+    /// the daemon's cwd.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Environment overlay as an ARRAY of {"key":"NAME","value":"VAL"}
+    /// objects (NOT a map). Merged onto the inherited environment; bounded.
+    #[serde(default, deserialize_with = "deserialize_env")]
+    #[schemars(with = "Vec<EnvEntry>")]
+    pub env: Vec<EnvEntry>,
+    /// Inline rules bound to the session bucket so the session's combed
+    /// output emits structured signals. Minimal example:
+    /// `[{"pattern": "ERROR"}]`. Omit for none.
+    #[serde(default, deserialize_with = "de_opt_rules_lenient")]
+    #[schemars(with = "Vec<RuleInput>")]
+    pub rules: Option<Vec<RuleInput>>,
+    /// Deprecated JSON-array string form of `rules`. Prefer `rules`.
+    #[serde(default)]
+    pub rules_json: Option<String>,
+    /// Optional per-job bucket override `{ "max_events": N, "ttl": <s> }`.
+    #[serde(default)]
+    pub bucket_config_json: Option<String>,
+    /// Optional per-bucket tag for subscription routing.
+    #[serde(default)]
+    pub tag: Option<String>,
+}
+
+/// `shell_session_exec` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpShellSessionExecParams {
+    /// Opaque session id from `shell_session_start` (e.g. `ses_<32hex>`);
+    /// copy it verbatim, not free-form.
+    pub session_id: String,
+    /// The shell line to run (no trailing newline; the daemon appends it).
+    pub line: String,
+    /// Cursor into the session bucket to read combed signals from. Omit /
+    /// `0` for the bucket head; pass the prior response's `next_cursor`.
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
+    pub cursor: Option<u64>,
+    /// Bounded wait (ms) for combed signals to appear after the line runs.
+    /// Clamped daemon-side. Omit for the default settle window.
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
+    pub wait_ms: Option<u64>,
+}
+
+/// Shared `{ session_id }` param for `shell_session_status` /
+/// `shell_session_stop`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpShellSessionRefParams {
+    /// Opaque session id from `shell_session_start` (e.g. `ses_<32hex>`);
+    /// copy it verbatim, not free-form.
+    pub session_id: String,
+}
+
+/// `workspace_snapshot_create` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpWorkspaceSnapshotCreateParams {
+    /// Opaque session id whose cwd + bounded env is captured.
+    pub session_id: String,
+    /// Optional human-friendly label stored with the snapshot.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// `workspace_snapshot_apply` parameters.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpWorkspaceSnapshotApplyParams {
+    /// Opaque snapshot id from `workspace_snapshot_create` (e.g.
+    /// `snap_<hex>`); copy it verbatim, not free-form.
+    pub snapshot_id: String,
+    /// The session to restore the snapshot's cwd/env into.
+    pub session_id: String,
+}
+
+// =====================================================================
 // TC45: aggregate runtime view MCP DTOs.
 // =====================================================================
 
@@ -4136,7 +4508,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_thirty_nine_live_tools() {
+    fn catalogue_lists_forty_six_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -4176,6 +4548,13 @@ mod tests {
                 "pty_command_write_stdin",
                 "pty_command_stop",
                 "pty_command_list",
+                "shell_session_start",
+                "shell_session_exec",
+                "shell_session_status",
+                "shell_session_stop",
+                "shell_session_list",
+                "workspace_snapshot_create",
+                "workspace_snapshot_apply",
                 "runtime_state",
                 "probe_list",
                 "probe_status",
@@ -4242,12 +4621,19 @@ mod tests {
                 "runtime_state".to_owned(),
                 "self_check".to_owned(),
                 "shell_exec".to_owned(),
+                "shell_session_exec".to_owned(),
+                "shell_session_list".to_owned(),
+                "shell_session_start".to_owned(),
+                "shell_session_status".to_owned(),
+                "shell_session_stop".to_owned(),
                 "subscription_close".to_owned(),
                 "subscription_list".to_owned(),
                 "subscription_open".to_owned(),
                 "subscription_pull".to_owned(),
                 "subscription_seek".to_owned(),
                 "system_discover".to_owned(),
+                "workspace_snapshot_apply".to_owned(),
+                "workspace_snapshot_create".to_owned(),
             ]
         );
     }

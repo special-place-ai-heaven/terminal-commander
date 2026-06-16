@@ -48,6 +48,13 @@
     "pty_command_write_stdin": "ensure_daemon_status_v1",
     "pty_command_stop": "ensure_daemon_status_v1",
     "pty_command_list": "ensure_daemon_status_v1",
+    "shell_session_start": "ensure_daemon_status_v1",
+    "shell_session_exec": "ensure_daemon_status_v1",
+    "shell_session_status": "ensure_daemon_status_v1",
+    "shell_session_stop": "ensure_daemon_status_v1",
+    "shell_session_list": "ensure_daemon_status_v1",
+    "workspace_snapshot_create": "ensure_daemon_status_v1",
+    "workspace_snapshot_apply": "ensure_daemon_status_v1",
     "runtime_state": "ensure_daemon_status_v1",
     "probe_list": "ensure_daemon_status_v1",
     "probe_status": "ensure_daemon_status_v1",
@@ -214,6 +221,41 @@
       "status": "covered_live"
     },
     {
+      "name": "shell_session_start",
+      "fixture": "mcp-tools/shell_session_start.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "shell_session_exec",
+      "fixture": "mcp-tools/shell_session_exec.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "shell_session_status",
+      "fixture": "mcp-tools/shell_session_status.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "shell_session_stop",
+      "fixture": "mcp-tools/shell_session_stop.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "shell_session_list",
+      "fixture": "mcp-tools/shell_session_list.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "workspace_snapshot_create",
+      "fixture": "mcp-tools/workspace_snapshot_create.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "workspace_snapshot_apply",
+      "fixture": "mcp-tools/workspace_snapshot_apply.v1.json",
+      "status": "covered_live"
+    },
+    {
       "name": "runtime_state",
       "fixture": "mcp-tools/runtime_state.v1.json",
       "status": "covered_live"
@@ -256,8 +298,8 @@
   ],
   "obsolete_fixtures": [],
   "counts": {
-    "live_tools": 39,
-    "covered_live": 35,
+    "live_tools": 46,
+    "covered_live": 42,
     "placeholder_for_live_tool": 0,
     "missing_fixture": 4,
     "obsolete_fixture_present": 0

@@ -31,6 +31,8 @@ use crate::policy::PolicyEngine;
 use crate::pty_command::PtyRuntime;
 use crate::router::Router;
 use crate::shell::ShellRuntime;
+#[cfg(unix)]
+use crate::shell_session::ShellSessionRuntime;
 use crate::store_actor::StoreClient;
 
 /// Errors raised during daemon bootstrap.
@@ -131,6 +133,14 @@ pub struct DaemonState {
     /// `UnsupportedPlatform`.
     #[cfg(unix)]
     pub pty: Arc<PtyRuntime>,
+    /// Persistent shell-session runtime (P1 / TC50). Built ON TOP of the
+    /// SAME `Arc<PtyRuntime>` above: a session is a long-lived login-shell
+    /// PTY job, so sticky cwd/env come from the persistent shell. Owns the
+    /// session id map, the `max_sessions` cap, and the idle TTL. Unix-only
+    /// (PTY is unix-only); on non-unix the field is absent and the IPC
+    /// layer returns `UnsupportedPlatform`.
+    #[cfg(unix)]
+    pub sessions: Arc<ShellSessionRuntime>,
     /// Last peer identity observed by the pipe/socket server. Only
     /// present in test builds; used by integration tests to assert
     /// that the Win32 peer-resolution path ran.
@@ -164,6 +174,10 @@ impl DaemonState {
     /// 6. Wire a `PersistentAudit` sink over the shared store.
     /// 7. Construct the router via `Router::with_sink` (NEVER
     ///    `Router::new`, which would default to `InMemoryAudit`).
+    // Linear wiring constructor: each runtime is built inline from shared
+    // Arcs in one place. Splitting it would scatter the wiring without
+    // reducing complexity, so the line cap is waived here.
+    #[allow(clippy::too_many_lines)]
     pub fn bootstrap(config: DaemonConfig) -> Result<Self> {
         ensure_dir(&config.daemon.data_dir)?;
         let db_path = config.db_path();
@@ -264,6 +278,17 @@ impl DaemonState {
             Arc::clone(&activation),
             Arc::clone(&sources),
         ));
+        // Session runtime (P1 / TC50): wraps the SAME `Arc<PtyRuntime>` so
+        // a session is just a long-lived login-shell PTY job. Sizes the
+        // cap + idle TTL from the `[shell_session]` config block. The
+        // capability is gated separately by `allow_session` in the policy
+        // engine above.
+        #[cfg(unix)]
+        let sessions = Arc::new(crate::shell_session::ShellSessionRuntime::new(
+            Arc::clone(&pty),
+            config.shell_session.max_sessions,
+            config.shell_session.idle_ttl_secs,
+        ));
 
         // Mint a fresh per-boot identity. A restart produces a new value;
         // surfaced on `subscription_open` as the restart signal (MUST-ADD #6).
@@ -291,6 +316,8 @@ impl DaemonState {
             watch,
             #[cfg(unix)]
             pty,
+            #[cfg(unix)]
+            sessions,
             #[cfg(any(test, feature = "test-util"))]
             test_last_peer: std::sync::Mutex::new(None),
         })

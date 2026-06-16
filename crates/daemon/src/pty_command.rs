@@ -274,14 +274,14 @@ mod runtime {
             }
             if let Some(shell) = Self::shell_interpreter_basename(&req.argv[0]) {
                 self.audit(
-                    "pty_command_start",
-                    &req.argv[0],
-                    "deny",
-                    Some(format!(
-                        "shell interpreter '{shell}' denied by default; pty_command_start is not a shell bridge"
-                    )),
-                    None,
-                );
+                            "pty_command_start",
+                            &req.argv[0],
+                            "deny",
+                            Some(format!(
+                                "shell interpreter '{shell}' denied by default; pty_command_start is not a shell bridge"
+                            )),
+                            None,
+                        );
                 return Err(PtyRuntimeError::ShellInterpreterDenied(shell.to_owned()));
             }
             let cwd_for_policy = req.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
@@ -300,6 +300,72 @@ mod runtime {
                 return Err(PtyRuntimeError::PolicyDenied(verdict.reason));
             }
 
+            self.spawn_pty_job(req, "pty_command_start")
+        }
+
+        /// Spawn a long-lived session shell PTY (P1 / TC50).
+        ///
+        /// Built ON TOP of the same PTY spawn core as [`PtyRuntime::start`]
+        /// via the shared [`PtyRuntime::spawn_pty_job`], but with TWO
+        /// deliberate differences from the `pty_command_*` argv lane:
+        ///
+        /// 1. The shell-interpreter deny (`SHELL_INTERPRETERS_DENY`) is
+        ///    SKIPPED: a session shell IS an interpreter on purpose (the
+        ///    caller never hand-builds the argv -- the session runtime
+        ///    assembles `[shell, "-i"]`).
+        /// 2. The gate is [`PolicyAction::SessionStart`] behind the
+        ///    independent `allow_session` capability (default deny), not
+        ///    `CommandStart`. Audited as `shell_session_start`.
+        ///
+        /// The caller (`ShellSessionRuntime`) owns the `session_id <->
+        /// job_id` mapping, the `max_sessions` cap, the idle TTL reaper,
+        /// and the terminal-state guard; this method only performs the
+        /// gated spawn.
+        pub fn start_session(
+            &self,
+            req: PtyStartRequest,
+        ) -> Result<PtyStartResponse, PtyRuntimeError> {
+            if req.argv.is_empty() {
+                return Err(PtyRuntimeError::EmptyArgv);
+            }
+            // NOTE: no shell-interpreter deny here -- the session lane runs
+            // a login shell ON PURPOSE and is gated by `SessionStart`
+            // instead (mirrors the command runtime's shell lane skipping
+            // the argv guard under `CommandShellStart`).
+            let shell = req.argv.first().cloned().unwrap_or_default();
+            let cwd_for_policy = req.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
+            let verdict = self.policy.evaluate(&PolicyAction::SessionStart {
+                shell: &shell,
+                cwd: cwd_for_policy.as_path(),
+            });
+            if verdict.decision == PolicyDecision::Deny {
+                self.audit(
+                    "shell_session_start",
+                    &shell,
+                    "deny",
+                    Some(verdict.reason.clone()),
+                    None,
+                );
+                return Err(PtyRuntimeError::PolicyDenied(verdict.reason));
+            }
+
+            self.spawn_pty_job(req, "shell_session_start")
+        }
+
+        /// Shared PTY spawn core for the argv lane ([`PtyRuntime::start`])
+        /// and the session lane ([`PtyRuntime::start_session`]).
+        ///
+        /// The caller is responsible for the per-lane GATE (shell-deny +
+        /// policy verdict) BEFORE calling this; this method performs no
+        /// policy evaluation. It allocates the bucket/probe/job, builds the
+        /// sifter from active + inline rules, spawns the [`PtyProbe`], wires
+        /// the lifecycle waiter, inserts the live binding, and writes the
+        /// `allow` audit row labelled with `audit_action`.
+        fn spawn_pty_job(
+            &self,
+            req: PtyStartRequest,
+            audit_action: &'static str,
+        ) -> Result<PtyStartResponse, PtyRuntimeError> {
             let bucket_id = BucketId::new();
             let probe_id = ProbeId::new();
             let job_id = JobId::new();
@@ -450,7 +516,7 @@ mod runtime {
             );
 
             self.audit(
-                "pty_command_start",
+                audit_action,
                 &job_id.to_wire_string(),
                 "allow",
                 None,

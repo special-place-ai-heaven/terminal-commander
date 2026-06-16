@@ -28,6 +28,8 @@ pub mod pty_command;
 pub mod router;
 pub mod runtime;
 pub mod shell;
+#[cfg(unix)]
+pub mod shell_session;
 pub mod state;
 pub mod store_actor;
 pub mod subscriptions;
@@ -40,7 +42,7 @@ pub use command::{
 };
 pub use config::{
     ConfigError, DaemonConfig, DaemonSection, LimitsSection, PolicyCapsSection, PolicySection,
-    RetentionSection, RuntimeMode,
+    RetentionSection, RuntimeMode, ShellSessionSection,
 };
 pub use file_watch::{LiveWatchIdentity, WatchError, WatchRebindReport, WatchRuntime};
 pub use ipc::{
@@ -61,23 +63,27 @@ pub use ipc::{
     MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_LIST_LIMIT,
     MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES, MAX_PULL_EVENTS, MAX_PULL_TIMEOUT_MS,
     MAX_REGISTRY_SEARCH_LIMIT, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
-    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_SUBSCRIPTIONS, MAX_TAIL_BYTES, MAX_TAIL_LINES,
-    PolicyStatusResponse, ProbeKind, ProbeListEntry, ProbeListResponse, ProbeStatusParams,
-    ProbeStatusResponse, PtyCommandListEntry, PtyCommandListResponse, PtyCommandStartParams,
-    PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
-    PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RegistryActivateParams,
-    RegistryActivateResponse, RegistryActiveEntry, RegistryDeactivateParams,
-    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportFailure,
-    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
-    RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse, RegistryTestMatch,
-    RegistryTestParams, RegistryTestResponse, RegistryTestSample, RegistryUpsertParams,
-    RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope, RuntimeActiveRule,
-    RuntimeBucketSummary, RuntimeStateResponse, SelfCheckResponse, SeverityHistogram,
-    ShellExecParams, SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionEvent,
-    SubscriptionListParams, SubscriptionListResponse, SubscriptionOpenParams,
-    SubscriptionOpenResponse, SubscriptionPredicate, SubscriptionPullParams,
-    SubscriptionPullResponse, SubscriptionSeekParams, SubscriptionSeekResponse,
-    SubscriptionSourceSel,
+    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_SESSION_ENV_ITEMS, MAX_SESSION_LINE_BYTES,
+    MAX_SUBSCRIPTIONS, MAX_TAIL_BYTES, MAX_TAIL_LINES, PolicyStatusResponse, ProbeKind,
+    ProbeListEntry, ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListEntry,
+    PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams,
+    PtyCommandStopResponse, PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse,
+    RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
+    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
+    RegistryImportFailure, RegistryImportPackParams, RegistryImportPackResponse,
+    RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
+    RegistryTestMatch, RegistryTestParams, RegistryTestResponse, RegistryTestSample,
+    RegistryUpsertParams, RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope,
+    RuntimeActiveRule, RuntimeBucketSummary, RuntimeStateResponse, SelfCheckResponse, SessionState,
+    SeverityHistogram, ShellExecParams, ShellSessionExecParams, ShellSessionExecResponse,
+    ShellSessionListEntry, ShellSessionListResponse, ShellSessionStartParams,
+    ShellSessionStartResponse, ShellSessionStatusParams, ShellSessionStatusResponse,
+    ShellSessionStopParams, ShellSessionStopResponse, SubscriptionCloseParams,
+    SubscriptionCloseResponse, SubscriptionEvent, SubscriptionListParams, SubscriptionListResponse,
+    SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
+    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSeekParams,
+    SubscriptionSeekResponse, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
+    WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
 };
 #[cfg(unix)]
 pub use ipc::{DaemonClient, IpcServer, PeerCred, ServerHandle};
@@ -97,6 +103,11 @@ pub use runtime::{
     RuntimeError, SelfCheckReport, run_foreground_idle, run_ipc_server, run_self_check,
 };
 pub use shell::{MAX_SHELL_LINE_BYTES, ShellExecRequest, ShellRuntime};
+#[cfg(unix)]
+pub use shell_session::{
+    SessionError, SessionListEntry, SessionStartOutcome, SessionStartRequest, SessionStatus,
+    ShellSessionRuntime,
+};
 pub use state::{BootstrapError, DaemonState};
 pub use subscriptions::model::{Predicate, SourceSel, Subscription};
 pub use subscriptions::pull::{

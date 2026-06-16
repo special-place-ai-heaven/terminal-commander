@@ -25,6 +25,7 @@
 pub mod audit;
 pub mod import;
 pub mod registry;
+pub mod workspace;
 pub use audit::{
     ALLOWED_AUDIT_DECISIONS, AuditEntry, AuditReadRequest, AuditRow, DEFAULT_AUDIT_READ_LIMIT,
     MAX_AUDIT_METADATA_BYTES, MAX_AUDIT_READ_LIMIT, MAX_AUDIT_REASON_BYTES,
@@ -36,6 +37,7 @@ pub use import::{
 pub use registry::{
     ActivationRecord, ActiveRuleDef, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, RuleSearchHit,
 };
+pub use workspace::WorkspaceSnapshotRow;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

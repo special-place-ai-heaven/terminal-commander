@@ -1,0 +1,61 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "shell_session_stop",
+      "arguments": {
+        "session_id": "ses_018f0000000000000000000000000003"
+      }
+    }
+  },
+  "tool": "shell_session_stop",
+  "_meta": {
+    "schema_anchor": "TC50/mcp-tools/shell_session_stop-v1",
+    "fixture_id": "contracts/mcp-tools/shell_session_stop.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC50"
+    ],
+    "note": "Daemon-backed session stop (omni P1). Terminates the session shell (graceful then forced via the PTY runtime) and reports the terminal state. Idempotent: stopping an already-terminal or unknown session returns the terminal state with a bounded reason, never an error. TB-7: session_id is opaque (copy verbatim, e.g. ses_<32hex>)."
+  },
+  "response_example": {
+    "session_id": "ses_018f0000000000000000000000000003",
+    "state": "exited",
+    "terminal_reason": "stopped"
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "unsupported_platform_error_example": {
+    "message": "daemon ipc error [UnsupportedPlatform]: persistent shell sessions are not available on this platform yet (PTY/ConPTY pending)",
+    "data": {
+      "ipc_code": "UnsupportedPlatform"
+    }
+  },
+  "invariants": [
+    "session_id is required",
+    "stop attempts a graceful terminate before a forced kill",
+    "success payload reports the terminal state + a bounded terminal_reason",
+    "stopping an unknown or already-terminal session is idempotent (terminal state, never a synthetic running result)"
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "workspace_snapshot_create",
+      "arguments": {
+        "session_id": "ses_018f0000000000000000000000000003",
+        "name": "build-workspace"
+      }
+    }
+  },
+  "tool": "workspace_snapshot_create",
+  "_meta": {
+    "schema_anchor": "TC50/mcp-tools/workspace_snapshot_create-v1",
+    "fixture_id": "contracts/mcp-tools/workspace_snapshot_create.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC50"
+    ],
+    "note": "Daemon-backed workspace snapshot create (omni P1). Captures a session's current working directory and bounded environment overlay and persists them as a restorable snapshot in SQLite. Returns the opaque snapshot id. The env is bounded before persistence (no unredacted host secrets)."
+  },
+  "response_example": {
+    "snapshot_id": "snap_018f00000000000000000000000003ab"
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "unsupported_platform_error_example": {
+    "message": "daemon ipc error [UnsupportedPlatform]: persistent shell sessions are not available on this platform yet (PTY/ConPTY pending)",
+    "data": {
+      "ipc_code": "UnsupportedPlatform"
+    }
+  },
+  "unknown_session_error_example": {
+    "message": "daemon ipc error [UnknownSession]: shell session 'ses_018f0000000000000000000000000099' is not known",
+    "data": {
+      "ipc_code": "UnknownSession"
+    }
+  },
+  "invariants": [
+    "session_id is required; name is optional",
+    "an unknown session fails with UnknownSession, never a synthetic snapshot",
+    "the persisted env is bounded (MAX_SESSION_ENV_ITEMS) and carries no unredacted host secrets",
+    "success payload contains only the opaque snapshot_id"
+  ]
+}

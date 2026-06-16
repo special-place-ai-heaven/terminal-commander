@@ -1,0 +1,74 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "shell_session_start",
+      "arguments": {
+        "shell": "/bin/bash",
+        "cwd": "/tmp",
+        "env": [],
+        "rules_json": "[{\"id\":\"inline-pwd\",\"version\":1,\"kind\":\"keyword\",\"status\":\"active\",\"severity\":\"low\",\"event_kind\":\"path\",\"keywords\":[\"/tmp\"],\"summary_template\":\"cwd\",\"context_hint\":{\"before_lines\":0,\"after_lines\":0}}]",
+        "bucket_config_json": "{\"max_events\": 512, \"ttl\": 300}",
+        "tag": "build-session"
+      }
+    }
+  },
+  "tool": "shell_session_start",
+  "_meta": {
+    "schema_anchor": "TC50/mcp-tools/shell_session_start-v1",
+    "fixture_id": "contracts/mcp-tools/shell_session_start.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC50"
+    ],
+    "note": "Daemon-backed persistent session start (omni P1). A session is a long-lived login-shell PTY whose cwd/env stay sticky across shell_session_exec lines. Gated by PolicyAction::SessionStart behind the allow_session capability (default deny) and audited before spawn. Success returns bounded identifiers and the session state, never a raw shell stream."
+  },
+  "response_example": {
+    "session_id": "ses_018f0000000000000000000000000003",
+    "bucket_id": "bkt_018f0000000000000000000000000003",
+    "state": "live"
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "unsupported_platform_error_example": {
+    "message": "daemon ipc error [UnsupportedPlatform]: persistent shell sessions are not available on this platform yet (PTY/ConPTY pending)",
+    "data": {
+      "ipc_code": "UnsupportedPlatform"
+    }
+  },
+  "policy_denied_error_example": {
+    "message": "daemon ipc error [PolicyDenied]: shell_session_start denied: allow_session capability is off or profile forbids sessions",
+    "data": {
+      "ipc_code": "PolicyDenied"
+    }
+  },
+  "invariants": [
+    "session start is denied by default (allow_session capability off) and surfaces a PolicyDenied error, never a synthetic success",
+    "every accepted start is audited with a redacted subject before the shell PTY is spawned",
+    "env is an ARRAY of {key,value} objects, not a map; bounded by MAX_SESSION_ENV_ITEMS",
+    "success payload contains only session_id, bucket_id, and state",
+    "session output is combed (read from the bucket via shell_session_exec), never a raw stream",
+    "max_sessions is enforced before spawn; over-cap returns a bounded SessionLimitExceeded error, never a hang"
+  ]
+}
