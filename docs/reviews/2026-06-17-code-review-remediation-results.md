@@ -37,7 +37,7 @@ run does not compile that module.
 | F-011 | NIT | DOCUMENTED | `compact:true` drops ids; re-fetch note in `OMNI_PLAYBOOK.md`. `8de3d2c`. |
 | F-012 | LOW | DOCUMENTED | `target_id` command-lane-only noted in `TOOL_CONTROL_SURFACE.md` / `OMNI_PLAYBOOK.md`. `8de3d2c`. |
 | F-013 | LOW | DOCUMENTED | Universal extractors fallback-only (no baseline alongside an active pack) noted in `OMNI_PLAYBOOK.md` + config comment. `8de3d2c`. |
-| F-010 | MED | STILL OPEN (release gate) | Live Windows ConPTY child-output + secret-gate e2e cannot run on this host (`0xC0000142` DLL-init; gated `TC_CONPTY_E2E=1`). The F-001 fix is compile- and mapping-verified, but the live byte/secret path needs a real Windows desktop/CI. Block Windows PTY release until green. |
+| F-010 | MED | CI GATE ADDED (closes on green) | `scripts/windows-gate.ps1` runs `conpty_*` with `TC_CONPTY_E2E=1` when `GITHUB_ACTIONS=true` (the existing required `pre-build-gates (windows-x64)` job). Refuses self-skip. Local `windows-gate.ps1` skips unless `TC_CONPTY_E2E=1` is set manually. F-010 closes when that CI job goes green on `windows-2022`. |
 | F-014 | NIT | NO ACTION | Job-receipt design confirmed sound (UUIDv7 job_id, live jobs read in-memory first, receipt only on `UnknownJob`). |
 
 ## Per-invariant outcome
@@ -49,13 +49,10 @@ run does not compile that module.
 
 ## Integration state and remaining steps (human-gated)
 
-- All fixes are on local `feature/omni-review-fixes` (`019ddcd`); NOTHING pushed,
-  main untouched (`9c87923` locally).
-- `origin/main` advanced to `v0.1.50` (`ddbe964`) - release-please released the
-  omni `feat:` commits. The review branch is based on the pre-release
-  `9c87923`, so before any outward push it needs a rebase/merge onto `v0.1.50`.
-- Open before declaring the Windows PTY surface releasable: close F-010 on a real
-  Windows desktop/CI with `TC_CONPTY_E2E=1`.
+- Branch `feature/omni-review-fixes` rebased onto `origin/main` (v0.1.50 / `ddbe964`).
+  Local only — not pushed. Recovery anchor `_anchor/pre-omni-integration` -> `9c87923`.
+- F-010 closes when the PR's `pre-build-gates (windows-x64)` job passes (ConPTY e2e
+  in `windows-gate.ps1`). Merge the PR to land fixes + the gate together.
 
 ## Honesty notes
 
