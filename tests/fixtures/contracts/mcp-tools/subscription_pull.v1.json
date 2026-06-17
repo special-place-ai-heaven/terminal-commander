@@ -1,0 +1,139 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "subscription_pull",
+      "arguments": {
+        "sub_id": "11111111-1111-4111-8111-111111111111",
+        "max": 50,
+        "timeout_ms": 5000
+      }
+    }
+  },
+  "tool": "subscription_pull",
+  "_meta": {
+    "schema_anchor": "TC46/mcp-tools/subscription_pull-v1",
+    "fixture_id": "contracts/mcp-tools/subscription_pull.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed multiplexed, lossless, blocking pull (Phase 3). Drains matched events across all in-scope buckets for one subscription, server-advancing the per-bucket offsets so the next pull continues where this one stopped. Blocks up to timeout_ms (omitted = DEFAULT_PULL_TIMEOUT_MS 5000; clamped to [1, MAX_PULL_TIMEOUT_MS 8000]) until events arrive or the timeout elapses. max is clamped to MAX_PULL_EVENTS (omitted = 50). Returns source-tagged events[] (each carrying bucket_id, optional job_id, the per-bucket seq, and the full SignalEvent) plus per-source liveness[] (one entry per in-scope bucket: starting|running|exited|failed|cancelled|stopped|dropped), and the lagged and truncated flags. An IDLE pull is SUCCESS with empty events[] plus liveness, NEVER an error. lagged=true means an in-scope bucket evicted events under the consumer; truncated=true means the routing scan hit MAX_BUCKETS_PER_SUBSCRIPTION. An unknown/expired/malformed sub_id returns the unknown_subscription IPC code (re-open). The MCP client waits longer than the daemon timeout so the idle path is empty-success, never a JSON-RPC timeout."
+  },
+  "response_example": {
+    "events": [
+      {
+        "bucket_id": "bkt_018f0000000000000000000000000001",
+        "job_id": "job_018f0000000000000000000000000001",
+        "seq": 1,
+        "event": {
+          "event_id": "evt_018f0000000000000000000000000001",
+          "bucket_id": "bkt_018f0000000000000000000000000001",
+          "seq": 1,
+          "timestamp": "2026-05-25T17:45:00Z",
+          "severity": "high",
+          "kind": "test_failure",
+          "summary": "npm test failed in av-safe-install-runtime.test.js",
+          "source": {
+            "probe_id": "prb_018f0000000000000000000000000001",
+            "source_type": "process",
+            "stream": "stderr",
+            "job_id": "job_018f0000000000000000000000000001"
+          },
+          "pointer": {
+            "frame_id": "frm_018f0000000000000000000000000042",
+            "line": 7,
+            "stream": "stderr",
+            "context_available": true
+          }
+        }
+      }
+    ],
+    "liveness": [
+      {
+        "bucket_id": "bkt_018f0000000000000000000000000001",
+        "job_id": "job_018f0000000000000000000000000001",
+        "probe_id": "prb_018f0000000000000000000000000001",
+        "liveness": {
+          "state": "running"
+        }
+      }
+    ],
+    "lagged": false,
+    "truncated": false
+  },
+  "response_example_idle": {
+    "_note": "An idle pull (no new events before the daemon timeout elapsed) is SUCCESS, not an error: events[] is empty but the per-source liveness[] still reports every in-scope bucket so the consumer keeps a live picture. The agent simply loops subscription_pull again.",
+    "events": [],
+    "liveness": [
+      {
+        "bucket_id": "bkt_018f0000000000000000000000000001",
+        "job_id": "job_018f0000000000000000000000000001",
+        "probe_id": "prb_018f0000000000000000000000000001",
+        "liveness": {
+          "state": "exited",
+          "code": 0
+        }
+      }
+    ],
+    "lagged": false,
+    "truncated": false
+  },
+  "response_example_lagged_truncated": {
+    "_note": "lagged=true means at least one in-scope bucket evicted events under the consumer (FIFO retention dropped events between pulls); the delivered events resume from the surviving head, so the consumer is told it fell behind. truncated=true means the routing scan hit MAX_BUCKETS_PER_SUBSCRIPTION and more buckets exist than were scanned this pull. Both are flags on a successful response, never an error.",
+    "events": [],
+    "liveness": [
+      {
+        "bucket_id": "bkt_018f0000000000000000000000000001",
+        "liveness": {
+          "state": "dropped",
+          "count": 12
+        }
+      }
+    ],
+    "lagged": true,
+    "truncated": true
+  },
+  "unknown_subscription_error_example": {
+    "_note": "An unknown, expired, or malformed sub_id (unknown handle, or reset by a daemon restart) surfaces as the unknown_subscription IPC code. The MCP facade maps every caller-fixable IPC error to JSON-RPC invalid_params (-32602) so the agent corrects its input and keeps routing through Terminal Commander; data.ipc_code carries the typed daemon code verbatim. The remedy is to re-open the subscription.",
+    "code": -32602,
+    "message": "unknown subscription: 99999999-9999-4999-8999-999999999999",
+    "data": {
+      "ipc_code": "UnknownSubscription"
+    }
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "sub_id is required; max and timeout_ms are optional",
+    "max is clamped to MAX_PULL_EVENTS (omitted = 50); timeout_ms is clamped to [1, MAX_PULL_TIMEOUT_MS 8000] (omitted = DEFAULT_PULL_TIMEOUT_MS 5000)",
+    "events are multiplexed across all in-scope buckets and carry bucket_id, optional job_id, the per-bucket seq, and the full SignalEvent",
+    "liveness reports one entry per in-scope bucket using the single authoritative Liveness union (snake_case state tag)",
+    "an idle pull is SUCCESS with empty events[] plus liveness, never an error",
+    "lagged=true flags eviction under the consumer; truncated=true flags the routing scan hitting MAX_BUCKETS_PER_SUBSCRIPTION; both ride a successful response",
+    "an unknown, expired, or malformed sub_id returns the unknown_subscription IPC code (mapped to invalid_params on the wire); the caller re-opens",
+    "the pull server-advances the per-bucket offsets so it is non-idempotent; the next pull continues from where this one stopped",
+    "daemon unavailable is a typed daemon_unavailable error, not an empty success"
+  ]
+}

@@ -281,23 +281,23 @@
     },
     {
       "name": "subscription_open",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/subscription_open.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "subscription_pull",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/subscription_pull.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "subscription_list",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/subscription_list.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "subscription_close",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/subscription_close.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "subscription_seek",
@@ -318,9 +318,9 @@
   "obsolete_fixtures": [],
   "counts": {
     "live_tools": 49,
-    "covered_live": 45,
+    "covered_live": 49,
     "placeholder_for_live_tool": 0,
-    "missing_fixture": 4,
+    "missing_fixture": 0,
     "obsolete_fixture_present": 0
   }
 }

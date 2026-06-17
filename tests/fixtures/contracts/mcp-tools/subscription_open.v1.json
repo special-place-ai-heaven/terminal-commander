@@ -1,0 +1,83 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "subscription_open",
+      "arguments": {
+        "severity_min": "medium",
+        "kind": ["test_failure", "panic"],
+        "sources": {
+          "kind": "buckets",
+          "buckets": ["bkt_018f0000000000000000000000000001"]
+        },
+        "tag": "build"
+      }
+    }
+  },
+  "tool": "subscription_open",
+  "_meta": {
+    "schema_anchor": "TC46/mcp-tools/subscription_open-v1",
+    "fixture_id": "contracts/mcp-tools/subscription_open.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed open of ONE multiplexed, predicate-routed subscription over many sources (Phase 1). The predicate is AND semantics: severity_min and kind are per-EVENT filters; sources (all|{jobs}|{buckets}|{probes}) and tag are per-BUCKET routing. All predicate fields are optional; omitting sources defaults to {\"kind\":\"all\"} (every bucket, future matching probes auto-join on the next routing rebuild). A late open starts from-now (each already-in-scope bucket starts at its current tail_seq, so the ring is never replayed). Returns an opaque sub_id plus boot_id (a changed boot_id across opens means the daemon restarted and every subscription, bucket, and offset reset together), the normalized predicate_hash (decimal string), created_at_ms (wall clock at open), and matched_sources (count of already-in-scope buckets at open). Then loop subscription_pull on the sub_id. Open allocates a registry slot and can trip subscription_limit_exceeded; free a slot with subscription_close and retry."
+  },
+  "response_example": {
+    "sub_id": "11111111-1111-4111-8111-111111111111",
+    "boot_id": "22222222-2222-4222-8222-222222222222",
+    "predicate_hash": "14213890420692902089",
+    "created_at_ms": 1748194200000,
+    "matched_sources": 1
+  },
+  "response_example_all_sources_no_matches": {
+    "_note": "An open with the default sources:all predicate and no in-scope buckets yet is a valid success: matched_sources is 0 and future matching probes auto-join on the next pull's routing rebuild. The from-now contract means no historical ring is replayed even once buckets join.",
+    "sub_id": "33333333-3333-4333-8333-333333333333",
+    "boot_id": "22222222-2222-4222-8222-222222222222",
+    "predicate_hash": "11400714819323198485",
+    "created_at_ms": 1748194260000,
+    "matched_sources": 0
+  },
+  "limit_exceeded_error_example": {
+    "_note": "Open allocates a registry slot. When MAX_SUBSCRIPTIONS open subscriptions already exist, a further open returns the subscription_limit_exceeded IPC code. The MCP facade maps every caller-fixable IPC error to JSON-RPC invalid_params (-32602); data.ipc_code carries the typed daemon code verbatim. The remedy is to subscription_close an idle handle and retry.",
+    "code": -32602,
+    "message": "subscription limit exceeded",
+    "data": {
+      "ipc_code": "SubscriptionLimitExceeded"
+    }
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "all predicate fields are optional; AND semantics across severity_min, kind, sources, and tag",
+    "severity_min and kind are per-EVENT filters; sources and tag are per-BUCKET routing",
+    "omitting sources defaults to the all selector (every bucket; future matching probes auto-join)",
+    "a late open starts from-now: each already-in-scope bucket starts at its current tail_seq and the ring is never replayed",
+    "the response carries sub_id, boot_id, predicate_hash (decimal string), created_at_ms (wall clock), and matched_sources",
+    "a changed boot_id across opens signals a daemon restart that reset every subscription, bucket, and offset together",
+    "open allocates a registry slot and can trip subscription_limit_exceeded (mapped to invalid_params on the wire); the caller closes a slot and retries",
+    "daemon unavailable is a typed daemon_unavailable error, not an empty success"
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "subscription_list",
+      "arguments": {
+        "limit": 64
+      }
+    }
+  },
+  "tool": "subscription_list",
+  "_meta": {
+    "schema_anchor": "TC46/mcp-tools/subscription_list-v1",
+    "fixture_id": "contracts/mcp-tools/subscription_list.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed bounded snapshot of every open subscription (Phase 1, Subscriptions design section 6). Each row reports sub_id + predicate_hash (decimal string of the normalized predicate, so an agent recognizes an equivalent predicate without coupling cursors) + source_count (number of buckets the subscription currently tracks an offset for) + created_at_ms (wall clock at open) + optional last_pull_at_ms (wall clock of the last pull, omitted until the first pull). Rows are sorted by sub_id for stable pagination. The optional limit clamps the row count to MAX_SUBSCRIPTIONS (omitted = 64, also the cap); truncated is true when more subscriptions exist than were returned. limit is the only argument and it is optional, so an empty arguments object is valid."
+  },
+  "response_example": {
+    "subscriptions": [
+      {
+        "sub_id": "11111111-1111-4111-8111-111111111111",
+        "predicate_hash": "14213890420692902089",
+        "source_count": 1,
+        "created_at_ms": 1748194200000,
+        "last_pull_at_ms": 1748194205000
+      },
+      {
+        "sub_id": "33333333-3333-4333-8333-333333333333",
+        "predicate_hash": "11400714819323198485",
+        "source_count": 0,
+        "created_at_ms": 1748194260000
+      }
+    ],
+    "truncated": false
+  },
+  "response_example_empty": {
+    "_note": "No open subscriptions is a valid success: subscriptions[] is empty and truncated is false. This is distinct from daemon unavailable, which is a typed error.",
+    "subscriptions": [],
+    "truncated": false
+  },
+  "response_example_truncated": {
+    "_note": "When more subscriptions are open than the clamped limit (omitted or over-cap = MAX_SUBSCRIPTIONS 64), only the first limit rows (sorted by sub_id) are returned and truncated is true. A row that has never been pulled omits last_pull_at_ms.",
+    "subscriptions": [
+      {
+        "sub_id": "11111111-1111-4111-8111-111111111111",
+        "predicate_hash": "14213890420692902089",
+        "source_count": 3,
+        "created_at_ms": 1748194200000,
+        "last_pull_at_ms": 1748194205000
+      }
+    ],
+    "truncated": true
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "limit is the only argument and it is optional; an empty arguments object is valid",
+    "limit is clamped to MAX_SUBSCRIPTIONS (omitted or over-cap = 64); over-cap sets truncated",
+    "rows are sorted by sub_id for stable pagination across calls",
+    "each row carries sub_id, predicate_hash (decimal string), source_count, created_at_ms, and optional last_pull_at_ms",
+    "last_pull_at_ms is omitted for a subscription that has never been pulled",
+    "an empty subscriptions[] with truncated false is a valid success, distinct from daemon unavailable",
+    "truncated is true when more subscriptions exist than were returned",
+    "daemon unavailable is a typed daemon_unavailable error, not an empty success"
+  ]
+}
