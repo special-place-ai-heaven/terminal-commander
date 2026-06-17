@@ -127,6 +127,42 @@ lock and stops them WITHOUT holding the session write lock (stopping
 calls into the PTY runtime, which takes its own locks). A zero TTL
 disables the idle path; terminal entries are still reaped.
 
+### Stop is graceful on unix; forced-kill-only on Windows ConPTY
+
+The cancel/stop semantics differ BY PLATFORM, and operators must not
+expect a graceful stop everywhere:
+
+- **Unix** (the only platform with a session lane): stop runs the grace
+  ladder -- SIGTERM, wait for `config.grace`, then SIGKILL
+  (`terminate_process_tree_graceful`). Cooperative shutdown is attempted
+  first.
+- **Windows ConPTY**: stop is FORCED-KILL-ONLY. `config.grace` is NOT
+  honored -- the child is killed and the pseudo-console master dropped
+  with no SIGTERM-equivalent grace step, because Windows has no per-
+  process "post a graceful terminate" signal that reaches a ConPTY
+  child. The forced kill IS the whole ladder. This asymmetry only
+  surfaces through the dual-backend PTY lane (`pty_command_stop`), since
+  the session lane itself does not exist on Windows; it is recorded here
+  so the platform contract lives next to the unix stop description. See
+  `docs/mcp/TOOL_CONTROL_SURFACE.md` (`command_stop` /
+  `pty_command_stop` are forced-kill-only).
+
+### Why priming keeps `stty -onlcr` (a bounded CRLF gap)
+
+The PTY line-comber resolves `\r\n` within a SINGLE read (the dominant
+case: a shell emits a whole `line\r\n` in one read). There is a KNOWN,
+BOUNDED gap at the read boundary: a `\r` at the very end of one PTY read
+with the `\n` arriving in the NEXT read is resolved as a carriage-return
+OVERWRITE, not as a CRLF line terminator. This is deliberate -- the M2
+secret-gate test depends on this overwrite behavior -- and in the rare
+split-read case it can merge or distort a legitimate interactive line.
+
+Session priming therefore retains `stty -onlcr` (see the
+`shell_session_start` lifecycle) as belt-and-suspenders: with `onlcr`
+off the shell does not translate `\n` to `\r\n` on output, so the
+split-read CRLF path is not exercised in normal session use. If priming
+ever drops `stty -onlcr`, add a session e2e for the split-read path.
+
 ## 5. cwd / env stickiness
 
 `cwd` and `env` are sticky because the SHELL PROCESS is persistent, not
@@ -143,20 +179,29 @@ because the daemon re-applies them. The daemon also keeps a lightweight
 
 ## 6. The partial `status.cwd` caveat (read this)
 
-`status.cwd` is BEST-EFFORT and can lag the real shell. The daemon
-tracks `cwd` by parsing `exec` lines with `parse_cd_target`, which only
-recognizes a plain `cd <single-arg>`:
+`status.cwd` is ADVISORY / BEST-EFFORT and can lag the real shell. It is
+NOT the live OS working directory -- it is derived from a `cd
+<single-token>` parser (`parse_cd_target`) that runs over the lines you
+send through `shell_session_exec`, so it only advances on a recognizable
+`cd`:
 
 - It accepts `cd /tmp`, `cd "/some/dir"`, `cd build`.
-- It returns `None` (no update) for `cd` with no arg, `cd -`, a compound
-  or pipeline (`cd a && cd b`, `cd a | x`), or `cd` with multiple args.
+- It returns `None` (no update) for `cd` with no arg, `cd -`, a `$VAR`
+  form (`cd $HOME`, `cd "$DIR"`), a quoted path containing spaces
+  (`cd '/tmp/a b'`), a compound or pipeline (`cd a && cd b`, `cd a | x`),
+  or `cd` with multiple args. The shell still moves; the tracker does
+  not.
 
 When tracking returns `None`, `status.cwd` keeps its previous value even
 though the live shell may have moved. This is intentional: cwd tracking
 is advisory bookkeeping, and the persistent shell is the real source of
-truth. To read the authoritative directory, run
+truth.
+
+The authoritative cwd is ALWAYS available: run
 `shell_session_exec { line: "pwd" }` and read the combed signal -- it
-returns the real directory regardless of what the tracker believes.
+returns the real directory regardless of what the tracker believes. Do
+NOT drive policy, containment, or any automated decision off
+`status.cwd`; read `pwd` when correctness matters.
 
 ## 7. Configuration
 

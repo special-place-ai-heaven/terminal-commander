@@ -53,6 +53,24 @@ Availability rules:
   aligned (`catalogue_lists_twenty_nine_live_tools_at_tc45` and
   `tool_router_exposes_all_live_tools`).
 
+Platform availability (unix-only sessions):
+
+- Persistent shell sessions and workspace snapshots
+  (`shell_session_*`, `workspace_snapshot_*`) are UNIX-ONLY. On Windows
+  the daemon omits the session IPC handlers, so `system_discover`
+  reports them unavailable on that host:
+  - `system_discover.omni_status.matrix.sessions.available` is `false`
+    on Windows (the session runtime is gated `cfg!(unix)`). This row
+    carries only the boolean; the human-readable reason rides the
+    per-tool catalogue.
+  - each session/snapshot entry in `system_discover.tools[]` reports
+    `available: false` with `unavailable_reason:
+    "shell-session runtime unavailable on this platform (unix-only)"`.
+- The PTY command lane (`pty_command_*`) is dual-backend (POSIX +
+  Windows ConPTY) and stays available on Windows; only the session
+  layer built on top of it is unix-only. See
+  `docs/runtime/SHELL_SESSION.md` section 3.
+
 Machine-readable fixture:
 `tests/fixtures/contracts/mcp-tools/system_discover.v1.json`.
 
@@ -70,6 +88,23 @@ The current rmcp stdio adapter exposes 49 live tools.
 | PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` (POSIX + Windows ConPTY) |
 | Remote | `target_list`, `target_probe` (routes to an operator-forwarded local socket; remote use gated by `allow_remote`; no public TCP) |
 | Runtime | `runtime_state`, `probe_list`, `probe_status` |
+
+Remote routing surface (`target_id`):
+
+- The optional `target_id` parameter (remote federation, gated by
+  `allow_remote`) is wired on the COMMAND lane only:
+  `command_start_combed`, `run_and_watch`, `command_status`,
+  `command_stop`, plus `target_list` / `target_probe`.
+- It is NOT a parameter on `shell_exec`, `pty_*`, `file_*`, or
+  `registry_*` (except `target_list` / `target_probe`). Passing
+  `target_id` to one of those tools does NOT route the call remotely;
+  the field is unknown to the schema and the call runs against the LOCAL
+  daemon as if no target were named.
+- This is NOT an `allow_remote` bypass. The remote gate lives on the
+  command path; tools without `target_id` simply have no remote path to
+  gate. To run other lanes remotely, run them inside a remote
+  `command_start_combed` / `run_and_watch`, not by tagging an unsupported
+  tool. See `docs/mcp/OMNI_PLAYBOOK.md` section 6.
 
 Each catalogue entry returned by `system_discover.tools[]` includes:
 

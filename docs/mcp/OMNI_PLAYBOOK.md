@@ -165,8 +165,16 @@ every time.
 
 Optional always-on baseline: the operator can set
 `sifters.universal_extractors = true`, which emits bounded LOW-severity
-error/warning/exit/progress signal for ANY command even with no rule.
-That is a config behavior, not a tool you call.
+error/warning/exit/progress signal for a command that has NO
+tool-specific rule. That is a config behavior, not a tool you call.
+
+Important and intentional: universals are a FALLBACK, not an additive
+layer. They emit ONLY when no scoped active rule and no inline rule
+apply to the command. If ANY pack rule or inline rule is in play, the
+flag adds nothing -- a real pack always out-ranks the baseline, and the
+universals are NOT merged alongside it. So enabling the flag does not
+sprinkle baseline LOW signal onto pack-covered commands; it only covers
+the otherwise-uncovered ones. This conservative behavior is by design.
 
 ## 6. Remote hosts: target_id
 
@@ -208,7 +216,13 @@ These apply to every lane:
 - `degraded: true` means an IPC error interrupted a wait -- follow the
   `recover_hint` (re-attach with the returned `job_id`).
 - Pass `compact: true` on signal-returning tools for a smaller
-  projection when you only need summary/stream/seq/severity.
+  projection when you only need summary/stream/seq/severity. Compact is
+  PRESENTATION-ONLY and DROPS the id and rule metadata (`event_id`,
+  `bucket_id`, `source`, `pointer`, rule fields); the event store keeps
+  the full record. If you need an `event_id` -- e.g. to call
+  `event_context` -- do NOT read it off a compact response (it is not
+  there): re-fetch the full event via `bucket_events_since` /
+  `bucket_wait`. Do not drive automated actions off compact alone.
 - Pass `wait_until: "exit"` on wait-capable tools to wait for exit
   (server-capped; a still-running response carries `poll_hint_ms`).
 - `strip_ansi` defaults true on `command_start_combed` / `run_and_watch`
