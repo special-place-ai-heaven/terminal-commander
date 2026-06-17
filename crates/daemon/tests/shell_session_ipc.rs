@@ -21,7 +21,7 @@ use terminal_commander_core::{ContextHint, RuleDefinition, RuleStatus, RuleType,
 use terminal_commanderd::{
     DaemonClient, DaemonConfig, DaemonState, IpcErrorCode, IpcRequest, IpcResponse, IpcServer,
     PolicyProfile, SessionState, ShellSessionExecParams, ShellSessionStartParams,
-    ShellSessionStatusParams, ShellSessionStopParams,
+    ShellSessionStatusParams, ShellSessionStopParams, WorkspaceSnapshotCreateParams,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -293,6 +293,124 @@ fn session_exec_unknown_session_fails_loudly() {
             .await
             .expect_err("exec on unknown session must fail");
         assert_eq!(err.code, IpcErrorCode::UnknownSession);
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// F-003 (security): a session started with a secret-shaped env value must NOT
+/// surface that secret verbatim anywhere. Start with env
+/// `[("TOKEN", "supersecretvalue")]`, snapshot the workspace, and assert the
+/// literal secret appears NOWHERE in (a) the persisted snapshot row / `env_json`
+/// and (b) the `shell_session_status` response. The session runtime masks
+/// secret-shaped values at capture time via `command::redact_env_pairs`, so
+/// `<redacted>` is what reaches both surfaces.
+#[test]
+fn session_env_secret_is_redacted_in_snapshot_and_status() {
+    const SECRET: &str = "supersecretvalue";
+    if !bash_available() {
+        eprintln!("skipping: /bin/bash not present");
+        return;
+    }
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server_full_access();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+
+        // Start a session carrying a secret-keyed env var.
+        let started = match client
+            .call(
+                1,
+                IpcRequest::ShellSessionStart(ShellSessionStartParams {
+                    shell: None,
+                    cwd: None,
+                    env: vec![("TOKEN".to_owned(), SECRET.to_owned())],
+                    rules: vec![],
+                    bucket_config: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect("session start")
+        {
+            IpcResponse::ShellSessionStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // (a) Persisted snapshot row: create via IPC, then read the row back
+        // straight from the store actor and inspect the serialized env_json.
+        let snap = match client
+            .call(
+                2,
+                IpcRequest::WorkspaceSnapshotCreate(WorkspaceSnapshotCreateParams {
+                    session_id: started.session_id,
+                    name: Some("redaction-probe".to_owned()),
+                }),
+            )
+            .await
+            .expect("snapshot create")
+        {
+            IpcResponse::WorkspaceSnapshotCreate(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let row = state
+            .store
+            .get_workspace_snapshot(&snap.snapshot_id)
+            .expect("store read")
+            .expect("snapshot row must exist");
+        // The TOKEN key stays visible; only the value is masked.
+        let env_pairs: Vec<String> = row.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let env_json = serde_json::to_string(&row.env).expect("serialize env");
+        assert!(
+            !env_json.contains(SECRET),
+            "secret value must NOT be persisted verbatim in env_json: {env_json}"
+        );
+        assert!(
+            env_pairs.iter().any(|p| p.starts_with("TOKEN=")),
+            "the TOKEN key must survive (only its value is masked): {env_pairs:?}"
+        );
+        assert!(
+            env_pairs.iter().any(|p| p.contains("<redacted>")),
+            "the secret value must be replaced with <redacted>: {env_pairs:?}"
+        );
+
+        // (b) Status response: the env_snapshot it returns must also be masked.
+        let status = match client
+            .call(
+                3,
+                IpcRequest::ShellSessionStatus(ShellSessionStatusParams {
+                    session_id: started.session_id,
+                }),
+            )
+            .await
+            .expect("session status")
+        {
+            IpcResponse::ShellSessionStatus(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let status_env: Vec<String> = status
+            .env_snapshot
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        assert!(
+            !status_env.iter().any(|p| p.contains(SECRET)),
+            "secret value must NOT appear in shell_session_status: {status_env:?}"
+        );
+        assert!(
+            status_env.iter().any(|p| p.contains("<redacted>")),
+            "status env value must be masked: {status_env:?}"
+        );
+
+        let _ = client
+            .call(
+                4,
+                IpcRequest::ShellSessionStop(ShellSessionStopParams {
+                    session_id: started.session_id,
+                }),
+            )
+            .await;
         handle.shutdown().await;
         cleanup(&data);
     });
