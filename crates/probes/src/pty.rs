@@ -430,6 +430,52 @@ mod pty_core {
         Io(#[from] std::io::Error),
     }
 
+    /// Typed reply a backend's writer/drain path sends back over the
+    /// per-write reply channel. Shared by BOTH backends so the deny
+    /// reason survives the channel hop as a value (not a sniffable
+    /// `io::Error` message string).
+    ///
+    /// F-001: previously the Windows writer thread encoded its
+    /// gate-deny as `io::Error(PermissionDenied)`, which `write_stdin`
+    /// then coerced into `WriteStdinError::Io` -- losing the typed
+    /// `SecretInputActive` contract the daemon keys off. `SecretDenied`
+    /// makes the writer-path refusal honest and typed (invariant III).
+    pub(super) enum WriterReply {
+        /// The OS write succeeded; carries the byte count written.
+        Written(usize),
+        /// The secret gate was active when the write was dequeued, so
+        /// the bytes were NOT written. Maps to
+        /// `WriteStdinError::SecretInputActive`.
+        ///
+        /// Constructed ONLY by the Windows ConPTY writer thread's
+        /// defence-in-depth gate re-check (`runtime_win`) -- the unix
+        /// single-task backend denies secret writes on the caller thread
+        /// before queuing, so it never sends this. On a non-Windows lib
+        /// build the variant is therefore not constructed by production
+        /// code (the cross-platform `map_writer_reply` tests still build
+        /// it), which is correct, not a missing seam.
+        #[cfg_attr(not(windows), allow(dead_code))]
+        SecretDenied,
+        /// The OS write failed.
+        Io(std::io::Error),
+    }
+
+    /// PURE, cross-platform mapping from a writer-path [`WriterReply`] to
+    /// the public `Result<usize, WriteStdinError>`. Factored out so it is
+    /// unit-testable WITHOUT a live ConPTY child (see `tests`).
+    ///
+    /// `SecretDenied` -> `SecretInputActive` is the F-001 fix: a
+    /// writer-thread secret denial now surfaces the SAME typed error the
+    /// caller-thread early check returns, so the daemon maps it to
+    /// `IpcErrorCode::SecretInputDenied` and counts the same metric.
+    pub(super) fn map_writer_reply(reply: WriterReply) -> Result<usize, WriteStdinError> {
+        match reply {
+            WriterReply::Written(n) => Ok(n),
+            WriterReply::SecretDenied => Err(WriteStdinError::SecretInputActive),
+            WriterReply::Io(e) => Err(WriteStdinError::Io(e)),
+        }
+    }
+
     /// Shared secret-prompt state threaded into `process_line`. Both
     /// backends construct one of these and clone the `Arc`s into their
     /// reader path so the SAME gate logic runs on every platform.
@@ -673,6 +719,46 @@ mod pty_core {
                  secret_prompt_active stayed flag={active} (expected false)"
             );
         }
+
+        /// F-001 (REGRESSION): a writer-path secret denial MUST surface the
+        /// typed `WriteStdinError::SecretInputActive`, NOT a generic
+        /// `io::Error`. Before the fix the Windows writer thread sent
+        /// `io::Error(PermissionDenied)` which `?`-coerced into
+        /// `WriteStdinError::Io`, so the daemon returned `Internal` instead of
+        /// the `SecretInputDenied` contract. This pure mapping is the seam the
+        /// fix routes through; it is cross-platform and needs NO live ConPTY.
+        #[test]
+        fn map_writer_reply_secret_denied_is_secret_input_active() {
+            let mapped = map_writer_reply(WriterReply::SecretDenied);
+            assert!(
+                matches!(mapped, Err(WriteStdinError::SecretInputActive)),
+                "writer-path SecretDenied must map to the typed SecretInputActive \
+                 contract, got {mapped:?}"
+            );
+        }
+
+        #[test]
+        fn map_writer_reply_written_is_ok_byte_count() {
+            let mapped = map_writer_reply(WriterReply::Written(7));
+            assert!(
+                matches!(mapped, Ok(7)),
+                "Written(n) must map to Ok(n), got {mapped:?}"
+            );
+        }
+
+        #[test]
+        fn map_writer_reply_io_is_write_stdin_io() {
+            let mapped = map_writer_reply(WriterReply::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "boom",
+            )));
+            match mapped {
+                Err(WriteStdinError::Io(e)) => {
+                    assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe);
+                }
+                other => panic!("Io(e) must map to WriteStdinError::Io, got {other:?}"),
+            }
+        }
     }
 }
 
@@ -697,7 +783,7 @@ mod runtime {
     // Shared platform-neutral surface (types + the secret-gate `process_line`).
     use super::pty_core::{
         self, MAX_PTY_STDIN_BYTES, PtyExitOutcome, PtyProbeConfig, PtyProbeError, PtyProbeMetrics,
-        SecretGate, WriteStdinError,
+        SecretGate, WriteStdinError, WriterReply, map_writer_reply,
     };
 
     use std::sync::Arc;
@@ -751,11 +837,10 @@ mod runtime {
         // Channel sender for stdin writes. The streaming task owns the
         // PTY exclusively (so the borrow-checker is happy with the
         // pty-process `&mut self` read+write API); writes are queued
-        // here and applied by that task. The Result channel returns
-        // the byte count actually written (or io error).
-        stdin_tx: Option<
-            tokio::sync::mpsc::Sender<(Vec<u8>, oneshot::Sender<Result<usize, std::io::Error>>)>,
-        >,
+        // here and applied by that task. The reply channel carries a
+        // typed [`WriterReply`] (byte count, secret-deny, or io error)
+        // shared with the Windows backend.
+        stdin_tx: Option<tokio::sync::mpsc::Sender<(Vec<u8>, oneshot::Sender<WriterReply>)>>,
         cancel_tx: Option<oneshot::Sender<()>>,
         join: Option<tokio::task::JoinHandle<Result<(), PtyProbeError>>>,
         // Fires once with the terminal [`PtyExitOutcome`] when the streaming
@@ -822,8 +907,19 @@ mod runtime {
             tx.send((bytes.to_vec(), reply_tx))
                 .await
                 .map_err(|_| WriteStdinError::Closed)?;
-            let result = reply_rx.await.map_err(|_| WriteStdinError::Closed)?;
-            let written = result?;
+            let reply = reply_rx.await.map_err(|_| WriteStdinError::Closed)?;
+            let written = match map_writer_reply(reply) {
+                Ok(n) => n,
+                // F-001 parity: a writer-path secret denial is counted with the
+                // SAME metric as the caller-thread early check. The early check
+                // above returns before queuing, so this never double-counts.
+                Err(WriteStdinError::SecretInputActive) => {
+                    let mut m = self.metrics.lock();
+                    m.stdin_writes_denied_secret = m.stdin_writes_denied_secret.saturating_add(1);
+                    return Err(WriteStdinError::SecretInputActive);
+                }
+                Err(e) => return Err(e),
+            };
             let mut m = self.metrics.lock();
             m.stdin_bytes_written = m.stdin_bytes_written.saturating_add(written as u64);
             Ok(written)
@@ -913,10 +1009,8 @@ mod runtime {
             let bucket_id = config.bucket_id;
             let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
             let (completion_tx, completion_rx) = oneshot::channel::<PtyExitOutcome>();
-            let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<(
-                Vec<u8>,
-                oneshot::Sender<Result<usize, std::io::Error>>,
-            )>(8);
+            let (stdin_tx, mut stdin_rx) =
+                tokio::sync::mpsc::channel::<(Vec<u8>, oneshot::Sender<WriterReply>)>(8);
 
             let metrics_for_task = Arc::clone(&metrics);
             let gate_for_task = gate.clone();
@@ -956,13 +1050,19 @@ mod runtime {
                         }
                         break Err(PtyProbeError::Cancelled);
                     }
-                    // Drain any pending stdin writes.
+                    // Drain any pending stdin writes. The caller-thread early
+                    // check in `write_stdin` already gates secret prompts on
+                    // this single-task backend, so the drain only ever reports
+                    // a byte count or an io error.
                     while let Ok((bytes, reply)) = stdin_rx.try_recv() {
                         let result = match pty.write_all(&bytes).await {
                             Ok(()) => pty.flush().await.map(|()| bytes.len()),
                             Err(e) => Err(e),
                         };
-                        let _ = reply.send(result);
+                        let _ = reply.send(match result {
+                            Ok(n) => WriterReply::Written(n),
+                            Err(e) => WriterReply::Io(e),
+                        });
                     }
                     // One bounded read with a short timeout so the
                     // loop wakes regularly to service cancellation +
@@ -1329,7 +1429,7 @@ mod runtime_win {
     use super::AnsiNormalizer;
     use super::pty_core::{
         self, MAX_PTY_STDIN_BYTES, PtyExitOutcome, PtyProbeConfig, PtyProbeError, PtyProbeMetrics,
-        SecretGate, WriteStdinError,
+        SecretGate, WriteStdinError, WriterReply, map_writer_reply,
     };
 
     use std::io::{Read, Write};
@@ -1345,9 +1445,10 @@ mod runtime_win {
     use crate::noise_pipeline::{ProbeNoisePipeline, SharedProbeNoisePipeline};
     use crate::process::EventSink;
 
-    /// One queued stdin write: bytes + a reply channel carrying the byte
-    /// count written (or the io error). Mirrors the unix lane's queue.
-    type StdinJob = (Vec<u8>, oneshot::Sender<Result<usize, std::io::Error>>);
+    /// One queued stdin write: bytes + a reply channel carrying the typed
+    /// [`WriterReply`] (byte count, secret-deny, or io error). Mirrors the
+    /// unix lane's queue and shares the SAME reply shape across backends.
+    type StdinJob = (Vec<u8>, oneshot::Sender<WriterReply>);
 
     /// Handle to a live Windows ConPTY probe. Drop or call `cancel` to
     /// terminate. SAME public API as the unix `PtyProbe`.
@@ -1432,8 +1533,24 @@ mod runtime_win {
             let (reply_tx, reply_rx) = oneshot::channel();
             tx.send((bytes.to_vec(), reply_tx))
                 .map_err(|_| WriteStdinError::Closed)?;
-            let result = reply_rx.await.map_err(|_| WriteStdinError::Closed)?;
-            let written = result?;
+            let reply = reply_rx.await.map_err(|_| WriteStdinError::Closed)?;
+            let written = match map_writer_reply(reply) {
+                Ok(n) => n,
+                // F-001: the writer thread re-checked the gate and denied
+                // because the reader flipped the secret flag AFTER the
+                // caller-thread early check above. Surface the SAME typed
+                // `SecretInputActive` (so the daemon returns the
+                // `SecretInputDenied` contract) AND count the SAME metric.
+                // The early check returns before queuing, so this path is the
+                // only one that reaches here for a secret deny -- no
+                // double-count.
+                Err(WriteStdinError::SecretInputActive) => {
+                    let mut m = self.metrics.lock();
+                    m.stdin_writes_denied_secret = m.stdin_writes_denied_secret.saturating_add(1);
+                    return Err(WriteStdinError::SecretInputActive);
+                }
+                Err(e) => return Err(e),
+            };
             let mut m = self.metrics.lock();
             m.stdin_bytes_written = m.stdin_bytes_written.saturating_add(written as u64);
             Ok(written)
@@ -1638,19 +1755,22 @@ mod runtime_win {
                     let mut writer = writer;
                     while let Some((bytes, reply)) = stdin_rx.blocking_recv() {
                         if writer_gate.active.load(Ordering::Acquire) {
-                            // The reader flipped the gate after the daemon's
-                            // first check but before this write applied: deny.
-                            let _ = reply.send(Err(std::io::Error::new(
-                                std::io::ErrorKind::PermissionDenied,
-                                "secret prompt active; write denied at writer",
-                            )));
+                            // F-001: the reader flipped the gate after the
+                            // daemon's first check but before this write
+                            // applied. Deny with the TYPED `SecretDenied` reply
+                            // (not an `io::Error`) so `write_stdin` can map it
+                            // to `WriteStdinError::SecretInputActive` and the
+                            // daemon returns the `SecretInputDenied` contract.
+                            let _ = reply.send(WriterReply::SecretDenied);
                             continue;
                         }
-                        let result = match writer.write_all(&bytes) {
-                            Ok(()) => writer.flush().map(|()| bytes.len()),
-                            Err(e) => Err(e),
-                        };
-                        let _ = reply.send(result);
+                        let _ = reply.send(match writer.write_all(&bytes) {
+                            Ok(()) => match writer.flush() {
+                                Ok(()) => WriterReply::Written(bytes.len()),
+                                Err(e) => WriterReply::Io(e),
+                            },
+                            Err(e) => WriterReply::Io(e),
+                        });
                     }
                 })
                 .map_err(PtyProbeError::Io)?;
