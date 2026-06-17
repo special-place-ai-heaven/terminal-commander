@@ -2051,6 +2051,12 @@ pub(crate) fn redact_argv_head(argv: &[String]) -> Vec<String> {
 /// can never look like a `-flag`; the flag rules (1-3) of `mask_token_inline`
 /// cannot mis-fire on the synthetic `KEY=VALUE` token. A value containing `=`
 /// is preserved intact (the split is on the FIRST `=`, the key boundary).
+// cfg_attr(not(unix), allow(dead_code)): the only production caller is the
+// #[cfg(unix)] shell-session runtime (F-003), so a non-test Windows lib build
+// sees this unused. The #[cfg(test)] redact_tests exercise it on every platform,
+// so keep the function compiled everywhere (do NOT #[cfg(unix)]-gate it, which
+// would break the Windows test build) -- this only silences the -D warnings lint.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn redact_env_pairs(env: &[(String, String)]) -> Vec<(String, String)> {
     env.iter()
         .map(|(k, v)| {
