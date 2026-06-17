@@ -111,7 +111,7 @@ const DEFAULT_SESSION_EXEC_WAIT_MS: u64 = 500;
 #[cfg(unix)]
 fn map_session_error(e: &SessionError) -> IpcError {
     match e {
-        SessionError::LimitReached(_) => {
+        SessionError::LimitReached { .. } => {
             IpcError::new(IpcErrorCode::SessionLimitExceeded, e.to_string())
         }
         SessionError::Pty(crate::pty_command::PtyRuntimeError::PolicyDenied(reason)) => {

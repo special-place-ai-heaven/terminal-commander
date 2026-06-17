@@ -1,0 +1,59 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "subscription_close",
+      "arguments": {
+        "sub_id": "11111111-1111-4111-8111-111111111111"
+      }
+    }
+  },
+  "tool": "subscription_close",
+  "_meta": {
+    "schema_anchor": "TC46/mcp-tools/subscription_close-v1",
+    "fixture_id": "contracts/mcp-tools/subscription_close.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "TC45"
+    ],
+    "note": "Daemon-backed close of one subscription by sub_id, freeing its registry slot (Phase 1, Subscriptions design section 4). Close is IDEMPOTENT and is NEVER an error: closed=true when the handle existed and was removed, closed=false when the sub_id was already unknown (never opened, already closed, malformed, or reset by a daemon restart). A malformed sub_id is treated as simply not present (closed=false), mirroring the registry's close -> bool contract, so unlike subscription_pull/seek a bad handle does NOT raise unknown_subscription here. Freeing a slot is the remedy for subscription_limit_exceeded on a later open."
+  },
+  "response_example": {
+    "closed": true
+  },
+  "response_example_already_unknown": {
+    "_note": "An unknown, already-closed, or malformed sub_id is closed=false, not an error. Close is idempotent: re-closing a handle the daemon no longer tracks (including after a restart that reset every subscription) simply reports false. There is NO unknown_subscription error on this path -- a bad handle is just absent.",
+    "closed": false
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "sub_id is required",
+    "close is idempotent and never an error: closed=true if the handle existed, closed=false if it was already unknown",
+    "a malformed sub_id is treated as not present (closed=false), not unknown_subscription -- unlike subscription_pull/seek",
+    "closing a handle reset by a daemon restart reports closed=false",
+    "closing frees a registry slot, the remedy for subscription_limit_exceeded on a later open",
+    "daemon unavailable is a typed daemon_unavailable error, not closed=false"
+  ]
+}

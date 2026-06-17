@@ -37,4 +37,29 @@ function Invoke-Gate([string]$pkg, [string]$bin, [string[]]$extra) {
 Invoke-Gate 'terminal-commander-probes' 'windows_no_console_spawn' @('--include-ignored')
 # crates/daemon/tests/windows_spawn_site_coverage.rs tests are NOT ignored.
 Invoke-Gate 'terminal-commanderd' 'windows_spawn_site_coverage' @()
+
+# F-010 / O-07: live ConPTY child-output + secret-gate e2e. Runs on GitHub Actions
+# (required pre-build-gates-windows) and when a developer opts in with
+# TC_CONPTY_E2E=1. Refuse a vacuous pass if the opt-in tests self-skip (headless
+# DLL-init) — same false-green guard as the linux load gate's python3 detector.
+$runConptyE2e = ($env:GITHUB_ACTIONS -eq 'true') -or ($env:TC_CONPTY_E2E -eq '1')
+if ($runConptyE2e) {
+  if ($env:GITHUB_ACTIONS -eq 'true') { $env:TC_CONPTY_E2E = '1' }
+  Write-Host '== ConPTY live e2e (TC_CONPTY_E2E=1) =='
+  $conptyOut = & cargo test -p terminal-commander-probes conpty_ -- --nocapture 2>&1 | Tee-Object -Variable _ | Out-String
+  Write-Host $conptyOut
+  if ($LASTEXITCODE -ne 0) { Write-Error 'tc-gate: ConPTY e2e FAILED'; exit 1 }
+  if ($conptyOut -match 'SKIP conpty_repl_produces_bounded_combed_output' -or
+      $conptyOut -match 'SKIP conpty_secret_prompt_sets_active_flag_and_denies_write') {
+    Write-Error 'tc-gate: ConPTY child-output e2e self-SKIPPED — refusing false pass (ConPTY children did not initialize on this host)'
+    exit 1
+  }
+  if ($conptyOut -notmatch '(\d+) passed' -or [int]($conptyOut | Select-String '(\d+) passed').Matches.Groups[1].Value -lt 3) {
+    Write-Error 'tc-gate: ConPTY e2e ran fewer than 3 tests — refusing false pass'
+    exit 1
+  }
+} else {
+  Write-Host '== ConPTY live e2e: skipped locally (CI runs with GITHUB_ACTIONS; set TC_CONPTY_E2E=1 to opt in) =='
+}
+
 Write-Host 'tc-gate: windows gate PASSED'

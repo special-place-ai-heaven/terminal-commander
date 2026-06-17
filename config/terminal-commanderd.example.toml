@@ -80,10 +80,15 @@ file_window_bytes = 65_536
 bucket_read_limit = 200
 
 [sifters]
-# Universal extractors (US2 / FR-009): always-on, LOW-severity
-# baseline rules (error/warning/exit/progress) that emit bounded
-# structured signal for ANY command even when no tool-specific rule
-# pack is active. Default false so the signal stream is exactly what
-# you opted into. When true, a command with no active pack still
-# surfaces a baseline (and a real pack always out-ranks it).
+# Universal extractors (US2 / FR-009): LOW-severity baseline rules
+# (error/warning/exit/progress) that emit bounded structured signal for
+# a command that has NO tool-specific rule. Default false so the signal
+# stream is exactly what you opted into.
+#
+# FALLBACK ONLY, not additive: when true, universals are merged ONLY for
+# a command with no scoped active rule and no inline rule. If any pack
+# rule or inline rule applies, the baseline is NOT merged alongside it --
+# a real pack always out-ranks it. The flag does not add baseline signal
+# to pack-covered commands; it only covers the otherwise-uncovered ones.
+# This conservative behavior is intentional.
 universal_extractors = false

@@ -66,8 +66,12 @@ fn default_session_shell() -> String {
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     /// The `max_sessions` cap is already reached; no spawn attempted.
-    #[error("session limit reached: {0} live sessions (cap {0})")]
-    LimitReached(usize),
+    ///
+    /// Reports the OBSERVED occupancy (`live` live-or-reserved slots) and the
+    /// configured `max` honestly -- the previous form printed the cap as both
+    /// numbers, hiding the real live count (F-008).
+    #[error("session limit reached: {live} live sessions (cap {max})")]
+    LimitReached { live: usize, max: usize },
     /// Underlying PTY spawn / policy error (includes `PolicyDenied`).
     #[error("session spawn error: {0}")]
     Pty(#[from] PtyRuntimeError),
@@ -100,14 +104,64 @@ struct SessionEntry {
     /// start cwd, then advanced when an `exec` line is a recognisable
     /// `cd <abs-path>` (best-effort; see [`parse_cd_target`]).
     cwd: Option<String>,
-    /// Bounded env overlay captured at start (the `(key, value)` pairs the
-    /// caller supplied). Never includes the inherited parent environment,
-    /// so no host secrets leak into status/snapshot responses.
+    /// Bounded env overlay captured at start: the caller-supplied
+    /// `(key, value)` pairs with secret-shaped VALUES masked by
+    /// [`crate::command::redact_env_pairs`] (F-003). Never includes the
+    /// inherited parent environment. The caller's own values CAN be secrets
+    /// (e.g. `TOKEN=...`), so the redaction -- not the absence of the parent
+    /// env -- is what keeps secrets out of the status/snapshot surfaces.
     env_snapshot: Vec<(String, String)>,
     /// Last exec/status touch, used by the idle reaper.
     last_active: Instant,
     /// Epoch-seconds copy of `last_active` for the wire response.
     last_active_epoch: u64,
+}
+
+/// The session bookkeeping guarded by ONE lock: the live entry map plus the
+/// count of in-flight slot RESERVATIONS.
+///
+/// A reservation is a slot claimed by a [`ShellSessionRuntime::start`] that has
+/// passed the cap check but has not yet finished the (slow) PTY spawn, so it
+/// does not appear in `entries` yet. Tracking reservations in the SAME lock as
+/// `entries` closes the F-002 check->insert race: the cap is enforced against
+/// `live + pending` atomically, so two concurrent starts at `live == max - 1`
+/// cannot both pass the gate and both spawn (cap overshoot).
+#[derive(Default)]
+struct SessionTable {
+    entries: HashMap<SessionId, SessionEntry>,
+    /// Slots claimed but not yet inserted (cleared on insert or on
+    /// spawn-failure release). Never exceeds `max_sessions - live`.
+    pending: usize,
+}
+
+impl SessionTable {
+    /// Atomically reserve one slot against the cap, given the caller's already
+    /// computed `live` entry count (entries whose PTY job is still
+    /// Starting/Live). MUST be called while holding the table WRITE lock so the
+    /// `live + pending` read and the `pending` bump are one critical section --
+    /// that serialization is the whole point of the fix.
+    ///
+    /// On success the slot is reserved (`pending += 1`) and the caller owns the
+    /// obligation to either convert it to an entry (which releases it) or call
+    /// [`Self::release_reservation`] on spawn failure.
+    ///
+    /// # Errors
+    /// Returns `(live_plus_pending, max)` when the cap is already reached, so
+    /// the caller can build an honest [`SessionError::LimitReached`].
+    const fn try_reserve(&mut self, live: usize, max: usize) -> Result<(), (usize, usize)> {
+        let occupied = live + self.pending;
+        if occupied >= max {
+            return Err((occupied, max));
+        }
+        self.pending += 1;
+        Ok(())
+    }
+
+    /// Release a previously reserved slot (spawn failed, or the slot was
+    /// converted to a real entry). Saturating so a double-release is harmless.
+    const fn release_reservation(&mut self) {
+        self.pending = self.pending.saturating_sub(1);
+    }
 }
 
 /// Daemon-owned persistent shell-session runtime.
@@ -117,7 +171,10 @@ struct SessionEntry {
 /// cap, and the idle TTL. Cheap to clone via the inner `Arc`s.
 pub struct ShellSessionRuntime {
     pty: Arc<PtyRuntime>,
-    sessions: Arc<RwLock<HashMap<SessionId, SessionEntry>>>,
+    /// Live entry map + in-flight reservation count, under ONE lock so the
+    /// `max_sessions` cap can be enforced atomically across the slow PTY spawn
+    /// (see [`SessionTable`] / F-002).
+    sessions: Arc<RwLock<SessionTable>>,
     max_sessions: usize,
     idle_ttl: Duration,
 }
@@ -178,7 +235,7 @@ impl ShellSessionRuntime {
     pub fn new(pty: Arc<PtyRuntime>, max_sessions: usize, idle_ttl_secs: u64) -> Self {
         Self {
             pty,
-            sessions: Arc::new(RwLock::new(HashMap::default())),
+            sessions: Arc::new(RwLock::new(SessionTable::default())),
             max_sessions,
             idle_ttl: Duration::from_secs(idle_ttl_secs),
         }
@@ -213,12 +270,12 @@ impl ShellSessionRuntime {
         peer_subject: &str,
     ) -> Result<SessionStartOutcome, SessionError> {
         // Reap terminal entries first so a dead session does not pin a cap
-        // slot, then enforce the cap on the LIVE count.
+        // slot, then ATOMICALLY reserve a slot against `live + pending` BEFORE
+        // the slow spawn (F-002). Reaping and the reserve both take the session
+        // write lock; the reservation is held across `start_session` so a
+        // concurrent start cannot pass the cap on the same slot and overshoot.
         self.reap_terminal();
-        let live = self.live_count();
-        if live >= self.max_sessions {
-            return Err(SessionError::LimitReached(self.max_sessions));
-        }
+        self.reserve_slot()?;
 
         let shell = req.shell.clone().unwrap_or_else(default_session_shell);
         // `-i` keeps the shell interactive so `cd` state persists across
@@ -249,24 +306,52 @@ impl ShellSessionRuntime {
         // resolved by the IPC layer; the PTY runtime's `start_session`
         // writes the `shell_session_start` audit row keyed on the job id.
         let _ = peer_subject;
-        let started = self.pty.start_session(pty_req)?;
+        // On spawn FAILURE the reserved slot must be released, or the cap would
+        // permanently shrink by one. The spawn runs WITHOUT holding the session
+        // lock (it is slow), so we release explicitly on the error path.
+        let started = match self.pty.start_session(pty_req) {
+            Ok(s) => s,
+            Err(e) => {
+                self.sessions.write().release_reservation();
+                return Err(SessionError::Pty(e));
+            }
+        };
 
         let session_id = SessionId::new();
-        let env_snapshot: Vec<(String, String)> =
-            req.env.into_iter().take(MAX_SESSION_ENV_ITEMS).collect();
+        // SECURITY (F-003): redact secret-shaped env values BEFORE they are
+        // recorded on the entry, so BOTH the status response and the persisted
+        // workspace snapshot (built from this entry via `workspace_of`) carry
+        // the masked overlay -- never the caller's verbatim secrets. Reuses the
+        // shared command-lane redactor (`command::redact_env_pairs`) so the two
+        // surfaces cannot drift.
+        let env_snapshot: Vec<(String, String)> = crate::command::redact_env_pairs(
+            &req.env
+                .into_iter()
+                .take(MAX_SESSION_ENV_ITEMS)
+                .collect::<Vec<_>>(),
+        );
         let cwd = req.cwd.as_ref().map(|p| p.to_string_lossy().into_owned());
         let now = Self::now_epoch();
-        self.sessions.write().insert(
-            session_id,
-            SessionEntry {
-                job_id: started.job_id,
-                bucket_id: started.bucket_id,
-                cwd,
-                env_snapshot,
-                last_active: Instant::now(),
-                last_active_epoch: now,
-            },
-        );
+        // Convert the reservation into a real entry: insert AND release the
+        // reservation under the SAME write lock so `live + pending` never dips
+        // (the new entry is counted by liveness the instant the lock is
+        // released, and the reservation is dropped in the same critical
+        // section).
+        {
+            let mut g = self.sessions.write();
+            g.entries.insert(
+                session_id,
+                SessionEntry {
+                    job_id: started.job_id,
+                    bucket_id: started.bucket_id,
+                    cwd,
+                    env_snapshot,
+                    last_active: Instant::now(),
+                    last_active_epoch: now,
+                },
+            );
+            g.release_reservation();
+        }
 
         // Prime the interactive shell so its combed output is CLEAN: a
         // bare prompt (`PS1=`) keeps prompts out of the signal stream,
@@ -312,6 +397,7 @@ impl ShellSessionRuntime {
         let (job_id, bucket_id) = {
             let g = self.sessions.read();
             let e = g
+                .entries
                 .get(&session_id)
                 .ok_or(SessionError::UnknownSession(session_id))?;
             (e.job_id, e.bucket_id)
@@ -362,7 +448,7 @@ impl ShellSessionRuntime {
 
         // Best-effort cwd tracking + activity touch.
         let now = Self::now_epoch();
-        if let Some(entry) = self.sessions.write().get_mut(&session_id) {
+        if let Some(entry) = self.sessions.write().entries.get_mut(&session_id) {
             entry.last_active = Instant::now();
             entry.last_active_epoch = now;
             if let Some(target) = parse_cd_target(line) {
@@ -381,6 +467,7 @@ impl ShellSessionRuntime {
         let now = Self::now_epoch();
         let mut g = self.sessions.write();
         let e = g
+            .entries
             .get_mut(&session_id)
             .ok_or(SessionError::UnknownSession(session_id))?;
         // A status read counts as activity so a polled-but-idle session is
@@ -402,7 +489,8 @@ impl ShellSessionRuntime {
     #[must_use]
     pub fn workspace_of(&self, session_id: SessionId) -> Option<WorkspaceState> {
         let g = self.sessions.read();
-        g.get(&session_id)
+        g.entries
+            .get(&session_id)
             .map(|e| (e.cwd.clone(), e.env_snapshot.clone()))
     }
 
@@ -434,7 +522,7 @@ impl ShellSessionRuntime {
         }
         // Record the restored env overlay on the entry too (so a later
         // status / snapshot reflects the applied workspace).
-        if let Some(entry) = self.sessions.write().get_mut(&session_id) {
+        if let Some(entry) = self.sessions.write().entries.get_mut(&session_id) {
             if !env.is_empty() {
                 entry.env_snapshot = env.into_iter().take(MAX_SESSION_ENV_ITEMS).collect();
             }
@@ -450,7 +538,7 @@ impl ShellSessionRuntime {
     /// already-terminal/unknown session returns the terminal state with a
     /// bounded reason, never an error.
     pub fn stop(&self, session_id: SessionId) -> (SessionState, String) {
-        let entry = self.sessions.write().remove(&session_id);
+        let entry = self.sessions.write().entries.remove(&session_id);
         let Some(e) = entry else {
             return (SessionState::Exited, "unknown or already reaped".to_owned());
         };
@@ -464,7 +552,8 @@ impl ShellSessionRuntime {
     #[must_use]
     pub fn list(&self) -> Vec<SessionListEntry> {
         let g = self.sessions.read();
-        g.iter()
+        g.entries
+            .iter()
             .map(|(sid, e)| SessionListEntry {
                 session_id: *sid,
                 bucket_id: e.bucket_id,
@@ -475,26 +564,50 @@ impl ShellSessionRuntime {
             .collect()
     }
 
-    /// Count sessions whose PTY job is still live (Starting / Live).
-    fn live_count(&self) -> usize {
-        let g = self.sessions.read();
-        g.values()
+    /// Count live (Starting/Live) entries in an ALREADY-LOCKED table. Free
+    /// function over `(&SessionTable, &PtyRuntime)` so the cap-decision in
+    /// [`Self::reserve_slot`] can compute liveness while it holds the table
+    /// write lock WITHOUT re-locking (`parking_lot::RwLock` is not reentrant).
+    fn live_entries(table: &SessionTable, pty: &PtyRuntime) -> usize {
+        table
+            .entries
+            .values()
             .filter(|e| {
                 matches!(
-                    self.state_of(e.job_id),
+                    Self::pty_state_of(pty, e.job_id),
                     SessionState::Starting | SessionState::Live
                 )
             })
             .count()
     }
 
+    /// Atomically reserve one cap slot for an in-flight start.
+    ///
+    /// Holds the session WRITE lock across the whole decision so the
+    /// `live + pending` read and the `pending` bump are one critical section --
+    /// this is what closes the F-002 check->insert race. On success the caller
+    /// MUST later either insert the entry (which releases the reservation under
+    /// the same lock, see `start`) or call `release_reservation` on the
+    /// failure path.
+    ///
+    /// # Errors
+    /// [`SessionError::LimitReached`] carrying the honest `(live, max)` (F-008)
+    /// when `live + pending` is already at the cap.
+    fn reserve_slot(&self) -> Result<(), SessionError> {
+        let mut g = self.sessions.write();
+        let live = Self::live_entries(&g, &self.pty);
+        g.try_reserve(live, self.max_sessions)
+            .map_err(|(live, max)| SessionError::LimitReached { live, max })
+    }
+
     /// Drop entries whose PTY job has reached a terminal state. Keeps the
     /// session map from leaking dead bookkeeping and frees cap slots.
     fn reap_terminal(&self) {
         let mut g = self.sessions.write();
-        g.retain(|_, e| {
+        let pty = Arc::clone(&self.pty);
+        g.entries.retain(|_, e| {
             !matches!(
-                self.pty_state(e.job_id),
+                Self::pty_state_of(&pty, e.job_id),
                 SessionState::Exited | SessionState::Failed
             )
         });
@@ -503,7 +616,14 @@ impl ShellSessionRuntime {
     /// Liveness lookup that does not borrow `self.sessions` (so it can be
     /// used inside `retain`).
     fn pty_state(&self, job_id: JobId) -> SessionState {
-        match self.pty.liveness(job_id) {
+        Self::pty_state_of(&self.pty, job_id)
+    }
+
+    /// Static liveness mapping over a borrowed [`PtyRuntime`]. Takes the
+    /// runtime explicitly (not `&self`) so it can be called while a
+    /// `self.sessions` guard is held without aliasing `&self`.
+    fn pty_state_of(pty: &PtyRuntime, job_id: JobId) -> SessionState {
+        match pty.liveness(job_id) {
             Liveness::Starting => SessionState::Starting,
             Liveness::Running | Liveness::Dropped { .. } => SessionState::Live,
             Liveness::Exited { .. } | Liveness::Cancelled | Liveness::Stopped => {
@@ -525,7 +645,8 @@ impl ShellSessionRuntime {
         // NOT hold the session write lock across the stop.
         let victims: Vec<SessionId> = {
             let g = self.sessions.read();
-            g.iter()
+            g.entries
+                .iter()
                 .filter(|(_, e)| {
                     let terminal = matches!(
                         self.pty_state(e.job_id),
@@ -645,5 +766,139 @@ mod tests {
         assert!(!is_safe_env_key("1FOO"));
         assert!(!is_safe_env_key("FOO;rm"));
         assert!(!is_safe_env_key(""));
+    }
+
+    // ---- F-008: honest LimitReached display (live distinct from cap) ----
+
+    #[test]
+    fn limit_reached_message_reports_live_distinct_from_cap() {
+        // The OLD form printed the cap as both the live count and the cap. The
+        // new form must show the REAL live count (here 5) distinct from the cap
+        // (here 4) so an operator sees the true occupancy.
+        let err = SessionError::LimitReached { live: 5, max: 4 };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("5 live sessions"),
+            "message must report the real live count: {msg}"
+        );
+        assert!(
+            msg.contains("cap 4"),
+            "message must report the real cap: {msg}"
+        );
+        // Guard against a regression to the `{0} ... cap {0}` form: live and cap
+        // are different numbers here, so the message must NOT read `4 live`.
+        assert!(
+            !msg.contains("4 live sessions"),
+            "live and cap must not collapse to the same number: {msg}"
+        );
+    }
+
+    // ---- F-002: atomic slot reservation holds the cap under concurrency ----
+
+    /// The reservation primitive used by `start`: `try_reserve` is called while
+    /// the table WRITE lock is held, so the `live + pending` check and the
+    /// `pending` bump are one critical section. This drives MANY parallel
+    /// reservers at `live == 0` against `max`, exactly the check->insert window
+    /// that the pre-fix code raced through. The lock serializes the critical
+    /// section, so the result is DETERMINISTIC (not timing-dependent): exactly
+    /// `max` reservers win and every loser gets `LimitReached` -- the reserved
+    /// count NEVER exceeds `max`.
+    #[test]
+    fn concurrent_reservations_never_exceed_cap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const MAX: usize = 4;
+        const THREADS: usize = 64;
+
+        // Shared table mirrors the runtime's `Arc<RwLock<SessionTable>>`. Empty
+        // entries => live == 0, so the cap is decided purely by `pending` (the
+        // reservation accounting under test).
+        let table = Arc::new(RwLock::new(SessionTable::default()));
+        let granted = Arc::new(AtomicUsize::new(0));
+        let denied = Arc::new(AtomicUsize::new(0));
+        let max_seen_pending = Arc::new(AtomicUsize::new(0));
+        // Release all threads at once to maximise contention on the boundary.
+        let start_gate = Arc::new(std::sync::Barrier::new(THREADS));
+
+        let mut handles = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            let table = Arc::clone(&table);
+            let granted = Arc::clone(&granted);
+            let denied = Arc::clone(&denied);
+            let max_seen_pending = Arc::clone(&max_seen_pending);
+            let start_gate = Arc::clone(&start_gate);
+            handles.push(std::thread::spawn(move || {
+                start_gate.wait();
+                // EXACTLY the critical section `reserve_slot` runs: take the
+                // write lock, then `try_reserve(live, max)` with live == 0.
+                let mut g = table.write();
+                match g.try_reserve(0, MAX) {
+                    Ok(()) => {
+                        granted.fetch_add(1, Ordering::SeqCst);
+                        // Record the peak observed pending under the lock: the
+                        // INVARIANT is that it never exceeds MAX.
+                        let p = g.pending;
+                        max_seen_pending.fetch_max(p, Ordering::SeqCst);
+                    }
+                    Err((_live_plus_pending, m)) => {
+                        assert_eq!(m, MAX, "denied error must carry the real cap");
+                        denied.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("reserver thread panicked");
+        }
+
+        // (a) the reserved count NEVER exceeded the cap.
+        assert!(
+            max_seen_pending.load(Ordering::SeqCst) <= MAX,
+            "reserved (pending) count overshot the cap: saw {} > {MAX}",
+            max_seen_pending.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            table.read().pending,
+            MAX,
+            "exactly MAX slots must end reserved (no overshoot, no undershoot)"
+        );
+        // (b) winners == MAX, losers == THREADS - MAX (every loser refused).
+        assert_eq!(
+            granted.load(Ordering::SeqCst),
+            MAX,
+            "exactly MAX reservers may win"
+        );
+        assert_eq!(
+            denied.load(Ordering::SeqCst),
+            THREADS - MAX,
+            "every loser must be refused with LimitReached"
+        );
+    }
+
+    /// A released reservation (spawn-failure path) frees the slot for a later
+    /// reserver -- the cap does not permanently shrink. Mirrors `start`'s
+    /// `release_reservation` on the `start_session` error branch.
+    #[test]
+    fn released_reservation_frees_the_slot() {
+        const MAX: usize = 2;
+        let table = Arc::new(RwLock::new(SessionTable::default()));
+        // Fill the cap with reservations.
+        {
+            let mut g = table.write();
+            g.try_reserve(0, MAX).expect("first reserve");
+            g.try_reserve(0, MAX).expect("second reserve");
+            // Now at cap: a third must be refused.
+            assert!(g.try_reserve(0, MAX).is_err(), "cap must be enforced");
+        }
+        // Release one (simulating a failed spawn) -> a new reserve succeeds.
+        {
+            let mut g = table.write();
+            g.release_reservation();
+            assert!(
+                g.try_reserve(0, MAX).is_ok(),
+                "a freed slot must be reusable after release"
+            );
+            assert_eq!(g.pending, MAX, "back at cap after the replacement reserve");
+        }
     }
 }

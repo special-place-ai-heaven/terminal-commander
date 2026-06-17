@@ -2025,6 +2025,54 @@ pub(crate) fn redact_argv_head(argv: &[String]) -> Vec<String> {
     redact_argv(argv, Some(ARGV_HEAD_ITEMS))
 }
 
+/// Redact secret-shaped VALUES in a bounded `(key, value)` env overlay,
+/// reusing the SAME Layer-B credential heuristic the argv/shell lanes use
+/// ([`mask_token_inline`]) so the env lane cannot drift from them.
+///
+/// SECURITY-CRITICAL (F-003). The session runtime calls this BEFORE recording a
+/// session's env overlay, so both the `shell_session_status` response and the
+/// persisted workspace snapshot carry the masked overlay, never the caller's
+/// verbatim secrets.
+///
+/// Each pair is masked by running `KEY=VALUE` through [`mask_token_inline`]
+/// (which already owns the env-`KEY=VALUE` secret-key rule + the URL-userinfo
+/// and `Authorization`/`Bearer` value-shape rules) and splitting the result
+/// back on the first `=`. The KEY stays visible; only a secret-shaped VALUE is
+/// replaced with `<redacted>`. Effects:
+///
+/// * KEY names a secret (`*TOKEN*`/`*SECRET*`/`*KEY*`/`*PASSWORD*`, etc., per
+///   [`env_key_is_secret`]) -> the whole value is masked.
+/// * VALUE itself carries a credential (a `user:pass@` URL, an
+///   `Authorization:`/`Bearer ` header) -> that span is masked even when the
+///   KEY looks benign.
+/// * Otherwise the pair is returned unchanged.
+///
+/// Env keys are caller-validated to `[A-Za-z_][A-Za-z0-9_]*` upstream, so a key
+/// can never look like a `-flag`; the flag rules (1-3) of `mask_token_inline`
+/// cannot mis-fire on the synthetic `KEY=VALUE` token. A value containing `=`
+/// is preserved intact (the split is on the FIRST `=`, the key boundary).
+// cfg_attr(not(unix), allow(dead_code)): the only production caller is the
+// #[cfg(unix)] shell-session runtime (F-003), so a non-test Windows lib build
+// sees this unused. The #[cfg(test)] redact_tests exercise it on every platform,
+// so keep the function compiled everywhere (do NOT #[cfg(unix)]-gate it, which
+// would break the Windows test build) -- this only silences the -D warnings lint.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn redact_env_pairs(env: &[(String, String)]) -> Vec<(String, String)> {
+    env.iter()
+        .map(|(k, v)| {
+            let masked = mask_token_inline(&format!("{k}={v}"));
+            // Split back on the FIRST `=` (the key boundary). `mask_token_inline`
+            // never removes the `KEY=` prefix, so this `=` is always present;
+            // the fallback keeps the pair intact if some future rule changed
+            // that, rather than dropping data.
+            masked.split_once('=').map_or_else(
+                || (k.clone(), v.clone()),
+                |(mk, mv)| (mk.to_owned(), mv.to_owned()),
+            )
+        })
+        .collect()
+}
+
 /// Rule (e) helper: decide whether an env-style `KEY=VALUE` key names a secret
 /// whose value must be masked. `key_lower` is the already-lowercased portion of
 /// the token before the first `=`. Matches a curated set of well-known bare
@@ -2927,5 +2975,78 @@ mod redact_tests {
         ];
         let out = super::format_shell_argv_metadata(&argv, "ignored");
         assert!(!out.contains("s3cr3t"), "plain-path secret leaked: {out}");
+    }
+
+    // ---- F-003: env-overlay value redaction (reuses mask_token_inline) ----
+
+    #[test]
+    fn redact_env_pairs_masks_secret_keyed_value_keeps_key() {
+        let env = vec![("TOKEN".to_owned(), "supersecretvalue".to_owned())];
+        let out = super::redact_env_pairs(&env);
+        assert_eq!(out.len(), 1);
+        let (k, v) = &out[0];
+        assert_eq!(k, "TOKEN", "the key stays visible");
+        assert_ne!(v, "supersecretvalue", "the secret value must be masked");
+        assert!(v.contains("<redacted>"), "value redacted: {v}");
+        // The literal secret must be gone from BOTH the value and any joined form.
+        let joined = format!("{k}={v}");
+        assert!(
+            !joined.contains("supersecretvalue"),
+            "secret leaked: {joined}"
+        );
+    }
+
+    #[test]
+    fn redact_env_pairs_masks_secret_suffix_keys() {
+        let env = vec![
+            (
+                "AWS_SECRET_ACCESS_KEY".to_owned(),
+                "AKIA_LIVE_xyz".to_owned(),
+            ),
+            ("DB_PASSWORD".to_owned(), "hunter2".to_owned()),
+        ];
+        let out = super::redact_env_pairs(&env);
+        for (k, v) in &out {
+            assert!(v.contains("<redacted>"), "{k} value must be masked: {v}");
+        }
+        let blob = out
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("\u{1f}");
+        assert!(!blob.contains("AKIA_LIVE_xyz"), "secret leaked: {blob}");
+        assert!(!blob.contains("hunter2"), "secret leaked: {blob}");
+    }
+
+    #[test]
+    fn redact_env_pairs_masks_credential_shaped_value_on_benign_key() {
+        // Benign KEY, but the VALUE carries a connection-string password: the
+        // value-shape rule (URL userinfo) must still mask it.
+        let env = vec![(
+            "DATABASE_URL".to_owned(),
+            "postgres://u:pw@host/db".to_owned(),
+        )];
+        let out = super::redact_env_pairs(&env);
+        let (_k, v) = &out[0];
+        assert!(!v.contains(":pw@"), "url password span must be masked: {v}");
+        assert!(v.contains("<redacted>"), "value redacted: {v}");
+        assert!(v.contains("postgres://"), "scheme kept: {v}");
+        assert!(v.contains("@host/db"), "host/path kept: {v}");
+    }
+
+    #[test]
+    fn redact_env_pairs_leaves_benign_pair_intact() {
+        let env = vec![("LANG".to_owned(), "en_US.UTF-8".to_owned())];
+        let out = super::redact_env_pairs(&env);
+        assert_eq!(out, env, "a benign env pair must pass through unchanged");
+    }
+
+    #[test]
+    fn redact_env_pairs_preserves_value_with_equals_for_benign_key() {
+        // A non-secret key whose value contains `=` must keep the full value
+        // (split is on the FIRST `=`, the key boundary only).
+        let env = vec![("OPTS".to_owned(), "a=b=c".to_owned())];
+        let out = super::redact_env_pairs(&env);
+        assert_eq!(out[0], ("OPTS".to_owned(), "a=b=c".to_owned()));
     }
 }

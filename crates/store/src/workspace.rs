@@ -5,9 +5,12 @@
 //!
 //! A workspace snapshot is a saved, restorable `(cwd + bounded env)`
 //! captured from a shell session. It lives in the same SQLite file as the
-//! event store and registry. The env map is bounded by the daemon BEFORE
-//! it reaches this layer (no unredacted host secrets are persisted) and is
-//! stored as a single JSON object string.
+//! event store and registry. The env map is bounded AND credential-redacted
+//! by the daemon BEFORE it reaches this layer: the session runtime masks
+//! secret-shaped values via `command::redact_env_pairs` at capture time
+//! (F-003), so the JSON object string persisted here carries `<redacted>` in
+//! place of secret values, never the caller's verbatim secrets. This layer
+//! performs neither bounding nor redaction; it persists what it is given.
 //!
 //! Source-status: live (P1 / TC50).
 
@@ -28,8 +31,9 @@ pub struct WorkspaceSnapshotRow {
     pub name: Option<String>,
     pub source_session_id: Option<String>,
     pub cwd: Option<String>,
-    /// Bounded `(key, value)` env overlay. Bounded by the daemon before
-    /// persistence.
+    /// Bounded, credential-redacted `(key, value)` env overlay. The daemon
+    /// bounds the item count AND masks secret-shaped values (F-003) before
+    /// persistence, so a secret value reads back as `<redacted>`.
     pub env: Vec<(String, String)>,
     pub created_at: OffsetDateTime,
 }
@@ -60,7 +64,9 @@ impl EventStore {
     }
 
     /// Persist a workspace snapshot. The caller supplies the opaque
-    /// `snapshot_id` and a pre-bounded env map. Returns the id on success.
+    /// `snapshot_id` and a pre-bounded, pre-redacted env map (the daemon masks
+    /// secret-shaped values before this layer, F-003). Returns the id on
+    /// success.
     pub fn create_workspace_snapshot(
         &mut self,
         snapshot_id: &str,
