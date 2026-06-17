@@ -1445,10 +1445,52 @@ mod runtime_win {
     use crate::noise_pipeline::{ProbeNoisePipeline, SharedProbeNoisePipeline};
     use crate::process::EventSink;
 
-    /// One queued stdin write: bytes + a reply channel carrying the typed
-    /// [`WriterReply`] (byte count, secret-deny, or io error). Mirrors the
-    /// unix lane's queue and shares the SAME reply shape across backends.
-    type StdinJob = (Vec<u8>, oneshot::Sender<WriterReply>);
+    /// A message for the single writer thread that owns the ConPTY master
+    /// writer. Two shapes share the one owner so writes are serialized and
+    /// ordered:
+    ///
+    /// * `Stdin` -- a user/daemon stdin write. Carries a reply channel with
+    ///   the typed [`WriterReply`] (byte count, secret-deny, or io error) and
+    ///   is subject to the secret-gate re-check. Mirrors the unix lane's queue
+    ///   and shares the SAME reply shape across backends.
+    /// * `Control` -- a backend-synthesized protocol reply (the CPR answer to
+    ///   conhost's `ESC[6n` cursor-position-report query). It is written
+    ///   UNCONDITIONALLY (never gated, no reply): it is the terminal answering
+    ///   the console host, not the LLM/daemon typing into the child. Without
+    ///   it conhost blocks the child before it writes any output (F-010).
+    enum WriterMsg {
+        Stdin(Vec<u8>, oneshot::Sender<WriterReply>),
+        Control(Vec<u8>),
+    }
+    type StdinJob = WriterMsg;
+
+    /// The DSR (Device Status Report) cursor-position-report QUERY conhost
+    /// sends the application: `ESC [ 6 n`. A real terminal answers with a CPR
+    /// (`ESC [ row ; col R`); until it does, console programs that probe the
+    /// cursor (PowerShell's host, `cmd` on current Windows) BLOCK before
+    /// emitting their own output. Our reader is a passive pipe drain, so it
+    /// must synthesize the answer (F-010).
+    const DSR_CURSOR_POS_QUERY: &[u8] = b"\x1b[6n";
+
+    /// The synthetic CPR answer we write back: cursor at row 1, col 1
+    /// (`ESC [ 1 ; 1 R`). The exact coordinates do not matter for unblocking
+    /// the child -- it only needs a syntactically valid reply -- and our
+    /// probe does not model a real cursor, so a stable origin is correct.
+    const CPR_REPLY_ROW1_COL1: &[u8] = b"\x1b[1;1R";
+
+    /// Count occurrences of the DSR query in `bytes`. The query is 4 bytes and
+    /// conhost emits it atomically at startup, so a within-chunk scan catches
+    /// the real case; the reader additionally retains a 3-byte tail across
+    /// reads (see `spawn`) so a query split across two `read`s is still found.
+    fn count_dsr_queries(bytes: &[u8]) -> usize {
+        if bytes.len() < DSR_CURSOR_POS_QUERY.len() {
+            return 0;
+        }
+        bytes
+            .windows(DSR_CURSOR_POS_QUERY.len())
+            .filter(|w| *w == DSR_CURSOR_POS_QUERY)
+            .count()
+    }
 
     /// Handle to a live Windows ConPTY probe. Drop or call `cancel` to
     /// terminate. SAME public API as the unix `PtyProbe`.
@@ -1531,7 +1573,7 @@ mod runtime_win {
             }
             let tx = self.stdin_tx.as_ref().ok_or(WriteStdinError::Closed)?;
             let (reply_tx, reply_rx) = oneshot::channel();
-            tx.send((bytes.to_vec(), reply_tx))
+            tx.send(WriterMsg::Stdin(bytes.to_vec(), reply_tx))
                 .map_err(|_| WriteStdinError::Closed)?;
             let reply = reply_rx.await.map_err(|_| WriteStdinError::Closed)?;
             let written = match map_writer_reply(reply) {
@@ -1638,18 +1680,19 @@ mod runtime_win {
                 cmd.env(k, v);
             }
 
-            let mut child = pair
-                .slave
-                .spawn_command(cmd)
-                .map_err(|e| PtyProbeError::Pty(e.to_string()))?;
-            // KEEP the slave alive for the child's lifetime. On Windows ConPTY
-            // the slave owns the pseudoconsole's input side; dropping it before
-            // the child exits tears down the console early and the child
-            // produces NO output. We move it into the waiter thread below so it
-            // lives exactly as long as the child does.
-            let slave = pair.slave;
-
-            let killer: Box<dyn ChildKiller + Send + Sync> = child.clone_killer();
+            // F-010: DO NOT spawn the child here. Spawning in `spawn`'s scope
+            // and then moving the child into the waiter thread to `wait()` it
+            // MIGRATES the child + ConPTY slave across a scope boundary, which
+            // trips `STATUS_DLL_INIT_FAILED` (0xC0000142) on Windows ConPTY --
+            // the child inits in a context it cannot survive and produces ZERO
+            // bytes (wezterm Discussion #4674: "spawn and wait in the SAME
+            // block works; return the child and wait elsewhere fails DLL
+            // init"). Instead we move the `slave` + `CommandBuilder` INTO the
+            // waiter thread and spawn+wait there in one owned scope. The killer
+            // is cloned in that thread and handed back over `killer_rx` so
+            // `spawn` can still return a spawn error and `cancel`/Drop can kill
+            // the child from any thread. The master/reader/writer are set up
+            // here from `pair.master`, which is independent of the slave/child.
             let reader = pair
                 .master
                 .try_clone_reader()
@@ -1663,12 +1706,25 @@ mod runtime_win {
             let gate = SecretGate::new();
             let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let master = Arc::new(Mutex::new(Some(pair.master)));
+            // Filled by the waiter thread once it has spawned the child and
+            // cloned its killer; `cancel`/Drop read from this slot.
             let killer_slot: Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>> =
-                Arc::new(Mutex::new(Some(killer)));
+                Arc::new(Mutex::new(None));
+            // Hands the cloned killer (or the spawn error) back from the waiter
+            // thread so `spawn` can surface a spawn failure in its `Result` and
+            // populate `killer_slot` before returning.
+            let (killer_tx, killer_rx) =
+                std::sync::mpsc::channel::<Result<Box<dyn ChildKiller + Send + Sync>, String>>();
+            // The slave + built command migrate INTO the waiter thread (the
+            // ONLY place the child is spawned and waited -- same owned scope).
+            let slave = pair.slave;
 
             let (done_tx, done_rx) = oneshot::channel::<Result<(), PtyProbeError>>();
             let (completion_tx, completion_rx) = oneshot::channel::<PtyExitOutcome>();
             let (stdin_tx, stdin_rx) = tokio::sync::mpsc::unbounded_channel::<StdinJob>();
+            // The reader uses this clone to answer conhost's `ESC[6n` DSR query
+            // with a CPR (`ESC[row;colR`) via the single writer thread (F-010).
+            let reader_ctrl_tx = stdin_tx.clone();
 
             let bucket_id = config.bucket_id;
             let noise_pipeline: SharedProbeNoisePipeline =
@@ -1691,11 +1747,35 @@ mod runtime_win {
                     let mut reader = reader;
                     let mut normalizer = AnsiNormalizer::new();
                     let mut buf = [0u8; 4096];
+                    // F-010: retain the last few bytes across reads so an
+                    // `ESC[6n` split across two `read`s is still detected.
+                    // 3 bytes = (DSR query len - 1), the longest possible
+                    // prefix that could straddle a read boundary.
+                    let mut dsr_carry: Vec<u8> = Vec::new();
                     loop {
                         match reader.read(&mut buf) {
                             Ok(0) => break,
                             Ok(n) => {
                                 normalizer.feed(&buf[..n]);
+                                // Answer conhost's cursor-position-report
+                                // queries so the child unblocks and writes its
+                                // own output. Scan the carry-prefixed chunk.
+                                let mut scan = dsr_carry.clone();
+                                scan.extend_from_slice(&buf[..n]);
+                                let dsr_hits = count_dsr_queries(&scan);
+                                for _ in 0..dsr_hits {
+                                    let _ = reader_ctrl_tx
+                                        .send(WriterMsg::Control(CPR_REPLY_ROW1_COL1.to_vec()));
+                                }
+                                // Keep a tail for the next read (split-safe).
+                                let keep = DSR_CURSOR_POS_QUERY.len().saturating_sub(1);
+                                dsr_carry.clear();
+                                let src = if n >= keep {
+                                    &buf[n - keep..n]
+                                } else {
+                                    &buf[..n]
+                                };
+                                dsr_carry.extend_from_slice(src);
                                 for line in normalizer.take_lines() {
                                     pty_core::process_line(
                                         &line,
@@ -1753,24 +1833,42 @@ mod runtime_win {
                 .name(format!("tc-conpty-wr-{probe_id}"))
                 .spawn(move || {
                     let mut writer = writer;
-                    while let Some((bytes, reply)) = stdin_rx.blocking_recv() {
-                        if writer_gate.active.load(Ordering::Acquire) {
-                            // F-001: the reader flipped the gate after the
-                            // daemon's first check but before this write
-                            // applied. Deny with the TYPED `SecretDenied` reply
-                            // (not an `io::Error`) so `write_stdin` can map it
-                            // to `WriteStdinError::SecretInputActive` and the
-                            // daemon returns the `SecretInputDenied` contract.
-                            let _ = reply.send(WriterReply::SecretDenied);
-                            continue;
+                    while let Some(msg) = stdin_rx.blocking_recv() {
+                        match msg {
+                            // F-010: a backend-synthesized protocol reply (the
+                            // CPR answer to conhost's `ESC[6n`). Written
+                            // UNCONDITIONALLY -- it is NOT user/daemon stdin, it
+                            // is the terminal answering the console host, and it
+                            // must go through even while a secret prompt is
+                            // active (the DSR query precedes any prompt). No
+                            // reply channel: fire-and-forget.
+                            WriterMsg::Control(bytes) => {
+                                if writer.write_all(&bytes).is_ok() {
+                                    let _ = writer.flush();
+                                }
+                            }
+                            WriterMsg::Stdin(bytes, reply) => {
+                                if writer_gate.active.load(Ordering::Acquire) {
+                                    // F-001: the reader flipped the gate after
+                                    // the daemon's first check but before this
+                                    // write applied. Deny with the TYPED
+                                    // `SecretDenied` reply (not an `io::Error`)
+                                    // so `write_stdin` maps it to
+                                    // `WriteStdinError::SecretInputActive` and
+                                    // the daemon returns the `SecretInputDenied`
+                                    // contract.
+                                    let _ = reply.send(WriterReply::SecretDenied);
+                                    continue;
+                                }
+                                let _ = reply.send(match writer.write_all(&bytes) {
+                                    Ok(()) => match writer.flush() {
+                                        Ok(()) => WriterReply::Written(bytes.len()),
+                                        Err(e) => WriterReply::Io(e),
+                                    },
+                                    Err(e) => WriterReply::Io(e),
+                                });
+                            }
                         }
-                        let _ = reply.send(match writer.write_all(&bytes) {
-                            Ok(()) => match writer.flush() {
-                                Ok(()) => WriterReply::Written(bytes.len()),
-                                Err(e) => WriterReply::Io(e),
-                            },
-                            Err(e) => WriterReply::Io(e),
-                        });
                     }
                 })
                 .map_err(PtyProbeError::Io)?;
@@ -1784,12 +1882,43 @@ mod runtime_win {
             //     waiter indefinitely on the reader.
             let waiter_master = Arc::clone(&master);
             let waiter_cancelled = Arc::clone(&cancelled);
+            let waiter_killer = Arc::clone(&killer_slot);
+            let waiter_metrics = Arc::clone(&metrics);
             std::thread::Builder::new()
                 .name(format!("tc-conpty-wt-{probe_id}"))
                 .spawn(move || {
                     // Hold the slave for the whole child lifetime (Windows
                     // ConPTY input side); released only after the child exits.
                     let slave = slave;
+                    // SPAWN + WAIT in the SAME owned scope (F-010). The child
+                    // never crosses a scope/thread boundary between spawn and
+                    // wait, so DLL-init cannot be tripped by handle migration.
+                    let mut child = match slave.spawn_command(cmd) {
+                        Ok(c) => {
+                            // Hand the killer back so `spawn` returns Ok and
+                            // cancel/Drop can terminate from any thread.
+                            let killer: Box<dyn ChildKiller + Send + Sync> = c.clone_killer();
+                            *waiter_killer.lock() = Some(killer.clone_killer());
+                            let _ = killer_tx.send(Ok(killer));
+                            c
+                        }
+                        Err(e) => {
+                            // Propagate the spawn failure to `spawn` and tear
+                            // down without waiting on a child that never
+                            // started. Releasing the master forces reader EOF.
+                            let _ = killer_tx.send(Err(e.to_string()));
+                            drop(slave);
+                            let _ = waiter_master.lock().take();
+                            let _ = writer_handle.join();
+                            let _ = reader_handle.join();
+                            let _ = completion_tx.send(PtyExitOutcome::Exited {
+                                code: None,
+                                signal: Some(format!("spawn-error:{e}")),
+                            });
+                            let _ = done_tx.send(Err(PtyProbeError::Pty(e.to_string())));
+                            return;
+                        }
+                    };
                     let status = child.wait();
                     drop(slave);
                     // Releasing the master here guarantees the reader sees EOF
@@ -1799,13 +1928,46 @@ mod runtime_win {
                     let _ = writer_handle.join();
                     let _ = reader_handle.join();
 
+                    // F-010 instrumentation: log the THREE numbers separately
+                    // so the windows-gate `--nocapture` stream records exactly
+                    // why a run did or did not produce frames. `exit_code()` is
+                    // the RAW Win32 status as u32 -- an abnormal exit like
+                    // 0xC0000142 (STATUS_DLL_INIT_FAILED) is preserved here
+                    // (and below as a negative i32 in the outcome), NOT
+                    // silently dropped. The reader thread has been joined, so
+                    // `bytes_total`/`frames_total` are final.
+                    let exit_u32 = status
+                        .as_ref()
+                        .ok()
+                        .map(portable_pty::ExitStatus::exit_code);
+                    let (bytes_total, frames_total) = {
+                        let m = waiter_metrics.lock();
+                        (m.bytes_total, m.frames_total)
+                    };
+                    match exit_u32 {
+                        Some(code) => eprintln!(
+                            "tc-conpty[{probe_id}]: child exit=0x{code:08X} ({code}) \
+                             bytes_total={bytes_total} frames_total={frames_total}"
+                        ),
+                        None => eprintln!(
+                            "tc-conpty[{probe_id}]: child wait() errored \
+                             bytes_total={bytes_total} frames_total={frames_total}"
+                        ),
+                    }
+
                     let cancelled = waiter_cancelled.load(Ordering::Acquire);
                     let (outcome_for_completion, result) = if cancelled {
                         (PtyExitOutcome::Cancelled, Err(PtyProbeError::Cancelled))
                     } else {
                         match status {
                             Ok(st) => {
-                                let code = i32::try_from(st.exit_code()).ok();
+                                // Preserve the FULL Win32 status. Codes above
+                                // i32::MAX (e.g. 0xC0000142) wrap to a negative
+                                // i32 -- the conventional signed rendering --
+                                // rather than collapsing to `None` as the old
+                                // `i32::try_from(..).ok()` did, which masked
+                                // abnormal exits.
+                                let code = Some(st.exit_code().cast_signed());
                                 (PtyExitOutcome::Exited { code, signal: None }, Ok(()))
                             }
                             Err(e) => (
@@ -1821,6 +1983,26 @@ mod runtime_win {
                     let _ = done_tx.send(result);
                 })
                 .map_err(PtyProbeError::Io)?;
+
+            // Block until the waiter thread has actually spawned the child (in
+            // its own scope) and reported success or failure. This keeps the
+            // `Result` spawn contract: a child that fails to spawn returns
+            // `Err` here, and on success `killer_slot` is already populated so
+            // an immediate `cancel`/Drop can terminate the child. A dropped
+            // sender (waiter thread panicked before sending) maps to a spawn
+            // error too.
+            match killer_rx.recv() {
+                Ok(Ok(_killer)) => {
+                    // The waiter already stored a killer clone in `killer_slot`;
+                    // this received handle is redundant and dropped.
+                }
+                Ok(Err(msg)) => return Err(PtyProbeError::Pty(msg)),
+                Err(_) => {
+                    return Err(PtyProbeError::Pty(
+                        "conpty waiter thread exited before reporting child spawn".to_owned(),
+                    ));
+                }
+            }
 
             Ok(Self {
                 probe_id,
@@ -1939,8 +2121,21 @@ mod runtime_win {
                 let _ = probe.wait().await;
                 let outcome = completion.await.expect("completion outcome");
                 match outcome {
-                    PtyExitOutcome::Exited { signal, .. } => {
+                    PtyExitOutcome::Exited { code, signal } => {
                         assert!(signal.is_none(), "Windows ConPTY must report signal=None");
+                        // F-010: assert the CLEAN exit code, do NOT discard it.
+                        // `cmd /c echo ...` exits 0 on success. An abnormal exit
+                        // such as STATUS_DLL_INIT_FAILED (0xC0000142, rendered
+                        // as the negative i32 -1073741502) now fails LOUDLY here
+                        // with the code instead of silently passing through the
+                        // old `{ signal, .. }` wildcard that threw the code away.
+                        assert_eq!(
+                            code,
+                            Some(0),
+                            "ConPTY child must exit cleanly (code 0); a non-zero/abnormal \
+                             code here (e.g. -1073741502 = 0xC0000142 STATUS_DLL_INIT_FAILED) \
+                             means the child failed to initialize and wrote nothing"
+                        );
                     }
                     PtyExitOutcome::Cancelled => panic!("clean child must not report Cancelled"),
                 }
@@ -2028,6 +2223,46 @@ mod runtime_win {
                     "a cancelled child must report PtyExitOutcome::Cancelled; got {outcome:?}"
                 );
             });
+        }
+
+        // --- F-010 DSR/CPR unit tests. These need NO live child and run on ANY
+        //     Windows host (including headless agent sessions where ConPTY
+        //     children fail DLL-init), so the cursor-position-report detection
+        //     that unblocks console children is asserted deterministically here
+        //     even when the live e2e tests above must self-skip.
+
+        #[test]
+        fn dsr_query_detected_once_in_chunk() {
+            // conhost's startup `ESC[6n` cursor-position-report query.
+            assert_eq!(count_dsr_queries(b"\x1b[6n"), 1);
+            // Embedded among other preamble bytes.
+            assert_eq!(count_dsr_queries(b"\x1b[2J\x1b[6n\x1b[?25h"), 1);
+        }
+
+        #[test]
+        fn dsr_query_counts_multiple_occurrences() {
+            assert_eq!(count_dsr_queries(b"\x1b[6n\x1b[6n"), 2);
+            assert_eq!(count_dsr_queries(b"pad\x1b[6npad\x1b[6npad"), 2);
+        }
+
+        #[test]
+        fn dsr_query_absent_in_plain_output() {
+            assert_eq!(count_dsr_queries(b"password: "), 0);
+            assert_eq!(count_dsr_queries(b""), 0);
+            // A near-miss (cursor-position REPORT, not the query) must NOT match.
+            assert_eq!(count_dsr_queries(b"\x1b[1;1R"), 0);
+            // A truncated query alone is not a match (the split-across-reads
+            // case is handled by the reader's carry buffer, not this counter).
+            assert_eq!(count_dsr_queries(b"\x1b[6"), 0);
+        }
+
+        #[test]
+        fn cpr_reply_is_a_valid_cursor_position_report() {
+            // `ESC [ 1 ; 1 R` -- the answer a real terminal sends back. The
+            // child only needs a syntactically valid CPR to unblock; the exact
+            // coordinates are not modeled by the probe.
+            assert_eq!(CPR_REPLY_ROW1_COL1, b"\x1b[1;1R");
+            assert_eq!(DSR_CURSOR_POS_QUERY, b"\x1b[6n");
         }
     }
 }
