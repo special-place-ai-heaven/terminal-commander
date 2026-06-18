@@ -4,7 +4,8 @@ Date: 2026-06-18
 Branch: `feature/omni-review-fixes`
 Supersedes (folded in here, originals removed):
 `docs/reviews/2026-06-17-code-review-findings.md`,
-`docs/reviews/2026-06-17-code-review-remediation-results.md`
+`docs/reviews/2026-06-17-code-review-remediation-results.md`,
+`docs/ponytail-audit-2026-06-17.md` (origin PR #100 -- folded into Part 3)
 
 Two passes live in this one doc:
 
@@ -144,3 +145,56 @@ cargo nextest run --workspace
 
 Suggested cut order: rows 1-5 first (biggest, independent, pure deletes), then the
 zero-caller batches 9/10/12/13/20, then the shrinks. Hold 6 and 14 for owner sign-off.
+
+---
+
+## Part 3 — Earlier ponytail audit 2026-06-17 (folded in from origin #100)
+
+A separate, earlier ponytail pass landed on `main` via PR #100
+(`docs/ponytail-audit-2026-06-17.md`, now removed and folded here so the consolidated
+doc stays the single source of truth). It used a **dedup/shrink lens** where Part 2
+used a **dead-code-deletion lens**, so the two lists are largely complementary rather
+than duplicates. Findings are preserved verbatim below; the few that overlap Part 2 or
+were already applied by the `refactor: remove confirmed-dead code` cleanup
+(`cbea00c`) are flagged in the right-hand column.
+
+Tags (same scheme): `delete` · `stdlib` · `native` · `yagni` · `shrink`.
+
+**Audit estimate: ~700 lines, 0 deps.**
+
+| # | Tag | What to cut | Replacement | Location | ~Lines | Cross-ref |
+|---|-----|-------------|-------------|----------|--------|-----------|
+| P3-1 | shrink | ~46 MCP tool handlers repeat the `ensure_daemon -> daemon.call -> match{Ok/Ok(other)/Err}` envelope verbatim | one `call_daemon_tool(daemon, req, map_resp)` helper | `crates/mcp/src/tools.rs:1000-2500` | 150 | not in Part 2 |
+| P3-2 | shrink | `run_and_watch` hand-rolls a C-style state machine (`last_observed_state`/`exit_code`/`receipt` + manual assigns) | Option combinators / small struct | `crates/mcp/src/tools.rs:1160-1313` | 150 | not in Part 2 |
+| P3-3 | yagni | 17 serde default-callback fns each wrap one const or `::default()` | `#[serde(default)]` + `#[derive(Default)]` | `crates/daemon/src/config.rs:131-337` | 60 | not in Part 2 |
+| P3-4 | yagni | 3x duplicate `SuppressionCounter` impls across Process/File/Pty metrics -- verbatim | macro or generic impl | `crates/probes/src/noise_pipeline.rs:41-102` | 62 | not in Part 2 |
+| P3-5 | delete | 3 byte-identical `EventSink` impls (`emit` + `patch_dedupe_aggregate`) | one generic `RouterEventSink<M>` | `daemon/src/file_watch.rs:124`, `pty_command.rs:119`, `command.rs:235` | 50 | not in Part 2 |
+| P3-6 | delete | 7 non-unix `session.rs` stub handlers each re-inline the same error | call existing `session_ipc_unsupported()` (L27) | `crates/daemon/src/ipc/handlers/session.rs:27-89` | 50 | not in Part 2 |
+| P3-7 | delete | `[policy.paths]` + `[policy.probes]` config -- parsed "for forward-compat," zero enforcement | delete structs, re-add when phase exists | `daemon/src/config.rs:264-286`, `policy.rs:26-27` | 40 | **overlaps Part 2 #6 (SIGN-OFF); Feature A now ENFORCES paths -- re-evaluate** |
+| P3-8 | yagni | `regex_rule()` factory -- 4 callers in the same fn, every "varying" arg hardcoded | inline, kill factory | `crates/sifters/src/universal.rs:91-126` | 35 | not in Part 2 |
+| P3-9 | shrink | `emit_audit` hand-marshals peer-identity JSON 3x (Unix/Windows/Unknown) via `format!` | `peer.to_metadata_json()` or serde | `daemon/src/ipc/handlers/common.rs:16-58` | 25 | not in Part 2 |
+| P3-10 | yagni | Duplicate read-limit/TTL/max-event constants in two crates (same values, divergent names + types) | single source in core, re-export | `core/bucket.rs:50-61`, `store/lib.rs:68-77` | 15 | not in Part 2 |
+| P3-11 | yagni | `ProbeNoisePipeline::new(policy)` dead -- only `with_default_policy()` is called (5 sites) | delete `new(policy)`, rename | `probes/src/noise_pipeline.rs:112-122` | 14 | not in Part 2 |
+| P3-12 | yagni | Reserved zero-defaulted `noise_suppressed_count`/`dedupe_collapsed_count` "awaiting TC11" | defer | `core/bucket.rs:125-130, 278` | 10 | not in Part 2 (forward-compat seam) |
+| P3-13 | yagni | 4 `pub fn new(){ Self::default() }` delegate-only ctors | `#[derive(Default)]`, drop them | `probes/process.rs:121`, `directory.rs:83`, `pty.rs:78`, `sifters/noise.rs:105` | 8 | `directory.rs` ctor MOOT -- module deleted by `cbea00c` (Part 2 #1) |
+| P3-14 | delete | Unreachable `Cmd::SelfcheckNoop` match arm (short-circuited at L107) | `unreachable!()` | `daemon/src/main.rs:173-177` | 5 | not in Part 2 |
+| P3-15 | yagni | `profile_version` ("TC36-era") parsed, never read outside tests | delete field + `default_profile_version()` | `daemon/src/config.rs:198-199` | 5 | not in Part 2 (forward-compat seam) |
+| P3-16 | yagni | `EnvironmentSpec::SshHost` "reserved, not implemented in M1" | delete or `#[cfg]`-gate | `core/src/environment.rs:17-18` | 5 | not in Part 2 (forward-compat seam) |
+| P3-17 | delete | `state_of()` "readability alias" for `pty_state()` -- called directly in the same impl | drop alias | `daemon/src/shell_session.rs:195-197` | 3 | DUP of Part 2 #18 (`state_of` thin alias) |
+| P3-18 | delete | `should_replace(stale,force) => stale\|\|force`, one call site | inline | `supervisor/src/replace.rs:50-52` | 3 | not in Part 2 |
+
+### Folding caveats (carried from origin's audit notes)
+
+- **Highest leverage is `tools.rs`.** P3-1 and P3-2 (~300 lines) both live in
+  `crates/mcp/src/tools.rs` (the repo's largest file). The handler-envelope dedup (P3-1)
+  touches ~46 call sites: a phased refactor, not a one-shot. Verify behavior is preserved
+  (the file carries explicit regression-guard comments) before touching.
+- **Reserved/forward-compat items are deliberate seams**, not accidental dead code:
+  P3-7 (`policy.paths`/`policy.probes`), P3-12 (TC11 counters), P3-15 (`profile_version`),
+  P3-16 (`SshHost`). Defer or stop-faking-success rather than blind-delete unless the
+  owning milestone is confirmed dead.
+- **P3-7 needs re-evaluation after Feature A.** Feature A (`b7a1de6`) now ENFORCES path
+  allow-lists and gates probe kinds, so `[policy.paths]` is no longer a zero-enforcement
+  seam. Part 2 #6 still flags `PolicyPathsSection`/`PolicyProbesSection` for owner
+  sign-off; this is the one finding where the two audits and Feature A intersect -- owner
+  must reconcile before any cut.
