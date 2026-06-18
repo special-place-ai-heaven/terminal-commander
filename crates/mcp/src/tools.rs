@@ -17,7 +17,7 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 49 live
+//! [`tool_catalogue`] is the single source of truth for the 50 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry
 //! (including `registry_suggest_from_samples`),
@@ -37,7 +37,7 @@
 //! (constitution IV: no public TCP; constitution I: the adapter never
 //! spawns -- the `ssh -L` tunnel is the OPERATOR's, not ours).
 //!
-//! Source-status: live; all 49 tools forward through daemon IPC.
+//! Source-status: live; all 50 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -61,25 +61,26 @@ use terminal_commanderd::ipc::protocol::{
     CommandStopParams, CommandStopResponse, ContextUnavailableReason, DiscoverResponse,
     EventContextParams, EventContextResponse, FileReadWindowParams, FileReadWindowResponse,
     FileSearchParams, FileSearchResponse, FileWatchListResponse, FileWatchStartParams,
-    FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, IpcContextFrame, IpcError,
-    IpcErrorCode, IpcRequest, IpcResponse, ListLimitParams, PolicyStatusResponse,
-    ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse,
-    PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
-    PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RegistryActivateParams,
-    RegistryActivateResponse, RegistryDeactivateParams, RegistryDeactivateResponse,
-    RegistryGetParams, RegistryGetResponse, RegistryImportPackParams, RegistryImportPackResponse,
-    RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse,
-    RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse, RegistryTestParams,
-    RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
-    SelfCheckResponse, ShellExecParams, ShellSessionExecParams, ShellSessionExecResponse,
-    ShellSessionListResponse, ShellSessionStartParams, ShellSessionStartResponse,
-    ShellSessionStatusParams, ShellSessionStatusResponse, ShellSessionStopParams,
-    ShellSessionStopResponse, SubscriptionCloseParams, SubscriptionCloseResponse,
-    SubscriptionListParams, SubscriptionListResponse, SubscriptionOpenParams,
-    SubscriptionOpenResponse, SubscriptionPredicate, SubscriptionPullParams,
-    SubscriptionPullResponse, SubscriptionSeekParams, SubscriptionSeekResponse,
-    SubscriptionSourceSel, WorkspaceSnapshotApplyParams, WorkspaceSnapshotApplyResponse,
-    WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
+    FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, FileWriteParams,
+    FileWriteResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse,
+    ListLimitParams, PolicyStatusResponse, ProbeListResponse, ProbeStatusParams,
+    ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
+    PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
+    PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
+    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
+    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
+    RegistrySearchParams, RegistrySearchResponse, RegistrySuggestFromSamplesParams,
+    RegistrySuggestFromSamplesResponse, RegistryTestParams, RegistryTestResponse,
+    RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
+    ShellExecParams, ShellSessionExecParams, ShellSessionExecResponse, ShellSessionListResponse,
+    ShellSessionStartParams, ShellSessionStartResponse, ShellSessionStatusParams,
+    ShellSessionStatusResponse, ShellSessionStopParams, ShellSessionStopResponse,
+    SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionListParams,
+    SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
+    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse,
+    SubscriptionSeekParams, SubscriptionSeekResponse, SubscriptionSourceSel,
+    WorkspaceSnapshotApplyParams, WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams,
+    WorkspaceSnapshotCreateResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -251,6 +252,11 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "file_search",
             status: ToolStatus::Live,
             description: "Bounded substring search over one file. Returns structured match pointers + capped snippets.",
+        },
+        ToolCatalogueEntry {
+            name: "file_write",
+            status: ToolStatus::Live,
+            description: "Write UTF-8 content to one file. Policy-gated by paths.write_allow; audited before write; bounded size; atomic. Mutating + non-idempotent.",
         },
         ToolCatalogueEntry {
             name: "file_watch_start",
@@ -1836,6 +1842,38 @@ impl TerminalCommanderMcpServer {
                 "file_bytes": file_bytes,
                 "truncated": truncated,
                 "next_byte_offset": next_byte_offset,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `file_write` — write UTF-8 content to one file (TC22 A3).
+    ///
+    /// Thin 1:1 forward to the daemon `FileWrite` IPC method, identical in
+    /// shape to `file_read_window`: the adapter never touches the filesystem.
+    /// The daemon policy-gates the canonical target against `paths.write_allow`,
+    /// audits BEFORE the write, bounds the content size, and writes atomically.
+    #[tool(
+        description = "Write UTF-8 content to a file. Policy-gated by paths.write_allow; audited before write; bounded size; atomic (no torn writes). Mutating + non-idempotent: never auto-retried."
+    )]
+    async fn file_write(
+        &self,
+        Parameters(params): Parameters<McpFileWriteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = FileWriteParams {
+            path: std::path::PathBuf::from(params.path),
+            content: params.content,
+            create_dirs: params.create_dirs.unwrap_or(false),
+        };
+        match self.daemon.call(IpcRequest::FileWrite(ipc)).await {
+            Ok(IpcResponse::FileWrite(FileWriteResponse {
+                path,
+                bytes_written,
+            })) => json_tool_result(&serde_json::json!({
+                "path": path,
+                "bytes_written": bytes_written,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -4397,6 +4435,27 @@ pub struct McpFileReadWindowParams {
     pub max_bytes: Option<usize>,
 }
 
+/// MCP-facing parameters for `file_write` (TC22 A3).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpFileWriteParams {
+    /// Absolute path to the target file (e.g. `/home/u/project/out.txt`).
+    /// Absolute is required: the daemon has no workspace root, so a relative
+    /// path is rejected rather than resolved against the daemon's working
+    /// directory. The write is gated by `paths.write_allow`; a path outside a
+    /// configured allow-list is denied.
+    pub path: String,
+    /// UTF-8 content to write. The daemon bounds this (currently 192 KiB);
+    /// oversize content is rejected before any filesystem touch. Write larger
+    /// files as multiple bounded calls.
+    pub content: String,
+    /// Create missing parent directories within an allowed path. The parent
+    /// must still pass the write policy gate -- `create_dirs` never widens the
+    /// allow-list. Defaults to false.
+    #[serde(default, deserialize_with = "de_opt_bool_lenient")]
+    #[schemars(with = "bool")]
+    pub create_dirs: Option<bool>,
+}
+
 /// MCP-facing parameters for `file_search`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileSearchParams {
@@ -5212,7 +5271,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_forty_nine_live_tools() {
+    fn catalogue_lists_fifty_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -5246,6 +5305,7 @@ mod tests {
                 "registry_suggest_from_samples",
                 "file_read_window",
                 "file_search",
+                "file_write",
                 "file_watch_start",
                 "file_watch_stop",
                 "file_watch_list",
@@ -5308,6 +5368,7 @@ mod tests {
                 "file_watch_list".to_owned(),
                 "file_watch_start".to_owned(),
                 "file_watch_stop".to_owned(),
+                "file_write".to_owned(),
                 "health".to_owned(),
                 "policy_status".to_owned(),
                 "probe_list".to_owned(),

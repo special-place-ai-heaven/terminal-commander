@@ -18,7 +18,8 @@ use terminal_commander_core::{ContextHint, RuleDefinition, RuleStatus, RuleType,
 use terminal_commander_store::AuditReadRequest;
 use terminal_commanderd::{
     DaemonClient, DaemonConfig, DaemonState, FileReadWindowParams, FileSearchParams,
-    FileWatchStartParams, FileWatchStopParams, IpcErrorCode, IpcRequest, IpcResponse, IpcServer,
+    FileWatchStartParams, FileWatchStopParams, FileWriteParams, FileWriteResponse, IpcErrorCode,
+    IpcRequest, IpcResponse, IpcServer, MAX_FILE_WRITE_BYTES,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -504,6 +505,137 @@ fn file_watch_denies_default_deny_path() {
     });
 }
 
+/// Build a daemon whose `[policy.probes] deny_kinds` is set to `deny`, leaving
+/// every other knob at defaults (developer_local, no path allow-lists). Used to
+/// prove the TC22 A2 probe-kind gate blocks the REAL `file_watch_start` op, not
+/// just `evaluate()` in isolation.
+fn build_server_with_probe_deny(
+    deny: &[&str],
+) -> (PathBuf, Arc<DaemonState>, terminal_commanderd::ServerHandle) {
+    let data = tmp_data_dir("probe-deny");
+    let mut cfg = DaemonConfig::defaults_in(&data);
+    cfg.policy.probes = Some(terminal_commanderd::PolicyProbesSection {
+        allow_kinds: vec![],
+        deny_kinds: deny.iter().map(|s| (*s).to_owned()).collect(),
+    });
+    let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+    let socket = state.config.socket_path();
+    let handle = IpcServer::new(Arc::clone(&state), socket).spawn().unwrap();
+    (data, state, handle)
+}
+
+#[test]
+fn file_watch_start_denied_when_probe_kind_denied() {
+    // TC22 A2: with deny_kinds = ["file_watch"], a file_watch_start on an
+    // otherwise-allowed path is DENIED with the POLICY.md `probe_kind_denied`
+    // substring, and NO probe is created (the live-watch list stays empty).
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server_with_probe_deny(&["file_watch"]);
+        let tmp = data.join("denied.log");
+        write_text(&tmp, "preexisting\n");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(3));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWatchStart(FileWatchStartParams {
+                    path: tmp.clone(),
+                    bucket_config: None,
+                    rules: vec![],
+                    follow_from_beginning: Some(false),
+                    tag: None,
+                }),
+            )
+            .await
+            .expect_err("file_watch probe kind is denied");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+        assert!(
+            err.message.contains("probe_kind_denied"),
+            "deny must carry the POLICY.md substring; got: {}",
+            err.message
+        );
+
+        // No probe was created: the live-watch snapshot is empty.
+        let resp = client
+            .call(2, IpcRequest::FileWatchList)
+            .await
+            .expect("watch list");
+        let list = match resp {
+            IpcResponse::FileWatchList(l) => l,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(
+            list.entries.is_empty(),
+            "a denied file_watch_start must create NO probe; got {:?}",
+            list.entries
+        );
+
+        // The deny was audited under the file_watch_start action.
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.action == "file_watch_start" && r.decision == "deny"),
+            "expected a file_watch_start deny audit row"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn file_watch_start_allowed_when_probe_kind_not_denied() {
+    // TC22 A2 control: with an EMPTY deny_kinds the SAME file_watch_start on the
+    // SAME path SUCCEEDS and creates a live probe. Proves the gate is the cause
+    // of the deny above, not an unrelated failure.
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server_with_probe_deny(&[]);
+        let tmp = data.join("allowed.log");
+        write_text(&tmp, "preexisting\n");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(3));
+
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileWatchStart(FileWatchStartParams {
+                    path: tmp.clone(),
+                    bucket_config: None,
+                    rules: vec![],
+                    follow_from_beginning: Some(false),
+                    tag: None,
+                }),
+            )
+            .await
+            .expect("watch start should succeed when probe kind is not denied");
+        let ws = match resp {
+            IpcResponse::FileWatchStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // The probe is live.
+        let resp = client
+            .call(2, IpcRequest::FileWatchList)
+            .await
+            .expect("watch list");
+        let list = match resp {
+            IpcResponse::FileWatchList(l) => l,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(
+            list.entries.iter().any(|w| w.watch_id == ws.watch_id),
+            "the allowed watch must be live; got {:?}",
+            list.entries
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
 #[test]
 fn file_watch_list_reflects_live_then_stopped_state() {
     let runtime = rt();
@@ -736,6 +868,377 @@ fn file_read_window_rejects_relative_path() {
             err.message.contains("must be absolute"),
             "teaching message expected, got: {}",
             err.message
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+// =====================================================================
+// TC22 A3: file_write through-daemon integration tests (constitution VI:
+// >=1 integration test per new tool). Covers the happy path (file exists
+// with EXACT content), the deny path (policy error AND no file created),
+// the oversize bound, and the audit-before-write proof.
+// =====================================================================
+
+/// AC: file_write to an allowed path -> file exists with the EXACT content,
+/// the response reports the canonical path + byte count, and an
+/// audit-before-write `file_write` row with decision `allow` landed.
+#[test]
+fn file_write_to_allowed_path_writes_exact_content_and_audits() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server();
+        let target = data.join("subdir/out.txt");
+        // Parent does not exist yet -> exercise create_dirs within an allowed
+        // path (developer_local zero-config allows the temp tree).
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let content = "alpha\nbeta\ngamma\n";
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: target.clone(),
+                    content: content.to_owned(),
+                    create_dirs: true,
+                }),
+            )
+            .await
+            .expect("write");
+        let r: FileWriteResponse = match resp {
+            IpcResponse::FileWrite(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(r.bytes_written, content.len() as u64);
+
+        // The file exists on disk with the EXACT bytes (not via the daemon).
+        let on_disk = std::fs::read_to_string(&target).expect("target file must exist");
+        assert_eq!(on_disk, content, "written content must be exact");
+
+        // Audit-before-write proof: a `file_write` row with decision `allow`
+        // exists. (The handler emits this BEFORE the bytes land.)
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row.action == "file_write" && row.decision == "allow"),
+            "expected a file_write allow audit row; got {:?}",
+            rows.iter()
+                .map(|r| (r.action.clone(), r.decision.clone()))
+                .collect::<Vec<_>>()
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC: file_write to a DENIED path (default-deny sensitive suffix) returns a
+/// PathDenied policy error AND creates no file.
+#[test]
+fn file_write_to_denied_path_errors_and_creates_no_file() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server();
+        // A path whose canonical form ends with a default-deny suffix. We put
+        // it under the (existing) data dir so the PARENT canonicalizes, and the
+        // file name `.ssh/id_rsa` tail is matched by the suffix deny. Build the
+        // parent dir so canonicalize-parent succeeds and the DENY is purely the
+        // policy verdict, not a missing-parent error.
+        let ssh_dir = data.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        let secret = ssh_dir.join("id_rsa");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: secret.clone(),
+                    content: "BEGIN OPENSSH PRIVATE KEY\n".to_owned(),
+                    create_dirs: false,
+                }),
+            )
+            .await
+            .expect_err("default-deny write target must be rejected");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+
+        // No file created: the deny precedes any write.
+        assert!(
+            !secret.exists(),
+            "denied write must not create the target file"
+        );
+
+        // A `file_write` deny audit row was recorded.
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row.action == "file_write" && row.decision == "deny"),
+            "expected a file_write deny audit row"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC: oversize content (> MAX_FILE_WRITE_BYTES) is rejected with a bounded
+/// OversizedRequest error before any filesystem touch.
+#[test]
+fn file_write_oversize_content_returns_bounded_error() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let target = data.join("big.txt");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+
+        let oversize = "x".repeat(MAX_FILE_WRITE_BYTES + 1);
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: target.clone(),
+                    content: oversize,
+                    create_dirs: false,
+                }),
+            )
+            .await
+            .expect_err("oversize content must be rejected");
+        assert_eq!(err.code, IpcErrorCode::OversizedRequest);
+        assert!(
+            !target.exists(),
+            "oversize-rejected write must not create the target file"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC: a relative write path is rejected with a teaching PathDenied (the
+/// daemon has no workspace root), and no file is created.
+#[test]
+fn file_write_rejects_relative_path() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: PathBuf::from("out.txt"),
+                    content: "x".to_owned(),
+                    create_dirs: false,
+                }),
+            )
+            .await
+            .expect_err("relative write path must be rejected");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+        assert!(
+            err.message.contains("must be absolute"),
+            "teaching message expected, got: {}",
+            err.message
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC (write_allow enforcement, A3): with a configured write_allow, a write
+/// OUTSIDE the allow-list is denied (no_allow_rule) and creates no file, while
+/// a write INSIDE is allowed with exact content. Proves the new tool finally
+/// makes write_allow enforceable end-to-end.
+#[test]
+fn file_write_enforces_write_allow_list() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("write-allow");
+        // Build a server whose policy.paths.write_allow confines writes to an
+        // `allowed/**` subtree of the data dir. Canonicalize the data dir so
+        // the glob matches the same canonical form the engine evaluates.
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        let allowed_dir = data.join("allowed");
+        std::fs::create_dir_all(&allowed_dir).unwrap();
+        let canon_data = std::fs::canonicalize(&data).unwrap();
+        let glob = format!("{}/allowed/**", canon_data.display());
+        cfg.policy.paths = Some(terminal_commanderd::PolicyPathsSection {
+            write_allow: vec![glob],
+            ..Default::default()
+        });
+        let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+        let socket = state.config.socket_path();
+        let handle = IpcServer::new(Arc::clone(&state), socket).spawn().unwrap();
+
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        // Inside the allow-list -> allowed, exact content.
+        let inside = allowed_dir.join("ok.txt");
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: inside.clone(),
+                    content: "ok\n".to_owned(),
+                    create_dirs: false,
+                }),
+            )
+            .await
+            .expect("in-allow write");
+        match resp {
+            IpcResponse::FileWrite(_) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&inside).unwrap(), "ok\n");
+
+        // Outside the allow-list -> denied (no_allow_rule), no file.
+        let outside = data.join("denied.txt");
+        let err = client
+            .call(
+                2,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: outside.clone(),
+                    content: "nope\n".to_owned(),
+                    create_dirs: false,
+                }),
+            )
+            .await
+            .expect_err("off-write-allow write must be denied");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+        assert!(
+            err.message.contains("no_allow_rule"),
+            "off-allow-list write must carry no_allow_rule: {}",
+            err.message
+        );
+        assert!(!outside.exists(), "denied write must not create a file");
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// FIX 1 (Medium finding): a write target containing `..` is rejected BEFORE
+/// any directory or file is created, on BOTH `create_dirs: true` and `false`.
+///
+/// Threat closed: previously the step-1 gate saw the RAW parent (carrying the
+/// literal `..`), and `create_dir_all` would honor the `..` and build a
+/// directory OUTSIDE the allow-list (e.g. `data/escaped`) before the final
+/// canonical gate denied the content -- a create-then-deny asymmetry that left
+/// an out-of-allow-list directory artifact on disk. The fix rejects `..` up
+/// front, so no escaped artifact is ever created.
+///
+/// Evidence: the call returns `PathDenied` with a `..` teaching reason AND the
+/// would-be-escaped directory `data/escaped` does NOT exist afterward.
+#[test]
+fn file_write_rejects_dotdot_target_before_creating_artifact() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        // Target whose `..` would climb out of `data/inner` into a SIBLING
+        // `data/escaped` directory. If `create_dir_all` ever honored the `..`,
+        // it would materialize `data/escaped` outside the intended tree.
+        let escaped_dir = data.join("escaped");
+        let dotdot_target = data
+            .join("inner")
+            .join("..")
+            .join("escaped")
+            .join("out.txt");
+        assert!(
+            !escaped_dir.exists(),
+            "precondition: escaped sibling dir must not pre-exist"
+        );
+
+        for create_dirs in [true, false] {
+            let err = client
+                .call(
+                    1,
+                    IpcRequest::FileWrite(FileWriteParams {
+                        path: dotdot_target.clone(),
+                        content: "escape\n".to_owned(),
+                        create_dirs,
+                    }),
+                )
+                .await
+                .expect_err("`..` write target must be rejected");
+            assert_eq!(
+                err.code,
+                IpcErrorCode::PathDenied,
+                "`..` rejection must be PathDenied (create_dirs={create_dirs})"
+            );
+            assert!(
+                err.message.contains(".."),
+                "teaching `..` reason expected (create_dirs={create_dirs}), got: {}",
+                err.message
+            );
+            // The escaped sibling directory was NOT created -- the `..` reject
+            // precedes any `create_dir_all` (proves create-then-deny is closed).
+            assert!(
+                !escaped_dir.exists(),
+                "no out-of-allow-list artifact may be created (create_dirs={create_dirs})"
+            );
+            assert!(
+                !dotdot_target.exists(),
+                "the target file must not exist (create_dirs={create_dirs})"
+            );
+        }
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// FIX 2 (audit-stream completeness): a non-PathDenied refusal -- here an
+/// OVERSIZE write -- emits a domain `file_write` DENY audit row, not just the
+/// dispatch-level `ipc_file_write` row. The `file_write` audit stream is now
+/// self-complete for every refusal. Audit-before-any-write is preserved: the
+/// row exists and no file was written.
+#[test]
+fn file_write_oversize_emits_domain_deny_audit_row() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server();
+        let target = data.join("big.txt");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+
+        let oversize = "x".repeat(MAX_FILE_WRITE_BYTES + 1);
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: target.clone(),
+                    content: oversize,
+                    create_dirs: false,
+                }),
+            )
+            .await
+            .expect_err("oversize content must be rejected");
+        assert_eq!(err.code, IpcErrorCode::OversizedRequest);
+        assert!(
+            !target.exists(),
+            "oversize-rejected write must not create a file"
+        );
+
+        // A domain `file_write` DENY row was recorded for the oversize refusal.
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row.action == "file_write" && row.decision == "deny"),
+            "expected a file_write deny audit row for the oversize refusal; got {:?}",
+            rows.iter()
+                .map(|r| (r.action.clone(), r.decision.clone()))
+                .collect::<Vec<_>>()
         );
 
         handle.shutdown().await;

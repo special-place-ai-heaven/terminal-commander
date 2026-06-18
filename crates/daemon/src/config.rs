@@ -210,8 +210,9 @@ pub struct PolicySection {
     /// containment is a later phase.
     #[serde(default)]
     pub paths: Option<PolicyPathsSection>,
-    /// `[policy.probes]` block (POLICY.md section 4). Parsed and retained;
-    /// probe-kind gating is a later phase.
+    /// `[policy.probes]` block (POLICY.md section 4 / 6; TC22 A2). ENFORCED:
+    /// threaded into the engine at bootstrap and applied deny-first to the
+    /// three probe-creating ops via `PolicyAction::ProbeCreate`.
     #[serde(default)]
     pub probes: Option<PolicyProbesSection>,
     /// `[policy.caps]` block (Hybrid trust model). Optional; absent == all false.
@@ -261,13 +262,30 @@ impl From<&PolicyCapsSection> for PolicyCaps {
     }
 }
 
-/// `[policy.paths]` (POLICY.md section 4). Forward-compat only at this
-/// phase; the engine does not yet enforce these allow/deny lists beyond
-/// repo_only containment and the default-deny suffix list.
+/// `[policy.paths]` (POLICY.md section 4 / section 5).
+///
+/// `read_allow`, `watch_allow`, `write_allow`, and `deny_extra` ARE enforced
+/// by the engine for `FileRead` / `FileWatch` / `FileWrite` (TC22 A1/A3):
+/// compiled to anchored glob-regexes at engine construction and applied as
+/// deny-first allow/deny layers on top of repo_only containment and the
+/// default-deny suffix list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyPathsSection {
     #[serde(default)]
     pub read_allow: Vec<String>,
+    /// `[policy.paths] write_allow` (TC22 A3). Enforced by the engine for
+    /// `FileWrite`: empty == not configured == allow (zero-config writes stay
+    /// usable); a non-empty list is authoritative and a write path matching no
+    /// glob is denied (`no_allow_rule`). Independent from `read_allow`.
+    ///
+    /// OPERATOR WARNING (zero-config write posture): with the DEFAULT config
+    /// (profile `DeveloperLocal`, no `repo_root`, EMPTY `write_allow`),
+    /// `file_write` can write ANYWHERE except the default-deny sensitive-suffix
+    /// list -- there is no path containment. This is intentional for a single
+    /// local developer, but in ANY shared or agent-facing context an operator
+    /// enabling the write lane MUST set a non-empty `write_allow` (or use the
+    /// `repo_only` profile with a `repo_root`) to confine writes. Leaving this
+    /// empty in a shared/agent deployment is an open write surface.
     #[serde(default)]
     pub write_allow: Vec<String>,
     #[serde(default)]
@@ -276,7 +294,16 @@ pub struct PolicyPathsSection {
     pub deny_extra: Vec<String>,
 }
 
-/// `[policy.probes]` (POLICY.md section 4). Forward-compat only.
+/// `[policy.probes]` allow/deny KIND lists (POLICY.md section 4 / 6; TC22 A2).
+///
+/// ENFORCED: threaded into the policy engine at bootstrap (`with_probe_kinds`)
+/// and applied as a deny-first secondary filter on the three probe-creating ops
+/// (`command_start_combed` -> `command`, `pty_command_start` /
+/// `shell_session_start` -> `pty`, `file_watch_start` -> `file_watch`) via
+/// `PolicyAction::ProbeCreate`. Kinds are CASE-SENSITIVE snake_case from the
+/// closed set {command, file_watch, pty}; deny beats allow; an EMPTY
+/// `allow_kinds` is "not configured" == allow (zero-config stays usable),
+/// matching the `[policy.paths]` allow-list posture.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyProbesSection {
     #[serde(default)]

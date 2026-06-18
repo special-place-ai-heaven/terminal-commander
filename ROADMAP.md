@@ -256,7 +256,7 @@ Per-slice outcome and HONEST status:
 | P2 (US2) | TC53-TC55 | `registry_suggest_from_samples` (pure-Rust heuristics; NEVER auto-activates; loop is suggest -> test -> activate), config-gated universal extractors (`sifters.universal_extractors`), rule-pack set grown 8 -> 25, `pack_available` hints. | DONE. |
 | P3 (US3) | TC56-TC58 | Platform parity: Windows ConPTY backend (`portable-pty`, dual-backend behind PtyProbe), event-driven file-watch (notify; poll retained for WSL `/mnt/c` 9P), graceful SIGTERM->SIGKILL terminate ladder shared by command/PTY/session stop. | DONE on unix + Windows lifecycle. BLOCKED: live ConPTY child-output e2e gated behind `TC_CONPTY_E2E=1` (env 0xC0000142 DLL-init on the dev host; must run on CI/desktop to close O-07). macOS parity is code + smoke script only, BLOCKED-no-Mac-host. |
 | P4 (US4) | TC61-TC65 | Operator-gated privileged helper: separate `terminal-commander-privileged` binary, closed named-op allow-list, human-approval flow, `allow_privileged` cap, audit-before-exec. | PLAN-ONLY by decision. NO code shipped. BLOCKED on a threat review (`docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md`). `omni_status.privileged_helper` reports `available:false, reason:"threat_review_pending"`. |
-| P5 (US5) | TC66-TC69 | Remote federation: `target_list` / `target_probe`, `target_id` routing on the command path, `allow_remote` cap + audit. Transport is an operator-established `ssh -L` forward to the remote daemon's LOCAL socket (NO public TCP; adapter never spawns ssh). | SIM-VERIFIED via a second-local-socket simulation. BLOCKED: real-SSH transit NOT tested (no sshd in the smoke env). `target_id` is wired on the command path, not yet all 49 tools. |
+| P5 (US5) | TC66-TC69 | Remote federation: `target_list` / `target_probe`, `target_id` routing on the command path, `allow_remote` cap + audit. Transport is an operator-established `ssh -L` forward to the remote daemon's LOCAL socket (NO public TCP; adapter never spawns ssh). | SIM-VERIFIED via a second-local-socket simulation. BLOCKED: real-SSH transit NOT tested (no sshd in the smoke env). `target_id` is wired on the command path, not yet all 50 tools. |
 | P6 (US6) | TC70-TC74 | Certification: `system_discover.omni_status` honest capability matrix; `scripts/smoke/verify-omni-{linux,wsl,windows,macos}` running gates O-01..O-14. | DONE -- runnable gates pass; host-blocked gates (O-06 privileged, O-07 ConPTY, O-09/O-10 remote, O-13 fault-injection) are LOUDLY skipped, not faked. |
 
 Out-of-omni-chain (deferred / blocked):
@@ -268,7 +268,7 @@ Out-of-omni-chain (deferred / blocked):
   gate when a Mac smoke run lands).
 - Real-SSH remote-federation transit (needs a host with sshd;
   closes O-09/O-10).
-- `target_id` threaded through every one of the 49 tools (currently
+- `target_id` threaded through every one of the 50 tools (currently
   on the command path).
 
 The goal-numbering above (TC61-TC74) follows the slice plans in

@@ -437,6 +437,7 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::RegistrySuggestFromSamples(_) => "registry_suggest_from_samples",
         IpcRequest::FileReadWindow(_) => "file_read_window",
         IpcRequest::FileSearch(_) => "file_search",
+        IpcRequest::FileWrite(_) => "file_write",
         IpcRequest::FileWatchStart(_) => "file_watch_start",
         IpcRequest::FileWatchStop(_) => "file_watch_stop",
         IpcRequest::FileWatchList => "file_watch_list",
@@ -494,6 +495,7 @@ const DISCOVERABLE_METHODS: &[&str] = &[
     "registry_list_active",
     "file_read_window",
     "file_search",
+    "file_write",
     "file_watch_start",
     "file_watch_stop",
     "file_watch_list",
@@ -674,6 +676,10 @@ async fn dispatch(
             Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::FileSearch(p) => match handlers::file::handle_file_search(state, p) {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
+        IpcRequest::FileWrite(p) => match handlers::file::handle_file_write(state, p) {
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
         },
@@ -955,6 +961,21 @@ pub async fn selfcheck_spawn_probe(
             line: format!("spawn probe skipped: {}", verdict.reason),
         };
     }
+    // A probe-kind deny ([policy.probes] deny_kinds = ["command"], or a
+    // non-empty allow_kinds without it) is likewise a SKIP, not a RED: the
+    // real spawn below funnels through start_combed_inner, which evaluates the
+    // same ProbeCreate{kind:"command"} gate and would deny. Mirror it here so a
+    // configured probe-kind deny reports as a clean skip, not a false self-check
+    // failure (TC22 A2; consistent with the CommandStart skip above).
+    let probe_verdict = state
+        .policy
+        .evaluate(&crate::policy::PolicyAction::ProbeCreate { kind: "command" });
+    if probe_verdict.decision == crate::policy::PolicyDecision::Deny {
+        return SpawnProbeOutcome {
+            failed: false,
+            line: format!("spawn probe skipped: {}", probe_verdict.reason),
+        };
+    }
 
     // 2. Read the cached bucket WITHOUT holding the lock across an await.
     //    `Option<BucketId>` is `Copy`, so the guard is dropped at the end
@@ -1123,11 +1144,11 @@ mod tests {
         AuditSinceParams, BucketEventsSinceParams, BucketSummaryParams, BucketWaitParams,
         CommandOutputTailParams, CommandStartParams, CommandStatusParams, CommandStopParams,
         EventContextParams, FileReadWindowParams, FileSearchParams, FileWatchStartParams,
-        FileWatchStopParams, ListLimitParams, ProbeStatusParams, PtyCommandStartParams,
-        PtyCommandStopParams, PtyCommandWriteStdinParams, RegistryActivateParams,
-        RegistryDeactivateParams, RegistryGetParams, RegistryImportPackParams,
-        RegistrySearchParams, RegistryTestParams, RegistryUpsertParams, ShellExecParams,
-        ShellSessionExecParams, ShellSessionStartParams, ShellSessionStatusParams,
+        FileWatchStopParams, FileWriteParams, ListLimitParams, ProbeStatusParams,
+        PtyCommandStartParams, PtyCommandStopParams, PtyCommandWriteStdinParams,
+        RegistryActivateParams, RegistryDeactivateParams, RegistryGetParams,
+        RegistryImportPackParams, RegistrySearchParams, RegistryTestParams, RegistryUpsertParams,
+        ShellExecParams, ShellSessionExecParams, ShellSessionStartParams, ShellSessionStatusParams,
         ShellSessionStopParams, SubscriptionCloseParams, SubscriptionListParams,
         SubscriptionOpenParams, SubscriptionPredicate, SubscriptionPullParams,
         SubscriptionSeekParams, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
@@ -1274,6 +1295,11 @@ mod tests {
                 case_insensitive: None,
                 max_matches: None,
                 max_snippet_bytes: None,
+            }),
+            IpcRequest::FileWrite(FileWriteParams {
+                path: std::path::PathBuf::from("/x"),
+                content: "x".to_owned(),
+                create_dirs: false,
             }),
             IpcRequest::FileWatchStart(FileWatchStartParams {
                 path: std::path::PathBuf::from("/x"),

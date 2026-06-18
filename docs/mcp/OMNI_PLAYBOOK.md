@@ -41,6 +41,17 @@ Need to run or observe something?
 |        -> registry_test  ->  registry_upsert  ->  registry_activate
 |        (suggest NEVER auto-activates; you drive the loop)
 |
++-- Read or write a file (not run a program)?
+|     +-- Read a bounded window / search one file
+|     |     -> file_read_window { path, start_line?, max_lines? }
+|     |     -> file_search { path, query }           (bounded matches + pointers)
+|     +-- Write content to a file
+|           -> file_write { path, content, create_dirs? }
+|              (policy-gated by paths.write_allow; audited BEFORE the write;
+|               bounded size; atomic temp+rename, no torn writes; MUTATING /
+|               non-idempotent -- the client never auto-retries it. read_only_observer
+|               denies it; repo_only confines it to $REPO_ROOT.)
+|
 +-- Run any of the above on a REMOTE host?
 |     -> add target_id=<id> to the tool call  (needs allow_remote; default off;
 |        reached only via an operator-established ssh -L forward, no public TCP)
@@ -195,7 +206,7 @@ run_and_watch argv=[...] rules=[...] target_id="build-box"
 - Honest caveat: federation is proven via a second-local-socket
   simulation; real-SSH transit is not yet exercised in CI (no sshd in
   the smoke env). `target_id` is wired on the command path; it is not
-  yet threaded through all 49 tools.
+  yet threaded through all 50 tools.
 
 ## 7. Privileged system ops: NOT AVAILABLE (plan-only)
 

@@ -330,6 +330,12 @@ pub enum IpcRequest {
     /// Bounded substring/regex search over one file. Returns
     /// structured match pointers + short snippets only.
     FileSearch(FileSearchParams),
+    /// Write UTF-8 content to a single regular file (TC22 A3).
+    /// MUTATING + NON-idempotent: a blind retry would double-write.
+    /// The daemon policy-gates the canonical target against
+    /// `paths.write_allow`, audits BEFORE the write, bounds the content
+    /// size, and writes atomically (temp file + rename).
+    FileWrite(FileWriteParams),
     /// Start a daemon-owned file probe that emits structured signal
     /// events into a bucket as the file is appended to. Never
     /// streams raw file content.
@@ -461,6 +467,13 @@ impl IpcRequest {
             | Self::RegistryActivate(_)
             | Self::RegistryDeactivate(_)
             | Self::RegistryImportPack(_)
+            // File WRITE (TC22 A3): creates or overwrites a file on disk.
+            // A blind retry double-writes (or re-truncates) the target, so
+            // it MUST be non-idempotent -- the BACKLOG P0.1 client self-heal
+            // can never auto-retry a write. Classified MUTATING alongside
+            // command_start / file_watch_start, NOT with the read-only
+            // file_read_window / file_search.
+            | Self::FileWrite(_)
             | Self::FileWatchStart(_)
             | Self::FileWatchStop(_)
             // Mints a fresh sub_id + a registry slot; a blind retry leaks
@@ -575,6 +588,7 @@ pub enum IpcResponse {
     RegistrySuggestFromSamples(RegistrySuggestFromSamplesResponse),
     FileReadWindow(FileReadWindowResponse),
     FileSearch(FileSearchResponse),
+    FileWrite(FileWriteResponse),
     FileWatchStart(FileWatchStartResponse),
     FileWatchStop(FileWatchStopResponse),
     FileWatchList(FileWatchListResponse),
@@ -1498,6 +1512,22 @@ pub const DEFAULT_FILE_SEARCH_SNIPPET_BYTES: usize = 240;
 /// Hard cap on bytes scanned by a single `file_search` call. Protects
 /// the daemon from a request that asks to search a gigabyte file.
 pub const MAX_FILE_SEARCH_SCAN_BYTES: u64 = 16 * 1024 * 1024;
+/// Hard cap on the content size accepted by a single `file_write` call.
+///
+/// (TC22 A3.) Bounds the request the same way the read window / search
+/// scan budgets bound their lanes: a write larger than this is rejected
+/// with [`IpcErrorCode::OversizedRequest`] before any filesystem touch,
+/// so a single tool call can never be coerced into writing an unbounded
+/// blob.
+///
+/// MUST stay comfortably below [`MAX_FRAME_BYTES`] (256 KiB): the content
+/// is carried inline in the request frame as escaped JSON, so the cap is
+/// 192 KiB to leave ~64 KiB headroom for the path, field names, and worst-
+/// case JSON string escaping. This guarantees the dedicated
+/// `OversizedRequest` verdict fires at the handler, rather than a generic
+/// transport `FrameTooLarge`, giving the caller an actionable, lane-specific
+/// error. (Larger files are written as multiple bounded calls.)
+pub const MAX_FILE_WRITE_BYTES: usize = 192 * 1024;
 
 /// `file_read_window` parameters.
 ///
@@ -1583,6 +1613,39 @@ pub struct FileSearchResponse {
     /// Bytes actually scanned (may be lower than file size when the
     /// scan-bytes budget tripped first).
     pub bytes_scanned: u64,
+}
+
+/// `file_write` parameters (TC22 A3).
+///
+/// Writes `content` to `path` as a single UTF-8 regular file. The daemon
+/// canonicalizes the PARENT directory (the target file need not exist
+/// yet), policy-gates the canonical target against `paths.write_allow`,
+/// audits BEFORE the write, bounds `content` to [`MAX_FILE_WRITE_BYTES`],
+/// and writes ATOMICALLY (temp file in the same dir + rename) so a partial
+/// or torn write can never be observed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWriteParams {
+    /// Absolute path to the target file. Absolute is required: the daemon
+    /// has no workspace root, so a relative path is rejected rather than
+    /// resolved against the daemon's working directory.
+    pub path: std::path::PathBuf,
+    /// UTF-8 content to write. Bounded by [`MAX_FILE_WRITE_BYTES`]; an
+    /// oversize payload is rejected before any filesystem touch.
+    pub content: String,
+    /// Create missing parent directories WITHIN an allowed path. The
+    /// parent must still pass policy: `create_dirs` never widens the
+    /// allow-list, it only saves a separate mkdir for a path the policy
+    /// already permits. Defaults to false.
+    #[serde(default)]
+    pub create_dirs: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWriteResponse {
+    /// Canonical path that was written.
+    pub path: std::path::PathBuf,
+    /// Number of content bytes written.
+    pub bytes_written: u64,
 }
 
 /// `file_watch_start` parameters.
@@ -2749,6 +2812,17 @@ mod tests {
                     pack: "p".to_owned(),
                     activate: false,
                     scope: None,
+                }),
+                false,
+            ),
+            (
+                // File WRITE (TC22 A3): MUTATING -- a blind retry double-writes,
+                // so is_idempotent MUST be false. Classified with the other
+                // file-state mutators, NOT with FileReadWindow / FileSearch.
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: "x".into(),
+                    content: "data".to_owned(),
+                    create_dirs: false,
                 }),
                 false,
             ),

@@ -29,7 +29,7 @@ use std::time::Duration;
 use terminal_commander_store::AuditReadRequest;
 use terminal_commanderd::{
     CommandStartParams, CommandStatusParams, DaemonClient, DaemonConfig, DaemonState, IpcErrorCode,
-    IpcRequest, IpcResponse, IpcServer, ShellExecParams,
+    IpcRequest, IpcResponse, IpcServer, ListLimitParams, PolicyProbesSection, ShellExecParams,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -247,6 +247,87 @@ fn command_start_combed_denies_shell_interpreter_and_audits() {
             rows.iter()
                 .any(|r| r.action == "command_rejected" && r.decision == "deny"),
             "runtime must record a deny row for the shell attempt; rows: {rows:?}"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// Build a daemon whose `[policy.probes] deny_kinds` is set, every other knob
+/// at defaults (developer_local). Proves the TC22 A2 probe-kind gate blocks the
+/// REAL `command_start_combed` op -- the highest-stakes lane -- not just
+/// `evaluate()` in isolation.
+fn build_server_with_probe_deny(
+    data: &std::path::Path,
+    deny: &[&str],
+) -> (Arc<DaemonState>, terminal_commanderd::ServerHandle) {
+    let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.probes = Some(PolicyProbesSection {
+        allow_kinds: vec![],
+        deny_kinds: deny.iter().map(|s| (*s).to_owned()).collect(),
+    });
+    let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+    let socket = state.config.socket_path();
+    let handle = IpcServer::new(Arc::clone(&state), socket).spawn().unwrap();
+    (state, handle)
+}
+
+/// TC22 A2 (command lane -- highest stakes): with `deny_kinds = ["command"]`, a
+/// `command_start_combed` of an otherwise-allowed argv is DENIED with the
+/// POLICY.md `probe_kind_denied` substring, maps to `PolicyDenied`, creates NO
+/// probe, and records a `command_rejected` deny row. The gate short-circuits
+/// BEFORE any spawn, so this is cross-platform (no child process runs).
+#[test]
+fn command_start_combed_denied_when_probe_kind_denied() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("probe-kind-deny");
+        let (state, handle) = build_server_with_probe_deny(&data, &["command"]);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::CommandStartCombed(small_start_params(&["true"])),
+            )
+            .await
+            .expect_err("command probe kind is denied");
+        assert_eq!(
+            err.code,
+            IpcErrorCode::PolicyDenied,
+            "probe-kind command deny must map to PolicyDenied, got {:?}: {}",
+            err.code,
+            err.message
+        );
+        assert!(
+            err.message.contains("probe_kind_denied"),
+            "deny must carry the POLICY.md substring; got: {}",
+            err.message
+        );
+
+        // No probe was created: the probe list is empty.
+        let resp = client
+            .call(2, IpcRequest::ProbeList(ListLimitParams { limit: None }))
+            .await
+            .expect("probe list");
+        let list = match resp {
+            IpcResponse::ProbeList(l) => l,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(
+            list.probes.is_empty(),
+            "a denied command_start must create NO probe; got {:?}",
+            list.probes
+        );
+
+        // The deny was audited under the argv lane's command_rejected action.
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.action == "command_rejected" && r.decision == "deny"),
+            "expected a command_rejected deny audit row; rows: {rows:?}"
         );
 
         handle.shutdown().await;

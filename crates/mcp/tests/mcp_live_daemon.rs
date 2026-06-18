@@ -111,6 +111,7 @@ async fn live_health_roundtrip_through_uds() {
                 "file_watch_list".to_owned(),
                 "file_watch_start".to_owned(),
                 "file_watch_stop".to_owned(),
+                "file_write".to_owned(),
                 "health".to_owned(),
                 "policy_status".to_owned(),
                 "probe_list".to_owned(),
@@ -221,8 +222,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             .filter(|t| t["status"].as_str() == Some("live"))
             .count();
         assert_eq!(
-            live_count, 49,
-            "tool catalogue must list exactly 49 live tools (47 + P5 target_list + target_probe)"
+            live_count, 50,
+            "tool catalogue must list exactly 50 live tools (49 + TC22 A3 file_write)"
         );
 
         // US6/T056 (FR-023): the payload carries the read-only omni capability

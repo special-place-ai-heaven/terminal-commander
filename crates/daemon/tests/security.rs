@@ -78,6 +78,67 @@ fn sensitive_path_default_deny_paths_all_variants() {
 }
 
 #[test]
+fn paths_read_allow_enforced_via_public_api() {
+    // TC22 A1: a configured read_allow denies an off-list FileRead with
+    // reason no_allow_rule, and allows an on-list one. Exercised through the
+    // public `with_paths` builder (the surface the daemon bootstrap uses).
+    let e = PolicyEngine::new(PolicyProfile::DeveloperLocal).with_paths(
+        &["/home/me/projects/**".to_owned()],
+        &[],
+        &[],
+        &[],
+    );
+    let hit = PathBuf::from("/home/me/projects/app/src/lib.rs");
+    assert_eq!(
+        e.evaluate(&PolicyAction::FileRead { path: &hit }).decision,
+        PolicyDecision::Allow
+    );
+    let miss = PathBuf::from("/etc/hosts");
+    let v = e.evaluate(&PolicyAction::FileRead { path: &miss });
+    assert_eq!(v.decision, PolicyDecision::Deny);
+    assert!(
+        v.reason.contains("no_allow_rule"),
+        "off-allow-list read must carry no_allow_rule: {}",
+        v.reason
+    );
+}
+
+#[test]
+fn paths_deny_extra_beats_allow_via_public_api() {
+    // TC22 A1: deny_extra is a hard deny that beats the allow-list.
+    let e = PolicyEngine::new(PolicyProfile::DeveloperLocal).with_paths(
+        &["/home/me/projects/**".to_owned()],
+        &[],
+        &[],
+        &["/home/me/projects/**/target/**".to_owned()],
+    );
+    let denied = PathBuf::from("/home/me/projects/app/target/debug/secret");
+    let v = e.evaluate(&PolicyAction::FileRead { path: &denied });
+    assert_eq!(v.decision, PolicyDecision::Deny);
+    assert!(
+        v.reason.contains("default_deny_match"),
+        "deny_extra must carry default_deny_match: {}",
+        v.reason
+    );
+}
+
+#[test]
+fn paths_empty_lists_preserve_zero_config_allow_via_public_api() {
+    // Regression: unconfigured path lists do not enforce; zero-config reads
+    // and watches still pass.
+    let e = PolicyEngine::new(PolicyProfile::DeveloperLocal).with_paths(&[], &[], &[], &[]);
+    let p = PathBuf::from("/some/ordinary/file.rs");
+    assert_eq!(
+        e.evaluate(&PolicyAction::FileRead { path: &p }).decision,
+        PolicyDecision::Allow
+    );
+    assert_eq!(
+        e.evaluate(&PolicyAction::FileWatch { path: &p }).decision,
+        PolicyDecision::Allow
+    );
+}
+
+#[test]
 fn read_only_observer_denies_every_mutation() {
     let e = PolicyEngine::new(PolicyProfile::ReadOnlyObserver);
     let argv = vec!["cargo".to_owned()];

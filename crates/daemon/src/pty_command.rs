@@ -310,6 +310,23 @@ mod runtime {
                 return Err(PtyRuntimeError::PolicyDenied(verdict.reason));
             }
 
+            // Probe-kind gate (TC22 A2; POLICY.md section 6 steps 2c / 2e).
+            // SECONDARY deny-first filter layered on top of the CommandStart
+            // gate above: this op creates a Pty probe, so it is gated as "pty".
+            let probe_verdict = self
+                .policy
+                .evaluate(&PolicyAction::ProbeCreate { kind: "pty" });
+            if probe_verdict.decision == PolicyDecision::Deny {
+                self.audit(
+                    "pty_command_start",
+                    &req.argv[0],
+                    "deny",
+                    Some(probe_verdict.reason.clone()),
+                    None,
+                );
+                return Err(PtyRuntimeError::PolicyDenied(probe_verdict.reason));
+            }
+
             self.spawn_pty_job(req, "pty_command_start")
         }
 
@@ -357,6 +374,24 @@ mod runtime {
                     None,
                 );
                 return Err(PtyRuntimeError::PolicyDenied(verdict.reason));
+            }
+
+            // Probe-kind gate (TC22 A2; POLICY.md section 6 steps 2c / 2e).
+            // SECONDARY deny-first filter on top of the SessionStart gate above.
+            // A session shell is recorded as a Pty probe, so it is gated as
+            // "pty" (the same kind as the one-shot pty_command_start lane).
+            let probe_verdict = self
+                .policy
+                .evaluate(&PolicyAction::ProbeCreate { kind: "pty" });
+            if probe_verdict.decision == PolicyDecision::Deny {
+                self.audit(
+                    "shell_session_start",
+                    &shell,
+                    "deny",
+                    Some(probe_verdict.reason.clone()),
+                    None,
+                );
+                return Err(PtyRuntimeError::PolicyDenied(probe_verdict.reason));
             }
 
             self.spawn_pty_job(req, "shell_session_start")

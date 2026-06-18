@@ -429,8 +429,9 @@ MVP deliberately deferred).
 The product identity is now **omni**: an LLM agent should never need a
 separate raw terminal tool. The MVP signal-combing core (sections 1-13)
 is unchanged; the omni program added stateful, interactive, parsing, and
-federation lanes on top of it. The live MCP surface is **49 tools** (up
-from the MVP/runtime-chain count); the rule-pack set is **25 packs** (up
+federation lanes on top of it. The live MCP surface is **50 tools** (up
+from the MVP/runtime-chain count; TC22 A3 added the policy-gated
+filesystem-write tool `file_write`); the rule-pack set is **25 packs** (up
 from the section-10 seed of six). The authoritative tool list and pack
 list live in `README.md` and `docs/mcp/TOOL_CONTROL_SURFACE.md`; the
 agent lane-selection map is `docs/mcp/OMNI_PLAYBOOK.md`.
@@ -446,7 +447,7 @@ the original boundary:
   operator-established `ssh -L` forward to the remote daemon's LOCAL
   socket -- there is still NO public TCP listener, and the adapter never
   spawns ssh. Gated by `allow_remote` (default deny). `target_id` is
-  wired on the command path; it is not yet threaded through all 49
+  wired on the command path; it is not yet threaded through all 50
   tools. Proven via a second-local-socket simulation; real-SSH transit
   is not yet exercised in CI (no sshd in the smoke env).
 - **macOS support beyond build artifacts** (was tier-3, section 3): now

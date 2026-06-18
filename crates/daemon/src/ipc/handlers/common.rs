@@ -226,6 +226,156 @@ pub(in crate::ipc::server) fn resolve_and_authorize_file(
     Ok(canonical)
 }
 
+/// Resolve a client-supplied WRITE target to a canonical, policy-authorized
+/// path (TC22 A3). Unlike [`resolve_and_authorize_file`], the target file
+/// MAY NOT EXIST yet, so `std::fs::canonicalize` on the target itself would
+/// wrongly return `FileNotFound`. Instead we canonicalize the PARENT
+/// directory (resolving every symlink in it) and append the target's
+/// file name, forming a canonical target whose parent is the real on-disk
+/// directory. We then policy-gate THAT canonical target.
+///
+/// `create_dirs` lets the caller create missing parent directories, but only
+/// WITHIN an allowed path: the parent the write lands in must still pass the
+/// `FileWrite` policy gate. We therefore (1) compute the canonical parent
+/// (creating it under policy when `create_dirs`), (2) build the canonical
+/// target, and (3) gate the canonical target. `create_dirs` never widens the
+/// allow-list -- it only saves a separate mkdir for a path policy permits.
+///
+/// SECURITY mirror of the read path:
+///  - ABSOLUTE-ONLY: a relative path is rejected (the daemon has no workspace
+///    root) before any filesystem touch.
+///  - NO `..`: a target containing any `..` (parent-dir) component is rejected
+///    UP FRONT, before the policy gate / `create_dir_all` / `canonicalize`. A
+///    write target never needs `..`, and rejecting it early prevents
+///    `create_dir_all` from building directories outside the allow-list before
+///    the canonical gate would deny (the create-then-deny asymmetry).
+///  - SYMLINK-SAFE: canonicalizing the parent resolves a symlinked directory
+///    to its real target, so a write through `/tmp/link -> ~/.ssh` is gated on
+///    `~/.ssh/...`, not the innocuous link name. The default-deny suffix check
+///    + `write_allow` then run on the real canonical target.
+///  - NO TOCTOU widening: the returned path is the SAME canonical path the
+///    caller then writes, so there is no re-resolution between gate and write.
+pub(in crate::ipc::server) fn resolve_and_authorize_file_write(
+    state: &Arc<DaemonState>,
+    path: &std::path::Path,
+    create_dirs: bool,
+) -> Result<std::path::PathBuf, IpcError> {
+    // (1) Absolute-only: the daemon has no workspace root.
+    if !path.is_absolute() {
+        return Err(IpcError::new(
+            IpcErrorCode::PathDenied,
+            format!(
+                "path '{}' must be absolute (e.g. /home/u/project/out.txt); \
+                 the daemon has no workspace root and would otherwise resolve \
+                 it against its own working directory",
+                path.display()
+            ),
+        ));
+    }
+
+    // (1b) SECURITY: reject any `..` (parent-dir) component UP FRONT, before the
+    // step-3 policy gate, `create_dir_all`, or `canonicalize`. A write target
+    // never legitimately needs `..`. Without this guard the step-3 gate sees the
+    // RAW parent (still carrying literal `..`); the policy engine collapses `..`
+    // lexically before matching and may DENY, but `create_dir_all` honors the raw
+    // `..` and builds directories OUTSIDE the allow-list before the final
+    // canonical gate runs -- a create-then-deny asymmetry that leaves an
+    // out-of-allow-list directory artifact on disk. Rejecting `..` here removes
+    // that asymmetry on EVERY platform. The canonical-form final gate (step 5)
+    // stays intact as defense in depth.
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(IpcError::new(
+            IpcErrorCode::PathDenied,
+            format!(
+                "path '{}' contains '..' (parent-dir traversal not permitted for writes)",
+                path.display()
+            ),
+        ));
+    }
+
+    // (2) Split off the file name; the parent is what we canonicalize.
+    let file_name = path.file_name().ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::PathDenied,
+            format!(
+                "path '{}' has no file name component; file_write needs a target file path",
+                path.display()
+            ),
+        )
+    })?;
+    let parent = path.parent().ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::PathDenied,
+            format!("path '{}' has no parent directory", path.display()),
+        )
+    })?;
+
+    // (3) Optionally create the parent BEFORE canonicalize so a fresh tree is
+    // writable -- but gate it FIRST so create_dirs never builds a directory
+    // outside an allowed path. We gate the requested parent (canonicalized
+    // tolerant of non-existence via the policy engine's own
+    // `canonicalize_lexical`) then create it, then canonicalize the real dir.
+    if create_dirs && !parent.exists() {
+        // Gate the parent-as-target so a mkdir cannot escape the allow-list.
+        // `..` has already been rejected in step 1b, so `parent` here is free of
+        // parent-dir components and `create_dir_all` cannot climb outside the
+        // gated tree. The engine still canonicalizes lexically before matching
+        // (defense in depth), so a future change cannot silently reintroduce a
+        // traversal escape past this gate.
+        let verdict = state
+            .policy
+            .evaluate(&crate::policy::PolicyAction::FileWrite { path: parent });
+        if verdict.decision == crate::policy::PolicyDecision::Deny {
+            return Err(IpcError::new(IpcErrorCode::PathDenied, verdict.reason));
+        }
+        std::fs::create_dir_all(parent).map_err(|e| {
+            IpcError::new(
+                IpcErrorCode::Internal,
+                format!("create_dirs '{}': {e}", parent.display()),
+            )
+        })?;
+    }
+
+    // (4) Canonicalize the parent (now guaranteed to exist if create_dirs was
+    // set). A missing parent without create_dirs is an honest FileNotFound.
+    let canonical_parent = std::fs::canonicalize(parent).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => IpcError::new(
+            IpcErrorCode::FileNotFound,
+            format!(
+                "parent directory '{}' does not exist (pass create_dirs to create it within an allowed path)",
+                parent.display()
+            ),
+        ),
+        _ => IpcError::new(
+            IpcErrorCode::Internal,
+            format!("resolve parent '{}': {e}", parent.display()),
+        ),
+    })?;
+    if !canonical_parent.is_dir() {
+        return Err(IpcError::new(
+            IpcErrorCode::PathDenied,
+            format!("parent '{}' is not a directory", canonical_parent.display()),
+        ));
+    }
+
+    // (5) Build the canonical target and gate IT. A symlinked parent is now
+    // resolved, so the gate sees the real target tree.
+    let canonical_target = canonical_parent.join(file_name);
+    let verdict = state
+        .policy
+        .evaluate(&crate::policy::PolicyAction::FileWrite {
+            path: &canonical_target,
+        });
+    if verdict.decision == crate::policy::PolicyDecision::Deny {
+        return Err(IpcError::new(IpcErrorCode::PathDenied, verdict.reason));
+    }
+
+    Ok(canonical_target)
+}
+
 pub(in crate::ipc::server) fn require_regular_file(
     path: &std::path::Path,
 ) -> Result<std::fs::Metadata, IpcError> {
@@ -438,5 +588,54 @@ mod tests {
     fn io_error_still_maps_to_internal() {
         let err = map_command_error(CommandError::Io(std::io::Error::other("disk gone")));
         assert_eq!(err.code, IpcErrorCode::Internal);
+    }
+
+    /// FIX 1 (Medium finding, cross-platform): a `..` write target is rejected
+    /// up front with a teaching `PathDenied`, BEFORE any `create_dir_all` or
+    /// canonicalize. We prove the placement directly: with `create_dirs: true`
+    /// the would-be-escaped sibling directory does NOT exist after the call, so
+    /// no out-of-allow-list directory artifact was created (the create-then-deny
+    /// asymmetry is closed). Covers both `create_dirs` values.
+    #[test]
+    fn dotdot_write_target_rejected_before_any_filesystem_touch() {
+        let data = unique_data_dir("dotdot");
+        std::fs::create_dir_all(&data).expect("data dir");
+        let state = state_for(&data);
+
+        // Absolute target whose `..` would climb out of `data/inner` into a
+        // SIBLING `data/escaped` directory.
+        let escaped_dir = data.join("escaped");
+        let dotdot_target = data
+            .join("inner")
+            .join("..")
+            .join("escaped")
+            .join("out.txt");
+        assert!(dotdot_target.is_absolute(), "target must be absolute");
+        assert!(
+            !escaped_dir.exists(),
+            "precondition: escaped sibling dir must not pre-exist"
+        );
+
+        for create_dirs in [true, false] {
+            let err = resolve_and_authorize_file_write(&state, &dotdot_target, create_dirs)
+                .expect_err("`..` write target must be rejected");
+            assert_eq!(
+                err.code,
+                IpcErrorCode::PathDenied,
+                "create_dirs={create_dirs}"
+            );
+            assert!(
+                err.message.contains(".."),
+                "teaching `..` reason expected (create_dirs={create_dirs}): {}",
+                err.message
+            );
+            // The reject precedes create_dir_all: no escaped artifact exists.
+            assert!(
+                !escaped_dir.exists(),
+                "no out-of-allow-list directory artifact (create_dirs={create_dirs})"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&data);
     }
 }

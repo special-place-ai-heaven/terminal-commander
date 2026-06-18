@@ -85,6 +85,7 @@ async fn initialize_and_list_tools_returns_full_live_set() {
             "file_watch_list".to_owned(),
             "file_watch_start".to_owned(),
             "file_watch_stop".to_owned(),
+            "file_write".to_owned(),
             "health".to_owned(),
             "policy_status".to_owned(),
             "probe_list".to_owned(),

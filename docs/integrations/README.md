@@ -51,7 +51,7 @@ requires actually running the provider against one of the configs
 above and observing tool calls in the session transcript.
 
 The rest of this page is the older provider-neutral baseline kept for historical
-context; the modern surface advertises 49 tools and the per-provider
+context; the modern surface advertises 50 tools and the per-provider
 walk-throughs above are the authoritative source.
 
 Language: ASCII only.

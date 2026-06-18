@@ -44,6 +44,11 @@ thiserror = "2.0.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
+# Already a production dependency of sibling workspace crates (core, sifters,
+# store) and present in Cargo.lock; declared here so the policy engine can
+# compile profile path-globs to anchored regexes once at construction. Adds
+# no new crate to the build graph.
+regex = "1.12.3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -81,5 +86,4 @@ doc_lazy_continuation = "allow"
 significant_drop_tightening = "allow"
 
 [dev-dependencies]
-regex = "1.12.3"
 tempfile = "3"

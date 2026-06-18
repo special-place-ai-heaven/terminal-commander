@@ -174,6 +174,9 @@ fn minimal_tool_args(tool: &str) -> serde_json::Value {
             serde_json::json!({ "path": "/tmp/tc-unavail" })
         }
         "file_search" => serde_json::json!({ "path": "/tmp/tc-unavail", "query": "q" }),
+        // file_write requires path + content (no defaults); supply both so the
+        // daemon-unavailable guard -- not a schema error -- is the path tested.
+        "file_write" => serde_json::json!({ "path": "/tmp/tc-unavail", "content": "x" }),
         "file_watch_stop" => serde_json::json!({ "watch_id": "job_x" }),
         "probe_status" => serde_json::json!({ "probe_id": "prb_x" }),
         // target_probe requires target_id (no default); supply one so the
@@ -238,8 +241,8 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
         "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
     assert_eq!(
-        checked, 47,
-        "expected 47 daemon-backed tools (49 catalogue entries minus system_discover and target_list)"
+        checked, 48,
+        "expected 48 daemon-backed tools (50 catalogue entries minus system_discover and target_list)"
     );
 
     let _ = client.cancel().await;

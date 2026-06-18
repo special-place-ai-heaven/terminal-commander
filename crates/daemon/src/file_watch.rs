@@ -233,6 +233,19 @@ impl WatchRuntime {
     /// spawns a `FileProbe` in follow mode, audits the start, and
     /// returns the bounded triple. Must be called from a tokio runtime
     /// because the probe spawn is async.
+    ///
+    /// TOCTOU: `path` is the CANONICAL, already-authorized target produced
+    /// by `resolve_and_authorize_file` in the only caller
+    /// (`handle_file_watch_start`). Every step below -- the policy check, the
+    /// `metadata` existence stat, the `BucketSource` record, and the
+    /// `FileProbeConfig` -- reuses THIS exact `PathBuf` and never re-resolves
+    /// by name, so the probe follows the same target policy authorized (no
+    /// re-canonicalization window between check and use).
+    // Linear gate (path policy -> probe-kind gate -> existence -> allocate ->
+    // spawn). The two security gates run deny-first up front and the rest is a
+    // straight allocation sequence; splitting it would scatter the deny-first
+    // logic the same way it would for `PolicyEngine::evaluate`.
+    #[allow(clippy::too_many_lines)]
     pub fn start(
         &self,
         path: PathBuf,
@@ -255,6 +268,26 @@ impl WatchRuntime {
                 None,
             );
             return Err(WatchError::PolicyDenied(verdict.reason));
+        }
+        // Probe-kind gate (TC22 A2; POLICY.md section 6 steps 2c / 2e).
+        // SECONDARY deny-first filter layered ON TOP of the FileWatch path gate
+        // above: file_watch_start creates a FileWatch probe, so it is gated as
+        // "file_watch". Placed here -- BEFORE any bucket/probe/job allocation --
+        // so a denied kind creates NO probe, and audited with the SAME
+        // `file_watch_start` deny row pattern the path gate uses (constitution
+        // Principle V: the probe-kind reason is recorded).
+        let probe_verdict = self
+            .policy
+            .evaluate(&PolicyAction::ProbeCreate { kind: "file_watch" });
+        if probe_verdict.decision == PolicyDecision::Deny {
+            self.audit(
+                "file_watch_start",
+                &path.display().to_string(),
+                "deny",
+                Some(probe_verdict.reason.clone()),
+                None,
+            );
+            return Err(WatchError::PolicyDenied(probe_verdict.reason));
         }
         // Existence check: the polling backend tolerates create-later
         // semantics, but TC43 deliberately requires the file to exist

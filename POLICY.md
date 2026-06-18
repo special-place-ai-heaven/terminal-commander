@@ -398,8 +398,13 @@ shell_passthrough = false   # the argv command lane NEVER invokes a
 require_argv_quoting = true # MCP argv lists, not joined strings
 
 [probes]
-allow_kinds = ["process", "terminal", "pty", "file", "directory"]
-deny_kinds  = ["journal"]   # MVP: journal probe deferred
+# Closed kind set {command, file_watch, pty} (the ProbeKind snake_case wire
+# tags), matched case-sensitively. EMPTY allow_kinds == "not configured" ==
+# allow any kind (zero-config usable); a non-empty list is authoritative (a
+# kind not listed is denied, no_allow_rule). deny_kinds is a hard deny that
+# beats allow (probe_kind_denied). Enforced at probe creation (TC22 A2).
+allow_kinds = []          # allow all three kinds (zero-config posture)
+deny_kinds  = ["pty"]     # ...but forbid interactive PTY probes in this profile
 
 [limits]
 max_jobs                   = 16
@@ -425,6 +430,53 @@ llm_can_delete   = false
 The exact schema (field names, defaults, validation) lands in TC22.
 This block is informative for TC03 fixture design and TC23/TC24 MCP
 test coverage.
+
+**Path allow/deny posture (SHIPPED, TC22 A1).** `read_allow`,
+`watch_allow`, and `deny_extra` are OPT-IN, matching the
+`commands.allow_roots` posture: an EMPTY list is unconfigured = ALLOW
+(the structural default-deny layers still run), and a NON-EMPTY list is
+authoritative (a miss is denied, `no_allow_rule`). See the decision
+algorithm in section 6 step 2e.
+
+**Probe-kind posture (SHIPPED, TC22 A2).** `[probes]` `allow_kinds` /
+`deny_kinds` are ENFORCED at probe creation. There is NO standalone
+probe_create operation; instead the THREE real probe-creating ops layer a
+deny-first probe-kind filter on top of their own primary gate:
+`command_start_combed` -> kind `command`, `pty_command_start` /
+`shell_session_start` -> kind `pty`, `file_watch_start` -> kind
+`file_watch`. Kinds are CASE-SENSITIVE snake_case drawn from the CLOSED set
+`{command, file_watch, pty}` (the `ProbeKind` wire tags); any other string
+never matches a real probe and is logged as a likely operator typo at
+startup. DENY BEATS ALLOW: a kind in `deny_kinds` is denied
+(`probe_kind_denied`) even if it is also in `allow_kinds`. An EMPTY
+`allow_kinds` means "not configured = ALLOW" (zero-config stays usable),
+and a NON-EMPTY `allow_kinds` is authoritative (a kind not listed is denied,
+`no_allow_rule`) -- mirroring the path allow-list posture above. The filter
+is a TIGHTENING layer only: it can deny a probe its primary op gate would
+have allowed, but it never widens. See section 6 steps 2c / 2e.
+
+**OPERATOR WARNING -- zero-config write posture (TC22 A3).** `write_allow`
+follows the same OPT-IN posture as the read/watch lists, and that has a
+sharp edge for WRITES. With the DEFAULT config (profile `developer_local`,
+no `repo_root`, EMPTY `write_allow`), the `file_write` tool can write
+ANYWHERE on disk EXCEPT the default-deny sensitive-suffix list -- there is
+no path containment at all. `..` (parent-dir) targets are rejected up front
+for writes, and the default-deny suffix list still runs, but neither
+confines the write to a project tree. This is acceptable for a single local
+developer on their own machine. In ANY shared, multi-user, or agent-facing
+deployment, an operator who enables the write lane MUST set a non-empty
+`write_allow` (or run the `repo_only` profile with a `repo_root`) to confine
+writes; leaving `write_allow` empty there is an open write surface.
+
+**Operator notes on path globs.**
+- Globs are CASE-SENSITIVE (`/Home/**` does not match `/home/...`).
+- `**` matches any run of characters INCLUDING `/` (cross-segment);
+  a single `*` matches within ONE segment (stops at `/`); `?` matches
+  one non-separator character. Write `**` AFTER a `/` separator
+  (`/home/me/projects/**`, not `/home/me/projects**`) so it expands a
+  whole subtree rather than gluing onto a partial path component.
+- Subjects are matched in CANONICAL form, so author globs against the
+  real on-disk path (symlinks resolved, `..` collapsed).
 
 ## 5. Default-deny override mechanism
 
@@ -467,8 +519,24 @@ Given request `(actor, action, subject, profile)`:
       -> deny ("probe_kind_denied").
    d. If action is registry_activate and llm_can_activate is false
       and actor is mcp -> deny ("registry_activate_requires_admin").
-   e. Else evaluate allow lists; if no match -> deny
-      ("no_allow_rule").
+   e. Evaluate the per-action path allow list (`paths.read_allow` for
+      file_read, `paths.watch_allow` for file_watch). The list is
+      OPT-IN, with the SAME posture as the command allow-list
+      (`commands.allow_roots`, section 4.2):
+        - an EMPTY / unconfigured list is "not enforced" -> ALLOW
+          (zero-config stays usable; the structural layers in 2a above
+          still apply);
+        - a NON-EMPTY list is AUTHORITATIVE -> a subject that matches
+          no glob is denied ("no_allow_rule").
+      The structural default-deny layers run REGARDLESS of the allow
+      list: the default-deny sensitive-suffix check and `paths.deny_extra`
+      (both step 2a), `commands.deny` (2b), and -- for `repo_only` --
+      $REPO_ROOT containment, are evaluated whether or not an allow list
+      is configured, and DENY beats ALLOW. The allow list is a TIGHTENING
+      layer (it can only narrow), never a widening one.
+      SECURITY: file_read / file_watch subjects are matched in CANONICAL
+      form (`..` / `.` collapsed) before any allow / deny glob runs, so a
+      `..` prefix cannot lexically satisfy an allow glob.
 3. If decision is allow, check limits (jobs, rates, sizes); if
    exceeded -> deny ("limit_exceeded").
 4. Emit audit record BEFORE executing the gated action.

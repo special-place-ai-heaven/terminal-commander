@@ -202,6 +202,20 @@ impl DaemonState {
         let sifter =
             Arc::new(SifterRuntime::build(&[]).map_err(|e| BootstrapError::Sifter(e.to_string()))?);
 
+        // TC22: thread the `[policy.paths]` allow/deny globs through the
+        // engine so FileRead / FileWatch / FileWrite enforce read_allow /
+        // watch_allow / write_allow / deny_extra (POLICY.md section 5).
+        // Absent block == unconfigured == not enforced (zero-config file
+        // reads stay usable). The globs are compiled once here, off the
+        // evaluate hot path.
+        let paths = config.policy.paths.clone().unwrap_or_default();
+        // TC22 A2: thread the `[policy.probes]` allow/deny KIND lists through the
+        // engine so the three probe-creating ops (command_start_combed,
+        // pty_command_start / shell_session_start, file_watch_start) enforce a
+        // deny-first probe-kind filter via PolicyAction::ProbeCreate (POLICY.md
+        // section 6 steps 2c / 2e). Absent block == unconfigured == not enforced
+        // (zero-config probe creation stays usable), same posture as the paths.
+        let probes = config.policy.probes.clone().unwrap_or_default();
         let policy = PolicyEngine::with_config_caps(
             config.policy.profile,
             config.policy.repo_root.clone(),
@@ -211,7 +225,14 @@ impl DaemonState {
                 .as_ref()
                 .map(|c| c.allow_roots.clone()),
             config.resolved_caps(),
-        );
+        )
+        .with_paths(
+            &paths.read_allow,
+            &paths.watch_allow,
+            &paths.write_allow,
+            &paths.deny_extra,
+        )
+        .with_probe_kinds(&probes.allow_kinds, &probes.deny_kinds);
 
         // Restore active rule definitions from the persistent
         // registry. The in-memory ActivationRegistry is the runtime

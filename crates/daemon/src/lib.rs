@@ -41,9 +41,9 @@ pub use command::{
     DEFAULT_COMMAND_SEVERITY_MIN, MAX_ARGV_ITEM_BYTES, MAX_ARGV_ITEMS, SHELL_INTERPRETERS_DENY,
 };
 pub use config::{
-    ConfigError, DaemonConfig, DaemonSection, LimitsSection, PolicyCapsSection, PolicySection,
-    RemoteTarget, RemoteTransport, RetentionSection, RuntimeMode, ShellSessionSection,
-    TargetsConfig, default_targets_config_path, load_targets,
+    ConfigError, DaemonConfig, DaemonSection, LimitsSection, PolicyCapsSection, PolicyPathsSection,
+    PolicyProbesSection, PolicySection, RemoteTarget, RemoteTransport, RetentionSection,
+    RuntimeMode, ShellSessionSection, TargetsConfig, default_targets_config_path, load_targets,
 };
 pub use file_watch::{LiveWatchIdentity, WatchError, WatchRebindReport, WatchRuntime};
 pub use ipc::{
@@ -57,11 +57,12 @@ pub use ipc::{
     EventContextResponse, FileLine, FileReadWindowParams, FileReadWindowResponse, FileSearchMatch,
     FileSearchParams, FileSearchResponse, FileWatchListEntry, FileWatchListResponse,
     FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse,
-    IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, ListLimitParams,
-    Liveness, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS, MAX_BUCKETS_PER_SUBSCRIPTION,
-    MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_GRACE_MS, MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES,
-    MAX_CONTEXT_FRAMES, MAX_FILE_READ_BYTES, MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES,
-    MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FRAME_BYTES, MAX_LIST_LIMIT,
+    FileWriteParams, FileWriteResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest,
+    IpcResponse, IpcResult, ListLimitParams, Liveness, MAX_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS,
+    MAX_BUCKETS_PER_SUBSCRIPTION, MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_GRACE_MS,
+    MAX_COMMAND_INLINE_RULES, MAX_CONTEXT_BYTES, MAX_CONTEXT_FRAMES, MAX_FILE_READ_BYTES,
+    MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES, MAX_FILE_SEARCH_SCAN_BYTES,
+    MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FILE_WRITE_BYTES, MAX_FRAME_BYTES, MAX_LIST_LIMIT,
     MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES, MAX_PULL_EVENTS, MAX_PULL_TIMEOUT_MS,
     MAX_REGISTRY_SEARCH_LIMIT, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
     MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_SESSION_ENV_ITEMS, MAX_SESSION_LINE_BYTES,

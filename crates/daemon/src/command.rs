@@ -789,6 +789,38 @@ impl CommandRuntime {
             );
         }
 
+        // Probe-kind gate (TC22 A2; POLICY.md section 6 steps 2c / 2e).
+        // SECONDARY deny-first filter layered ON TOP of the primary lane gate
+        // above: both lanes (Argv and Shell) create a Command probe, so a
+        // single `ProbeCreate { kind: "command" }` check after the lane-select
+        // covers both. It can only NARROW -- if `[policy.probes]` denies the
+        // `command` kind, the start is rejected even though the primary gate
+        // allowed it. On deny we emit the SAME lane-aware deny audit row the
+        // primary gate uses (`command_rejected` / `command_shell_rejected`)
+        // with the probe-kind reason, then return the same `PolicyDenied`.
+        let probe_verdict = self
+            .policy
+            .evaluate(&PolicyAction::ProbeCreate { kind: "command" });
+        if probe_verdict.decision == PolicyDecision::Deny {
+            match mode {
+                StartLane::Argv => self.audit(
+                    "command_rejected",
+                    &subject_for_argv(&req.argv),
+                    "deny",
+                    Some(probe_verdict.reason.clone()),
+                    Some(format_argv_metadata(&req.argv)),
+                ),
+                StartLane::Shell { shell_line, .. } => self.audit(
+                    "command_shell_rejected",
+                    &redact_shell_line(shell_line),
+                    "deny",
+                    Some(probe_verdict.reason.clone()),
+                    Some(format_shell_argv_metadata(&req.argv, shell_line)),
+                ),
+            }
+            return Err(CommandError::PolicyDenied(probe_verdict.reason));
+        }
+
         // Allocate identifiers. These are pure value allocations (no
         // backing resource), so generating them before any side effect
         // is free and lets the scope snapshot + rule compile run first.

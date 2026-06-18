@@ -245,7 +245,7 @@ flowchart LR
   end
 
   subgraph mcp["terminal-commander-mcp"]
-    Stdio["rmcp stdio server\n49 live tools\n1:1 facade over IPC"]
+    Stdio["rmcp stdio server\n50 live tools\n1:1 facade over IPC"]
   end
 
   subgraph sup["terminal-commander-supervisor (shared lib)"]
@@ -379,7 +379,7 @@ Agent rules:
 
 ## MCP Tool Surface
 
-`system_discover` advertises the live tool catalogue: **49 live tools**,
+`system_discover` advertises the live tool catalogue: **50 live tools**,
 grouped by workflow. All daemon-backed tools return a structured
 `daemon_unavailable` error when the daemon is down instead of leaking raw
 pipe/socket errors, and `system_discover` itself remains callable to explain
@@ -393,15 +393,15 @@ It also carries an honest `omni_status` capability matrix (see below).
 | Buckets and context | `bucket_wait`, `bucket_events_since`, `bucket_summary`, `event_context` |
 | Subscriptions | `subscription_open`, `subscription_pull`, `subscription_list`, `subscription_close`, `subscription_seek` |
 | Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_import_pack`, `registry_deactivate`, `registry_list_active`, `registry_suggest_from_samples` |
-| Files | `file_read_window`, `file_search`, `file_watch_start`, `file_watch_stop`, `file_watch_list` |
+| Files | `file_read_window`, `file_search`, `file_write`, `file_watch_start`, `file_watch_stop`, `file_watch_list` |
 | PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` |
 | Shell sessions | `shell_session_start`, `shell_session_exec`, `shell_session_status`, `shell_session_stop`, `shell_session_list` |
 | Workspace snapshots | `workspace_snapshot_create`, `workspace_snapshot_apply` |
 | Remote targets | `target_list`, `target_probe` |
 | Runtime | `runtime_state`, `probe_status`, `probe_list` |
 
-That is 49 tools: discovery/health (4), commands (6), buckets/context (4),
-subscriptions (5), registry (9), files (5), PTY (4), shell sessions (5),
+That is 50 tools: discovery/health (4), commands (6), buckets/context (4),
+subscriptions (5), registry (9), files (6), PTY (4), shell sessions (5),
 workspace snapshots (2), remote targets (2), runtime (3).
 
 Full contract: [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).

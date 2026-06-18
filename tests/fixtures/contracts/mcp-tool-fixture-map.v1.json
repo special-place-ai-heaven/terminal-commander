@@ -43,6 +43,7 @@
     "registry_suggest_from_samples": "ensure_daemon_status_v1",
     "file_read_window": "ensure_daemon_status_v1",
     "file_search": "ensure_daemon_status_v1",
+    "file_write": "ensure_daemon_status_v1",
     "file_watch_start": "ensure_daemon_status_v1",
     "file_watch_stop": "ensure_daemon_status_v1",
     "file_watch_list": "ensure_daemon_status_v1",
@@ -195,6 +196,11 @@
       "status": "covered_live"
     },
     {
+      "name": "file_write",
+      "fixture": "mcp-tools/file_write.v1.json",
+      "status": "covered_live"
+    },
+    {
       "name": "file_watch_start",
       "fixture": "mcp-tools/file_watch_start.v1.json",
       "status": "covered_live"
@@ -317,8 +323,8 @@
   ],
   "obsolete_fixtures": [],
   "counts": {
-    "live_tools": 49,
-    "covered_live": 49,
+    "live_tools": 50,
+    "covered_live": 50,
     "placeholder_for_live_tool": 0,
     "missing_fixture": 0,
     "obsolete_fixture_present": 0

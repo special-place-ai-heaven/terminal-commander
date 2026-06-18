@@ -328,3 +328,105 @@ async fn file_read_window_denies_sensitive_path_through_mcp() {
     handle.shutdown().await;
     cleanup(&data);
 }
+
+/// TC22 A3 end-to-end through the real rmcp stdio adapter: file_write creates
+/// a file with the exact content (response reports the canonical path + byte
+/// count), and file_read_window reads the same bytes back. Proves the full
+/// MCP -> daemon -> filesystem write path works through the production surface.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_write_then_read_back_through_mcp() {
+    let data = tmp_data_dir("write");
+    let handle = spawn_live_daemon(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        let target = data.join("nested/out.txt");
+        let content = "first line\nsecond line\n";
+
+        // Write through the MCP tool (create_dirs builds the nested parent).
+        let payload = first_text(
+            &call_tool(
+                &client,
+                "file_write",
+                serde_json::json!({
+                    "path": target.to_string_lossy(),
+                    "content": content,
+                    "create_dirs": true,
+                }),
+            )
+            .await,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("write json");
+        assert_eq!(
+            v["bytes_written"].as_u64(),
+            Some(content.len() as u64),
+            "write response must report the byte count; payload: {payload}"
+        );
+
+        // The file exists on disk with the EXACT content.
+        let on_disk = std::fs::read_to_string(&target).expect("written file must exist");
+        assert_eq!(on_disk, content, "written content must be exact");
+
+        // Read it back through file_read_window to prove the round-trip.
+        let payload = first_text(
+            &call_tool(
+                &client,
+                "file_read_window",
+                serde_json::json!({"path": target.to_string_lossy()}),
+            )
+            .await,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("read json");
+        let lines = v["lines"].as_array().expect("lines");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["text"], "first line");
+        assert_eq!(lines[1]["text"], "second line");
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
+/// TC22 A3 end-to-end: file_write to a default-deny sensitive path is denied
+/// through the MCP adapter and creates no file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_write_denies_sensitive_path_through_mcp() {
+    let data = tmp_data_dir("write-deny");
+    let handle = spawn_live_daemon(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+        // Build the parent so the deny is purely the policy verdict, not a
+        // missing-parent error. `.ssh/id_rsa` matches a default-deny suffix.
+        let ssh_dir = data.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        let secret = ssh_dir.join("id_rsa");
+
+        let mut params = CallToolRequestParams::new("file_write");
+        params.arguments = Some(
+            serde_json::json!({
+                "path": secret.to_string_lossy(),
+                "content": "BEGIN OPENSSH PRIVATE KEY\n",
+            })
+            .as_object()
+            .cloned()
+            .unwrap(),
+        );
+        let err = client
+            .call_tool(params)
+            .await
+            .expect_err("sensitive write target must be rejected");
+        let msg = format!("{err}").to_ascii_lowercase();
+        assert!(
+            msg.contains("path_denied") || msg.contains("default-deny"),
+            "expected path-denied error; got: {err}"
+        );
+        assert!(!secret.exists(), "denied write must not create the file");
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
