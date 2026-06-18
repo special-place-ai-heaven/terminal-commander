@@ -34,7 +34,7 @@ pub mod state;
 pub mod store_actor;
 pub mod subscriptions;
 
-pub use activation::{ActivationRegistry, ActivationRegistryHandle};
+pub use activation::ActivationRegistry;
 pub use audit::{AuditSink, InMemoryAudit, PersistentAudit};
 pub use command::{
     CommandError, CommandRuntime, CommandStartRequest, CommandStartResponse, CommandStatusResponse,

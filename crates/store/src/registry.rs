@@ -484,13 +484,6 @@ impl EventStore {
         Ok(out)
     }
 
-    /// Close the most recent open globally-scoped activation for
-    /// `(rule_id, version)`. Compatibility wrapper around
-    /// [`Self::deactivate_rule_scoped`].
-    pub fn deactivate_rule(&mut self, rule_id: &str, version: u32) -> Result<bool> {
-        self.deactivate_rule_scoped(rule_id, version, ActivationScope::Global)
-    }
-
     /// Close EVERY open activation for `(rule_id, version, scope)`.
     /// "Open" means `deactivated_at IS NULL`. Returns whether at least
     /// one row was actually closed (so the caller can distinguish
@@ -563,21 +556,6 @@ impl EventStore {
                 definition: def,
                 scope,
             });
-        }
-        Ok(out)
-    }
-
-    /// Compatibility wrapper: returns the de-duplicated flat list of
-    /// active rule definitions (dropping scope). Older callers that
-    /// pre-date TC42c keep working.
-    pub fn list_active_rule_defs(&self) -> Result<Vec<RuleDefinition>> {
-        let mut seen = std::collections::HashSet::<(String, u32)>::new();
-        let scoped = self.list_active_rule_defs_scoped()?;
-        let mut out = Vec::with_capacity(scoped.len());
-        for ActiveRuleDef { definition, .. } in scoped {
-            if seen.insert((definition.id.clone(), definition.version)) {
-                out.push(definition);
-            }
         }
         Ok(out)
     }

@@ -359,15 +359,6 @@ impl DaemonState {
         })
     }
 
-    /// Convenience: report whether the active audit sink is the
-    /// persistent one. Used by the bootstrap assertion test.
-    #[must_use]
-    pub fn audit_is_persistent(&self) -> bool {
-        // PersistentAudit is the only Arc<PersistentAudit> we hand
-        // back. By construction, true.
-        Arc::strong_count(&self.audit) >= 1
-    }
-
     /// Record that a real (non-peek) IPC request was served.
     pub fn bump_activity(&self) {
         *self.last_activity.lock() = std::time::Instant::now();

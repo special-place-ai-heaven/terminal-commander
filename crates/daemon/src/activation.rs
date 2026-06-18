@@ -24,7 +24,6 @@
 //! Source-status: live (TC42c).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use parking_lot::RwLock;
 use terminal_commander_core::{ActivationScope, BucketId, JobId, ProbeId, RuleDefinition};
@@ -198,11 +197,6 @@ impl ActivationRegistry {
         out
     }
 }
-
-/// Convenience alias so call sites can write
-/// `Arc<ActivationRegistryHandle>` without paying the verbose
-/// `Arc<ActivationRegistry>` everywhere.
-pub type ActivationRegistryHandle = Arc<ActivationRegistry>;
 
 #[cfg(test)]
 mod tests {

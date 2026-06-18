@@ -24,17 +24,10 @@
 //! forced-only by platform constraint. Job lifecycle + exit events in TC16.
 
 pub mod ansi;
-pub mod directory;
 pub mod file;
 pub mod noise_pipeline;
 pub mod process;
 pub mod pty;
-
-pub use directory::{
-    DEFAULT_DIR_POLL_INTERVAL, DirectoryEvent, DirectoryEventKind, DirectoryProbe,
-    DirectoryProbeConfig, DirectoryProbeError, DirectorySink, InMemoryDirectorySink, JunitSummary,
-    spawn_with_in_memory_sink as spawn_directory_probe_with_sink,
-};
 
 pub use ansi::strip_ansi;
 pub use file::{

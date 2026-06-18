@@ -80,12 +80,6 @@ impl<K: TypedIdKind> TypedId<K> {
         }
     }
 
-    /// Raw UUID bytes.
-    #[must_use]
-    pub const fn as_uuid(&self) -> Uuid {
-        self.raw
-    }
-
     /// Wire-form string: `<prefix>_<32-hex>`.
     #[must_use]
     pub fn to_wire_string(&self) -> String {
