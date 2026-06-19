@@ -1392,12 +1392,18 @@ mod tests {
     fn classify_health_maps_state_and_idle_columns() {
         // Modern daemon: real seconds.
         assert_eq!(
-            classify_health(Some(&ProbeHealth { idle_secs: Some(7) })),
+            classify_health(Some(&ProbeHealth {
+                idle_secs: Some(7),
+                version: None
+            })),
             ("alive", "7s".to_string())
         );
         // Legacy daemon: alive, idle unknown.
         assert_eq!(
-            classify_health(Some(&ProbeHealth { idle_secs: None })),
+            classify_health(Some(&ProbeHealth {
+                idle_secs: None,
+                version: None
+            })),
             ("alive", "?".to_string())
         );
         // No Health reply: unresponsive.
@@ -1406,8 +1412,16 @@ mod tests {
 
     #[test]
     fn idle_reap_decision_is_partial_upgrade_tolerant() {
-        let modern = |s| Some(ProbeHealth { idle_secs: Some(s) });
-        let legacy = ProbeHealth { idle_secs: None };
+        let modern = |s| {
+            Some(ProbeHealth {
+                idle_secs: Some(s),
+                version: None,
+            })
+        };
+        let legacy = ProbeHealth {
+            idle_secs: None,
+            version: None,
+        };
         // At/over threshold -> reap; under -> skip with the observed idle.
         assert_eq!(
             idle_reap_decision(modern(100).as_ref(), 60),

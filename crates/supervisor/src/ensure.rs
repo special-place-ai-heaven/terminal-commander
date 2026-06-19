@@ -508,6 +508,14 @@ pub struct ProbeHealth {
     /// `None` when the daemon answered the LEGACY Health shape (no
     /// idle_secs) — idle is UNKNOWN, NOT "not our daemon".
     pub idle_secs: Option<u64>,
+    /// The responding daemon's self-reported crate version
+    /// (`env!("CARGO_PKG_VERSION")` on the daemon side). `None` when the
+    /// daemon answered the LEGACY Health shape (no `version` field) — the
+    /// running version is UNKNOWN, which the replace path treats as a
+    /// pre-feature (stale) daemon. A modern daemon always carries it, so
+    /// the supervisor can learn the live version WITHOUT trusting the
+    /// fragile on-disk pidfile (see `replace_if_stale`'s no-pidfile branch).
+    pub version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -520,6 +528,11 @@ enum ProbeResponse {
         uptime_secs: u64,
         #[serde(default)]
         idle_secs: Option<u64>,
+        // The daemon's self-reported version. Absent on a legacy daemon
+        // (an empty string on the wire deserialises to ""), which the
+        // probe normalises to `None` = "version unknown".
+        #[serde(default)]
+        version: String,
     },
     // A well-formed envelope carrying some other method is a daemon
     // answering the wrong question — still "not our health handshake".
@@ -564,9 +577,22 @@ where
         Ok(ProbeResponseEnvelope {
             result:
                 ProbeResult::Ok {
-                    response: ProbeResponse::Health { idle_secs, .. },
+                    response:
+                        ProbeResponse::Health {
+                            idle_secs, version, ..
+                        },
                 },
-        }) => Some(ProbeHealth { idle_secs }),
+        }) => Some(ProbeHealth {
+            idle_secs,
+            // Normalise the legacy empty-string version to `None` so callers
+            // can distinguish "modern daemon reporting v" from "legacy daemon,
+            // version unknown" without string-empty checks at every call site.
+            version: if version.is_empty() {
+                None
+            } else {
+                Some(version)
+            },
+        }),
         _ => None,
     }
 }

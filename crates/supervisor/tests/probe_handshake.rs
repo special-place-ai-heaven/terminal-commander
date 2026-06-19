@@ -77,16 +77,17 @@ async fn modern_health_with_idle_secs_is_surfaced() {
     // Modern daemon: Health response carries idle_secs as a sibling of
     // uptime_secs (verified against crates/daemon/src/ipc/protocol.rs).
     let sock = spawn_health_responder(
-        br#"{"correlation_id":0,"result":{"kind":"ok","response":{"method":"health","uptime_secs":1,"idle_secs":42}}}"#,
+        br#"{"correlation_id":0,"result":{"kind":"ok","response":{"method":"health","uptime_secs":1,"idle_secs":42,"version":"0.1.51"}}}"#,
     )
     .await;
     let ep = Endpoint::UnixSocket { path: sock };
     assert_eq!(
         probe_endpoint_health(&ep).await,
         Some(ProbeHealth {
-            idle_secs: Some(42)
+            idle_secs: Some(42),
+            version: Some("0.1.51".to_string())
         }),
-        "a modern Health reply must surface its idle_secs"
+        "a modern Health reply must surface its idle_secs AND its version"
     );
     // The bool wrapper must still see this as our daemon.
     assert!(probe_endpoint(&ep).await);
@@ -103,8 +104,13 @@ async fn legacy_health_without_idle_secs_is_alive_idle_unknown() {
     let ep = Endpoint::UnixSocket { path: sock };
     assert_eq!(
         probe_endpoint_health(&ep).await,
-        Some(ProbeHealth { idle_secs: None }),
-        "a legacy Health reply (no idle_secs) is alive with idle UNKNOWN, not absent"
+        Some(ProbeHealth {
+            idle_secs: None,
+            // A legacy daemon omits `version`; the probe normalises the
+            // empty-string wire value to `None` = "version unknown".
+            version: None
+        }),
+        "a legacy Health reply (no idle_secs / no version) is alive with idle + version UNKNOWN, not absent"
     );
     assert!(probe_endpoint(&ep).await);
 }

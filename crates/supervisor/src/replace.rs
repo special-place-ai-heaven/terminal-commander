@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::ensure::{
     Endpoint, EnsureDaemonOptions, EnsureDaemonStatus, ensure_daemon, probe_endpoint,
-    spawn_under_lock,
+    probe_endpoint_health, spawn_under_lock,
 };
 use crate::pidfile;
 use crate::proc_lock::{self, TryLockResult};
@@ -648,7 +648,32 @@ pub async fn replace_if_stale(
             (rec.version, rec.pid)
         }
         None => {
-            // Reachable but no pidfile => predates the feature => stale.
+            // Reachable but NO pidfile. The pidfile is a fragile on-disk
+            // artifact: a CURRENT, live daemon can be reachable without one
+            // (a `session reap` that mis-classified it, a transient fs error,
+            // a lost rename, manual cleanup) and the daemon writes its pidfile
+            // exactly once at bind — it never re-asserts a lost one. Treating
+            // "no pidfile" as unconditionally "pre-feature => stale" therefore
+            // hard-kills a healthy current daemon on EVERY adapter start,
+            // orphaning its in-flight work and respawning a 0s-uptime daemon
+            // (the operator's "daemon flaps under use" report).
+            //
+            // Before killing, ASK THE DAEMON its version over the same health
+            // handshake the probe already used. The wire `Health` response
+            // carries `version` (the daemon's own CARGO_PKG_VERSION). If the
+            // live daemon reports a version that is NOT stale relative to the
+            // installed binary, it is a current daemon that merely lost its
+            // pidfile — REFUSE the kill. This NEVER widens the kill set: it
+            // only declines a kill the old code would have wrongly performed.
+            // A genuinely pre-feature daemon reports no version (legacy Health
+            // shape => `None`), which IS stale and is still replaced.
+            if !force
+                && let Some(health) = probe_endpoint_health(&opts.endpoint).await
+                && let Some(running) = health.version
+                && !is_stale(&running, installed_version)
+            {
+                return ReplaceOutcome::UpToDate { version: running };
+            }
             match find_daemon_pid_os(&opts.state_dir) {
                 Some(pid) => ("pre-pidfile".to_owned(), pid),
                 None => {
