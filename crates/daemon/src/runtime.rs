@@ -339,6 +339,10 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     spawn_idle_reaper(&state);
     // P1 / TC50: reclaim sessions idle past their per-session TTL.
     spawn_session_reaper(&state);
+    // Re-assert the pidfile if it goes missing (the daemon writes it once at
+    // bind above and never used to recover a lost one). Closes the
+    // pidfile-less window the version-aware replace path mis-reads as stale.
+    spawn_pidfile_reasserter(state_dir.clone(), endpoint.clone());
 
     // Two shutdown sources: an OS signal (SIGINT/SIGTERM) or an
     // internal `Shutdown` IPC request that flipped the state trigger.
@@ -407,6 +411,9 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     spawn_idle_reaper(&state);
     // Session idle-reap (no-op on non-unix; sessions are PTY-backed).
     spawn_session_reaper(&state);
+    // Re-assert the pidfile if it goes missing (cross-platform; see the Unix
+    // arm). Closes the pidfile-less window mis-read as stale by the replace path.
+    spawn_pidfile_reasserter(state_dir.clone(), pipe_name.clone());
 
     // Two shutdown sources, mirroring the Unix arm: an OS signal
     // (Ctrl-C) or an internal `Shutdown` IPC request that flipped the
@@ -542,6 +549,138 @@ fn write_daemon_pidfile(state_dir: &std::path::Path, endpoint: &str) {
     }
 }
 
+/// Self-heal tick interval for the pidfile re-assert task.
+///
+/// The daemon writes its pidfile exactly once at bind and historically never
+/// re-asserted a lost one, so any event that removed a live daemon's pidfile
+/// (a mis-classified reap, a transient fs error, a lost atomic rename, manual
+/// cleanup) left it running but pidfile-less — and the version-aware replace
+/// path then mis-classified it as "predates the pidfile feature => stale".
+/// A bounded 15s re-assert closes that window: short enough that the gap a
+/// `replace`/`session list`/`reap` could observe is tiny, long enough that the
+/// idle daemon does a single cheap stat (no /proc walk) per tick.
+const PIDFILE_REASSERT_TICK_SECS: u64 = 15;
+
+/// What the periodic self-heal task should do about the pidfile it found.
+///
+/// Pure decision so the safety policy is unit-testable without touching the
+/// filesystem or spawning a daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReassertDecision {
+    /// The pidfile is missing, records a now-dead pid, or already records OUR
+    /// pid with the wrong endpoint — (re)write it to point at us. Covers the
+    /// "missing", "stale-dead", and "ours-but-wrong-endpoint" cases.
+    Rewrite,
+    /// The pidfile already records OUR pid + OUR endpoint. Nothing to do.
+    LeaveOurs,
+    /// The pidfile records a DIFFERENT, LIVE pid bound to OUR endpoint. That is
+    /// an anomaly (two daemons claiming one endpoint) — log warn and do NOT
+    /// overwrite; leave it for the operator.
+    AnomalyOurEndpoint { pid: u32 },
+    /// The pidfile records a DIFFERENT, LIVE pid bound to a DIFFERENT endpoint.
+    /// It belongs to another daemon; never clobber it.
+    AnomalyDifferentEndpoint { pid: u32 },
+}
+
+/// Decide whether to re-assert the pidfile, given the raw pidfile contents
+/// (`read_pidfile_raw` — liveness-unfiltered so we can classify dead pids),
+/// our own identity (`our_pid` + `our_endpoint`), and a liveness predicate.
+///
+/// SAFETY: the only outcomes that lead to a write are [`ReassertDecision::Rewrite`]
+/// (missing / stale-dead / ours-with-wrong-endpoint). A DIFFERENT live pid is
+/// NEVER overwritten, whether it is bound to our endpoint (an anomaly we surface)
+/// or a different one (someone else's daemon).
+fn reassert_decision(
+    current: Option<&terminal_commander_supervisor::pidfile::RunningDaemon>,
+    our_pid: u32,
+    our_endpoint: &str,
+    is_alive: impl Fn(u32) -> bool,
+) -> ReassertDecision {
+    let Some(rec) = current else {
+        // Missing or unparseable — re-assert.
+        return ReassertDecision::Rewrite;
+    };
+    if rec.pid == our_pid {
+        // It is ours. Fix the endpoint if it somehow drifted, else no-op.
+        if rec.endpoint == our_endpoint {
+            ReassertDecision::LeaveOurs
+        } else {
+            ReassertDecision::Rewrite
+        }
+    } else if !is_alive(rec.pid) {
+        // A different pid, but it is dead — stale entry, safe to reclaim.
+        ReassertDecision::Rewrite
+    } else if rec.endpoint == our_endpoint {
+        // A different LIVE pid claims OUR endpoint: two daemons, one endpoint.
+        // Do not clobber; surface it.
+        ReassertDecision::AnomalyOurEndpoint { pid: rec.pid }
+    } else {
+        // A different LIVE pid on a different endpoint: not ours, leave it.
+        ReassertDecision::AnomalyDifferentEndpoint { pid: rec.pid }
+    }
+}
+
+/// Run one pidfile self-heal pass: read the current pidfile, decide, and
+/// (re)write it iff the decision says so. Best-effort — a failed write is
+/// logged at warn and never fatal, mirroring [`write_daemon_pidfile`].
+fn reassert_pidfile_once(state_dir: &std::path::Path, endpoint: &str) {
+    use terminal_commander_supervisor::pidfile;
+    let current = pidfile::read_pidfile_raw(state_dir);
+    let decision = reassert_decision(
+        current.as_ref(),
+        std::process::id(),
+        endpoint,
+        pidfile::pid_alive,
+    );
+    match decision {
+        ReassertDecision::LeaveOurs => {}
+        ReassertDecision::Rewrite => {
+            tracing::warn!(
+                "pidfile missing or stale at bind endpoint {endpoint}; re-asserting it \
+                 (pid {}, version {})",
+                std::process::id(),
+                env!("CARGO_PKG_VERSION"),
+            );
+            write_daemon_pidfile(state_dir, endpoint);
+        }
+        ReassertDecision::AnomalyOurEndpoint { pid } => {
+            tracing::warn!(
+                "pidfile records a DIFFERENT live daemon (pid {pid}) bound to OUR endpoint \
+                 {endpoint}; leaving it untouched for the operator (not overwriting)"
+            );
+        }
+        ReassertDecision::AnomalyDifferentEndpoint { pid } => {
+            tracing::warn!(
+                "pidfile records a different live daemon (pid {pid}) bound to a different \
+                 endpoint; not overwriting it from {endpoint}"
+            );
+        }
+    }
+}
+
+/// Spawn the periodic pidfile self-heal task.
+///
+/// The daemon writes its pidfile exactly once at bind; this task re-asserts it
+/// on a bounded [`PIDFILE_REASSERT_TICK_SECS`] interval whenever it goes missing
+/// (or records a dead pid, or records ours with a drifted endpoint), so the
+/// pidfile-less window the version-aware replace path mis-reads as "stale" never
+/// persists. The pidfile is cross-platform, so this runs on every target. The
+/// task shares the process lifetime — the IPC server's shutdown drops it.
+fn spawn_pidfile_reasserter(state_dir: std::path::PathBuf, endpoint: String) {
+    tracing::info!(
+        "pidfile self-heal enabled: tick={PIDFILE_REASSERT_TICK_SECS}s endpoint={endpoint}"
+    );
+    tokio::spawn(async move {
+        let mut iv =
+            tokio::time::interval(std::time::Duration::from_secs(PIDFILE_REASSERT_TICK_SECS));
+        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            iv.tick().await;
+            reassert_pidfile_once(&state_dir, &endpoint);
+        }
+    });
+}
+
 #[cfg(windows)]
 async fn wait_for_shutdown_signal_windows() -> Result<(), RuntimeError> {
     // Ctrl-C on Windows.
@@ -600,6 +739,110 @@ mod tests {
         assert!(r.contains("V0003 audit migration"));
         assert!(r.contains("router -> persistent audit pipeline"));
         assert!(r.contains("sudo denied"));
+        cleanup(&data);
+    }
+
+    use terminal_commander_supervisor::pidfile::RunningDaemon;
+
+    fn rec(pid: u32, endpoint: &str) -> RunningDaemon {
+        RunningDaemon {
+            pid,
+            version: "9.9.9".to_owned(),
+            endpoint: endpoint.to_owned(),
+        }
+    }
+
+    // --- pidfile re-assert decision table (pure, fs-free) ---
+
+    #[test]
+    fn reassert_rewrites_when_pidfile_missing() {
+        // The flap trigger: a live daemon lost its pidfile entirely.
+        let d = reassert_decision(None, 100, "/run/tc.sock", |_| true);
+        assert_eq!(d, ReassertDecision::Rewrite);
+    }
+
+    #[test]
+    fn reassert_leaves_ours_untouched() {
+        let existing = rec(100, "/run/tc.sock");
+        let d = reassert_decision(Some(&existing), 100, "/run/tc.sock", |_| true);
+        assert_eq!(d, ReassertDecision::LeaveOurs);
+    }
+
+    #[test]
+    fn reassert_rewrites_when_ours_but_endpoint_drifted() {
+        // Same pid (ours), wrong endpoint recorded -> correct it.
+        let existing = rec(100, "/run/OLD.sock");
+        let d = reassert_decision(Some(&existing), 100, "/run/tc.sock", |_| true);
+        assert_eq!(d, ReassertDecision::Rewrite);
+    }
+
+    #[test]
+    fn reassert_rewrites_when_recorded_pid_is_dead() {
+        // A different pid, but the liveness predicate says it is gone: stale.
+        let existing = rec(200, "/run/tc.sock");
+        let d = reassert_decision(Some(&existing), 100, "/run/tc.sock", |_| false);
+        assert_eq!(d, ReassertDecision::Rewrite);
+    }
+
+    #[test]
+    fn reassert_refuses_when_different_live_pid_on_our_endpoint() {
+        // Anomaly: two live daemons claim the same endpoint. Never overwrite.
+        let existing = rec(200, "/run/tc.sock");
+        let d = reassert_decision(Some(&existing), 100, "/run/tc.sock", |_| true);
+        assert_eq!(d, ReassertDecision::AnomalyOurEndpoint { pid: 200 });
+    }
+
+    #[test]
+    fn reassert_refuses_when_different_live_pid_on_different_endpoint() {
+        // SAFETY case: a pidfile naming a DIFFERENT live pid on a DIFFERENT
+        // endpoint must NOT be overwritten — it belongs to another daemon.
+        let existing = rec(200, "/run/OTHER.sock");
+        let d = reassert_decision(Some(&existing), 100, "/run/tc.sock", |_| true);
+        assert_eq!(d, ReassertDecision::AnomalyDifferentEndpoint { pid: 200 });
+    }
+
+    // --- one-pass self-heal against the real filesystem (fs, no daemon) ---
+
+    #[test]
+    fn reassert_pidfile_once_recreates_a_missing_pidfile() {
+        use terminal_commander_supervisor::pidfile;
+        let data = temp_data_dir("reassert-missing");
+        std::fs::create_dir_all(&data).unwrap();
+        let endpoint = data.join("tc.sock").display().to_string();
+
+        // No pidfile yet.
+        assert!(pidfile::read_pidfile_raw(&data).is_none());
+
+        reassert_pidfile_once(&data, &endpoint);
+
+        let got = pidfile::read_pidfile_raw(&data).expect("pidfile recreated");
+        assert_eq!(got.pid, std::process::id());
+        assert_eq!(got.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(got.endpoint, endpoint);
+        cleanup(&data);
+    }
+
+    // SAFETY at the fs layer: a pidfile owned by a DIFFERENT, LIVE pid bound to
+    // a DIFFERENT endpoint must survive a self-heal pass untouched. Uses pid 1
+    // (init/launchd, always alive on unix) as the unambiguous foreign live owner.
+    #[cfg(unix)]
+    #[test]
+    fn reassert_pidfile_once_does_not_clobber_a_foreign_live_pidfile() {
+        use terminal_commander_supervisor::pidfile;
+        let data = temp_data_dir("reassert-foreign");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let foreign = rec(1, "/run/SOMEONE_ELSE.sock");
+        pidfile::write_pidfile(&data, &foreign).unwrap();
+
+        let our_endpoint = data.join("tc.sock").display().to_string();
+        reassert_pidfile_once(&data, &our_endpoint);
+
+        let after = pidfile::read_pidfile_raw(&data).expect("pidfile still present");
+        assert_eq!(
+            after, foreign,
+            "a foreign live daemon's pidfile must not be overwritten"
+        );
         cleanup(&data);
     }
 }
