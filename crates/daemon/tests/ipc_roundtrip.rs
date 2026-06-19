@@ -87,7 +87,19 @@ fn health_round_trip() {
         let client = DaemonClient::new(handle.socket_path().to_path_buf());
         let resp = client.call(2, IpcRequest::Health).await.unwrap();
         match resp {
-            IpcResponse::Health { uptime_secs: _, .. } => {}
+            IpcResponse::Health {
+                uptime_secs: _,
+                version,
+                ..
+            } => {
+                // The daemon must report its OWN compile-time crate
+                // version so a client can assert WHICH build is live.
+                assert_eq!(
+                    version,
+                    env!("CARGO_PKG_VERSION"),
+                    "Health must carry the daemon crate version"
+                );
+            }
             other => panic!("unexpected response: {other:?}"),
         }
         handle.shutdown().await;

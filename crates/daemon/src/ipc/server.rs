@@ -551,6 +551,7 @@ async fn dispatch(
             let r = IpcResponse::Health {
                 uptime_secs: boot.elapsed().as_secs(),
                 idle_secs: Some(state.idle_secs()),
+                version: env!("CARGO_PKG_VERSION").to_owned(),
             };
             IpcResult::Ok { response: r }
         }

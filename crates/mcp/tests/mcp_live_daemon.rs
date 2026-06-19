@@ -168,6 +168,14 @@ async fn live_health_roundtrip_through_uds() {
             body["uptime_secs"].is_number(),
             "health payload must include numeric uptime_secs; got {body}"
         );
+        // The live daemon reports its OWN compile-time crate version so a
+        // client can assert WHICH build is running. The daemon shares the
+        // workspace version, so it equals this crate's CARGO_PKG_VERSION.
+        assert_eq!(
+            body["version"].as_str(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "health payload must carry the live daemon's version; got {body}"
+        );
 
         let _ = client.cancel().await;
     }
