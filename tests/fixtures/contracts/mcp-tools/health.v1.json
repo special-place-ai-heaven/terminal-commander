@@ -20,7 +20,8 @@
   },
   "response_example": {
     "ok": true,
-    "uptime_secs": 42
+    "uptime_secs": 42,
+    "version": "0.1.51"
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -45,7 +46,8 @@
   },
   "invariants": [
     "requires_daemon=true in system_discover",
-    "success payload contains only ok and uptime_secs",
+    "success payload contains ok, uptime_secs, and the daemon's version",
+    "version is the responding daemon's compile-time crate version",
     "does not synthesize liveness while daemon is unavailable"
   ]
 }

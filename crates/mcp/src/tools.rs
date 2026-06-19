@@ -956,9 +956,14 @@ impl TerminalCommanderMcpServer {
     async fn health(&self) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
         match self.daemon.call(IpcRequest::Health).await {
-            Ok(IpcResponse::Health { uptime_secs, .. }) => json_tool_result(&serde_json::json!({
+            Ok(IpcResponse::Health {
+                uptime_secs,
+                version,
+                ..
+            }) => json_tool_result(&serde_json::json!({
                 "ok": true,
                 "uptime_secs": uptime_secs,
+                "version": version,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),

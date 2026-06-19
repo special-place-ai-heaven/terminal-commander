@@ -566,6 +566,12 @@ pub enum IpcResponse {
         /// absence as unknown.
         #[serde(default)]
         idle_secs: Option<u64>,
+        /// The responding daemon's own compile-time crate version
+        /// (`env!("CARGO_PKG_VERSION")`). Lets a client assert WHICH
+        /// build is live. `#[serde(default)]` keeps back-compat: a
+        /// legacy daemon omits it, so an empty string means "unknown".
+        #[serde(default)]
+        version: String,
     },
     PolicyStatus(PolicyStatusResponse),
     SelfCheck(SelfCheckResponse),

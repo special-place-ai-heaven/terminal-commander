@@ -150,6 +150,13 @@ async fn self_heal_flips_unavailable_to_available_against_live_daemon() {
             body["uptime_secs"].is_number(),
             "healed health payload must include uptime_secs; got {body}"
         );
+        // The live daemon populates its own crate version; the MCP tool
+        // surfaces it so a client can assert WHICH build is running.
+        assert_eq!(
+            body["version"].as_str(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "healed health payload must carry the live daemon's version; got {body}"
+        );
 
         // The cached status must now be available (the flag was cleared),
         // and exactly one probe was fired to observe the live daemon.
