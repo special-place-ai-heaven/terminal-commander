@@ -45,11 +45,12 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, Content, Implementation, LoggingLevel, LoggingMessageNotificationParam,
-        ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
+        LoggingLevel, LoggingMessageNotificationParam, PaginatedRequestParams, ProtocolVersion,
+        ServerCapabilities, ServerInfo,
     },
     service::RequestContext,
-    tool, tool_handler, tool_router,
+    tool, tool_router,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -2615,8 +2616,75 @@ sub_list. For an interactive shell, see the `session` facade."
     }
 }
 
-#[tool_handler]
+// Hand-written `ServerHandler` (replaces the rmcp `#[tool_handler]` macro) so
+// the `tools/list` and `tools/call` paths can honor `TC_SURFACE`:
+//   - `list_tools` advertises the compact facade(s) under `TC_SURFACE=compact`,
+//     else the unchanged granular tools (with facade names filtered OUT so the
+//     full surface stays EXACTLY the 50 legacy tools).
+//   - `call_tool` runs the admission gate, then delegates to the SAME router
+//     the macro used (`ToolCallContext` + `self.tool_router.call`).
+//   - `get_tool` mirrors the macro (router lookup) to preserve task-support
+//     validation behavior identically.
+// `get_info` / `initialize` are unchanged.
+//
+// Signatures confirmed against rmcp 1.7.0 (`rmcp::handler::server::ServerHandler`
+// + `rmcp-macros` `tool_handler`):
+//   call_tool(&self, CallToolRequestParams, RequestContext<RoleServer>)
+//     -> Result<CallToolResult, McpError>
+//   list_tools(&self, Option<PaginatedRequestParams>, RequestContext<RoleServer>)
+//     -> Result<ListToolsResult, McpError>
 impl ServerHandler for TerminalCommanderMcpServer {
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let tools = match crate::surface::surface_from_env() {
+            crate::surface::Surface::Compact => crate::surface_list::compact_surface_tools(),
+            // `full` keeps the granular surface EXACTLY the 50 legacy tools:
+            // the facade handler is registered on the same router, so filter
+            // its name(s) OUT of `list_all()` -- the facade must not leak into
+            // the full list.
+            crate::surface::Surface::Full => self
+                .tool_router
+                .list_all()
+                .into_iter()
+                .filter(|t| !crate::surface_list::COMPACT_TOOL_NAMES.contains(&t.name.as_ref()))
+                .collect(),
+        };
+        Ok(ListToolsResult {
+            tools,
+            next_cursor: None,
+            ..Default::default()
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        // Admission gate FIRST: under `compact`, reject any name not on the
+        // facade set with a clear "set TC_SURFACE=full" message. Under `full`
+        // every name is admitted and the router routes by name as before.
+        crate::surface_list::enforce_surface(
+            crate::surface::surface_from_env(),
+            request.name.as_ref(),
+        )?;
+        // Delegate to the SAME router the macro used -- dispatch still flows
+        // through `self.tool_router`; no hand-rolled per-tool match.
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
+    fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
+        // Mirror the macro: look the tool up in the router so task-support
+        // validation (rmcp `handle_request`) behaves identically. The gate in
+        // `call_tool` is what enforces the surface; `get_tool` only feeds
+        // task-mode validation and never bypasses it.
+        self.tool_router.get(name).cloned()
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
             ServerCapabilities::builder()
