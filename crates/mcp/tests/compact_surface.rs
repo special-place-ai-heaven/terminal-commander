@@ -20,8 +20,9 @@
 //! Harness copied from `crates/mcp/tests/daemon_unavailable_envelope.rs`.
 //!
 //! The surface is injected via `TerminalCommanderMcpServer::with_surface`
-//! (a `#[cfg(test)]` builder seam that bypasses the live `TC_SURFACE` env
-//! read). This avoids `std::env::set_var`, which is `unsafe` under edition
+//! (a `#[doc(hidden)]` builder seam, test-only by intent, that bypasses the
+//! live `TC_SURFACE` env read). This avoids `std::env::set_var`, which is
+//! `unsafe` under edition
 //! 2024 and cannot be used because `unsafe_code` is `forbid` workspace-wide.
 //! No process-global env mutation; tests may run in any thread count.
 

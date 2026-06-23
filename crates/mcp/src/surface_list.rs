@@ -26,7 +26,7 @@ const COMMAND_FACADE_DESCRIPTION: &str = "Run and observe a one-shot command. To
 get its result in ONE call, use action=\"run_and_watch\" (it does start + bounded \
 wait + collect for you). Other actions: run, exec, status, output_tail, stop, \
 events, wait, summary, event_context, sub_open, sub_pull, sub_seek, sub_close, \
-sub_list. For an interactive shell, see the `session` facade.";
+sub_list.";
 
 /// The facade tool names advertised + admitted on the compact surface.
 ///

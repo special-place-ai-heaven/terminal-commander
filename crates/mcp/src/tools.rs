@@ -2616,7 +2616,7 @@ impl TerminalCommanderMcpServer {
 get its result in ONE call, use action=\"run_and_watch\" (it does start + bounded \
 wait + collect for you). Other actions: run, exec, status, output_tail, stop, \
 events, wait, summary, event_context, sub_open, sub_pull, sub_seek, sub_close, \
-sub_list. For an interactive shell, see the `session` facade."
+sub_list."
     )]
     pub(crate) async fn command_facade(
         &self,
