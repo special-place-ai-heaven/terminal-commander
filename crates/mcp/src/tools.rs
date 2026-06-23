@@ -673,6 +673,12 @@ pub struct TerminalCommanderMcpServer {
     /// so the dead-code lint trips here; suppressed below.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+    /// Optional surface override for tests. When `Some`, bypasses the live
+    /// `TC_SURFACE` env read so tests can inject a known surface without
+    /// mutating process-global env (`set_var` is `unsafe` in edition 2024
+    /// and `unsafe_code` is `forbid` workspace-wide). Production code
+    /// always leaves this `None` and reads the env live.
+    surface_override: Option<crate::surface::Surface>,
 }
 
 impl std::fmt::Debug for TerminalCommanderMcpServer {
@@ -744,7 +750,28 @@ impl TerminalCommanderMcpServer {
             notify,
             target_router,
             tool_router: Self::tool_router(),
+            surface_override: None,
         }
+    }
+
+    /// Override the active surface for this server instance, bypassing the
+    /// live `TC_SURFACE` env read. Intended for integration tests that cannot
+    /// mutate process-global env (`set_var` is `unsafe` in edition 2024 and
+    /// `unsafe_code` is `forbid` workspace-wide).
+    ///
+    /// Production binaries MUST NOT call this; they rely on `surface_from_env`
+    /// so an operator can flip the surface at runtime without rebuild.
+    ///
+    /// # Note
+    ///
+    /// This is `#[doc(hidden)]` rather than `#[cfg(test)]` because integration
+    /// tests live in a separate binary and cannot see `#[cfg(test)]` items from
+    /// the library. The method is only intended for test harnesses.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_surface(mut self, surface: crate::surface::Surface) -> Self {
+        self.surface_override = Some(surface);
+        self
     }
 
     /// Single daemon-availability guard shared by every daemon-backed tool.
@@ -2640,7 +2667,10 @@ impl ServerHandler for TerminalCommanderMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools = match crate::surface::surface_from_env() {
+        let tools = match self
+            .surface_override
+            .unwrap_or_else(crate::surface::surface_from_env)
+        {
             crate::surface::Surface::Compact => crate::surface_list::compact_surface_tools(),
             // `full` keeps the granular surface EXACTLY the 50 legacy tools:
             // the facade handler is registered on the same router, so filter
@@ -2669,7 +2699,8 @@ impl ServerHandler for TerminalCommanderMcpServer {
         // facade set with a clear "set TC_SURFACE=full" message. Under `full`
         // every name is admitted and the router routes by name as before.
         crate::surface_list::enforce_surface(
-            crate::surface::surface_from_env(),
+            self.surface_override
+                .unwrap_or_else(crate::surface::surface_from_env),
             request.name.as_ref(),
         )?;
         // Delegate to the SAME router the macro used -- dispatch still flows
