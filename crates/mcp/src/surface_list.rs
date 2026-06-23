@@ -13,9 +13,12 @@
 //! on the compact surface is byte-identical to what the router would advertise
 //! for the same input type -- no hand-maintained schema drift.
 
+use std::sync::Arc;
+
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::common::schema_for_type;
 use rmcp::model::Tool;
+use serde_json::{Map, Value};
 
 use crate::surface::Surface;
 
@@ -40,7 +43,19 @@ fn surface_tool<T>(name: &'static str, description: &'static str) -> Tool
 where
     T: schemars::JsonSchema + std::any::Any,
 {
-    Tool::new(name, description, schema_for_type::<T>())
+    // schemars renders an internally-tagged enum (the facade's discriminated
+    // union) as a root `oneOf` with NO top-level `type`. The MCP `tools/list`
+    // contract requires every tool's `inputSchema.type == "object"`, and strict
+    // clients (e.g. the Claude Code harness) REJECT the entire tools list when
+    // it is absent -- which silently zeroes the compact surface. Inject it: the
+    // `oneOf` branches are all objects, so `{ "type": "object", "oneOf": [...] }`
+    // is sound and satisfies the contract. (Regression: 0.1.55 tools-fetch
+    // failed with `inputSchema.type expected "object"`.)
+    let mut schema: Map<String, Value> = (*schema_for_type::<T>()).clone();
+    schema
+        .entry("type".to_string())
+        .or_insert_with(|| Value::String("object".to_string()));
+    Tool::new(name, description, Arc::new(schema))
 }
 
 /// `tools/list` payload for `TC_SURFACE=compact`.
@@ -101,5 +116,24 @@ mod tests {
         // Facade name is allowed on both.
         assert!(enforce_surface(Surface::Compact, "command").is_ok());
         assert!(enforce_surface(Surface::Full, "command").is_ok());
+    }
+
+    #[test]
+    fn compact_tools_input_schema_is_object() {
+        // Every compact facade tool MUST advertise `inputSchema.type == "object"`
+        // or strict MCP clients reject the ENTIRE tools/list. Regression: the
+        // discriminated-union schema rendered a root `oneOf` with no `type`,
+        // which zeroed the compact surface live in the Claude Code harness
+        // (`tools/list` failed: inputSchema.type expected "object").
+        for tool in compact_surface_tools() {
+            let ty = tool.input_schema.get("type").and_then(|v| v.as_str());
+            assert_eq!(
+                ty,
+                Some("object"),
+                "tool '{}' inputSchema.type must be \"object\", got {:?}",
+                tool.name,
+                tool.input_schema.get("type"),
+            );
+        }
     }
 }
