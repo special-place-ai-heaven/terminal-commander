@@ -2580,6 +2580,39 @@ impl TerminalCommanderMcpServer {
             Err(e) => Err(into_mcp_error(&e)),
         }
     }
+
+    /// `command` -- run + observe + stream a one-shot command (compact surface).
+    #[tool(
+        description = "Run and observe a one-shot command. To run a command and \
+get its result in ONE call, use action=\"run_and_watch\" (it does start + bounded \
+wait + collect for you). Other actions: run, exec, status, output_tail, stop, \
+events, wait, summary, event_context, sub_open, sub_pull, sub_seek, sub_close, \
+sub_list. For an interactive shell, see the `session` facade."
+    )]
+    pub(crate) async fn command_facade(
+        &self,
+        Parameters(call): Parameters<crate::facades::CommandFacadeCall>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::facades::CommandFacadeCall as C;
+        match call {
+            C::Run(p) => self.command_start_combed(Parameters(p)).await,
+            C::RunAndWatch(p) => self.run_and_watch(Parameters(p)).await,
+            C::Exec(p) => self.shell_exec(Parameters(p)).await,
+            C::Status(p) => self.command_status(Parameters(p)).await,
+            C::OutputTail(p) => self.command_output_tail(Parameters(p)).await,
+            C::Stop(p) => self.command_stop(Parameters(p)).await,
+            C::Events(p) => self.bucket_events_since(Parameters(p)).await,
+            C::Wait(p) => self.bucket_wait(Parameters(p)).await,
+            C::Summary(p) => self.bucket_summary(Parameters(p)).await,
+            C::EventContext(p) => self.event_context(Parameters(p)).await,
+            C::SubOpen(p) => self.subscription_open(Parameters(p)).await,
+            C::SubPull(p) => self.subscription_pull(Parameters(p), ctx).await,
+            C::SubSeek(p) => self.subscription_seek(Parameters(p)).await,
+            C::SubClose(p) => self.subscription_close(Parameters(p)).await,
+            C::SubList(p) => self.subscription_list(Parameters(p)).await,
+        }
+    }
 }
 
 #[tool_handler]
@@ -3682,7 +3715,7 @@ pub struct McpCommandStopParams {
 /// is config/TOML, not an MCP-flippable parameter. Mirrors the IPC
 /// [`ShellExecParams`] field set, with the MCP-layer `env` array shape
 /// and `wait_ms` bounded-wait control.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpShellExecParams {
     /// The shell line to run, e.g. `"echo a | wc -c"` or
     /// `"grep -r foo . && echo done"`. Pipelines, compounds, and
