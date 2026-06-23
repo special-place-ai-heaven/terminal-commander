@@ -34,7 +34,7 @@ terminal-commander-sifters.workspace = true
 terminal-commander-probes.workspace = true
 terminal-commander-store.workspace = true
 terminal-commander-ipc.workspace = true
-terminal-commander-supervisor = { path = "../supervisor", version = "0.1.55" } # x-release-please-version
+terminal-commander-supervisor = { path = "../supervisor", version = "0.1.56" } # x-release-please-version
 uuid = { workspace = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
