@@ -2584,6 +2584,7 @@ impl TerminalCommanderMcpServer {
 
     /// `command` -- run + observe + stream a one-shot command (compact surface).
     #[tool(
+        name = "command",
         description = "Run and observe a one-shot command. To run a command and \
 get its result in ONE call, use action=\"run_and_watch\" (it does start + bounded \
 wait + collect for you). Other actions: run, exec, status, output_tail, stop, \
@@ -5513,6 +5514,16 @@ mod tests {
                 "workspace_snapshot_create".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn command_facade_registers_under_name_command() {
+        let router = TerminalCommanderMcpServer::tool_router();
+        let names: Vec<String> = router.list_all().into_iter().map(|t| t.name.into_owned()).collect();
+        assert!(names.contains(&"command".to_string()),
+            "facade must register as 'command' (was the #[tool] name attr dropped?)");
+        assert!(!names.contains(&"command_facade".to_string()),
+            "facade must NOT register under its fn identifier 'command_facade'");
     }
 
     #[test]
