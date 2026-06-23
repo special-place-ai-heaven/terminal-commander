@@ -251,12 +251,14 @@ pub const MAX_PULL_TIMEOUT_MS: u64 = 8_000;
 /// Method-typed request union.
 ///
 /// Method names are namespaced `<domain>_<verb>` to match the MCP tool
-/// names; the rmcp adapter maps each tool 1:1 to a method. All 33
-/// methods are live: the 32-method TC45 set carried via IPC plus the
-/// P4 `audit_since` read surface. `audit_since` is the one CLI-only
-/// read method with no rmcp tool, so the MCP tool catalogue stays at
-/// 32 live tools (see `docs/mcp/TOOL_CONTROL_SURFACE.md` §2) while the
-/// IPC method set carries the extra audit-log reader.
+/// names; the rmcp adapter maps each tool 1:1 to a method. 49 IPC
+/// methods are live: the 48-method set carried via IPC plus the P4
+/// `audit_since` read surface. `audit_since` is the one CLI-only read
+/// method with no rmcp tool, so the MCP legacy tool catalogue stays at
+/// 50 live tools (see `docs/mcp/TOOL_CONTROL_SURFACE.md` §2) while the
+/// IPC method set carries the extra audit-log reader. The compact MCP
+/// surface adds facade tools (e.g. `command`) on top, gated by
+/// `TC_SURFACE=compact`; those forward to the same IPC methods.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum IpcRequest {

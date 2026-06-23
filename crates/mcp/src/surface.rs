@@ -39,10 +39,10 @@ mod tests {
 
     #[test]
     fn parse_surface_defaults_and_values() {
-        assert_eq!(Surface::parse(None), Surface::Full);          // unset -> Full
+        assert_eq!(Surface::parse(None), Surface::Full); // unset -> Full
         assert_eq!(Surface::parse(Some("full")), Surface::Full);
         assert_eq!(Surface::parse(Some("compact")), Surface::Compact);
         assert_eq!(Surface::parse(Some("COMPACT")), Surface::Compact); // case-insensitive
-        assert_eq!(Surface::parse(Some("garbage")), Surface::Full);    // unknown -> Full
+        assert_eq!(Surface::parse(Some("garbage")), Surface::Full); // unknown -> Full
     }
 }

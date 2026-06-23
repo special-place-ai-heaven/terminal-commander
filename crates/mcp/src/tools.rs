@@ -5465,6 +5465,7 @@ mod tests {
                 "bucket_events_since".to_owned(),
                 "bucket_summary".to_owned(),
                 "bucket_wait".to_owned(),
+                "command".to_owned(),
                 "command_output_tail".to_owned(),
                 "command_start_combed".to_owned(),
                 "command_status".to_owned(),
@@ -5519,11 +5520,53 @@ mod tests {
     #[test]
     fn command_facade_registers_under_name_command() {
         let router = TerminalCommanderMcpServer::tool_router();
-        let names: Vec<String> = router.list_all().into_iter().map(|t| t.name.into_owned()).collect();
-        assert!(names.contains(&"command".to_string()),
-            "facade must register as 'command' (was the #[tool] name attr dropped?)");
-        assert!(!names.contains(&"command_facade".to_string()),
-            "facade must NOT register under its fn identifier 'command_facade'");
+        let names: Vec<String> = router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.into_owned())
+            .collect();
+        assert!(
+            names.contains(&"command".to_string()),
+            "facade must register as 'command' (was the #[tool] name attr dropped?)"
+        );
+        assert!(
+            !names.contains(&"command_facade".to_string()),
+            "facade must NOT register under its fn identifier 'command_facade'"
+        );
+    }
+
+    #[test]
+    fn command_facade_action_map_is_total() {
+        // Every CommandFacadeCall action parses and is a known variant. If a new
+        // action is added without a dispatch arm, the match in `command_facade`
+        // fails to compile -- this test guards the *schema* side: every advertised
+        // action name round-trips into a variant (no silent drop of an action).
+        let actions = [
+            "run",
+            "run_and_watch",
+            "exec",
+            "status",
+            "output_tail",
+            "stop",
+            "events",
+            "wait",
+            "summary",
+            "event_context",
+            "sub_open",
+            "sub_pull",
+            "sub_seek",
+            "sub_close",
+            "sub_list",
+        ];
+        let schema = serde_json::to_value(schemars::schema_for!(crate::facades::CommandFacadeCall))
+            .expect("schema serializes");
+        let blob = schema.to_string();
+        for a in actions {
+            assert!(
+                blob.contains(a),
+                "action '{a}' missing from CommandFacadeCall schema"
+            );
+        }
     }
 
     #[test]

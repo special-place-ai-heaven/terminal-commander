@@ -10,9 +10,9 @@ use serde::Deserialize;
 use crate::tools::{
     McpBucketEventsSinceParams, McpBucketSummaryParams, McpBucketWaitParams,
     McpCommandOutputTailParams, McpCommandStartParams, McpCommandStatusParams,
-    McpCommandStopParams, McpEventContextParams, McpRunAndWatchParams,
-    McpShellExecParams, McpSubscriptionCloseParams, McpSubscriptionListParams,
-    McpSubscriptionOpenParams, McpSubscriptionPullParams, McpSubscriptionSeekParams,
+    McpCommandStopParams, McpEventContextParams, McpRunAndWatchParams, McpShellExecParams,
+    McpSubscriptionCloseParams, McpSubscriptionListParams, McpSubscriptionOpenParams,
+    McpSubscriptionPullParams, McpSubscriptionSeekParams,
 };
 
 /// `command` facade -- run + observe + stream a one-shot command. Internally
