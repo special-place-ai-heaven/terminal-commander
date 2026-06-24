@@ -1643,9 +1643,14 @@ impl TerminalCommanderMcpServer {
             Ok(IpcResponse::RegistryTest(RegistryTestResponse {
                 matches,
                 truncated_bytes,
+                stream_mismatches,
             })) => json_tool_result(&serde_json::json!({
                 "matches": matches,
                 "truncated_bytes": truncated_bytes,
+                // F8b (trust): sample indices whose regex matched but whose
+                // stream the rule's `stream` filter excluded -- surfaced so
+                // the operator sees WHY an apparent match did not fire.
+                "stream_mismatches": stream_mismatches,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),

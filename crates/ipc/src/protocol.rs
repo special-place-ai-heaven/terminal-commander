@@ -1317,6 +1317,14 @@ pub struct RegistryTestResponse {
     /// Bytes dropped by per-sample truncation. Helps the operator
     /// reason about why a tail-anchored regex did not fire.
     pub truncated_bytes: u32,
+    /// F8b (trust): `sample_index` values whose text the rule's regex
+    /// WOULD match, but whose stream the rule's `stream` filter
+    /// excludes -- so the rule produced no match for a reason invisible
+    /// in the sample text alone. Empty when no sample is a stream
+    /// mismatch. Additive: omitted from the wire when empty so older
+    /// clients keep the historical shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stream_mismatches: Vec<usize>,
 }
 
 /// `registry_suggest_from_samples` parameters (US2 / FR-007).

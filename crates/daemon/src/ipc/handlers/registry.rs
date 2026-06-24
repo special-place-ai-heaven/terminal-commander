@@ -126,6 +126,10 @@ pub(in crate::ipc::server) fn handle_registry_test(
     let bucket = terminal_commander_core::BucketId::new();
     let mut matches: Vec<RegistryTestMatch> = Vec::new();
     let mut truncated_total: u32 = 0;
+    // F8b (trust): sample indices whose text the regex WOULD match,
+    // but whose stream the rule's `stream` filter excludes. A rule
+    // with `stream: None` matches any stream and can never mismatch.
+    let mut stream_mismatches: Vec<usize> = Vec::new();
 
     for (i, sample) in params.samples.iter().enumerate() {
         // Per-sample cap; bytes beyond it are dropped before the
@@ -140,9 +144,10 @@ pub(in crate::ipc::server) fn handle_registry_test(
             text.truncate(end);
             truncated_total = truncated_total.saturating_add(dropped);
         }
-        let stream = sample.stream.clone().unwrap_or(SourceStream::Stdout);
-        let frame = SourceFrame::new(probe, stream, text);
+        let sample_stream = sample.stream.clone().unwrap_or(SourceStream::Stdout);
+        let frame = SourceFrame::new(probe, sample_stream.clone(), text.clone());
         let drafts = sifter.evaluate(&frame, bucket);
+        let had_match = !drafts.is_empty();
         for draft in drafts {
             let mut captures: std::collections::BTreeMap<String, String> =
                 std::collections::BTreeMap::new();
@@ -159,11 +164,30 @@ pub(in crate::ipc::server) fn handle_registry_test(
                 captures,
             });
         }
+
+        // F8b: no match on the sample's actual stream, and the rule has
+        // a stream filter that excludes that stream. Re-evaluate the
+        // SAME rule against a frame built on the rule's OWN stream: if
+        // the regex fires there, the only thing that suppressed the
+        // match was the invisible stream attribute -- a trust trap.
+        // The inline `!=` mirrors the sifter's private `stream_matches`;
+        // `def.stream: None` falls through the let-chain (matches any
+        // stream, so it can never be a stream mismatch).
+        if !had_match
+            && let Some(rule_stream) = def.stream.as_ref()
+            && rule_stream != &sample_stream
+        {
+            let rule_frame = SourceFrame::new(probe, rule_stream.clone(), text);
+            if !sifter.evaluate(&rule_frame, bucket).is_empty() {
+                stream_mismatches.push(i);
+            }
+        }
     }
 
     Ok(IpcResponse::RegistryTest(RegistryTestResponse {
         matches,
         truncated_bytes: truncated_total,
+        stream_mismatches,
     }))
 }
 
@@ -553,6 +577,7 @@ pub(in crate::ipc::server) fn handle_registry_suggest_from_samples(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::protocol::RegistryTestSample;
     use std::sync::atomic::{AtomicU64, Ordering};
     use terminal_commander_core::{
         ActivationScope, ContextHint, RuleDefinition, RuleStatus, RuleType, Severity,
@@ -576,6 +601,14 @@ mod tests {
     }
 
     fn rule(id: &str, status: RuleStatus) -> RuleDefinition {
+        rule_with_stream(id, status, None)
+    }
+
+    fn rule_with_stream(
+        id: &str,
+        status: RuleStatus,
+        stream: Option<terminal_commander_core::SourceStream>,
+    ) -> RuleDefinition {
         RuleDefinition {
             id: id.to_owned(),
             version: 1,
@@ -583,7 +616,7 @@ mod tests {
             status,
             severity: Severity::Medium,
             event_kind: "test".to_owned(),
-            stream: None,
+            stream,
             description: None,
             pattern: None,
             keywords: Some(vec!["boom".to_owned()]),
@@ -595,6 +628,134 @@ mod tests {
             context_hint: ContextHint::default(),
             examples: vec![],
         }
+    }
+
+    /// F8b (trust): a rule whose `stream` filter is `Some(Stderr)` and
+    /// whose keyword matches text `T` must NOT fire for a sample carrying
+    /// `T` on stdout -- the regex would match, but the stream attribute
+    /// (invisible in the text) suppresses it. The handler must surface
+    /// that suppression as a `stream_mismatches` entry so `registry_test`
+    /// never silently reports "no match" for a stream-only divergence.
+    #[test]
+    fn stream_filtered_rule_flags_stream_mismatch_not_silent_zero() {
+        use terminal_commander_core::SourceStream;
+
+        let data = unique_data_dir("stream-mismatch");
+        let state = state_for(&data);
+
+        // Rule fires only on stderr; keyword "boom" is present in every
+        // sample below, so the ONLY thing that can suppress a match is
+        // the stream filter.
+        state
+            .store
+            .create_rule_version(&rule_with_stream(
+                "stderr.boom",
+                RuleStatus::Active,
+                Some(SourceStream::Stderr),
+            ))
+            .expect("seed stderr rule");
+
+        // Sample 0: "boom" on stdout -> regex matches, stream excludes.
+        //   Expect: zero matches, flagged as a stream mismatch.
+        // Sample 1: "boom" on stderr -> the rule's own stream.
+        //   Expect: a normal match, NOT flagged.
+        let params = RegistryTestParams {
+            rule_id: "stderr.boom".to_owned(),
+            version: None,
+            samples: vec![
+                RegistryTestSample {
+                    text: "boom on stdout".to_owned(),
+                    stream: Some(SourceStream::Stdout),
+                },
+                RegistryTestSample {
+                    text: "boom on stderr".to_owned(),
+                    stream: Some(SourceStream::Stderr),
+                },
+            ],
+        };
+
+        let resp = match handle_registry_test(&state, &params).expect("registry_test ok") {
+            IpcResponse::RegistryTest(r) => r,
+            other => panic!("expected RegistryTest response, got {other:?}"),
+        };
+
+        // Sample 0 produced no match but IS flagged.
+        assert!(
+            !resp.matches.iter().any(|m| m.sample_index == 0),
+            "stdout sample must produce zero matches, got: {:?}",
+            resp.matches
+        );
+        assert!(
+            resp.stream_mismatches.contains(&0),
+            "stdout sample must be flagged as a stream mismatch, got: {:?}",
+            resp.stream_mismatches
+        );
+
+        // Sample 1 produced a real match and is NOT flagged.
+        assert!(
+            resp.matches.iter().any(|m| m.sample_index == 1),
+            "stderr sample must produce a match, got: {:?}",
+            resp.matches
+        );
+        assert!(
+            !resp.stream_mismatches.contains(&1),
+            "stderr sample (rule's own stream) must NOT be flagged, got: {:?}",
+            resp.stream_mismatches
+        );
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// F8b: a rule with `stream: None` matches ANY stream, so it can
+    /// never be a stream mismatch -- a sample whose regex matches simply
+    /// produces a match on whatever stream it arrives on, and a sample
+    /// whose regex does NOT match is a genuine no-match, not a stream
+    /// trap. Neither path may populate `stream_mismatches`.
+    #[test]
+    fn stream_none_rule_never_flags_mismatch() {
+        use terminal_commander_core::SourceStream;
+
+        let data = unique_data_dir("stream-none");
+        let state = state_for(&data);
+        state
+            .store
+            .create_rule_version(&rule("anystream.boom", RuleStatus::Active))
+            .expect("seed any-stream rule");
+
+        let params = RegistryTestParams {
+            rule_id: "anystream.boom".to_owned(),
+            version: None,
+            samples: vec![
+                // Matches on stdout (rule.stream None -> any stream).
+                RegistryTestSample {
+                    text: "boom here".to_owned(),
+                    stream: Some(SourceStream::Stdout),
+                },
+                // Genuine no-match: no keyword, on stderr.
+                RegistryTestSample {
+                    text: "all quiet".to_owned(),
+                    stream: Some(SourceStream::Stderr),
+                },
+            ],
+        };
+
+        let resp = match handle_registry_test(&state, &params).expect("registry_test ok") {
+            IpcResponse::RegistryTest(r) => r,
+            other => panic!("expected RegistryTest response, got {other:?}"),
+        };
+
+        assert!(
+            resp.matches.iter().any(|m| m.sample_index == 0),
+            "stdout 'boom' must match a stream:None rule, got: {:?}",
+            resp.matches
+        );
+        assert!(
+            resp.stream_mismatches.is_empty(),
+            "a stream:None rule must never flag a stream mismatch, got: {:?}",
+            resp.stream_mismatches
+        );
+
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     /// M7: when one imported rule's activation fails mid-loop, the import
