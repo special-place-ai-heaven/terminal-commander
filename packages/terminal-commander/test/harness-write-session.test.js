@@ -14,8 +14,9 @@ const { writeProvider } = require("../lib/harness/write_all.js");
 const { isValidSessionToken } = require("../lib/session/mint.js");
 const { buildCodexTomlBlock } = require("../lib/harness/io/toml_mcp.js");
 
-// Providers whose written stanza carries an env block (Item 1 surface-flag scope).
-const ENV_WRITERS = ["cursor", "claude-code", "claude-desktop"];
+// Providers whose written stanza carries an env block (surface-flag scope).
+// codex-cli is now wired too (its TOML gets a per-server [.env] table).
+const ENV_WRITERS = ["cursor", "claude-code", "claude-desktop", "codex-cli"];
 
 function dryRun(id, extra) {
   return writeProvider(id, {
@@ -99,11 +100,50 @@ for (const id of ENV_WRITERS) {
   });
 }
 
-test("codex-cli is scoped OUT of TC_SURFACE: its TOML block emits no env even if surface passed", () => {
-  // Item 1 decision (b): Codex ships includeEnv:false (TC_SESSION already does
-  // not reach it; pre-existing B1 follow-up). Confirm threading surface does NOT
-  // silently half-wire a TC_SURFACE into the Codex block.
-  const block = buildCodexTomlBlock({ surface: "compact" });
-  assert.equal(block.includes("TC_SURFACE"), false);
+// --- Codex env wiring: TC_SESSION + TC_SURFACE + TC_WSL_DISTRO reach Codex ---
+
+test("codex-cli TOML block emits [.env] with TC_SESSION + TC_SURFACE (literal values)", () => {
+  const block = buildCodexTomlBlock({ sessionToken: "tc-abc123", surface: "compact" });
+  assert.match(block, /\[mcp_servers\.terminal_commander\.env\]/);
+  assert.match(block, /TC_SESSION = "tc-abc123"/);
+  assert.match(block, /TC_SURFACE = "compact"/);
+});
+
+test("codex-cli TOML block emits TC_WSL_DISTRO only on win32", () => {
+  const win = buildCodexTomlBlock({
+    sessionToken: "tc-abc123",
+    distro: "Ubuntu-24.04",
+    platform: "win32",
+  });
+  assert.match(win, /TC_WSL_DISTRO = "Ubuntu-24.04"/);
+  const lin = buildCodexTomlBlock({
+    sessionToken: "tc-abc123",
+    distro: "Ubuntu-24.04",
+    platform: "linux",
+  });
+  assert.equal(lin.includes("TC_WSL_DISTRO"), false);
+});
+
+test("codex-cli TOML block omits the env sub-table when there are no env values", () => {
+  const block = buildCodexTomlBlock({ exePath: "x" });
   assert.equal(block.includes("[mcp_servers.terminal_commander.env]"), false);
+});
+
+test("codex-cli TOML block rejects an unsafe TC_SESSION token", () => {
+  assert.throws(
+    () => buildCodexTomlBlock({ sessionToken: "bad token!" }),
+    (e) => e && e.code === "UNSAFE_SESSION_TOKEN",
+  );
+});
+
+test("codex-cli TOML block rejects an unsafe TC_WSL_DISTRO on win32", () => {
+  assert.throws(
+    () =>
+      buildCodexTomlBlock({
+        sessionToken: "tc-abc123",
+        distro: "bad; rm -rf /",
+        platform: "win32",
+      }),
+    (e) => e && (e.code === "UNSAFE_DISTRO_NAME" || /distro/i.test(e.message)),
+  );
 });

@@ -9,9 +9,10 @@ const { writeCursorMcpConfig } = require("../cursor/write.js");
 const {
   buildTerminalCommanderCommandConfig,
   buildTerminalCommanderServerConfig,
+  assertSafeDistroName,
 } = require("../cursor/config.js");
 const { writeJsonMcpConfig } = require("./io/json_mcp.js");
-const { writeCodexTomlConfig } = require("./io/toml_mcp.js");
+const { writeCodexTomlConfig, buildCodexEnv } = require("./io/toml_mcp.js");
 const {
   codexConfigPath,
   claudeCodeMcpConfigPath,
@@ -50,6 +51,10 @@ function buildJsonMcpStanza(opts) {
     env.TC_SESSION = o.sessionToken;
   }
   if (o.distro && o.platform === "win32") {
+    // Defense in depth: the distro is interpolated into a `wsl -d <distro>`
+    // command downstream, so validate the charset before it lands in env —
+    // symmetric with the Cursor path (buildTerminalCommanderServerConfig).
+    assertSafeDistroName(o.distro);
     env.TC_WSL_DISTRO = o.distro;
   }
   // TC_SURFACE selects the MCP tool surface (compact 5-facade vs full). Value is
@@ -131,17 +136,29 @@ function writeProvider(id, opts) {
 
   if (id === "codex-cli") {
     const target = detection.config_path || codexConfigPath(o);
+    // Codex now gets the same per-harness env as the JSON harnesses: its own
+    // TC_SESSION daemon endpoint, the TC_SURFACE tool surface, and TC_WSL_DISTRO
+    // on Windows. Codex applies these literally to the spawned MCP server's
+    // process env (verified against openai/codex codex-rs mcp_types.rs).
+    const codexEnvOpts = {
+      sessionToken,
+      surface: o.surface,
+      distro: o.distro,
+      platform: o.platform,
+    };
     if (dryRun) {
-      return { id, status: HARNESS_WRITE_STATUSES.OK, dry_run: true, path: target };
+      const cmd = buildTerminalCommanderCommandConfig(o);
+      const env = buildCodexEnv(codexEnvOpts);
+      const stanza = { command: cmd.command, args: cmd.args };
+      if (Object.keys(env).length > 0) stanza.env = env;
+      return { id, status: HARNESS_WRITE_STATUSES.OK, dry_run: true, path: target, stanza };
     }
-    // NOTE: Codex TOML env wiring (TC_SESSION) is a follow-up — writeCodexTomlConfig
-    // currently emits no env block (includeEnv: false). Tracked in B1 Phase 1 TODO.
     const r = writeCodexTomlConfig({
       path: target,
       exePath: o.exePath,
       force,
       clobber_backup,
-      includeEnv: false,
+      ...codexEnvOpts,
     });
     const ok =
       r.status === "config_created" || r.status === "config_updated";
