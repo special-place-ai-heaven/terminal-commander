@@ -160,6 +160,77 @@ function getCursorProjectConfigPath(projectRoot) {
 }
 
 /**
+ * Single source of truth for the per-harness MCP env map. Shared by all three
+ * stanza builders (Cursor `buildTerminalCommanderServerConfig`, JSON
+ * `buildJsonMcpStanza`, Codex `buildCodexEnv`); each keeps only its own
+ * output-shape wrapper around this env.
+ *
+ * Behavior intentionally differs per caller and is controlled by flags:
+ *   - gateDistroOnWin32: Cursor emits TC_WSL_DISTRO whenever distro is set
+ *     (false); the JSON/Codex harnesses emit it only on win32 (true).
+ *   - requireKnownDistro/knownDistros: only Cursor enforces detectWsl
+ *     whitelist membership (throws DISTRO_NOT_FOUND).
+ *
+ * Emit order: TC_SESSION, TC_WSL_DISTRO, TC_SURFACE.
+ *
+ * @param {Object} [opts]
+ * @param {string} [opts.sessionToken]  Validated TC_SESSION (throws if unsafe).
+ * @param {string} [opts.distro]  Optional WSL distro; safety-checked when set.
+ * @param {boolean} [opts.gateDistroOnWin32=false]  Gate distro emission on win32.
+ * @param {string} [opts.platform]  Required when gateDistroOnWin32 is true.
+ * @param {boolean} [opts.requireKnownDistro=false]  Enforce knownDistros membership.
+ * @param {ReadonlyArray<{name:string}>} [opts.knownDistros]
+ * @param {("compact"|"full")} [opts.surface]  Optional TC_SURFACE.
+ * @returns {{ TC_SESSION?:string, TC_WSL_DISTRO?:string, TC_SURFACE?:string }}
+ * @throws {Error} `.code` UNSAFE_SESSION_TOKEN, UNSAFE_DISTRO_NAME, or DISTRO_NOT_FOUND.
+ */
+function buildHarnessEnv(opts) {
+  const o = opts || {};
+  const env = {};
+  if (o.sessionToken != null && o.sessionToken !== "") {
+    // Defense in depth: validate before the token can name a kernel object /
+    // socket path. Callers pass minted (valid-by-construction) tokens today,
+    // but every builder routing through here is exported.
+    if (!isValidSessionToken(o.sessionToken)) {
+      const err = new Error(
+        "terminal-commander: TC_SESSION token failed safety whitelist; only [A-Za-z0-9._-] (1..64, at least one alphanumeric, not dot-only) is allowed",
+      );
+      err.code = UNSAFE_SESSION_TOKEN;
+      throw err;
+    }
+    env.TC_SESSION = o.sessionToken;
+  }
+  if (o.distro != null && o.distro !== "") {
+    const gated = o.gateDistroOnWin32 === true;
+    if (!gated || o.platform === "win32") {
+      // Distro safety: WWS03 charset whitelist (interpolated into a
+      // `wsl -d <distro>` command downstream) + optional live whitelist
+      // membership (Cursor only).
+      assertSafeDistroName(o.distro);
+      if (o.requireKnownDistro === true) {
+        const known =
+          Array.isArray(o.knownDistros) &&
+          o.knownDistros.some((d) => d && d.name === o.distro);
+        if (!known) {
+          const err = new Error(
+            `terminal-commander: distro '${o.distro}' not found in detectWsl whitelist`,
+          );
+          err.code = "DISTRO_NOT_FOUND";
+          throw err;
+        }
+      }
+      env.TC_WSL_DISTRO = o.distro;
+    }
+  }
+  if (o.surface) {
+    // TC_SURFACE: validated compact|full at the CLI parser boundary; not a
+    // security boundary (names no kernel object / socket), so no extra guard.
+    env.TC_SURFACE = o.surface;
+  }
+  return env;
+}
+
+/**
  * Build the terminal-commander MCP server stanza for Cursor.
  *
  * @param {Object} [opts]
@@ -185,40 +256,14 @@ function buildTerminalCommanderServerConfig(opts) {
     command: commandConfig.command,
     args: commandConfig.args,
   };
-  const env = {};
-  if (o.sessionToken != null && o.sessionToken !== "") {
-    if (!isValidSessionToken(o.sessionToken)) {
-      const err = new Error(
-        "terminal-commander: TC_SESSION token failed safety whitelist; only [A-Za-z0-9._-] (1..64, at least one alphanumeric, not dot-only) is allowed",
-      );
-      err.code = UNSAFE_SESSION_TOKEN;
-      throw err;
-    }
-    env.TC_SESSION = o.sessionToken;
-  }
-  if (o.distro != null && o.distro !== "") {
-    // Distro safety: WWS03 whitelist + optional live whitelist
-    // membership.
-    assertSafeDistroName(o.distro);
-    if (o.requireKnownDistro === true) {
-      const known =
-        Array.isArray(o.knownDistros) &&
-        o.knownDistros.some((d) => d && d.name === o.distro);
-      if (!known) {
-        const err = new Error(
-          `terminal-commander: distro '${o.distro}' not found in detectWsl whitelist`,
-        );
-        err.code = "DISTRO_NOT_FOUND";
-        throw err;
-      }
-    }
-    env.TC_WSL_DISTRO = o.distro;
-  }
-  if (o.surface) {
-    // TC_SURFACE: validated compact|full at the CLI parser boundary; not a
-    // security boundary (names no kernel object / socket), so no extra guard.
-    env.TC_SURFACE = o.surface;
-  }
+  const env = buildHarnessEnv({
+    sessionToken: o.sessionToken,
+    distro: o.distro,
+    gateDistroOnWin32: false, // cursor: no win32 gate (preserves behavior)
+    requireKnownDistro: o.requireKnownDistro === true,
+    knownDistros: o.knownDistros,
+    surface: o.surface,
+  });
   if (Object.keys(env).length > 0) {
     stanza.env = env;
   }
@@ -356,6 +401,7 @@ module.exports = {
   getCursorGlobalConfigPath,
   getCursorProjectConfigPath,
   buildTerminalCommanderCommandConfig,
+  buildHarnessEnv,
   buildTerminalCommanderServerConfig,
   parseExistingCursorConfig,
   validateCursorConfigShape,
