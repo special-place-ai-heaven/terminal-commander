@@ -129,14 +129,14 @@ fn heuristics() -> Vec<Heuristic> {
         },
         Heuristic {
             id_suffix: "warning-prefix",
-            detector: Regex::new(r"^(?i:warning)[: ](?P<message>.+)$")
+            detector: Regex::new(r"^(?i:warn(?:ing)?)[: ](?P<message>.+)$")
                 .expect("warning-prefix pattern compiles"),
             severity: Severity::Low,
             event_kind: "warning",
             stream: SourceStream::Stderr,
             summary_template: "warning: ${message}",
             captures: &["message"],
-            description: "Plain `warning:`/`WARNING ` line prefix.",
+            description: "Plain `warning:`/`WARNING `/`WARN ` line prefix.",
         },
         Heuristic {
             id_suffix: "failed-token",
@@ -357,6 +357,67 @@ mod tests {
             .expect("warning-prefix proposal");
         // Universal/warning shapes are LOW severity by design.
         assert_eq!(r.severity, Severity::Low);
+    }
+
+    /// F13: a bare `WARN ` prefix (no trailing `ING`) must now fire the
+    /// warning heuristic. Previously the detector only matched the full
+    /// `warning` token, so `WARN deprecated option` was silently
+    /// dropped. The named `message` capture must still bind so the
+    /// `warning: ${message}` template can substitute.
+    #[test]
+    fn detects_bare_warn_prefix() {
+        let set = suggest_rules(&s(&["WARN deprecated option"]), None);
+        let r = set
+            .proposed_rules
+            .iter()
+            .find(|r| r.id == "suggest.warning-prefix")
+            .expect("bare WARN must produce a warning-prefix proposal (F13)");
+        assert_eq!(r.severity, Severity::Low);
+
+        // The reused detector pattern must capture the message body, so
+        // a live rule built from this proposal renders `warning: <msg>`.
+        let pat = r.pattern.as_deref().expect("warning proposal has a pattern");
+        let re = Regex::new(pat).expect("proposed pattern compiles");
+        let caps = re
+            .captures("WARN deprecated option")
+            .expect("WARN line matches the proposed pattern");
+        assert_eq!(&caps["message"], "deprecated option");
+    }
+
+    /// F13 regression guard: the original `WARNING`/`warning` forms must
+    /// keep matching after the widen, both with a space and a colon.
+    #[test]
+    fn warning_full_forms_still_match() {
+        for line in [
+            "WARNING: something",
+            "warning: something",
+            "WARNING something",
+            "WARN: something",
+        ] {
+            let set = suggest_rules(&s(&[line]), None);
+            assert!(
+                set.proposed_rules
+                    .iter()
+                    .any(|r| r.id == "suggest.warning-prefix"),
+                "expected warning-prefix proposal for {line:?}"
+            );
+        }
+    }
+
+    /// F13 over-match guard: the `warn(?:ing)?` alternation must NOT
+    /// swallow unrelated `warn`-prefixed words. `warmup complete` is
+    /// `warm` + `up`, not `warn` + `[: ]`, so it must propose nothing.
+    /// Asserting this stops a future careless widen (e.g. dropping the
+    /// `[: ]` delimiter) from regressing into false warnings.
+    #[test]
+    fn warmup_line_does_not_falsely_match_warning() {
+        let set = suggest_rules(&s(&["warmup complete"]), None);
+        assert!(
+            !set.proposed_rules
+                .iter()
+                .any(|r| r.id == "suggest.warning-prefix"),
+            "`warmup complete` must NOT be detected as a warning"
+        );
     }
 
     #[test]
