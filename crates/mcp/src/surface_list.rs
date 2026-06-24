@@ -78,6 +78,27 @@ fn collect_ref_names(v: &Value, acc: &mut BTreeSet<String>) {
     }
 }
 
+/// Build the `if action==<verb> then required:[...]` conditional for one facade
+/// branch, derived from that branch's referenced param def `param_def`.
+///
+/// schemars puts the param struct's real `required` on the referenced
+/// `$defs/<Name>` entry (the branch's own `required` is just `["action"]`), and
+/// that list never contains the tag field `action`. Returns `None` when the
+/// action requires nothing beyond `action` (or is a unit variant) so the root
+/// `allOf` stays lean. This is the F2/F10 schema-honesty shim: it advertises
+/// per-action required fields without leaving the flat object shape clients
+/// accept.
+fn action_required_conditional(verb: &str, param_def: &Map<String, Value>) -> Option<Value> {
+    let req = param_def
+        .get("required")
+        .and_then(Value::as_array)
+        .filter(|r| !r.is_empty())?;
+    Some(serde_json::json!({
+        "if": { "properties": { "action": { "const": verb } }, "required": ["action"] },
+        "then": { "required": req },
+    }))
+}
+
 /// Flatten an internally-tagged-enum schema (root `oneOf`) into the flat
 /// `{ "type":"object", "properties": {...}, "required": ["action"] }` shape MCP
 /// clients require.
@@ -90,8 +111,12 @@ fn collect_ref_names(v: &Value, acc: &mut BTreeSet<String>) {
 /// symforge's working flat `symforge` tool). Dispatch is untouched; we only
 /// reshape the schema: collect every variant's `action` const into an enum, and
 /// union every referenced param struct's properties into a flat `properties`
-/// (all optional at the root -- per-action required fields are still enforced
-/// when the typed enum deserializes the call). `$defs` is pruned to only the
+/// (all optional at the root). Per-action required fields are advertised via a
+/// root `allOf` of `if action==<verb> then required:[<verb's fields>]` blocks
+/// (derived from each branch's referenced param def -- never hand-listed), so a
+/// schema-following client supplies the RIGHT fields per action instead of
+/// treating every union field as universally valid; deserialization still
+/// enforces the typed requirements. `$defs` is pruned to only the
 /// entries actually referenced (transitively) by the flat `properties`, removing
 /// the now-unreachable `Mcp*Params` defs that were only used by the removed
 /// `oneOf` branches. (Regression: 0.1.55/0.1.56 shipped a root-oneOf schema
@@ -117,30 +142,47 @@ fn flatten_facade_schema(mut schema: Map<String, Value>) -> Map<String, Value> {
         .unwrap_or_default();
     let mut actions: Vec<Value> = Vec::new();
     let mut props = Map::new();
+    // Per-action required-field conditionals. Each entry is an `if/then` that
+    // says "when action == <verb>, these fields are required". This restores
+    // action-scoped required-field honesty without leaving the flat object
+    // shape MCP clients accept (the phantom-field bug F2/F10): the union
+    // `properties` keeps every field KNOWN, but only the right action's fields
+    // are advertised as REQUIRED. See `action_required_conditional`.
+    let mut conditionals: Vec<Value> = Vec::new();
     for branch in &one_of {
         let Some(b) = branch.as_object() else {
             continue;
         };
-        if let Some(a) = b
+        let action = b
             .get("properties")
             .and_then(|p| p.get("action"))
             .and_then(|a| a.get("const"))
-            .and_then(Value::as_str)
-        {
+            .and_then(Value::as_str);
+        if let Some(a) = action {
             actions.push(Value::String(a.to_string()));
         }
-        // Unit variants have no `$ref` sibling -- they contribute only the
-        // action verb above and no properties. That is correct and expected.
-        if let Some(p) = b
+        // Resolve the branch's referenced param def once: schemars emits each
+        // internally-tagged branch as `{ "$ref": "#/$defs/<Name>",
+        // "properties": {"action": {"const": ...}}, "required": ["action"] }`,
+        // so the branch's own `required` is just `["action"]` -- the param
+        // struct's real `properties` AND `required` both live on the
+        // referenced `$defs/<Name>` entry. We harvest both from there.
+        let param_def = b
             .get("$ref")
             .and_then(Value::as_str)
             .and_then(|r| r.rsplit('/').next())
             .and_then(|name| defs.get(name))
-            .and_then(|d| d.get("properties"))
-            .and_then(Value::as_object)
-        {
-            for (k, v) in p {
-                props.entry(k.clone()).or_insert_with(|| v.clone());
+            .and_then(Value::as_object);
+        // Unit variants have no `$ref` sibling -- they contribute only the
+        // action verb above and no properties. That is correct and expected.
+        if let Some(d) = param_def {
+            if let Some(p) = d.get("properties").and_then(Value::as_object) {
+                for (k, v) in p {
+                    props.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+            if let Some(cond) = action.and_then(|verb| action_required_conditional(verb, d)) {
+                conditionals.push(cond);
             }
         }
     }
@@ -162,6 +204,16 @@ fn flatten_facade_schema(mut schema: Map<String, Value>) -> Map<String, Value> {
         "required".to_string(),
         Value::Array(vec![Value::String("action".to_string())]),
     );
+    // Attach the per-action required-field conditionals. The root stays a flat
+    // object (`type:object`, `properties`, `required:["action"]`) -- clients
+    // accept it -- but `allOf` now carries `if action==<verb> then
+    // required:[<verb's fields>]`, so a schema-following client supplies the
+    // RIGHT fields per action instead of treating every union field as
+    // universally valid. The `if/then` blocks reference only `action` + bare
+    // field names (no `$ref`s), so the `$defs` pruning below is unaffected.
+    if !conditionals.is_empty() {
+        schema.insert("allOf".to_string(), Value::Array(conditionals));
+    }
 
     // Prune $defs to only transitively reachable entries from the flat
     // properties. Seed from $refs in the built props, then fixpoint-expand
@@ -286,9 +338,11 @@ mod tests {
     }
 
     /// A0/A1: strict schema-contract test.
-    /// Each compact tool must have `type=="object"`, no root `oneOf`/`anyOf`/`allOf`,
+    /// Each compact tool must have `type=="object"`, no root `oneOf`/`anyOf`,
     /// `required==["action"]` with every required name in properties, and
-    /// `properties.action.enum` must be a non-empty string array.
+    /// `properties.action.enum` must be a non-empty string array. A root `allOf`
+    /// is permitted ONLY as `if/then` action-scoped required-field conditionals
+    /// (see [`flatten_facade_schema`]); it must not smuggle a branch union.
     #[test]
     fn compact_tools_schema_is_flat_object() {
         // MCP clients (the Claude Code harness, the MCP TS SDK) accept a flat
@@ -297,7 +351,9 @@ mod tests {
         // is flat: type==object, has `properties` with an `action` enum, NO root
         // `oneOf`, and that the flatten is lossless enough to surface params from
         // different actions. (Regression: 0.1.55/0.1.56 shipped a root-oneOf
-        // schema and zeroed the compact surface live.)
+        // schema and zeroed the compact surface live.) A root `allOf` of
+        // `if/then` conditionals is the action-scoped required-field shim (F2/F10)
+        // and is allowed -- but only as `if`/`then` entries, never a `oneOf`.
         for tool in compact_surface_tools() {
             let s = &tool.input_schema;
             let name = &tool.name;
@@ -309,7 +365,7 @@ mod tests {
                 "tool '{name}': inputSchema.type must be \"object\"",
             );
 
-            // No root oneOf / anyOf / allOf
+            // No root oneOf / anyOf (those are the shapes clients drop / branch on).
             assert!(
                 s.get("oneOf").is_none(),
                 "tool '{name}': schema must NOT have a root oneOf (MCP clients drop it)",
@@ -318,10 +374,27 @@ mod tests {
                 s.get("anyOf").is_none(),
                 "tool '{name}': schema must NOT have a root anyOf",
             );
-            assert!(
-                s.get("allOf").is_none(),
-                "tool '{name}': schema must NOT have a root allOf",
-            );
+            // A root `allOf` is allowed ONLY as `if/then` conditionals -- every
+            // entry must be an `if`/`then` block (the F2/F10 required-field shim),
+            // never a smuggled branch union.
+            if let Some(all_of) = s.get("allOf") {
+                let entries = all_of
+                    .as_array()
+                    .unwrap_or_else(|| panic!("tool '{name}': root allOf must be an array"));
+                for (i, entry) in entries.iter().enumerate() {
+                    let e = entry
+                        .as_object()
+                        .unwrap_or_else(|| panic!("tool '{name}': allOf[{i}] must be an object"));
+                    assert!(
+                        e.contains_key("if") && e.contains_key("then"),
+                        "tool '{name}': allOf[{i}] must be an if/then conditional, got {entry:?}",
+                    );
+                    assert!(
+                        !e.contains_key("oneOf") && !e.contains_key("anyOf"),
+                        "tool '{name}': allOf[{i}] must not smuggle a branch union",
+                    );
+                }
+            }
 
             let props = s
                 .get("properties")
@@ -683,6 +756,173 @@ mod tests {
                 }
             }
             // If $defs is absent entirely that is also fine.
+        }
+    }
+
+    /// Find the `then.required` list for a given `action` const in a flat
+    /// facade schema's root `allOf` of `if/then` conditionals. Returns `None`
+    /// when no conditional matches that action (i.e. the action requires only
+    /// `action`, or is a unit variant -- no `if/then` entry is emitted).
+    fn required_for_action<'a>(schema: &'a Value, action: &str) -> Option<Vec<&'a str>> {
+        let all_of = schema.get("allOf")?.as_array()?;
+        for entry in all_of {
+            let matches = entry
+                .get("if")
+                .and_then(|i| i.get("properties"))
+                .and_then(|p| p.get("action"))
+                .and_then(|a| a.get("const"))
+                .and_then(Value::as_str)
+                == Some(action);
+            if matches {
+                let req = entry
+                    .get("then")
+                    .and_then(|t| t.get("required"))
+                    .and_then(Value::as_array)?;
+                return Some(req.iter().filter_map(Value::as_str).collect());
+            }
+        }
+        None
+    }
+
+    fn facade_schema(name: &str) -> Value {
+        let tools = compact_surface_tools();
+        let tool = tools
+            .iter()
+            .find(|t| t.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("facade '{name}' must be in compact_surface_tools"));
+        serde_json::to_value(tool.input_schema.as_ref()).expect("schema serializes")
+    }
+
+    /// F2: the `command` facade advertises action-scoped required fields, so a
+    /// schema-following client no longer presents `shell_line` as valid for
+    /// `run_and_watch` (which actually needs `argv`) nor `argv` as required for
+    /// `exec` (which needs `shell_line`). The root stays a flat object.
+    #[test]
+    fn command_facade_scopes_required_fields_per_action() {
+        let schema = facade_schema("command");
+
+        // Root flat-object invariant must hold (regression guard).
+        assert_eq!(schema.get("type").and_then(Value::as_str), Some("object"));
+        assert!(schema.get("properties").is_some());
+        assert!(schema.get("oneOf").is_none());
+        assert_eq!(
+            schema
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|r| r.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
+            Some(vec!["action"]),
+        );
+        // The union `properties` still KNOWS both fields (they are not removed).
+        let props = schema.get("properties").and_then(Value::as_object).unwrap();
+        assert!(props.contains_key("argv"), "argv must be a known field");
+        assert!(
+            props.contains_key("shell_line"),
+            "shell_line must be a known field",
+        );
+
+        // run_and_watch requires argv and does NOT require shell_line (F2).
+        let raw = required_for_action(&schema, "run_and_watch")
+            .expect("run_and_watch must have an if/then required block");
+        assert!(
+            raw.contains(&"argv"),
+            "run_and_watch must require argv, got {raw:?}",
+        );
+        assert!(
+            !raw.contains(&"shell_line"),
+            "run_and_watch must NOT require shell_line, got {raw:?}",
+        );
+        assert!(
+            !raw.contains(&"action"),
+            "then.required must not re-list the tag field action, got {raw:?}",
+        );
+
+        // exec requires shell_line and does NOT require argv.
+        let exec =
+            required_for_action(&schema, "exec").expect("exec must have an if/then required block");
+        assert!(
+            exec.contains(&"shell_line"),
+            "exec must require shell_line, got {exec:?}",
+        );
+        assert!(
+            !exec.contains(&"argv"),
+            "exec must NOT require argv, got {exec:?}",
+        );
+    }
+
+    /// F10: the `registry` facade scopes `definition_json` to `upsert` only.
+    /// `registry_test` (action="test") must NOT require `definition_json`
+    /// (it needs `rule_id` + `samples`); `upsert` must require `definition_json`.
+    #[test]
+    fn registry_facade_scopes_definition_json_to_upsert() {
+        let schema = facade_schema("registry");
+
+        // upsert requires definition_json (F10: it is upsert's field).
+        let upsert = required_for_action(&schema, "upsert")
+            .expect("upsert must have an if/then required block");
+        assert!(
+            upsert.contains(&"definition_json"),
+            "upsert must require definition_json, got {upsert:?}",
+        );
+
+        // test (registry_test) must NOT require definition_json; it requires
+        // rule_id + samples (the actual McpRegistryTestParams required fields).
+        let test =
+            required_for_action(&schema, "test").expect("test must have an if/then required block");
+        assert!(
+            !test.contains(&"definition_json"),
+            "registry_test must NOT require definition_json (F10), got {test:?}",
+        );
+        assert!(
+            test.contains(&"rule_id"),
+            "registry_test must require rule_id, got {test:?}",
+        );
+        assert!(
+            test.contains(&"samples"),
+            "registry_test must require samples, got {test:?}",
+        );
+    }
+
+    /// The if/then conditionals are DERIVED from the same branch defs the
+    /// flatten already reads -- not hand-listed -- so every emitted `then`
+    /// required name must also be a known field in the flat `properties`, and
+    /// every action with a non-trivial required set must get a conditional.
+    #[test]
+    fn allof_required_fields_are_derived_and_known() {
+        for tool in compact_surface_tools() {
+            let name = tool.name.clone();
+            let schema =
+                serde_json::to_value(tool.input_schema.as_ref()).expect("schema serializes");
+            let props = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("tool '{name}': missing properties"));
+            let Some(all_of) = schema.get("allOf").and_then(Value::as_array) else {
+                continue;
+            };
+            for entry in all_of {
+                let then_req = entry
+                    .get("then")
+                    .and_then(|t| t.get("required"))
+                    .and_then(Value::as_array)
+                    .unwrap_or_else(|| panic!("tool '{name}': allOf entry missing then.required"));
+                assert!(
+                    !then_req.is_empty(),
+                    "tool '{name}': a lean allOf must not emit an empty then.required",
+                );
+                for field in then_req {
+                    let field = field
+                        .as_str()
+                        .unwrap_or_else(|| panic!("tool '{name}': then.required entry not a str"));
+                    assert_ne!(
+                        field, "action",
+                        "tool '{name}': then.required must not re-list the tag field action",
+                    );
+                    assert!(
+                        props.contains_key(field),
+                        "tool '{name}': then.required field '{field}' must exist in flat properties",
+                    );
+                }
+            }
         }
     }
 }
