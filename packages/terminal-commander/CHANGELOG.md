@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.63](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.62...v0.1.63) (2026-06-24)
+
+
+### Bug Fixes
+
+* **harness:** atomic config writes fsync + scope-check on every writer ([37339fa](https://github.com/special-place-ai-heaven/terminal-commander/commit/37339fab8e316feb5a2c4c1b1bef79715f41d495))
+* **harness:** atomic config writes fsync + scope-check on every writer ([122f7f6](https://github.com/special-place-ai-heaven/terminal-commander/commit/122f7f6534ea7e1573db2748c43423432531db07))
+
 ## [0.1.62](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.61...v0.1.62) (2026-06-24)
 
 
