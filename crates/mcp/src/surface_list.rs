@@ -37,24 +37,90 @@ sub_list.";
 /// follow-on plans). KEEP IN SYNC with [`compact_surface_tools`].
 pub const COMPACT_TOOL_NAMES: &[&str] = &["command"];
 
-/// Build the single facade `Tool` for a given name + input type, reusing the
-/// rmcp `schema_for_type` cache so the schema matches the router's exactly.
+/// Flatten an internally-tagged-enum schema (root `oneOf`) into the flat
+/// `{ "type":"object", "properties": {...}, "required": ["action"] }` shape MCP
+/// clients require.
+///
+/// The facade enum is `#[serde(tag = "action")]`, so its WIRE format is already
+/// flat (`{"action": "...", ...fields}` deserializes directly) -- only the
+/// ADVERTISED schema is a root `oneOf`, which strict MCP clients (the Claude
+/// Code harness, the MCP TS SDK) SILENTLY DROP ("connected, no tools"), because a
+/// tool inputSchema must be a flat object with `properties` (proven against
+/// symforge's working flat `symforge` tool). Dispatch is untouched; we only
+/// reshape the schema: collect every variant's `action` const into an enum, and
+/// union every referenced param struct's properties into a flat `properties`
+/// (all optional at the root -- per-action required fields are still enforced
+/// when the typed enum deserializes the call). `$defs` is kept as-is so the
+/// inlined props' `$ref`s (EnvEntry / RuleInput / McpSubscriptionSourceSel) still
+/// resolve; now-unused `Mcp*Params` defs are harmless. (Regression: 0.1.55/0.1.56
+/// shipped a root-oneOf schema and zeroed the compact surface live.)
+fn flatten_facade_schema(mut schema: Map<String, Value>) -> Map<String, Value> {
+    let Some(one_of) = schema.remove("oneOf").and_then(|v| match v {
+        Value::Array(a) => Some(a),
+        _ => None,
+    }) else {
+        // Already a flat object schema (e.g. a struct facade): just ensure type.
+        schema
+            .entry("type".to_string())
+            .or_insert_with(|| Value::String("object".to_string()));
+        return schema;
+    };
+    let defs = schema
+        .get("$defs")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut actions: Vec<Value> = Vec::new();
+    let mut props = Map::new();
+    for branch in &one_of {
+        let Some(b) = branch.as_object() else {
+            continue;
+        };
+        if let Some(a) = b
+            .get("properties")
+            .and_then(|p| p.get("action"))
+            .and_then(|a| a.get("const"))
+            .and_then(Value::as_str)
+        {
+            actions.push(Value::String(a.to_string()));
+        }
+        if let Some(p) = b
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.rsplit('/').next())
+            .and_then(|name| defs.get(name))
+            .and_then(|d| d.get("properties"))
+            .and_then(Value::as_object)
+        {
+            for (k, v) in p {
+                props.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+    props.insert(
+        "action".to_string(),
+        serde_json::json!({
+            "type": "string",
+            "enum": actions,
+            "description": "The operation. Prefer \"run_and_watch\" to run a command and get its signals + exit in ONE call.",
+        }),
+    );
+    schema.insert("type".to_string(), Value::String("object".to_string()));
+    schema.insert("properties".to_string(), Value::Object(props));
+    schema.insert(
+        "required".to_string(),
+        Value::Array(vec![Value::String("action".to_string())]),
+    );
+    schema
+}
+
+/// Build the single facade `Tool` for a given name + input type. The schema is
+/// flattened to the MCP-required flat object shape (see [`flatten_facade_schema`]).
 fn surface_tool<T>(name: &'static str, description: &'static str) -> Tool
 where
     T: schemars::JsonSchema + std::any::Any,
 {
-    // schemars renders an internally-tagged enum (the facade's discriminated
-    // union) as a root `oneOf` with NO top-level `type`. The MCP `tools/list`
-    // contract requires every tool's `inputSchema.type == "object"`, and strict
-    // clients (e.g. the Claude Code harness) REJECT the entire tools list when
-    // it is absent -- which silently zeroes the compact surface. Inject it: the
-    // `oneOf` branches are all objects, so `{ "type": "object", "oneOf": [...] }`
-    // is sound and satisfies the contract. (Regression: 0.1.55 tools-fetch
-    // failed with `inputSchema.type expected "object"`.)
-    let mut schema: Map<String, Value> = (*schema_for_type::<T>()).clone();
-    schema
-        .entry("type".to_string())
-        .or_insert_with(|| Value::String("object".to_string()));
+    let schema = flatten_facade_schema((*schema_for_type::<T>()).clone());
     Tool::new(name, description, Arc::new(schema))
 }
 
@@ -119,20 +185,40 @@ mod tests {
     }
 
     #[test]
-    fn compact_tools_input_schema_is_object() {
-        // Every compact facade tool MUST advertise `inputSchema.type == "object"`
-        // or strict MCP clients reject the ENTIRE tools/list. Regression: the
-        // discriminated-union schema rendered a root `oneOf` with no `type`,
-        // which zeroed the compact surface live in the Claude Code harness
-        // (`tools/list` failed: inputSchema.type expected "object").
+    fn compact_tools_schema_is_flat_object() {
+        // MCP clients (the Claude Code harness, the MCP TS SDK) accept a flat
+        // `{type:"object", properties:{...}}` tool inputSchema and SILENTLY DROP
+        // a root-`oneOf` tool ("connected, no tools"). Assert the facade schema
+        // is flat: type==object, has `properties` with an `action` enum, NO root
+        // `oneOf`, and that the flatten is lossless enough to surface params from
+        // different actions. (Regression: 0.1.55/0.1.56 shipped a root-oneOf
+        // schema and zeroed the compact surface live.)
         for tool in compact_surface_tools() {
-            let ty = tool.input_schema.get("type").and_then(|v| v.as_str());
+            let s = &tool.input_schema;
             assert_eq!(
-                ty,
+                s.get("type").and_then(|v| v.as_str()),
                 Some("object"),
-                "tool '{}' inputSchema.type must be \"object\", got {:?}",
+                "tool '{}': inputSchema.type must be \"object\"",
                 tool.name,
-                tool.input_schema.get("type"),
+            );
+            assert!(
+                s.get("oneOf").is_none(),
+                "tool '{}': schema must NOT have a root oneOf (MCP clients drop it)",
+                tool.name,
+            );
+            let props = s
+                .get("properties")
+                .and_then(|v| v.as_object())
+                .unwrap_or_else(|| panic!("tool '{}': missing root properties", tool.name));
+            assert!(
+                props.contains_key("action"),
+                "tool '{}': properties must include the action enum",
+                tool.name,
+            );
+            assert!(
+                props.contains_key("argv") && props.contains_key("job_id"),
+                "tool '{}': flatten must surface params from multiple actions (argv, job_id)",
+                tool.name,
             );
         }
     }
