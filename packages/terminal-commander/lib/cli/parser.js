@@ -48,7 +48,10 @@ const BOOLEAN_FLAGS = new Set([
   "--uninstall",
 ]);
 
-const STRING_FLAGS = new Set(["--distro", "--project", "--provider"]);
+const STRING_FLAGS = new Set(["--distro", "--project", "--provider", "--surface"]);
+
+/** Legal values for `--surface` (mirrors the Rust MCP server's TC_SURFACE gate). */
+const SURFACE_VALUES = new Set(["compact", "full"]);
 
 const HARNESS_SETUP_FLAGS = new Set([
   "distro",
@@ -60,6 +63,7 @@ const HARNESS_SETUP_FLAGS = new Set([
   "dry-run",
   "install-wsl-runtime",
   "provider",
+  "surface",
   "uninstall",
 ]);
 
@@ -174,6 +178,11 @@ function parseArgv(argv) {
       }
       if (flags.global === true && flags.project != null) {
         return makeError("--global and --project are mutually exclusive");
+      }
+      if (flags.surface != null && !SURFACE_VALUES.has(flags.surface)) {
+        return makeError(
+          `flag --surface must be 'compact' or 'full' (got '${flags.surface}')`,
+        );
       }
       return {
         ok: true,
@@ -361,6 +370,12 @@ FLAGS
   --provider <id>                     Configure only one harness (cursor,
                                       codex-cli, claude-code, claude-desktop,
                                       gemini, kimi).
+  --surface <compact|full>            MCP tool surface the configured server
+                                      advertises. Writes env.TC_SURFACE into
+                                      each harness stanza (cursor, claude-code,
+                                      claude-desktop). Omit to leave it unset
+                                      (server default). 'compact' = 5 verb
+                                      facades; 'full' = all tools.
   --uninstall                         (daemon-logon only) Remove the per-user
                                       logon Scheduled Task.
   --help, -h                          Show this panel.

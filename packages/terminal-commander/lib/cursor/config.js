@@ -25,8 +25,9 @@
 // passing `opts.distro` to `buildTerminalCommanderServerConfig` — the
 // resulting stanza adds `"env": { "TC_WSL_DISTRO": "<distro>" }`. The
 // distro name is validated by `assertSafeDistroName` (WWS03) before
-// it can land in the config. No other env key is ever emitted; no
-// secrets / tokens / credentials are written.
+// it can land in the config. The stanza may also carry TC_SESSION (a
+// non-secret per-harness daemon endpoint id) and TC_SURFACE (compact|full
+// tool surface); no secrets / passwords / credentials are ever written.
 //
 // The legacy `wsl.exe`-direct stanza (`{ "command": "wsl", "args":
 // ["-d", "<distro>", "bash", "-lc", "terminal-commander-mcp"] }`) is
@@ -170,7 +171,9 @@ function getCursorProjectConfigPath(projectRoot) {
  * @param {ReadonlyArray<{name:string}>} [opts.knownDistros]  Required
  *     iff `opts.requireKnownDistro === true`.
  * @param {boolean} [opts.requireKnownDistro=false]
- * @returns {{ type:string, command:string, args:string[], env?: { TC_SESSION?:string, TC_WSL_DISTRO?:string } }}
+ * @param {("compact"|"full")} [opts.surface]  Optional MCP tool surface; when
+ *     set, emitted as env.TC_SURFACE. Validated at the CLI parser boundary.
+ * @returns {{ type:string, command:string, args:string[], env?: { TC_SESSION?:string, TC_WSL_DISTRO?:string, TC_SURFACE?:string } }}
  * @throws {Error} with `.code` `UNSAFE_DISTRO_NAME`, `DISTRO_NOT_FOUND`, or
  *     `UNSAFE_SESSION_TOKEN`.
  */
@@ -210,6 +213,11 @@ function buildTerminalCommanderServerConfig(opts) {
       }
     }
     env.TC_WSL_DISTRO = o.distro;
+  }
+  if (o.surface) {
+    // TC_SURFACE: validated compact|full at the CLI parser boundary; not a
+    // security boundary (names no kernel object / socket), so no extra guard.
+    env.TC_SURFACE = o.surface;
   }
   if (Object.keys(env).length > 0) {
     stanza.env = env;
