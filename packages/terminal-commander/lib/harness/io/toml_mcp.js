@@ -77,11 +77,10 @@ function buildCodexTomlBlock(opts) {
     `command = ${JSON.stringify(commandConfig.command)}`,
     `args = [${commandConfig.args.map((arg) => JSON.stringify(arg)).join(", ")}]`,
   ];
-  // Emit the env sub-table when there are values. `includeEnv: false` is an
-  // explicit opt-out. Keys are bare TOML keys; values are TOML basic strings
-  // (JSON.stringify is a valid TOML basic-string encoder for the [A-Za-z0-9._-]
-  // + compact|full value charset these keys carry).
-  const env = o.includeEnv === false ? {} : buildCodexEnv(o);
+  // Emit the env sub-table when there are values. Keys are bare TOML keys;
+  // values are TOML basic strings (JSON.stringify is a valid TOML basic-string
+  // encoder for the [A-Za-z0-9._-] + compact|full value charset these keys carry).
+  const env = buildCodexEnv(o);
   const envKeys = Object.keys(env);
   if (envKeys.length > 0) {
     lines.push("", ENV_SECTION_HEADER);
