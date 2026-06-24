@@ -131,6 +131,50 @@ pub(in crate::ipc::server) fn handle_file_read_window(
     }))
 }
 
+/// Build a bounded snippet that CONTAINS the match at byte offset `col`
+/// within `line`.
+///
+/// The window is centered on the match rather than always taken from column 0
+/// (F12): a match sitting past `max_snippet` bytes into a long line must still
+/// appear in the returned snippet. We aim to start roughly `max_snippet / 2`
+/// before `col`, then clamp so the window never starts before 0 nor runs past
+/// the end of the line; when the match is near the end the window slides left
+/// so it still fills `max_snippet` bytes. Both window edges are snapped DOWN to
+/// UTF-8 char boundaries so the slice can never split a multi-byte character.
+///
+/// Invariant: `start <= col` always holds for this formula, so the BEGINNING of
+/// the match is always visible -- even when the matched term is itself longer
+/// than `max_snippet` (a huge query), in which case only the head of the match
+/// fits, which is the best we can do without growing the snippet budget.
+fn center_snippet(line: &str, col: usize, max_snippet: usize) -> String {
+    if line.len() <= max_snippet {
+        return line.to_owned();
+    }
+    // Center the window on the match, then clamp into [0, line.len()] while
+    // keeping it `max_snippet` wide. `start <= col` is preserved: the left edge
+    // is at most `col`, so the match start is never clipped off.
+    let half = max_snippet / 2;
+    let centered_start = col.saturating_sub(half);
+    let mut end = (centered_start + max_snippet).min(line.len());
+    let mut start = end.saturating_sub(max_snippet);
+
+    // Snap BOTH edges DOWN to char boundaries so we never slice through a
+    // multi-byte char. Walking down keeps `start <= col` (col is a boundary)
+    // and can only shrink the window.
+    while start > 0 && !line.is_char_boundary(start) {
+        start -= 1;
+    }
+    while end > start && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Defensive: boundary walking can only move `end` toward `start`, so this
+    // clamp is belt-and-suspenders, never a real slice-order violation.
+    if end < start {
+        end = start;
+    }
+    line[start..end].to_owned()
+}
+
 pub(in crate::ipc::server) fn handle_file_search(
     state: &Arc<DaemonState>,
     params: &FileSearchParams,
@@ -196,15 +240,7 @@ pub(in crate::ipc::server) fn handle_file_search(
             line.find(&params.query)
         };
         if let Some(col) = pos {
-            let snippet = if line.len() > max_snippet {
-                let mut end = max_snippet;
-                while !line.is_char_boundary(end) && end > 0 {
-                    end -= 1;
-                }
-                line[..end].to_owned()
-            } else {
-                line.to_owned()
-            };
+            let snippet = center_snippet(line, col, max_snippet);
             matches.push(FileSearchMatch {
                 line: line_no,
                 byte_offset: line_start.saturating_add(col as u64),
@@ -475,4 +511,135 @@ pub(in crate::ipc::server) fn handle_file_watch_list(state: &Arc<DaemonState>) -
         )
         .collect();
     IpcResponse::FileWatchList(FileWatchListResponse { entries })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::center_snippet;
+
+    /// F12 regression: when the match sits far past `max_snippet` bytes from
+    /// column 0, the centered window must still CONTAIN the matched substring.
+    /// The old code always sliced `line[..max_snippet]`, so a match deep in a
+    /// long line was invisible in the returned snippet.
+    #[test]
+    fn center_snippet_contains_match_far_from_column_zero() {
+        let max = 20;
+        let prefix = "x".repeat(200);
+        let needle = "NEEDLE";
+        let line = format!("{prefix}{needle}{}", "y".repeat(200));
+        let col = line.find(needle).expect("needle present");
+        assert!(col > max, "match must be past the snippet budget to exercise F12");
+
+        let snippet = center_snippet(&line, col, max);
+        assert!(
+            snippet.contains(needle),
+            "centered snippet must contain the match; got {snippet:?}"
+        );
+        assert!(snippet.len() <= max, "snippet must stay within the byte budget");
+    }
+
+    /// A match near column 0 still works: the window starts at 0 and the match
+    /// is visible at the head of the snippet.
+    #[test]
+    fn center_snippet_match_near_column_zero() {
+        let max = 20;
+        let needle = "HIT";
+        let line = format!("{needle}{}", "z".repeat(200));
+        let col = line.find(needle).expect("needle present");
+        assert_eq!(col, 0);
+
+        let snippet = center_snippet(&line, col, max);
+        assert!(snippet.starts_with(needle), "got {snippet:?}");
+        assert!(snippet.len() <= max);
+    }
+
+    /// A short line (<= max_snippet) is returned whole and unchanged.
+    #[test]
+    fn center_snippet_short_line_unchanged() {
+        let max = 240;
+        let line = "a short line with the WORD in it";
+        let col = line.find("WORD").expect("needle present");
+        let snippet = center_snippet(line, col, max);
+        assert_eq!(snippet, line);
+    }
+
+    /// A multi-byte UTF-8 line whose RAW window edges land MID-CHARACTER. This
+    /// fixture is built so the unclamped centering math puts both edges inside
+    /// a multi-byte char, forcing BOTH boundary-snapping `while` loops to walk
+    /// down -- a regression that broke the snapping would panic here (mid-char
+    /// slice) instead of silently passing. We assert no panic, the result still
+    /// sits on char boundaries (valid UTF-8 + recoverable as a substring), and
+    /// the match is inside the window.
+    ///
+    /// Fixture math (prefix 'é' = 2 bytes, suffix 'り' = 3 bytes):
+    ///   prefix = "é"*80  -> bytes [0, 160), boundaries on every EVEN offset.
+    ///   needle = "TARGET" (ASCII) at col = 160, occupying [160, 166).
+    ///   suffix = "り"*40  -> boundaries at 166, 169, 172, 175, 178, 181, ...
+    ///   max_snippet = 43 -> half = 21. Unclamped: start = col - 21 = 139 (ODD
+    ///   -> mid-'é'), end = 139 + 43 = 182 (16 bytes into the suffix, between
+    ///   181 and 184 -> mid-'り'). Both `while` loops MUST run: 139->138 and
+    ///   182->181, yielding the on-boundary window [138, 181).
+    #[test]
+    fn center_snippet_utf8_snaps_offboundary_edges() {
+        let prefix = "é".repeat(80); // 160 bytes
+        let needle = "TARGET";
+        let suffix = "り".repeat(40); // 120 bytes, 3-byte chars
+        let line = format!("{prefix}{needle}{suffix}");
+        let col = line.find(needle).expect("needle present");
+        assert_eq!(col, 160, "fixture assumes the match sits at byte 160");
+
+        let max = 43;
+        // Sanity-check the fixture itself: the RAW (unsnapped) edges this helper
+        // computes must both be mid-character, or the test would be vacuous.
+        let raw_start = col - max / 2; // 139
+        let raw_end = raw_start + max; // 182
+        assert!(
+            !line.is_char_boundary(raw_start),
+            "fixture must put the raw start edge mid-char to exercise the snap loop"
+        );
+        assert!(
+            !line.is_char_boundary(raw_end),
+            "fixture must put the raw end edge mid-char to exercise the snap loop"
+        );
+
+        // No panic on a mid-char raw window == the snap loops did their job.
+        let snippet = center_snippet(&line, col, max);
+        // The result is valid UTF-8 (String guarantees it only because we sliced
+        // on boundaries) and must be locatable back in the line on boundaries.
+        let snip_start = line.find(snippet.as_str()).expect("snippet is a substring of line");
+        let snip_end = snip_start + snippet.len();
+        assert!(line.is_char_boundary(snip_start), "result start must be on a char boundary");
+        assert!(line.is_char_boundary(snip_end), "result end must be on a char boundary");
+        // Edges were snapped DOWN from the mid-char raw edges.
+        assert_eq!(snip_start, 138, "start should snap 139 -> 138");
+        assert_eq!(snip_end, 181, "end should snap 182 -> 181");
+        assert!(snippet.len() <= max, "got len {} for {snippet:?}", snippet.len());
+        assert!(snippet.contains(needle), "centered snippet should hold the match");
+    }
+
+    /// Huge-query edge: the matched term itself is longer than `max_snippet`.
+    /// We cannot show the whole match, but the invariant `start <= col` must
+    /// hold so the FIRST byte of the match falls inside the window (the head of
+    /// the match is visible) -- and we must not panic on the slice.
+    #[test]
+    fn center_snippet_query_longer_than_budget() {
+        let max = 8;
+        let needle = "A_VERY_LONG_QUERY_STRING";
+        assert!(needle.len() > max);
+        let pad = "p".repeat(50);
+        let line = format!("{pad}{needle}{}", "q".repeat(50));
+        let col = line.find(needle).expect("needle present");
+
+        let snippet = center_snippet(&line, col, max);
+        assert!(snippet.len() <= max);
+        // The match's first byte is inside the returned window: the snippet
+        // contains the slice [col, col+1), i.e. the head of the match. Confirm
+        // by locating the snippet back in the line and checking it spans `col`.
+        let snip_start = line.find(snippet.as_str()).expect("snippet is a substring of line");
+        let snip_end = snip_start + snippet.len();
+        assert!(
+            snip_start <= col && col < snip_end,
+            "window [{snip_start}, {snip_end}) must contain match at {col}; got {snippet:?}"
+        );
+    }
 }
