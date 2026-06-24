@@ -655,14 +655,10 @@ mod runtime {
             } else {
                 PtyProbeMetrics::default()
             };
-            let sink_snap = b.metrics_snapshot.lock().clone();
             // Combine: probe owns the frame/byte/prompt counters; the
-            // sink owns `events_emitted`. Take whichever is larger
-            // for `events_emitted` so a race doesn't lose the count.
-            let metrics = PtyProbeMetrics {
-                events_emitted: probe_metrics.events_emitted.max(sink_snap.events_emitted),
-                ..probe_metrics
-            };
+            // sink owns `events_emitted` (see `combine_pty_metrics`).
+            let sink_snap = b.metrics_snapshot.lock().clone();
+            let metrics = combine_pty_metrics(&probe_metrics, &sink_snap);
             // An operator stop IS a cancellation, not a clean exit: record it
             // as Cancelled so the ledger (and any lingering runtime view)
             // reflects the kill. Synchronous so `pty_command_list` is
@@ -687,13 +683,30 @@ mod runtime {
             let g = self.live.read();
             g.iter()
                 .map(|(jid, b)| {
-                    let metrics = b.metrics_snapshot.lock().clone();
-                    let secret = if let Ok(guard) = b.probe.try_lock() {
-                        guard
+                    // The PtyEventSink only writes `events_emitted` into the
+                    // binding snapshot; the real frame / byte / prompt /
+                    // suppression counters live on the probe (mirrors
+                    // `stop()`). Lock the probe ONCE per entry to read both
+                    // the metrics and the secret-prompt flag. If the probe is
+                    // busy (e.g. `write_stdin` holding it across `.await`),
+                    // fall back to the snapshot metrics + secret=false: a
+                    // momentary stale read is acceptable and must never block
+                    // `list()`. `list()` is read-only — never cancel here.
+                    let (metrics, secret) = if let Ok(guard) = b.probe.try_lock() {
+                        let probe_metrics = guard
                             .as_ref()
-                            .is_some_and(PtyProbe::is_secret_prompt_active)
+                            .map_or_else(PtyProbeMetrics::default, PtyProbe::metrics);
+                        let secret = guard
+                            .as_ref()
+                            .is_some_and(PtyProbe::is_secret_prompt_active);
+                        // The sink owns `events_emitted` (see
+                        // `combine_pty_metrics`); everything else is the
+                        // probe's real workload.
+                        let sink_snap = b.metrics_snapshot.lock().clone();
+                        let metrics = combine_pty_metrics(&probe_metrics, &sink_snap);
+                        (metrics, secret)
                     } else {
-                        false
+                        (b.metrics_snapshot.lock().clone(), false)
                     };
                     (
                         *jid,
@@ -804,6 +817,116 @@ mod runtime {
                 .cloned(),
         );
         out
+    }
+
+    /// Combine probe-side and sink-side PTY metrics into the value
+    /// surfaced by `stop()` and `list()`.
+    ///
+    /// The probe owns the real workload counters
+    /// (`frames_total` / `bytes_total` / prompt / suppression); the
+    /// `PtyEventSink` only records `events_emitted` into the binding
+    /// snapshot. Everything but `events_emitted` therefore comes from
+    /// `probe`; `events_emitted` is the max of the two so a race between
+    /// the probe finalizing and the sink emitting cannot lose the count.
+    ///
+    /// This was the exact F9 footgun (the snapshot's zeroed frame/byte
+    /// counters leaking into `list()`); keeping the combine in one place
+    /// means there is a single line to get right and a single line to
+    /// test.
+    fn combine_pty_metrics(
+        probe: &PtyProbeMetrics,
+        snapshot: &PtyProbeMetrics,
+    ) -> PtyProbeMetrics {
+        PtyProbeMetrics {
+            events_emitted: probe.events_emitted.max(snapshot.events_emitted),
+            ..*probe
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{combine_pty_metrics, PtyProbeMetrics};
+
+        #[test]
+        fn combine_takes_workload_counters_from_probe_not_snapshot() {
+            // The probe carries the real workload; the snapshot's
+            // frame/byte/prompt/suppression counters are structurally
+            // zero (only the sink's `events_emitted` is ever written
+            // there). This is the F9 regression guard: those probe
+            // counters must survive the combine even when the snapshot
+            // is all-default.
+            let probe = PtyProbeMetrics {
+                frames_total: 192,
+                bytes_total: 1876,
+                events_emitted: 5,
+                prompts_total: 3,
+                secret_prompts_total: 1,
+                stdin_bytes_written: 42,
+                stdin_writes_denied_secret: 2,
+                frames_suppressed: 7,
+                frames_suppressed_progress: 4,
+                frames_suppressed_dedupe: 3,
+            };
+            let snapshot = PtyProbeMetrics::default();
+
+            let combined = combine_pty_metrics(&probe, &snapshot);
+
+            assert_eq!(combined.frames_total, 192, "frames must come from probe");
+            assert_eq!(combined.bytes_total, 1876, "bytes must come from probe");
+            assert_eq!(combined.prompts_total, 3);
+            assert_eq!(combined.secret_prompts_total, 1);
+            assert_eq!(combined.stdin_bytes_written, 42);
+            assert_eq!(combined.stdin_writes_denied_secret, 2);
+            assert_eq!(combined.frames_suppressed, 7);
+            assert_eq!(combined.frames_suppressed_progress, 4);
+            assert_eq!(combined.frames_suppressed_dedupe, 3);
+        }
+
+        #[test]
+        fn combine_events_emitted_is_max_probe_greater() {
+            let probe = PtyProbeMetrics {
+                events_emitted: 9,
+                frames_total: 10,
+                ..PtyProbeMetrics::default()
+            };
+            let snapshot = PtyProbeMetrics {
+                events_emitted: 4,
+                ..PtyProbeMetrics::default()
+            };
+
+            let combined = combine_pty_metrics(&probe, &snapshot);
+
+            assert_eq!(combined.events_emitted, 9, "probe events > snapshot wins");
+            assert_eq!(combined.frames_total, 10, "non-event fields still from probe");
+        }
+
+        #[test]
+        fn combine_events_emitted_is_max_snapshot_greater() {
+            // The sink may have emitted more than the probe has recorded
+            // at the instant we read (e.g. probe metrics lagging the sink
+            // by a frame). The snapshot value must win for `events_emitted`
+            // so the count is never lost.
+            let probe = PtyProbeMetrics {
+                events_emitted: 4,
+                frames_total: 10,
+                ..PtyProbeMetrics::default()
+            };
+            let snapshot = PtyProbeMetrics {
+                events_emitted: 9,
+                // A non-zero snapshot frame count must NOT leak through;
+                // only `events_emitted` is taken from the snapshot.
+                frames_total: 999,
+                ..PtyProbeMetrics::default()
+            };
+
+            let combined = combine_pty_metrics(&probe, &snapshot);
+
+            assert_eq!(combined.events_emitted, 9, "snapshot events > probe wins");
+            assert_eq!(
+                combined.frames_total, 10,
+                "frames must come from probe, never the snapshot"
+            );
+        }
     }
 }
 
