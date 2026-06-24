@@ -13,8 +13,7 @@ const path = require("node:path");
 const { atomicWriteWithBackup, ATOMIC_REASONS } = require("./atomic.js");
 const {
   buildTerminalCommanderCommandConfig,
-  isValidSessionToken,
-  assertSafeDistroName,
+  buildHarnessEnv,
 } = require("../../cursor/config.js");
 
 const SECTION_HEADER = "[mcp_servers.terminal_commander]";
@@ -60,30 +59,13 @@ function sectionExists(text, header) {
  */
 function buildCodexEnv(opts) {
   const o = opts || {};
-  const env = {};
-  if (o.sessionToken != null && o.sessionToken !== "") {
-    // Symmetric with buildJsonMcpStanza: a token can name a kernel object /
-    // socket path, so validate before it can land in a config.
-    if (!isValidSessionToken(o.sessionToken)) {
-      const err = new Error(
-        "terminal-commander: TC_SESSION token failed safety whitelist; only [A-Za-z0-9._-] (1..64, at least one alphanumeric, not dot-only) is allowed",
-      );
-      err.code = "UNSAFE_SESSION_TOKEN";
-      throw err;
-    }
-    env.TC_SESSION = o.sessionToken;
-  }
-  if (o.surface) {
-    env.TC_SURFACE = o.surface;
-  }
-  if (o.distro && o.platform === "win32") {
-    // Validate the distro charset before it lands in env: it is interpolated
-    // into a `wsl -d <distro>` command downstream. Symmetric with the Cursor
-    // path and the JSON harness path.
-    assertSafeDistroName(o.distro);
-    env.TC_WSL_DISTRO = o.distro;
-  }
-  return env;
+  return buildHarnessEnv({
+    sessionToken: o.sessionToken,
+    surface: o.surface,
+    distro: o.distro,
+    gateDistroOnWin32: true, // Codex: win32-only distro
+    platform: o.platform,
+  });
 }
 
 function buildCodexTomlBlock(opts) {

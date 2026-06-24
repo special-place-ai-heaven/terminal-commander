@@ -9,7 +9,7 @@ const { writeCursorMcpConfig } = require("../cursor/write.js");
 const {
   buildTerminalCommanderCommandConfig,
   buildTerminalCommanderServerConfig,
-  assertSafeDistroName,
+  buildHarnessEnv,
 } = require("../cursor/config.js");
 const { writeJsonMcpConfig } = require("./io/json_mcp.js");
 const { writeCodexTomlConfig, buildCodexEnv } = require("./io/toml_mcp.js");
@@ -20,7 +20,7 @@ const {
 } = require("./paths.js");
 const { detectProvider } = require("./detect.js");
 const { getProvider, listProviders } = require("./registry.js");
-const { mintSessionToken, isValidSessionToken } = require("../session/mint.js");
+const { mintSessionToken } = require("../session/mint.js");
 
 const HARNESS_WRITE_STATUSES = Object.freeze({
   SKIPPED: "skipped",
@@ -36,33 +36,13 @@ function buildJsonMcpStanza(opts) {
     command: commandConfig.command,
     args: commandConfig.args,
   };
-  const env = {};
-  if (o.sessionToken != null && o.sessionToken !== "") {
-    // Defense in depth: validate before the token can name a kernel object /
-    // socket path, symmetric with the Cursor path (config.js). Today callers
-    // pass minted (valid-by-construction) tokens, but this is an exported fn.
-    if (!isValidSessionToken(o.sessionToken)) {
-      const err = new Error(
-        "terminal-commander: TC_SESSION token failed safety whitelist; only [A-Za-z0-9._-] (1..64, at least one alphanumeric, not dot-only) is allowed",
-      );
-      err.code = "UNSAFE_SESSION_TOKEN";
-      throw err;
-    }
-    env.TC_SESSION = o.sessionToken;
-  }
-  if (o.distro && o.platform === "win32") {
-    // Defense in depth: the distro is interpolated into a `wsl -d <distro>`
-    // command downstream, so validate the charset before it lands in env —
-    // symmetric with the Cursor path (buildTerminalCommanderServerConfig).
-    assertSafeDistroName(o.distro);
-    env.TC_WSL_DISTRO = o.distro;
-  }
-  // TC_SURFACE selects the MCP tool surface (compact 5-facade vs full). Value is
-  // validated as compact|full at the CLI parser boundary; never security-sensitive
-  // (unlike the token/distro above, it names no kernel object), so no extra guard.
-  if (o.surface) {
-    env.TC_SURFACE = o.surface;
-  }
+  const env = buildHarnessEnv({
+    sessionToken: o.sessionToken,
+    distro: o.distro,
+    gateDistroOnWin32: true, // JSON harness: win32-only distro
+    platform: o.platform,
+    surface: o.surface,
+  });
   if (Object.keys(env).length > 0) {
     stanza.env = env;
   }
