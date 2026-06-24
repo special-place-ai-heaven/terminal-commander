@@ -410,11 +410,24 @@ impl WatchRuntime {
         // Cancel the running probe. We deliberately do not block on
         // probe.wait() here because the dispatcher must return
         // promptly; the probe is fire-and-forget after cancel.
+        //
+        // Read the probe's REAL workload metrics from the taken
+        // `FileProbe` BEFORE dropping it. The `WatchEventSink` only ever
+        // writes `events_emitted` into `b.metrics` (the sink snapshot);
+        // `frames_total` / `bytes_total` / rotation / truncation /
+        // suppression counters live on the probe and are structurally
+        // zero in the snapshot. `combine_file_metrics` overlays the two
+        // so the returned metrics and the audit line carry real
+        // counters (same F9 footgun fixed for PTY in `combine_pty_metrics`).
         let taken = b.cancel.lock().take();
+        let probe_metrics = taken
+            .as_ref()
+            .map_or_else(FileProbeMetrics::default, FileProbe::metrics);
         if let Some(mut p) = taken {
             p.cancel();
         }
-        let metrics = b.metrics.lock().clone();
+        let sink_snap = b.metrics.lock().clone();
+        let metrics = combine_file_metrics(&probe_metrics, &sink_snap);
         // Mark the JobManager record finished so bucket_wait /
         // command_status (if anyone reads it) see a non-Running
         // state. exit_code=0 because the cancel is a clean stop.
@@ -433,14 +446,38 @@ impl WatchRuntime {
     }
 
     /// Snapshot bounded info about every live watch (for
-    /// `file_watch_list`). Metrics are cloned out of each binding's
-    /// `Mutex` under a brief lock.
+    /// `file_watch_list`). Metrics combine the probe's real workload
+    /// counters with the sink snapshot's `events_emitted`.
     #[must_use]
     pub fn list(&self) -> Vec<(JobId, BucketId, ProbeId, PathBuf, FileProbeMetrics)> {
         let g = self.live.read();
         g.iter()
             .map(|(wid, b)| {
-                let m = b.metrics.lock().clone();
+                // The `WatchEventSink` only writes `events_emitted` into
+                // `b.metrics`; the real frame / byte / rotation /
+                // truncation / suppression counters live on the probe
+                // (mirrors `stop()`). Read the probe metrics under a
+                // NON-BLOCKING `try_lock()` on `b.cancel` so `list()`
+                // never blocks. If the probe lock is contended OR the
+                // probe was already taken by `stop()` (`None`), fall back
+                // to the sink snapshot: a momentary stale read is
+                // acceptable. `list()` is read-only — never cancel here.
+                //
+                // Lock order is `live.read()` then `cancel.try_lock()`;
+                // `stop()` releases `live.write()` before taking
+                // `cancel.lock()` and never re-takes `live` while holding
+                // it, so there is no lock-order inversion (and `try_lock`
+                // cannot deadlock regardless).
+                let m = b.cancel.try_lock().map_or_else(
+                    || b.metrics.lock().clone(),
+                    |guard| {
+                        let probe_metrics = guard
+                            .as_ref()
+                            .map_or_else(FileProbeMetrics::default, FileProbe::metrics);
+                        let sink_snap = b.metrics.lock().clone();
+                        combine_file_metrics(&probe_metrics, &sink_snap)
+                    },
+                );
                 (*wid, b.bucket_id, b.probe_id, b.path.clone(), m)
             })
             .collect()
@@ -542,4 +579,119 @@ fn merge_active_and_inline(
             .cloned(),
     );
     out
+}
+
+/// Combine probe-side and sink-side file-watch metrics into the value
+/// surfaced by `stop()` and `list()`.
+///
+/// The probe owns the real workload counters (`frames_total` /
+/// `bytes_total` / `rotations_detected` / `truncations_detected` /
+/// suppression); the [`WatchEventSink`] only records `events_emitted`
+/// into the binding's sink snapshot. Everything but `events_emitted`
+/// therefore comes from `probe`; `events_emitted` is the max of the two
+/// so a race between the probe finalizing and the sink emitting cannot
+/// lose the count.
+///
+/// This is the file-watch sibling of `combine_pty_metrics` and guards
+/// the exact F9 footgun: the sink snapshot's zeroed frame/byte counters
+/// must NEVER leak through into `list()` / `stop()`. Keeping the combine
+/// in one place means there is a single line to get right and a single
+/// line to test.
+fn combine_file_metrics(probe: &FileProbeMetrics, snapshot: &FileProbeMetrics) -> FileProbeMetrics {
+    FileProbeMetrics {
+        events_emitted: probe.events_emitted.max(snapshot.events_emitted),
+        ..probe.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileProbeMetrics, combine_file_metrics};
+
+    #[test]
+    fn combine_takes_workload_counters_from_probe_not_snapshot() {
+        // The probe carries the real workload; the sink snapshot's
+        // frame/byte/rotation/truncation/suppression counters are
+        // structurally zero (only the sink's `events_emitted` is ever
+        // written there). This is the F9 regression guard: those probe
+        // counters must survive the combine even when the snapshot is
+        // all-default — a zeroed snapshot must not be able to zero out
+        // real probe frames.
+        let probe = FileProbeMetrics {
+            frames_total: 192,
+            bytes_total: 1876,
+            events_emitted: 5,
+            rotations_detected: 2,
+            truncations_detected: 1,
+            frames_suppressed: 7,
+            frames_suppressed_progress: 4,
+            frames_suppressed_dedupe: 3,
+        };
+        let snapshot = FileProbeMetrics::default();
+
+        let combined = combine_file_metrics(&probe, &snapshot);
+
+        assert_eq!(combined.frames_total, 192, "frames must come from probe");
+        assert_eq!(combined.bytes_total, 1876, "bytes must come from probe");
+        assert_eq!(combined.rotations_detected, 2);
+        assert_eq!(combined.truncations_detected, 1);
+        assert_eq!(combined.frames_suppressed, 7);
+        assert_eq!(combined.frames_suppressed_progress, 4);
+        assert_eq!(combined.frames_suppressed_dedupe, 3);
+    }
+
+    #[test]
+    fn combine_events_emitted_is_max_probe_greater() {
+        let probe = FileProbeMetrics {
+            events_emitted: 9,
+            frames_total: 10,
+            ..FileProbeMetrics::default()
+        };
+        let snapshot = FileProbeMetrics {
+            events_emitted: 4,
+            ..FileProbeMetrics::default()
+        };
+
+        let combined = combine_file_metrics(&probe, &snapshot);
+
+        assert_eq!(combined.events_emitted, 9, "probe events > snapshot wins");
+        assert_eq!(
+            combined.frames_total, 10,
+            "non-event fields still from probe"
+        );
+    }
+
+    #[test]
+    fn combine_events_emitted_is_max_snapshot_greater() {
+        // The sink may have emitted more than the probe has recorded at
+        // the instant we read (e.g. probe metrics lagging the sink by a
+        // frame). The snapshot value must win for `events_emitted` so the
+        // count is never lost — but a non-zero snapshot frame count must
+        // still NOT leak through; only `events_emitted` is taken from the
+        // snapshot.
+        let probe = FileProbeMetrics {
+            events_emitted: 4,
+            frames_total: 10,
+            ..FileProbeMetrics::default()
+        };
+        let snapshot = FileProbeMetrics {
+            events_emitted: 9,
+            // A bogus non-zero snapshot frame count must be ignored.
+            frames_total: 999,
+            bytes_total: 999,
+            ..FileProbeMetrics::default()
+        };
+
+        let combined = combine_file_metrics(&probe, &snapshot);
+
+        assert_eq!(combined.events_emitted, 9, "snapshot events > probe wins");
+        assert_eq!(
+            combined.frames_total, 10,
+            "frames must come from probe, never the snapshot"
+        );
+        assert_eq!(
+            combined.bytes_total, 0,
+            "bytes must come from probe, never the snapshot"
+        );
+    }
 }
