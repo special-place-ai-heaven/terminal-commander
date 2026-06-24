@@ -1492,6 +1492,20 @@ mod runtime_win {
             .count()
     }
 
+    /// F1: the time LEFT until a shared `deadline`, saturating to zero once the
+    /// deadline has passed. The waiter polls the reader/writer drain
+    /// handshakes against ONE shared deadline; this is how each `recv_timeout`
+    /// gets only the REMAINING budget, so the two together can never exceed a
+    /// single `drain_grace` (the regression `remaining_budget` guards against
+    /// is handing each thread its own full grace). Pure + total: extracted so
+    /// the budget math is unit-tested directly rather than implicitly.
+    fn remaining_budget(
+        deadline: std::time::Instant,
+        now: std::time::Instant,
+    ) -> std::time::Duration {
+        deadline.saturating_duration_since(now)
+    }
+
     /// Handle to a live Windows ConPTY probe. Drop or call `cancel` to
     /// terminate. SAME public API as the unix `PtyProbe`.
     pub struct PtyProbe {
@@ -1735,12 +1749,21 @@ mod runtime_win {
             //     runs here as on unix. Exits when the read returns 0 / Err,
             //     which happens at child exit OR when `cancel` drops the
             //     master (ClosePseudoConsole -> EOF).
+            //
+            // F1: on a NATURAL exit, conhost (not the child) owns the cloned
+            // reader pipe, so dropping the master does NOT EOF this blocking
+            // `read` -- the reader can park forever. So the reader signals its
+            // OWN natural exit over `reader_done_tx` (a unit message sent right
+            // before the closure returns). The waiter `recv_timeout`s on that
+            // instead of an unbounded `join()`, so a stuck reader never strands
+            // the authoritative exit from `child.wait()`.
             let reader_metrics = Arc::clone(&metrics);
             let reader_gate = gate.clone();
             let reader_rings = Arc::clone(&rings);
             let reader_runtime = Arc::clone(&runtime);
             let reader_sink = Arc::clone(&sink);
             let reader_noise = Arc::clone(&noise_pipeline);
+            let (reader_done_tx, reader_done_rx) = std::sync::mpsc::channel::<()>();
             let reader_handle = std::thread::Builder::new()
                 .name(format!("tc-conpty-rd-{probe_id}"))
                 .spawn(move || {
@@ -1819,6 +1842,11 @@ mod runtime_win {
                             reader_noise,
                         );
                     }
+                    // F1: signal that this reader has drained + flushed and is
+                    // about to return, so the waiter's bounded handshake can
+                    // observe a clean reader exit and read FINAL metrics. A send
+                    // error (waiter already gave up and dropped the rx) is fine.
+                    let _ = reader_done_tx.send(());
                 })
                 .map_err(PtyProbeError::Io)?;
 
@@ -1829,6 +1857,12 @@ mod runtime_win {
             //     Release; this Acquire-load observes it).
             let writer_gate = gate.clone();
             let mut stdin_rx = stdin_rx;
+            // F1: like the reader, the writer can be stranded on a natural exit
+            // -- its `stdin_rx` still has live senders (the probe's `stdin_tx`
+            // and the reader's `reader_ctrl_tx`), so `blocking_recv()` never
+            // returns `None` until those drop. The waiter uses a bounded
+            // handshake on this channel instead of an unbounded `join()`.
+            let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
             let writer_handle = std::thread::Builder::new()
                 .name(format!("tc-conpty-wr-{probe_id}"))
                 .spawn(move || {
@@ -1870,20 +1904,57 @@ mod runtime_win {
                             }
                         }
                     }
+                    // F1: writer drained its queue and is returning; let the
+                    // waiter's bounded handshake observe a clean writer exit.
+                    let _ = writer_done_tx.send(());
                 })
                 .map_err(PtyProbeError::Io)?;
 
             // --- Waiter thread (blocking `child.wait()`). Maps the exit to a
             //     `PtyExitOutcome` (exit code only; signal is always None on
-            //     Windows). Then joins the reader/writer with a bounded
-            //     attempt: a reader parked on a silent KILLED child is a known,
-            //     documented risk -- we drop the master before joining (cancel
-            //     does this) so EOF should arrive, but we never block the
-            //     waiter indefinitely on the reader.
+            //     Windows) and reports it on `completion_tx`/`done_tx`.
+            //
+            //     F1: the exit from `child.wait()` is AUTHORITATIVE, so the
+            //     waiter must NOT gate that report on joining the reader/writer.
+            //     On a NATURAL exit, conhost (not the child) owns the cloned
+            //     reader pipe, so dropping the master does NOT EOF the reader's
+            //     blocking `read` -- it can park forever, and an unbounded
+            //     `reader_handle.join()` here would block the exit report
+            //     forever (the original lesion). Instead the reader/writer each
+            //     SIGNAL a handshake channel when they return, and the waiter
+            //     waits only a bounded `drain_grace` (polling BOTH concurrently
+            //     against ONE shared deadline) before reporting the outcome
+            //     regardless. Whichever drained is joined; whichever did not is
+            //     detached (reaped at process teardown).
+            //
+            //     ASYMMETRY (be honest about the common case): on a NATURAL exit
+            //     the WRITER is, BY DESIGN, always still parked -- its mpsc
+            //     senders (`stdin_tx` in the live `PtyProbe`, `reader_ctrl_tx`
+            //     in the parked reader) outlive the child, so `blocking_recv`
+            //     never returns `None` at child exit. So on natural exit the
+            //     writer side is EXPECTED to hit the grace and be detached; it
+            //     is the READER that can actually EOF (when conhost lets go) /
+            //     flush its tail, so it must get the FULL window, never have it
+            //     burned by the parked writer. On a CANCEL both EOF fast: the
+            //     killed child + dropped master EOF the reader, and once the
+            //     reader returns (dropping `reader_ctrl_tx`) plus `cancel`
+            //     having cleared `stdin_tx`, the writer sees `None` and drains
+            //     too -- so the handshake genuinely fires for both there.
             let waiter_master = Arc::clone(&master);
             let waiter_cancelled = Arc::clone(&cancelled);
             let waiter_killer = Arc::clone(&killer_slot);
             let waiter_metrics = Arc::clone(&metrics);
+            // F1: how long the waiter gives the reader/writer to drain + flush
+            // and signal their handshake AFTER the master has been dropped, and
+            // the WORST-CASE added latency before the authoritative exit fires.
+            // On a CANCEL both EOF almost immediately, so it does not elapse
+            // there. On a NATURAL exit the writer is parked by design and is
+            // EXPECTED to hit it (then be detached); the reader uses the same
+            // window to flush its tail if conhost releases the pipe. It is the
+            // SAFETY VALVE for the path where conhost keeps the cloned reader
+            // pipe open and a blocking `read` would otherwise park forever. A
+            // slightly-late tail frame is acceptable; a stranded exit is not.
+            let drain_grace = std::time::Duration::from_millis(750);
             std::thread::Builder::new()
                 .name(format!("tc-conpty-wt-{probe_id}"))
                 .spawn(move || {
@@ -1906,11 +1977,37 @@ mod runtime_win {
                             // Propagate the spawn failure to `spawn` and tear
                             // down without waiting on a child that never
                             // started. Releasing the master forces reader EOF.
+                            // F1: bound the drain so a stuck reader never
+                            // strands the spawn-error report either.
                             let _ = killer_tx.send(Err(e.to_string()));
                             drop(slave);
                             let _ = waiter_master.lock().take();
-                            let _ = writer_handle.join();
-                            let _ = reader_handle.join();
+                            // Same bounded CONCURRENT drain as the natural-exit
+                            // path: a stuck reader must never strand the
+                            // spawn-error report either. The child never
+                            // started, so both should EOF fast.
+                            let drain_deadline = std::time::Instant::now() + drain_grace;
+                            let mut writer_drained = false;
+                            let mut reader_drained = false;
+                            while !(writer_drained && reader_drained) {
+                                if !writer_drained && writer_done_rx.try_recv().is_ok() {
+                                    writer_drained = true;
+                                }
+                                if !reader_drained && reader_done_rx.try_recv().is_ok() {
+                                    reader_drained = true;
+                                }
+                                if writer_drained && reader_drained {
+                                    break;
+                                }
+                                if remaining_budget(drain_deadline, std::time::Instant::now())
+                                    .is_zero()
+                                {
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            drop(writer_handle);
+                            drop(reader_handle);
                             let _ = completion_tx.send(PtyExitOutcome::Exited {
                                 code: None,
                                 signal: Some(format!("spawn-error:{e}")),
@@ -1921,12 +2018,55 @@ mod runtime_win {
                     };
                     let status = child.wait();
                     drop(slave);
-                    // Releasing the master here guarantees the reader sees EOF
-                    // even on a natural exit where conhost may keep the pipe
-                    // briefly open.
+                    // Releasing the master SHOULD make the reader see EOF, but
+                    // on a NATURAL exit conhost -- not the child -- owns the
+                    // cloned reader pipe, so the blocking `read` may NOT return
+                    // and the reader can park forever (F1). The exit code from
+                    // `child.wait()` above is AUTHORITATIVE and already in hand;
+                    // the reader/writer tail-flush is BEST-EFFORT. So we wait
+                    // ONLY a bounded `drain_grace` for each to signal a clean
+                    // exit, then proceed to report the outcome regardless. A
+                    // reader that does not signal in time is left detached
+                    // (reaped at process teardown, or released by cancel/Drop
+                    // which kills the child + drops the master); it must NEVER
+                    // strand the exit report.
                     let _ = waiter_master.lock().take();
-                    let _ = writer_handle.join();
-                    let _ = reader_handle.join();
+                    // Drain BOTH handshakes CONCURRENTLY against ONE shared
+                    // deadline (see the asymmetry note above). Polling both with
+                    // `try_recv` + a short sleep -- rather than blocking on one
+                    // then the other -- means the always-parked writer cannot
+                    // burn the reader's budget: the reader gets the full grace
+                    // to EOF/flush, and the writer drains for free IF it does
+                    // (the cancel path). Whichever signalled is joined; whichever
+                    // did not is detached.
+                    let drain_deadline = std::time::Instant::now() + drain_grace;
+                    let mut writer_drained = false;
+                    let mut reader_drained = false;
+                    while !(writer_drained && reader_drained) {
+                        if !writer_drained && writer_done_rx.try_recv().is_ok() {
+                            writer_drained = true;
+                        }
+                        if !reader_drained && reader_done_rx.try_recv().is_ok() {
+                            reader_drained = true;
+                        }
+                        if writer_drained && reader_drained {
+                            break;
+                        }
+                        if remaining_budget(drain_deadline, std::time::Instant::now()).is_zero() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    if writer_drained {
+                        let _ = writer_handle.join();
+                    } else {
+                        drop(writer_handle);
+                    }
+                    if reader_drained {
+                        let _ = reader_handle.join();
+                    } else {
+                        drop(reader_handle);
+                    }
 
                     // F-010 instrumentation: log the THREE numbers separately
                     // so the windows-gate `--nocapture` stream records exactly
@@ -1934,8 +2074,10 @@ mod runtime_win {
                     // the RAW Win32 status as u32 -- an abnormal exit like
                     // 0xC0000142 (STATUS_DLL_INIT_FAILED) is preserved here
                     // (and below as a negative i32 in the outcome), NOT
-                    // silently dropped. The reader thread has been joined, so
-                    // `bytes_total`/`frames_total` are final.
+                    // silently dropped. The reader has had its bounded chance
+                    // to flush, so `bytes_total`/`frames_total` are final
+                    // (a slightly-late tail frame from a still-parked reader is
+                    // acceptable; a stranded exit is not).
                     let exit_u32 = status
                         .as_ref()
                         .ok()
@@ -2119,7 +2261,19 @@ mod runtime_win {
                 .await;
                 assert!(saw_output, "ConPTY child produced no combed frames");
                 let _ = probe.wait().await;
-                let outcome = completion.await.expect("completion outcome");
+                // F1 REGRESSION: a self-exiting ConPTY child must report its
+                // terminal outcome PROMPTLY after `child.wait()` returns, even
+                // though conhost keeps the cloned reader pipe open (so the
+                // reader stays parked). Before the bounded drain-handshake, the
+                // waiter blocked on an unbounded `reader_handle.join()` and this
+                // `completion` NEVER fired without an explicit cancel. Bound the
+                // await so a regression hangs the test (caught) instead of
+                // blocking forever. `drain_grace` is 750ms; 10s is generous
+                // slack for spawn/teardown on a loaded host.
+                let outcome = tokio::time::timeout(Duration::from_secs(10), completion)
+                    .await
+                    .expect("F1: completion must fire promptly after natural exit, not hang")
+                    .expect("completion outcome");
                 match outcome {
                     PtyExitOutcome::Exited { code, signal } => {
                         assert!(signal.is_none(), "Windows ConPTY must report signal=None");
@@ -2263,6 +2417,90 @@ mod runtime_win {
             // coordinates are not modeled by the probe.
             assert_eq!(CPR_REPLY_ROW1_COL1, b"\x1b[1;1R");
             assert_eq!(DSR_CURSOR_POS_QUERY, b"\x1b[6n");
+        }
+
+        // F1: the waiter's drain-handshake timing contract, asserted WITHOUT a
+        // live ConPTY (so it runs on every Windows host, including the headless
+        // agent sessions where ConPTY children fail DLL-init). This pins the
+        // two properties the bounded drain relies on: a reader that NEVER
+        // signals cannot stall the waiter past `drain_grace`, and a reader that
+        // DOES signal is observed immediately. The live promptness of the
+        // overall `completion` is additionally asserted by
+        // `conpty_repl_produces_bounded_combed_output` under `TC_CONPTY_E2E=1`.
+
+        #[test]
+        fn drain_handshake_times_out_when_reader_never_signals() {
+            // Models the F1 natural-exit path: the reader is parked forever on
+            // a conhost-owned pipe and NEVER sends on its done channel. The
+            // waiter must give up after a bounded grace and proceed -- it must
+            // NOT block (the original unbounded-join lesion).
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+            let grace = Duration::from_millis(150);
+            let started = std::time::Instant::now();
+            let drained = done_rx.recv_timeout(grace).is_ok();
+            let elapsed = started.elapsed();
+            assert!(!drained, "a never-signalling reader must NOT report drained");
+            assert!(
+                elapsed >= grace,
+                "must wait the full grace before giving up; waited {elapsed:?}"
+            );
+            assert!(
+                elapsed < grace + Duration::from_secs(2),
+                "must not block far past the grace; waited {elapsed:?}"
+            );
+            // `done_tx` is held (alive) until HERE so the channel is not
+            // disconnected early -- this proves the waiter survives the TIMEOUT
+            // path (reader parked, never signals), not the cheap hang-up path.
+            drop(done_tx);
+        }
+
+        #[test]
+        fn drain_handshake_observes_a_reader_that_signals_promptly() {
+            // The clean path: the reader drains, flushes, and signals its done
+            // channel; the waiter observes it well within the grace and can
+            // then join + read final metrics.
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+            done_tx.send(()).expect("reader signals done");
+            let started = std::time::Instant::now();
+            let drained = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            let elapsed = started.elapsed();
+            assert!(drained, "a signalling reader must report drained");
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "an already-signalled handshake must resolve immediately; took {elapsed:?}"
+            );
+        }
+
+        // F1: directly unit-test the SHARED-DEADLINE budget math the waiter
+        // relies on (the two timing tests above only exercise raw mpsc). This
+        // is what catches the exact regression the reviewer flagged -- if a
+        // future change gave each drain thread its own full grace instead of
+        // the time REMAINING until the shared deadline, these break.
+
+        #[test]
+        fn remaining_budget_shrinks_toward_a_shared_deadline() {
+            let now = std::time::Instant::now();
+            let deadline = now + Duration::from_millis(750);
+            // At t0 the full window is available.
+            assert_eq!(remaining_budget(deadline, now), Duration::from_millis(750));
+            // Halfway through the shared deadline, only HALF the budget is left
+            // -- a second consumer cannot get another full 750ms.
+            let half = now + Duration::from_millis(375);
+            assert_eq!(remaining_budget(deadline, half), Duration::from_millis(375));
+        }
+
+        #[test]
+        fn remaining_budget_saturates_to_zero_past_the_deadline() {
+            let now = std::time::Instant::now();
+            let deadline = now + Duration::from_millis(750);
+            // Once the shared deadline has passed, the budget is ZERO (never a
+            // wraparound / huge Duration), so the second drain consumer gets no
+            // window and the waiter proceeds to report the exit immediately.
+            let after = deadline + Duration::from_millis(10);
+            assert_eq!(remaining_budget(deadline, after), Duration::ZERO);
+            assert!(remaining_budget(deadline, after).is_zero());
+            // Exactly AT the deadline is also zero.
+            assert_eq!(remaining_budget(deadline, deadline), Duration::ZERO);
         }
     }
 }
