@@ -4176,7 +4176,7 @@ pub struct McpEventContextParams {
     #[schemars(with = "u32")]
     pub after: Option<u32>,
     #[serde(default, deserialize_with = "de_opt_usize_lenient")]
-    #[schemars(with = "usize")]
+    #[schemars(with = "u32")]
     pub max_bytes: Option<usize>,
 }
 
