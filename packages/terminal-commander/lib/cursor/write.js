@@ -31,7 +31,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const crypto = require("node:crypto");
+const sharedAtomic = require("../harness/io/atomic.js");
 
 const {
   buildTerminalCommanderServerConfig,
@@ -89,98 +89,14 @@ function hintFor(status, p) {
   }
 }
 
-/**
- * Copy `path` to `<path>.bak` if `path` exists. Refuses when the
- * `.bak` already exists AND `opts.clobber_backup !== true`.
- *
- * @param {string} target
- * @param {Object} [opts]
- * @param {boolean} [opts.clobber_backup=false]
- * @param {string} [opts.scopeDir]  Optional; defaults to dirname(target).
- * @returns {{ok:true, backup_path:string|null}|{ok:false, reason:string}}
- */
-function backupCursorConfig(target, opts) {
-  const o = opts || {};
-  const scopeDir = o.scopeDir || path.dirname(target);
-  if (!fs.existsSync(target)) {
-    return { ok: true, backup_path: null };
-  }
-  const backupPath = target + ".bak";
-  if (!isPathInsideScope(scopeDir, backupPath)) {
-    return { ok: false, reason: CONFIG_STATUSES.PATH_NOT_ALLOWED };
-  }
-  if (fs.existsSync(backupPath) && o.clobber_backup !== true) {
-    return { ok: false, reason: CONFIG_STATUSES.BACKUP_FAILED };
-  }
-  try {
-    fs.copyFileSync(target, backupPath);
-  } catch (_err) {
-    return { ok: false, reason: CONFIG_STATUSES.BACKUP_FAILED };
-  }
-  return { ok: true, backup_path: backupPath };
-}
+// Backup + atomic-write are the shared primitives in lib/harness/io/atomic.js.
+// Re-exported here under their historical names (consumed by tests + the writer
+// below). Their generic reason strings ("path_not_allowed" / "backup_failed" /
+// "write_failed") are identical to the CONFIG_STATUSES values, so the existing
+// writeCursorMcpConfig tail keeps mapping them straight through, unchanged.
+const backupCursorConfig = sharedAtomic.backupExisting;
 
-/**
- * Atomic write to `target`. Writes to a `<target>.tmp.<random>` sibling
- * in the SAME directory, fsyncs the tmp file, then renames to `target`.
- * Refuses if `target` is outside `scopeDir`.
- *
- * @param {string} target
- * @param {string} contents
- * @param {Object} [opts]
- * @param {string} [opts.scopeDir]
- * @param {(p:string)=>string} [opts.randomSuffix]  Injected randomness for tests.
- * @returns {{ok:true, path:string}|{ok:false, reason:string}}
- */
-function atomicWrite(target, contents, opts) {
-  const o = opts || {};
-  const scopeDir = o.scopeDir || path.dirname(target);
-  if (!isPathInsideScope(scopeDir, target)) {
-    return { ok: false, reason: CONFIG_STATUSES.PATH_NOT_ALLOWED };
-  }
-  const parent = path.dirname(target);
-  try {
-    fs.mkdirSync(parent, { recursive: true });
-  } catch (_err) {
-    return { ok: false, reason: CONFIG_STATUSES.WRITE_FAILED };
-  }
-  const suffix =
-    typeof o.randomSuffix === "function"
-      ? o.randomSuffix(target)
-      : crypto.randomBytes(8).toString("hex");
-  const tmp = target + ".tmp." + suffix;
-  if (!isPathInsideScope(scopeDir, tmp)) {
-    return { ok: false, reason: CONFIG_STATUSES.PATH_NOT_ALLOWED };
-  }
-  let fd;
-  try {
-    fd = fs.openSync(tmp, "w", 0o600);
-    fs.writeSync(fd, contents);
-    try {
-      fs.fsyncSync(fd);
-    } catch (_e) {
-      // fsync may not be supported on some test FS; non-fatal.
-    }
-    fs.closeSync(fd);
-    fd = null;
-    fs.renameSync(tmp, target);
-  } catch (_err) {
-    if (fd != null) {
-      try {
-        fs.closeSync(fd);
-      } catch (_e) {
-        /* ignore */
-      }
-    }
-    try {
-      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
-    } catch (_e) {
-      /* ignore */
-    }
-    return { ok: false, reason: CONFIG_STATUSES.WRITE_FAILED };
-  }
-  return { ok: true, path: target };
-}
+const atomicWrite = sharedAtomic.atomicWrite;
 
 /**
  * Resolve the target Cursor scope (global or project) + its scope

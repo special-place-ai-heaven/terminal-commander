@@ -10,7 +10,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const crypto = require("node:crypto");
+const { atomicWriteWithBackup, ATOMIC_REASONS } = require("./atomic.js");
 const {
   buildTerminalCommanderCommandConfig,
   isValidSessionToken,
@@ -171,17 +171,6 @@ function writeCodexTomlConfig(opts) {
       };
     }
   }
-  if (fileExisted) {
-    const backupPath = target + ".bak";
-    if (fs.existsSync(backupPath) && o.clobber_backup !== true) {
-      return { status: TOML_MCP_STATUSES.BACKUP_FAILED, path: target, hint: "" };
-    }
-    try {
-      fs.copyFileSync(target, backupPath);
-    } catch (_e) {
-      return { status: TOML_MCP_STATUSES.BACKUP_FAILED, path: target, hint: "" };
-    }
-  }
   let merged;
   if (fileExisted && o.force === true) {
     merged = removeSection(existing, SECTION_HEADER).trimEnd();
@@ -192,23 +181,21 @@ function writeCodexTomlConfig(opts) {
   } else {
     merged = buildCodexTomlBlock(o);
   }
-  try {
-    fs.mkdirSync(scopeDir, { recursive: true });
-  } catch (_e) {
-    return { status: TOML_MCP_STATUSES.WRITE_FAILED, path: target, hint: "" };
-  }
-  const suffix = crypto.randomBytes(8).toString("hex");
-  const tmp = target + ".tmp." + suffix;
-  try {
-    fs.writeFileSync(tmp, merged, { mode: 0o600 });
-    fs.renameSync(tmp, target);
-  } catch (_e) {
-    try {
-      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
-    } catch (_ee) {
-      /* ignore */
-    }
-    return { status: TOML_MCP_STATUSES.WRITE_FAILED, path: target, hint: "" };
+  // Shared atomic write-with-backup: brings this writer to fsync + tmp/.bak
+  // scope-check parity with the JSON and Cursor writers (it previously skipped
+  // both). Backup-of-existing is handled inside the helper.
+  const wrote = atomicWriteWithBackup(target, merged, {
+    scopeDir,
+    clobber_backup: o.clobber_backup === true,
+    randomSuffix: o.randomSuffix,
+  });
+  if (!wrote.ok) {
+    // toml has no PATH_NOT_ALLOWED status; collapse it into WRITE_FAILED.
+    const status =
+      wrote.reason === ATOMIC_REASONS.PATH_NOT_ALLOWED
+        ? TOML_MCP_STATUSES.WRITE_FAILED
+        : wrote.reason;
+    return { status, path: target, hint: "" };
   }
   const status = fileExisted
     ? TOML_MCP_STATUSES.CONFIG_UPDATED
