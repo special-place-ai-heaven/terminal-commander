@@ -153,7 +153,7 @@ fn flatten_facade_schema(mut schema: Map<String, Value>) -> Map<String, Value> {
         serde_json::json!({
             "type": "string",
             "enum": actions,
-            "description": "The operation. Prefer \"run_and_watch\" to run a command and get its signals + exit in ONE call.",
+            "description": "The operation to perform; the remaining fields are this action's parameters. See the tool description for the recommended starting action.",
         }),
     );
     schema.insert("type".to_string(), Value::String("object".to_string()));
