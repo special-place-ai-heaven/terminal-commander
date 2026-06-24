@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.62](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.61...v0.1.62) (2026-06-24)
+
+
+### Features
+
+* **setup:** wire TC_SESSION/TC_SURFACE/TC_WSL_DISTRO into Codex MCP config ([e2ca060](https://github.com/special-place-ai-heaven/terminal-commander/commit/e2ca060bfe58e7191e6b55b44c2222571fe240ad))
+
 ## [0.1.61](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.60...v0.1.61) (2026-06-24)
 
 
