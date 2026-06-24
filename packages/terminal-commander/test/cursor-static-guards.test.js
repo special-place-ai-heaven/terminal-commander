@@ -293,11 +293,15 @@ test("no active .cursor/mcp.json exists anywhere in the repo", () => {
   );
 });
 
-test("write.js: atomicWrite tmp path is a child of the target's directory", () => {
-  // Structural assertion: the tmp path is built as
-  // `target + ".tmp." + suffix`, which guarantees same-directory
-  // tmp file. We grep for the exact concatenation pattern.
-  const src = readSource("write.js");
+test("atomic.js: tmp path is a child of the target's directory", () => {
+  // Structural assertion: the shared atomic writer builds the tmp path as
+  // `target + ".tmp." + suffix`, which guarantees a same-directory tmp file.
+  // Relocated here from write.js, which now delegates to the shared helper at
+  // lib/harness/io/atomic.js (one writer, one tmp-construction invariant).
+  const src = fs.readFileSync(
+    path.join(PKG_ROOT, "lib", "harness", "io", "atomic.js"),
+    "utf8",
+  );
   assert.match(
     src,
     /const\s+tmp\s*=\s*target\s*\+\s*['"]\.tmp\.['"]\s*\+/,

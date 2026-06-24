@@ -7,7 +7,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const crypto = require("node:crypto");
+const { atomicWriteWithBackup, ATOMIC_REASONS } = require("./atomic.js");
 
 const MAX_CONFIG_BYTES = 256 * 1024;
 
@@ -21,13 +21,6 @@ const JSON_MCP_STATUSES = Object.freeze({
   WRITE_FAILED: "write_failed",
   UNSUPPORTED: "unsupported",
 });
-
-function isPathInsideScope(scopeDir, child) {
-  const absScope = path.resolve(scopeDir);
-  const absChild = path.resolve(child);
-  if (absChild === absScope) return true;
-  return absChild.startsWith(absScope + path.sep);
-}
 
 function parseJsonMcp(buffer) {
   if (buffer == null) return { ok: true, value: { mcpServers: {} } };
@@ -70,72 +63,6 @@ function mergeJsonMcpServers(existing, serverName, serverConfig, opts) {
     value: { ...existing, mcpServers: mergedServers },
     was_present: wasPresent,
   };
-}
-
-function backupFile(target, opts) {
-  const scopeDir = opts.scopeDir || path.dirname(target);
-  if (!fs.existsSync(target)) return { ok: true, backup_path: null };
-  const backupPath = target + ".bak";
-  if (!isPathInsideScope(scopeDir, backupPath)) {
-    return { ok: false, reason: JSON_MCP_STATUSES.WRITE_FAILED };
-  }
-  if (fs.existsSync(backupPath) && opts.clobber_backup !== true) {
-    return { ok: false, reason: JSON_MCP_STATUSES.BACKUP_FAILED };
-  }
-  try {
-    fs.copyFileSync(target, backupPath);
-  } catch (_e) {
-    return { ok: false, reason: JSON_MCP_STATUSES.BACKUP_FAILED };
-  }
-  return { ok: true, backup_path: backupPath };
-}
-
-function atomicWriteFile(target, contents, opts) {
-  const scopeDir = opts.scopeDir || path.dirname(target);
-  if (!isPathInsideScope(scopeDir, target)) {
-    return { ok: false, reason: JSON_MCP_STATUSES.WRITE_FAILED };
-  }
-  try {
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-  } catch (_e) {
-    return { ok: false, reason: JSON_MCP_STATUSES.WRITE_FAILED };
-  }
-  const suffix =
-    typeof opts.randomSuffix === "function"
-      ? opts.randomSuffix(target)
-      : crypto.randomBytes(8).toString("hex");
-  const tmp = target + ".tmp." + suffix;
-  if (!isPathInsideScope(scopeDir, tmp)) {
-    return { ok: false, reason: JSON_MCP_STATUSES.WRITE_FAILED };
-  }
-  let fd;
-  try {
-    fd = fs.openSync(tmp, "w", 0o600);
-    fs.writeSync(fd, contents);
-    try {
-      fs.fsyncSync(fd);
-    } catch (_e) {
-      /* optional */
-    }
-    fs.closeSync(fd);
-    fd = null;
-    fs.renameSync(tmp, target);
-  } catch (_e) {
-    if (fd != null) {
-      try {
-        fs.closeSync(fd);
-      } catch (_ee) {
-        /* ignore */
-      }
-    }
-    try {
-      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
-    } catch (_ee) {
-      /* ignore */
-    }
-    return { ok: false, reason: JSON_MCP_STATUSES.WRITE_FAILED };
-  }
-  return { ok: true, path: target };
 }
 
 /**
@@ -185,19 +112,20 @@ function writeJsonMcpConfig(opts) {
     };
   }
   const fileExisted = existingBuf != null;
-  if (fileExisted) {
-    const backup = backupFile(target, {
-      scopeDir,
-      clobber_backup: o.clobber_backup === true,
-    });
-    if (!backup.ok) {
-      return { status: backup.reason, path: target, hint: "" };
-    }
-  }
   const contents = JSON.stringify(merged.value, null, 2) + "\n";
-  const wrote = atomicWriteFile(target, contents, { scopeDir, randomSuffix: o.randomSuffix });
+  const wrote = atomicWriteWithBackup(target, contents, {
+    scopeDir,
+    clobber_backup: o.clobber_backup === true,
+    randomSuffix: o.randomSuffix,
+  });
   if (!wrote.ok) {
-    return { status: wrote.reason, path: target, hint: "" };
+    // json_mcp has no PATH_NOT_ALLOWED status; collapse it into WRITE_FAILED
+    // exactly as the previous hand-rolled writer did.
+    const status =
+      wrote.reason === ATOMIC_REASONS.PATH_NOT_ALLOWED
+        ? JSON_MCP_STATUSES.WRITE_FAILED
+        : wrote.reason;
+    return { status, path: target, hint: "" };
   }
   const status = fileExisted
     ? JSON_MCP_STATUSES.CONFIG_UPDATED
