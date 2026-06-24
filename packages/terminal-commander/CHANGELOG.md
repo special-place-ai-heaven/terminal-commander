@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.61](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.60...v0.1.61) (2026-06-24)
+
+
+### Features
+
+* **setup:** add `--surface compact|full` to write TC_SURFACE into harness MCP env ([3ceeea8](https://github.com/special-place-ai-heaven/terminal-commander/commit/3ceeea8600518a406af24e2974e4ae5f63b9fac3))
+
 ## [0.1.60](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.59...v0.1.60) (2026-06-24)
 
 
