@@ -2907,7 +2907,7 @@ pub fn into_mcp_error_for(request_is_idempotent: bool, e: &IpcError) -> McpError
     // F7: a non-existent program is a COMMAND ATTEMPT that failed, not a
     // daemon/transport fault. Enrich the structured `data` payload with the
     // failure-receipt vocabulary the agent reasons over -- `error_kind`,
-    // `argv0` (parsed from the daemon-authored message), and an explicit
+    // `argv0` (read from the TYPED `IpcError::argv0` carrier), and an explicit
     // null `exit_code` (the process never started) -- so a missing program
     // reads as a structured `program_not_found` receipt rather than an
     // opaque error. The code itself is classified `invalid_params` below.
@@ -2918,25 +2918,17 @@ pub fn into_mcp_error_for(request_is_idempotent: bool, e: &IpcError) -> McpError
                 serde_json::Value::String("program_not_found".to_owned()),
             );
             map.insert("exit_code".to_owned(), serde_json::Value::Null);
-            // The daemon authors the message as `... 'argv0'. Remedy: ...`;
-            // recover the single-quoted argv0 so the data carries it as a
-            // discrete field. UNAMBIGUOUS-ONLY: recover the token ONLY when
-            // the message holds EXACTLY ONE balanced single-quote pair (two
-            // `'` chars total). An argv0 that itself contains an apostrophe
-            // (e.g. `my'prog`) yields three-plus quotes -- a naive
-            // "first pair" parse would emit a TRUNCATED, WRONG value (`my`),
-            // which is worse than absent. Zero/one/three-plus quotes
-            // therefore OMIT `argv0` entirely (the message still names it;
-            // graceful degradation). Never panics, never fabricates, never
-            // truncates.
-            if e.message.matches('\'').count() == 2
-                && let Some(argv0) = e
-                    .message
-                    .split_once('\'')
-                    .and_then(|(_, rest)| rest.split_once('\''))
-                    .map(|(argv0, _)| argv0.to_owned())
-            {
-                map.insert("argv0".to_owned(), serde_json::Value::String(argv0));
+            // `argv0` rides as a discrete TYPED field on the IpcError (set by
+            // the daemon via `IpcError::program_not_found`), so we copy it
+            // straight into the data payload -- no fragile prose parsing. The
+            // value survives any wording change to `message` and carries
+            // verbatim even when the program name itself contains an
+            // apostrophe (the case the old quote-count parse could not
+            // recover). When `argv0` is None we OMIT the field entirely --
+            // same graceful-degradation contract as before (the message still
+            // names the program).
+            if let Some(argv0) = &e.argv0 {
+                map.insert("argv0".to_owned(), serde_json::Value::String(argv0.clone()));
             }
         }
     }
@@ -6424,14 +6416,14 @@ mod tests {
     /// exact F7 client contract.
     #[test]
     fn program_not_found_surfaces_structured_failure_receipt_not_internal() {
-        // The daemon authors the message the way `map_command_error` does:
-        // `program not found: 'argv0'. Remedy: ...`.
-        // Mirrors the apostrophe-free wording `map_command_error` authors so
-        // the only single quotes are the two wrapping `argv0`.
-        let e = IpcError::new(
-            IpcErrorCode::ProgramNotFound,
-            "program not found: 'tc_nonexistent_program_f7_xyz'. Remedy: check the \
-             spelling of argv[0] and ensure the program is on the daemon PATH.",
+        // The daemon carries `argv0` as a TYPED field via
+        // `IpcError::program_not_found`. Use a DELIBERATELY reworded message
+        // (note the apostrophe in "daemon's" -- which the old prose
+        // quote-count parse REQUIRED be absent) to prove `argv0` recovery is
+        // driven by the typed field, not by message wording.
+        let e = IpcError::program_not_found(
+            "tc_nonexistent_program_f7_xyz",
+            "could not find the program 'tc_nonexistent_program_f7_xyz' on the daemon's PATH.",
         );
         let mcp = into_mcp_error(&e);
 
@@ -6467,34 +6459,67 @@ mod tests {
         );
     }
 
-    /// F7 hardening: an `argv0` that itself contains an apostrophe makes the
-    /// message carry three single-quote chars. A naive "first balanced pair"
-    /// parse would emit a TRUNCATED, WRONG `argv0` (`my`) -- worse than
-    /// absent. The unambiguous-only guard must OMIT the `argv0` field in that
-    /// case while still surfacing the rest of the structured receipt
-    /// (`-32602`, `error_kind`, null `exit_code`). The message itself still
-    /// names the program, so the agent is not left blind.
+    /// F7 (typed carrier): an `argv0` that itself contains an apostrophe -- the
+    /// exact case the OLD prose quote-count parse could not recover (it would
+    /// have truncated to `my` or omitted the field) -- now rides verbatim on
+    /// the TYPED `IpcError::argv0` field. The receipt must carry the full
+    /// `my'prog`, proving recovery no longer depends on message wording.
     #[test]
-    fn program_not_found_omits_argv0_when_program_name_contains_apostrophe() {
-        // `argv0` = `my'prog` -> the message has THREE single quotes total
-        // (the two wrappers plus the embedded apostrophe).
-        let e = IpcError::new(
-            IpcErrorCode::ProgramNotFound,
-            "program not found: 'my'prog'. Remedy: check the spelling of argv[0].",
+    fn program_not_found_typed_argv0_with_apostrophe_survives_to_data() {
+        // `argv0` = `my'prog`; the message wording is intentionally arbitrary
+        // (it is no longer the source of truth).
+        let e = IpcError::program_not_found(
+            "my'prog",
+            "the program could not be located on PATH (it does not exist).",
         );
         let mcp = into_mcp_error(&e);
 
-        // The core classification is unaffected by the parse outcome.
+        assert_eq!(mcp.code.0, -32602, "still a caller-fixable command attempt");
+
+        let data = mcp
+            .data
+            .expect("program_not_found carries a structured data payload");
+        assert_eq!(
+            data["error_kind"].as_str(),
+            Some("program_not_found"),
+            "error_kind must name the failure class; got: {data}"
+        );
+        assert!(
+            data["exit_code"].is_null(),
+            "exit_code must be null (the process never started); got: {data}"
+        );
+        // The apostrophe-bearing argv0 must now survive VERBATIM via the typed
+        // field -- not be truncated or omitted as the prose parse required.
+        assert_eq!(
+            data["argv0"].as_str(),
+            Some("my'prog"),
+            "the typed argv0 must carry the apostrophe-bearing name verbatim; got: {data}"
+        );
+    }
+
+    /// F7 (graceful degradation): a `ProgramNotFound` error WITHOUT a typed
+    /// `argv0` (e.g. built via the generic `IpcError::new`, or decoded from a
+    /// pre-F7 client) must still surface the rest of the structured receipt
+    /// (`-32602`, `error_kind`, null `exit_code`) and simply OMIT the `argv0`
+    /// data key -- never `null`, never a fabricated value. The message still
+    /// names the program, so the agent is not left blind.
+    #[test]
+    fn program_not_found_omits_argv0_data_field_when_typed_field_absent() {
+        let e = IpcError::new(
+            IpcErrorCode::ProgramNotFound,
+            "program not found: 'somewhere'. Remedy: check the spelling of argv[0].",
+        );
+        assert!(e.argv0.is_none(), "precondition: no typed argv0");
+        let mcp = into_mcp_error(&e);
+
         assert_eq!(
             mcp.code.0, -32602,
-            "still a caller-fixable command attempt regardless of argv0 recovery"
+            "still a caller-fixable command attempt regardless of argv0 presence"
         );
 
         let data = mcp
             .data
             .expect("program_not_found carries a structured data payload");
-        // error_kind + null exit_code are derived from the CODE alone, so they
-        // are always present even when argv0 cannot be safely recovered.
         assert_eq!(
             data["error_kind"].as_str(),
             Some("program_not_found"),
@@ -6504,15 +6529,11 @@ mod tests {
             data["exit_code"].is_null(),
             "exit_code must be null even when argv0 is omitted; got: {data}"
         );
-        // The ambiguous argv0 must be OMITTED, never a truncated `my`.
+        // No typed argv0 -> the data key is OMITTED entirely (not null, not
+        // recovered from the prose).
         assert!(
             data.get("argv0").is_none(),
-            "an apostrophe-bearing argv0 must be OMITTED, not truncated; got: {data}"
-        );
-        assert_ne!(
-            data.get("argv0").and_then(serde_json::Value::as_str),
-            Some("my"),
-            "must never emit the truncated-before-apostrophe value; got: {data}"
+            "argv0 data key must be omitted when the typed field is absent; got: {data}"
         );
     }
 

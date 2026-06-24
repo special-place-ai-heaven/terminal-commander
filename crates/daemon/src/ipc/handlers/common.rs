@@ -132,18 +132,17 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
         // `ProgramNotFound` code (mapped to `invalid_params` at the MCP
         // boundary, carrying `error_kind: "program_not_found"` + `argv0`)
         // instead of the opaque `Internal` the generic `Spawn` arm yields.
-        // The message names `argv0` and the remedy so the agent can fix it.
-        // Wording note: the ONLY single quotes in this message are the two
-        // that wrap `argv0`. The remedy text is deliberately apostrophe-free
-        // ("the daemon PATH", not "the daemon's PATH") so the MCP boundary
-        // can unambiguously recover `argv0` as the single balanced quote pair
-        // (count == 2). An apostrophe IN `argv0` itself still trips the
-        // boundary's omit guard -- never a truncated value.
-        CommandError::ProgramNotFound { argv0 } => IpcError::new(
-            IpcErrorCode::ProgramNotFound,
+        // `argv0` rides as a TYPED field on the IpcError (via
+        // `IpcError::program_not_found`), which is what the MCP boundary reads
+        // -- so the message wording is no longer load-bearing. The message
+        // still names the program and the remedy for humans/logs; an
+        // apostrophe in `argv0` no longer breaks recovery now that the value
+        // is carried out-of-band rather than parsed from this prose.
+        CommandError::ProgramNotFound { argv0 } => IpcError::program_not_found(
+            argv0.clone(),
             format!(
                 "program not found: '{argv0}'. Remedy: check the spelling of argv[0] and \
-                 ensure the program is on the daemon PATH (or pass an absolute path)."
+                 ensure the program is on the daemon's PATH (or pass an absolute path)."
             ),
         ),
         // Genuine server faults (bucket store failure, IO, other spawn
@@ -623,8 +622,31 @@ mod tests {
         assert_eq!(err.code, IpcErrorCode::ProgramNotFound);
         assert!(
             err.message.contains("tc_nonexistent_program_f7_xyz"),
-            "the offending argv0 must be surfaced, got: {}",
+            "the offending argv0 must be surfaced in the message, got: {}",
             err.message
+        );
+        // F7: the typed `argv0` field -- not the prose -- is the authoritative
+        // carrier the MCP boundary reads. It must hold the exact argv0.
+        assert_eq!(
+            err.argv0.as_deref(),
+            Some("tc_nonexistent_program_f7_xyz"),
+            "the typed argv0 field must carry the offending program name"
+        );
+    }
+
+    /// F7: an `argv0` containing an apostrophe must still ride verbatim on the
+    /// TYPED field. The old prose quote-count parse could not recover this; the
+    /// typed carrier makes the message wording irrelevant to recovery.
+    #[test]
+    fn program_not_found_typed_argv0_carries_apostrophe_program_name() {
+        let err = map_command_error(CommandError::ProgramNotFound {
+            argv0: "my'prog".to_owned(),
+        });
+        assert_eq!(err.code, IpcErrorCode::ProgramNotFound);
+        assert_eq!(
+            err.argv0.as_deref(),
+            Some("my'prog"),
+            "an apostrophe-bearing argv0 must survive verbatim on the typed field"
         );
     }
 

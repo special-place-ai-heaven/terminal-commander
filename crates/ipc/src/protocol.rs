@@ -804,6 +804,17 @@ pub enum IpcErrorCode {
 pub struct IpcError {
     pub code: IpcErrorCode,
     pub message: String,
+    /// F7: the offending `argv[0]` for an [`IpcErrorCode::ProgramNotFound`]
+    /// error, carried as a TYPED field rather than recovered by parsing the
+    /// human-readable `message`. The message still names the program for logs
+    /// and humans, but this field is the authoritative source the MCP boundary
+    /// reads to populate the `argv0` data key -- so the receipt survives any
+    /// wording change to `message` (including apostrophes in the program name,
+    /// which the old prose quote-count parse could not handle). Additive and
+    /// `serde(default)`: omitted from the wire when `None`, so every other
+    /// error (and any pre-F7 client payload) round-trips unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv0: Option<String>,
 }
 
 impl IpcError {
@@ -827,6 +838,21 @@ impl IpcError {
         Self {
             code,
             message: message.into(),
+            argv0: None,
+        }
+    }
+
+    /// F7: construct a [`IpcErrorCode::ProgramNotFound`] error that carries the
+    /// offending `argv[0]` as a TYPED field. The `message` is still
+    /// human/log-facing (and may name the program however it likes), but the
+    /// `argv0` field -- not the prose -- is the authoritative value the MCP
+    /// boundary reads into the structured `program_not_found` receipt.
+    #[must_use]
+    pub fn program_not_found(argv0: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: IpcErrorCode::ProgramNotFound,
+            message: message.into(),
+            argv0: Some(argv0.into()),
         }
     }
 
@@ -840,6 +866,7 @@ impl IpcError {
         Self {
             code: IpcErrorCode::Internal,
             message: format!("{}{}", Self::TRANSPORT_PREFIX, message.as_ref()),
+            argv0: None,
         }
     }
 
@@ -2590,6 +2617,48 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let back: IpcError = serde_json::from_str(&json).unwrap();
         assert!(back.is_transport());
+    }
+
+    /// F7: the typed `argv0` field is the authoritative carrier for a
+    /// `ProgramNotFound` error and must survive a serde round-trip exactly,
+    /// independent of the human-readable `message`. The MCP boundary reads
+    /// THIS field (not the prose), so the round-trip is the contract.
+    #[test]
+    fn program_not_found_argv0_survives_wire_round_trip() {
+        // A program name with an embedded apostrophe -- the exact case the old
+        // prose quote-count parse could not recover. The typed field carries it
+        // verbatim regardless of how the message is worded.
+        let e = IpcError::program_not_found("my'prog", "program not found: 'my'prog'.");
+        assert_eq!(e.code, IpcErrorCode::ProgramNotFound);
+        assert_eq!(e.argv0.as_deref(), Some("my'prog"));
+
+        let json = serde_json::to_string(&e).unwrap();
+        let back: IpcError = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.argv0.as_deref(),
+            Some("my'prog"),
+            "the typed argv0 must survive serialization verbatim"
+        );
+        assert_eq!(back.code, IpcErrorCode::ProgramNotFound);
+        assert_eq!(back.message, e.message);
+    }
+
+    /// F7: `argv0` is additive and `skip_serializing_if = "Option::is_none"`,
+    /// so a non-ProgramNotFound error (the common case) must OMIT the `argv0`
+    /// key from the wire entirely -- no key, not `null`. This pins the
+    /// skip_serializing_if contract so every other error round-trips unchanged
+    /// and pre-F7 clients see no new field.
+    #[test]
+    fn argv0_key_is_omitted_from_json_when_none() {
+        let e = IpcError::new(IpcErrorCode::PathDenied, "nope");
+        assert!(e.argv0.is_none());
+        let value: serde_json::Value = serde_json::to_value(&e).unwrap();
+        assert!(
+            value.get("argv0").is_none(),
+            "the argv0 key must be absent (not null) when None; got: {value}"
+        );
+        // And the typical constructors default it to None.
+        assert!(IpcError::transport("x").argv0.is_none());
     }
 
     // Source-status: test-only. TC-2: the dedup_nonce field is additive and
