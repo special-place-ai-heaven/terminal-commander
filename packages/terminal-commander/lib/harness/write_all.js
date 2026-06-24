@@ -52,6 +52,12 @@ function buildJsonMcpStanza(opts) {
   if (o.distro && o.platform === "win32") {
     env.TC_WSL_DISTRO = o.distro;
   }
+  // TC_SURFACE selects the MCP tool surface (compact 5-facade vs full). Value is
+  // validated as compact|full at the CLI parser boundary; never security-sensitive
+  // (unlike the token/distro above, it names no kernel object), so no extra guard.
+  if (o.surface) {
+    env.TC_SURFACE = o.surface;
+  }
   if (Object.keys(env).length > 0) {
     stanza.env = env;
   }
@@ -95,6 +101,7 @@ function writeProvider(id, opts) {
         distro: o.distro,
         knownDistros: o.knownDistros,
         requireKnownDistro: o.requireKnownDistro === true,
+        surface: o.surface,
       });
       return { id, status: HARNESS_WRITE_STATUSES.OK, dry_run: true, stanza };
     }
@@ -108,6 +115,7 @@ function writeProvider(id, opts) {
       distro: o.distro,
       knownDistros: o.knownDistros,
       requireKnownDistro: o.requireKnownDistro === true,
+      surface: o.surface,
       force,
       clobber_backup,
       randomSuffix: o.randomSuffix,

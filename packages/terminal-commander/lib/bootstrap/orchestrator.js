@@ -312,6 +312,7 @@ async function runBootstrap(opts) {
       cursor_scope: o.cursor_scope || "global",
       projectRoot: o.projectRoot,
       providerFilter: o.providerFilter,
+      surface: o.surface,
       cursorOnly: o.cursorOnly === true,
       randomSuffix: o.randomSuffix,
     })

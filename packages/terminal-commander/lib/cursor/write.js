@@ -218,6 +218,7 @@ function resolveScope(opts) {
  * @param {string} [opts.platform=process.platform]
  * @param {NodeJS.ProcessEnv} [opts.env=process.env]
  * @param {string} [opts.distro]  Optional WSL distro to pin in env.
+ * @param {("compact"|"full")} [opts.surface]  Optional MCP tool surface (env.TC_SURFACE).
  * @param {ReadonlyArray<{name:string}>} [opts.knownDistros]
  * @param {boolean} [opts.requireKnownDistro=false]
  * @param {boolean} [opts.force=false]
@@ -253,6 +254,7 @@ function writeCursorMcpConfig(opts) {
       distro: o.distro,
       knownDistros: o.knownDistros,
       requireKnownDistro: o.requireKnownDistro === true,
+      surface: o.surface,
     });
   } catch (err) {
     if (err && err.code === UNSAFE_DISTRO_NAME) {
