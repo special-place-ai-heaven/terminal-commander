@@ -34,7 +34,7 @@ sub_list.";
 /// Description for the `session` facade.
 pub(crate) const SESSION_FACADE_DESCRIPTION: &str = "PTY commands and persistent shell sessions. To start a PTY command use \
 action=\"pty_start\"; write stdin with pty_stdin; stop with pty_stop; list with pty_list. \
-For sticky-cwd sessions: sh_start (requires allow_session), sh_exec, sh_status, sh_stop, sh_list.";
+For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires allow_session), sh_exec, sh_status, sh_stop, sh_list.";
 
 /// Description for the `files` facade.
 pub(crate) const FILES_FACADE_DESCRIPTION: &str = "File operations: bounded read (action=\"read\"), substring search, \

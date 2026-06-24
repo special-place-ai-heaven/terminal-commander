@@ -15,7 +15,14 @@
 
 use std::sync::Arc;
 
-use crate::ipc::protocol::{IpcError, IpcErrorCode, IpcResponse};
+use crate::ipc::protocol::{IpcError, IpcResponse};
+// `IpcErrorCode` is referenced only by the unix implementation now: the
+// non-unix stubs build their `UnsupportedPlatform` error via the typed
+// `IpcError::unsupported_platform` constructor (which sets the code), so a
+// Windows build that excludes the unix block would otherwise see the import
+// as unused. Gate it with the unix block it serves.
+#[cfg(unix)]
+use crate::ipc::protocol::IpcErrorCode;
 #[cfg(unix)]
 use crate::ipc::protocol::{
     ShellSessionExecParams, ShellSessionStartParams, ShellSessionStatusParams,
@@ -24,9 +31,9 @@ use crate::ipc::protocol::{
 use crate::state::DaemonState;
 
 #[cfg(not(unix))]
-pub(in crate::ipc::server) fn session_ipc_unsupported() -> IpcError {
-    IpcError::new(
-        IpcErrorCode::UnsupportedPlatform,
+pub(in crate::ipc::server) fn session_ipc_unsupported(tool: &str) -> IpcError {
+    IpcError::unsupported_platform(
+        tool,
         "persistent shell sessions are not available on this platform (unix-only; Windows session support is a separate slice)",
     )
 }
@@ -36,7 +43,7 @@ pub(in crate::ipc::server) fn handle_shell_session_start(
     _state: &Arc<DaemonState>,
     _params: &crate::ipc::protocol::ShellSessionStartParams,
 ) -> Result<IpcResponse, IpcError> {
-    Err(session_ipc_unsupported())
+    Err(session_ipc_unsupported("shell_session_start"))
 }
 
 #[cfg(not(unix))]
@@ -45,7 +52,7 @@ pub(in crate::ipc::server) async fn handle_shell_session_exec(
     _state: &Arc<DaemonState>,
     _params: &crate::ipc::protocol::ShellSessionExecParams,
 ) -> Result<IpcResponse, IpcError> {
-    Err(session_ipc_unsupported())
+    Err(session_ipc_unsupported("shell_session_exec"))
 }
 
 #[cfg(not(unix))]
@@ -53,7 +60,7 @@ pub(in crate::ipc::server) fn handle_shell_session_status(
     _state: &Arc<DaemonState>,
     _params: &crate::ipc::protocol::ShellSessionStatusParams,
 ) -> Result<IpcResponse, IpcError> {
-    Err(session_ipc_unsupported())
+    Err(session_ipc_unsupported("shell_session_status"))
 }
 
 #[cfg(not(unix))]
@@ -61,14 +68,14 @@ pub(in crate::ipc::server) fn handle_shell_session_stop(
     _state: &Arc<DaemonState>,
     _params: &crate::ipc::protocol::ShellSessionStopParams,
 ) -> Result<IpcResponse, IpcError> {
-    Err(session_ipc_unsupported())
+    Err(session_ipc_unsupported("shell_session_stop"))
 }
 
 #[cfg(not(unix))]
 pub(in crate::ipc::server) fn handle_shell_session_list(
     _state: &Arc<DaemonState>,
 ) -> Result<IpcResponse, IpcError> {
-    Err(session_ipc_unsupported())
+    Err(session_ipc_unsupported("shell_session_list"))
 }
 
 #[cfg(not(unix))]
@@ -76,7 +83,7 @@ pub(in crate::ipc::server) fn handle_workspace_snapshot_create(
     _state: &Arc<DaemonState>,
     _params: &crate::ipc::protocol::WorkspaceSnapshotCreateParams,
 ) -> Result<IpcResponse, IpcError> {
-    Err(session_ipc_unsupported())
+    Err(session_ipc_unsupported("workspace_snapshot_create"))
 }
 
 #[cfg(not(unix))]
@@ -85,7 +92,7 @@ pub(in crate::ipc::server) async fn handle_workspace_snapshot_apply(
     _state: &Arc<DaemonState>,
     _params: &crate::ipc::protocol::WorkspaceSnapshotApplyParams,
 ) -> Result<IpcResponse, IpcError> {
-    Err(session_ipc_unsupported())
+    Err(session_ipc_unsupported("workspace_snapshot_apply"))
 }
 
 // ---------------------------------------------------------------------

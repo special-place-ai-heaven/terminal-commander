@@ -297,37 +297,37 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "shell_session_start",
             status: ToolStatus::Live,
-            description: "Start a persistent shell session (sticky cwd/env across sends). Requires allow_session; denied by default; combed output only.",
+            description: "Start a persistent shell session (sticky cwd/env across sends). Requires allow_session; denied by default; combed output only. (unix-only; unavailable on Windows)",
         },
         ToolCatalogueEntry {
             name: "shell_session_exec",
             status: ToolStatus::Live,
-            description: "Run ONE line in a session shell; returns the combed signals it produced. Sticky cwd/env from the prior lines; never a raw stream.",
+            description: "Run ONE line in a session shell; returns the combed signals it produced. Sticky cwd/env from the prior lines; never a raw stream. (unix-only; unavailable on Windows)",
         },
         ToolCatalogueEntry {
             name: "shell_session_status",
             status: ToolStatus::Live,
-            description: "Session lifecycle state, current cwd, and a bounded env snapshot.",
+            description: "Session lifecycle state, current cwd, and a bounded env snapshot. (unix-only; unavailable on Windows)",
         },
         ToolCatalogueEntry {
             name: "shell_session_stop",
             status: ToolStatus::Live,
-            description: "Stop a session (graceful then forced); reports the terminal state.",
+            description: "Stop a session (graceful then forced); reports the terminal state. (unix-only; unavailable on Windows)",
         },
         ToolCatalogueEntry {
             name: "shell_session_list",
             status: ToolStatus::Live,
-            description: "Snapshot of every currently-live session (id, state, cwd, last_active).",
+            description: "Snapshot of every currently-live session (id, state, cwd, last_active). (unix-only; unavailable on Windows)",
         },
         ToolCatalogueEntry {
             name: "workspace_snapshot_create",
             status: ToolStatus::Live,
-            description: "Save a session's cwd + bounded env as a restorable workspace snapshot.",
+            description: "Save a session's cwd + bounded env as a restorable workspace snapshot. (unix-only; unavailable on Windows)",
         },
         ToolCatalogueEntry {
             name: "workspace_snapshot_apply",
             status: ToolStatus::Live,
-            description: "Restore a workspace snapshot's cwd/env into a session.",
+            description: "Restore a workspace snapshot's cwd/env into a session. (unix-only; unavailable on Windows)",
         },
         ToolCatalogueEntry {
             name: "runtime_state",
@@ -2665,7 +2665,7 @@ sub_list."
         name = "session",
         description = "PTY commands and persistent shell sessions. To start a PTY command use \
 action=\"pty_start\"; write stdin with pty_stdin; stop with pty_stop; list with pty_list. \
-For sticky-cwd sessions: sh_start (requires allow_session), sh_exec, sh_status, sh_stop, sh_list."
+For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires allow_session), sh_exec, sh_status, sh_stop, sh_list."
     )]
     pub(crate) async fn session_facade(
         &self,
@@ -2932,6 +2932,31 @@ pub fn into_mcp_error_for(request_is_idempotent: bool, e: &IpcError) -> McpError
             }
         }
     }
+    // F14: an unsupported-platform error is a caller-ROUTABLE fact, not a
+    // daemon fault: the session/snapshot tools are unix-only, so on Windows
+    // the agent should route to WSL or a different tool rather than conclude
+    // TC is broken. Enrich the structured `data` with the receipt vocabulary
+    // the agent reasons over -- `error_kind`, the HONEST host `platform`
+    // (`std::env::consts::OS`), and the unavailable `tool` (read from the
+    // TYPED `IpcError::tool` carrier, set by the daemon via
+    // `IpcError::unsupported_platform`). When `tool` is None we OMIT the field
+    // entirely -- same graceful-degradation contract as `argv0`. The code
+    // itself is classified `invalid_params` below.
+    if e.code == IpcErrorCode::UnsupportedPlatform {
+        if let serde_json::Value::Object(map) = &mut data {
+            map.insert(
+                "error_kind".to_owned(),
+                serde_json::Value::String("unsupported_platform".to_owned()),
+            );
+            map.insert(
+                "platform".to_owned(),
+                serde_json::Value::String(std::env::consts::OS.to_owned()),
+            );
+            if let Some(tool) = &e.tool {
+                map.insert("tool".to_owned(), serde_json::Value::String(tool.clone()));
+            }
+        }
+    }
     // Trust contract: a caller-fixable error MUST surface as
     // `invalid_params` (JSON-RPC -32602) so the agent corrects its
     // input and keeps routing through Terminal Commander. Mapping such
@@ -2947,7 +2972,6 @@ pub fn into_mcp_error_for(request_is_idempotent: bool, e: &IpcError) -> McpError
     match e.code {
         IpcErrorCode::Internal
         | IpcErrorCode::PeerCredentialFailure
-        | IpcErrorCode::UnsupportedPlatform
         | IpcErrorCode::ShuttingDown => McpError::internal_error(message, Some(data)),
         IpcErrorCode::FrameTooLarge
         | IpcErrorCode::MalformedJson
@@ -2983,7 +3007,14 @@ pub fn into_mcp_error_for(request_is_idempotent: bool, e: &IpcError) -> McpError
         // SessionLimitExceeded -> stop a session and retry.
         | IpcErrorCode::UnknownSession
         | IpcErrorCode::SessionNotLive
-        | IpcErrorCode::SessionLimitExceeded => McpError::invalid_params(message, Some(data)),
+        | IpcErrorCode::SessionLimitExceeded
+        // F14: an unsupported platform is a caller-ROUTABLE fact, not a server
+        // fault. The session/snapshot tools are unix-only; on Windows the agent
+        // should route to WSL or pick a different tool. `invalid_params`
+        // (-32602) keeps it reasoning (the data payload names the unavailable
+        // tool + host platform), whereas `internal_error` (-32603) would read
+        // as "TC is broken" and train it to abandon TC for raw shell.
+        | IpcErrorCode::UnsupportedPlatform => McpError::invalid_params(message, Some(data)),
     }
 }
 
@@ -6383,6 +6414,10 @@ mod tests {
             IpcErrorCode::SecretInputDenied,
             IpcErrorCode::UnknownProbe,
             IpcErrorCode::RuleNotActive,
+            // F14: an unsupported platform is caller-ROUTABLE (route to WSL /
+            // a different tool), not a server fault -- it must stay
+            // invalid_params so the agent reasons instead of abandoning TC.
+            IpcErrorCode::UnsupportedPlatform,
         ];
         for code in caller_fixable {
             let mcp = into_mcp_error(&IpcError::new(code, "x"));
@@ -6395,7 +6430,6 @@ mod tests {
         let server_fault = [
             IpcErrorCode::Internal,
             IpcErrorCode::PeerCredentialFailure,
-            IpcErrorCode::UnsupportedPlatform,
             IpcErrorCode::ShuttingDown,
         ];
         for code in server_fault {
@@ -6534,6 +6568,87 @@ mod tests {
         assert!(
             data.get("argv0").is_none(),
             "argv0 data key must be omitted when the typed field is absent; got: {data}"
+        );
+    }
+
+    /// F14: an unsupported-platform error (the unix-only session/snapshot tools
+    /// on a non-unix host) surfaces a STRUCTURED, caller-ROUTABLE receipt --
+    /// `invalid_params` (-32602), not the `internal_error` (-32603) that reads
+    /// as "TC is broken" and trains the agent to abandon TC for raw shell. The
+    /// data payload carries the vocabulary the agent routes on: `error_kind`,
+    /// the HONEST host `platform`, and the unavailable `tool` (typed carrier).
+    /// This MAPPING test runs on every platform (it does not need the daemon's
+    /// `#[cfg(not(unix))]` stub compiled), so it is NOT cfg-gated.
+    #[test]
+    fn unsupported_platform_surfaces_structured_routable_receipt_not_internal() {
+        let e = IpcError::unsupported_platform(
+            "shell_session_start",
+            "persistent shell sessions are not available on this platform (unix-only)",
+        );
+        let mcp = into_mcp_error(&e);
+
+        // (1) Caller-ROUTABLE, NOT a server fault. This is the core F14 fix:
+        // the old behavior was internal_error (-32603).
+        assert_eq!(
+            mcp.code.0, -32602,
+            "an unsupported platform is caller-routable, must be invalid_params"
+        );
+
+        // (2) Structured data payload names the failure class, the host, and
+        // the unavailable tool the agent must route around.
+        let data = mcp
+            .data
+            .expect("unsupported_platform carries a structured data payload");
+        assert_eq!(
+            data["error_kind"].as_str(),
+            Some("unsupported_platform"),
+            "error_kind must name the failure class; got: {data}"
+        );
+        assert_eq!(
+            data["tool"].as_str(),
+            Some("shell_session_start"),
+            "the unavailable tool must be a discrete typed field; got: {data}"
+        );
+        // `platform` is the HONEST host truth (`std::env::consts::OS`), whatever
+        // CI host runs this -- assert present + non-empty, never hard-pinned.
+        let platform = data["platform"]
+            .as_str()
+            .expect("platform must be a non-empty host string");
+        assert!(
+            !platform.is_empty(),
+            "platform must be a non-empty host string; got: {data}"
+        );
+    }
+
+    /// F14 (graceful degradation): an `UnsupportedPlatform` error WITHOUT a
+    /// typed `tool` (e.g. built via the generic `IpcError::new`) must still
+    /// surface the rest of the structured receipt (`-32602`, `error_kind`,
+    /// `platform`) and simply OMIT the `tool` data key -- never `null`, never a
+    /// fabricated value. Mirrors the F7 `argv0` omission contract.
+    #[test]
+    fn unsupported_platform_omits_tool_data_field_when_typed_field_absent() {
+        let e = IpcError::new(IpcErrorCode::UnsupportedPlatform, "x");
+        assert!(e.tool.is_none(), "precondition: no typed tool");
+        let mcp = into_mcp_error(&e);
+
+        assert_eq!(
+            mcp.code.0, -32602,
+            "still caller-routable regardless of tool presence"
+        );
+
+        let data = mcp
+            .data
+            .expect("unsupported_platform carries a structured data payload");
+        assert_eq!(
+            data["error_kind"].as_str(),
+            Some("unsupported_platform"),
+            "error_kind must be present even when tool is omitted; got: {data}"
+        );
+        // No typed tool -> the data key is OMITTED entirely (not null, not
+        // fabricated).
+        assert!(
+            data.get("tool").is_none(),
+            "tool data key must be omitted when the typed field is absent; got: {data}"
         );
     }
 

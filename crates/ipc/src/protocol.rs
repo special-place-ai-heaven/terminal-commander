@@ -815,6 +815,16 @@ pub struct IpcError {
     /// error (and any pre-F7 client payload) round-trips unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argv0: Option<String>,
+    /// F14: the MCP tool name for an [`IpcErrorCode::UnsupportedPlatform`]
+    /// error, carried as a TYPED field so the MCP boundary can name the
+    /// caller-routable tool (e.g. `shell_session_start`) in its structured
+    /// `unsupported_platform` receipt without parsing the human-readable
+    /// `message`. An unsupported platform is a caller-ROUTABLE fact (route to
+    /// WSL / a different tool), not a server fault, so the receipt must say
+    /// WHICH tool is unavailable here. Additive and `serde(default)`: omitted
+    /// from the wire when `None`, so every other error round-trips unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
 }
 
 impl IpcError {
@@ -839,6 +849,7 @@ impl IpcError {
             code,
             message: message.into(),
             argv0: None,
+            tool: None,
         }
     }
 
@@ -853,6 +864,24 @@ impl IpcError {
             code: IpcErrorCode::ProgramNotFound,
             message: message.into(),
             argv0: Some(argv0.into()),
+            tool: None,
+        }
+    }
+
+    /// F14: construct an [`IpcErrorCode::UnsupportedPlatform`] error that
+    /// carries the offending MCP `tool` name as a TYPED field. The `message`
+    /// stays human/log-facing, but the `tool` field -- not the prose -- is the
+    /// authoritative value the MCP boundary reads into the structured
+    /// `unsupported_platform` receipt. An unsupported platform is a
+    /// caller-ROUTABLE fact (route to WSL / a different tool), so naming the
+    /// unavailable tool keeps the agent reasoning instead of abandoning TC.
+    #[must_use]
+    pub fn unsupported_platform(tool: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: IpcErrorCode::UnsupportedPlatform,
+            message: message.into(),
+            argv0: None,
+            tool: Some(tool.to_owned()),
         }
     }
 
@@ -867,6 +896,7 @@ impl IpcError {
             code: IpcErrorCode::Internal,
             message: format!("{}{}", Self::TRANSPORT_PREFIX, message.as_ref()),
             argv0: None,
+            tool: None,
         }
     }
 
