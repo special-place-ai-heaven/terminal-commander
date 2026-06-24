@@ -25,29 +25,29 @@ use crate::surface::Surface;
 /// Description for the `command` facade. Kept identical to the `#[tool]`
 /// attribute on `command_facade` in `tools.rs` so the compact-surface entry
 /// matches the router-advertised entry verbatim.
-const COMMAND_FACADE_DESCRIPTION: &str = "Run and observe a one-shot command. To run a command and \
+pub(crate) const COMMAND_FACADE_DESCRIPTION: &str = "Run and observe a one-shot command. To run a command and \
 get its result in ONE call, use action=\"run_and_watch\" (it does start + bounded \
 wait + collect for you). Other actions: run, exec, status, output_tail, stop, \
 events, wait, summary, event_context, sub_open, sub_pull, sub_seek, sub_close, \
 sub_list.";
 
 /// Description for the `session` facade.
-const SESSION_FACADE_DESCRIPTION: &str = "PTY commands and persistent shell sessions. To start a PTY command use \
+pub(crate) const SESSION_FACADE_DESCRIPTION: &str = "PTY commands and persistent shell sessions. To start a PTY command use \
 action=\"pty_start\"; write stdin with pty_stdin; stop with pty_stop; list with pty_list. \
 For sticky-cwd sessions: sh_start (requires allow_session), sh_exec, sh_status, sh_stop, sh_list.";
 
 /// Description for the `files` facade.
-const FILES_FACADE_DESCRIPTION: &str = "File operations: bounded read (action=\"read\"), substring search, \
+pub(crate) const FILES_FACADE_DESCRIPTION: &str = "File operations: bounded read (action=\"read\"), substring search, \
 atomic write, file-watch start/stop/list, and workspace snapshots \
 (snapshot_create, snapshot_apply). All paths must be absolute.";
 
 /// Description for the `registry` facade.
-const REGISTRY_FACADE_DESCRIPTION: &str = "Rule registry: search, get, upsert, test (dry-run), activate, deactivate, \
+pub(crate) const REGISTRY_FACADE_DESCRIPTION: &str = "Rule registry: search, get, upsert, test (dry-run), activate, deactivate, \
 list_active, import_pack (25 built-in packs), suggest_from_samples (heuristic DRAFT proposals). \
 Rules comb command output into structured signals.";
 
 /// Description for the `status` facade.
-const STATUS_FACADE_DESCRIPTION: &str = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
+pub(crate) const STATUS_FACADE_DESCRIPTION: &str = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
 policy_status, runtime_state (aggregate snapshot), probe_list, probe_status, system_discover, \
 target_list, target_probe.";
 

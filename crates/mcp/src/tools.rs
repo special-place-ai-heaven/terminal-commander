@@ -5661,6 +5661,40 @@ mod tests {
     }
 
     #[test]
+    fn facade_consts_match_tool_attribute_descriptions() {
+        // Drift guard: the 5 facade description consts in surface_list.rs are
+        // hand-copied from the #[tool(description=...)] attributes here. Assert
+        // they stay byte-identical so the duplication cannot silently diverge.
+        use crate::surface_list::{
+            COMMAND_FACADE_DESCRIPTION, FILES_FACADE_DESCRIPTION, REGISTRY_FACADE_DESCRIPTION,
+            SESSION_FACADE_DESCRIPTION, STATUS_FACADE_DESCRIPTION,
+        };
+        let router = TerminalCommanderMcpServer::tool_router();
+        let cases: &[(&str, &str)] = &[
+            ("command", COMMAND_FACADE_DESCRIPTION),
+            ("session", SESSION_FACADE_DESCRIPTION),
+            ("files", FILES_FACADE_DESCRIPTION),
+            ("registry", REGISTRY_FACADE_DESCRIPTION),
+            ("status", STATUS_FACADE_DESCRIPTION),
+        ];
+        for (name, konst) in cases {
+            let tool = router
+                .list_all()
+                .into_iter()
+                .find(|t| t.name.as_ref() == *name)
+                .unwrap_or_else(|| panic!("facade '{name}' must be a live router tool"));
+            let attr = tool
+                .description
+                .as_deref()
+                .unwrap_or_else(|| panic!("facade '{name}' must carry a #[tool] description"));
+            assert_eq!(
+                attr, *konst,
+                "facade '{name}': #[tool] attribute description and surface_list const have drifted"
+            );
+        }
+    }
+
+    #[test]
     fn command_facade_registers_under_name_command() {
         let router = TerminalCommanderMcpServer::tool_router();
         let names: Vec<String> = router
