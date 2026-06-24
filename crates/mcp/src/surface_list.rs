@@ -4,12 +4,11 @@
 //! Compact-surface `tools/list` construction + the admission gate.
 //!
 //! The compact surface advertises the verb-dispatched facade tools instead of
-//! the granular legacy tools. This milestone exposes a single facade,
-//! `command`; later plans extend [`COMPACT_TOOL_NAMES`] and
-//! [`compact_surface_tools`] in lockstep.
+//! the granular legacy tools. Five facades cover the full tool surface:
+//! `command`, `session`, `files`, `registry`, `status`.
 //!
 //! The facade `Tool` here is built from the SAME schema source the rmcp
-//! `#[tool]` macro uses (`schema_for_type`), so the `command` entry advertised
+//! `#[tool]` macro uses (`schema_for_type`), so each entry advertised
 //! on the compact surface is byte-identical to what the router would advertise
 //! for the same input type -- no hand-maintained schema drift.
 
@@ -32,11 +31,29 @@ wait + collect for you). Other actions: run, exec, status, output_tail, stop, \
 events, wait, summary, event_context, sub_open, sub_pull, sub_seek, sub_close, \
 sub_list.";
 
+/// Description for the `session` facade.
+const SESSION_FACADE_DESCRIPTION: &str = "PTY commands and persistent shell sessions. To start a PTY command use \
+action=\"pty_start\"; write stdin with pty_stdin; stop with pty_stop; list with pty_list. \
+For sticky-cwd sessions: sh_start (requires allow_session), sh_exec, sh_status, sh_stop, sh_list.";
+
+/// Description for the `files` facade.
+const FILES_FACADE_DESCRIPTION: &str = "File operations: bounded read (action=\"read\"), substring search, \
+atomic write, file-watch start/stop/list, and workspace snapshots \
+(snapshot_create, snapshot_apply). All paths must be absolute.";
+
+/// Description for the `registry` facade.
+const REGISTRY_FACADE_DESCRIPTION: &str = "Rule registry: search, get, upsert, test (dry-run), activate, deactivate, \
+list_active, import_pack (25 built-in packs), suggest_from_samples (heuristic DRAFT proposals). \
+Rules comb command output into structured signals.";
+
+/// Description for the `status` facade.
+const STATUS_FACADE_DESCRIPTION: &str = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
+policy_status, runtime_state (aggregate snapshot), probe_list, probe_status, system_discover, \
+target_list, target_probe.";
+
 /// The facade tool names advertised + admitted on the compact surface.
-///
-/// This milestone: `command` only (session/files/registry/status land in
-/// follow-on plans). KEEP IN SYNC with [`compact_surface_tools`].
-pub const COMPACT_TOOL_NAMES: &[&str] = &["command"];
+/// KEEP IN SYNC with [`compact_surface_tools`].
+pub const COMPACT_TOOL_NAMES: &[&str] = &["command", "files", "registry", "session", "status"];
 
 /// Walk `v` recursively and collect every `$defs/<name>` referenced by a
 /// `"$ref": "#/$defs/<name>"` string anywhere in the value tree.
@@ -79,6 +96,9 @@ fn collect_ref_names(v: &Value, acc: &mut BTreeSet<String>) {
 /// the now-unreachable `Mcp*Params` defs that were only used by the removed
 /// `oneOf` branches. (Regression: 0.1.55/0.1.56 shipped a root-oneOf schema
 /// and zeroed the compact surface live.)
+///
+/// Unit variants (no `$ref` sibling; just the `action` const) are valid: they
+/// contribute only the action verb to the `action` enum and no properties.
 fn flatten_facade_schema(mut schema: Map<String, Value>) -> Map<String, Value> {
     let Some(one_of) = schema.remove("oneOf").and_then(|v| match v {
         Value::Array(a) => Some(a),
@@ -109,6 +129,8 @@ fn flatten_facade_schema(mut schema: Map<String, Value>) -> Map<String, Value> {
         {
             actions.push(Value::String(a.to_string()));
         }
+        // Unit variants have no `$ref` sibling -- they contribute only the
+        // action verb above and no properties. That is correct and expected.
         if let Some(p) = b
             .get("$ref")
             .and_then(Value::as_str)
@@ -186,13 +208,17 @@ where
 
 /// `tools/list` payload for `TC_SURFACE=compact`.
 ///
-/// This milestone returns the single `command` facade `Tool`.
+/// Returns the five facade `Tool`s: `command`, `session`, `files`, `registry`,
+/// `status`. KEEP IN SYNC with [`COMPACT_TOOL_NAMES`].
 #[must_use]
 pub fn compact_surface_tools() -> Vec<Tool> {
-    vec![surface_tool::<crate::facades::CommandFacadeCall>(
-        "command",
-        COMMAND_FACADE_DESCRIPTION,
-    )]
+    vec![
+        surface_tool::<crate::facades::CommandFacadeCall>("command", COMMAND_FACADE_DESCRIPTION),
+        surface_tool::<crate::facades::FilesFacadeCall>("files", FILES_FACADE_DESCRIPTION),
+        surface_tool::<crate::facades::RegistryFacadeCall>("registry", REGISTRY_FACADE_DESCRIPTION),
+        surface_tool::<crate::facades::SessionFacadeCall>("session", SESSION_FACADE_DESCRIPTION),
+        surface_tool::<crate::facades::StatusFacadeCall>("status", STATUS_FACADE_DESCRIPTION),
+    ]
 }
 
 /// Admission gate: under [`Surface::Compact`], reject any tool name not in the
@@ -225,13 +251,20 @@ mod tests {
             .iter()
             .map(|t| t.name.to_string())
             .collect();
-        assert!(names.contains(&"command".to_string()));
-        // No granular legacy tool leaks into the compact list this milestone:
+        for facade in COMPACT_TOOL_NAMES {
+            assert!(
+                names.contains(&facade.to_string()),
+                "compact surface must include '{facade}'"
+            );
+        }
+        // No granular legacy tool leaks into the compact list:
         assert!(
             !names
                 .iter()
                 .any(|n| n.starts_with("command_") || n == "run_and_watch")
         );
+        // Exactly 5 tools (one per facade).
+        assert_eq!(names.len(), 5, "compact surface must have exactly 5 tools");
     }
 
     #[test]
@@ -239,9 +272,17 @@ mod tests {
         // Legacy name is rejected on compact, allowed on full.
         assert!(enforce_surface(Surface::Compact, "command_status").is_err());
         assert!(enforce_surface(Surface::Full, "command_status").is_ok());
-        // Facade name is allowed on both.
-        assert!(enforce_surface(Surface::Compact, "command").is_ok());
-        assert!(enforce_surface(Surface::Full, "command").is_ok());
+        // Each facade name is allowed on both surfaces.
+        for facade in COMPACT_TOOL_NAMES {
+            assert!(
+                enforce_surface(Surface::Compact, facade).is_ok(),
+                "facade '{facade}' must be admitted on compact"
+            );
+            assert!(
+                enforce_surface(Surface::Full, facade).is_ok(),
+                "facade '{facade}' must be admitted on full"
+            );
+        }
     }
 
     /// A0/A1: strict schema-contract test.
@@ -330,51 +371,122 @@ mod tests {
         }
     }
 
-    /// A1 command-specific: `properties.action.enum` must be exactly the 15 known verbs.
+    /// A1: per-facade exact action-enum assertion.
+    /// Each facade must advertise EXACTLY the named set of verbs.
+    #[allow(clippy::too_many_lines)]
     #[test]
-    fn command_facade_action_enum_is_exactly_15_verbs() {
-        const EXPECTED: &[&str] = &[
-            "run",
-            "run_and_watch",
-            "exec",
-            "status",
-            "output_tail",
-            "stop",
-            "events",
-            "wait",
-            "summary",
-            "event_context",
-            "sub_open",
-            "sub_pull",
-            "sub_seek",
-            "sub_close",
-            "sub_list",
+    fn all_facade_action_enums_are_exact() {
+        // (tool_name, sorted expected verbs)
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "command",
+                &[
+                    "event_context",
+                    "events",
+                    "exec",
+                    "output_tail",
+                    "run",
+                    "run_and_watch",
+                    "status",
+                    "stop",
+                    "sub_close",
+                    "sub_list",
+                    "sub_open",
+                    "sub_pull",
+                    "sub_seek",
+                    "summary",
+                    "wait",
+                ],
+            ),
+            (
+                "session",
+                &[
+                    "pty_list",
+                    "pty_start",
+                    "pty_stdin",
+                    "pty_stop",
+                    "sh_exec",
+                    "sh_list",
+                    "sh_start",
+                    "sh_status",
+                    "sh_stop",
+                ],
+            ),
+            (
+                "files",
+                &[
+                    "read",
+                    "search",
+                    "snapshot_apply",
+                    "snapshot_create",
+                    "watch_list",
+                    "watch_start",
+                    "watch_stop",
+                    "write",
+                ],
+            ),
+            (
+                "registry",
+                &[
+                    "activate",
+                    "deactivate",
+                    "get",
+                    "import_pack",
+                    "list_active",
+                    "search",
+                    "suggest_from_samples",
+                    "test",
+                    "upsert",
+                ],
+            ),
+            (
+                "status",
+                &[
+                    "health",
+                    "policy_status",
+                    "probe_list",
+                    "probe_status",
+                    "runtime_state",
+                    "self_check",
+                    "system_discover",
+                    "target_list",
+                    "target_probe",
+                ],
+            ),
         ];
 
         let tools = compact_surface_tools();
-        let command_tool = tools
-            .iter()
-            .find(|t| t.name.as_ref() == "command")
-            .expect("command tool must be in compact_surface_tools");
 
-        let got_enum = command_tool
-            .input_schema
-            .get("properties")
-            .and_then(|p| p.get("action"))
-            .and_then(|a| a.get("enum"))
-            .and_then(|e| e.as_array())
-            .expect("command tool must have properties.action.enum");
+        for (tool_name, expected_verbs) in cases {
+            let tool = tools
+                .iter()
+                .find(|t| t.name.as_ref() == *tool_name)
+                .unwrap_or_else(|| panic!("tool '{tool_name}' must be in compact_surface_tools"));
 
-        let got_set: BTreeSet<&str> = got_enum.iter().filter_map(|v| v.as_str()).collect();
-        let expected_set: BTreeSet<&str> = EXPECTED.iter().copied().collect();
+            let got_enum = tool
+                .input_schema
+                .get("properties")
+                .and_then(|p| p.get("action"))
+                .and_then(|a| a.get("enum"))
+                .and_then(|e| e.as_array())
+                .unwrap_or_else(|| panic!("tool '{tool_name}' must have properties.action.enum"));
 
-        assert_eq!(got_set, expected_set, "command facade action.enum mismatch");
-        let got_len = got_enum.len();
-        let exp_len = EXPECTED.len();
-        assert_eq!(
-            got_len, exp_len,
-            "command facade action.enum has {got_len} entries but expected {exp_len} (possible duplicates)",
-        );
+            let got_set: BTreeSet<&str> = got_enum.iter().filter_map(|v| v.as_str()).collect();
+            let expected_set: BTreeSet<&str> = expected_verbs.iter().copied().collect();
+
+            assert_eq!(
+                got_set, expected_set,
+                "tool '{tool_name}': action.enum set mismatch"
+            );
+            assert_eq!(
+                got_enum.len(),
+                expected_verbs.len(),
+                "tool '{tool_name}': action.enum has {} entries but expected {} \
+                 (possible duplicates)",
+                got_enum.len(),
+                expected_verbs.len(),
+            );
+        }
     }
 
     /// Compute a shape key for a JSON Schema fragment.
@@ -402,10 +514,207 @@ mod tests {
         (type_str, items_shape)
     }
 
-    /// A2/A3: flatten is lossless + collision-safe.
-    /// Re-derive per-action fields from the raw pre-flatten schema and audit.
+    /// A2/A3: flatten is lossless + collision-safe for all 5 facades.
+    ///
+    /// Re-derives per-action fields from the raw pre-flatten schema and audits:
+    /// - Every non-unit action's param fields appear in the flat schema.
+    /// - No two actions share a field name with a different structural shape.
+    /// - Unit variants (action const present, no $ref) are valid and skipped for
+    ///   param checks rather than failing the audit.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn all_facades_flatten_is_lossless_and_collision_safe() {
+        use crate::facades::{
+            CommandFacadeCall, FilesFacadeCall, RegistryFacadeCall, SessionFacadeCall,
+            StatusFacadeCall,
+        };
+
+        fn check_facade<T: schemars::JsonSchema>(facade_name: &str) {
+            let raw_schema = serde_json::to_value(schemars::schema_for!(T))
+                .unwrap_or_else(|e| panic!("{facade_name}: schema serializes: {e}"));
+
+            let raw_defs = raw_schema
+                .get("$defs")
+                .and_then(|d| d.as_object())
+                .cloned()
+                .unwrap_or_default();
+
+            let one_of = raw_schema
+                .get("oneOf")
+                .and_then(|v| v.as_array())
+                .unwrap_or_else(|| panic!("{facade_name}: raw schema must have a root oneOf"));
+
+            let flat_schema_map = super::flatten_facade_schema(
+                raw_schema
+                    .as_object()
+                    .expect("schema root is object")
+                    .clone(),
+            );
+            let flat_props = flat_schema_map
+                .get("properties")
+                .and_then(|v| v.as_object())
+                .unwrap_or_else(|| panic!("{facade_name}: flat schema must have properties"));
+
+            let mut field_shapes: std::collections::HashMap<String, ((String, String), String)> =
+                std::collections::HashMap::new();
+
+            for branch in one_of {
+                // Every branch MUST have an action const -- a missing one means
+                // the schemars layout no longer matches the assumption. Fail loud.
+                let action_name = branch
+                    .get("properties")
+                    .and_then(|p| p.get("action"))
+                    .and_then(|a| a.get("const"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{facade_name}: oneOf branch has no resolvable action.const -- \
+                             schemars branch shape may have changed: {branch:?}"
+                        )
+                    })
+                    .to_string();
+
+                // Try to resolve the $ref to the param struct. A branch with NO
+                // $ref is a valid unit variant -- skip the param property checks.
+                let param_props = branch
+                    .get("$ref")
+                    .and_then(Value::as_str)
+                    .and_then(|r| r.rsplit('/').next())
+                    .and_then(|name| raw_defs.get(name))
+                    .and_then(|d| d.get("properties"))
+                    .and_then(Value::as_object);
+
+                // Unit variant: no $ref, no param check. Only confirm the action
+                // const resolved (already asserted above). Skip property checks.
+                let Some(param_props) = param_props else {
+                    // Confirm there is genuinely no $ref (unit variant), not a
+                    // broken $ref that failed to resolve.
+                    assert!(
+                        branch.get("$ref").is_none(),
+                        "{facade_name}: action '{action_name}': branch has a $ref that \
+                         did not resolve to a properties object -- schemars branch shape \
+                         may have changed: {branch:?}",
+                    );
+                    // Unit variant: valid, nothing to check for param collision.
+                    continue;
+                };
+
+                for (field_name, field_schema) in param_props {
+                    // LOSSLESS: field must appear in the flat schema's properties.
+                    assert!(
+                        flat_props.contains_key(field_name),
+                        "{facade_name}: LOSSLESS FAIL: field '{field_name}' from action \
+                         '{action_name}' is missing from flat schema properties",
+                    );
+
+                    // COLLISION-SAFE: same field from two actions must have the
+                    // same structural shape.
+                    let this_shape = shape_key(field_schema);
+                    if let Some((prev_shape, prev_action)) = field_shapes.get(field_name) {
+                        assert_eq!(
+                            &this_shape, prev_shape,
+                            "{facade_name}: COLLISION FAIL: field '{field_name}' appears in \
+                             actions '{prev_action}' and '{action_name}' with different shapes: \
+                             {prev_shape:?} vs {this_shape:?}. The flatten's first-wins will \
+                             silently drop the second action's shape.",
+                        );
+                    } else {
+                        field_shapes.insert(field_name.clone(), (this_shape, action_name.clone()));
+                    }
+                }
+            }
+        }
+
+        check_facade::<CommandFacadeCall>("command");
+        check_facade::<SessionFacadeCall>("session");
+        check_facade::<FilesFacadeCall>("files");
+        check_facade::<RegistryFacadeCall>("registry");
+        check_facade::<StatusFacadeCall>("status");
+    }
+
+    /// B1 test: `$defs` in every flat facade schema are lean.
+    /// No `Mcp*Params` wrapper structs remain; every retained key is referenced.
+    #[test]
+    fn all_facades_flat_defs_are_lean() {
+        // The Mcp*Params struct names used by CommandFacadeCall (must be pruned).
+        const COMMAND_PARAM_STRUCT_NAMES: &[&str] = &[
+            "McpCommandStartParams",
+            "McpRunAndWatchParams",
+            "McpShellExecParams",
+            "McpCommandStatusParams",
+            "McpCommandOutputTailParams",
+            "McpCommandStopParams",
+            "McpBucketEventsSinceParams",
+            "McpBucketWaitParams",
+            "McpBucketSummaryParams",
+            "McpEventContextParams",
+            "McpSubscriptionOpenParams",
+            "McpSubscriptionPullParams",
+            "McpSubscriptionSeekParams",
+            "McpSubscriptionCloseParams",
+            "McpSubscriptionListParams",
+        ];
+
+        for tool in compact_surface_tools() {
+            let name = &tool.name;
+            let s = &tool.input_schema;
+            let schema_str =
+                serde_json::to_string(s.as_ref()).expect("schema must serialize to string");
+
+            if let Some(defs) = s.get("$defs").and_then(|d| d.as_object()) {
+                // command-specific: the Mcp*Params wrappers must be pruned.
+                if name.as_ref() == "command" {
+                    for param_name in COMMAND_PARAM_STRUCT_NAMES {
+                        assert!(
+                            !defs.contains_key(*param_name),
+                            "tool '{name}': $defs must NOT contain '{param_name}' after pruning",
+                        );
+                    }
+                }
+
+                // For all facades: every retained $defs key must be referenced.
+                for key in defs.keys() {
+                    let ref_str = format!("#/$defs/{key}");
+                    assert!(
+                        schema_str.contains(&ref_str),
+                        "tool '{name}': $defs key '{key}' is retained but not referenced \
+                         anywhere in the schema (ref '{ref_str}' not found)",
+                    );
+                }
+            }
+            // If $defs is absent entirely that is also fine.
+        }
+    }
+
+    /// Backward-compat: the old test names that the test harness expects
+    /// (they now delegate to the generalized helpers above).
+    #[test]
+    fn command_facade_action_enum_is_exactly_15_verbs() {
+        // Covered by all_facade_action_enums_are_exact, but kept for CI name
+        // stability: the command facade must have exactly 15 verbs.
+        let tools = compact_surface_tools();
+        let command_tool = tools
+            .iter()
+            .find(|t| t.name.as_ref() == "command")
+            .expect("command tool must be in compact_surface_tools");
+        let got_enum = command_tool
+            .input_schema
+            .get("properties")
+            .and_then(|p| p.get("action"))
+            .and_then(|a| a.get("enum"))
+            .and_then(|e| e.as_array())
+            .expect("command tool must have properties.action.enum");
+        assert_eq!(
+            got_enum.len(),
+            15,
+            "command facade must have exactly 15 verbs"
+        );
+    }
+
     #[test]
     fn command_facade_flatten_is_lossless_and_collision_safe() {
+        // Delegate to the generalized all-facades test for the command facade.
+        // Kept for CI name stability.
         use crate::facades::CommandFacadeCall;
 
         let raw_schema = serde_json::to_value(schemars::schema_for!(CommandFacadeCall))
@@ -421,7 +730,6 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("raw CommandFacadeCall schema must have a root oneOf");
 
-        // Build the flat schema via the real function.
         let flat_schema_map = flatten_facade_schema(
             raw_schema
                 .as_object()
@@ -433,16 +741,10 @@ mod tests {
             .and_then(|v| v.as_object())
             .expect("flat schema must have properties");
 
-        // Track per-field shapes seen so far: field_name -> (shape_key, action_name).
         let mut field_shapes: std::collections::HashMap<String, ((String, String), String)> =
             std::collections::HashMap::new();
 
         for branch in one_of {
-            // Get the action name from the branch's const. A branch whose
-            // action const does NOT resolve means the schemars layout no longer
-            // matches the sibling-`$ref` + `action.const` assumption this audit
-            // (and the production flatten) rely on -- fail LOUD rather than skip
-            // it and pass vacuously.
             let action_name = branch
                 .get("properties")
                 .and_then(|p| p.get("action"))
@@ -456,9 +758,6 @@ mod tests {
                 })
                 .to_string();
 
-            // Resolve the $ref to the param struct's properties. Same contract:
-            // a branch whose $ref'd param struct has no `properties` must FAIL
-            // the audit, not be silently skipped.
             let param_props = branch
                 .get("$ref")
                 .and_then(Value::as_str)
@@ -466,6 +765,9 @@ mod tests {
                 .and_then(|name| raw_defs.get(name))
                 .and_then(|d| d.get("properties"))
                 .and_then(Value::as_object);
+
+            // For CommandFacadeCall all variants have params; unit variants in
+            // other facades are handled by all_facades_flatten_is_lossless_and_collision_safe.
             assert!(
                 param_props.is_some(),
                 "action '{action_name}': $ref'd param struct did not resolve to a \
@@ -474,15 +776,12 @@ mod tests {
             let param_props = param_props.expect("asserted Some above");
 
             for (field_name, field_schema) in param_props {
-                // LOSSLESS: field must appear in the flat schema's properties.
                 assert!(
                     flat_props.contains_key(field_name),
                     "LOSSLESS FAIL: field '{field_name}' from action '{action_name}' \
                      is missing from flat schema properties",
                 );
 
-                // COLLISION-SAFE: if this field appeared before with a different
-                // shape key, fail loudly.
                 let this_shape = shape_key(field_schema);
                 if let Some((prev_shape, prev_action)) = field_shapes.get(field_name) {
                     assert_eq!(
@@ -530,12 +829,10 @@ mod tests {
 
         let s = &command_tool.input_schema;
 
-        // Serialize the whole schema to a string for $ref scanning.
         let schema_str =
             serde_json::to_string(s.as_ref()).expect("schema must serialize to string");
 
         if let Some(defs) = s.get("$defs").and_then(|d| d.as_object()) {
-            // None of the Mcp*Params struct names should be in $defs.
             for name in PARAM_STRUCT_NAMES {
                 assert!(
                     !defs.contains_key(*name),
@@ -544,7 +841,6 @@ mod tests {
                 );
             }
 
-            // Every retained $defs key must be referenced somewhere in the schema.
             for key in defs.keys() {
                 let ref_str = format!("#/$defs/{key}");
                 assert!(
@@ -554,6 +850,5 @@ mod tests {
                 );
             }
         }
-        // If $defs is absent entirely that is also fine (all refs were inlined).
     }
 }

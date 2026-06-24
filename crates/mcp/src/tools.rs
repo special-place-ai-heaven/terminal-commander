@@ -1822,7 +1822,7 @@ impl TerminalCommanderMcpServer {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
         let ipc = RegistrySuggestFromSamplesParams {
-            samples: params.samples,
+            samples: params.sample_lines,
             intent: params.intent,
             max_rules: params.max_rules,
         };
@@ -2640,6 +2640,105 @@ sub_list."
             C::SubSeek(p) => self.subscription_seek(Parameters(p)).await,
             C::SubClose(p) => self.subscription_close(Parameters(p)).await,
             C::SubList(p) => self.subscription_list(Parameters(p)).await,
+        }
+    }
+
+    /// `session` facade — PTY commands + persistent shell sessions.
+    #[tool(
+        name = "session",
+        description = "PTY commands and persistent shell sessions. To start a PTY command use \
+action=\"pty_start\"; write stdin with pty_stdin; stop with pty_stop; list with pty_list. \
+For sticky-cwd sessions: sh_start (requires allow_session), sh_exec, sh_status, sh_stop, sh_list."
+    )]
+    pub(crate) async fn session_facade(
+        &self,
+        Parameters(call): Parameters<crate::facades::SessionFacadeCall>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::facades::SessionFacadeCall as S;
+        match call {
+            S::PtyStart(p) => self.pty_command_start(Parameters(p)).await,
+            S::PtyStdin(p) => self.pty_command_write_stdin(Parameters(p)).await,
+            S::PtyStop(p) => self.pty_command_stop(Parameters(p)).await,
+            S::PtyList => self.pty_command_list().await,
+            S::ShStart(p) => self.shell_session_start(Parameters(p)).await,
+            S::ShExec(p) => self.shell_session_exec(Parameters(p)).await,
+            S::ShStatus(p) => self.shell_session_status(Parameters(p)).await,
+            S::ShStop(p) => self.shell_session_stop(Parameters(p)).await,
+            S::ShList => self.shell_session_list().await,
+        }
+    }
+
+    /// `files` facade — file read/search/write + watch + workspace snapshots.
+    #[tool(
+        name = "files",
+        description = "File operations: bounded read (action=\"read\"), substring search, \
+atomic write, file-watch start/stop/list, and workspace snapshots \
+(snapshot_create, snapshot_apply). All paths must be absolute."
+    )]
+    pub(crate) async fn files_facade(
+        &self,
+        Parameters(call): Parameters<crate::facades::FilesFacadeCall>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::facades::FilesFacadeCall as F;
+        match call {
+            F::Read(p) => self.file_read_window(Parameters(p)).await,
+            F::Search(p) => self.file_search(Parameters(p)).await,
+            F::Write(p) => self.file_write(Parameters(p)).await,
+            F::WatchStart(p) => self.file_watch_start(Parameters(p)).await,
+            F::WatchStop(p) => self.file_watch_stop(Parameters(p)).await,
+            F::WatchList => self.file_watch_list().await,
+            F::SnapshotCreate(p) => self.workspace_snapshot_create(Parameters(p)).await,
+            F::SnapshotApply(p) => self.workspace_snapshot_apply(Parameters(p)).await,
+        }
+    }
+
+    /// `registry` facade — rule registry CRUD + test + suggest.
+    #[tool(
+        name = "registry",
+        description = "Rule registry: search, get, upsert, test (dry-run), activate, deactivate, \
+list_active, import_pack (25 built-in packs), suggest_from_samples (heuristic DRAFT proposals). \
+Rules comb command output into structured signals."
+    )]
+    pub(crate) async fn registry_facade(
+        &self,
+        Parameters(call): Parameters<crate::facades::RegistryFacadeCall>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::facades::RegistryFacadeCall as R;
+        match call {
+            R::Search(p) => self.registry_search(Parameters(p)).await,
+            R::Get(p) => self.registry_get(Parameters(p)).await,
+            R::Upsert(p) => self.registry_upsert(Parameters(p)).await,
+            R::Test(p) => self.registry_test(Parameters(p)).await,
+            R::Activate(p) => self.registry_activate(Parameters(p)).await,
+            R::Deactivate(p) => self.registry_deactivate(Parameters(p)).await,
+            R::ListActive(p) => self.registry_list_active(Parameters(p)).await,
+            R::ImportPack(p) => self.registry_import_pack(Parameters(p)).await,
+            R::SuggestFromSamples(p) => self.registry_suggest_from_samples(Parameters(p)).await,
+        }
+    }
+
+    /// `status` facade — health, policy, runtime state, probes, targets.
+    #[tool(
+        name = "status",
+        description = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
+policy_status, runtime_state (aggregate snapshot), probe_list, probe_status, system_discover, \
+target_list, target_probe."
+    )]
+    pub(crate) async fn status_facade(
+        &self,
+        Parameters(call): Parameters<crate::facades::StatusFacadeCall>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::facades::StatusFacadeCall as St;
+        match call {
+            St::Health => self.health().await,
+            St::SelfCheck => self.self_check().await,
+            St::PolicyStatus => self.policy_status().await,
+            St::RuntimeState(p) => self.runtime_state(Parameters(p)).await,
+            St::ProbeList(p) => self.probe_list(Parameters(p)).await,
+            St::ProbeStatus(p) => self.probe_status(Parameters(p)).await,
+            St::SystemDiscover => self.system_discover().await,
+            St::TargetList => self.target_list().await,
+            St::TargetProbe(p) => self.target_probe(Parameters(p)).await,
         }
     }
 }
@@ -4403,7 +4502,16 @@ pub struct McpRegistryTestParams {
 pub struct McpRegistrySuggestFromSamplesParams {
     /// Raw output sample lines to analyze. Bounded by the daemon
     /// (sample count + per-line bytes); excess is ignored.
-    pub samples: Vec<String>,
+    ///
+    /// Renamed from `samples` to avoid a shape collision with
+    /// `McpRegistryTestParams.samples` (array of objects vs array of
+    /// strings) in the flat `registry` facade schema. The
+    /// `#[serde(alias = "samples")]` keeps RUNTIME deserialization of a
+    /// literal `samples` key working for hand-written callers, but
+    /// schemars does NOT advertise the alias: `tools/list` exposes only
+    /// `sample_lines`, so schema-introspecting clients see and send that.
+    #[serde(alias = "samples")]
+    pub sample_lines: Vec<String>,
     /// Optional free-text hint about the tool/intent. Advisory only.
     #[serde(default)]
     pub intent: Option<String>,
@@ -5508,6 +5616,7 @@ mod tests {
                 "file_watch_start".to_owned(),
                 "file_watch_stop".to_owned(),
                 "file_write".to_owned(),
+                "files".to_owned(),
                 "health".to_owned(),
                 "policy_status".to_owned(),
                 "probe_list".to_owned(),
@@ -5516,6 +5625,7 @@ mod tests {
                 "pty_command_start".to_owned(),
                 "pty_command_stop".to_owned(),
                 "pty_command_write_stdin".to_owned(),
+                "registry".to_owned(),
                 "registry_activate".to_owned(),
                 "registry_deactivate".to_owned(),
                 "registry_get".to_owned(),
@@ -5528,12 +5638,14 @@ mod tests {
                 "run_and_watch".to_owned(),
                 "runtime_state".to_owned(),
                 "self_check".to_owned(),
+                "session".to_owned(),
                 "shell_exec".to_owned(),
                 "shell_session_exec".to_owned(),
                 "shell_session_list".to_owned(),
                 "shell_session_start".to_owned(),
                 "shell_session_status".to_owned(),
                 "shell_session_stop".to_owned(),
+                "status".to_owned(),
                 "subscription_close".to_owned(),
                 "subscription_list".to_owned(),
                 "subscription_open".to_owned(),
