@@ -129,6 +129,15 @@ pub enum CommandError {
     Sifter(String),
     #[error("process spawn error: {0}")]
     Spawn(#[from] terminal_commander_probes::ProcessProbeError),
+    /// F7: the program in `argv[0]` does not exist (the OS spawn returned
+    /// `ErrorKind::NotFound`). A non-existent program is a COMMAND ATTEMPT
+    /// that failed, not a daemon/transport fault: the caller fixes their
+    /// `argv0` (typo, wrong PATH). Carved out of [`Self::Spawn`] so the IPC
+    /// boundary can surface a structured caller-fixable receipt
+    /// (`error_kind: "program_not_found"`) instead of an opaque `Internal`
+    /// MCP error. Every OTHER spawn error stays [`Self::Spawn`] (Internal).
+    #[error("program not found: '{argv0}'")]
+    ProgramNotFound { argv0: String },
     #[error("unknown job id: {0}")]
     UnknownJob(JobId),
     #[error("io error: {0}")]
@@ -966,6 +975,21 @@ impl CommandRuntime {
                         Some(format!("spawn failed: {e}")),
                         Some(format_argv_metadata(&req.argv)),
                     );
+                    // F7: carve out "program not found" (OS spawn returned
+                    // `ErrorKind::NotFound`) from the generic Spawn error.
+                    // It is a CALLER-fixable command attempt (typo / wrong
+                    // PATH), not a daemon fault, so the IPC boundary can
+                    // surface a structured `program_not_found` receipt
+                    // instead of an opaque `Internal` MCP error. Every
+                    // other spawn failure keeps its current `Spawn` ->
+                    // `Internal` behavior unchanged.
+                    if let terminal_commander_probes::ProcessProbeError::Io(io_err) = &e
+                        && io_err.kind() == std::io::ErrorKind::NotFound
+                    {
+                        return Err(CommandError::ProgramNotFound {
+                            argv0: req.argv.first().cloned().unwrap_or_default(),
+                        });
+                    }
                     return Err(CommandError::Spawn(e));
                 }
             };

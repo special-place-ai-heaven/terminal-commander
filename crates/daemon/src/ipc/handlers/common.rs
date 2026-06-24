@@ -127,7 +127,27 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
             IpcErrorCode::RuleInvalid,
             format!("inline rule compile failed: {msg}"),
         ),
-        // Genuine server faults (bucket store failure, IO) stay Internal.
+        // F7: a non-existent program is a CALLER-fixable command attempt
+        // (typo / wrong PATH), not a daemon fault. Surface the structured
+        // `ProgramNotFound` code (mapped to `invalid_params` at the MCP
+        // boundary, carrying `error_kind: "program_not_found"` + `argv0`)
+        // instead of the opaque `Internal` the generic `Spawn` arm yields.
+        // The message names `argv0` and the remedy so the agent can fix it.
+        // Wording note: the ONLY single quotes in this message are the two
+        // that wrap `argv0`. The remedy text is deliberately apostrophe-free
+        // ("the daemon PATH", not "the daemon's PATH") so the MCP boundary
+        // can unambiguously recover `argv0` as the single balanced quote pair
+        // (count == 2). An apostrophe IN `argv0` itself still trips the
+        // boundary's omit guard -- never a truncated value.
+        CommandError::ProgramNotFound { argv0 } => IpcError::new(
+            IpcErrorCode::ProgramNotFound,
+            format!(
+                "program not found: '{argv0}'. Remedy: check the spelling of argv[0] and \
+                 ensure the program is on the daemon PATH (or pass an absolute path)."
+            ),
+        ),
+        // Genuine server faults (bucket store failure, IO, other spawn
+        // failures) stay Internal.
         other => IpcError::new(IpcErrorCode::Internal, other.to_string()),
     }
 }
@@ -587,6 +607,37 @@ mod tests {
     #[test]
     fn io_error_still_maps_to_internal() {
         let err = map_command_error(CommandError::Io(std::io::Error::other("disk gone")));
+        assert_eq!(err.code, IpcErrorCode::Internal);
+    }
+
+    /// F7 (cross-platform): a non-existent program is a CALLER-fixable
+    /// command attempt, so it maps to the structured `ProgramNotFound`
+    /// code (which the MCP boundary surfaces as `invalid_params` with an
+    /// `error_kind`/`argv0` data payload), NEVER the opaque server-fault
+    /// `Internal`. The teaching message must name the offending argv0.
+    #[test]
+    fn program_not_found_maps_to_program_not_found_code_naming_argv0() {
+        let err = map_command_error(CommandError::ProgramNotFound {
+            argv0: "tc_nonexistent_program_f7_xyz".to_owned(),
+        });
+        assert_eq!(err.code, IpcErrorCode::ProgramNotFound);
+        assert!(
+            err.message.contains("tc_nonexistent_program_f7_xyz"),
+            "the offending argv0 must be surfaced, got: {}",
+            err.message
+        );
+    }
+
+    /// F7 (cross-platform): a GENERIC spawn failure (not program-not-found)
+    /// must stay `Internal`. The `ProgramNotFound` carve-out must not widen
+    /// to swallow other spawn faults.
+    #[test]
+    fn generic_spawn_error_still_maps_to_internal() {
+        let err = map_command_error(CommandError::Spawn(
+            terminal_commander_probes::ProcessProbeError::Io(std::io::Error::other(
+                "spawn permission denied",
+            )),
+        ));
         assert_eq!(err.code, IpcErrorCode::Internal);
     }
 

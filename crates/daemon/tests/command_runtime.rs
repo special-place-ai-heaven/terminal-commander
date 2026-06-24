@@ -1063,9 +1063,16 @@ fn dedup_evicts_on_spawn_failure_so_retry_is_not_blocked() {
             .command
             .start_combed(dedup_req(bogus.clone(), Some("nonce-F"), Some(7)))
             .expect_err("bogus binary must fail to spawn");
+        // F7: a missing binary (OS `ErrorKind::NotFound`) is now classified
+        // as the caller-fixable `ProgramNotFound`, carved out of the generic
+        // `Spawn`. The dedup-eviction contract is independent of the variant;
+        // accept either spawn-failure shape.
         assert!(
-            matches!(first, CommandError::Spawn(_)),
-            "first failure must be a spawn error, got {first:?}"
+            matches!(
+                first,
+                CommandError::ProgramNotFound { .. } | CommandError::Spawn(_)
+            ),
+            "first failure must be a spawn failure, got {first:?}"
         );
 
         // The fingerprint was evicted on the spawn-failure path, so the
@@ -1076,9 +1083,61 @@ fn dedup_evicts_on_spawn_failure_so_retry_is_not_blocked() {
             .start_combed(dedup_req(bogus, Some("nonce-F"), Some(7)))
             .expect_err("retry must also reach spawn and fail, not be blocked");
         assert!(
-            matches!(second, CommandError::Spawn(_)),
+            matches!(
+                second,
+                CommandError::ProgramNotFound { .. } | CommandError::Spawn(_)
+            ),
             "a leaked entry must never block a legitimate retry; got {second:?}"
         );
+    });
+}
+
+// F7: a command whose program does not exist must fail to start with the
+// structured, caller-fixable `CommandError::ProgramNotFound { argv0 }`
+// (carved out of the generic `Spawn`), carrying the offending `argv0`.
+// This is the runtime-layer half of the fix; the IPC mapping
+// (`map_command_error` -> `IpcErrorCode::ProgramNotFound`) is asserted in
+// the daemon `ipc::handlers::common` unit tests. A deterministically-absent
+// program name is used so the OS spawn returns `ErrorKind::NotFound`.
+#[test]
+fn missing_program_yields_structured_program_not_found_receipt() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("program-not-found");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let missing = "tc_nonexistent_program_f7_xyz";
+        let req = CommandStartRequest {
+            argv: vec![missing.to_owned(), "--noop".to_owned()],
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            strip_ansi: true,
+            peer_discriminator: None,
+        };
+
+        let err = state
+            .command
+            .start_combed(req)
+            .expect_err("a non-existent program must fail to start");
+
+        match err {
+            CommandError::ProgramNotFound { argv0 } => {
+                assert_eq!(argv0, missing, "the receipt must name the offending argv0");
+            }
+            other => panic!(
+                "expected CommandError::ProgramNotFound, got {other:?} \
+                 (a missing program is a caller-fixable command attempt, \
+                 not a generic Spawn/Internal fault)"
+            ),
+        }
+
+        cleanup(&data);
     });
 }
 

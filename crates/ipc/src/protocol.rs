@@ -713,6 +713,15 @@ pub enum IpcErrorCode {
     /// `argv[0]` basename matches the shell-bridge deny list.
     /// `command_start_combed` is not a shell entry point.
     ShellInterpreterDenied,
+    /// F7: the program named in `argv[0]` does not exist (the OS spawn
+    /// returned `ErrorKind::NotFound`). A CALLER-fixable command attempt
+    /// (typo / wrong PATH / missing binary), NOT a daemon or transport
+    /// fault. Surfaced as a structured `program_not_found` receipt at the
+    /// MCP boundary (`invalid_params`, carrying `error_kind` + `argv0`)
+    /// instead of an opaque `Internal` error so the agent corrects its
+    /// argv and keeps routing through Terminal Commander. Distinct from
+    /// every other spawn failure, which stays `Internal`.
+    ProgramNotFound,
     /// argv shape is invalid (empty, too long, or item too large).
     ArgvInvalid,
     /// `command_status` was called with a job id the daemon does not
