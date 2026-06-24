@@ -1506,6 +1506,44 @@ mod runtime_win {
         deadline.saturating_duration_since(now)
     }
 
+    /// F1: the waiter's bounded CONCURRENT drain. Polls BOTH handshake
+    /// channels with `try_recv` against ONE shared `deadline`, returning
+    /// `(writer_drained, reader_drained)` -- whether each signalled before the
+    /// deadline. This is THE loop the production waiter runs on natural exit
+    /// AND on the spawn-error path (both call sites used to inline an identical
+    /// copy); extracted so the bound is unit-tested directly rather than only
+    /// implicitly via a live ConPTY. The bound is the regression guard: a
+    /// reader that never signals (conhost owns its cloned pipe) must make this
+    /// RETURN at the deadline, never park -- the original lesion was an
+    /// unbounded `reader_handle.join()` here. The join-vs-detach decision stays
+    /// at each call site, driven by the returned bools, so behavior is
+    /// identical. Polling both (rather than blocking on one then the other)
+    /// means the always-parked writer cannot burn the reader's budget.
+    fn drain_both(
+        writer_done_rx: &std::sync::mpsc::Receiver<()>,
+        reader_done_rx: &std::sync::mpsc::Receiver<()>,
+        deadline: std::time::Instant,
+    ) -> (bool, bool) {
+        let mut writer_drained = false;
+        let mut reader_drained = false;
+        while !(writer_drained && reader_drained) {
+            if !writer_drained && writer_done_rx.try_recv().is_ok() {
+                writer_drained = true;
+            }
+            if !reader_drained && reader_done_rx.try_recv().is_ok() {
+                reader_drained = true;
+            }
+            if writer_drained && reader_drained {
+                break;
+            }
+            if remaining_budget(deadline, std::time::Instant::now()).is_zero() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        (writer_drained, reader_drained)
+    }
+
     /// Handle to a live Windows ConPTY probe. Drop or call `cancel` to
     /// terminate. SAME public API as the unix `PtyProbe`.
     pub struct PtyProbe {
@@ -1985,27 +2023,12 @@ mod runtime_win {
                             // Same bounded CONCURRENT drain as the natural-exit
                             // path: a stuck reader must never strand the
                             // spawn-error report either. The child never
-                            // started, so both should EOF fast.
+                            // started, so both should EOF fast. Both handles
+                            // are detached regardless here -- the outcome does
+                            // not depend on a tail flush from a child that
+                            // never ran.
                             let drain_deadline = std::time::Instant::now() + drain_grace;
-                            let mut writer_drained = false;
-                            let mut reader_drained = false;
-                            while !(writer_drained && reader_drained) {
-                                if !writer_drained && writer_done_rx.try_recv().is_ok() {
-                                    writer_drained = true;
-                                }
-                                if !reader_drained && reader_done_rx.try_recv().is_ok() {
-                                    reader_drained = true;
-                                }
-                                if writer_drained && reader_drained {
-                                    break;
-                                }
-                                if remaining_budget(drain_deadline, std::time::Instant::now())
-                                    .is_zero()
-                                {
-                                    break;
-                                }
-                                std::thread::sleep(std::time::Duration::from_millis(5));
-                            }
+                            let _ = drain_both(&writer_done_rx, &reader_done_rx, drain_deadline);
                             drop(writer_handle);
                             drop(reader_handle);
                             let _ = completion_tx.send(PtyExitOutcome::Exited {
@@ -2040,23 +2063,8 @@ mod runtime_win {
                     // (the cancel path). Whichever signalled is joined; whichever
                     // did not is detached.
                     let drain_deadline = std::time::Instant::now() + drain_grace;
-                    let mut writer_drained = false;
-                    let mut reader_drained = false;
-                    while !(writer_drained && reader_drained) {
-                        if !writer_drained && writer_done_rx.try_recv().is_ok() {
-                            writer_drained = true;
-                        }
-                        if !reader_drained && reader_done_rx.try_recv().is_ok() {
-                            reader_drained = true;
-                        }
-                        if writer_drained && reader_drained {
-                            break;
-                        }
-                        if remaining_budget(drain_deadline, std::time::Instant::now()).is_zero() {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                    }
+                    let (writer_drained, reader_drained) =
+                        drain_both(&writer_done_rx, &reader_done_rx, drain_deadline);
                     if writer_drained {
                         let _ = writer_handle.join();
                     } else {
@@ -2501,6 +2509,84 @@ mod runtime_win {
             assert!(remaining_budget(deadline, after).is_zero());
             // Exactly AT the deadline is also zero.
             assert_eq!(remaining_budget(deadline, deadline), Duration::ZERO);
+        }
+
+        // F1: drive the REAL `drain_both` the production waiter now runs (not
+        // raw mpsc in the abstract). These catch a regression of the EXTRACTED
+        // loop itself -- if `drain_both` ever reverted to an unbounded reader
+        // join, Test A would park forever on the never-signalling reader and
+        // fail loudly (the elapsed-bound assert, or failing that the harness
+        // timeout) instead of the silent strand the original lesion caused.
+
+        #[test]
+        fn drain_both_returns_at_the_deadline_when_the_reader_never_signals() {
+            // Models the F1 natural-exit common case: the WRITER drains (its
+            // queue emptied) but the READER is parked forever on a conhost-owned
+            // pipe and NEVER signals. `drain_both` MUST return at the shared
+            // deadline rather than block on the never-signalling reader.
+            let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+            let (reader_done_tx, reader_done_rx) = std::sync::mpsc::channel::<()>();
+            // The writer signalled; the reader's sender is held (alive) so
+            // `try_recv` stays `Empty` for the whole call -- never disconnected,
+            // proving the TIMEOUT path (parked reader), not a cheap hang-up.
+            writer_done_tx.send(()).expect("writer signals done");
+
+            let grace = Duration::from_millis(150);
+            let deadline = std::time::Instant::now() + grace;
+            let started = std::time::Instant::now();
+            let (writer_drained, reader_drained) =
+                drain_both(&writer_done_rx, &reader_done_rx, deadline);
+            let elapsed = started.elapsed();
+
+            // The regression bound: if this reverted to an unbounded reader
+            // join it would never return here. Asserting a wall-time ceiling
+            // makes a re-hang fail loudly rather than relying only on the test
+            // harness timeout. The 5ms poll + scheduler jitter need slack, so
+            // bound generously at grace*5.
+            assert!(
+                elapsed < grace * 5,
+                "drain_both must return near the deadline, not park; waited {elapsed:?}"
+            );
+            // The never-signalling reader was NOT falsely marked drained.
+            assert!(
+                !reader_drained,
+                "a reader that never signals must report NOT drained"
+            );
+            // The writer that DID signal is observed as drained.
+            assert!(
+                writer_drained,
+                "a writer that signalled must report drained"
+            );
+            // Hold the reader sender live until HERE so the channel stays
+            // connected for the whole call (the parked-not-hung-up case).
+            drop(reader_done_tx);
+        }
+
+        #[test]
+        fn drain_both_returns_both_drained_when_both_signal_promptly() {
+            // The clean path (the CANCEL case): both reader and writer drain and
+            // signal their done channels. `drain_both` observes BOTH well within
+            // the grace and returns `(true, true)`.
+            let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+            let (reader_done_tx, reader_done_rx) = std::sync::mpsc::channel::<()>();
+            writer_done_tx.send(()).expect("writer signals done");
+            reader_done_tx.send(()).expect("reader signals done");
+
+            let grace = Duration::from_millis(150);
+            let deadline = std::time::Instant::now() + grace;
+            let started = std::time::Instant::now();
+            let (writer_drained, reader_drained) =
+                drain_both(&writer_done_rx, &reader_done_rx, deadline);
+            let elapsed = started.elapsed();
+
+            assert!(writer_drained, "the signalling writer must report drained");
+            assert!(reader_drained, "the signalling reader must report drained");
+            // Both already-signalled handshakes resolve almost immediately, well
+            // inside the grace -- the deadline is never reached.
+            assert!(
+                elapsed < grace,
+                "both-signalled drain must resolve inside the grace; took {elapsed:?}"
+            );
         }
     }
 }
