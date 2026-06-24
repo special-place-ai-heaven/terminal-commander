@@ -1237,6 +1237,9 @@ impl TerminalCommanderMcpServer {
                         true,
                         Some(RUN_AND_WATCH_RECOVER_HINT),
                         compact,
+                        // F6: an interrupted wait did not necessarily cap;
+                        // degraded:true already marks the result incomplete.
+                        false,
                     );
                 }
             };
@@ -1295,6 +1298,9 @@ impl TerminalCommanderMcpServer {
                         true,
                         Some(RUN_AND_WATCH_RECOVER_HINT),
                         compact,
+                        // F6: an interrupted wait did not necessarily cap;
+                        // degraded:true already marks the result incomplete.
+                        false,
                     );
                 }
             }
@@ -1348,6 +1354,12 @@ impl TerminalCommanderMcpServer {
             false,
             None,
             compact,
+            // F6 (truncation honesty): the returned `signals` array was limited
+            // by `max_signals` iff it reached the cap -- true in default mode
+            // when `cap_reached` ended the wait, and also in wait_until_exit mode
+            // where collect_rule_signals stops appending at `max_signals`. Either
+            // way more matches may exist beyond `cursor`.
+            signals.len() >= max_signals,
         )
     }
 
@@ -3096,6 +3108,13 @@ fn run_and_watch_result(
     degraded: bool,
     recover_hint: Option<&str>,
     compact: bool,
+    // F6 (truncation honesty): true iff the returned `signals` array was
+    // limited by `max_signals` and more matches may exist beyond `cursor`.
+    // Computed by the caller (which owns `max_signals`) as
+    // `signals.len() >= max_signals`; the degraded paths pass `false` because
+    // an interrupted wait did not necessarily cap, and `degraded:true` already
+    // marks the result incomplete.
+    signals_capped: bool,
 ) -> Result<CallToolResult, McpError> {
     // A degraded result is never "complete" (the wait was interrupted);
     // otherwise derive completion from the last observed state.
@@ -3141,6 +3160,9 @@ fn run_and_watch_result(
         "exit_code": exit_code,
         "signals": signals_json,
         "signal_count": signals.len(),
+        // F6: explicit truncation flag -- true when `signals` hit `max_signals`
+        // and more matches may exist beyond `cursor` (poll/resume to fetch them).
+        "signals_capped": signals_capped,
         "compact": compact,
         "receipt": if include_receipt { receipt } else { None },
         "complete": complete,
@@ -5470,6 +5492,19 @@ mod tests {
         exit_code: Option<i32>,
         degraded: bool,
     ) -> serde_json::Value {
+        build_run_and_watch_json_with(last_observed_state, exit_code, degraded, &[], false)
+    }
+
+    /// Like [`build_run_and_watch_json`] but lets a test supply the `signals`
+    /// slice and the F6 `signals_capped` flag, so the truncation-honesty field
+    /// can be exercised through the real builder.
+    fn build_run_and_watch_json_with(
+        last_observed_state: Option<terminal_commander_core::JobState>,
+        exit_code: Option<i32>,
+        degraded: bool,
+        signals: &[terminal_commander_core::SignalEvent],
+        signals_capped: bool,
+    ) -> serde_json::Value {
         let recover_hint = degraded.then_some(RUN_AND_WATCH_RECOVER_HINT);
         let result = run_and_watch_result(
             terminal_commander_core::JobId::new(),
@@ -5477,11 +5512,12 @@ mod tests {
             7,
             last_observed_state,
             exit_code,
-            &[],
+            signals,
             None,
             degraded,
             recover_hint,
             false,
+            signals_capped,
         )
         .expect("run_and_watch_result must build an Ok (success-shaped) result");
         for item in &result.content {
@@ -5560,6 +5596,93 @@ mod tests {
         assert_eq!(v["wait_exhausted"], serde_json::json!(false));
         assert_eq!(v["cursor"], serde_json::json!(7));
         assert_eq!(v["exit_code"], serde_json::json!(0));
+    }
+
+    // --- F6: truncation honesty -- the single `signals_capped` bool ---
+
+    /// Mint `n` minimal low-severity rule signals for builder tests. Low
+    /// severity sidesteps the pointer invariant; the builder only serializes
+    /// the slice and reads its length, so the content is otherwise inert.
+    fn capped_test_signals(n: usize) -> Vec<terminal_commander_core::SignalEvent> {
+        (0..n)
+            .map(|i| {
+                let value = serde_json::json!({
+                    "event_id": terminal_commander_core::EventId::new(),
+                    "bucket_id": terminal_commander_core::BucketId::new(),
+                    "seq": i as u64,
+                    "timestamp": "2026-06-24T00:00:00Z",
+                    "severity": "low",
+                    "kind": "test_signal",
+                    "summary": "f6 builder fixture signal",
+                    "source": {
+                        "probe_id": terminal_commander_core::ProbeId::new(),
+                        "source_type": "process",
+                        "stream": "stdout"
+                    }
+                });
+                serde_json::from_value(value).expect("fixture signal must deserialize")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn run_and_watch_result_marks_signals_capped_true_at_cap() {
+        // F6: when the returned signals array reached `max_signals`, the result
+        // must say so explicitly so a reader cannot conclude "done, N matches"
+        // while more matches exist beyond the cursor.
+        let max_signals = 3usize;
+        let signals = capped_test_signals(max_signals);
+        let signals_capped = signals.len() >= max_signals;
+        assert!(signals_capped, "fixture must hit the cap");
+        let v = build_run_and_watch_json_with(
+            Some(terminal_commander_core::JobState::Running),
+            None,
+            false,
+            &signals,
+            signals_capped,
+        );
+        assert_eq!(
+            v["signals_capped"],
+            serde_json::json!(true),
+            "capped signal set must flag signals_capped:true"
+        );
+        assert_eq!(v["signal_count"], serde_json::json!(max_signals));
+    }
+
+    #[test]
+    fn run_and_watch_result_marks_signals_capped_false_under_cap() {
+        // F6: under the cap the array is complete -- signals_capped must be false.
+        let max_signals = 50usize;
+        let signals = capped_test_signals(2);
+        let signals_capped = signals.len() >= max_signals;
+        assert!(!signals_capped, "fixture must be under the cap");
+        let v = build_run_and_watch_json_with(
+            Some(terminal_commander_core::JobState::Exited),
+            Some(0),
+            false,
+            &signals,
+            signals_capped,
+        );
+        assert_eq!(
+            v["signals_capped"],
+            serde_json::json!(false),
+            "an under-cap signal set must flag signals_capped:false"
+        );
+        assert_eq!(v["signal_count"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn run_and_watch_degraded_does_not_claim_capping() {
+        // F6: a degraded result passes signals_capped:false -- an interrupted
+        // wait did not necessarily cap, and degraded:true already marks it
+        // incomplete, so it must not falsely claim truncation.
+        let v = build_run_and_watch_json(None, None, true);
+        assert_eq!(v["degraded"], serde_json::json!(true));
+        assert_eq!(
+            v["signals_capped"],
+            serde_json::json!(false),
+            "a degraded result must not falsely claim it capped signals"
+        );
     }
 
     #[test]
