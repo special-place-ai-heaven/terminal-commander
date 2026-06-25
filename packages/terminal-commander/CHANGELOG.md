@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.69](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.68...v0.1.69) (2026-06-25)
+
+
+### Bug Fixes
+
+* **mcp:** drop top-level allOf from facade inputSchema (Anthropic API rejects it) ([#141](https://github.com/special-place-ai-heaven/terminal-commander/issues/141)) ([bc70ebd](https://github.com/special-place-ai-heaven/terminal-commander/commit/bc70ebd0cca03e9814a415e706a50b8d2d555c15))
+
 ## [0.1.68](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.67...v0.1.68) (2026-06-25)
 
 
