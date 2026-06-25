@@ -11,7 +11,7 @@ const { resolveDistro } = require("../cli/setup_cursor_wsl.js");
 const { writeSetupJson, readSetupJson } = require("../cli/setup_state.js");
 const { detectAllHarnesses } = require("../harness/detect.js");
 const { writeAllHarnesses, HARNESS_WRITE_STATUSES } = require("../harness/write_all.js");
-const { ensureStableBinaries } = require("../harness/stable_bin.js");
+const { ensureStableBinaries, resolveDirectExePath } = require("../harness/stable_bin.js");
 const { ensureWslRuntime, ENSURE_STATUSES } = require("./ensure_wsl_runtime.js");
 const {
   ensureDaemonAutostartInWsl,
@@ -279,8 +279,14 @@ async function runBootstrap(opts) {
     // per-user dir the package owns and point every harness config at that path
     // (command: <stable>\terminal-commander-mcp.exe, args: []). This removes the
     // npm script-launcher shim -> node -> JS-shim -> spawn chain that heuristic
-    // AV reads as a loader. A failed/locked copy yields exePath=null, so the
-    // writers fall back to the bare-name command and setup never hard-fails.
+    // AV reads as a loader.
+    //
+    // If the stable copy cannot be made (locked file mid-update, EACCES), DO NOT
+    // fall through to the bare PATH-dependent command: resolve a real ABSOLUTE
+    // path to the currently-running node_modules exe instead (the known-good
+    // resolution the live codex entry already uses). The bare name is reached
+    // only as an absolute last resort, with a loud warning, when NO absolute
+    // path can be resolved (e.g. the only candidate lives in the npx cache).
     // In dry-run / print-config the path is resolved but nothing is copied.
     let stableExePath;
     if (autoConfigure || needsHarness || noWrite) {
@@ -289,11 +295,26 @@ async function runBootstrap(opts) {
         env,
         dry_run: noWrite,
       });
-      stableExePath = stable.exePath || undefined;
       if (stable.exePath) {
+        stableExePath = stable.exePath;
         lines.push(
           `terminal-commander: harness configs point at stable exe ${stable.exePath}`,
         );
+      } else {
+        const direct = (o.resolveDirectExePath || resolveDirectExePath)({
+          platform,
+        });
+        if (direct.exePath) {
+          stableExePath = direct.exePath;
+          lines.push(
+            `terminal-commander: stable exe copy unavailable (${stable.reason}); harness configs point at the absolute node_modules exe ${direct.exePath}`,
+          );
+        } else {
+          stableExePath = undefined;
+          lines.push(
+            `terminal-commander: WARNING could not resolve an absolute MCP binary path (${stable.reason}/${direct.reason}); harness configs fall back to the PATH-dependent bare command 'terminal-commander-mcp' which only works if its shim is on PATH. Run 'npm install -g terminal-commander' then 'terminal-commander setup harness' to write an absolute path.`,
+          );
+        }
       }
     }
 

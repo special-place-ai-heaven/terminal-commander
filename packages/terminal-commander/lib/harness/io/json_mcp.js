@@ -7,7 +7,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { atomicWriteWithBackup, ATOMIC_REASONS } = require("./atomic.js");
+const { atomicWriteWithBackup, ATOMIC_REASONS, stripBom } = require("./atomic.js");
 
 const MAX_CONFIG_BYTES = 256 * 1024;
 
@@ -32,7 +32,11 @@ function parseJsonMcp(buffer) {
     return { ok: false, reason: JSON_MCP_STATUSES.CONFIG_TOO_LARGE };
   }
   try {
-    const value = JSON.parse(Buffer.isBuffer(buffer) ? buffer.toString("utf8") : String(buffer));
+    // BOM-strip before parse: a leading UTF-8 BOM (some Windows shells/editors)
+    // makes JSON.parse reject the first value.
+    const value = JSON.parse(
+      stripBom(Buffer.isBuffer(buffer) ? buffer.toString("utf8") : String(buffer)),
+    );
     if (value == null || typeof value !== "object" || Array.isArray(value)) {
       return { ok: false, reason: JSON_MCP_STATUSES.INVALID_JSON };
     }

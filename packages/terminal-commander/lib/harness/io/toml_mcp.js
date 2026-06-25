@@ -10,7 +10,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { atomicWriteWithBackup, ATOMIC_REASONS } = require("./atomic.js");
+const { atomicWriteWithBackup, ATOMIC_REASONS, stripBom } = require("./atomic.js");
 const {
   buildTerminalCommanderCommandConfig,
   buildHarnessEnv,
@@ -30,6 +30,7 @@ const TOML_MCP_STATUSES = Object.freeze({
   CONFIG_UPDATED: "config_updated",
   ALREADY_EXISTS: "already_exists",
   CONFIG_TOO_LARGE: "config_too_large",
+  INVALID_TOML: "invalid_toml",
   BACKUP_FAILED: "backup_failed",
   WRITE_FAILED: "write_failed",
 });
@@ -37,6 +38,33 @@ const TOML_MCP_STATUSES = Object.freeze({
 function sectionExists(text, header) {
   const re = new RegExp(`^\\s*${header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "m");
   return re.test(text);
+}
+
+/**
+ * Conservative malformed-TOML guard. We ship no TOML AST parser (zero-dep), so
+ * this only flags CLEAR corruption that the section-scoped text merge below
+ * would otherwise silently mangle: a non-blank, non-comment line that opens a
+ * table header with `[` but never closes it on the same line (e.g. a truncated
+ * `[mcp_servers.terminal_commander` from an aborted write). It deliberately
+ * does NOT attempt full validation — a false "malformed" would wrongly refuse a
+ * valid config. When this returns true the caller leaves the file untouched and
+ * reports INVALID_TOML, mirroring the JSON writer's malformed-safe behavior.
+ *
+ * @param {string} text
+ * @returns {boolean}
+ */
+function isLikelyMalformedToml(text) {
+  if (typeof text !== "string") return false;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.length === 0 || line.startsWith("#")) continue;
+    // A table/array-of-tables header line starts with '['. If it starts with
+    // '[' it must also contain a matching ']'; otherwise it is a broken header.
+    if (line.startsWith("[") && !line.includes("]")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -140,9 +168,18 @@ function writeCodexTomlConfig(opts) {
           hint: "terminal-commander: codex config.toml too large",
         };
       }
-      existing = fs.readFileSync(target, "utf8");
+      existing = stripBom(fs.readFileSync(target, "utf8"));
     } catch (_e) {
       return { status: TOML_MCP_STATUSES.WRITE_FAILED, path: target, hint: "" };
+    }
+    // Malformed-safe: if the existing config is grossly broken TOML, do NOT
+    // overwrite it — report and let the caller continue with other harnesses.
+    if (isLikelyMalformedToml(existing)) {
+      return {
+        status: TOML_MCP_STATUSES.INVALID_TOML,
+        path: target,
+        hint: `terminal-commander: existing config.toml at ${target} is malformed; the file was NOT modified`,
+      };
     }
     if (sectionExists(existing, SECTION_HEADER) && o.force !== true) {
       return {
@@ -193,6 +230,7 @@ module.exports = {
   writeCodexTomlConfig,
   buildCodexTomlBlock,
   buildCodexEnv,
+  isLikelyMalformedToml,
   TOML_MCP_STATUSES,
   SECTION_HEADER,
   ENV_SECTION_HEADER,

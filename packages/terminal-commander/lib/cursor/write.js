@@ -138,8 +138,9 @@ function resolveScope(opts) {
  * @param {ReadonlyArray<{name:string}>} [opts.knownDistros]
  * @param {boolean} [opts.requireKnownDistro=false]
  * @param {boolean} [opts.force=false]
- * @param {boolean} [opts.clobber_backup=false]
- * @param {(p:string)=>string} [opts.randomSuffix]  Test injection.
+ * @param {boolean} [opts.clobber_backup=false]  Accepted; no-op with timestamped backups.
+ * @param {(p:string)=>string} [opts.randomSuffix]  Test injection (tmp suffix).
+ * @param {(d?:Date)=>string} [opts.timestamp]  Test injection (backup timestamp).
  * @returns {{status:string, path:string|null, backup_path:string|null, server:object|null, was_present:boolean, hint:string}}
  */
 function writeCursorMcpConfig(opts) {
@@ -273,6 +274,7 @@ function writeCursorMcpConfig(opts) {
     const backup = backupCursorConfig(target, {
       scopeDir,
       clobber_backup: o.clobber_backup === true,
+      timestamp: o.timestamp,
     });
     if (!backup.ok) {
       return buildResult({

@@ -43,19 +43,57 @@ function collectJsFiles(dir) {
   return out;
 }
 
-test("npm install is passive: no lifecycle script starts bootstrap work", () => {
+test("postinstall is the guarded auto-setup trigger (Fix 4): safe, fail-soft, no daemon", () => {
+  // Fix 4 reverses the prior "npm install is passive" decision: a `postinstall`
+  // now auto-configures detected harnesses. It must remain AV/CI-safe — the
+  // remaining assertions encode that contract.
   const pkg = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, "package.json"), "utf8"));
   const scripts = pkg.scripts || {};
 
+  // The trigger exists and points at the small delegating entry (no install/preinstall).
+  assert.equal(scripts.postinstall, "node scripts/postinstall.js");
   assert.equal(scripts.install, undefined);
-  assert.equal(scripts.postinstall, undefined);
   assert.equal(scripts.preinstall, undefined);
-  assert.equal((pkg.files || []).includes("scripts/"), false);
-  assert.equal(fs.existsSync(path.join(PKG_ROOT, "scripts", "install.js")), false);
+  // The script ships in the published package.
+  assert.equal((pkg.files || []).includes("scripts/"), true);
+  assert.equal(fs.existsSync(path.join(PKG_ROOT, "scripts", "postinstall.js")), true);
+  // No daemon supervisor is started by install.
   assert.equal(
     fs.existsSync(path.join(PKG_ROOT, "lib", "daemon", "session_supervisor.js")),
     false,
   );
+
+  // The postinstall must be a SAFE no-op shape: it delegates to runBootstrap in
+  // install mode, honors the CI / opt-out guards, and is wrapped so it never
+  // fails `npm install`.
+  const src = fs.readFileSync(path.join(PKG_ROOT, "scripts", "postinstall.js"), "utf8");
+  assert.match(src, /runBootstrap/);
+  assert.match(src, /mode:\s*"install"/);
+  assert.match(src, /shouldSkipBootstrap/);
+  assert.match(src, /isCiOrNonInteractive/);
+  assert.match(src, /try\s*\{/);
+  assert.match(src, /process\.exitCode = 0/);
+  // No daemon autostart / spawn / shell from the install trigger.
+  assert.doesNotMatch(src, /child_process|spawn|exec(?:Sync)?\b/);
+});
+
+test("postinstall is a SAFE no-op under CI / TC_NO_AUTO_SETUP and never throws", () => {
+  const script = path.join(PKG_ROOT, "scripts", "postinstall.js");
+  for (const env of [
+    { CI: "true" },
+    { TC_NO_AUTO_SETUP: "1" },
+    { TC_SKIP_BOOTSTRAP: "1" },
+    { GITHUB_ACTIONS: "true" },
+  ]) {
+    const r = spawnSync(process.execPath, [script], {
+      encoding: "utf8",
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+    });
+    // Always exits 0, never blows up npm install.
+    assert.equal(r.status, 0, `postinstall must exit 0 under ${JSON.stringify(env)}: ${r.stderr}`);
+  }
 });
 
 test("Cursor-facing MCP shim directly spawns the native MCP binary", () => {
@@ -143,12 +181,18 @@ test("JS-only control-plane commands route before native binary spawn", () => {
   }
 });
 
-test("setup harness provider failure emits each diagnostic once", () => {
+test("setup harness --force refreshes a stale codex entry without colliding on a pre-existing .bak", () => {
+  // Fixes 1 + 3: `setup harness --force` REFRESHES a stale terminal_commander
+  // entry (it must not skip with already_exists), and the timestamped backup
+  // never collides with a pre-existing `config.toml.bak`, so a re-run succeeds
+  // instead of the old broken `backup_failed`. The pre-existing .bak is left
+  // untouched and a fresh `<config>.<UTC>.bak` is created alongside it.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tc-setup-output-"));
   const codexDir = path.join(root, ".codex");
   fs.mkdirSync(codexDir, { recursive: true });
+  const configPath = path.join(codexDir, "config.toml");
   fs.writeFileSync(
-    path.join(codexDir, "config.toml"),
+    configPath,
     '[mcp_servers.terminal_commander]\ncommand = "old"\nargs = []\n',
   );
   fs.writeFileSync(path.join(codexDir, "config.toml.bak"), "existing backup\n");
@@ -156,9 +200,9 @@ test("setup harness provider failure emits each diagnostic once", () => {
   const shim = path.join(PKG_ROOT, "bin", "terminal-commander.js");
   // S9 host-env leak: TC_WSL_DISTRO / TC_USE_LEGACY_WSL_BRIDGE flip the
   // orchestrator into the legacy WSL bootstrap lane, which emits
-  // "WSL runtime already present." instead of the native-path diagnostic
-  // this test asserts. Any WSL-equipped dev box with TC_WSL_DISTRO set
-  // failed here; strip the selectors so the DEFAULT path is under test.
+  // "WSL runtime already present." instead of the native-path diagnostic.
+  // Strip the selectors so the DEFAULT path is under test. HOME/USERPROFILE
+  // point the codex config path (~/.codex/config.toml) at our isolated root.
   const cleanEnv = {
     ...process.env,
     HOME: root,
@@ -178,14 +222,20 @@ test("setup harness provider failure emits each diagnostic once", () => {
     },
   );
 
-  const stderrLines = r.stderr.trim().split(/\r?\n/).filter(Boolean);
-  const expectedLines = [];
-  if (process.platform === "win32") {
-    expectedLines.push("terminal-commander: native Windows MCP path selected; WSL bootstrap skipped.");
-  }
-  expectedLines.push("codex-cli: backup_failed");
-
-  assert.equal(r.status, 64, r.stderr);
-  assert.equal(r.stdout, "");
-  assert.deepEqual(stderrLines, expectedLines);
+  // The refresh succeeds (no backup_failed, no already_exists skip).
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /backup_failed/);
+  // The stale entry was rewritten with a fresh, correct stanza.
+  const after = fs.readFileSync(configPath, "utf8");
+  assert.match(after, /\[mcp_servers\.terminal_commander\]/);
+  assert.doesNotMatch(after, /command = "old"/);
+  // The pre-existing .bak is untouched; a fresh timestamped backup was created.
+  assert.equal(
+    fs.readFileSync(path.join(codexDir, "config.toml.bak"), "utf8"),
+    "existing backup\n",
+  );
+  const timestamped = fs
+    .readdirSync(codexDir)
+    .filter((n) => /^config\.toml\.\d{8}T\d{9}Z\.bak$/.test(n));
+  assert.equal(timestamped.length, 1, "exactly one timestamped backup of the prior config");
 });

@@ -13,7 +13,10 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const { writeCodexTomlConfig } = require("../lib/harness/io/toml_mcp.js");
+const {
+  writeCodexTomlConfig,
+  isLikelyMalformedToml,
+} = require("../lib/harness/io/toml_mcp.js");
 
 function tmpCfg() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tc-codex-"));
@@ -103,4 +106,62 @@ test("codex force-rewrite preserves OTHER mcp_servers sections", () => {
   assert.match(text, /TC_SESSION = "tc-new111"/);
   assert.equal(text.includes("tc-old"), false, "old session token must be stripped");
   assert.equal((text.match(/TC_SESSION = /g) || []).length, 1);
+});
+
+// --- Fix 3: malformed-safe + BOM-strip ---
+
+test("isLikelyMalformedToml flags a truncated section header, not valid TOML", () => {
+  // Valid configs (incl. comments + the real stanza) are NOT flagged.
+  assert.equal(isLikelyMalformedToml(""), false);
+  assert.equal(isLikelyMalformedToml("# just a comment\n"), false);
+  assert.equal(
+    isLikelyMalformedToml('[mcp_servers.terminal_commander]\ncommand = "x"\nargs = []\n'),
+    false,
+  );
+  // A header line that opens '[' but never closes ']' is clearly broken.
+  assert.equal(isLikelyMalformedToml("[mcp_servers.terminal_commander\ncommand = "), true);
+});
+
+test("writeCodexTomlConfig refuses a malformed config.toml and leaves it untouched", () => {
+  const target = tmpCfg();
+  const bad = "[mcp_servers.terminal_commander\ncommand = ";
+  fs.writeFileSync(target, bad);
+  const r = writeCodexTomlConfig({
+    path: target,
+    sessionToken: "tc-aaa111",
+    force: true,
+    clobber_backup: true,
+  });
+  assert.equal(r.status, "invalid_toml");
+  // The malformed file is NOT modified, and no backup was made.
+  assert.equal(fs.readFileSync(target, "utf8"), bad);
+  const baks = fs.readdirSync(path.dirname(target)).filter((n) => n.endsWith(".bak"));
+  assert.equal(baks.length, 0, "a refused write must not create a backup");
+});
+
+test("writeCodexTomlConfig strips a leading UTF-8 BOM before the section check", () => {
+  const target = tmpCfg();
+  // BOM + an existing terminal_commander section. Without BOM-strip the section
+  // check would miss it (BOM glued to '[') and the writer would append a
+  // duplicate; with force-rewrite it must instead refresh the single section.
+  fs.writeFileSync(
+    target,
+    "﻿[mcp_servers.terminal_commander]\ncommand = \"old\"\nargs = []\n",
+  );
+  const r = writeCodexTomlConfig({
+    path: target,
+    sessionToken: "tc-new222",
+    force: true,
+    clobber_backup: true,
+  });
+  assert.equal(r.status, "config_updated");
+  const text = fs.readFileSync(target, "utf8");
+  assert.equal(
+    (text.match(/\[mcp_servers\.terminal_commander\]/g) || []).length,
+    1,
+    "BOM must not cause a duplicate section",
+  );
+  assert.equal(text.includes('command = "old"'), false, "stale command must be gone");
+  // The rewritten file carries no BOM.
+  assert.equal(text.charCodeAt(0) === 0xfeff, false, "rewritten config must not carry the BOM");
 });

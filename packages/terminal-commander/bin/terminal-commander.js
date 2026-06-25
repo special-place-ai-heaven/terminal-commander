@@ -176,6 +176,16 @@ function runUpdate() {
         process.kill(process.pid, signal);
         return;
       }
+      if (code === 0) {
+        // The npm update landed a NEW package version on disk. This process is
+        // still the OLD launcher, so re-run harness setup by spawning the
+        // freshly-installed launcher in a NEW process (mirrors SymForge
+        // update.rs re-spawning the new binary) — never in-process, which would
+        // re-register the OLD paths. Best-effort: never turn a successful update
+        // into a failure.
+        reregisterHarnesses(() => process.exit(0));
+        return;
+      }
       process.exit(code == null ? 1 : code);
     });
 
@@ -185,6 +195,59 @@ function runUpdate() {
       );
       process.exit(126);
     });
+  });
+}
+
+// Locate the freshly-installed launcher's JS entry under the npm GLOBAL root so
+// we can re-run setup with the NEW version via `node <new>/bin/terminal-commander.js`.
+// Spawning `process.execPath` + the resolved JS entry (no shell, no Windows
+// shim) keeps the AV-safe contract. Returns null when the global path is
+// unresolvable.
+function globalLauncherEntry() {
+  const prefix = process.env.npm_config_prefix || process.env.PREFIX;
+  const candidates = [];
+  if (prefix) {
+    // Unix global: <prefix>/lib/node_modules; Windows global: <prefix>/node_modules.
+    candidates.push(
+      path.join(prefix, "lib", "node_modules", "terminal-commander", "bin", "terminal-commander.js"),
+      path.join(prefix, "node_modules", "terminal-commander", "bin", "terminal-commander.js"),
+    );
+  }
+  // Fallback: the global root that hosts node itself (npm's default prefix).
+  candidates.push(
+    path.join(path.dirname(process.execPath), "node_modules", "terminal-commander", "bin", "terminal-commander.js"),
+  );
+  return candidates.find((c) => {
+    try {
+      return fs.existsSync(c);
+    } catch (_e) {
+      return false;
+    }
+  }) || null;
+}
+
+// Re-run `setup harness` with the freshly-installed launcher. Always invokes
+// `done` (success or not) so a setup hiccup never fails the update.
+function reregisterHarnesses(done) {
+  const entry = globalLauncherEntry();
+  if (!entry) {
+    process.stderr.write(
+      "terminal-commander: update installed; could not locate the new launcher to refresh harness configs. Run 'terminal-commander setup harness'.\n",
+    );
+    done();
+    return;
+  }
+  const child = spawn(process.execPath, [entry, "setup", "harness"], {
+    stdio: "inherit",
+    shell: false,
+    env: process.env,
+  });
+  child.on("exit", () => done());
+  child.on("error", () => {
+    process.stderr.write(
+      "terminal-commander: update installed; harness refresh did not start. Run 'terminal-commander setup harness'.\n",
+    );
+    done();
   });
 }
 
