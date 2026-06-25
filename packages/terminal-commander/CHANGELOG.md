@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.68](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.67...v0.1.68) (2026-06-25)
+
+
+### Bug Fixes
+
+* **harness:** never write a bare MCP command on Windows (shell:false ENOENT) ([c0b695b](https://github.com/special-place-ai-heaven/terminal-commander/commit/c0b695bb3ea3b085f1a482b958f1e4ec93e7be24))
+
 ## [0.1.67](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.66...v0.1.67) (2026-06-25)
 
 
