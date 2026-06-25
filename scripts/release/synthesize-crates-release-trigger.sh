@@ -86,7 +86,47 @@ case "$strongest" in
   feat)     commit_type="feat";;
   fix)      commit_type="fix";;
 esac
-echo "[synth] strongest type: ${strongest} -> commit '${commit_type}: release Rust crate changes'"
+
+# Build the synthetic commit message FROM THE REAL crate subjects in range so
+# release-please's generated changelog describes the actual fixes instead of a
+# static "release Rust crate changes" (which buried every real crates/** change
+# -- the bug that produced misleading 0.1.64 / 0.1.65 changelogs).
+#
+# release-please turns ONE commit into ONE changelog bullet (it uses the SUBJECT;
+# the body is parsed only for BREAKING CHANGE footers, not split into bullets).
+# Since this script pushes exactly one synthetic commit, the changelog gets one
+# bullet per release. So: single real fix -> reuse its subject verbatim (perfect
+# bullet); multiple -> a faithful summary subject + every real subject in the
+# body for the audit trail.
+# UPGRADE PATH (only if a real multi-fix release proves it's needed): emit N
+# synthetic commits, or post-process release-please's changelog. Out of scope here.
+mapfile -t crate_subjects < <(git log --format='%s' "${base_tag}..HEAD" -- crates)
+# True if a subject already starts with a conventional-commit type (so release-please
+# will classify it correctly and we can use it verbatim, scope and all).
+is_conventional() { printf '%s' "$1" | grep -Eq '^[a-z]+(\([^)]*\))?!?:[[:space:]]'; }
+# Strip a leading conventional-commit type so we can re-prefix with the canonical
+# ${commit_type} without doubling it (used only for non-conventional / multi cases).
+strip_cc_type() { printf '%s' "$1" | sed -E 's/^[a-z]+(\([^)]*\))?!?:[[:space:]]*//'; }
+if [ "${#crate_subjects[@]}" -eq 1 ]; then
+  # Single fix: use the real subject VERBATIM when it's already conventional
+  # (keeps the scope, e.g. "fix(daemon): ..."); otherwise prefix the canonical type.
+  if is_conventional "${crate_subjects[0]}"; then
+    commit_subject="${crate_subjects[0]}"
+  else
+    commit_subject="${commit_type}: ${crate_subjects[0]}"
+  fi
+else
+  commit_subject="${commit_type}: ${#crate_subjects[@]} crate fixes -- $(strip_cc_type "${crate_subjects[0]}") (+$(( ${#crate_subjects[@]} - 1 )) more)"
+fi
+# Body: provenance + every real subject (audit trail / full attribution).
+commit_body="Synthesized by synthesize-crates-release-trigger.sh so release-please
+attributes crates/** changes to the canonical version source. Crate commits
+since ${base_tag}: ${#crate_shas[@]} (fingerprint ${fingerprint}).
+
+Crate changes in this release:
+$(printf '* %s\n' "${crate_subjects[@]}")"
+
+echo "[synth] strongest type: ${strongest} -> commit subject: '${commit_subject}'"
 
 # Write the sentinel (fingerprint + audit trail of the crate SHAs).
 {
@@ -100,7 +140,8 @@ echo "[synth] strongest type: ${strongest} -> commit '${commit_type}: release Ru
 } > "$SENTINEL"
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
-  echo "[synth] DRY_RUN=1: would commit '${commit_type}: release Rust crate changes' and push to main."
+  echo "[synth] DRY_RUN=1: would commit '${commit_subject}' and push to main."
+  echo "[synth] commit body:"; printf '%s\n' "$commit_body" | sed 's/^/    /'
   echo "[synth] sentinel content:"; sed 's/^/    /' "$SENTINEL"
   git checkout -- "$SENTINEL" 2>/dev/null || rm -f "$SENTINEL"
   emit trigger_pushed false
@@ -110,10 +151,6 @@ fi
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git add "$SENTINEL"
-git commit -m "${commit_type}: release Rust crate changes
-
-Synthesized by synthesize-crates-release-trigger.sh so release-please
-attributes crates/** changes to the canonical version source. Crate
-commits since ${base_tag}: ${#crate_shas[@]} (fingerprint ${fingerprint})."
+git commit -m "${commit_subject}" -m "${commit_body}"
 git push origin HEAD:main
 emit trigger_pushed true
