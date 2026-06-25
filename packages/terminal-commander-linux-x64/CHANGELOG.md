@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.66](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.65...v0.1.66) (2026-06-25)
+
+
+### Bug Fixes
+
+* **release:** sync platform + cargo versions to 0.1.65 to unblock the release ([#134](https://github.com/special-place-ai-heaven/terminal-commander/issues/134)) ([f3f329f](https://github.com/special-place-ai-heaven/terminal-commander/commit/f3f329f8fe5aa27fb56410d7217f1c6aee4c6a39))
+
 ## [0.1.36](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.35...v0.1.36) (2026-05-28)
 
 
