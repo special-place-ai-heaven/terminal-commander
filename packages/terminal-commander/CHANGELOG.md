@@ -5,8 +5,15 @@
 
 ### Bug Fixes
 
-* release Rust crate changes ([585a3a8](https://github.com/special-place-ai-heaven/terminal-commander/commit/585a3a8c4d845782d61484eb55b561a79a0d4362))
-* release Rust crate changes ([3277b0d](https://github.com/special-place-ai-heaven/terminal-commander/commit/3277b0d85b655e3d607ea297ed9d457ce38bc08f))
+* **probes:** reap self-exiting ConPTY child exit on Windows so a finished PTY job reports `exited`/`exit_code` instead of hanging in `running` until stop ([7507bb4](https://github.com/special-place-ai-heaven/terminal-commander/commit/7507bb4)), with a CI-default regression test for the bounded drain ([1d92266](https://github.com/special-place-ai-heaven/terminal-commander/commit/1d92266))
+* **mcp:** action-scoped required fields in the compact facade schema so each action advertises only its own params (no phantom fields), keeping the root a flat object for strict clients ([e522274](https://github.com/special-place-ai-heaven/terminal-commander/commit/e522274))
+* **mcp:** session/snapshot tools on Windows return a caller-routable `unsupported_platform` error (`-32602`) instead of `-32603 internal` ([f4368c7](https://github.com/special-place-ai-heaven/terminal-commander/commit/f4368c7))
+* **mcp:** add `signals_capped` to the `run_and_watch` result so truncation at `max_signals` is explicit ([2ee81af](https://github.com/special-place-ai-heaven/terminal-commander/commit/2ee81af))
+* **daemon:** structured `program_not_found` receipt for a missing program (`-32602` with `error_kind`/`argv0`) instead of an internal error ([4b803ea](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b803ea)), with `argv0` carried as a typed IPC field rather than parsed from prose ([ce0bfdd](https://github.com/special-place-ai-heaven/terminal-commander/commit/ce0bfdd))
+* **daemon:** live `frames_total`/`bytes_total` for PTY jobs ([1c4e9cd](https://github.com/special-place-ai-heaven/terminal-commander/commit/1c4e9cd)) and for file watches ([b4b8129](https://github.com/special-place-ai-heaven/terminal-commander/commit/b4b8129)) (previously read 0 while output flowed)
+* **daemon:** surface `stream_mismatch` in `registry_test` when a rule's regex matches but its stream filter excludes the sample ([c01f526](https://github.com/special-place-ai-heaven/terminal-commander/commit/c01f526))
+* **daemon:** center the `file_search` snippet on the match so a hit past the snippet budget stays visible ([cbe755f](https://github.com/special-place-ai-heaven/terminal-commander/commit/cbe755f))
+* **sifters:** widen the warning heuristic to catch bare `WARN` (not just `WARNING`) ([c3cf469](https://github.com/special-place-ai-heaven/terminal-commander/commit/c3cf469))
 
 ## [0.1.63](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.62...v0.1.63) (2026-06-24)
 
