@@ -74,7 +74,7 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
     // The binding lingers after exit (like command's), so liveness is the
     // authoritative JobState from the ledger via `PtyRuntime::liveness`, NOT
     // live-map presence: a terminated PTY reports Exited{code}/Failed/Cancelled.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     for (jid, bid, pid, argv, m, secret) in state.pty.list() {
         out.push(ProbeListEntry {
             kind: ProbeKind::Pty,
