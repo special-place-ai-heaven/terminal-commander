@@ -78,6 +78,10 @@ function defaultMcpScriptPath() {
 
 function buildTerminalCommanderCommandConfig(opts) {
   const o = opts || {};
+  // Platform drives ONLY the last-resort fallback below (bare command is
+  // ENOENT-fatal on Windows shell:false). Pure: defaults to process.platform,
+  // overridable by callers/tests; no FS, no spawn.
+  const platform = o.platform || process.platform;
   // Highest precedence: a resolved native exe at a STABLE per-user path.
   // The MCP client launches it directly (no npm script-launcher shim, no
   // node hop), which removes the script-interpreter-then-spawn chain that
@@ -98,10 +102,53 @@ function buildTerminalCommanderCommandConfig(opts) {
       args: [o.scriptPath || defaultMcpScriptPath()],
     };
   }
-  // Default: emit the PATH-resolved command form. The installed package
-  // puts `terminal-commander-mcp` on PATH, so the generated config is
-  // portable and never leaks this machine's absolute checkout path
-  // (which would embed a private \Users\ path into a shipped config).
+  // Last-resort fallback: no exePath and no node+script override were passed.
+  //
+  // The bare `terminal-commander-mcp` command is FATAL on Windows when the MCP
+  // client spawns the server with Node `child_process` `shell:false` (which
+  // Claude Code and similar harnesses do). Under shell:false on Windows, Node
+  // does NOT perform PATHEXT resolution and cannot exec a non-PE script shim
+  // (the npm-generated Windows launcher), so a bare name => ENOENT and the
+  // server never launches (it shows up as "0 tools" because the process never
+  // started). Verified live:
+  //   spawnSync("terminal-commander-mcp", ["--version"], { shell:false }) -> ENOENT
+  //   spawnSync("C:\\...\\terminal-commander-mcp.exe", [...], { shell:false }) -> ok
+  // So on Windows we must NEVER emit the bare name; we need an absolute exe path.
+  //
+  // This module is pure (no FS / no child_process / no resolve-binary require --
+  // enforced by cursor-static-guards). The orchestrator (lib/bootstrap) already
+  // resolves an absolute exe via ensureStableBinaries -> resolveDirectExePath and
+  // passes it as o.exePath, so this fallback is only hit by callers that did NOT
+  // pre-resolve. Such callers may inject `o.resolveExePath` (e.g. the stable_bin
+  // resolver) to recover an absolute path here WITHOUT this pure module taking an
+  // FS dependency. Do NOT "simplify" this back to an unconditional bare command:
+  // that silently breaks every Windows shell:false harness.
+  if (typeof o.resolveExePath === "function") {
+    let resolved = null;
+    try {
+      resolved = o.resolveExePath({ platform, arch: o.arch });
+    } catch (_e) {
+      resolved = null;
+    }
+    if (resolved && typeof resolved === "string" && resolved.length > 0) {
+      return { command: resolved, args: [] };
+    }
+  }
+  if (platform === "win32") {
+    // No absolute path could be resolved on Windows. Bare is ENOENT-fatal here
+    // (see above), so this is a caller-prevented condition: the orchestrator's
+    // resolver chain should have produced o.exePath or warned. We still return
+    // the bare name (there is nothing else to return) but the caller MUST treat
+    // a Windows fallback that reaches this point as a setup failure, not success.
+    return {
+      command: SERVER_COMMAND,
+      args: [],
+    };
+  }
+  // Non-Windows: emit the PATH-resolved command form. On Unix the MCP client's
+  // PATH + shell resolution find the installed `terminal-commander-mcp` shim, so
+  // a bare command is portable and never leaks this machine's absolute checkout
+  // path (which would embed a private /home/ or \Users\ path into a config).
   return {
     command: SERVER_COMMAND,
     args: [],

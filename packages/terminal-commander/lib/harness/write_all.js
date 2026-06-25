@@ -13,6 +13,7 @@ const {
 } = require("../cursor/config.js");
 const { writeJsonMcpConfig } = require("./io/json_mcp.js");
 const { writeCodexTomlConfig, buildCodexEnv } = require("./io/toml_mcp.js");
+const { resolveDirectExePath } = require("./stable_bin.js");
 const {
   codexConfigPath,
   claudeCodeMcpConfigPath,
@@ -29,9 +30,25 @@ const HARNESS_WRITE_STATUSES = Object.freeze({
   FAILED: "failed",
 });
 
+// resolveExePath seam for buildTerminalCommanderCommandConfig's last-resort
+// fallback. The pure cursor/config.js cannot resolve an absolute exe (no FS),
+// so when a caller did NOT pre-resolve o.exePath we hand it the stable_bin
+// resolver here (this module is allowed FS-backed deps). On Windows, where a
+// bare `terminal-commander-mcp` is ENOENT-fatal under MCP-client shell:false,
+// this lets the stanza recover the absolute node_modules exe instead of
+// shipping a dead command. Returns null on miss; the pure fallback then decides.
+function defaultResolveExePath(args) {
+  const a = args || {};
+  const r = resolveDirectExePath({ platform: a.platform, arch: a.arch });
+  return r && r.exePath ? r.exePath : null;
+}
+
 function buildJsonMcpStanza(opts) {
   const o = opts || {};
-  const commandConfig = buildTerminalCommanderCommandConfig(o);
+  const commandConfig = buildTerminalCommanderCommandConfig({
+    resolveExePath: defaultResolveExePath,
+    ...o,
+  });
   const stanza = {
     command: commandConfig.command,
     args: commandConfig.args,
@@ -82,6 +99,8 @@ function writeProvider(id, opts) {
     if (dryRun) {
       const stanza = buildTerminalCommanderServerConfig({
         exePath: o.exePath,
+        resolveExePath: defaultResolveExePath,
+        platform: o.platform,
         sessionToken,
         distro: o.distro,
         knownDistros: o.knownDistros,
@@ -127,7 +146,10 @@ function writeProvider(id, opts) {
       platform: o.platform,
     };
     if (dryRun) {
-      const cmd = buildTerminalCommanderCommandConfig(o);
+      const cmd = buildTerminalCommanderCommandConfig({
+        resolveExePath: defaultResolveExePath,
+        ...o,
+      });
       const env = buildCodexEnv(codexEnvOpts);
       const stanza = { command: cmd.command, args: cmd.args };
       if (Object.keys(env).length > 0) stanza.env = env;
