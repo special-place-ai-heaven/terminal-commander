@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.67](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.66...v0.1.67) (2026-06-25)
+
+
+### Bug Fixes
+
+* **harness:** auto-register absolute-path MCP entry into all harnesses ([393f89c](https://github.com/special-place-ai-heaven/terminal-commander/commit/393f89ca4dacb72d8feb0b699272c58bdf76945c))
+
 ## [0.1.66](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.65...v0.1.66) (2026-06-25)
 
 
