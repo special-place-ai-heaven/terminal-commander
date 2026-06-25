@@ -528,14 +528,20 @@ mod tests {
         let needle = "NEEDLE";
         let line = format!("{prefix}{needle}{}", "y".repeat(200));
         let col = line.find(needle).expect("needle present");
-        assert!(col > max, "match must be past the snippet budget to exercise F12");
+        assert!(
+            col > max,
+            "match must be past the snippet budget to exercise F12"
+        );
 
         let snippet = center_snippet(&line, col, max);
         assert!(
             snippet.contains(needle),
             "centered snippet must contain the match; got {snippet:?}"
         );
-        assert!(snippet.len() <= max, "snippet must stay within the byte budget");
+        assert!(
+            snippet.len() <= max,
+            "snippet must stay within the byte budget"
+        );
     }
 
     /// A match near column 0 still works: the window starts at 0 and the match
@@ -606,15 +612,30 @@ mod tests {
         let snippet = center_snippet(&line, col, max);
         // The result is valid UTF-8 (String guarantees it only because we sliced
         // on boundaries) and must be locatable back in the line on boundaries.
-        let snip_start = line.find(snippet.as_str()).expect("snippet is a substring of line");
+        let snip_start = line
+            .find(snippet.as_str())
+            .expect("snippet is a substring of line");
         let snip_end = snip_start + snippet.len();
-        assert!(line.is_char_boundary(snip_start), "result start must be on a char boundary");
-        assert!(line.is_char_boundary(snip_end), "result end must be on a char boundary");
+        assert!(
+            line.is_char_boundary(snip_start),
+            "result start must be on a char boundary"
+        );
+        assert!(
+            line.is_char_boundary(snip_end),
+            "result end must be on a char boundary"
+        );
         // Edges were snapped DOWN from the mid-char raw edges.
         assert_eq!(snip_start, 138, "start should snap 139 -> 138");
         assert_eq!(snip_end, 181, "end should snap 182 -> 181");
-        assert!(snippet.len() <= max, "got len {} for {snippet:?}", snippet.len());
-        assert!(snippet.contains(needle), "centered snippet should hold the match");
+        assert!(
+            snippet.len() <= max,
+            "got len {} for {snippet:?}",
+            snippet.len()
+        );
+        assert!(
+            snippet.contains(needle),
+            "centered snippet should hold the match"
+        );
     }
 
     /// Huge-query edge: the matched term itself is longer than `max_snippet`.
@@ -635,7 +656,9 @@ mod tests {
         // The match's first byte is inside the returned window: the snippet
         // contains the slice [col, col+1), i.e. the head of the match. Confirm
         // by locating the snippet back in the line and checking it spans `col`.
-        let snip_start = line.find(snippet.as_str()).expect("snippet is a substring of line");
+        let snip_start = line
+            .find(snippet.as_str())
+            .expect("snippet is a substring of line");
         let snip_end = snip_start + snippet.len();
         assert!(
             snip_start <= col && col < snip_end,
