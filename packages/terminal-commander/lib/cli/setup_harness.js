@@ -18,6 +18,13 @@ async function runSetupHarness(opts) {
     platform: o.platform || process.platform,
     env: o.env || process.env,
     distro: flags.distro,
+    // The manual `setup harness` command always REFRESHES the terminal_commander
+    // entry: a stale or hand-written stanza must be rewritten with a fresh,
+    // correct one, not skipped with ALREADY_EXISTS. auto_configure flows to the
+    // writers' `force` (orchestrator.js), which overwrites the single named key
+    // and preserves every other server/key (idempotent by construction). The
+    // explicit `--force` flag remains supported for parity.
+    auto_configure: true,
     force: flags.force === true,
     clobber_backup: flags["clobber-backup"] === true,
     dry_run: flags["dry-run"] === true,

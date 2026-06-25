@@ -17,6 +17,8 @@ const {
   stableBinDir,
   stableBinPath,
   ensureStableBinaries,
+  resolveDirectExePath,
+  isTransientBinaryPath,
 } = require("../lib/harness/stable_bin.js");
 
 test("stableBinDir derives %LOCALAPPDATA%\\terminal-commander\\bin on Windows", () => {
@@ -228,4 +230,55 @@ test("ensureStableBinaries tolerates a missing daemon exe (only primary forces f
   assert.equal(r.reason, "ok");
   assert.ok(r.exePath);
   assert.equal(r.copied.length, 1, "only the MCP exe was copied");
+});
+
+// --- Fix 2: absolute direct-exe fallback + transient-path guard ---
+
+test("isTransientBinaryPath flags npx-cache and OS-temp paths, not a real node_modules path", () => {
+  assert.equal(isTransientBinaryPath("C:\\Users\\op\\AppData\\Local\\npm-cache\\_npx\\a\\node_modules\\@tc\\windows-x64\\bin\\x.exe"), true);
+  assert.equal(isTransientBinaryPath("/home/op/.npm/_npx/abcd/node_modules/@tc/linux-x64/bin/x"), true);
+  // Under an injected temp dir.
+  assert.equal(
+    isTransientBinaryPath("/tmp/work/bin/x", { tmpDir: "/tmp" }),
+    true,
+  );
+  // A normal installed node_modules path is NOT transient.
+  assert.equal(
+    isTransientBinaryPath("/home/op/proj/node_modules/@terminal-commander/linux-x64/bin/terminal-commander-mcp", { tmpDir: "/tmp" }),
+    false,
+  );
+});
+
+test("resolveDirectExePath returns the absolute node_modules exe the resolver finds", () => {
+  const ABS =
+    "/home/op/proj/node_modules/@terminal-commander/linux-x64/bin/terminal-commander-mcp";
+  const r = resolveDirectExePath({
+    platform: "linux",
+    arch: "x64",
+    tmpDir: "/tmp",
+    resolveBinary: () => ({ reason: "ok", binaryPath: ABS }),
+  });
+  assert.equal(r.reason, "ok");
+  assert.equal(r.exePath, ABS, "must be the absolute node_modules exe (never the bare name)");
+});
+
+test("resolveDirectExePath REFUSES a transient temp/npx-cache binary (warns, no write)", () => {
+  const r = resolveDirectExePath({
+    platform: "linux",
+    arch: "x64",
+    tmpDir: "/tmp",
+    resolveBinary: () => ({ reason: "ok", binaryPath: "/tmp/_npx/zz/node_modules/@tc/linux-x64/bin/x" }),
+  });
+  assert.equal(r.exePath, null);
+  assert.equal(r.reason, "transient_path");
+});
+
+test("resolveDirectExePath returns null/resolve_failed when no binary resolves", () => {
+  const r = resolveDirectExePath({
+    platform: "linux",
+    arch: "x64",
+    resolveBinary: () => ({ reason: "platform_package_missing", binaryPath: null }),
+  });
+  assert.equal(r.exePath, null);
+  assert.equal(r.reason, "resolve_failed");
 });

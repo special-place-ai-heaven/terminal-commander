@@ -133,7 +133,12 @@ test("runBootstrap dry-run resolves the stable exe path WITHOUT copying", async 
   assert.equal(ensureOpts.dry_run, true, "dry-run must not copy binaries");
 });
 
-test("runBootstrap falls back gracefully when the stable copy fails (exePath undefined)", async () => {
+test("runBootstrap resolves the absolute node_modules exe when the stable copy fails", async () => {
+  // Fix 2: a failed stable copy must NOT fall through to the bare PATH-dependent
+  // command. The orchestrator resolves the absolute node_modules exe instead
+  // (the known-good path the live codex entry uses) and threads it to the writers.
+  const DIRECT =
+    "C:\\Users\\example\\node_modules\\@terminal-commander\\windows-x64\\bin\\terminal-commander-mcp.exe";
   const writes = [];
   const r = await runBootstrap({
     mode: "cli",
@@ -142,6 +147,7 @@ test("runBootstrap falls back gracefully when the stable copy fails (exePath und
     force: true,
     acquireLock: false,
     ensureStableBinaries: () => ({ exePath: null, copied: [], reason: "copy_failed" }),
+    resolveDirectExePath: () => ({ exePath: DIRECT, reason: "ok" }),
     writeAllHarnesses: (opts) => {
       writes.push(opts);
       return [{ id: "cursor", status: "ok" }];
@@ -150,7 +156,33 @@ test("runBootstrap falls back gracefully when the stable copy fails (exePath und
   });
   assert.equal(r.exit_code, 0);
   assert.equal(writes.length, 1);
-  assert.equal(writes[0].exePath, undefined, "a failed copy leaves exePath unset so the writer uses the bare-name fallback");
+  assert.equal(writes[0].exePath, DIRECT, "writer receives the absolute node_modules exe, not bare");
+  assert.match(r.output, /absolute node_modules exe/);
+});
+
+test("runBootstrap falls back to bare command only when NO absolute path resolves (loud warning)", async () => {
+  // Last resort: stable copy failed AND the only resolvable binary is transient
+  // (temp/npx cache). The writer's exePath is left unset (bare-name fallback),
+  // and a loud warning is emitted naming the upgrade path.
+  const writes = [];
+  const r = await runBootstrap({
+    mode: "cli",
+    platform: "win32",
+    env: { USERPROFILE: "C:\\Users\\example", LOCALAPPDATA: "C:\\L" },
+    force: true,
+    acquireLock: false,
+    ensureStableBinaries: () => ({ exePath: null, copied: [], reason: "copy_failed" }),
+    resolveDirectExePath: () => ({ exePath: null, reason: "transient_path" }),
+    writeAllHarnesses: (opts) => {
+      writes.push(opts);
+      return [{ id: "cursor", status: "ok" }];
+    },
+    writeState: () => ({ status: "ok" }),
+  });
+  assert.equal(r.exit_code, 0);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].exePath, undefined, "no absolute path -> writer uses the bare-name fallback");
+  assert.match(r.output, /WARNING could not resolve an absolute MCP binary path/);
 });
 
 test("runBootstrap cli mode fails loudly when requested harness write fails", async () => {
@@ -195,6 +227,10 @@ test("runBootstrap returns diagnostics without writing stderr by default", async
       force: true,
       acquireLock: false,
       skipDaemonAutostart: true,
+      // Pin the exe resolution so the orchestrator emits exactly the harness
+      // diagnostic under test (no environment-dependent stable/direct-exe line).
+      ensureStableBinaries: () => ({ exePath: null, copied: [], reason: "copy_failed" }),
+      resolveDirectExePath: () => ({ exePath: null, reason: "resolve_failed" }),
       writeAllHarnesses: () => [
         {
           id: "codex-cli",
@@ -223,6 +259,8 @@ test("runBootstrap writes stderr only when emitOutput is explicit", async () => 
     return true;
   };
   try {
+    const DIRECT =
+      "/home/example/node_modules/@terminal-commander/linux-x64/bin/terminal-commander-mcp";
     const r = await runBootstrap({
       mode: "cli",
       platform: "linux",
@@ -231,6 +269,10 @@ test("runBootstrap writes stderr only when emitOutput is explicit", async () => 
       acquireLock: false,
       skipDaemonAutostart: true,
       emitOutput: true,
+      // Pin the exe resolution to the absolute-node_modules fallback so the
+      // emitted lines are deterministic across environments.
+      ensureStableBinaries: () => ({ exePath: null, copied: [], reason: "copy_failed" }),
+      resolveDirectExePath: () => ({ exePath: DIRECT, reason: "ok" }),
       writeAllHarnesses: () => [
         {
           id: "codex-cli",
@@ -242,6 +284,7 @@ test("runBootstrap writes stderr only when emitOutput is explicit", async () => 
     });
     assert.equal(r.status, "harness_failed");
     assert.deepEqual(writes, [
+      `terminal-commander: stable exe copy unavailable (copy_failed); harness configs point at the absolute node_modules exe ${DIRECT}\n`,
       "terminal-commander: codex config.toml backup failed\n",
     ]);
   } finally {

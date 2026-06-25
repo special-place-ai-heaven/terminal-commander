@@ -30,6 +30,7 @@
   "files": [
     "bin/",
     "lib/",
+    "scripts/",
     "README.md",
     "LICENSE"
   ],
@@ -41,6 +42,7 @@
     "@terminal-commander/mac-arm64": "0.1.66"
   },
   "scripts": {
+    "postinstall": "node scripts/postinstall.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {

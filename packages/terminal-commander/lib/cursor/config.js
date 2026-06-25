@@ -293,6 +293,12 @@ function parseExistingCursorConfig(buffer) {
   } else {
     text = String(buffer);
   }
+  // BOM-strip: a leading UTF-8 BOM (written by some Windows shells/editors)
+  // makes JSON.parse reject the first value. (Inlined rather than imported from
+  // io/atomic.js, which already requires this module — avoids a cycle.)
+  if (text.charCodeAt(0) === 0xfeff) {
+    text = text.slice(1);
+  }
   let value;
   try {
     value = JSON.parse(text);

@@ -28,6 +28,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { resolveBinary } = require("../resolve-binary.js");
 
@@ -225,10 +226,74 @@ function readPackageVersion() {
   }
 }
 
+/**
+ * True when `child` resolves to a path under the OS temp dir or an npm/npx
+ * cache. A binary living there is TRANSIENT — npx unpacks one run's package
+ * into a cache dir that is GC'd, so registering it bakes a path that vanishes.
+ * Mirrors SymForge's `path_is_inside(temp_dir, ...)` + `_npx`/`npx-cache`
+ * refusal (src/cli/init.rs).
+ *
+ * @param {string} child
+ * @param {Object} [opts]
+ * @param {string} [opts.tmpDir]  Defaults to os.tmpdir().
+ * @returns {boolean}
+ */
+function isTransientBinaryPath(child, opts) {
+  const o = opts || {};
+  if (typeof child !== "string" || child.length === 0) return false;
+  const lower = child.toLowerCase();
+  if (lower.includes("_npx") || lower.includes("npx-cache")) return true;
+  const tmp = o.tmpDir || os.tmpdir();
+  if (typeof tmp === "string" && tmp.length > 0) {
+    const sep = path.sep;
+    const absTmp = path.resolve(tmp);
+    const absChild = path.resolve(child);
+    if (absChild === absTmp || absChild.startsWith(absTmp + sep)) return true;
+  }
+  return false;
+}
+
+/**
+ * Resolve a real ABSOLUTE path to the currently-running platform MCP binary
+ * inside node_modules (the same exe `resolveBinary` returns) for use as a
+ * harness `command` when the stable per-user copy could not be made. This is
+ * the known-good resolution the live codex entry already uses.
+ *
+ * SymForge guard mirrored: a binary under the OS temp dir / npx cache is
+ * transient, so we REFUSE to return it (the caller warns loudly and falls back
+ * to the bare name only as an absolute last resort).
+ *
+ * @param {Object} [opts]
+ * @param {string} [opts.platform=process.platform]
+ * @param {string} [opts.arch=process.arch]
+ * @param {string} [opts.binary="terminal-commander-mcp"]
+ * @param {(o:object)=>{reason:string,binaryPath:string|null}} [opts.resolveBinary]  Test seam.
+ * @param {string} [opts.tmpDir]  Test seam for the temp-dir guard.
+ * @returns {{ exePath: string|null, reason: string }}
+ *   reason: "ok" | "resolve_failed" | "transient_path"
+ */
+function resolveDirectExePath(opts) {
+  const o = opts || {};
+  const platform = o.platform || process.platform;
+  const arch = o.arch || process.arch;
+  const binary = o.binary || "terminal-commander-mcp";
+  const resolve = o.resolveBinary || resolveBinary;
+  const resolved = resolve({ binary, platform, arch });
+  if (resolved.reason !== "ok" || !resolved.binaryPath) {
+    return { exePath: null, reason: "resolve_failed" };
+  }
+  if (isTransientBinaryPath(resolved.binaryPath, { tmpDir: o.tmpDir })) {
+    return { exePath: null, reason: "transient_path" };
+  }
+  return { exePath: resolved.binaryPath, reason: "ok" };
+}
+
 module.exports = {
   STABLE_BINARIES,
   VERSION_STAMP,
   stableBinDir,
   stableBinPath,
   ensureStableBinaries,
+  resolveDirectExePath,
+  isTransientBinaryPath,
 };

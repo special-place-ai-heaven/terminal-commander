@@ -193,10 +193,15 @@ test("project scope: existing terminal-commander entry overwritten with force; .
         2,
       ),
     );
-    const r = writeCursorMcpConfig({ scope: "project", projectRoot: root, force: true });
+    const r = writeCursorMcpConfig({
+      scope: "project",
+      projectRoot: root,
+      force: true,
+      timestamp: () => "20260625T140530123Z",
+    });
     assert.equal(r.status, "config_updated");
     assert.equal(r.was_present, true);
-    assert.equal(r.backup_path, cfgPath + ".bak");
+    assert.equal(r.backup_path, `${cfgPath}.20260625T140530123Z.bak`);
     const data = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
     assertTerminalCommanderStanza(data.mcpServers["terminal-commander"]);
     // Unrelated entry preserved.
@@ -209,7 +214,7 @@ test("project scope: existing terminal-commander entry overwritten with force; .
   }
 });
 
-test("refuses overwrite when .bak already exists unless clobber_backup:true", () => {
+test("timestamped backups never collide on re-run (no backup_failed on a pre-existing .bak)", () => {
   const root = mkScope();
   try {
     const cfgPath = path.join(root, ".cursor", "mcp.json");
@@ -224,31 +229,21 @@ test("refuses overwrite when .bak already exists unless clobber_backup:true", ()
         2,
       ),
     );
-    // Pre-existing backup.
-    fs.writeFileSync(cfgPath + ".bak", "stale-backup");
-    const refused = writeCursorMcpConfig({
-      scope: "project",
-      projectRoot: root,
-      force: true,
-    });
-    assert.equal(refused.status, "backup_failed");
-    // Original config untouched.
-    const stillOld = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-    assert.equal(stillOld.mcpServers["terminal-commander"].command, "old");
-    // Stale backup untouched.
-    assert.equal(fs.readFileSync(cfgPath + ".bak", "utf8"), "stale-backup");
-
-    // With clobber_backup, write proceeds.
+    // A stale, differently-named backup beside the target must NOT block a write.
+    fs.writeFileSync(`${cfgPath}.20260101T000000000Z.bak`, "stale-backup");
     const r = writeCursorMcpConfig({
       scope: "project",
       projectRoot: root,
       force: true,
-      clobber_backup: true,
+      timestamp: () => "20260625T140530123Z",
     });
-    assert.equal(r.status, "config_updated");
-    // Backup now contains the just-before state (the "old" config).
-    const bak = JSON.parse(fs.readFileSync(cfgPath + ".bak", "utf8"));
+    assert.equal(r.status, "config_updated", "re-run must NOT fail on a pre-existing backup");
+    assert.equal(r.backup_path, `${cfgPath}.20260625T140530123Z.bak`);
+    // The fresh backup captured the just-before state.
+    const bak = JSON.parse(fs.readFileSync(r.backup_path, "utf8"));
     assert.equal(bak.mcpServers["terminal-commander"].command, "old");
+    // Stale backup left untouched.
+    assert.equal(fs.readFileSync(`${cfgPath}.20260101T000000000Z.bak`, "utf8"), "stale-backup");
   } finally {
     rmScope(root);
   }
@@ -398,34 +393,33 @@ test("backupCursorConfig is a no-op when target does not exist", () => {
   }
 });
 
-test("backupCursorConfig copies existing target to .bak (one-shot)", () => {
+test("backupCursorConfig copies existing target to a timestamped .bak", () => {
   const root = mkScope();
   try {
     const target = path.join(root, "x.json");
     fs.writeFileSync(target, "payload");
-    const r = backupCursorConfig(target);
+    const r = backupCursorConfig(target, { timestamp: () => "20260625T140530123Z" });
     assert.equal(r.ok, true);
-    assert.equal(r.backup_path, target + ".bak");
-    assert.equal(fs.readFileSync(target + ".bak", "utf8"), "payload");
+    assert.equal(r.backup_path, `${target}.20260625T140530123Z.bak`);
+    assert.equal(fs.readFileSync(r.backup_path, "utf8"), "payload");
   } finally {
     rmScope(root);
   }
 });
 
-test("backupCursorConfig refuses existing .bak unless clobber_backup", () => {
+test("backupCursorConfig writes a fresh non-colliding backup each call", () => {
   const root = mkScope();
   try {
     const target = path.join(root, "x.json");
     fs.writeFileSync(target, "payload-v2");
-    fs.writeFileSync(target + ".bak", "old-bak");
-    const refused = backupCursorConfig(target);
-    assert.equal(refused.ok, false);
-    assert.equal(refused.reason, "backup_failed");
-    assert.equal(fs.readFileSync(target + ".bak", "utf8"), "old-bak");
-
-    const ok = backupCursorConfig(target, { clobber_backup: true });
-    assert.equal(ok.ok, true);
-    assert.equal(fs.readFileSync(target + ".bak", "utf8"), "payload-v2");
+    // A stale, differently-named backup beside the target is irrelevant.
+    fs.writeFileSync(`${target}.20260101T000000000Z.bak`, "old-bak");
+    const r = backupCursorConfig(target, { timestamp: () => "20260625T140530123Z" });
+    assert.equal(r.ok, true, "a pre-existing backup must NOT block a fresh one");
+    assert.equal(r.backup_path, `${target}.20260625T140530123Z.bak`);
+    assert.equal(fs.readFileSync(r.backup_path, "utf8"), "payload-v2");
+    // The stale backup is left untouched.
+    assert.equal(fs.readFileSync(`${target}.20260101T000000000Z.bak`, "utf8"), "old-bak");
   } finally {
     rmScope(root);
   }

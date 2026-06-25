@@ -35,28 +35,30 @@ test("atomicWriteWithBackup creates the file and removes the tmp sibling", () =>
   assert.equal(fs.existsSync(target + ".tmp.fixed"), false);
 });
 
-test("atomicWriteWithBackup backs up an existing target to .bak", () => {
+test("atomicWriteWithBackup backs up an existing target to a timestamped .bak", () => {
   const target = path.join(tmpDir(), "out.json");
   fs.writeFileSync(target, "old");
-  const r = atomicWriteWithBackup(target, "new", {});
+  const r = atomicWriteWithBackup(target, "new", { timestamp: () => "20260625T140530123Z" });
   assert.equal(r.ok, true);
-  assert.equal(r.backup_path, target + ".bak");
-  assert.equal(fs.readFileSync(target + ".bak", "utf8"), "old");
+  assert.equal(r.backup_path, `${target}.20260625T140530123Z.bak`);
+  assert.equal(fs.readFileSync(r.backup_path, "utf8"), "old");
   assert.equal(fs.readFileSync(target, "utf8"), "new");
 });
 
-test("atomicWriteWithBackup refuses an existing .bak unless clobber_backup", () => {
+test("atomicWriteWithBackup never collides on re-run (timestamped backups, no backup_failed)", () => {
+  // Timestamped backups are unique per call, so a re-run with an existing
+  // backup beside the target no longer fails with backup_failed (the brokenness
+  // the old non-timestamped .bak model caused). Two applies => two backups.
   const target = path.join(tmpDir(), "out.json");
-  fs.writeFileSync(target, "v2");
-  fs.writeFileSync(target + ".bak", "old-bak");
-  const refused = atomicWriteWithBackup(target, "v3", {});
-  assert.equal(refused.ok, false);
-  assert.equal(refused.reason, ATOMIC_REASONS.BACKUP_FAILED);
-  assert.equal(fs.readFileSync(target + ".bak", "utf8"), "old-bak"); // untouched
-  assert.equal(fs.readFileSync(target, "utf8"), "v2"); // target NOT overwritten on backup failure
-  const ok = atomicWriteWithBackup(target, "v3", { clobber_backup: true });
-  assert.equal(ok.ok, true);
-  assert.equal(fs.readFileSync(target + ".bak", "utf8"), "v2");
+  fs.writeFileSync(target, "v1");
+  const first = atomicWriteWithBackup(target, "v2", { timestamp: () => "20260625T000000001Z" });
+  assert.equal(first.ok, true);
+  assert.equal(fs.readFileSync(first.backup_path, "utf8"), "v1");
+  const second = atomicWriteWithBackup(target, "v3", { timestamp: () => "20260625T000000002Z" });
+  assert.equal(second.ok, true, "re-run must NOT fail on a pre-existing backup");
+  assert.equal(fs.readFileSync(second.backup_path, "utf8"), "v2");
+  assert.equal(fs.readFileSync(target, "utf8"), "v3");
+  assert.notEqual(first.backup_path, second.backup_path);
 });
 
 test("atomicWriteWithBackup refuses a target outside scopeDir (path_not_allowed)", () => {

@@ -7,7 +7,36 @@ const path = require("node:path");
 
 function shouldSkipBootstrap(env) {
   const e = env || process.env;
-  return e.TC_SKIP_BOOTSTRAP === "1";
+  // TC_SKIP_BOOTSTRAP is the long-standing opt-out; TC_NO_AUTO_SETUP is the
+  // documented postinstall opt-out (Fix 4). Either one disables auto-setup.
+  return e.TC_SKIP_BOOTSTRAP === "1" || e.TC_NO_AUTO_SETUP === "1";
+}
+
+/**
+ * Heuristic CI / non-interactive / headless detection. A postinstall must be a
+ * SAFE no-op in CI and in any non-interactive install so it never blocks or
+ * surprises an automated pipeline (Fix 4). Honors the de-facto `CI` standard
+ * plus the common provider flags, and treats a non-TTY stdout as headless.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {boolean}
+ */
+function isCiOrNonInteractive(env) {
+  const e = env || process.env;
+  if (e.CI === "true" || e.CI === "1") return true;
+  for (const key of [
+    "CONTINUOUS_INTEGRATION",
+    "GITHUB_ACTIONS",
+    "GITLAB_CI",
+    "BUILDKITE",
+    "CIRCLECI",
+    "TRAVIS",
+    "TEAMCITY_VERSION",
+    "JENKINS_URL",
+  ]) {
+    if (e[key]) return true;
+  }
+  return false;
 }
 
 function isGlobalNpmInstall(env) {
@@ -38,6 +67,7 @@ function isPackageInstallLifecycle(env) {
 
 module.exports = {
   shouldSkipBootstrap,
+  isCiOrNonInteractive,
   isGlobalNpmInstall,
   isPackageInstallLifecycle,
 };

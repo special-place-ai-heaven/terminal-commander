@@ -5,10 +5,12 @@
 //
 // One code path for json_mcp / toml_mcp / cursor: write `<path>.tmp.<rand>` in
 // the SAME directory (mode 0o600) -> fsync -> rename, after copying any existing
-// target to `<path>.bak`. Every path (target, tmp, .bak) is asserted inside the
-// resolved scope dir before it is touched. Consolidates three previously
-// hand-rolled copies and gives every writer the same durability (fsync) and
-// path-safety (scope-check) guarantees.
+// target to a TIMESTAMPED `<path>.<UTC-compact>.bak` (no colons; Windows-safe).
+// Every path (target, tmp, .bak) is asserted inside the resolved scope dir
+// before it is touched. Consolidates three previously hand-rolled copies and
+// gives every writer the same durability (fsync) and path-safety (scope-check)
+// guarantees. Timestamped backups never collide, so a re-run never fails on a
+// stale `.bak`.
 
 "use strict";
 
@@ -25,13 +27,64 @@ const ATOMIC_REASONS = Object.freeze({
 });
 
 /**
- * Copy `target` -> `<target>.bak` if `target` exists. No-op (ok, backup_path:null)
- * when it does not. Refuses an existing `.bak` unless `clobber_backup === true`.
+ * Strip a leading UTF-8 BOM (U+FEFF) from a decoded string. Some Windows
+ * shells/editors write config files with a BOM that makes JSON.parse and the
+ * TOML reader reject the first value ("Unexpected token"). Mirrors SymForge's
+ * `read_config_text` BOM strip (src/cli/init.rs).
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function stripBom(text) {
+  if (typeof text === "string" && text.charCodeAt(0) === 0xfeff) {
+    return text.slice(1);
+  }
+  return text;
+}
+
+/**
+ * Filesystem-safe UTC timestamp for backup names: `YYYYMMDDTHHMMSSmmmZ`
+ * (NO colons — Windows forbids `:` in filenames). Mirrors SymForge's
+ * `%Y%m%dT%H%M%S%3fZ` backup_path format (src/cli/harness_apply.rs).
+ *
+ * @param {Date} [now]
+ * @returns {string}
+ */
+function backupTimestamp(now) {
+  // toISOString() => "2026-06-25T14:05:30.123Z"; strip separators + millis dot.
+  return (now || new Date())
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace(".", "");
+}
+
+/**
+ * Compute the timestamped backup path beside `target`:
+ * `<config>.<UTC-compact>.bak`. Timestamped so every apply writes a fresh,
+ * non-colliding backup (a re-run never fails on a stale `.bak`).
+ *
+ * @param {string} target
+ * @param {Object} [opts]
+ * @param {(d?:Date)=>string} [opts.timestamp]  Test seam.
+ * @returns {string}
+ */
+function backupPathFor(target, opts) {
+  const o = opts || {};
+  const ts = typeof o.timestamp === "function" ? o.timestamp() : backupTimestamp();
+  return `${target}.${ts}.bak`;
+}
+
+/**
+ * Copy `target` -> `<target>.<UTC-compact>.bak` if `target` exists. No-op
+ * (ok, backup_path:null) when it does not. The timestamped name is unique per
+ * call, so backups never collide; `clobber_backup` is accepted for API compat
+ * but no longer gates the write (kept so callers and tests stay source-stable).
  *
  * @param {string} target
  * @param {Object} [opts]
  * @param {string} [opts.scopeDir]  Defaults to dirname(target).
- * @param {boolean} [opts.clobber_backup=false]
+ * @param {boolean} [opts.clobber_backup=false]  Accepted; no-op with timestamps.
+ * @param {(d?:Date)=>string} [opts.timestamp]  Test seam for the timestamp.
  * @returns {{ok:true, backup_path:string|null}|{ok:false, reason:string}}
  */
 function backupExisting(target, opts) {
@@ -40,12 +93,9 @@ function backupExisting(target, opts) {
   if (!fs.existsSync(target)) {
     return { ok: true, backup_path: null };
   }
-  const backupPath = target + ".bak";
+  const backupPath = backupPathFor(target, { timestamp: o.timestamp });
   if (!isPathInsideScope(scopeDir, backupPath)) {
     return { ok: false, reason: ATOMIC_REASONS.PATH_NOT_ALLOWED };
-  }
-  if (fs.existsSync(backupPath) && o.clobber_backup !== true) {
-    return { ok: false, reason: ATOMIC_REASONS.BACKUP_FAILED };
   }
   try {
     fs.copyFileSync(target, backupPath);
@@ -134,6 +184,7 @@ function atomicWriteWithBackup(target, contents, opts) {
   const backup = backupExisting(target, {
     scopeDir,
     clobber_backup: o.clobber_backup === true,
+    timestamp: o.timestamp,
   });
   if (!backup.ok) {
     return { ok: false, reason: backup.reason };
@@ -152,5 +203,8 @@ module.exports = {
   atomicWrite,
   backupExisting,
   atomicWriteWithBackup,
+  backupTimestamp,
+  backupPathFor,
+  stripBom,
   ATOMIC_REASONS,
 };
