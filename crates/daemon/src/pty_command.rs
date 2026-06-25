@@ -833,10 +833,7 @@ mod runtime {
     /// counters leaking into `list()`); keeping the combine in one place
     /// means there is a single line to get right and a single line to
     /// test.
-    fn combine_pty_metrics(
-        probe: &PtyProbeMetrics,
-        snapshot: &PtyProbeMetrics,
-    ) -> PtyProbeMetrics {
+    fn combine_pty_metrics(probe: &PtyProbeMetrics, snapshot: &PtyProbeMetrics) -> PtyProbeMetrics {
         PtyProbeMetrics {
             events_emitted: probe.events_emitted.max(snapshot.events_emitted),
             ..*probe
@@ -845,7 +842,7 @@ mod runtime {
 
     #[cfg(test)]
     mod tests {
-        use super::{combine_pty_metrics, PtyProbeMetrics};
+        use super::{PtyProbeMetrics, combine_pty_metrics};
 
         #[test]
         fn combine_takes_workload_counters_from_probe_not_snapshot() {
@@ -897,7 +894,10 @@ mod runtime {
             let combined = combine_pty_metrics(&probe, &snapshot);
 
             assert_eq!(combined.events_emitted, 9, "probe events > snapshot wins");
-            assert_eq!(combined.frames_total, 10, "non-event fields still from probe");
+            assert_eq!(
+                combined.frames_total, 10,
+                "non-event fields still from probe"
+            );
         }
 
         #[test]

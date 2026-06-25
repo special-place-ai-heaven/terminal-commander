@@ -376,7 +376,10 @@ mod tests {
 
         // The reused detector pattern must capture the message body, so
         // a live rule built from this proposal renders `warning: <msg>`.
-        let pat = r.pattern.as_deref().expect("warning proposal has a pattern");
+        let pat = r
+            .pattern
+            .as_deref()
+            .expect("warning proposal has a pattern");
         let re = Regex::new(pat).expect("proposed pattern compiles");
         let caps = re
             .captures("WARN deprecated option")

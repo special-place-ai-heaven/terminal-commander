@@ -2447,7 +2447,10 @@ mod runtime_win {
             let started = std::time::Instant::now();
             let drained = done_rx.recv_timeout(grace).is_ok();
             let elapsed = started.elapsed();
-            assert!(!drained, "a never-signalling reader must NOT report drained");
+            assert!(
+                !drained,
+                "a never-signalling reader must NOT report drained"
+            );
             assert!(
                 elapsed >= grace,
                 "must wait the full grace before giving up; waited {elapsed:?}"
