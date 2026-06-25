@@ -37,6 +37,8 @@ function Invoke-Gate([string]$pkg, [string]$bin, [string[]]$extra) {
 Invoke-Gate 'terminal-commander-probes' 'windows_no_console_spawn' @('--include-ignored')
 # crates/daemon/tests/windows_spawn_site_coverage.rs tests are NOT ignored.
 Invoke-Gate 'terminal-commanderd' 'windows_spawn_site_coverage' @()
+# T1: collect_probes PTY cfg must admit Windows (headless-safe; live ConPTY is not).
+Invoke-Gate 'terminal-commanderd' 'runtime_state_windows' @('collect_probes_pty_enumeration_cfg_admits_windows')
 
 # F-010 / O-07: live ConPTY child-output + secret-gate e2e. Runs on GitHub Actions
 # (required pre-build-gates-windows) and when a developer opts in with

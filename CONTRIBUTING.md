@@ -194,6 +194,14 @@ OS's `cfg` paths, so an OS-gated change can pass locally and still break
 the other platform's gate in CI. Running both gates is the only way to
 exercise both `cfg` worlds before you push.
 
+When fixing a platform-asymmetric daemon surface (a `cfg` gate that hides
+behavior on one OS), ship three pieces together: the production fix, a
+Windows or Unix regression test, and — for Windows cfg sentinels that
+headless CI cannot exercise live — registration in `scripts/windows-gate.ps1`
+so the guard runs before merge. Live dogfood on the affected OS remains a
+required author step with evidence; mark live acceptance `UNVERIFIED` only
+with an explicit stated reason in the PR.
+
 `scripts/linux-gate.sh` IS the linux PR gate that CI runs (the single
 source of truth — `npm-binary-build.yml` invokes it directly).
 `scripts/dev/verify-baseline.sh` remains a separate fixture / doctrine
