@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.65](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.64...v0.1.65) (2026-06-25)
+
+
+### Bug Fixes
+
+* **daemon:** list PTY jobs in unified runtime view on Windows ([#129](https://github.com/special-place-ai-heaven/terminal-commander/issues/129)) ([e2e1bc4](https://github.com/special-place-ai-heaven/terminal-commander/commit/e2e1bc4d4d2b572a14f18804b04493226babc7a0))
+
+
+### Build System
+
+* **release:** derive the synthetic crates-trigger commit message from the real crate subjects so generated changelogs describe the actual fixes ([#131](https://github.com/special-place-ai-heaven/terminal-commander/issues/131)) ([9de5472](https://github.com/special-place-ai-heaven/terminal-commander/commit/9de5472))
+
 ## [0.1.64](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.63...v0.1.64) (2026-06-25)
 
 
