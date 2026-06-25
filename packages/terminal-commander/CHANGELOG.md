@@ -6,7 +6,6 @@
 ### Bug Fixes
 
 * **daemon:** list PTY jobs in unified runtime view on Windows ([#129](https://github.com/special-place-ai-heaven/terminal-commander/issues/129)) ([e2e1bc4](https://github.com/special-place-ai-heaven/terminal-commander/commit/e2e1bc4d4d2b572a14f18804b04493226babc7a0))
-* release Rust crate changes ([f7b3421](https://github.com/special-place-ai-heaven/terminal-commander/commit/f7b3421335dc55a2df64c80f4dfa151c3b6abdf0))
 
 ## [0.1.64](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.63...v0.1.64) (2026-06-25)
 
