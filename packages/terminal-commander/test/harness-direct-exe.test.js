@@ -37,10 +37,71 @@ test("exePath takes precedence over nodePath/scriptPath", () => {
   assert.deepEqual(c.args, []);
 });
 
-test("without exePath the default stays the portable bare-name command (fallback)", () => {
-  const c = buildTerminalCommanderCommandConfig({});
+test("without exePath on non-Windows the fallback is the portable bare-name command", () => {
+  // On Unix the MCP client's PATH + shell resolution finds the installed
+  // `terminal-commander-mcp` shim, so a bare command is portable and acceptable.
+  const c = buildTerminalCommanderCommandConfig({ platform: "linux" });
   assert.equal(c.command, "terminal-commander-mcp");
   assert.deepEqual(c.args, []);
+});
+
+test("without exePath on Windows the fallback must NOT be the bare command when a resolver yields an absolute exe", () => {
+  // CONTRACT CHANGE (fix/harness-windows-shell-false): the previous test
+  // asserted an UNCONDITIONAL bare-name fallback. That is ENOENT-fatal on
+  // Windows when the MCP client spawns with shell:false (Node does no PATHEXT
+  // resolution and cannot exec a .cmd/.ps1 shim => the server never starts =>
+  // "0 tools"). When a caller injects a resolver that returns an absolute exe,
+  // the win32 fallback MUST use it, never the bare name.
+  const ABS = "C:\\Users\\op\\AppData\\Local\\terminal-commander\\bin\\terminal-commander-mcp.exe";
+  const c = buildTerminalCommanderCommandConfig({
+    platform: "win32",
+    resolveExePath: ({ platform }) => (platform === "win32" ? ABS : "/x/tc-mcp"),
+  });
+  assert.equal(c.command, ABS);
+  assert.deepEqual(c.args, []);
+  assert.notEqual(c.command, "terminal-commander-mcp");
+});
+
+test("win32 fallback: a resolver that throws or returns null degrades safely (last-resort bare, no crash)", () => {
+  // Defense in depth: a resolver hiccup must never throw out of the pure builder.
+  // When NO absolute path can be recovered on win32, the builder returns the bare
+  // name as a caller-prevented last resort (the orchestrator's resolver chain is
+  // expected to have produced o.exePath or warned). We assert it does not crash.
+  const throwing = buildTerminalCommanderCommandConfig({
+    platform: "win32",
+    resolveExePath: () => {
+      throw new Error("resolver boom");
+    },
+  });
+  assert.equal(throwing.command, "terminal-commander-mcp");
+  const nullish = buildTerminalCommanderCommandConfig({
+    platform: "win32",
+    resolveExePath: () => null,
+  });
+  assert.equal(nullish.command, "terminal-commander-mcp");
+});
+
+test("exePath still wins over an injected resolver (precedence preserved)", () => {
+  const ABS_STABLE = "C:\\stable\\terminal-commander-mcp.exe";
+  const c = buildTerminalCommanderCommandConfig({
+    platform: "win32",
+    exePath: ABS_STABLE,
+    resolveExePath: () => "C:\\other\\terminal-commander-mcp.exe",
+  });
+  assert.equal(c.command, ABS_STABLE);
+});
+
+test("buildJsonMcpStanza on win32 without exePath recovers an absolute exe via the wired resolver (no bare ENOENT)", () => {
+  // The JSON harness (Claude Code / Desktop) is the exact harness that shipped a
+  // bare command and showed "0 tools". With the resolver wired in write_all.js,
+  // a win32 stanza built without a pre-resolved exePath must not be the bare name.
+  const ABS = "C:\\node_modules\\@tc\\windows-x64\\bin\\terminal-commander-mcp.exe";
+  const stanza = buildJsonMcpStanza({
+    platform: "win32",
+    resolveExePath: ({ platform }) => (platform === "win32" ? ABS : null),
+  });
+  assert.equal(stanza.command, ABS);
+  assert.notEqual(stanza.command, "terminal-commander-mcp");
 });
 
 test("Cursor stanza points command at the stable exe and keeps args empty", () => {
