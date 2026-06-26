@@ -29,6 +29,11 @@ use terminal_commander_supervisor::paths;
 /// this budget only caps the failure case.
 const SELF_HEAL_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 
+/// Bound on the startup version-skew probe (DEFECT B). A co-located WSL daemon
+/// answers `system_discover` in sub-milliseconds; this budget only caps the
+/// failure case so adapter startup never hangs on a slow/absent daemon.
+const SKEW_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
+
 /// Resolve the socket path the MCP adapter should connect to.
 ///
 /// Resolution order:
@@ -42,6 +47,35 @@ pub fn resolve_socket_path(cli_override: Option<&std::path::Path>) -> std::path:
         return p.to_path_buf();
     }
     paths::resolve_socket_path()
+}
+
+/// Probe the ALIVE daemon's version via `system_discover` and report version
+/// skew against this adapter (DEFECT B).
+///
+/// `system_discover` is one of the four methods even a legacy daemon serves, so
+/// its `DiscoverResponse.version` is the robust skew source -- `Health.version`
+/// is `#[serde(default)]` and a legacy daemon OMITS it, so Health cannot
+/// positively name a stale daemon. The skew test is an HONEST both-direction
+/// inequality: a daemon whose version is empty/legacy OR present-but-different
+/// (including NEWER than the adapter) is skewed. The adapter version is always
+/// a non-empty `env!("CARGO_PKG_VERSION")`, so a plain `!=` subsumes the
+/// empty/legacy case.
+///
+/// Returns `Some((daemon_version, adapter_version))` on skew, `None` when the
+/// versions match OR the daemon could not be reached (an unreachable daemon is
+/// the `daemon_unavailable` path, never a skew verdict). Bounded by
+/// [`SKEW_PROBE_TIMEOUT`]; no spawn, no fs, just one IPC round trip.
+pub async fn detect_version_skew(
+    socket_path: &std::path::Path,
+    adapter_version: &str,
+) -> Option<(String, String)> {
+    let client = McpDaemonClient::new(socket_path).with_timeout(SKEW_PROBE_TIMEOUT);
+    match client.call(IpcRequest::SystemDiscover).await {
+        Ok(IpcResponse::SystemDiscover(d)) if d.version != adapter_version => {
+            Some((d.version, adapter_version.to_owned()))
+        }
+        _ => None,
+    }
 }
 
 /// Shared, cheaply-cloneable handle to the `EnsureDaemonStatus`
@@ -67,6 +101,12 @@ pub struct DaemonStatusHandle {
     /// Observability + lets tests assert single-flight (concurrent tools
     /// hitting an unavailable status must not each fire a probe).
     probe_count: Arc<AtomicU64>,
+    /// DEFECT B: `Some((daemon_version, adapter_version))` when the ALIVE
+    /// daemon's `system_discover` version does not match this adapter (skew in
+    /// EITHER direction). `None` => versions matched, or skew could not be
+    /// determined (the down-daemon case is the `Unavailable` path, not skew).
+    /// Set once at startup; never mutated, so it needs no lock.
+    version_skew: Option<(String, String)>,
 }
 
 impl DaemonStatusHandle {
@@ -75,7 +115,34 @@ impl DaemonStatusHandle {
             status: Arc::new(Mutex::new(status)),
             probe_guard: Arc::new(tokio::sync::Mutex::new(())),
             probe_count: Arc::new(AtomicU64::new(0)),
+            version_skew: None,
         }
+    }
+
+    /// Construct a handle carrying a startup version-skew verdict (DEFECT B).
+    /// `version_skew` is `Some((daemon_version, adapter_version))` when the
+    /// alive daemon's version does not match this adapter, else `None`.
+    /// `new(...)` stays the back-compat (no-skew) constructor for the existing
+    /// construction/test sites.
+    #[must_use]
+    pub fn with_skew(
+        status: EnsureDaemonStatus,
+        version_skew: Option<(String, String)>,
+    ) -> Self {
+        Self {
+            status: Arc::new(Mutex::new(status)),
+            probe_guard: Arc::new(tokio::sync::Mutex::new(())),
+            probe_count: Arc::new(AtomicU64::new(0)),
+            version_skew,
+        }
+    }
+
+    /// The startup version-skew verdict, if any (DEFECT B).
+    /// `Some((daemon_version, adapter_version))` when the alive daemon is the
+    /// wrong build; `None` when versions matched or skew is unknown.
+    #[must_use]
+    pub fn version_skew(&self) -> Option<(String, String)> {
+        self.version_skew.clone()
     }
 
     /// Number of self-heal `Health` re-probes fired so far. Used by tests
@@ -370,6 +437,35 @@ mod tests {
             EnsureDaemonStatus::AlreadyRunning { pid, .. } => assert_eq!(pid, Some(7)),
             other => panic!("expected unchanged AlreadyRunning, got {other:?}"),
         }
+    }
+
+    // --- DEFECT B: version-skew verdict on the status handle ---
+
+    #[test]
+    fn with_skew_carries_versions_and_new_reports_none() {
+        let avail = EnsureDaemonStatus::AlreadyRunning {
+            endpoint: Endpoint::UnixSocket {
+                path: "/tmp/tc-skew-unit.sock".into(),
+            },
+            pid: Some(1),
+        };
+        let skewed = DaemonStatusHandle::with_skew(
+            avail.clone(),
+            Some(("0.1.47".to_owned(), "0.1.69".to_owned())),
+        );
+        assert_eq!(
+            skewed.version_skew(),
+            Some(("0.1.47".to_owned(), "0.1.69".to_owned())),
+            "with_skew must surface the daemon/adapter version pair"
+        );
+
+        // Back-compat: the existing `new(...)` constructor carries no skew.
+        let matched = DaemonStatusHandle::new(avail);
+        assert_eq!(
+            matched.version_skew(),
+            None,
+            "new(...) must report no skew (back-compat for existing call sites)"
+        );
     }
 
     #[tokio::test]

@@ -774,11 +774,37 @@ impl TerminalCommanderMcpServer {
         self
     }
 
-    /// Single daemon-availability guard shared by every daemon-backed tool.
-    /// Returns the structured `daemon_unavailable` envelope error when the
-    /// daemon is not reachable; otherwise `Ok(())`. Call
-    /// `self.ensure_daemon_available().await?` at the top of each handler
-    /// before issuing IPC.
+    /// Single daemon-availability + version-skew guard shared by every
+    /// daemon-backed tool. Returns the structured `daemon_unavailable`
+    /// envelope when the daemon is unreachable, or the `daemon_version_skew`
+    /// error (DEFECT B) when the daemon is ALIVE but the wrong build;
+    /// otherwise `Ok(())`. Call `self.ensure_daemon_available().await?` at the
+    /// top of each handler before issuing IPC.
+    ///
+    /// Reachability + self-heal live in [`Self::ensure_daemon_reachable`]; this
+    /// method layers the skew gate on top. The diagnostic pair (`health`,
+    /// `system_discover`) deliberately call `ensure_daemon_reachable` instead,
+    /// so an operator can still inspect a version-skewed daemon.
+    async fn ensure_daemon_available(&self) -> Result<(), McpError> {
+        self.ensure_daemon_reachable().await?;
+        // DEFECT B: an ALIVE but version-skewed daemon (e.g. a 0.1.47 WSL
+        // runtime under a 0.1.69 adapter) must fail with an HONEST
+        // `daemon_version_skew` error, not a misleading `daemon_unavailable`.
+        // `health` / `system_discover` bypass this via `ensure_daemon_reachable`
+        // so an operator can still diagnose while skewed.
+        if let Some((daemon_ver, adapter_ver)) =
+            self.daemon.status().and_then(|s| s.version_skew())
+        {
+            return Err(daemon_version_skew_error(&daemon_ver, &adapter_ver));
+        }
+        Ok(())
+    }
+
+    /// Daemon-REACHABILITY gate WITHOUT the version-skew check. The diagnostic
+    /// pair (`health`, `system_discover`) use this so an operator can still
+    /// inspect a version-skewed-but-alive daemon (DEFECT B exemption); every
+    /// other daemon-backed tool routes through [`Self::ensure_daemon_available`],
+    /// which layers the skew gate on top.
     ///
     /// Self-heal (audit H1): the startup status is a one-shot sample, so a
     /// daemon that was slow to bind would pin every tool to
@@ -789,7 +815,7 @@ impl TerminalCommanderMcpServer {
     /// A genuinely-down daemon's probe fails and the envelope is returned
     /// unchanged. The happy path (already available) is cheap: it never
     /// probes.
-    async fn ensure_daemon_available(&self) -> Result<(), McpError> {
+    async fn ensure_daemon_reachable(&self) -> Result<(), McpError> {
         // Cheap happy path: no status handle, or already available.
         let Some(status) = self.daemon.status() else {
             return Ok(());
@@ -982,7 +1008,9 @@ impl TerminalCommanderMcpServer {
     /// and a typed error otherwise.
     #[tool(description = "Daemon liveness ping. Returns uptime in seconds when reachable.")]
     async fn health(&self) -> Result<CallToolResult, McpError> {
-        self.ensure_daemon_available().await?;
+        // DEFECT B exemption: health is a diagnostic — reachability only, no
+        // skew gate, so an operator can still ping a version-skewed daemon.
+        self.ensure_daemon_reachable().await?;
         match self.daemon.call(IpcRequest::Health).await {
             Ok(IpcResponse::Health {
                 uptime_secs,
@@ -3209,6 +3237,29 @@ fn daemon_unavailable_error(status: &EnsureDaemonStatus) -> McpError {
         "details": status,
     });
     McpError::internal_error("daemon_unavailable", Some(payload))
+}
+
+/// Build the structured `daemon_version_skew` MCP error (DEFECT B).
+///
+/// Returned when the daemon is ALIVE (it answered `system_discover`) but its
+/// version does not match this adapter. Distinct from `daemon_unavailable`: the
+/// daemon is reachable, it is the WRONG build, so a misleading "not reachable"
+/// envelope would send an operator chasing a phantom connectivity problem. The
+/// message names BOTH versions and the remedy points at the WSL npm runtime
+/// update / restart.
+fn daemon_version_skew_error(daemon: &str, adapter: &str) -> McpError {
+    let payload = serde_json::json!({
+        "code": "daemon_version_skew",
+        "message": format!(
+            "terminal-commanderd version {daemon} does not match this adapter version {adapter}"
+        ),
+        "details": {
+            "daemon_version": daemon,
+            "adapter_version": adapter,
+            "remedy": "update the WSL terminal-commander npm runtime so the daemon version matches this adapter (or run `terminal-commander restart`)",
+        },
+    });
+    McpError::internal_error("daemon_version_skew", Some(payload))
 }
 
 /// Map a [`TargetRouteError`] to a typed MCP error (P5 / T050).
@@ -6340,6 +6391,96 @@ mod tests {
             .await
             .expect_err("self_check should fail");
         assert_daemon_unavailable_tool_error("self_check", &self_check);
+    }
+
+    // --- DEFECT B: version-skew gate at the tool edge ---
+
+    /// Build a server whose daemon status is AVAILABLE (so reachability passes)
+    /// but carries the given version-skew verdict. The socket is never bound, so
+    /// any tool that gets past the gate and issues IPC sees a transport error
+    /// (the existing `daemon_unavailable` path).
+    fn available_status_with_skew(skew: Option<(String, String)>) -> TerminalCommanderMcpServer {
+        let sock = std::env::temp_dir().join(format!(
+            "tc-mcp-skew-unit-test-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let status = EnsureDaemonStatus::AlreadyRunning {
+            endpoint: terminal_commander_supervisor::ensure::Endpoint::UnixSocket {
+                path: sock.clone(),
+            },
+            pid: Some(1),
+        };
+        let daemon = McpDaemonClient::with_status(
+            sock,
+            crate::daemon_client::DaemonStatusHandle::with_skew(status, skew),
+        )
+        .with_timeout(std::time::Duration::from_millis(10));
+        TerminalCommanderMcpServer::new(daemon)
+    }
+
+    #[tokio::test]
+    async fn version_skew_blocks_tools_but_exempts_health_and_discover() {
+        // A daemon-backed tool fails with an HONEST daemon_version_skew naming
+        // BOTH versions -- never a misleading daemon_unavailable.
+        let server =
+            available_status_with_skew(Some(("0.1.47".to_owned(), "0.1.69".to_owned())));
+        let policy = server
+            .policy_status()
+            .await
+            .expect_err("policy_status must fail on version skew");
+        let rendered = policy.to_string();
+        assert!(
+            rendered.contains("daemon_version_skew"),
+            "skew must surface daemon_version_skew, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("0.1.47") && rendered.contains("0.1.69"),
+            "skew error must name BOTH versions, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("daemon_unavailable"),
+            "skew must NOT masquerade as daemon_unavailable, got: {rendered}"
+        );
+
+        // Exemption: health is not blocked by the skew gate. It still fails
+        // (no live daemon) but as daemon_unavailable, so an operator can probe.
+        let health = server
+            .health()
+            .await
+            .expect_err("health fails: no live daemon");
+        let health_rendered = health.to_string();
+        assert!(
+            !health_rendered.contains("daemon_version_skew"),
+            "health must be exempt from the skew gate, got: {health_rendered}"
+        );
+
+        // Exemption: system_discover returns its catalogue (daemon_error in the
+        // payload), never a skew gate error.
+        server
+            .system_discover()
+            .await
+            .expect("system_discover must not be blocked by the skew gate");
+
+        // No-skew available handle: the gate injects NO skew error; a down
+        // daemon still yields the existing daemon_unavailable (no regression).
+        let ok_server = available_status_with_skew(None);
+        let down = ok_server
+            .policy_status()
+            .await
+            .expect_err("no live daemon -> daemon_unavailable");
+        let r = down.to_string();
+        assert!(
+            !r.contains("daemon_version_skew"),
+            "a no-skew handle must never raise daemon_version_skew, got: {r}"
+        );
+        assert!(
+            r.contains("daemon_unavailable"),
+            "a down no-skew daemon must remain daemon_unavailable, got: {r}"
+        );
     }
 
     // --- FIX A: run_and_watch completion markers ---

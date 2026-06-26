@@ -471,7 +471,7 @@ const fn method_name(req: &IpcRequest) -> &'static str {
 /// `IpcRequest` variants -- the `system_discover_methods_match_dispatch`
 /// parity test enforces both directions, so a method added to the
 /// dispatcher but forgotten here (or vice-versa) fails the test.
-const DISCOVERABLE_METHODS: &[&str] = &[
+pub(crate) const DISCOVERABLE_METHODS: &[&str] = &[
     "system_discover",
     "health",
     "policy_status",
