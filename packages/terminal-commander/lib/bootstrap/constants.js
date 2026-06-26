@@ -13,6 +13,12 @@ const INSTALL_PROBE_CMD = `${LINUX_PATH_PREFIX}npm install -g terminal-commander
 
 const RUNTIME_VERIFY_CMD = `${LINUX_PATH_PREFIX}command -v terminal-commander-mcp && node -e "const a=process.arch==='arm64'?'arm64':'x64';require.resolve('@terminal-commander/linux-'+a)"`;
 
+// Version probe for skew detection. clap prints `terminal-commander-mcp <ver>`
+// to stdout; the caller splits the last whitespace token and compares it to the
+// host package version. (Documented fallback if the flag proves unreliable:
+// read `"$(npm root -g)/terminal-commander/package.json"`.)
+const RUNTIME_VERSION_CMD = `${LINUX_PATH_PREFIX}terminal-commander-mcp --version`;
+
 // WSL must not resolve terminal-commander-mcp from /mnt/c (Windows npm shim);
 // that runs Node as linux and fails optionalDependency resolve.
 const BRIDGE_DAEMON_ENSURE =
@@ -24,6 +30,7 @@ module.exports = {
   LINUX_PATH_PREFIX,
   INSTALL_PROBE_CMD,
   RUNTIME_VERIFY_CMD,
+  RUNTIME_VERSION_CMD,
   BRIDGE_DAEMON_ENSURE,
   BRIDGE_PROBE_CMD,
   getInstallDaemonAutostartCmd,

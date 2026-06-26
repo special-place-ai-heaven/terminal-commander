@@ -119,7 +119,9 @@ function runWslBashLc({ distro, cmd, env, exec, wslPath, timeoutMs }) {
       clearTimeout(timer);
       const combined = (stdoutBuf + "\n" + stderrBuf).toLowerCase();
       const classified = classifyNpmOutput(combined, code);
-      resolve(classified);
+      // Surface raw stdout (classifyNpmOutput only sees a lowercased copy) so
+      // callers can read command output, e.g. a version probe.
+      resolve({ ...classified, stdout: stdoutBuf });
     });
   });
 }

@@ -360,6 +360,95 @@ test("runBootstrap print_config runs harness no-write and does not persist state
   assert.equal(harnessDryRun, true, "print_config must run harness writers in no-write mode");
 });
 
+// Minimal fake WSL child for runWslBashLc's injected exec ({wslPath,argv,env}).
+function fakeWslChild(code, stdout) {
+  const { EventEmitter } = require("node:events");
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => {};
+  process.nextTick(() => {
+    if (stdout) child.stdout.emit("data", Buffer.from(String(stdout)));
+    child.emit("close", code);
+  });
+  return child;
+}
+
+const HOST_VERSION = require("../package.json").version;
+
+test("runBootstrap upgrades WSL runtime AND swaps live daemon on version skew", async () => {
+  // Defect A: presence-only gate never upgrades a stale WSL runtime. With the
+  // runtime present but at a different version than the host package, the gate
+  // must (a) run ensureWslRuntime to upgrade and (b) dispatch the live-daemon
+  // swap (`terminal-commanderd update --force`) exactly once.
+  const execCmds = [];
+  let ensureCalled = false;
+  const r = await runBootstrap({
+    mode: "cli",
+    platform: "win32",
+    env: { USERPROFILE: "C:\\Users\\example", LOCALAPPDATA: os.tmpdir() },
+    distro: "Ubuntu",
+    acquireLock: false,
+    skipDaemonAutostart: true,
+    detect: async () => ({ reason: "ok", distros: [{ name: "Ubuntu" }], default_distro: "Ubuntu" }),
+    doctor: async () => ({ status: "runtime_present", distro: "Ubuntu", runtime_present: true }),
+    probeRuntimeVersion: async () => "0.0.0-stale",
+    ensureWslRuntime: async () => {
+      ensureCalled = true;
+      return { status: "ok", hint: "installed" };
+    },
+    exec: ({ argv }) => {
+      execCmds.push(argv[argv.length - 1]);
+      return fakeWslChild(0, "");
+    },
+    ensureStableBinaries: () => ({ exePath: null, copied: [], reason: "skip" }),
+    resolveDirectExePath: () => ({ exePath: null, reason: "skip" }),
+    writeAllHarnesses: () => [{ id: "cursor", status: "ok" }],
+    writeState: () => ({ status: "ok" }),
+  });
+  assert.equal(r.exit_code, 0);
+  assert.equal(ensureCalled, true, "stale runtime must trigger ensureWslRuntime (upgrade)");
+  assert.ok(
+    execCmds.some((c) => c.includes("terminal-commanderd update --force")),
+    "live daemon swap must be dispatched on skew",
+  );
+  assert.match(r.output, /!= host/);
+});
+
+test("runBootstrap matched runtime skips install and daemon swap (fast path)", async () => {
+  // Regression: when the WSL runtime version matches the host, the gate keeps
+  // the "already present" optimization — no npm install, no daemon restart.
+  const execCmds = [];
+  let ensureCalled = false;
+  const r = await runBootstrap({
+    mode: "cli",
+    platform: "win32",
+    env: { USERPROFILE: "C:\\Users\\example", LOCALAPPDATA: os.tmpdir() },
+    distro: "Ubuntu",
+    acquireLock: false,
+    skipDaemonAutostart: true,
+    detect: async () => ({ reason: "ok", distros: [{ name: "Ubuntu" }], default_distro: "Ubuntu" }),
+    doctor: async () => ({ status: "runtime_present", distro: "Ubuntu", runtime_present: true }),
+    probeRuntimeVersion: async () => HOST_VERSION,
+    ensureWslRuntime: async () => {
+      ensureCalled = true;
+      return { status: "ok", hint: "installed" };
+    },
+    exec: ({ argv }) => {
+      execCmds.push(argv[argv.length - 1]);
+      return fakeWslChild(0, "");
+    },
+    ensureStableBinaries: () => ({ exePath: null, copied: [], reason: "skip" }),
+    resolveDirectExePath: () => ({ exePath: null, reason: "skip" }),
+    writeAllHarnesses: () => [{ id: "cursor", status: "ok" }],
+    writeState: () => ({ status: "ok" }),
+  });
+  assert.equal(r.exit_code, 0);
+  assert.equal(ensureCalled, false, "matched runtime must NOT reinstall");
+  assert.equal(execCmds.length, 0, "matched runtime must NOT dispatch a daemon swap");
+  assert.match(r.output, /already present/);
+});
+
 test("setup harness --print-config forwards the flag and does not persist state", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "tc-printcfg-"));
   let stateWrites = 0;
