@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.70](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.69...v0.1.70) (2026-06-29)
+
+
+### Bug Fixes
+
+* 3 crate fixes -- apply cargo fmt to skew handshake code (linux fmt gate) (+2 more) ([0473c43](https://github.com/special-place-ai-heaven/terminal-commander/commit/0473c43ff8325670fdd247400dbd2c69a055ad16))
+* **bootstrap:** make WSL runtime gate version-aware, swap stale daemon on skew ([d1ec657](https://github.com/special-place-ai-heaven/terminal-commander/commit/d1ec657636e63fb41f0eb205bf92fe674330397a))
+* WSL version-skew daemon_unavailable + honest skew error + truthful diagnostics ([92355c8](https://github.com/special-place-ai-heaven/terminal-commander/commit/92355c8525bfa35a9c209a7fec536e1bdc566e22))
+
 ## [0.1.69](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.68...v0.1.69) (2026-06-25)
 
 
