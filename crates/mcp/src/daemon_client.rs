@@ -125,10 +125,7 @@ impl DaemonStatusHandle {
     /// `new(...)` stays the back-compat (no-skew) constructor for the existing
     /// construction/test sites.
     #[must_use]
-    pub fn with_skew(
-        status: EnsureDaemonStatus,
-        version_skew: Option<(String, String)>,
-    ) -> Self {
+    pub fn with_skew(status: EnsureDaemonStatus, version_skew: Option<(String, String)>) -> Self {
         Self {
             status: Arc::new(Mutex::new(status)),
             probe_guard: Arc::new(tokio::sync::Mutex::new(())),

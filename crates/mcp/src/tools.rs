@@ -792,8 +792,7 @@ impl TerminalCommanderMcpServer {
         // `daemon_version_skew` error, not a misleading `daemon_unavailable`.
         // `health` / `system_discover` bypass this via `ensure_daemon_reachable`
         // so an operator can still diagnose while skewed.
-        if let Some((daemon_ver, adapter_ver)) =
-            self.daemon.status().and_then(|s| s.version_skew())
+        if let Some((daemon_ver, adapter_ver)) = self.daemon.status().and_then(|s| s.version_skew())
         {
             return Err(daemon_version_skew_error(&daemon_ver, &adapter_ver));
         }
@@ -6426,8 +6425,7 @@ mod tests {
     async fn version_skew_blocks_tools_but_exempts_health_and_discover() {
         // A daemon-backed tool fails with an HONEST daemon_version_skew naming
         // BOTH versions -- never a misleading daemon_unavailable.
-        let server =
-            available_status_with_skew(Some(("0.1.47".to_owned(), "0.1.69".to_owned())));
+        let server = available_status_with_skew(Some(("0.1.47".to_owned(), "0.1.69".to_owned())));
         let policy = server
             .policy_status()
             .await
