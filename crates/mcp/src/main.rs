@@ -23,7 +23,7 @@ use std::time::Duration;
 use clap::Parser;
 use rmcp::{ServiceExt, service::ServerInitializeError, transport::stdio};
 use terminal_commander_mcp::daemon_client::{
-    DaemonStatusHandle, McpDaemonClient, resolve_socket_path,
+    DaemonStatusHandle, McpDaemonClient, detect_version_skew, resolve_socket_path,
 };
 use terminal_commander_mcp::tools::TerminalCommanderMcpServer;
 use terminal_commander_supervisor::ensure::{
@@ -186,7 +186,22 @@ fn main() -> ExitCode {
             }
         }
 
-        let status_handle = DaemonStatusHandle::new(status);
+        // DEFECT B: learn the live daemon's version over IPC so an ALIVE but
+        // version-skewed daemon fails tools with an honest `daemon_version_skew`
+        // error instead of a misleading `daemon_unavailable`. `system_discover`
+        // is served even by a stale daemon, so its version is the robust source
+        // (Health.version is `serde(default)` and a stale daemon omits it). Only
+        // probe when a daemon is actually there; an Unavailable status is the
+        // daemon_unavailable path, not skew. One bounded IPC round trip; a
+        // matched build => `None` => zero behaviour change.
+        let version_skew = match &status {
+            EnsureDaemonStatus::AlreadyRunning { .. } | EnsureDaemonStatus::Started { .. } => {
+                detect_version_skew(&socket_path, env!("CARGO_PKG_VERSION")).await
+            }
+            EnsureDaemonStatus::Unavailable { .. } => None,
+        };
+
+        let status_handle = DaemonStatusHandle::with_skew(status, version_skew);
         let daemon = McpDaemonClient::with_status(socket_path, status_handle);
         // P5: load the remote-federation target registry (targets.toml). The
         // fs read lives in the daemon crate (`terminal_commanderd::load_targets`),

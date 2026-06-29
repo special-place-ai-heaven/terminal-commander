@@ -177,11 +177,17 @@ pub fn run_self_check(
         }
     }
 
-    // 5. Confirm no socket / no command exec happened (these are
-    //    not actively running in TC36, but we make the contract
-    //    visible in the report).
-    rep.ok("transport: no UDS, no TCP, no MCP stdio (TC37/TC40 scope)");
-    rep.ok("command execution: not wired (TC38/TC44 scope)");
+    // 5. Honest capability summary (DEFECT C): this build WIRES the IPC
+    //    transport and command execution. The old "not wired" / "no UDS"
+    //    text was frozen TC37 scaffold that mis-described 0.1.69 and
+    //    actively misled incident diagnosis. Derive the served-method count
+    //    from the same authority `system_discover` advertises so it cannot
+    //    rot into a new hand-maintained wrong number.
+    rep.ok("transport: UDS (Unix) / named-pipe (Windows) IPC wired");
+    rep.ok(format!(
+        "command execution: wired ({} IPC methods served; see system_discover)",
+        crate::ipc::server::DISCOVERABLE_METHODS.len()
+    ));
 
     if rep.failures > 0 {
         return Err(RuntimeError::SelfCheck(format!(
@@ -328,8 +334,9 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     write_daemon_pidfile(&state_dir, &endpoint);
     tracing::info!(
         "IPC server bound. \
-         Method set: system_discover, health, policy_status, self_check. \
-         Send SIGINT (Ctrl-C) or SIGTERM (or a `Shutdown` IPC request) to shut down."
+         Serving {} IPC methods (authoritative set; query system_discover for the list). \
+         Send SIGINT (Ctrl-C) or SIGTERM (or a `Shutdown` IPC request) to shut down.",
+        crate::ipc::server::DISCOVERABLE_METHODS.len()
     );
 
     // F1 idle self-reap: if configured, spawn a background timer that fires
@@ -739,6 +746,36 @@ mod tests {
         assert!(r.contains("V0003 audit migration"));
         assert!(r.contains("router -> persistent audit pipeline"));
         assert!(r.contains("sudo denied"));
+        cleanup(&data);
+    }
+
+    #[test]
+    fn self_check_reports_wired_capabilities_not_stale_scope_text() {
+        // DEFECT C: the self-check must reflect the REAL served surface, not
+        // the frozen TC37 "not wired" / "no UDS" scaffold text that misled
+        // this incident's diagnosis.
+        let data = temp_data_dir("wired");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let (_state, rep) = run_self_check(cfg).unwrap();
+        let r = rep.render();
+        assert!(
+            !r.contains("not wired") && !r.contains("no UDS"),
+            "self-check must not carry stale 'not wired' / 'no UDS' claims: {r}"
+        );
+        assert!(
+            r.contains("command execution: wired"),
+            "self-check must report command execution wired: {r}"
+        );
+        // The reported method count must derive from the authoritative served
+        // set (the same `DISCOVERABLE_METHODS` `system_discover` advertises),
+        // so the diagnostic cannot drift from reality.
+        assert!(
+            r.contains(&format!(
+                "{} IPC methods",
+                crate::ipc::server::DISCOVERABLE_METHODS.len()
+            )),
+            "self-check method count must derive from DISCOVERABLE_METHODS: {r}"
+        );
         cleanup(&data);
     }
 

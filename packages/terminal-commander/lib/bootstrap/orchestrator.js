@@ -30,7 +30,13 @@ const {
 } = require("./skip.js");
 const { harnessNeedsConfiguration } = require("../harness/needs.js");
 const { runWslBashLc } = require("./ensure_wsl_runtime.js");
-const { LINUX_PATH_PREFIX } = require("./constants.js");
+const { LINUX_PATH_PREFIX, RUNTIME_VERSION_CMD } = require("./constants.js");
+const { DAEMON_RESTART_CMD } = require("../cli/restart.js");
+
+// Authoritative host runtime version. The WSL runtime must match this: a stale
+// WSL runtime serves `health` but not command execution (daemon skew), so the
+// install gate compares versions rather than checking presence alone.
+const HOST_VERSION = require("../../package.json").version;
 
 const BOOTSTRAP_STATUSES = Object.freeze({
   BOOTSTRAP_READY: "bootstrap_ready",
@@ -48,6 +54,32 @@ function logStderr(lines) {
   for (const line of lines) {
     if (line) process.stderr.write(`${line}\n`);
   }
+}
+
+// clap `--version` prints `terminal-commander-mcp <ver>`; take the last
+// whitespace token of the last non-empty line. Returns null when unreadable.
+function parseRuntimeVersion(stdout) {
+  if (!stdout) return null;
+  const text = String(stdout).trim();
+  if (!text) return null;
+  const lastLine = text.split(/\r?\n/).filter((l) => l.trim().length > 0).pop() || "";
+  const token = lastLine.trim().split(/\s+/).pop() || "";
+  return token || null;
+}
+
+// Default WSL runtime-version probe. Runs RUNTIME_VERSION_CMD in the distro via
+// the shared runWslBashLc helper (which surfaces raw stdout) and parses the
+// version token. Injectable as `o.probeRuntimeVersion` for deterministic tests.
+async function defaultProbeRuntimeVersion({ distro, env, exec, wslPath, timeoutMs }) {
+  const res = await runWslBashLc({
+    distro,
+    cmd: RUNTIME_VERSION_CMD,
+    env,
+    exec,
+    wslPath,
+    timeoutMs: typeof timeoutMs === "number" ? timeoutMs : 15_000,
+  });
+  return parseRuntimeVersion(res && res.stdout);
 }
 
 /**
@@ -169,6 +201,10 @@ async function runBootstrap(opts) {
       if (!skipWslInstall) {
         const doctor = o.doctor || wslDoctor;
         let needInstall = true;
+        // Only an actual version skew (runtime present but != host) leaves a
+        // stale LIVE daemon the upgrade must swap. A fresh install (runtime
+        // absent) had no daemon to replace, so the swap stays gated on skew.
+        let skewDetected = false;
         const doc = await doctor({
           distro,
           platform,
@@ -178,7 +214,28 @@ async function runBootstrap(opts) {
           timeoutMs: o.timeoutMs,
         });
         if (doc.status === DOCTOR_STATUSES.RUNTIME_PRESENT) {
-          needInstall = false;
+          // Presence is NOT enough: a stale WSL runtime serves `health` but not
+          // command execution. Compare the WSL runtime version to the host
+          // package version; upgrade on skew (or when the version is unreadable).
+          const probeVersion = o.probeRuntimeVersion || defaultProbeRuntimeVersion;
+          const wslVersion = await probeVersion({
+            distro,
+            env,
+            exec: o.exec,
+            wslPath: o.wslPath,
+            timeoutMs: o.timeoutMs,
+          });
+          if (wslVersion && wslVersion === HOST_VERSION) {
+            needInstall = false;
+          } else {
+            needInstall = true;
+            skewDetected = true;
+            lines.push(
+              wslVersion
+                ? `terminal-commander: WSL runtime ${wslVersion} != host ${HOST_VERSION}; upgrading WSL runtime.`
+                : `terminal-commander: WSL runtime version unreadable; reinstalling to match host ${HOST_VERSION}.`,
+            );
+          }
         }
         if (needInstall) {
           const ensure = await (o.ensureWslRuntime || ensureWslRuntime)({
@@ -203,6 +260,27 @@ async function runBootstrap(opts) {
             }
           } else {
             lines.push("terminal-commander: WSL runtime installed and verified.");
+            // On a DETECTED skew only, swap the live daemon once: re-sourcing
+            // autostart.sh won't replace a running stale daemon (its
+            // `[ -S "$SOCK" ]` early-exit). failSoft: a swap failure is
+            // non-fatal and only logged, matching the surrounding pattern.
+            if (skewDetected) {
+              const restart = await runWslBashLc({
+                distro,
+                cmd: `${LINUX_PATH_PREFIX}${DAEMON_RESTART_CMD}`,
+                env,
+                exec: o.exec,
+                wslPath: o.wslPath,
+                timeoutMs: o.daemonRestartTimeoutMs || 45_000,
+              });
+              if (restart.status === ENSURE_STATUSES.OK) {
+                lines.push("terminal-commander: live WSL daemon swapped to the upgraded runtime.");
+              } else {
+                lines.push(
+                  `terminal-commander: live WSL daemon swap after upgrade not completed (${restart.status}); restart WSL or run 'terminal-commander restart'.`,
+                );
+              }
+            }
           }
         } else {
           lines.push("terminal-commander: WSL runtime already present.");
