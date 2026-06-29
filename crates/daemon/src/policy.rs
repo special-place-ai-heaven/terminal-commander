@@ -1077,6 +1077,14 @@ mod tests {
         }
     }
 
+    // Unix absolute-path + glob policy semantics. On Windows, canonicalize_lexical
+    // resolves these synthetic non-existent paths against the real FS (drive root +
+    // \\?\ verbatim prefix, backslashes) so the Unix glob regexes miss. The daemon's
+    // production target is Linux/WSL (Windows-native daemon deferred, ARCHITECTURE.md
+    // section 10), so these are Unix-only tests. A future Windows-native daemon would
+    // ALSO need the policy glob compilation to account for the \\?\ canonical prefix
+    // (deferred capability, not a current prod path).
+    #[cfg(unix)]
     #[test]
     fn default_deny_path_denied() {
         let e = PolicyEngine::default_engine();
@@ -1558,6 +1566,8 @@ mod tests {
         )
     }
 
+    // Unix path-glob semantics (see default_deny_path_denied).
+    #[cfg(unix)]
     #[test]
     fn read_allow_nonempty_allows_match_denies_miss() {
         // A1: read_allow non-empty -> path matching a glob Allow; miss Deny
@@ -1583,6 +1593,8 @@ mod tests {
         );
     }
 
+    // Unix path-glob semantics (see default_deny_path_denied).
+    #[cfg(unix)]
     #[test]
     fn watch_allow_nonempty_allows_match_denies_miss() {
         // A1: watch_allow governs FileWatch the same way read_allow governs
@@ -1609,6 +1621,8 @@ mod tests {
         );
     }
 
+    // Unix path-glob semantics (see default_deny_path_denied).
+    #[cfg(unix)]
     #[test]
     fn deny_extra_beats_allow_list() {
         // A1: deny_extra is a hard deny layered onto default-deny. A path that
@@ -1641,6 +1655,8 @@ mod tests {
         );
     }
 
+    // Unix path-glob semantics (see default_deny_path_denied).
+    #[cfg(unix)]
     #[test]
     fn deny_extra_applies_to_watch_too() {
         // deny_extra is layered for FileWatch as well as FileRead.
@@ -1784,6 +1800,8 @@ mod tests {
         );
     }
 
+    // Unix path-glob semantics (see default_deny_path_denied).
+    #[cfg(unix)]
     #[test]
     fn traversal_deny_extra_matches_canonical_form() {
         // deny_extra must match the CANONICAL form, not the raw `..` string.
@@ -1822,6 +1840,8 @@ mod tests {
         drop(base);
     }
 
+    // Unix path-glob semantics (see default_deny_path_denied).
+    #[cfg(unix)]
     #[test]
     fn traversal_in_allow_canonical_path_still_allows() {
         // No over-deny: a canonical path genuinely UNDER the allowed marker
@@ -1840,6 +1860,8 @@ mod tests {
 
     // --- TC22 A3: [policy.paths] write_allow enforcement (FileWrite) ---
 
+    // Unix path-glob semantics (see default_deny_path_denied).
+    #[cfg(unix)]
     #[test]
     fn write_allow_nonempty_allows_match_denies_miss() {
         // A3: write_allow non-empty -> a path matching a glob Allow; a miss
@@ -1869,6 +1891,8 @@ mod tests {
         );
     }
 
+    // Unix path-glob semantics (see default_deny_path_denied).
+    #[cfg(unix)]
     #[test]
     fn write_allow_independent_from_read_allow() {
         // A3: write_allow is INDEPENDENT from read_allow. An engine with a
@@ -1903,6 +1927,8 @@ mod tests {
         assert!(v.reason.contains("no_allow_rule"), "{}", v.reason);
     }
 
+    // Unix path-glob semantics (see default_deny_path_denied).
+    #[cfg(unix)]
     #[test]
     fn write_deny_extra_beats_write_allow() {
         // A3: deny_extra is a hard deny layered onto FileWrite too. A path that
