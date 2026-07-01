@@ -619,7 +619,12 @@ impl BucketManager {
         let mut out: Vec<SignalEvent> = Vec::with_capacity(limit);
         let mut last_seq = request.cursor;
         let mut has_more = false;
-        for ev in inner.events.iter().filter(|e| e.seq > request.cursor) {
+        // Iterate a contiguous slice: `VecDeque::iter` pays ring-index
+        // arithmetic per element; `make_contiguous` (we hold the write
+        // lock) hands back a flat slice with no wraparound math. It is a
+        // no-op when the deque is already contiguous.
+        let events = inner.events.make_contiguous();
+        for ev in events.iter().filter(|e| e.seq > request.cursor) {
             if let Some(min) = request.severity_min
                 && ev.severity < min
             {
