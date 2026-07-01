@@ -19,6 +19,7 @@ Baseline commit: `e1b6ff9`
 | 11 | Index-based `while i < events.len()` loop instead of `for ev in events.iter()` | ~412000 | ~412000 | reverted | interleaved 4-2 but sums equal/slightly worse; per-element bounds checks on `events[i]` cancel any gain — the iterator was already elision-friendly |
 | 12 | Drop per-push `last_seq = ev.seq`, derive `next_cursor` from `out.last()` after loop | ~412000 | ~412000 | reverted | interleaved 3-3, sums identical (~0.04%); `last_seq` was already register-resident, the write is free next to the clone |
 | 13 | OUT-OF-BOX: coalesce contiguous matching runs, bulk `extend_from_slice` (specialized clone) instead of N `push(clone())` | ~412000 | ~450000 | reverted | interleaved 3-9 aggregate (tiebreaker 0-6, ~10% slower). Correct (bench asserts pass). But in the DEBUG-measured regime `extend_from_slice`'s clone specialization does not kick in, and the closure-based `matches` predicate costs a non-inlined call per element (same lesson as round 6). Bulk clone only wins in release, which the harness does not measure. |
+| 14 | Hoist `cursor`+`severity_min` into locals on top of the kept kind hoist (opt-level=0 memory-load reasoning) | ~412000 | ~417000 | reverted | interleaved 3-5, candidate ~1.3% higher; unlike `kind` (String->&str removes an indirection), `cursor`(u64)/`severity`(small enum) are one memory load either way — no fewer instructions |
 
 ## Measurement note (agent, round 2+)
 
