@@ -616,7 +616,7 @@ impl BucketManager {
             .unwrap_or(DEFAULT_READ_LIMIT)
             .clamp(1, MAX_READ_LIMIT);
 
-        let mut out: Vec<SignalEvent> = Vec::new();
+        let mut out: Vec<SignalEvent> = Vec::with_capacity(limit);
         let mut last_seq = request.cursor;
         let mut has_more = false;
         for ev in inner.events.iter().filter(|e| e.seq > request.cursor) {
