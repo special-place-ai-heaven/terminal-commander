@@ -11,6 +11,7 @@ Baseline commit: `e1b6ff9`
 | 3 | Single combined `filter` closure + `.take(limit)` + peek `has_more` (move `len>=limit` out of clone hot path) | ~440000 | ~436000 | reverted | interleaved 2-2 tie, all deltas <3% (noise); loop overhead is dwarfed by 2000 clones, no real win |
 | 4 | `out.extend(matches.take(limit).cloned())` instead of manual push loop | ~420000 | ~460000 | reverted | interleaved 0-5, candidate ~30-50k slower every pair; filter+take size_hint defeats extend's fast path |
 | 5 | Iterate `inner.events.make_contiguous()` (flat slice) instead of `VecDeque::iter()` | ~441000 | ~406000 | **kept** | interleaved 9-2 across two batches (6-0 tiebreaker, ~8% faster); slice iterator drops VecDeque ring-index math over 5000 filtered elements; no-op rotate since fixture is already contiguous |
+| 6 | Plain `for ev in events.iter()` with inline `if ev.seq <= cursor { continue }` instead of `.filter()` adaptor | ~425000 | ~410000 | **kept** | interleaved 9-3 across two batches (5-1 tiebreaker, ~3-5% lower sums); removes the per-element filter-closure call (not inlined in debug) over 5000 elements |
 
 ## Measurement note (agent, round 2+)
 

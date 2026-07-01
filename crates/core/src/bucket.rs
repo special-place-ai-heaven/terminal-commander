@@ -624,7 +624,10 @@ impl BucketManager {
         // lock) hands back a flat slice with no wraparound math. It is a
         // no-op when the deque is already contiguous.
         let events = inner.events.make_contiguous();
-        for ev in events.iter().filter(|e| e.seq > request.cursor) {
+        for ev in events.iter() {
+            if ev.seq <= request.cursor {
+                continue;
+            }
             if let Some(min) = request.severity_min
                 && ev.severity < min
             {
