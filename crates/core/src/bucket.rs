@@ -623,6 +623,7 @@ impl BucketManager {
         // arithmetic per element; `make_contiguous` (we hold the write
         // lock) hands back a flat slice with no wraparound math. It is a
         // no-op when the deque is already contiguous.
+        let kind_filter = request.kind_filter.as_deref();
         let events = inner.events.make_contiguous();
         for ev in events.iter() {
             if ev.seq <= request.cursor {
@@ -633,8 +634,8 @@ impl BucketManager {
             {
                 continue;
             }
-            if let Some(ref kf) = request.kind_filter
-                && ev.kind != *kf
+            if let Some(kf) = kind_filter
+                && ev.kind != kf
             {
                 continue;
             }
