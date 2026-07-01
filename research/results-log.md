@@ -17,6 +17,7 @@ Baseline commit: `e1b6ff9`
 | 9 | Pure hoist of `cursor`/`severity_min` (Copy scalars) into loop-local vars, isolated retest of round-2 idea | ~415000 | ~420000 | reverted | interleaved 2-4; compiler already keeps a Copy field behind a shared ref in a register across the loop, so hoisting is redundant |
 | 10 | Hoist `kind_filter` as `Option<&str>` via `as_deref()` once, compare `ev.kind != kf` | ~418000 | ~412000 | **kept** | interleaved 8-4 across two batches (both batches candidate-favored, sums ~0.3-1.3% lower); marginal but reproducible — leaner `Option<&str>` local avoids re-derefing the `Option<String>` behind `&request` per element. Small win. |
 | 11 | Index-based `while i < events.len()` loop instead of `for ev in events.iter()` | ~412000 | ~412000 | reverted | interleaved 4-2 but sums equal/slightly worse; per-element bounds checks on `events[i]` cancel any gain — the iterator was already elision-friendly |
+| 12 | Drop per-push `last_seq = ev.seq`, derive `next_cursor` from `out.last()` after loop | ~412000 | ~412000 | reverted | interleaved 3-3, sums identical (~0.04%); `last_seq` was already register-resident, the write is free next to the clone |
 
 ## Measurement note (agent, round 2+)
 
