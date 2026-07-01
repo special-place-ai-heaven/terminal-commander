@@ -13,6 +13,7 @@ Baseline commit: `e1b6ff9`
 | 5 | Iterate `inner.events.make_contiguous()` (flat slice) instead of `VecDeque::iter()` | ~441000 | ~406000 | **kept** | interleaved 9-2 across two batches (6-0 tiebreaker, ~8% faster); slice iterator drops VecDeque ring-index math over 5000 filtered elements; no-op rotate since fixture is already contiguous |
 | 6 | Plain `for ev in events.iter()` with inline `if ev.seq <= cursor { continue }` instead of `.filter()` adaptor | ~425000 | ~410000 | **kept** | interleaved 9-3 across two batches (5-1 tiebreaker, ~3-5% lower sums); removes the per-element filter-closure call (not inlined in debug) over 5000 elements |
 | 7 | `remaining` countdown counter instead of `out.len() >= limit` for the cap check | ~410000 | ~410000 | reverted | interleaved 5-7 aggregate (tiebreaker 1-5, candidate ~4% slower); Vec::len is already a cheap field read, counter is a wash within noise |
+| 8 | `partition_point` to binary-search first `seq > cursor`, skip per-element cursor check | ~410000 | ~412000 | reverted | interleaved 3-3 tie; fixture cursor=0 skips no prefix, so binary search's ~13 cmps just replace 5000 well-predicted single cmps — no net gain (would help large-cursor calls, but that is not the scored fixture) |
 
 ## Measurement note (agent, round 2+)
 
