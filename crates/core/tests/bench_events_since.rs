@@ -79,7 +79,14 @@ fn query() -> BucketReadRequest {
 fn project(resp: &terminal_commander_core::BucketReadResponse) -> Vec<(u64, String, String, u32)> {
     resp.events
         .iter()
-        .map(|e| (e.seq, e.severity.as_str().to_owned(), e.kind.clone(), e.count))
+        .map(|e| {
+            (
+                e.seq,
+                e.severity.as_str().to_owned(),
+                e.kind.clone(),
+                e.count,
+            )
+        })
         .collect()
 }
 
@@ -102,7 +109,10 @@ fn bench_events_since() {
 
         // Correctness gate: a faster-but-different result is not a win.
         assert_eq!(project(&resp), expected_events, "output events changed");
-        assert_eq!(resp.next_cursor, expected_next_cursor, "next_cursor changed");
+        assert_eq!(
+            resp.next_cursor, expected_next_cursor,
+            "next_cursor changed"
+        );
         assert_eq!(resp.has_more, expected_has_more, "has_more changed");
         assert_eq!(
             resp.dropped_count, expected_dropped_count,
