@@ -1342,7 +1342,9 @@ impl TerminalCommanderMcpServer {
                 // TC-1b: the job_id is already known; a transport failure here
                 // must NOT discard it. Return a degraded, job-identified result
                 // so the agent can recover the live job instead of a bare error.
-                Err(_) => {
+                // The underlying error is surfaced in the hint: swallowing it
+                // made the degradation cause undiagnosable (dogfood 2026-07-02).
+                Err(e) => {
                     return run_and_watch_result(
                         job_id,
                         bucket_id,
@@ -1352,7 +1354,7 @@ impl TerminalCommanderMcpServer {
                         &signals,
                         None,
                         true,
-                        Some(RUN_AND_WATCH_RECOVER_HINT),
+                        Some(&degraded_wait_hint(&e)),
                         compact,
                         // F6: an interrupted wait did not necessarily cap;
                         // degraded:true already marks the result incomplete.
@@ -1403,7 +1405,7 @@ impl TerminalCommanderMcpServer {
                 }
                 Ok(other) => return Err(unexpected_variant(&other)),
                 // TC-1b: same as the status arm -- preserve the job handle.
-                Err(_) => {
+                Err(e) => {
                     return run_and_watch_result(
                         job_id,
                         bucket_id,
@@ -1413,7 +1415,7 @@ impl TerminalCommanderMcpServer {
                         &signals,
                         None,
                         true,
-                        Some(RUN_AND_WATCH_RECOVER_HINT),
+                        Some(&degraded_wait_hint(&e)),
                         compact,
                         // F6: an interrupted wait did not necessarily cap;
                         // degraded:true already marks the result incomplete.
@@ -3829,7 +3831,8 @@ pub struct RuleInput {
     /// Event kind label. Default `match`.
     #[serde(default)]
     pub event_kind: Option<String>,
-    /// Human id. Default auto-minted `inline-<n>`.
+    /// Human id. Default auto-minted `inline-<n>-<matcher digest>` (stable
+    /// for the same matcher, distinct for different matchers).
     #[serde(default)]
     pub id: Option<String>,
     /// Rule version. Default 1.
@@ -3921,7 +3924,18 @@ impl RuleInput {
         };
 
         Ok(RuleDefinition {
-            id: self.id.unwrap_or_else(|| format!("inline-{index}")),
+            id: self.id.unwrap_or_else(|| {
+                // A purely positional `inline-{index}` collides ACROSS calls:
+                // every call's first id-less rule minted "inline-0", so two
+                // different matchers shared one RuleId and events could not
+                // say which inline rule matched. Digest the matcher into the
+                // id so it follows content; index keeps within-call order.
+                use std::hash::{Hash, Hasher};
+                let mut h = std::hash::DefaultHasher::new();
+                self.pattern.hash(&mut h);
+                self.keywords.hash(&mut h);
+                format!("inline-{index}-{:08x}", h.finish() & 0xffff_ffff)
+            }),
             version: self.version.unwrap_or(1),
             kind,
             // Inline rules are bound directly to a job/watch and must run
@@ -4273,6 +4287,17 @@ const RUN_AND_WATCH_POLL_HINT_MS: u64 = 1_000;
 /// An IPC error interrupted the wait, but the job is still tracked by the
 /// daemon, so the agent should confirm liveness before polling -- not re-run.
 const RUN_AND_WATCH_RECOVER_HINT: &str = "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with the `health` tool, then poll command_status with this job_id for the final state and signals. Do not re-run the command.";
+
+/// [`RUN_AND_WATCH_RECOVER_HINT`] with the underlying error appended. A
+/// daemon-returned code and a transport drop need different recovery, and a
+/// fixed phrase made the degradation cause undiagnosable -- the agent (and any
+/// bug report) needs the real code + message.
+fn degraded_wait_hint(e: &IpcError) -> String {
+    format!(
+        "{RUN_AND_WATCH_RECOVER_HINT} (underlying: {:?}: {})",
+        e.code, e.message
+    )
+}
 
 /// Serde default for MCP `bool` params that default to `true`
 /// (`strip_ansi` on `command_start_combed` / `run_and_watch`). A bare
@@ -5366,10 +5391,27 @@ mod tests {
         assert_eq!(def.event_kind, "match");
         assert_eq!(def.summary_template, "${line}");
         assert_eq!(def.version, 1);
-        assert_eq!(def.id, "inline-0");
+        assert!(
+            def.id.starts_with("inline-0-"),
+            "auto id is positional + matcher digest, got: {}",
+            def.id
+        );
         // The whole point: it validates AND is runtime-eligible.
         def.validate().expect("shorthand rule must validate");
         assert!(def.status.is_runtime_eligible());
+    }
+
+    #[test]
+    fn shorthand_auto_ids_differ_when_matchers_differ() {
+        // Regression (dogfood 2026-07-02): two id-less inline rules from two
+        // separate calls both minted "inline-0" -> one shared RuleId, so an
+        // event could not name which inline rule matched.
+        let a = finalize_one(r#"{"pattern": ".+"}"#).unwrap();
+        let b = finalize_one(r#"{"pattern": "WATCH_HIT"}"#).unwrap();
+        assert_ne!(a.id, b.id, "different matchers must mint different ids");
+        // Same matcher stays stable across calls (id follows content).
+        let a2 = finalize_one(r#"{"pattern": ".+"}"#).unwrap();
+        assert_eq!(a.id, a2.id, "same matcher must mint the same auto id");
     }
 
     #[test]
