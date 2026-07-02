@@ -19,6 +19,20 @@ use crate::protocol::{
 /// currently waiting for a connection (between accept and recreate).
 const ERROR_PIPE_BUSY_OS: i32 = windows::Win32::Foundation::ERROR_PIPE_BUSY.0.cast_signed();
 
+/// Win32 ERROR_FILE_NOT_FOUND (2): at this instant NO instance of the pipe
+/// name exists. With a single-pending-instance accept loop this is the same
+/// transient accept/recreate gap as ERROR_PIPE_BUSY, just observed when the
+/// consumed instance has fully closed before the replacement is listening.
+/// Under CPU starvation (heavy builds) the gap widens from microseconds to
+/// whole scheduler quanta, so connects land in it routinely (dogfood
+/// 2026-07-02, BACKLOG P1.0f: healthy daemon reported unavailable under
+/// load). Retried on the same bounded budget; a genuinely-absent daemon
+/// still fails, just up to ~1 s later -- the supervisor/self-heal path is
+/// what handles truly-dead daemons, not this loop.
+const ERROR_FILE_NOT_FOUND_OS: i32 = windows::Win32::Foundation::ERROR_FILE_NOT_FOUND
+    .0
+    .cast_signed();
+
 /// Maximum number of retries when the named pipe is busy.
 const PIPE_BUSY_RETRIES: u32 = 50; // 50 × 20 ms = 1 000 ms
 
@@ -57,13 +71,31 @@ impl DaemonClient {
         correlation_id: u64,
         request: IpcRequest,
     ) -> Result<IpcResponse, IpcError> {
+        self.call_with_timeout(correlation_id, request, self.request_timeout)
+            .await
+    }
+
+    /// Run one round trip with an explicit per-CALL transport deadline,
+    /// overriding the client-level `request_timeout`. Required for requests
+    /// that legitimately BLOCK daemon-side (e.g. `bucket_wait` holds the
+    /// response up to `MAX_BUCKET_WAIT_MS`): their transport deadline must
+    /// COVER the daemon's promised blocking budget or a healthy long wait is
+    /// cancelled client-side and misread as a dead daemon.
+    pub async fn call_with_timeout(
+        &self,
+        correlation_id: u64,
+        request: IpcRequest,
+        timeout: Duration,
+    ) -> Result<IpcResponse, IpcError> {
         let env = RequestEnvelope {
             correlation_id,
             request,
         };
-        let resp_env = tokio::time::timeout(self.request_timeout, self.round_trip(&env))
+        let resp_env = tokio::time::timeout(timeout, self.round_trip(&env))
             .await
-            .map_err(|_| IpcError::transport("request timed out"))??;
+            .map_err(|_| {
+                IpcError::transport(format!("request timed out after {}ms", timeout.as_millis()))
+            })??;
         if resp_env.correlation_id != correlation_id {
             return Err(IpcError::transport(format!(
                 "correlation mismatch: expected {correlation_id} got {}",
@@ -94,11 +126,21 @@ impl DaemonClient {
             loop {
                 match ClientOptions::new().open(&pipe_name) {
                     Ok(p) => break p,
-                    Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY_OS) => {
+                    // Both errors are the transient accept/recreate gap of a
+                    // single-pending-instance server: BUSY = instances exist
+                    // but none listening; FILE_NOT_FOUND = the consumed
+                    // instance closed before the replacement was listening
+                    // (routine under CPU starvation -- see the constant docs).
+                    Err(e)
+                        if matches!(
+                            e.raw_os_error(),
+                            Some(ERROR_PIPE_BUSY_OS | ERROR_FILE_NOT_FOUND_OS)
+                        ) =>
+                    {
                         attempt += 1;
                         if attempt >= PIPE_BUSY_RETRIES {
                             return Err(IpcError::transport(format!(
-                                "pipe connect: ERROR_PIPE_BUSY after {attempt} retries: {e}"
+                                "pipe connect: still failing after {attempt} retries: {e}"
                             )));
                         }
                         tokio::time::sleep(Duration::from_millis(PIPE_BUSY_DELAY_MS)).await;

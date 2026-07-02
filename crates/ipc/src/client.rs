@@ -64,13 +64,31 @@ impl DaemonClient {
         correlation_id: u64,
         request: IpcRequest,
     ) -> Result<IpcResponse, IpcError> {
+        self.call_with_timeout(correlation_id, request, self.request_timeout)
+            .await
+    }
+
+    /// Run one round trip with an explicit per-CALL transport deadline,
+    /// overriding the client-level `request_timeout`. Required for requests
+    /// that legitimately BLOCK daemon-side (e.g. `bucket_wait` holds the
+    /// response up to `MAX_BUCKET_WAIT_MS`): their transport deadline must
+    /// COVER the daemon's promised blocking budget or a healthy long wait is
+    /// cancelled client-side and misread as a dead daemon.
+    pub async fn call_with_timeout(
+        &self,
+        correlation_id: u64,
+        request: IpcRequest,
+        timeout: Duration,
+    ) -> Result<IpcResponse, IpcError> {
         let env = RequestEnvelope {
             correlation_id,
             request,
         };
-        let resp_env = tokio::time::timeout(self.request_timeout, self.round_trip(&env))
+        let resp_env = tokio::time::timeout(timeout, self.round_trip(&env))
             .await
-            .map_err(|_| IpcError::transport("request timed out"))??;
+            .map_err(|_| {
+                IpcError::transport(format!("request timed out after {}ms", timeout.as_millis()))
+            })??;
         if resp_env.correlation_id != correlation_id {
             return Err(IpcError::transport(format!(
                 "correlation mismatch: expected {correlation_id} got {}",

@@ -3044,11 +3044,12 @@ pub fn into_mcp_error_for(request_is_idempotent: bool, e: &IpcError) -> McpError
     // semantics at the application layer (the `code` is `daemon_unavailable`),
     // which trains agents to abandon TC for raw shell (TB-7 / Cursor call #21).
     // This must come BEFORE the code match: a transport error is `Internal`-
-    // coded but is "could not reach the daemon", not a server fault. The raw OS
-    // detail (e.g. "pipe connect ... os error 2") is deliberately NOT leaked
-    // into the message or data.
+    // coded but is "could not reach the daemon", not a server fault. The raw
+    // transport detail stays out of the top-level message but rides in the
+    // structured details as `transport_detail` -- diagnosability beats
+    // tidiness (dogfood 2026-07-02: five opaque failures, one lost day).
     if e.is_transport() {
-        return transport_unavailable_error(request_is_idempotent);
+        return transport_unavailable_error(request_is_idempotent, e);
     }
     let message: Cow<'static, str> = Cow::Owned(format_ipc_error(e));
     let mut data = serde_json::json!({
@@ -3449,7 +3450,7 @@ fn remote_denied_error(target_id: &str) -> McpError {
 ///     the daemon already applied the change. The remedy is operation-neutral
 ///     and explicitly does NOT say "retry the tool": it tells the agent to
 ///     reconcile actual state via `command_status` / `runtime_state` first.
-fn transport_unavailable_error(operation_is_idempotent: bool) -> McpError {
+fn transport_unavailable_error(operation_is_idempotent: bool, cause: &IpcError) -> McpError {
     let (recovery, remedy) = if operation_is_idempotent {
         (
             "auto-recovery (health re-probe + one retry) was attempted",
@@ -3473,6 +3474,12 @@ fn transport_unavailable_error(operation_is_idempotent: bool) -> McpError {
             "phase": "mid_call_transport",
             "recovery": recovery,
             "remedy": remedy,
+            // The underlying transport failure, verbatim. Kept OUT of the
+            // top-level message (bounded, non-alarming) but carried in the
+            // structured details: without it, "timed out" vs "connect
+            // refused" vs "pipe busy" are indistinguishable and the true
+            // cause is undiagnosable (dogfood 2026-07-02, BACKLOG P1.0f).
+            "transport_detail": cause.message,
         },
     });
     McpError::internal_error("daemon_unavailable", Some(payload))
@@ -7058,11 +7065,27 @@ mod tests {
             rendered.contains("daemon_unavailable"),
             "transport failure must surface the daemon_unavailable envelope, got: {rendered}"
         );
-        // The raw transport detail must NOT leak (this is the exact regression
-        // `assert_daemon_unavailable_tool_error` guards in the integration test).
+        // The transport detail is CONFINED to the structured
+        // `details.transport_detail` (diagnosability -- P1.0f) while the
+        // top-level message stays clean and the raw ipc_code stays absent.
         assert!(
-            !rendered.contains("pipe connect") && !rendered.contains("ipc_code"),
-            "transport failure must not leak the raw IPC failure detail, got: {rendered}"
+            !rendered.contains("ipc_code"),
+            "transport failure must not surface a raw ipc_code, got: {rendered}"
+        );
+        let data = into_mcp_error(&transport)
+            .data
+            .expect("transport envelope carries a data payload");
+        assert_eq!(
+            data["message"].as_str(),
+            Some("terminal-commanderd became unreachable mid-call"),
+            "top-level envelope message stays clean; got: {data}"
+        );
+        assert!(
+            data["details"]["transport_detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("pipe connect")),
+            "the underlying transport failure must ride in details.transport_detail \
+             (P1.0f: an opaque envelope made the true cause undiagnosable); got: {data}"
         );
     }
 
@@ -7120,11 +7143,19 @@ mod tests {
             "the MUTATING remedy must be operation-neutral; got: {remedy}"
         );
 
-        // The raw OS detail still must not leak.
-        let rendered = serde_json::to_string(&data).unwrap();
+        // The raw detail rides ONLY in details.transport_detail; the
+        // envelope's own message stays clean.
         assert!(
-            !rendered.contains("pipe connect"),
-            "the mutating envelope must not leak the raw IPC failure detail; got: {rendered}"
+            data["details"]["transport_detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("pipe connect")),
+            "the mutating envelope must carry the underlying cause in \
+             details.transport_detail; got: {data}"
+        );
+        assert_eq!(
+            data["message"].as_str(),
+            Some("terminal-commanderd became unreachable mid-call"),
+            "top-level envelope message stays clean; got: {data}"
         );
     }
 

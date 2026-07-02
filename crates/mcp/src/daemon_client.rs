@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use terminal_commander_ipc::{IpcError, IpcRequest, IpcResponse};
+use terminal_commander_ipc::{IpcError, IpcRequest, IpcResponse, MAX_BUCKET_WAIT_MS};
 use terminal_commander_supervisor::ensure::EnsureDaemonStatus;
 use terminal_commander_supervisor::paths;
 
@@ -185,6 +185,33 @@ pub struct McpDaemonClient {
     status: Option<DaemonStatusHandle>,
 }
 
+/// Margin added on top of a request's daemon-side blocking budget to form its
+/// per-request transport deadline (covers connect retries + write + read
+/// latency around the daemon's hold). Mirrors the subscription-pull client's
+/// budget shape (12 s client for an ~8 s daemon hold).
+const BLOCKING_DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// The transport deadline for a request that legitimately BLOCKS daemon-side,
+/// or `None` for ordinary requests (client-level timeout applies).
+///
+/// `bucket_wait` holds its response up to the clamped `timeout_ms` (max
+/// [`MAX_BUCKET_WAIT_MS`] = 30 s) and `shell_session_exec` holds up to its
+/// clamped `wait_ms` settle window -- but the shared client cancels every
+/// round trip at a flat 5 s. A quiet bucket + `timeout_ms > 5s` therefore
+/// ALWAYS timed out client-side, self-healed (health is fast and fine),
+/// retried, timed out again, and surfaced as `daemon_unavailable` against a
+/// perfectly healthy daemon (dogfood 2026-07-02, BACKLOG P1.0f). The deadline
+/// must COVER the daemon's promised hold.
+fn blocking_deadline(request: &IpcRequest) -> Option<std::time::Duration> {
+    match request {
+        IpcRequest::BucketWait(p) => Some(p.timeout() + BLOCKING_DEADLINE_MARGIN),
+        IpcRequest::ShellSessionExec(p) => p.wait_ms.map(|ms| {
+            std::time::Duration::from_millis(ms.min(MAX_BUCKET_WAIT_MS)) + BLOCKING_DEADLINE_MARGIN
+        }),
+        _ => None,
+    }
+}
+
 impl McpDaemonClient {
     /// Construct a client targeting the given socket path. Does not
     /// open a connection until [`McpDaemonClient::call`] is invoked.
@@ -264,7 +291,8 @@ impl McpDaemonClient {
     /// path, mcp stays a thin client.
     pub async fn call(&self, request: IpcRequest) -> Result<IpcResponse, IpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        match self.inner.call(id, request.clone()).await {
+        let deadline = blocking_deadline(&request);
+        match self.call_inner(id, request.clone(), deadline).await {
             Ok(resp) => Ok(resp),
             Err(e) if e.is_transport() => {
                 // Could not reach the daemon mid-call. ALWAYS attempt recovery
@@ -276,7 +304,7 @@ impl McpDaemonClient {
                     // Safe to re-send: a pure read / idempotent reposition can
                     // run twice without a server-side double-effect.
                     let retry_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                    self.inner.call(retry_id, request).await
+                    self.call_inner(retry_id, request, deadline).await
                 } else {
                     // Mutating RPC: the daemon may already have performed the
                     // side effect before the transport dropped. Returning the
@@ -286,6 +314,21 @@ impl McpDaemonClient {
                 }
             }
             Err(e) => Err(e),
+        }
+    }
+
+    /// One inner round trip, honoring a per-request transport deadline when
+    /// the request has a daemon-side blocking budget (see
+    /// [`blocking_deadline`]); otherwise the client-level timeout applies.
+    async fn call_inner(
+        &self,
+        id: u64,
+        request: IpcRequest,
+        deadline: Option<std::time::Duration>,
+    ) -> Result<IpcResponse, IpcError> {
+        match deadline {
+            Some(d) => self.inner.call_with_timeout(id, request, d).await,
+            None => self.inner.call(id, request).await,
         }
     }
 
@@ -370,6 +413,37 @@ mod tests {
         let p = std::path::Path::new("/tmp/tc-record.sock");
         let c = McpDaemonClient::new(p);
         assert_eq!(c.socket_path(), p);
+    }
+
+    // --- P1.0f: per-request transport deadlines for blocking requests ---
+
+    #[test]
+    fn blocking_deadline_covers_bucket_wait_hold() {
+        // A 55s request clamps to MAX_BUCKET_WAIT_MS daemon-side; the
+        // transport deadline must cover that clamped hold plus margin --
+        // before this, the flat 5s client cancelled every quiet wait > 5s
+        // and misreported a healthy daemon as unavailable.
+        let p = terminal_commander_ipc::BucketWaitParams {
+            bucket_id: terminal_commander_core::BucketId::new(),
+            cursor: 0,
+            severity_min: None,
+            kind_filter: None,
+            limit: None,
+            timeout_ms: Some(55_000),
+        };
+        let d = blocking_deadline(&IpcRequest::BucketWait(p)).expect("bucket_wait blocks");
+        assert_eq!(
+            d,
+            std::time::Duration::from_millis(MAX_BUCKET_WAIT_MS) + BLOCKING_DEADLINE_MARGIN
+        );
+    }
+
+    #[test]
+    fn blocking_deadline_none_for_ordinary_requests() {
+        assert!(
+            blocking_deadline(&IpcRequest::Health).is_none(),
+            "non-blocking requests keep the client-level timeout"
+        );
     }
 
     // --- FIX D: self-heal handle behaviour ---

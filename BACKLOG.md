@@ -241,6 +241,20 @@ daemon wait it forwards (bucket_wait 30s). Reproduce under load with
 the surfaced error string before choosing the constant.
 **Scope:** `crates/mcp/src/daemon_client.rs`, `crates/ipc/src/client.rs`,
 `crates/ipc/src/pipe_client.rs`.
+**Resolution (as_of 2026-07-02, second dogfood round):** the surfaced
+error string pinned the mechanism live: `pipe connect: The system
+cannot find the file specified. (os error 2)` — connects landing in
+the single-pending-instance accept/recreate gap, which under CPU
+starvation widens to whole scheduler quanta; ERROR_FILE_NOT_FOUND was
+not in the ERROR_PIPE_BUSY retry loop so it failed instantly (and the
+immediate idempotent retry landed in the same gap). Fixed three ways:
+(1) ERROR_FILE_NOT_FOUND joins the bounded connect-retry loop;
+(2) per-request transport deadlines — bucket_wait / session-exec get
+their clamped daemon-side budget + 4 s margin instead of the flat 5 s
+client timeout (which also deterministically killed ANY quiet wait
+over ~5 s, load or not); (3) the daemon_unavailable envelope carries
+`details.transport_detail`. OPTIONAL follow-up: server-side, keep N>1
+pending pipe instances to shrink the gap at the source.
 
 ### P1.0g — dogfood 2026-07-02 ergonomics batch
 
