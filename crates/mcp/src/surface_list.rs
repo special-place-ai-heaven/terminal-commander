@@ -37,8 +37,8 @@ action=\"pty_start\"; write stdin with pty_stdin; stop with pty_stop; list with 
 For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires allow_session), sh_exec, sh_status, sh_stop, sh_list.";
 
 /// Description for the `files` facade.
-pub(crate) const FILES_FACADE_DESCRIPTION: &str = "File operations: bounded read (action=\"read\"), substring search, \
-atomic write, file-watch start/stop/list, and workspace snapshots \
+pub(crate) const FILES_FACADE_DESCRIPTION: &str = "File operations: bounded read (action=\"read\"), directory listing (action=\"list\"), \
+substring search, atomic write, file-watch start/stop/list, and workspace snapshots \
 (snapshot_create, snapshot_apply). All paths must be absolute.";
 
 /// Description for the `registry` facade.
@@ -452,6 +452,7 @@ mod tests {
             (
                 "files",
                 &[
+                    "list",
                     "read",
                     "search",
                     "snapshot_apply",
