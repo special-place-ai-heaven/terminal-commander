@@ -37,15 +37,15 @@ ignored.
 **Why this priority**: This was the single largest observed waste. Live
 repro: `registry deactivate` revealed missing fields one per call (three
 round-trips to learn one call shape), and `sub_pull` silently accepted
-`timeout_ms` while honoring only `wait_ms` — the agent believed it had set a
+`wait_ms` while honoring only `timeout_ms` — the agent believed it had set a
 30 s wait when it had set nothing, and misdiagnosed the resulting behavior as
 a daemon bug. Silent parameter acceptance corrupts agent reasoning; every
 other item in this batch is cheaper once errors teach completely.
 
 **Independent Test**: Call `registry` action=`deactivate` with only
 `rule_id`; the single error names every other required field. Call `command`
-action=`sub_pull` with `timeout_ms`; the error names `timeout_ms` as unknown
-for the action and names `wait_ms` as the field that action consumes.
+action=`sub_pull` with `wait_ms`; the error names `wait_ms` as unknown
+for the action and names `timeout_ms` as the field that action consumes.
 
 **Acceptance Scenarios**:
 
