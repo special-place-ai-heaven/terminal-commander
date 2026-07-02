@@ -1,11 +1,16 @@
 {
-  "version": "0.10.2",
+  "version": "0.12.0",
   "integration_state_schema": 1,
   "installed_integrations": [
-    "claude"
+    "claude",
+    "cursor-agent"
   ],
   "integration_settings": {
     "claude": {
+      "script": "ps",
+      "invoke_separator": "-"
+    },
+    "cursor-agent": {
       "script": "ps",
       "invoke_separator": "-"
     }
