@@ -219,4 +219,28 @@ mod tests {
         .expect("probe_status must parse");
         assert!(matches!(v, StatusFacadeCall::ProbeStatus(_)));
     }
+
+    #[test]
+    fn facade_samples_alias_still_accepted_on_suggest() {
+        // FR-003: the runtime-only `samples` alias (absent from the advertised
+        // schema, which shows only `sample_lines`) must pass the strict
+        // validator AND still deserialize into SuggestFromSamples.
+        let with_alias = serde_json::json!({
+            "action": "suggest_from_samples",
+            "samples": ["error: boom"]
+        });
+        crate::facade_strict::validate_facade_call("registry", &with_alias)
+            .expect("samples alias must pass strict validation");
+        let v: RegistryFacadeCall =
+            serde_json::from_value(with_alias).expect("alias must still deserialize");
+        assert!(matches!(v, RegistryFacadeCall::SuggestFromSamples(_)));
+
+        // The advertised field name also passes.
+        let with_canonical = serde_json::json!({
+            "action": "suggest_from_samples",
+            "sample_lines": ["error: boom"]
+        });
+        crate::facade_strict::validate_facade_call("registry", &with_canonical)
+            .expect("sample_lines must pass strict validation");
+    }
 }

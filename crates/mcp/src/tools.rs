@@ -2969,6 +2969,16 @@ impl ServerHandler for TerminalCommanderMcpServer {
                 .unwrap_or_else(crate::surface::surface_from_env),
             request.name.as_ref(),
         )?;
+        // US1 strictness: for the five facade tools, validate the raw call
+        // object against the advertised action schema BEFORE the router
+        // deserializes the *FacadeCall enum. A well-formed call passes untouched
+        // (byte-identical dispatch); a malformed one gets ONE teaching error
+        // naming the action + every missing/unknown field. Legacy granular tools
+        // are not facades and are not validated here.
+        if crate::surface_list::COMPACT_TOOL_NAMES.contains(&request.name.as_ref()) {
+            let call = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
+            crate::facade_strict::validate_facade_call(request.name.as_ref(), &call)?;
+        }
         // Delegate to the SAME router the macro used -- dispatch still flows
         // through `self.tool_router`; no hand-rolled per-tool match.
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
