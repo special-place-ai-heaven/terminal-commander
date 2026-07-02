@@ -23,7 +23,7 @@ fn fixture_event(bid: BucketId, seq: u64) -> SignalEvent {
         1 => Severity::Medium,
         _ => Severity::High,
     };
-    let kind = if seq % 2 == 0 { "a" } else { "b" };
+    let kind = if seq.is_multiple_of(2) { "a" } else { "b" };
     SignalEvent {
         event_id: terminal_commander_core::EventId::new(),
         bucket_id: bid,
@@ -62,7 +62,7 @@ fn build_fixture() -> (BucketManager, BucketId) {
     (mgr, bid)
 }
 
-fn query() -> BucketReadRequest {
+const fn query() -> BucketReadRequest {
     BucketReadRequest {
         cursor: 0,
         severity_min: Some(Severity::Low),
