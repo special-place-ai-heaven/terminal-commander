@@ -671,7 +671,14 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     noise_pipeline: SharedProbeNoisePipeline,
     strip_ansi: bool,
 ) {
-    let mut reader = BufReader::new(stream);
+    // Transcode a UTF-16 child stream (e.g. `wsl.exe --list --verbose`, which
+    // emits UTF-16LE on Windows) to UTF-8 BEFORE line splitting. Without this,
+    // the `\n` scan below hits the `0A 00` of a UTF-16 newline and desyncs the
+    // stream into NUL-riddled garbage. Non-UTF-16 streams latch pass-through on
+    // the first chunk and this adds no cost. Mirrors the strip_ansi seam: a
+    // small focused decoder wired at the read boundary, one layer earlier
+    // because the encoding decides how bytes group into lines.
+    let mut reader = BufReader::new(crate::utf16::Utf16Decoder::new(stream));
     let mut line_no: u64 = 0;
     loop {
         // `read_line_bounded` returns raw bytes and so never errors on
@@ -1050,8 +1057,15 @@ mod tests {
             let bucket = BucketId::new();
             let sifter = Arc::new(SifterRuntime::build(&[rule_warning()]).unwrap());
             let sink: Arc<dyn EventSink> = Arc::new(InMemorySink::new());
-            // 0xFF 0xFE is invalid UTF-8 (lone bytes / BOM-ish noise).
-            let argv = argv_raw_prefix_then_line(&[0xFF, 0xFE, 0x00, 0xC0], "WARN: real line");
+            // Invalid-UTF-8 lead/continuation bytes as arbitrary noise. The
+            // prefix must NOT begin with `FF FE`/`FE FF`: those are the UTF-16
+            // BOM, which the read layer now (correctly) latches and transcodes
+            // as UTF-16 -- pairing the trailing `\n` into a code unit and
+            // yielding one un-split line. This test is about mid-stream invalid
+            // UTF-8 surviving capture, not encoding detection, so the BOM bytes
+            // sit AFTER a non-BOM lead byte (UTF-16 detection is a separate
+            // test: `utf16le_wsl_output_yields_clean_lines`).
+            let argv = argv_raw_prefix_then_line(&[0xC0, 0x00, 0xFF, 0xFE], "WARN: real line");
             let mut probe = ProcessProbe::spawn(
                 &argv,
                 &ProcessProbeConfig::for_bucket(bucket),
@@ -1196,6 +1210,104 @@ mod tests {
                 .expect("io ok")
                 .expect("a line");
             assert_eq!(second.bytes, b"ok");
+        });
+    }
+
+    // --- UTF-16LE transcode through the real byte->line pipeline (wsl.exe) ---
+
+    /// An `AsyncRead` that yields its data in fixed-size slices so a UTF-16
+    /// code unit can be forced to straddle a `poll_read` boundary -- the same
+    /// fragmentation a real pipe produces. `chunk == usize::MAX` means "all at
+    /// once" (single-chunk, like a small slice read).
+    struct ChunkedReader {
+        data: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+    }
+    impl tokio::io::AsyncRead for ChunkedReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let remaining = self.data.len() - self.pos;
+            if remaining == 0 {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            let n = remaining.min(self.chunk).min(buf.remaining());
+            let start = self.pos;
+            let slice = self.data[start..start + n].to_vec();
+            buf.put_slice(&slice);
+            self.pos += n;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Encode `s` as UTF-16LE bytes, optionally prefixed with the LE BOM.
+    fn utf16le(s: &str, bom: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        if bom {
+            out.extend_from_slice(&[0xFF, 0xFE]);
+        }
+        for u in s.encode_utf16() {
+            out.extend_from_slice(&u.to_le_bytes());
+        }
+        out
+    }
+
+    /// Drive the EXACT byte->line pipeline `read_stream` uses -- the UTF-16
+    /// decoder, the `BufReader`, and `read_line_bounded` -- and collect the
+    /// decoded, CR-trimmed lines. `chunk` controls how the raw bytes are
+    /// fragmented into `poll_read` calls.
+    async fn pipeline_lines(raw: Vec<u8>, chunk: usize) -> Vec<String> {
+        let decoder = crate::utf16::Utf16Decoder::new(ChunkedReader {
+            data: raw,
+            pos: 0,
+            chunk,
+        });
+        let mut reader = BufReader::new(decoder);
+        let mut lines = Vec::new();
+        while let Ok(Some(LineRead { bytes, .. })) = read_line_bounded(&mut reader).await {
+            let text = String::from_utf8_lossy(&bytes);
+            lines.push(text.trim_end_matches('\r').to_owned());
+        }
+        lines
+    }
+
+    /// Acceptance (1): a UTF-16LE `wsl.exe --list --verbose`-shaped stream must
+    /// yield clean UTF-8 lines through the whole pipeline -- with a BOM, without
+    /// a BOM (heuristic), and with a code unit split across a chunk boundary.
+    #[test]
+    fn utf16le_wsl_output_yields_clean_lines() {
+        let runtime = rt();
+        runtime.block_on(async {
+            // CRLF like real Windows tool output; the pipeline trims the CR.
+            let wsl = "  NAME            STATE           VERSION\r\n\
+                       * Ubuntu          Running         2\r\n\
+                         docker-desktop  Stopped         2\r\n";
+            let expected: Vec<String> = wsl
+                .split_terminator('\n')
+                .map(|l| l.trim_end_matches('\r').to_owned())
+                .collect();
+
+            // (a) With BOM, single chunk.
+            let with_bom = pipeline_lines(utf16le(wsl, true), usize::MAX).await;
+            assert_eq!(with_bom, expected, "BOM'd UTF-16LE must decode cleanly");
+
+            // (b) Without BOM: the heuristic must latch UTF-16LE.
+            let no_bom = pipeline_lines(utf16le(wsl, false), usize::MAX).await;
+            assert_eq!(no_bom, expected, "BOM-less UTF-16LE must be detected");
+
+            // (c) Odd chunk size splits code units (incl. the `0A 00` newline)
+            //     across poll_read boundaries -- the carry must reassemble them.
+            let split = pipeline_lines(utf16le(wsl, true), 3).await;
+            assert_eq!(split, expected, "split code units must reassemble");
+
+            // No line contains a stray NUL or the desync artifacts of a raw
+            // UTF-16 byte scan.
+            for line in &with_bom {
+                assert!(!line.contains('\u{0}'), "no NUL bytes: {line:?}");
+            }
         });
     }
 
