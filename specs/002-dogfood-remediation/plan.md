@@ -154,7 +154,8 @@ Stories are independent by design; the only soft ordering constraints:
    other stories' tests ride on). Skipping with written rationale is
    compliant.
 4. Suggested batches respecting the 5-file phase discipline:
-   P1 = US1, US2, US3; P2 = US4, US5, US6, US8; P3 = US7, US9.
+   P1 = US1, US2, US3; P2 = US4, US5, US8, US6 (security before
+   convenience); P3 = US7, US9.
 
 ## Complexity Tracking
 

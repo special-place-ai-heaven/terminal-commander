@@ -35,26 +35,38 @@ manages WSL itself and carries no command payload -> `Management`:
 
 ### Step 3 — payload location
 
-Skip recognized selectors/introducers, in any valid order, to find the
-first payload token:
+Skip recognized selectors, in any valid order, to find the payload; note
+which INTRODUCER (if any) precedes it — the introducer decides the
+execution mode in step 4:
 
 ```text
--d <distro>   --distribution <distro>
--u <user>     --user <user>
---cd <dir>
---system
--e            --exec
---
---shell-type <standard|login|none>
+selectors (skipped):
+  ~             (start-in-home shorthand — a selector, never a payload)
+  -d <distro>   --distribution <distro>
+  -u <user>     --user <user>
+  --cd <dir>
+  --system
+  --shell-type <standard|login|none>
+introducers (mode-deciding):
+  -e            --exec     (DIRECT EXEC: wsl bypasses the distro shell)
+  --            (end-of-options: payload is handed to the distro's
+                 DEFAULT SHELL — shell-interpreted, same as no introducer)
 ```
 
 ### Step 4 — payload classification
 
+`wsl.exe` only bypasses the distro shell for payloads introduced by
+`-e`/`--exec`. A bare payload (no introducer) and a `--`-introduced
+payload are handed to the distro's DEFAULT SHELL as a command line — WSL
+itself shell-interprets them (globs, `$(...)`, redirects). The shell
+capability therefore gates them regardless of the program they name.
+
 | Payload | Class | Rationale |
 |---|---|---|
-| first token's basename in `SHELL_INTERPRETERS_DENY` (e.g. `bash`, `sh`, `zsh`, `busybox`) | `NestedShell{interpreter}` | a shell line smuggled through argv |
+| via `-e`/`--exec`, first token's basename in `SHELL_INTERPRETERS_DENY` (e.g. `bash`, `sh`, `zsh`, `busybox`) | `NestedShell{interpreter}` | a shell line smuggled through argv |
+| via `-e`/`--exec`, any other program (`cargo`, `uname`, `ls`, ...) | `NonShellPayload` | direct exec, no shell interpretation; runs exactly as today |
+| NOT via `-e`/`--exec` (bare payload, or after `--`) | `NestedShell{interpreter}` — the recognized interpreter if the first token is one, else `"default shell interpretation"` | WSL passes the line through the distro's default shell; running it IS running a shell |
 | EMPTY (bare `wsl.exe`, or selectors with no command) | `NestedShell{interpreter: "default shell"}` | wsl with no command launches the distro's default interactive shell |
-| any other program (`cargo`, `uname`, `ls`, ...) | `NonShellPayload` | runs exactly as today |
 | unrecognized flag in payload position | `UnknownConstruction` | **FAIL CLOSED** — treated as potentially carrying a payload |
 
 ## Enforcement contract
@@ -105,11 +117,13 @@ wsl.exe --status                  -> Management      -> runs
 
 ```text
 wsl.exe -e bash -lc "..."             -> NestedShell(bash)
-wsl bash                              -> NestedShell(bash)
-wsl.exe -- sh -c "..."                -> NestedShell(sh)
+wsl bash                              -> NestedShell(bash)        [bare: shell-interpreted anyway]
+wsl.exe -- sh -c "..."                -> NestedShell(sh)          [--: shell-interpreted anyway]
 wsl.exe -d Ubuntu -e zsh              -> NestedShell(zsh)
 C:\Windows\System32\wsl.exe -e bash   -> NestedShell(bash)
 wsl.exe --exec busybox sh             -> NestedShell(busybox)
+wsl.exe echo $(id)                    -> NestedShell(default shell interpretation)  [bare payload, no -e]
+wsl.exe ~                             -> NestedShell(default shell)  [~ is a selector; empty payload]
 wsl.exe                               -> NestedShell(default shell)
 wsl.exe --some-future-flag x          -> UnknownConstruction (fail closed)
 ```

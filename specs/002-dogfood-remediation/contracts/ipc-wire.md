@@ -219,13 +219,15 @@ pub struct FileWriteParams {
 ```
 
 `FileWriteResponse` unchanged (`bytes_written` = bytes appended in append
-mode). **Atomicity contract**: an append either fully lands or does not
-happen; the original content is never modified. Implementation: open with
-append mode + a single `write_all` + `sync_all` (payload capped at
-`MAX_FILE_WRITE_BYTES` = 192 KiB); OS append-mode offset atomicity is what
-serializes racing appenders (spec edge case: both land, order unspecified).
-Domain audit row: same `file_write` action, metadata gains
-`"append": true`.
+mode). **Integrity contract (honest)**: the original content is never
+modified and racing appends never interleave (OS append-mode offset
+atomicity serializes appenders; spec edge case: both land, order
+unspecified). All-or-nothing is NOT promised: a mid-write I/O failure
+(e.g. disk full) can leave a partial append and MUST surface as an error
+reporting the bytes actually written. Implementation: open with append
+mode + a single `write_all` + `sync_all` (payload capped at
+`MAX_FILE_WRITE_BYTES` = 192 KiB). Domain audit row: same `file_write`
+action, metadata gains `"append": true`.
 
 ## W7. RegistryImportPackResponse — semantics only (US2)
 

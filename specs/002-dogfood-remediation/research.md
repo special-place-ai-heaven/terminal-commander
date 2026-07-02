@@ -59,8 +59,18 @@ the existing enum and dispatch unchanged.
 - Counterpart remedies come from a small static table consulted for unknown
   fields; seed entries: `wait_ms` -> `timeout_ms` (on `sub_pull`, `wait`),
   `timeout_ms` -> `wait_ms` (on `run_and_watch`, `sh_exec`, `pty_stdin`).
-  Secondary hint: if the unknown field exists on a sibling action of the
-  same facade, name that action.
+  A counterpart is suggested ONLY if it exists in the chosen action's live
+  schema `properties` at suggestion time — entries for fields other
+  stories add later (e.g. `wait_ms` on `pty_stdin` from US5) activate only
+  once those fields ship, so landing order never produces a misleading
+  remedy. Secondary hint: if the unknown field exists on a sibling action
+  of the same facade, name that action.
+- The ADVERTISED tools/list schema stays the `*FacadeCall` schemars
+  schema; only runtime parameter ACCEPTANCE switches to a raw object. rmcp
+  couples `Parameters<T>` to schema generation, so the implementer must
+  decouple the two (emit the enum's schema explicitly). Guards:
+  `command_facade_action_map_is_total` and the new
+  `facade_validator_derives_from_advertised_schema` must both stay green.
 - Unknown `action` value: teaching error listing the valid actions (serde
   already enumerates variants; the validator should preserve that quality).
 - Well-formed calls must be byte-identical: validation passes -> the
@@ -375,13 +385,19 @@ Classification rules (argv-only, file contents never inspected):
   `--version`, `--help`, `--shutdown`, `--terminate`, `--set-default`,
   `--set-version`, `--export`, `--import`, `--mount`, `--unmount`,
   `--update`, `--install`, `--manage`) -> `Management` (runs as today).
-- Payload introducers and selectors are skipped to find the payload:
+- Selectors are skipped to find the payload: `~` (start-in-home),
   `-d`/`--distribution <name>`, `-u`/`--user <name>`, `--cd <dir>`,
-  `--system`, `-e`/`--exec`, `--`. First payload token's basename is matched
-  against the existing `SHELL_INTERPRETERS_DENY` list (`command.rs:80-97`)
-  extended semantically to Unix-side spellings it already contains
-  (`sh`, `bash`, `dash`, `zsh`, `fish`, `ksh`, `csh`, `tcsh`, `ash`,
-  `busybox`) -> `NestedShell` or `NonShellPayload`.
+  `--system`, `--shell-type <t>`. The INTRODUCER decides execution mode:
+  `-e`/`--exec` = direct exec (no shell) — the first payload token's
+  basename is matched against the existing `SHELL_INTERPRETERS_DENY` list
+  (`command.rs:80-97`, which already contains the Unix-side spellings
+  `sh`, `bash`, `dash`, `zsh`, `fish`, `ksh`, `csh`, `tcsh`, `ash`,
+  `busybox`) -> `NestedShell` or `NonShellPayload`. A payload NOT
+  introduced by `-e`/`--exec` (bare, or after `--`) is handed to the
+  distro's default shell by WSL itself (shell-interpreted: globs,
+  `$(...)`, redirects) -> `NestedShell` regardless of the program named
+  (interpreter = the recognized shell if the first token is one, else
+  "default shell interpretation").
 - EMPTY payload (bare `wsl.exe`, or selectors with no command) launches the
   distro's default shell -> classified `NestedShell` (interpreter
   "default shell").

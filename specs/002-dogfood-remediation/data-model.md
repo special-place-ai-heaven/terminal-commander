@@ -79,7 +79,8 @@ The discovery unit of the files facade.
 | `mtime_ms` | Option<i64> | millis since epoch; omitted when unavailable (stat race) |
 
 **Listing invariants**: single level, no recursion, no globbing; sorted
-dirs-first then files, each group lexicographic by `name`; capped at
+dirs first, then files/symlinks (symlinks sort in the second group), each
+group lexicographic by `name`; capped at
 `MAX_FILE_LIST_ENTRIES` (500, default 200) with `total_entries` +
 `truncated` flag; entries that vanish mid-enumeration are omitted or
 partial, never a whole-listing error; policy gate and error shape identical
@@ -126,9 +127,15 @@ fields.
 WslArgvClass =
   NotWsl                      -- argv[0] is not a wsl carrier; existing path
 | Management                  -- wsl management flag, no command payload; runs
-| NonShellPayload             -- payload program not in the interpreter list; runs
-| NestedShell { interpreter } -- payload is a recognized shell (or empty payload
-                              --   = distro default shell); allow_shell governs
+| NonShellPayload             -- payload via -e/--exec (direct exec) naming a
+                              --   program not in the interpreter list; runs
+| NestedShell { interpreter } -- payload via -e/--exec naming a recognized
+                              --   shell; OR any payload NOT introduced by
+                              --   -e/--exec (bare or after --, which WSL
+                              --   hands to the distro default shell,
+                              --   shell-interpreted); OR empty payload
+                              --   (= default interactive shell);
+                              --   allow_shell governs
 | UnknownConstruction         -- unrecognized flag in payload position;
                               --   FAIL CLOSED under allow_shell=false
 ```

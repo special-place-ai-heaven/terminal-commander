@@ -279,8 +279,12 @@ cargo build` and `wsl.exe --list --verbose` still run. With
    **Then** the call is denied with a teaching error naming the nested
    interpreter and the `allow_shell` gate.
 2. **Given** `allow_shell=false`, **When** argv is `wsl.exe` carrying a
-   non-shell program (`cargo`, `uname`, `ls`) or a WSL management flag
-   (`--list`, `--status`), **Then** it runs exactly as today.
+   non-shell program via the direct-exec introducer (`-e`/`--exec`, e.g.
+   `wsl.exe -e cargo build`) or a WSL management flag (`--list`,
+   `--status`), **Then** it runs exactly as today. A payload NOT
+   introduced by `-e`/`--exec` is handed to the distro's default shell by
+   WSL itself (shell-interpreted) and is therefore governed by
+   `allow_shell` like any other shell line.
 3. **Given** `allow_shell=true`, **Then** nested shell payloads run, and the
    audit record notes the nested-shell classification.
 4. The stance (what is inspected, what is not, and why WSL is treated as
@@ -326,8 +330,10 @@ to near zero compared to the single-instance baseline.
   accepted where currently accepted.
 - Pack idempotency vs. drafts: a stored rule locally edited (new version
   upserted by the operator) must NOT be clobbered or "skipped" into
-  ambiguity by a pack re-import — identity comparison is against the pack's
-  own latest stored version content.
+  ambiguity by a pack re-import — identity comparison is against the
+  latest stored version of the same rule id (an operator edit differs in
+  content, so re-import imports a new version and is never falsely
+  reported as skipped).
 - Bulk deactivate with mixed scopes: one call, one scope; mixing scopes in
   one bulk call is rejected with a teaching error.
 - Directory listing of a symlink/junction cycle or reparse point: entry
@@ -344,10 +350,12 @@ to near zero compared to the single-instance baseline.
 - `event_context` by id alone when the owning bucket was evicted: the same
   honest not-found/evicted answer the two-field form gives today.
 - WSL gating with exotic spellings: `wsl` vs `wsl.exe` vs absolute path to
-  wsl.exe, distro flags before the payload, `--exec` long form — all
-  classified identically; unknown/novel WSL flags fail CLOSED (treated as
-  potentially carrying a payload -> denied under `allow_shell=false`) with
-  a teaching error, never open.
+  wsl.exe, distro flags before the payload, the `~` start-in-home
+  shorthand, `--exec` long form — all classified identically; payloads not
+  introduced by `-e`/`--exec` (bare, or after `--`) are shell-interpreted
+  by WSL itself and classify as nested shell; unknown/novel WSL flags fail
+  CLOSED (treated as potentially carrying a payload -> denied under
+  `allow_shell=false`) with a teaching error, never open.
 - Compact + severity filters compose: `compact` changes projection only,
   never which events match.
 
@@ -386,8 +394,11 @@ Files facade (US3, US6):
   as `file_read` (deny paths, allow lists) and MUST be audited like other
   file operations.
 - **FR-022**: `file_write` MUST support an append mode: same policy gate,
-  same size bound per call, same atomicity guarantee (an append either
-  fully lands or does not happen), original content never modified.
+  same size bound per call, original content never modified, and racing
+  appends never interleaved. All-or-nothing is not promised: on an I/O
+  failure a partial append is possible and MUST surface as an error
+  reporting the bytes actually written — honesty over an unkeepable
+  guarantee.
 
 Token economy (US4):
 
@@ -397,7 +408,9 @@ Token economy (US4):
 - **FR-031**: `sub_pull` MUST send a full liveness snapshot on a
   subscription's first pull and after any seek/reopen, and thereafter only
   entries whose liveness changed since the last pull; no transition may be
-  skippable (change -> guaranteed present in exactly the next pull).
+  skippable (change -> guaranteed present in exactly the next pull). This
+  contract binds the MCP `sub_pull` action; the daemon wire flag is
+  opt-in for compatibility with existing wire clients.
 
 Round-trips (US5):
 
@@ -423,7 +436,9 @@ WSL boundary (US8):
   invocation whose command payload is a recognized shell interpreter as a
   shell request, denied under `allow_shell=false` with a teaching error and
   permitted (and audit-tagged) under `allow_shell=true`. Non-shell payloads
-  and WSL management flags are unaffected. Unknown payload-position
+  under `-e`/`--exec` and WSL management flags are unaffected; a payload
+  not introduced by `-e`/`--exec` is shell-interpreted by WSL itself and
+  MUST gate identically to a shell request. Unknown payload-position
   constructions fail closed under `allow_shell=false`.
 - **FR-061**: The WSL boundary stance MUST be documented with the policy
   documentation (what is inspected, the fail-closed rule, and the rationale

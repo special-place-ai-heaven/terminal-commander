@@ -22,7 +22,7 @@ added elsewhere in this batch.
 | Unknown/missing `action` | the invalid value and the full list of valid actions for that facade |
 | Missing required fields | the action name + EVERY missing required field (not just the first) |
 | Unknown-for-action fields | the action name + EVERY unknown field by name |
-| Unknown field with a known counterpart | the counterpart named as the remedy (static table; seed pairs: `wait_ms` -> `timeout_ms` on `sub_pull` and `wait`; `timeout_ms` -> `wait_ms` on `run_and_watch`, `sh_exec`, `pty_stdin`) |
+| Unknown field with a known counterpart | the counterpart named as the remedy (static table; seed pairs: `wait_ms` -> `timeout_ms` on `sub_pull` and `wait`; `timeout_ms` -> `wait_ms` on `run_and_watch`, `sh_exec`, `pty_stdin`). A counterpart is suggested ONLY if it exists in the chosen action's live schema `properties` — entries for fields later stories add (e.g. `wait_ms` on `pty_stdin`, US5) activate only once those fields ship |
 | Unknown field that exists on a sibling action | that sibling action named as a hint |
 
 Missing + unknown violations aggregate into the SAME single error.
@@ -83,10 +83,14 @@ plus the (already required) `scope`:
 ```
 
 Adapter routing: `rule_id` -> existing `RegistryDeactivate` (unchanged);
-`rule_ids`/`pack` -> `RegistryDeactivateBulk`. Zero or multiple selectors ->
-strictness-style teaching error naming all three selectors. `version` is
-only meaningful with `rule_id` (unknown-for-selector otherwise — teaching
-error). Bulk payload surfaces `outcomes` per rule + `jobs_rebound`.
+`rule_ids`/`pack` -> `RegistryDeactivateBulk`. Schema note: `rule_id`
+becomes schema-OPTIONAL on the deactivate action (all three selectors are
+`Option` in `McpRegistryDeactivateParams`; the exactly-one-of validator
+owns required-ness; `scope` stays schema-required). Zero or multiple
+selectors -> strictness-style teaching error naming all three selectors.
+`version` is only meaningful with `rule_id` (unknown-for-selector
+otherwise — teaching error). Bulk payload surfaces `outcomes` per rule +
+`jobs_rebound`.
 
 ## F4. `command` facade — `wait` / `events` gain `compact` (US4)
 
