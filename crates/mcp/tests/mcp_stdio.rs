@@ -133,9 +133,9 @@ async fn initialize_and_list_tools_returns_full_live_set() {
 async fn health_against_missing_daemon_returns_daemon_unavailable_envelope_not_raw_connect() {
     // FIX #2 (TB-7 / Cursor call #21): a mid-call connect failure (daemon
     // socket/pipe absent) must self-heal + retry and then surface the CLEAN
-    // `daemon_unavailable` envelope -- NOT a raw `internal_error` that leaks
-    // "daemon ipc error"/"connect ... os error" and trains the agent to
-    // abandon the tool for raw shell.
+    // `daemon_unavailable` envelope -- NOT a raw `internal_error` shape that
+    // trains the agent to abandon the tool for raw shell. The underlying
+    // cause rides in `details.transport_detail` (P1.0f diagnosability).
     let (_server, client) = paired_service().await;
     let params = CallToolRequestParams::new("health");
     let err = client
@@ -148,10 +148,20 @@ async fn health_against_missing_daemon_returns_daemon_unavailable_envelope_not_r
         "a missing daemon must surface the daemon_unavailable envelope, got: {rendered}"
     );
     assert!(
-        !rendered.contains("daemon ipc error")
-            && !rendered.contains("ipc_code")
-            && !rendered.contains("os error"),
-        "the raw transport/connect failure must NOT leak to the agent, got: {rendered}"
+        !rendered.contains("daemon ipc error") && !rendered.contains("ipc_code"),
+        "the raw IPC error shape must NOT leak to the agent, got: {rendered}"
+    );
+    // P1.0f: the underlying transport cause is REQUIRED, but confined to the
+    // structured `details.transport_detail` -- a fully opaque envelope made
+    // "timed out" vs "connect refused" undiagnosable. The envelope's own
+    // message stays the clean fixed phrase.
+    assert!(
+        rendered.contains("transport_detail"),
+        "the envelope must carry the underlying cause in details.transport_detail, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("terminal-commanderd became unreachable mid-call"),
+        "the top-level envelope message stays the clean fixed phrase, got: {rendered}"
     );
     let _ = client.cancel().await;
 }
