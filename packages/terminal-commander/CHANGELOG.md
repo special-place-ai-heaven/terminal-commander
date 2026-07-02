@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.72](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.71...v0.1.72) (2026-07-02)
+
+
+### Bug Fixes
+
+* 2 crate fixes -- align mcp_stdio envelope test with transport_detail contract (+1 more) ([39cd989](https://github.com/special-place-ai-heaven/terminal-commander/commit/39cd989746575d140700d30cbd01bedd0a8cb64e))
+* **ipc,mcp:** stop misreporting a healthy daemon as unavailable (P1.0f) ([021cf55](https://github.com/special-place-ai-heaven/terminal-commander/commit/021cf55d539863667ffe93dcf0fda5ae1fbaf5cd))
+
 ## [0.1.71](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.70...v0.1.71) (2026-07-02)
 
 
