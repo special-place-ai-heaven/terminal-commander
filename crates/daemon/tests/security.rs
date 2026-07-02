@@ -49,6 +49,13 @@ fn fully_qualified_sudo_path_also_denied() {
     }
 }
 
+// Unix absolute-path + glob policy semantics: on Windows, canonicalize_lexical
+// resolves these synthetic non-existent paths against the real FS (drive root +
+// \\?\ verbatim prefix, backslashes) so the Unix glob regexes miss and the
+// verdicts flip. Same class as the policy::tests gated in commit 81b2396; the
+// daemon's production target is Linux/WSL (ARCHITECTURE.md section 10). Still
+// run on Linux/CI.
+#[cfg(unix)]
 #[test]
 fn sensitive_path_default_deny_paths_all_variants() {
     let e = PolicyEngine::default_engine();
@@ -77,6 +84,8 @@ fn sensitive_path_default_deny_paths_all_variants() {
     }
 }
 
+// Unix path-glob semantics -- see the gate comment above.
+#[cfg(unix)]
 #[test]
 fn paths_read_allow_enforced_via_public_api() {
     // TC22 A1: a configured read_allow denies an off-list FileRead with
@@ -103,6 +112,8 @@ fn paths_read_allow_enforced_via_public_api() {
     );
 }
 
+// Unix path-glob semantics -- see the gate comment above.
+#[cfg(unix)]
 #[test]
 fn paths_deny_extra_beats_allow_via_public_api() {
     // TC22 A1: deny_extra is a hard deny that beats the allow-list.

@@ -67,7 +67,16 @@ fn argv_colored_aap_line(msg: &str) -> Vec<String> {
     let safe = msg.replace('\'', "\\'");
     // \x1b[0;32m  green   [AAP]   \x1b[0m reset   ' ' + msg
     let script = format!("print('\\x1b[0;32m[AAP]\\x1b[0m {safe}')");
-    vec!["python3".to_owned(), "-c".to_owned(), script]
+    // -X utf8: force UTF-8 mode so the multibyte fixture survives hosts whose
+    // pipe encoding is a legacy code page (Windows cp1250 raised
+    // UnicodeEncodeError on the CJK/emoji test and emitted zero lines).
+    vec![
+        "python3".to_owned(),
+        "-X".to_owned(),
+        "utf8".to_owned(),
+        "-c".to_owned(),
+        script,
+    ]
 }
 
 fn rt() -> tokio::runtime::Runtime {
