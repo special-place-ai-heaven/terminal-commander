@@ -417,8 +417,8 @@ fn drain_fair(
 }
 
 /// Derive per-source liveness for every in-scope bucket (subscriptions §3
-/// step 7 + MUST-ADD #3). Command sources read the authoritative `JobState`;
-/// file-watch / pty present -> Running.
+/// step 7 + MUST-ADD #3). Command and PTY sources read their runtime's
+/// authoritative job state; file-watch present -> Running.
 fn liveness_for(state: &Arc<DaemonState>, scope: &Scope) -> Vec<SourceLiveness> {
     use terminal_commander_ipc::ProbeKind;
     let mut out = Vec::with_capacity(scope.buckets.len());
@@ -430,11 +430,22 @@ fn liveness_for(state: &Arc<DaemonState>, scope: &Scope) -> Vec<SourceLiveness> 
                     crate::liveness::command_liveness(s.state, s.exit_code, s.signal)
                 })
             }),
-            // File-watch / pty have no exit-code surface on this path: present
-            // in the side-table -> Running (the side-table is immortal, so a
-            // stopped watch still appears Running here; Phase 1 reports
-            // process-state liveness only for commands).
-            ProbeKind::FileWatch | ProbeKind::Pty => Liveness::Running,
+            // File-watch has no exit-code surface on this path: present in
+            // the side-table -> Running (the side-table is immortal, so a
+            // stopped watch still appears Running here).
+            ProbeKind::FileWatch => Liveness::Running,
+            // PTY bindings LINGER in the runtime's job ledger after exit
+            // (like command's), so the authoritative terminal state is one
+            // lookup away — mirror the command arm instead of reporting a
+            // stopped PTY as Running.
+            #[cfg(any(unix, windows))]
+            ProbeKind::Pty => source
+                .job_id
+                .map_or(Liveness::Running, |job| state.pty.liveness(job)),
+            // No PTY backend on this platform: a Pty source cannot exist,
+            // but the match must stay exhaustive.
+            #[cfg(not(any(unix, windows)))]
+            ProbeKind::Pty => Liveness::Running,
         };
         out.push(SourceLiveness {
             bucket_id: scoped.bucket_id,
