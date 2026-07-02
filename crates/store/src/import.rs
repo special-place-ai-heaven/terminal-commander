@@ -106,6 +106,20 @@ pub fn known_pack_names() -> Vec<&'static str> {
     SEED_PACKS.iter().map(|(n, _)| *n).collect()
 }
 
+/// The ordered rule ids of a named seed pack, or `None` if unknown.
+///
+/// Ids come back in pack-file order. Membership is resolved from the
+/// embedded pack JSON (`resolve_pack_json`) ONLY -- never from id-prefix
+/// or tag conventions. The embedded pack JSON is a validated compile-time
+/// constant (see `import_all_seed_packs_from_repo`), so a known pack
+/// always parses; a parse failure here maps to `None`.
+#[must_use]
+pub fn pack_member_ids(name: &str) -> Option<Vec<String>> {
+    let json = resolve_pack_json(name)?;
+    let parsed: RulePackFile = sj::from_str(json).ok()?;
+    Some(parsed.rules.into_iter().map(|r| r.id).collect())
+}
+
 impl EventStore {
     /// Import a rule pack from a JSON file at `path`. Returns a
     /// per-pack result summarizing imported and skipped rules.
@@ -159,6 +173,13 @@ impl EventStore {
         let pack = parsed.meta.pack.clone();
         let mut imported = Vec::new();
         let mut skipped = Vec::new();
+        // Ensure the registry schema exists BEFORE the skip-on-identical
+        // `get_latest_rule` lookup below queries the `rules` table. On a
+        // fresh store `create_rule_version` used to be the first op (it
+        // ensures the schema); the FR-010 identity check now runs first,
+        // so the schema must be materialized up front. `ensure_registry`
+        // is idempotent, so `create_rule_version`'s own call is a no-op.
+        self.ensure_registry()?;
         for rule in parsed.rules {
             // Application-layer validation first.
             if rule.validate().is_err() {
@@ -172,6 +193,26 @@ impl EventStore {
                     continue;
                 };
                 if compile_bounded_regex(pat).is_err() {
+                    skipped.push(rule.id.clone());
+                    continue;
+                }
+            }
+            // FR-010: skip-on-identical. If the latest stored version of
+            // this rule id is content-identical to the incoming rule --
+            // ignoring `version` (the store overwrites it with latest+1)
+            // and `status` (a lifecycle field the activate=true import
+            // path and operator activation mutate) -- re-import is a
+            // no-op: report it in `skipped` and mint no new version. A
+            // genuinely edited definition differs in a content field and
+            // imports a new version as before.
+            if let Some(stored) = self.get_latest_rule(&rule.id)? {
+                let mut incoming = rule.clone();
+                let mut latest = stored;
+                incoming.version = 0;
+                latest.version = 0;
+                incoming.status = terminal_commander_core::RuleStatus::Draft;
+                latest.status = terminal_commander_core::RuleStatus::Draft;
+                if incoming == latest {
                     skipped.push(rule.id.clone());
                     continue;
                 }
@@ -389,5 +430,147 @@ mod tests {
         // A representative search hits the apt pack.
         let hits = s.search_rules("apt", None).unwrap();
         assert!(!hits.is_empty());
+    }
+
+    // ---- US2 FR-010: import idempotency (skip-on-identical) ----
+
+    /// Build a keyword-rule pack JSON with the given `(id, summary_template)`
+    /// rules. `pack` is the pack name written into `_meta`.
+    fn kw_pack_json(pack: &str, rules: &[(&str, &str)]) -> String {
+        let rule_objs: Vec<sj::Value> = rules
+            .iter()
+            .map(|(id, tmpl)| {
+                sj::json!({
+                    "id": id,
+                    "version": 1,
+                    "kind": "keyword",
+                    "status": "draft",
+                    "severity": "medium",
+                    "event_kind": "test",
+                    "keywords": ["boom"],
+                    "captures": [],
+                    "summary_template": tmpl,
+                    "tags": []
+                })
+            })
+            .collect();
+        sj::to_string(&sj::json!({
+            "_meta": { "pack": pack, "version": 1 },
+            "rules": rule_objs
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn reimport_identical_pack_skips_all_rules_and_creates_no_versions() {
+        let mut s = EventStore::in_memory().unwrap();
+        let json = kw_pack_json("idem", &[("idem.a", "A"), ("idem.b", "B"), ("idem.c", "C")]);
+        // First import mints v1 for every rule.
+        let first = s.import_rule_pack_str(&json).unwrap();
+        assert_eq!(first.imported.len(), 3, "first import must mint all rules");
+        assert!(first.skipped.is_empty());
+
+        // Second import of the byte-identical pack must skip every rule
+        // and mint NOTHING (FR-010: re-import is a no-op).
+        let second = s.import_rule_pack_str(&json).unwrap();
+        assert!(
+            second.imported.is_empty(),
+            "identical re-import must import nothing, got: {:?}",
+            second.imported
+        );
+        assert_eq!(
+            second.skipped,
+            vec![
+                "idem.a".to_owned(),
+                "idem.b".to_owned(),
+                "idem.c".to_owned()
+            ],
+            "every unchanged rule must be reported as skipped"
+        );
+        // The store still holds exactly ONE version per rule.
+        for id in ["idem.a", "idem.b", "idem.c"] {
+            let versions = s.list_rule_versions(id).unwrap();
+            assert_eq!(
+                versions.len(),
+                1,
+                "rule {id} must have exactly one version after re-import, got {versions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reimport_with_two_changed_rules_imports_exactly_those_two() {
+        let mut s = EventStore::in_memory().unwrap();
+        let v1 = kw_pack_json(
+            "chg",
+            &[
+                ("chg.a", "A"),
+                ("chg.b", "B"),
+                ("chg.c", "C"),
+                ("chg.d", "D"),
+            ],
+        );
+        s.import_rule_pack_str(&v1).unwrap();
+
+        // Re-import a pack where TWO rules changed content (new summary)
+        // and two are byte-identical.
+        let v2 = kw_pack_json(
+            "chg",
+            &[
+                ("chg.a", "A CHANGED"),
+                ("chg.b", "B"),
+                ("chg.c", "C CHANGED"),
+                ("chg.d", "D"),
+            ],
+        );
+        let res = s.import_rule_pack_str(&v2).unwrap();
+        assert_eq!(
+            res.imported,
+            vec!["chg.a".to_owned(), "chg.c".to_owned()],
+            "only the two changed rules import a new version"
+        );
+        assert_eq!(
+            res.skipped,
+            vec!["chg.b".to_owned(), "chg.d".to_owned()],
+            "the unchanged rules are skipped"
+        );
+        // Changed rules are now v2; unchanged rules stay v1.
+        assert_eq!(s.get_latest_rule("chg.a").unwrap().unwrap().version, 2);
+        assert_eq!(s.get_latest_rule("chg.c").unwrap().unwrap().version, 2);
+        assert_eq!(s.get_latest_rule("chg.b").unwrap().unwrap().version, 1);
+        assert_eq!(s.get_latest_rule("chg.d").unwrap().unwrap().version, 1);
+    }
+
+    #[test]
+    fn reimport_skip_ignores_version_and_status_differences() {
+        use terminal_commander_core::RuleStatus;
+        let mut s = EventStore::in_memory().unwrap();
+        let json = kw_pack_json("norm", &[("norm.a", "A")]);
+        s.import_rule_pack_str(&json).unwrap();
+
+        // Mint a v2 that differs ONLY in status (Active) -- same content.
+        // create_rule_version stamps version = latest+1 automatically, so
+        // the stored latest becomes (v2, Active) while the pack rule is
+        // (v1, Draft). Identity must exclude BOTH version and status.
+        let mut promoted = s.get_latest_rule("norm.a").unwrap().unwrap();
+        promoted.status = RuleStatus::Active;
+        s.create_rule_version(&promoted).unwrap();
+        assert_eq!(s.get_latest_rule("norm.a").unwrap().unwrap().version, 2);
+
+        // Re-import the original draft pack: version (1 vs 2) and status
+        // (draft vs active) differ, but content is identical -> skipped,
+        // no v3 minted.
+        let res = s.import_rule_pack_str(&json).unwrap();
+        assert_eq!(
+            res.skipped,
+            vec!["norm.a".to_owned()],
+            "a rule differing only in version/status must be skipped"
+        );
+        assert!(res.imported.is_empty());
+        assert_eq!(
+            s.get_latest_rule("norm.a").unwrap().unwrap().version,
+            2,
+            "no new version may be minted for a version/status-only difference"
+        );
     }
 }

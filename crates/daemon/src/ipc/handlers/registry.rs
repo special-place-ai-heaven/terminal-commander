@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use super::common::{map_store_error, validate_scope_against_live_jobs};
 use crate::ipc::protocol::{
-    IpcError, IpcErrorCode, IpcResponse, MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES,
-    MAX_SUGGEST_PROPOSED_RULES, MAX_SUGGEST_SAMPLES, RegistryActivateParams,
-    RegistryActivateResponse, RegistryActiveEntry, RegistryDeactivateParams,
+    BulkDeactivateOutcome, BulkOutcomeKind, IpcError, IpcErrorCode, IpcResponse,
+    MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES, MAX_SUGGEST_PROPOSED_RULES,
+    MAX_SUGGEST_SAMPLES, RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
+    RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse, RegistryDeactivateParams,
     RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportFailure,
     RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
     RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
@@ -498,6 +499,121 @@ pub(in crate::ipc::server) fn handle_registry_deactivate(
                 .jobs_rebound
                 .saturating_add(watch_report.watches_rebound)
                 .saturating_add(pty_rebound),
+        },
+    ))
+}
+
+/// US2 (FR-011): deactivate a whole seed pack or a list of rule ids in
+/// ONE call under one scope.
+///
+/// Reports a per-rule outcome for every requested rule (deactivated /
+/// not_active / unknown_rule). Partial success is the NORMAL shape -- the
+/// call errors only on validation failures (wrong selector count, unknown
+/// pack, invalid scope), never because one member was not active.
+/// Rebinding live jobs runs ONCE after the loop. The single-rule
+/// [`handle_registry_deactivate`] path is untouched.
+pub(in crate::ipc::server) fn handle_registry_deactivate_bulk(
+    state: &Arc<DaemonState>,
+    params: &RegistryDeactivateBulkParams,
+) -> Result<IpcResponse, IpcError> {
+    // Exactly ONE selector: zero or both is an invalid call, named so
+    // the caller can self-correct in one step.
+    let rule_ids: Vec<String> = match (&params.pack, &params.rule_ids) {
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(IpcError::new(
+                IpcErrorCode::RuleInvalid,
+                "exactly one of 'pack' or 'rule_ids' must be provided (not both, not neither)",
+            ));
+        }
+        (Some(pack), None) => {
+            // Pack membership resolves ONLY from the embedded seed-pack
+            // JSON (never id-prefix or tag heuristics). An unknown pack
+            // name yields the SAME teaching error `registry_import_pack`
+            // gives, listing the known packs.
+            terminal_commander_store::pack_member_ids(pack).ok_or_else(|| {
+                IpcError::new(
+                    IpcErrorCode::RuleInvalid,
+                    format!(
+                        "unknown rule pack '{pack}'; known packs: {}",
+                        terminal_commander_store::known_pack_names().join(", ")
+                    ),
+                )
+            })?
+        }
+        (None, Some(ids)) => ids.clone(),
+    };
+
+    // ONE scope per call: validate it once, the same gate the single
+    // deactivate applies.
+    let scope = params.scope;
+    validate_scope_against_live_jobs(state, scope)?;
+
+    let mut outcomes = Vec::with_capacity(rule_ids.len());
+    for rule_id in &rule_ids {
+        // `unknown_rule` = the id is not in the registry at all.
+        let known = state
+            .store
+            .get_latest_rule(rule_id)
+            .map_err(map_store_error)?
+            .is_some();
+        if !known {
+            outcomes.push(BulkDeactivateOutcome {
+                rule_id: rule_id.clone(),
+                version: None,
+                outcome: BulkOutcomeKind::UnknownRule,
+            });
+            continue;
+        }
+        // `not_active` = a known rule with nothing open under this scope.
+        let active_versions = active_versions_for_scope(state, rule_id, scope);
+        if active_versions.is_empty() {
+            outcomes.push(BulkDeactivateOutcome {
+                rule_id: rule_id.clone(),
+                version: None,
+                outcome: BulkOutcomeKind::NotActive,
+            });
+            continue;
+        }
+        // Close every active version under the scope, durable row FIRST
+        // then the in-memory authority (the established durability-first
+        // order, so a store failure never leaves memory ahead of the
+        // log). The normal state is a single active version per
+        // (rule, scope); the highest version acted on is echoed.
+        // ponytail: single-version is the common case; a version stack
+        // all closes, the top one is reported.
+        let mut acted: Option<u32> = None;
+        for version in active_versions {
+            state
+                .store
+                .deactivate_rule_scoped(rule_id, version, scope)
+                .map_err(map_store_error)?;
+            state.activation.deactivate(rule_id, version, scope);
+            acted = Some(acted.map_or(version, |a| a.max(version)));
+        }
+        outcomes.push(BulkDeactivateOutcome {
+            rule_id: rule_id.clone(),
+            version: acted,
+            outcome: BulkOutcomeKind::Deactivated,
+        });
+    }
+
+    // Rebind live jobs ONCE after the whole loop (the scope is constant,
+    // so a single pass reflects every closed activation -- N passes would
+    // be waste).
+    let cmd_report = state.command.rebind_jobs_in_scope(Some(scope));
+    let watch_report = state.watch.rebind_watches_in_scope(Some(scope));
+    #[cfg(unix)]
+    let pty_rebound = state.pty.rebind_jobs_in_scope(Some(scope)).jobs_rebound;
+    #[cfg(not(unix))]
+    let pty_rebound = 0u32;
+    let jobs_rebound = u64::from(cmd_report.jobs_rebound)
+        .saturating_add(u64::from(watch_report.watches_rebound))
+        .saturating_add(u64::from(pty_rebound));
+
+    Ok(IpcResponse::RegistryDeactivateBulk(
+        RegistryDeactivateBulkResponse {
+            outcomes,
+            jobs_rebound,
         },
     ))
 }

@@ -864,3 +864,88 @@ fn import_pack_unknown_name_is_typed_teaching_error() {
         cleanup(&data);
     });
 }
+
+/// US2 / FR-010: re-importing an identical pack reports every rule as
+/// `skipped`, imports nothing, and leaves exactly one version per rule
+/// in the store (was: one new version per rule on every re-import).
+#[test]
+fn import_pack_twice_reports_skipped_and_store_holds_one_version_per_rule() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("importpack-twice");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+
+        // First import: every cargo rule minted at v1.
+        let first = client
+            .call(
+                1,
+                IpcRequest::RegistryImportPack(RegistryImportPackParams {
+                    pack: "cargo".to_owned(),
+                    activate: false,
+                    scope: None,
+                }),
+            )
+            .await
+            .expect("first import");
+        let first = match first {
+            IpcResponse::RegistryImportPack(r) => r,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert!(!first.imported.is_empty(), "first import must mint rules");
+        assert!(first.skipped.is_empty(), "first import skips nothing");
+        let ids = first.imported.clone();
+
+        // Second import of the identical pack: every rule skipped,
+        // nothing imported (FR-010).
+        let second = client
+            .call(
+                2,
+                IpcRequest::RegistryImportPack(RegistryImportPackParams {
+                    pack: "cargo".to_owned(),
+                    activate: false,
+                    scope: None,
+                }),
+            )
+            .await
+            .expect("second import");
+        let second = match second {
+            IpcResponse::RegistryImportPack(r) => r,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert!(
+            second.imported.is_empty(),
+            "identical re-import must import nothing, got: {:?}",
+            second.imported
+        );
+        assert_eq!(
+            second.skipped, ids,
+            "every unchanged rule must be reported as skipped, in pack order"
+        );
+        // W7: identical rules land in `skipped` with NO `failed` entry.
+        assert!(
+            second.failed.is_empty(),
+            "an identical rule is skipped, not failed; got: {:?}",
+            second.failed
+        );
+
+        // The store holds exactly ONE version per rule. The daemon's
+        // `StoreClient` actor wrapper exposes get_latest_rule /
+        // get_rule_version (not list_rule_versions), so prove it by the
+        // latest staying at v1 and no v2 existing.
+        for id in &ids {
+            let latest = state.store.get_latest_rule(id).unwrap().unwrap();
+            assert_eq!(
+                latest.version, 1,
+                "rule {id} latest version must stay 1 after an identical re-import"
+            );
+            assert!(
+                state.store.get_rule_version(id, 2).unwrap().is_none(),
+                "rule {id} must have NO v2 after an identical re-import"
+            );
+        }
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}

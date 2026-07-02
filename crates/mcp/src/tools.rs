@@ -68,20 +68,20 @@ use terminal_commanderd::ipc::protocol::{
     ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
     PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
     PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
-    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
-    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
-    RegistrySearchParams, RegistrySearchResponse, RegistrySuggestFromSamplesParams,
-    RegistrySuggestFromSamplesResponse, RegistryTestParams, RegistryTestResponse,
-    RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
-    ShellExecParams, ShellSessionExecParams, ShellSessionExecResponse, ShellSessionListResponse,
-    ShellSessionStartParams, ShellSessionStartResponse, ShellSessionStatusParams,
-    ShellSessionStatusResponse, ShellSessionStopParams, ShellSessionStopResponse,
-    SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionListParams,
-    SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
-    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse,
-    SubscriptionSeekParams, SubscriptionSeekResponse, SubscriptionSourceSel,
-    WorkspaceSnapshotApplyParams, WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams,
-    WorkspaceSnapshotCreateResponse,
+    RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse, RegistryDeactivateParams,
+    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
+    RegistryImportPackResponse, RegistryListActiveResponse, RegistrySearchParams,
+    RegistrySearchResponse, RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse,
+    RegistryTestParams, RegistryTestResponse, RegistryTestSample, RegistryUpsertParams,
+    RegistryUpsertResponse, SelfCheckResponse, ShellExecParams, ShellSessionExecParams,
+    ShellSessionExecResponse, ShellSessionListResponse, ShellSessionStartParams,
+    ShellSessionStartResponse, ShellSessionStatusParams, ShellSessionStatusResponse,
+    ShellSessionStopParams, ShellSessionStopResponse, SubscriptionCloseParams,
+    SubscriptionCloseResponse, SubscriptionListParams, SubscriptionListResponse,
+    SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
+    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSeekParams,
+    SubscriptionSeekResponse, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
+    WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -1903,9 +1903,9 @@ impl TerminalCommanderMcpServer {
         }
     }
 
-    /// `registry_deactivate` — remove a rule from the active set.
+    /// `registry_deactivate` — remove a rule, a list, or a whole pack from the active set.
     #[tool(
-        description = "Deactivate (rule_id, version?, scope). version is OPTIONAL: omit it to deactivate the LATEST stored version (the resolved version is echoed in the response), or pass it to target a specific version -- an explicit version is used verbatim, never widened. scope is REQUIRED and must match the scope used at activation (e.g. {kind:'global'}); an omitted scope is rejected. Future commands skip the rule; already-running commands keep the rules they were started with."
+        description = "Deactivate rules under one scope. Provide EXACTLY ONE selector: rule_id (single rule), rule_ids (explicit list, one call), or pack (every member of a seed pack, one call). version is OPTIONAL and only valid with rule_id: omit it to deactivate the LATEST stored version (echoed in the response), or pass it to target a specific version -- used verbatim, never widened. scope is REQUIRED and must match the scope used at activation (e.g. {kind:'global'}); an omitted scope is rejected. Bulk selectors report per-rule outcomes (deactivated / not_active / unknown_rule) -- partial success is never silent. Future commands skip the rule(s); already-running commands keep the rules they were started with."
     )]
     async fn registry_deactivate(
         &self,
@@ -1913,41 +1913,88 @@ impl TerminalCommanderMcpServer {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
         // `scope` is schema-required (TB-5): rmcp rejects an omitted
-        // scope before this handler runs. The wire IPC type keeps
-        // `scope: Option` for backward compatibility, so wrap in `Some`.
-        let scope = Some(params.scope.into_ipc_scope()?);
-        // BUG 2: an omitted `version` resolves to the LATEST stored version of
-        // this rule_id, so a version-less deactivate is symmetric with the
-        // version-less activate that opened the row. The wire IPC carries a
-        // concrete `u32`, so resolve it here with one bounded RegistryGet (the
-        // daemon returns the latest version when the request omits it), then
-        // deactivate the resolved version. An explicit version is used verbatim
-        // (no silent widen); either way the response echoes the version acted on.
-        let version = match params.version {
-            Some(v) => v,
-            None => self.resolve_latest_rule_version(&params.rule_id).await?,
-        };
-        let ipc = RegistryDeactivateParams {
-            rule_id: params.rule_id,
-            version,
-            scope,
-        };
-        match self.daemon.call(IpcRequest::RegistryDeactivate(ipc)).await {
-            Ok(IpcResponse::RegistryDeactivate(RegistryDeactivateResponse {
+        // scope before this handler runs.
+        let scope = params.scope.into_ipc_scope()?;
+
+        // Exactly ONE selector of {rule_id, rule_ids, pack}. All three are
+        // schema-optional; this validator owns required-ness and teaches
+        // the whole set in one error (US2/FR-011).
+        let selector_count = usize::from(params.rule_id.is_some())
+            + usize::from(params.rule_ids.is_some())
+            + usize::from(params.pack.is_some());
+        if selector_count != 1 {
+            return Err(invalid_params(
+                "registry deactivate requires EXACTLY ONE of 'rule_id' (single rule), \
+                 'rule_ids' (list of rule ids), or 'pack' (whole seed pack); you supplied \
+                 none or more than one"
+                    .to_owned(),
+            ));
+        }
+        // `version` is meaningful only with a single `rule_id`.
+        if params.version.is_some() && params.rule_id.is_none() {
+            return Err(invalid_params(
+                "'version' is only valid with 'rule_id'; a bulk deactivate by 'rule_ids' or \
+                 'pack' closes each rule's active version(s) under the scope"
+                    .to_owned(),
+            ));
+        }
+
+        if let Some(rule_id) = params.rule_id {
+            // Single-rule path: byte-identical to the historical behavior.
+            // An omitted version resolves to the LATEST stored version, so a
+            // version-less deactivate is symmetric with the version-less
+            // activate that opened the row. The wire IPC keeps `scope:
+            // Option` for backward compatibility, so wrap in `Some`.
+            let version = match params.version {
+                Some(v) => v,
+                None => self.resolve_latest_rule_version(&rule_id).await?,
+            };
+            let ipc = RegistryDeactivateParams {
                 rule_id,
                 version,
-                was_deactivated,
+                scope: Some(scope),
+            };
+            match self.daemon.call(IpcRequest::RegistryDeactivate(ipc)).await {
+                Ok(IpcResponse::RegistryDeactivate(RegistryDeactivateResponse {
+                    rule_id,
+                    version,
+                    was_deactivated,
+                    scope,
+                    jobs_rebound,
+                })) => json_tool_result(&serde_json::json!({
+                    "rule_id": rule_id,
+                    "version": version,
+                    "was_deactivated": was_deactivated,
+                    "scope": scope,
+                    "jobs_rebound": jobs_rebound,
+                })),
+                Ok(other) => Err(unexpected_variant(&other)),
+                Err(e) => Err(into_mcp_error_for(false, &e)),
+            }
+        } else {
+            // Bulk path: rule_ids or pack -> RegistryDeactivateBulk. The
+            // daemon reports one outcome per requested rule (partial
+            // success is the normal shape) and rebinds live jobs once.
+            let ipc = RegistryDeactivateBulkParams {
+                pack: params.pack,
+                rule_ids: params.rule_ids,
                 scope,
-                jobs_rebound,
-            })) => json_tool_result(&serde_json::json!({
-                "rule_id": rule_id,
-                "version": version,
-                "was_deactivated": was_deactivated,
-                "scope": scope,
-                "jobs_rebound": jobs_rebound,
-            })),
-            Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error_for(false, &e)),
+            };
+            match self
+                .daemon
+                .call(IpcRequest::RegistryDeactivateBulk(ipc))
+                .await
+            {
+                Ok(IpcResponse::RegistryDeactivateBulk(RegistryDeactivateBulkResponse {
+                    outcomes,
+                    jobs_rebound,
+                })) => json_tool_result(&serde_json::json!({
+                    "outcomes": outcomes,
+                    "jobs_rebound": jobs_rebound,
+                })),
+                Ok(other) => Err(unexpected_variant(&other)),
+                Err(e) => Err(into_mcp_error_for(false, &e)),
+            }
         }
     }
 
@@ -4871,13 +4918,43 @@ pub struct McpRegistryImportPackParams {
 }
 
 /// MCP-facing parameters for `registry_deactivate`.
+///
+/// Three selectors, EXACTLY ONE required (the schema marks all three
+/// optional; the adapter's exactly-one-of validator owns required-ness
+/// and teaches the whole set in one error -- US2/FR-011):
+/// - `rule_id`: a single rule (byte-identical to the historical path).
+/// - `rule_ids`: an explicit list of rule ids, one call.
+/// - `pack`: every member of a seed pack, one call.
+///
+/// `scope` stays schema-required. `version` is only valid with
+/// `rule_id`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryDeactivateParams {
-    pub rule_id: String,
+    /// Selector: a single rule id. Schema-optional; exactly one of
+    /// `rule_id` / `rule_ids` / `pack` must be supplied. Advertised as a
+    /// plain `string` (like the `rule_id` on other registry actions) so
+    /// the facade flatten stays collision-safe; optionality is expressed
+    /// by absence from the schema `required[]`.
+    #[serde(default)]
+    #[schemars(with = "String")]
+    pub rule_id: Option<String>,
+    /// Selector: deactivate this explicit list of rule ids in one call.
+    /// Per-rule outcomes (deactivated / not_active / unknown_rule) are
+    /// reported; partial success is never silent.
+    #[serde(default)]
+    #[schemars(with = "Vec<String>")]
+    pub rule_ids: Option<Vec<String>>,
+    /// Selector: deactivate every member of this seed pack in one call.
+    /// Pack membership resolves from the embedded pack JSON only.
+    /// Advertised as a plain `string` (matching `import_pack`'s `pack`).
+    #[serde(default)]
+    #[schemars(with = "String")]
+    pub pack: Option<String>,
     /// Omit to deactivate the LATEST stored version (mirrors registry_get /
     /// registry_activate); the adapter resolves it and the response echoes the
     /// resolved version. Provide a value to target a specific version. An
-    /// explicit version is used verbatim -- never silently widened.
+    /// explicit version is used verbatim -- never silently widened. Only
+    /// valid with `rule_id`.
     #[serde(default, deserialize_with = "de_opt_u32_lenient")]
     #[schemars(with = "u32")]
     pub version: Option<u32>,
@@ -6433,15 +6510,23 @@ mod tests {
     fn deactivate_schema_lists_scope_as_required() {
         let schema = schemars::schema_for!(McpRegistryDeactivateParams);
         let required = schema_required(&schema);
-        for field in ["rule_id", "scope"] {
+        // US2/FR-011: scope stays schema-required.
+        assert!(
+            required.iter().any(|f| f == "scope"),
+            "registry_deactivate schema must list scope in required[]; got {required:?}"
+        );
+        // US2/FR-011: rule_id is now schema-OPTIONAL -- it is one of three
+        // selectors {rule_id, rule_ids, pack} and the adapter's
+        // exactly-one-of validator owns required-ness. NONE of the three
+        // selectors is in required[].
+        for selector in ["rule_id", "rule_ids", "pack"] {
             assert!(
-                required.iter().any(|f| f == field),
-                "registry_deactivate schema must list {field} in required[]; got {required:?}"
+                !required.iter().any(|f| f == selector),
+                "selector {selector} must be schema-optional (exactly-one-of validator owns \
+                 required-ness); got {required:?}"
             );
         }
-        // BUG 2: version is now OPTIONAL (omit = latest stored), so it must NOT
-        // be in required[] -- otherwise an omitted version is rejected with the
-        // very "missing field `version`" error this fix removes.
+        // version is OPTIONAL (omit = latest stored) and only valid with rule_id.
         assert!(
             !required.iter().any(|f| f == "version"),
             "version must be optional on deactivate (omit = latest); got {required:?}"
@@ -6457,7 +6542,7 @@ mod tests {
             r#"{"rule_id":"r","scope":{"kind":"global"}}"#,
         )
         .expect("deactivate without version must deserialize (version is optional)");
-        assert_eq!(params.rule_id, "r");
+        assert_eq!(params.rule_id.as_deref(), Some("r"));
         assert_eq!(params.version, None, "omitted version must parse as None");
         assert_eq!(params.scope.kind, "global");
 
