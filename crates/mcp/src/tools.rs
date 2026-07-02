@@ -64,7 +64,7 @@ use terminal_commanderd::ipc::protocol::{
     FileSearchParams, FileSearchResponse, FileWatchListResponse, FileWatchStartParams,
     FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, FileWriteParams,
     FileWriteResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse,
-    ListLimitParams, PolicyStatusResponse, ProbeListResponse, ProbeStatusParams,
+    ListLimitParams, PolicyCapsView, PolicyStatusResponse, ProbeListResponse, ProbeStatusParams,
     ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
     PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
     PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
@@ -232,7 +232,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "registry_deactivate",
             status: ToolStatus::Live,
-            description: "Deactivate (rule_id, version); future commands skip the rule.",
+            description: "Deactivate (rule_id, version?, scope); omit version = latest stored. Future commands skip the rule.",
         },
         ToolCatalogueEntry {
             name: "registry_list_active",
@@ -497,8 +497,49 @@ const SESSION_UNAVAILABLE_REASON: &str =
 /// not claim a capability that is not wired.
 const PRIVILEGED_HELPER_UNAVAILABLE_REASON: &str = "threat_review_pending";
 
+/// Reason surfaced for `shell_exec` when the active policy profile has
+/// `allow_shell` OFF. The shell lane is WIRED, but a call is PolicyDenied, so
+/// discovery reports it unavailable with this cap-truthful reason rather than
+/// advertising a call that can only fail (the exact BUG-1 lie this closes).
+const SHELL_CAP_DENIED_REASON: &str = "allow_shell capability is off in the active policy profile";
+/// Reason surfaced for session/snapshot tools when `allow_session` is OFF on a
+/// host whose platform DOES provide the session runtime. Platform absence takes
+/// precedence and surfaces [`SESSION_UNAVAILABLE_REASON`] instead.
+const SESSION_CAP_DENIED_REASON: &str =
+    "allow_session capability is off in the active policy profile";
+/// Reason surfaced for `target_probe` when `allow_remote` is OFF. Remote
+/// federation is opt-in; a probe is denied until the operator grants the cap.
+const REMOTE_CAP_DENIED_REASON: &str =
+    "allow_remote capability is off in the active policy profile";
+
+/// Policy-cap gate for a tool, evaluated only when the daemon is reachable and
+/// its caps are known. Returns the cap-truthful reason a call WOULD be denied,
+/// or `None` when no cap gates this tool (or the gating cap is granted).
+///
+/// This is the discovery counterpart of the daemon's PolicyDenied gate: a tool
+/// whose cap is off is reported `available: false` so a client never calls a
+/// lane policy can only reject (`shell_exec` under `allow_shell: false`,
+/// sessions under `allow_session: false`, `target_probe` under
+/// `allow_remote: false`). Platform gating is handled separately and takes
+/// precedence (a cap is moot when the runtime does not exist on this host).
 #[must_use]
-fn discovered_tools(daemon_available: bool) -> Vec<DiscoveredToolEntry> {
+fn tool_policy_block_reason(name: &str, caps: PolicyCapsView) -> Option<&'static str> {
+    if name == "shell_exec" && !caps.allow_shell {
+        Some(SHELL_CAP_DENIED_REASON)
+    } else if is_session_tool(name) && !caps.allow_session {
+        Some(SESSION_CAP_DENIED_REASON)
+    } else if name == "target_probe" && !caps.allow_remote {
+        Some(REMOTE_CAP_DENIED_REASON)
+    } else {
+        None
+    }
+}
+
+#[must_use]
+fn discovered_tools(
+    daemon_available: bool,
+    caps: Option<PolicyCapsView>,
+) -> Vec<DiscoveredToolEntry> {
     let pty_available = pty_command_available();
     let session_available = session_runtime_available();
     tool_catalogue()
@@ -513,8 +554,20 @@ fn discovered_tools(daemon_available: bool) -> Vec<DiscoveredToolEntry> {
             let pty_blocked = is_pty_command_tool(tool.name) && !pty_available;
             let session_blocked = is_session_tool(tool.name) && !session_available;
             let platform_blocked = pty_blocked || session_blocked;
-            let available =
+            // Policy-cap truth (BUG 1): only meaningful once the tool would
+            // otherwise be callable (implemented, platform-supported, daemon
+            // reachable). A cap-off tool is reported unavailable so discovery
+            // never claims a call that policy can only PolicyDeny. Caps are
+            // `None` when the daemon is down (already `daemon_unavailable`) or a
+            // caps probe failed -- both fall back to presence-only gating.
+            let would_be_callable =
                 implemented && !platform_blocked && (!requires_daemon || daemon_available);
+            let policy_reason = if would_be_callable {
+                caps.and_then(|c| tool_policy_block_reason(tool.name, c))
+            } else {
+                None
+            };
+            let available = would_be_callable && policy_reason.is_none();
             let unavailable_reason = if !implemented {
                 Some("not_implemented")
             } else if pty_blocked {
@@ -523,6 +576,8 @@ fn discovered_tools(daemon_available: bool) -> Vec<DiscoveredToolEntry> {
                 Some(SESSION_UNAVAILABLE_REASON)
             } else if requires_daemon && !daemon_available {
                 Some("daemon_unavailable")
+            } else if policy_reason.is_some() {
+                policy_reason
             } else {
                 None
             };
@@ -581,16 +636,20 @@ pub struct OmniMatrix {
     pub remote_targets: RemoteTargetsStatus,
 }
 
-/// Shell-lane capability presence (US1/TC49).
+/// Shell-lane capability (US1/TC49).
 ///
-/// `available` reports that the gated shell lane is WIRED (the `shell_exec`
-/// tool is live and the daemon is reachable) -- it is capability PRESENCE, not
-/// the `allow_shell` cap value. A deny-by-default profile still reports
-/// `available: true` here because the lane exists; the cap gate is reported
-/// separately by `policy_status`.
+/// `available` is the CAP-TRUTHFUL verdict: the lane is WIRED (the `shell_exec`
+/// tool is live and the daemon is reachable) AND the active profile grants
+/// `allow_shell`. A deny-by-default profile (allow_shell off) reports
+/// `available: false` with `reason` set, because a call would be PolicyDenied
+/// (BUG 1). `reason` is `None` when available, or when caps could not be read
+/// (the presence-only fallback). The precise cap value is still reported by
+/// `policy_status`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ShellExecStatus {
     pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
 }
 
 /// Persistent shell-session runtime (US2/TC50).
@@ -926,16 +985,32 @@ impl TerminalCommanderMcpServer {
             Err(e) => (None, Some(format_ipc_error(&e))),
         };
         let daemon_available = daemon.is_some() && daemon_error.is_none();
+        // BUG 1: policy caps drive the cap-truthful availability of policy-gated
+        // tools (shell_exec/allow_shell, sessions/allow_session,
+        // target_probe/allow_remote). `DiscoverResponse` does NOT carry caps, so
+        // read them with one bounded `PolicyStatus` round trip -- but ONLY when
+        // the daemon is reachable (a down daemon already makes every
+        // daemon-gated tool `daemon_unavailable`). A caps-probe failure leaves
+        // caps `None`: discovery falls back to presence-only gating rather than
+        // guessing a deny.
+        let caps = if daemon_available {
+            match self.daemon.call(IpcRequest::PolicyStatus).await {
+                Ok(IpcResponse::PolicyStatus(p)) => Some(p.caps),
+                _ => None,
+            }
+        } else {
+            None
+        };
         // US6/T056: read-only omni capability matrix, assembled before we move
         // `daemon`/`daemon_error` into the payload. Honest from live state.
-        let omni_status = self.omni_status(daemon_available).await;
+        let omni_status = self.omni_status(daemon_available, caps).await;
         let payload = SystemDiscoverPayload {
             adapter_version: ADAPTER_VERSION,
             mcp_spec: MCP_SPEC_REVISION,
             daemon_available,
             daemon,
             daemon_error,
-            tools: discovered_tools(daemon_available),
+            tools: discovered_tools(daemon_available, caps),
             omni_status,
         };
         json_tool_result(&payload)
@@ -952,15 +1027,29 @@ impl TerminalCommanderMcpServer {
     /// Invariant: no row may claim `available: true` for a capability that is
     /// not actually wired. The privileged helper is always `false`
     /// (`threat_review_pending`); PTY/session reflect this host's real backend.
-    async fn omni_status(&self, daemon_available: bool) -> OmniStatus {
-        // Shell lane (US1): capability PRESENCE, not the `allow_shell` cap
-        // value. The lane exists iff the `shell_exec` tool is live and the
-        // daemon is reachable to run it. The policy cap is reported by
-        // `policy_status`, never conflated into "availability" here.
+    async fn omni_status(
+        &self,
+        daemon_available: bool,
+        caps: Option<PolicyCapsView>,
+    ) -> OmniStatus {
+        // Shell lane (US1): CAP-TRUTHFUL (BUG 1). The lane is wired iff the
+        // `shell_exec` tool is live and the daemon is reachable, but a profile
+        // with `allow_shell` off can only PolicyDeny the call -- so when caps
+        // are known, an off cap reports `available: false` with the cap reason.
+        // (Previously this reported capability PRESENCE regardless of the cap,
+        // which let discovery claim available:true for a call policy denies.)
+        // Caps `None` (daemon down / probe failed) falls back to presence.
         let shell_exec_live = tool_catalogue()
             .iter()
             .any(|t| t.name == "shell_exec" && matches!(t.status, ToolStatus::Live));
-        let shell_exec_available = shell_exec_live && daemon_available;
+        let shell_exec_wired = shell_exec_live && daemon_available;
+        let shell_denied = caps.is_some_and(|c| !c.allow_shell);
+        let shell_exec_available = shell_exec_wired && !shell_denied;
+        let shell_exec_reason = if shell_exec_wired && shell_denied {
+            Some(SHELL_CAP_DENIED_REASON)
+        } else {
+            None
+        };
 
         // Sessions (US2): unix-only runtime AND a reachable daemon.
         let sessions_available = session_runtime_available() && daemon_available;
@@ -985,6 +1074,7 @@ impl TerminalCommanderMcpServer {
             matrix: OmniMatrix {
                 shell_exec: ShellExecStatus {
                     available: shell_exec_available,
+                    reason: shell_exec_reason,
                 },
                 sessions: SessionsStatus {
                     available: sessions_available,
@@ -1791,9 +1881,29 @@ impl TerminalCommanderMcpServer {
         }
     }
 
+    /// Resolve the LATEST stored version of `rule_id` via one bounded
+    /// `RegistryGet` round trip (the daemon returns the latest version when the
+    /// request omits `version`). Used by `registry_deactivate` to turn an
+    /// omitted MCP `version` into the concrete version the wire IPC requires,
+    /// symmetric with `registry_activate`'s daemon-side latest resolution. A
+    /// missing rule surfaces the daemon's `RuleNotFound` error unchanged.
+    async fn resolve_latest_rule_version(&self, rule_id: &str) -> Result<u32, McpError> {
+        let ipc = RegistryGetParams {
+            rule_id: rule_id.to_owned(),
+            version: None,
+        };
+        match self.daemon.call(IpcRequest::RegistryGet(ipc)).await {
+            Ok(IpcResponse::RegistryGet(RegistryGetResponse { definition })) => {
+                Ok(definition.version)
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
     /// `registry_deactivate` — remove a rule from the active set.
     #[tool(
-        description = "Deactivate (rule_id, version, scope). scope is REQUIRED and must match the scope used at activation (e.g. {kind:'global'}); an omitted scope is rejected. Future commands skip the rule; already-running commands keep the rules they were started with."
+        description = "Deactivate (rule_id, version?, scope). version is OPTIONAL: omit it to deactivate the LATEST stored version (the resolved version is echoed in the response), or pass it to target a specific version -- an explicit version is used verbatim, never widened. scope is REQUIRED and must match the scope used at activation (e.g. {kind:'global'}); an omitted scope is rejected. Future commands skip the rule; already-running commands keep the rules they were started with."
     )]
     async fn registry_deactivate(
         &self,
@@ -1804,9 +1914,20 @@ impl TerminalCommanderMcpServer {
         // scope before this handler runs. The wire IPC type keeps
         // `scope: Option` for backward compatibility, so wrap in `Some`.
         let scope = Some(params.scope.into_ipc_scope()?);
+        // BUG 2: an omitted `version` resolves to the LATEST stored version of
+        // this rule_id, so a version-less deactivate is symmetric with the
+        // version-less activate that opened the row. The wire IPC carries a
+        // concrete `u32`, so resolve it here with one bounded RegistryGet (the
+        // daemon returns the latest version when the request omits it), then
+        // deactivate the resolved version. An explicit version is used verbatim
+        // (no silent widen); either way the response echoes the version acted on.
+        let version = match params.version {
+            Some(v) => v,
+            None => self.resolve_latest_rule_version(&params.rule_id).await?,
+        };
         let ipc = RegistryDeactivateParams {
             rule_id: params.rule_id,
-            version: params.version,
+            version,
             scope,
         };
         match self.daemon.call(IpcRequest::RegistryDeactivate(ipc)).await {
@@ -4711,7 +4832,13 @@ pub struct McpRegistryImportPackParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryDeactivateParams {
     pub rule_id: String,
-    pub version: u32,
+    /// Omit to deactivate the LATEST stored version (mirrors registry_get /
+    /// registry_activate); the adapter resolves it and the response echoes the
+    /// resolved version. Provide a value to target a specific version. An
+    /// explicit version is used verbatim -- never silently widened.
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub version: Option<u32>,
     /// REQUIRED scope (TC42c/TC42d). No default and it is in the schema
     /// `required[]`: an omitted scope is rejected. MUST match the scope
     /// used at activation; deactivating with a different scope will not
@@ -5990,7 +6117,7 @@ mod tests {
 
     #[test]
     fn system_discover_tools_explain_daemon_unavailable() {
-        let tools = discovered_tools(false);
+        let tools = discovered_tools(false, None);
         assert_eq!(tools.len(), tool_catalogue().len());
 
         for tool in &tools {
@@ -6048,6 +6175,60 @@ mod tests {
         }
     }
 
+    /// BUG 1: with the daemon UP but `allow_shell` OFF in the active profile,
+    /// the catalogue MUST report `shell_exec` unavailable with the cap-truthful
+    /// reason -- never `available:true` for a call policy can only PolicyDeny.
+    /// Granting the cap flips it back to available with no reason. The same gate
+    /// covers `target_probe` / `allow_remote`. (shell_exec + target_probe are
+    /// platform-independent, so this asserts identically on unix and Windows.)
+    #[test]
+    fn catalogue_marks_policy_gated_tools_unavailable_when_cap_off() {
+        fn entry(tools: &[DiscoveredToolEntry], name: &str) -> DiscoveredToolEntry {
+            tools
+                .iter()
+                .find(|t| t.name == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} missing from discovered tools"))
+        }
+
+        // Daemon up, every cap OFF (the DeveloperLocal deny-by-default posture).
+        let denied = discovered_tools(true, Some(PolicyCapsView::default()));
+        let shell = entry(&denied, "shell_exec");
+        assert!(
+            !shell.available,
+            "shell_exec must be unavailable when allow_shell is off"
+        );
+        assert_eq!(shell.unavailable_reason, Some(SHELL_CAP_DENIED_REASON));
+        let probe = entry(&denied, "target_probe");
+        assert!(
+            !probe.available,
+            "target_probe must be unavailable when allow_remote is off"
+        );
+        assert_eq!(probe.unavailable_reason, Some(REMOTE_CAP_DENIED_REASON));
+
+        // Grant allow_shell + allow_remote: both become available, no reason.
+        let granted = discovered_tools(
+            true,
+            Some(PolicyCapsView {
+                allow_shell: true,
+                allow_remote: true,
+                ..PolicyCapsView::default()
+            }),
+        );
+        let shell = entry(&granted, "shell_exec");
+        assert!(
+            shell.available,
+            "shell_exec must be available when allow_shell is on"
+        );
+        assert_eq!(shell.unavailable_reason, None);
+        let probe = entry(&granted, "target_probe");
+        assert!(
+            probe.available,
+            "target_probe must be available when allow_remote is on"
+        );
+        assert_eq!(probe.unavailable_reason, None);
+    }
+
     /// TB-1 regression: on a host without a PTY runtime (non-unix; ConPTY
     /// pending) the four `pty_*` tools MUST be reported `available: false`
     /// with the platform reason -- even when the daemon is reachable. They
@@ -6058,7 +6239,7 @@ mod tests {
     fn pty_tools_unavailable_on_unsupported_platform() {
         // daemon_available = true on purpose: a platform block must fire
         // regardless of daemon reachability.
-        let tools = discovered_tools(true);
+        let tools = discovered_tools(true, None);
 
         // The four PTY command tools are platform-available wherever a PTY
         // backend exists: unix (pty-process) AND Windows (ConPTY / US3a-TC53).
@@ -6135,7 +6316,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pty_tools_available_on_supported_platform_with_daemon() {
-        let tools = discovered_tools(true);
+        let tools = discovered_tools(true, None);
         for name in [
             "pty_command_start",
             "pty_command_write_stdin",
@@ -6193,12 +6374,40 @@ mod tests {
     fn deactivate_schema_lists_scope_as_required() {
         let schema = schemars::schema_for!(McpRegistryDeactivateParams);
         let required = schema_required(&schema);
-        for field in ["rule_id", "version", "scope"] {
+        for field in ["rule_id", "scope"] {
             assert!(
                 required.iter().any(|f| f == field),
                 "registry_deactivate schema must list {field} in required[]; got {required:?}"
             );
         }
+        // BUG 2: version is now OPTIONAL (omit = latest stored), so it must NOT
+        // be in required[] -- otherwise an omitted version is rejected with the
+        // very "missing field `version`" error this fix removes.
+        assert!(
+            !required.iter().any(|f| f == "version"),
+            "version must be optional on deactivate (omit = latest); got {required:?}"
+        );
+    }
+
+    #[test]
+    fn deactivate_omitted_version_deserializes_as_none() {
+        // BUG 2 regression: an omitted `version` must DESERIALIZE (to None,
+        // resolved to the latest stored version by the adapter) instead of
+        // failing with "missing field `version`". scope stays required.
+        let params = serde_json::from_str::<McpRegistryDeactivateParams>(
+            r#"{"rule_id":"r","scope":{"kind":"global"}}"#,
+        )
+        .expect("deactivate without version must deserialize (version is optional)");
+        assert_eq!(params.rule_id, "r");
+        assert_eq!(params.version, None, "omitted version must parse as None");
+        assert_eq!(params.scope.kind, "global");
+
+        // An explicit version still parses and is preserved verbatim.
+        let explicit = serde_json::from_str::<McpRegistryDeactivateParams>(
+            r#"{"rule_id":"r","version":3,"scope":{"kind":"global"}}"#,
+        )
+        .expect("deactivate with explicit version must deserialize");
+        assert_eq!(explicit.version, Some(3));
     }
 
     #[test]

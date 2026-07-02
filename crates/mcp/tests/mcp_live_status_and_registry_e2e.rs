@@ -367,3 +367,70 @@ async fn live_pty_command_list_contains_started_job() {
     handle.shutdown().await;
     cleanup(&data);
 }
+
+/// BUG 2: `registry_deactivate` with an OMITTED version must resolve to the
+/// LATEST stored version (symmetric with the version-less activate that opened
+/// the row) instead of failing with "missing field `version`". Two versions of
+/// one rule id are seeded so "latest" (v2) is unambiguously distinct from a
+/// hardcoded 1, and the response must echo the version actually acted on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_deactivate_omitted_version_resolves_latest() {
+    let data = tmp_data_dir("deactlatest");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        // Seed two versions of one rule id: the store assigns monotonic
+        // versions, so the second upsert is v2 (the latest stored version).
+        for _ in 0..2 {
+            let _ = call_tool(
+                &client,
+                "registry_upsert",
+                serde_json::json!({
+                    "definition_json": keyword_rule_json("tcdeactlatest", "boom", "boom_match"),
+                }),
+            )
+            .await;
+        }
+
+        // Activate the latest version (omit version -> daemon resolves v2).
+        let activated = parse_payload(
+            &call_tool(
+                &client,
+                "registry_activate",
+                serde_json::json!({ "rule_id": "tcdeactlatest", "scope": { "kind": "global" } }),
+            )
+            .await,
+        );
+        assert_eq!(
+            activated["version"].as_u64(),
+            Some(2),
+            "activate (omitted version) must resolve to the latest stored version; got {activated}"
+        );
+
+        // Deactivate with an OMITTED version: the adapter resolves latest (v2)
+        // via a bounded registry_get and echoes the version actually acted on.
+        let deactivated = parse_payload(
+            &call_tool(
+                &client,
+                "registry_deactivate",
+                serde_json::json!({ "rule_id": "tcdeactlatest", "scope": { "kind": "global" } }),
+            )
+            .await,
+        );
+        assert_eq!(
+            deactivated["version"].as_u64(),
+            Some(2),
+            "deactivate (omitted version) must resolve + echo the latest stored version; got {deactivated}"
+        );
+        assert_eq!(
+            deactivated["was_deactivated"].as_bool(),
+            Some(true),
+            "the resolved-latest deactivate must close the active row; got {deactivated}"
+        );
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
