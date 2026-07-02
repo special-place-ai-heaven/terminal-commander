@@ -1784,7 +1784,7 @@ fn resolve_on_path(argv0: &str, path: &std::ffi::OsStr, pathext: &str) -> Option
 /// spawn site platform-agnostic.
 #[cfg(not(windows))]
 #[inline]
-fn resolve_windows_argv0(_argv0: &str) -> Option<String> {
+const fn resolve_windows_argv0(_argv0: &str) -> Option<String> {
     None
 }
 
