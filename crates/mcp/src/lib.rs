@@ -23,6 +23,7 @@
 //! Source-status: live.
 
 pub mod daemon_client;
+pub mod facade_strict;
 pub mod facades;
 pub mod surface;
 pub mod surface_list;
