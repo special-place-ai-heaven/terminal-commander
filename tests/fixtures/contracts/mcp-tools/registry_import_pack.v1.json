@@ -62,6 +62,20 @@
       }
     ]
   },
+  "reimport_idempotent_response_example": {
+    "_note": "US2/FR-010: re-importing a pack whose rules are content-identical to the latest stored version reports every unchanged rule in skipped[], imports nothing, and mints NO new version. A rule whose definition genuinely changed imports a new version and appears in imported[]. Identity excludes version and status (store-owned / lifecycle fields). W7 reader discriminator: skipped + a failed entry = an invalid rule; skipped alone = identical/unchanged.",
+    "pack": "cargo",
+    "imported": [],
+    "skipped": [
+      "cargo.compile-error",
+      "cargo.could-not-compile",
+      "cargo.warning",
+      "cargo.test-failed",
+      "cargo.panic",
+      "cargo.aborting"
+    ],
+    "activated": []
+  },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
     "data": {
@@ -92,6 +106,9 @@
     "no raw stream content is returned; imported/activated are rule ids",
     "M7: a mid-loop activation failure is a PARTIAL SUCCESS, not an error -- the response returns activated[] (rules that succeeded) plus an additive failed[] of {rule_id, reason} (rules that did not), never a bare error that hides the activated rules",
     "M7: failed[] is additive and omitted when empty, so the all-success wire shape is unchanged and older clients still deserialize",
-    "M7: daemon state matches the split -- rules in activated[] are live in the active set, rules in failed[] are not"
+    "M7: daemon state matches the split -- rules in activated[] are live in the active set, rules in failed[] are not",
+    "FR-010: re-importing a content-identical pack reports every unchanged rule in skipped[] and imports nothing -- no new version is minted",
+    "FR-010: rule identity excludes version and status (store-owned / lifecycle fields); a genuinely edited definition imports a new version and appears in imported[]",
+    "FR-010/W7: an identical rule lands in skipped[] with NO failed[] entry -- skipped+failed=invalid rule, skipped alone=identical/unchanged"
   ]
 }

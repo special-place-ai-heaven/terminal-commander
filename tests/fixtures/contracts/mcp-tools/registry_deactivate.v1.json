@@ -60,14 +60,67 @@
       "ipc_code": "RuleNotActive"
     }
   },
+  "bulk_pack_request_example": {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "tools/call",
+    "params": {
+      "name": "registry_deactivate",
+      "arguments": {
+        "pack": "cargo",
+        "scope": {
+          "kind": "global"
+        }
+      }
+    }
+  },
+  "bulk_rule_ids_request_example": {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "registry_deactivate",
+      "arguments": {
+        "rule_ids": [
+          "cargo.compile-error",
+          "cargo.warning"
+        ],
+        "scope": {
+          "kind": "global"
+        }
+      }
+    }
+  },
+  "bulk_response_example": {
+    "outcomes": [
+      {
+        "rule_id": "cargo.compile-error",
+        "version": 1,
+        "outcome": "deactivated"
+      },
+      {
+        "rule_id": "cargo.warning",
+        "outcome": "not_active"
+      },
+      {
+        "rule_id": "ghost.unknown",
+        "outcome": "unknown_rule"
+      }
+    ],
+    "jobs_rebound": 0
+  },
   "invariants": [
-    "rule_id and version are required",
+    "exactly ONE selector of {rule_id, rule_ids, pack} is required; rule_id is schema-optional and the adapter's exactly-one-of validator owns required-ness (US2/FR-011)",
+    "version is optional and only valid with rule_id; bulk selectors close each rule's active version(s) under the scope",
     "scope is required and present in the MCP input schema required[] (TB-5)",
     "scope.kind is a JSON-Schema enum [global,bucket,job,probe] (TB-7)",
     "an omitted scope is rejected, never silently widened to global",
     "jobs_rebound is a count, not job output",
-    "success payload reports whether an active binding was closed",
-    "a deactivate matching no active (rule_id, version, scope) row returns a typed RuleNotActive error, not a silent ok:true/was_deactivated:false",
-    "the RuleNotActive message echoes the version(s) actually active under the scope so the caller can self-correct"
+    "single-rule success payload reports whether an active binding was closed",
+    "a single-rule deactivate matching no active (rule_id, version, scope) row returns a typed RuleNotActive error, not a silent ok:true/was_deactivated:false",
+    "the RuleNotActive message echoes the version(s) actually active under the scope so the caller can self-correct",
+    "bulk (rule_ids/pack) reports one outcome per requested rule in request order: deactivated | not_active | unknown_rule; partial success is explicit, never silent (FR-011)",
+    "pack membership resolves from the embedded seed-pack JSON only, never id-prefix or tag heuristics; an unknown pack lists the known packs",
+    "bulk jobs_rebound reflects ONE post-loop rebind pass, not one per rule"
   ]
 }

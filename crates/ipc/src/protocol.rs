@@ -316,6 +316,11 @@ pub enum IpcRequest {
     /// Remove `(rule_id, version)` from the active set and close
     /// the persistent activation row.
     RegistryDeactivate(RegistryDeactivateParams),
+    /// US2 (FR-011): deactivate an entire seed pack or an explicit list
+    /// of rule ids in ONE call, under one explicit scope, reporting
+    /// per-rule outcomes. The single-rule [`RegistryDeactivate`] wire
+    /// contract is untouched.
+    RegistryDeactivateBulk(RegistryDeactivateBulkParams),
     /// Snapshot of every currently-active `(rule_id, version)`. Bounded
     /// by [`MAX_LIST_LIMIT`] / the request `limit`.
     RegistryListActive(ListLimitParams),
@@ -468,6 +473,12 @@ impl IpcRequest {
             | Self::RegistryUpsert(_)
             | Self::RegistryActivate(_)
             | Self::RegistryDeactivate(_)
+            // Bulk deactivate mutates the active set (durable rows +
+            // in-memory authority) exactly like the single-rule form; a
+            // blind retry re-closes already-closed rows (harmless no-op)
+            // but is still a server-side mutation, so it groups with the
+            // other registry mutators.
+            | Self::RegistryDeactivateBulk(_)
             | Self::RegistryImportPack(_)
             // File WRITE (TC22 A3): creates or overwrites a file on disk.
             // A blind retry double-writes (or re-truncates) the target, so
@@ -592,6 +603,7 @@ pub enum IpcResponse {
     RegistryActivate(RegistryActivateResponse),
     RegistryImportPack(RegistryImportPackResponse),
     RegistryDeactivate(RegistryDeactivateResponse),
+    RegistryDeactivateBulk(RegistryDeactivateBulkResponse),
     RegistryListActive(RegistryListActiveResponse),
     RegistrySuggestFromSamples(RegistrySuggestFromSamplesResponse),
     FileReadWindow(FileReadWindowResponse),
@@ -1540,6 +1552,59 @@ pub struct RegistryDeactivateResponse {
     pub scope: ActivationScope,
     /// Number of live jobs whose sifter was rebound by this call.
     pub jobs_rebound: u32,
+}
+
+/// `registry_deactivate_bulk` parameters (US2 / FR-011).
+///
+/// Deactivate an entire seed pack OR an explicit list of rule ids in ONE
+/// call, under exactly ONE scope. Exactly one of `pack` / `rule_ids`
+/// must be present; the daemon rejects zero or both with a teaching
+/// error. The single-rule [`RegistryDeactivateParams`] wire contract is
+/// untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryDeactivateBulkParams {
+    /// Selector 1: deactivate every member of this seed pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<String>,
+    /// Selector 2: deactivate these rule ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_ids: Option<Vec<String>>,
+    /// Required. ONE scope per call.
+    pub scope: ActivationScope,
+}
+
+/// The disposition of one rule in a bulk deactivate (US2 / FR-011).
+///
+/// Partial success is the NORMAL shape: `not_active` and `unknown_rule`
+/// are reported per-rule, never as a call-level error.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkOutcomeKind {
+    /// At least one active version under the scope was closed.
+    Deactivated,
+    /// Known rule, but nothing was open under this scope.
+    NotActive,
+    /// Rule id not in the registry (or not a member of the named pack).
+    UnknownRule,
+}
+
+/// One per-rule outcome entry in a bulk deactivate response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BulkDeactivateOutcome {
+    pub rule_id: String,
+    /// The version acted on; `None` for `unknown_rule`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    pub outcome: BulkOutcomeKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryDeactivateBulkResponse {
+    /// One entry per requested rule, ALWAYS, in request order (pack
+    /// order = pack-file order).
+    pub outcomes: Vec<BulkDeactivateOutcome>,
+    /// Live jobs rebound ONCE after the whole loop.
+    pub jobs_rebound: u64,
 }
 
 /// One entry in `registry_list_active`. Carries the scope the rule

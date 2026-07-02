@@ -433,6 +433,7 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::RegistryActivate(_) => "registry_activate",
         IpcRequest::RegistryImportPack(_) => "registry_import_pack",
         IpcRequest::RegistryDeactivate(_) => "registry_deactivate",
+        IpcRequest::RegistryDeactivateBulk(_) => "registry_deactivate_bulk",
         IpcRequest::RegistryListActive(_) => "registry_list_active",
         IpcRequest::RegistrySuggestFromSamples(_) => "registry_suggest_from_samples",
         IpcRequest::FileReadWindow(_) => "file_read_window",
@@ -492,6 +493,7 @@ pub(crate) const DISCOVERABLE_METHODS: &[&str] = &[
     "registry_activate",
     "registry_import_pack",
     "registry_deactivate",
+    "registry_deactivate_bulk",
     "registry_list_active",
     "file_read_window",
     "file_search",
@@ -659,6 +661,12 @@ async fn dispatch(
         }
         IpcRequest::RegistryDeactivate(p) => {
             match handlers::registry::handle_registry_deactivate(state, p) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::RegistryDeactivateBulk(p) => {
+            match handlers::registry::handle_registry_deactivate_bulk(state, p) {
                 Ok(r) => IpcResult::Ok { response: r },
                 Err(e) => IpcResult::Err { error: e },
             }
@@ -1147,13 +1155,13 @@ mod tests {
         EventContextParams, FileReadWindowParams, FileSearchParams, FileWatchStartParams,
         FileWatchStopParams, FileWriteParams, ListLimitParams, ProbeStatusParams,
         PtyCommandStartParams, PtyCommandStopParams, PtyCommandWriteStdinParams,
-        RegistryActivateParams, RegistryDeactivateParams, RegistryGetParams,
-        RegistryImportPackParams, RegistrySearchParams, RegistryTestParams, RegistryUpsertParams,
-        ShellExecParams, ShellSessionExecParams, ShellSessionStartParams, ShellSessionStatusParams,
-        ShellSessionStopParams, SubscriptionCloseParams, SubscriptionListParams,
-        SubscriptionOpenParams, SubscriptionPredicate, SubscriptionPullParams,
-        SubscriptionSeekParams, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
-        WorkspaceSnapshotCreateParams,
+        RegistryActivateParams, RegistryDeactivateBulkParams, RegistryDeactivateParams,
+        RegistryGetParams, RegistryImportPackParams, RegistrySearchParams, RegistryTestParams,
+        RegistryUpsertParams, ShellExecParams, ShellSessionExecParams, ShellSessionStartParams,
+        ShellSessionStatusParams, ShellSessionStopParams, SubscriptionCloseParams,
+        SubscriptionListParams, SubscriptionOpenParams, SubscriptionPredicate,
+        SubscriptionPullParams, SubscriptionSeekParams, SubscriptionSourceSel,
+        WorkspaceSnapshotApplyParams, WorkspaceSnapshotCreateParams,
     };
     use std::collections::BTreeSet;
     use terminal_commander_core::{
@@ -1282,6 +1290,11 @@ mod tests {
                 rule_id: "x".to_owned(),
                 version: 1,
                 scope: None,
+            }),
+            IpcRequest::RegistryDeactivateBulk(RegistryDeactivateBulkParams {
+                pack: None,
+                rule_ids: Some(vec!["x".to_owned()]),
+                scope: terminal_commander_core::ActivationScope::Global,
             }),
             IpcRequest::RegistryListActive(ListLimitParams { limit: None }),
             IpcRequest::FileReadWindow(FileReadWindowParams {

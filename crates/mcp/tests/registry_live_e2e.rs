@@ -424,3 +424,82 @@ async fn import_pack_unknown_name_is_teaching_error_through_mcp() {
     handle.shutdown().await;
     cleanup(&data);
 }
+
+/// US2 / FR-011: one MCP `registry_deactivate` call with the `pack`
+/// selector deactivates every active member of the pack. The active
+/// list is empty afterwards and each rule reports a `deactivated`
+/// outcome (the exact pack-lifecycle operation the dogfood round needed
+/// six separate calls for).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deactivate_pack_through_mcp_empties_active_list() {
+    let data = tmp_data_dir("deactivate-pack");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        // Import + activate the whole cargo pack in one call.
+        let out = first_text(
+            &call_tool(
+                &client,
+                "registry_import_pack",
+                serde_json::json!({
+                    "pack": "cargo",
+                    "activate": true,
+                    "scope": { "kind": "global" }
+                }),
+            )
+            .await,
+        );
+        let imported: serde_json::Value = serde_json::from_str(&out).expect("import json");
+        let imported_count = imported["imported"].as_array().expect("imported").len();
+        assert!(imported_count >= 6, "cargo pack must activate its rules");
+
+        // Active list is non-empty before deactivation.
+        let before =
+            first_text(&call_tool(&client, "registry_list_active", serde_json::json!({})).await);
+        let before: serde_json::Value = serde_json::from_str(&before).expect("list json");
+        assert!(
+            !before["entries"].as_array().expect("entries").is_empty(),
+            "cargo rules must be active before deactivate"
+        );
+
+        // ONE pack-level deactivate call.
+        let out = first_text(
+            &call_tool(
+                &client,
+                "registry_deactivate",
+                serde_json::json!({
+                    "pack": "cargo",
+                    "scope": { "kind": "global" }
+                }),
+            )
+            .await,
+        );
+        let bulk: serde_json::Value = serde_json::from_str(&out).expect("deactivate json");
+        let outcomes = bulk["outcomes"].as_array().expect("outcomes array");
+        assert_eq!(
+            outcomes.len(),
+            imported_count,
+            "one outcome per pack member"
+        );
+        for o in outcomes {
+            assert_eq!(
+                o["outcome"], "deactivated",
+                "every active member must be deactivated, got {o}"
+            );
+        }
+
+        // Active list is empty afterwards.
+        let after =
+            first_text(&call_tool(&client, "registry_list_active", serde_json::json!({})).await);
+        let after: serde_json::Value = serde_json::from_str(&after).expect("list json");
+        assert!(
+            after["entries"].as_array().expect("entries").is_empty(),
+            "no rule may remain active after pack deactivate, got: {after}"
+        );
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
