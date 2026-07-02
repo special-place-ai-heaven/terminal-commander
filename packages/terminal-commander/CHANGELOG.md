@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.71](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.70...v0.1.71) (2026-07-02)
+
+
+### Bug Fixes
+
+* 12 crate fixes -- make Windows-host test runs honest (+11 more) ([be87f70](https://github.com/special-place-ai-heaven/terminal-commander/commit/be87f70d1c4e2216d971bf1891f51d0a7dd036e3))
+* 13 crate fixes -- const fn on the non-Windows argv0 resolver stub (linux clippy gate) (+12 more) ([d51f056](https://github.com/special-place-ai-heaven/terminal-commander/commit/d51f05609e42285b4113e8eea6018b3598fe9781))
+* 14 crate fixes -- clear linux clippy lints in bench_events_since harness (+13 more) ([b4e4bdc](https://github.com/special-place-ai-heaven/terminal-commander/commit/b4e4bdc3e29991bb262ec69f0ec4c892e32a649a))
+
 ## [0.1.70](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.69...v0.1.70) (2026-06-29)
 
 
