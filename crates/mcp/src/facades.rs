@@ -10,9 +10,9 @@ use serde::Deserialize;
 use crate::tools::{
     McpBucketEventsSinceParams, McpBucketSummaryParams, McpBucketWaitParams,
     McpCommandOutputTailParams, McpCommandStartParams, McpCommandStatusParams,
-    McpCommandStopParams, McpEventContextParams, McpFileReadWindowParams, McpFileSearchParams,
-    McpFileWatchStartParams, McpFileWatchStopParams, McpFileWriteParams, McpListLimitParams,
-    McpProbeStatusParams, McpPtyCommandStartParams, McpPtyCommandStopParams,
+    McpCommandStopParams, McpEventContextParams, McpFileListDirParams, McpFileReadWindowParams,
+    McpFileSearchParams, McpFileWatchStartParams, McpFileWatchStopParams, McpFileWriteParams,
+    McpListLimitParams, McpProbeStatusParams, McpPtyCommandStartParams, McpPtyCommandStopParams,
     McpPtyCommandWriteStdinParams, McpRegistryActivateParams, McpRegistryDeactivateParams,
     McpRegistryGetParams, McpRegistryImportPackParams, McpRegistrySearchParams,
     McpRegistrySuggestFromSamplesParams, McpRegistryTestParams, McpRegistryUpsertParams,
@@ -73,6 +73,8 @@ pub enum SessionFacadeCall {
 pub enum FilesFacadeCall {
     Read(McpFileReadWindowParams),
     Search(McpFileSearchParams),
+    /// US3: bounded single-level directory listing.
+    List(McpFileListDirParams),
     Write(McpFileWriteParams),
     WatchStart(McpFileWatchStartParams),
     WatchStop(McpFileWatchStopParams),
@@ -176,6 +178,12 @@ mod tests {
             serde_json::from_value(serde_json::json!({"action":"read","path":"/tmp/foo.txt"}))
                 .expect("read must parse");
         assert!(matches!(v, FilesFacadeCall::Read(_)));
+
+        // US3 param variant: list (new directory-listing action).
+        let v: FilesFacadeCall =
+            serde_json::from_value(serde_json::json!({"action":"list","path":"/tmp/dir"}))
+                .expect("list must parse");
+        assert!(matches!(v, FilesFacadeCall::List(p) if p.path == "/tmp/dir"));
     }
 
     #[test]

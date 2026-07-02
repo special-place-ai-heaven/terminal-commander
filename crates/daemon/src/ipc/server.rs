@@ -438,6 +438,7 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::RegistrySuggestFromSamples(_) => "registry_suggest_from_samples",
         IpcRequest::FileReadWindow(_) => "file_read_window",
         IpcRequest::FileSearch(_) => "file_search",
+        IpcRequest::FileListDir(_) => "file_list_dir",
         IpcRequest::FileWrite(_) => "file_write",
         IpcRequest::FileWatchStart(_) => "file_watch_start",
         IpcRequest::FileWatchStop(_) => "file_watch_stop",
@@ -497,6 +498,7 @@ pub(crate) const DISCOVERABLE_METHODS: &[&str] = &[
     "registry_list_active",
     "file_read_window",
     "file_search",
+    "file_list_dir",
     "file_write",
     "file_watch_start",
     "file_watch_stop",
@@ -685,6 +687,10 @@ async fn dispatch(
             Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::FileSearch(p) => match handlers::file::handle_file_search(state, p) {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
+        IpcRequest::FileListDir(p) => match handlers::file::handle_file_list_dir(state, p) {
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
         },
@@ -1152,9 +1158,9 @@ mod tests {
     use crate::ipc::protocol::{
         AuditSinceParams, BucketEventsSinceParams, BucketSummaryParams, BucketWaitParams,
         CommandOutputTailParams, CommandStartParams, CommandStatusParams, CommandStopParams,
-        EventContextParams, FileReadWindowParams, FileSearchParams, FileWatchStartParams,
-        FileWatchStopParams, FileWriteParams, ListLimitParams, ProbeStatusParams,
-        PtyCommandStartParams, PtyCommandStopParams, PtyCommandWriteStdinParams,
+        EventContextParams, FileListDirParams, FileReadWindowParams, FileSearchParams,
+        FileWatchStartParams, FileWatchStopParams, FileWriteParams, ListLimitParams,
+        ProbeStatusParams, PtyCommandStartParams, PtyCommandStopParams, PtyCommandWriteStdinParams,
         RegistryActivateParams, RegistryDeactivateBulkParams, RegistryDeactivateParams,
         RegistryGetParams, RegistryImportPackParams, RegistrySearchParams, RegistryTestParams,
         RegistryUpsertParams, ShellExecParams, ShellSessionExecParams, ShellSessionStartParams,
@@ -1309,6 +1315,10 @@ mod tests {
                 case_insensitive: None,
                 max_matches: None,
                 max_snippet_bytes: None,
+            }),
+            IpcRequest::FileListDir(FileListDirParams {
+                path: "/x".to_owned(),
+                max_entries: None,
             }),
             IpcRequest::FileWrite(FileWriteParams {
                 path: std::path::PathBuf::from("/x"),

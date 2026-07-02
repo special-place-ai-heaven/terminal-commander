@@ -337,6 +337,12 @@ pub enum IpcRequest {
     /// Bounded substring/regex search over one file. Returns
     /// structured match pointers + short snippets only.
     FileSearch(FileSearchParams),
+    /// Bounded single-level listing of one directory (US3). Returns
+    /// name/kind/size/mtime per entry, dirs-first deterministic order,
+    /// capped with a truthful truncation flag. Same read-path policy gate
+    /// as `file_read_window`. Symlinks/reparse points reported by kind,
+    /// never followed.
+    FileListDir(FileListDirParams),
     /// Write UTF-8 content to a single regular file (TC22 A3).
     /// MUTATING + NON-idempotent: a blind retry would double-write.
     /// The daemon policy-gates the canonical target against
@@ -529,6 +535,9 @@ impl IpcRequest {
             | Self::ShellSessionList
             | Self::FileReadWindow(_)
             | Self::FileSearch(_)
+            // Directory listing (US3): a pure bounded read, replayable and
+            // side-effect free, so it groups with the file read/search reads.
+            | Self::FileListDir(_)
             | Self::FileWatchList
             | Self::RegistrySearch(_)
             | Self::RegistryGet(_)
@@ -608,6 +617,7 @@ pub enum IpcResponse {
     RegistrySuggestFromSamples(RegistrySuggestFromSamplesResponse),
     FileReadWindow(FileReadWindowResponse),
     FileSearch(FileSearchResponse),
+    FileListDir(FileListDirResponse),
     FileWrite(FileWriteResponse),
     FileWatchStart(FileWatchStartResponse),
     FileWatchStop(FileWatchStopResponse),
@@ -1659,6 +1669,15 @@ pub const DEFAULT_FILE_SEARCH_SNIPPET_BYTES: usize = 240;
 /// Hard cap on bytes scanned by a single `file_search` call. Protects
 /// the daemon from a request that asks to search a gigabyte file.
 pub const MAX_FILE_SEARCH_SCAN_BYTES: u64 = 16 * 1024 * 1024;
+/// Hard cap on entries returned by `file_list_dir` in a single call.
+///
+/// (US3 FR-020.) Bounds a single-level directory listing the same way the
+/// read-window / search lanes bound their output: a directory with more than
+/// this many entries is returned truncation-flagged with the true total, never
+/// silently partial (Constitution III).
+pub const MAX_FILE_LIST_ENTRIES: usize = 500;
+/// Default `file_list_dir` entry cap when the caller omits `max_entries`.
+pub const DEFAULT_FILE_LIST_ENTRIES: usize = 200;
 /// Hard cap on the content size accepted by a single `file_write` call.
 ///
 /// (TC22 A3.) Bounds the request the same way the read window / search
@@ -1760,6 +1779,63 @@ pub struct FileSearchResponse {
     /// Bytes actually scanned (may be lower than file size when the
     /// scan-bytes budget tripped first).
     pub bytes_scanned: u64,
+}
+
+/// Kind of a single directory entry, from `symlink_metadata` (never
+/// followed): a symlink is reported as `symlink` regardless of its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirEntryKind {
+    File,
+    Dir,
+    Symlink,
+}
+
+/// One entry returned by `file_list_dir` (US3). The discovery unit of the
+/// files facade: a single-level entry, never recursed into and, for a
+/// symlink/reparse point, never followed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirEntry {
+    /// Entry file name only (no path component).
+    pub name: String,
+    /// `file` / `dir` / `symlink`, taken from `symlink_metadata`.
+    pub kind: DirEntryKind,
+    /// Size in bytes for regular files only; omitted for dirs/symlinks and
+    /// when the entry vanished between enumeration and stat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// Modification time in milliseconds since the Unix epoch; omitted when
+    /// unavailable (stat race or platform without an mtime).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_ms: Option<i64>,
+}
+
+/// `file_list_dir` parameters (US3 FR-020).
+///
+/// Single-level listing of one directory. Absolute path required (the daemon
+/// has no workspace root); gated by the SAME read-path policy as
+/// `file_read_window` (FR-021).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileListDirParams {
+    /// Absolute path of the directory to list.
+    pub path: String,
+    /// Cap on returned entries; clamped to
+    /// `[1, MAX_FILE_LIST_ENTRIES]`, default `DEFAULT_FILE_LIST_ENTRIES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_entries: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileListDirResponse {
+    /// Canonicalized directory that was listed.
+    pub path: String,
+    /// Sorted: dirs first, then files/symlinks together; each group
+    /// lexicographic by `name`.
+    pub entries: Vec<DirEntry>,
+    /// Total entries present in the directory (`>= entries.len()`).
+    pub total_entries: u64,
+    /// `true` iff `total_entries > entries.len()` (the cap clamped the list).
+    pub truncated: bool,
 }
 
 /// `file_write` parameters (TC22 A3).
@@ -3139,6 +3215,14 @@ mod tests {
                 }),
                 true,
             ),
+            (
+                // Directory listing (US3): a pure bounded read, replayable.
+                IpcRequest::FileListDir(FileListDirParams {
+                    path: "/x".to_owned(),
+                    max_entries: None,
+                }),
+                true,
+            ),
             (IpcRequest::FileWatchList, true),
             (
                 IpcRequest::RegistrySearch(RegistrySearchParams {
@@ -3233,6 +3317,60 @@ mod tests {
              sub_id + registry slot, leaking a slot and risking \
              SubscriptionLimitExceeded"
         );
+    }
+
+    /// US3 (W1): the `file_list_dir` response wire shape is the pinned one --
+    /// `DirEntryKind` renders snake_case (`file`/`dir`/`symlink`), and the
+    /// per-entry `size_bytes`/`mtime_ms` optionals are omitted when `None`
+    /// (`skip_serializing_if`). Round-trips back into the same variant.
+    #[test]
+    fn file_list_dir_response_wire_shape_is_pinned() {
+        let resp = IpcResponse::FileListDir(FileListDirResponse {
+            path: "/abs/dir".to_owned(),
+            entries: vec![
+                DirEntry {
+                    name: "sub".to_owned(),
+                    kind: DirEntryKind::Dir,
+                    size_bytes: None,
+                    mtime_ms: Some(1),
+                },
+                DirEntry {
+                    name: "f.txt".to_owned(),
+                    kind: DirEntryKind::File,
+                    size_bytes: Some(3),
+                    mtime_ms: None,
+                },
+                DirEntry {
+                    name: "link".to_owned(),
+                    kind: DirEntryKind::Symlink,
+                    size_bytes: None,
+                    mtime_ms: None,
+                },
+            ],
+            total_entries: 3,
+            truncated: false,
+        });
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["method"], "file_list_dir");
+        // snake_case kinds.
+        assert_eq!(json["entries"][0]["kind"], "dir");
+        assert_eq!(json["entries"][1]["kind"], "file");
+        assert_eq!(json["entries"][2]["kind"], "symlink");
+        // Absent optionals are omitted, not rendered as null.
+        assert!(
+            json["entries"][0].get("size_bytes").is_none(),
+            "dir omits size_bytes"
+        );
+        assert!(
+            json["entries"][1].get("mtime_ms").is_none(),
+            "None mtime_ms omitted"
+        );
+        assert_eq!(json["entries"][1]["size_bytes"], 3);
+        assert_eq!(json["total_entries"], 3);
+        assert_eq!(json["truncated"], false);
+        // Round-trip.
+        let back: IpcResponse = serde_json::from_value(json).expect("deserialize");
+        assert!(matches!(back, IpcResponse::FileListDir(_)));
     }
 
     #[test]

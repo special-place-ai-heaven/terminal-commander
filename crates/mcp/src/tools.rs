@@ -60,28 +60,29 @@ use terminal_commanderd::ipc::protocol::{
     BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
     CommandStartParams, CommandStartResponse, CommandStatusParams, CommandStatusResponse,
     CommandStopParams, CommandStopResponse, ContextUnavailableReason, DiscoverResponse,
-    EventContextParams, EventContextResponse, FileReadWindowParams, FileReadWindowResponse,
-    FileSearchParams, FileSearchResponse, FileWatchListResponse, FileWatchStartParams,
-    FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, FileWriteParams,
-    FileWriteResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse,
-    ListLimitParams, PolicyCapsView, PolicyStatusResponse, ProbeListResponse, ProbeStatusParams,
-    ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
-    PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
-    PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
-    RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse, RegistryDeactivateParams,
-    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
-    RegistryImportPackResponse, RegistryListActiveResponse, RegistrySearchParams,
-    RegistrySearchResponse, RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse,
-    RegistryTestParams, RegistryTestResponse, RegistryTestSample, RegistryUpsertParams,
-    RegistryUpsertResponse, SelfCheckResponse, ShellExecParams, ShellSessionExecParams,
-    ShellSessionExecResponse, ShellSessionListResponse, ShellSessionStartParams,
-    ShellSessionStartResponse, ShellSessionStatusParams, ShellSessionStatusResponse,
-    ShellSessionStopParams, ShellSessionStopResponse, SubscriptionCloseParams,
-    SubscriptionCloseResponse, SubscriptionListParams, SubscriptionListResponse,
-    SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
-    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSeekParams,
-    SubscriptionSeekResponse, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
-    WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
+    EventContextParams, EventContextResponse, FileListDirParams, FileListDirResponse,
+    FileReadWindowParams, FileReadWindowResponse, FileSearchParams, FileSearchResponse,
+    FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
+    FileWatchStopResponse, FileWriteParams, FileWriteResponse, IpcContextFrame, IpcError,
+    IpcErrorCode, IpcRequest, IpcResponse, ListLimitParams, PolicyCapsView, PolicyStatusResponse,
+    ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse,
+    PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
+    PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RegistryActivateParams,
+    RegistryActivateResponse, RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse,
+    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
+    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
+    RegistrySearchParams, RegistrySearchResponse, RegistrySuggestFromSamplesParams,
+    RegistrySuggestFromSamplesResponse, RegistryTestParams, RegistryTestResponse,
+    RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
+    ShellExecParams, ShellSessionExecParams, ShellSessionExecResponse, ShellSessionListResponse,
+    ShellSessionStartParams, ShellSessionStartResponse, ShellSessionStatusParams,
+    ShellSessionStatusResponse, ShellSessionStopParams, ShellSessionStopResponse,
+    SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionListParams,
+    SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
+    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse,
+    SubscriptionSeekParams, SubscriptionSeekResponse, SubscriptionSourceSel,
+    WorkspaceSnapshotApplyParams, WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams,
+    WorkspaceSnapshotCreateResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -2095,6 +2096,39 @@ impl TerminalCommanderMcpServer {
         }
     }
 
+    /// `file_list_dir` — bounded single-level directory listing (US3).
+    ///
+    /// A `files` facade ACTION forwarder, deliberately NOT a granular `#[tool]`,
+    /// so the MCP tool count is unchanged. Thin 1:1 forward to the daemon
+    /// `FileListDir` IPC method: the adapter never touches the filesystem. The
+    /// daemon applies the same read-path policy gate as `read` and returns a
+    /// bounded, deterministically ordered, truncation-flagged listing.
+    async fn file_list_dir(
+        &self,
+        Parameters(params): Parameters<McpFileListDirParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = FileListDirParams {
+            path: params.path,
+            max_entries: params.max_entries,
+        };
+        match self.daemon.call(IpcRequest::FileListDir(ipc)).await {
+            Ok(IpcResponse::FileListDir(FileListDirResponse {
+                path,
+                entries,
+                total_entries,
+                truncated,
+            })) => json_tool_result(&serde_json::json!({
+                "path": path,
+                "entries": entries,
+                "total_entries": total_entries,
+                "truncated": truncated,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
     /// `file_write` — write UTF-8 content to one file (TC22 A3).
     ///
     /// Thin 1:1 forward to the daemon `FileWrite` IPC method, identical in
@@ -2885,8 +2919,8 @@ For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires 
     /// `files` facade — file read/search/write + watch + workspace snapshots.
     #[tool(
         name = "files",
-        description = "File operations: bounded read (action=\"read\"), substring search, \
-atomic write, file-watch start/stop/list, and workspace snapshots \
+        description = "File operations: bounded read (action=\"read\"), directory listing (action=\"list\"), \
+substring search, atomic write, file-watch start/stop/list, and workspace snapshots \
 (snapshot_create, snapshot_apply). All paths must be absolute."
     )]
     pub(crate) async fn files_facade(
@@ -2897,6 +2931,7 @@ atomic write, file-watch start/stop/list, and workspace snapshots \
         match call {
             F::Read(p) => self.file_read_window(Parameters(p)).await,
             F::Search(p) => self.file_search(Parameters(p)).await,
+            F::List(p) => self.file_list_dir(Parameters(p)).await,
             F::Write(p) => self.file_write(Parameters(p)).await,
             F::WatchStart(p) => self.file_watch_start(Parameters(p)).await,
             F::WatchStop(p) => self.file_watch_stop(Parameters(p)).await,
@@ -5066,6 +5101,21 @@ pub struct McpFileReadWindowParams {
     #[serde(default, deserialize_with = "de_opt_usize_lenient")]
     #[schemars(with = "usize")]
     pub max_bytes: Option<usize>,
+}
+
+/// MCP-facing parameters for the `list` files action (US3 directory listing).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpFileListDirParams {
+    /// Absolute path to the directory to list (e.g. `/home/u/project`).
+    /// Absolute is required: the daemon has no workspace root, so a relative
+    /// path is rejected rather than resolved against the daemon's working
+    /// directory. Gated by the same read-path policy as `read`.
+    pub path: String,
+    /// Max entries returned. Clamped by the daemon to `[1, 500]`; omitted =
+    /// 200. Over-cap listings are truncation-flagged with the true total.
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub max_entries: Option<u32>,
 }
 
 /// MCP-facing parameters for `file_write` (TC22 A3).

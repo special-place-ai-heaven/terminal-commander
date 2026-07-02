@@ -389,6 +389,71 @@ async fn file_write_then_read_back_through_mcp() {
     cleanup(&data);
 }
 
+/// US3 (FR-020/021) end-to-end: on the default-deny developer_local profile
+/// (no shell, no session caps), the `files` facade `list` action enumerates a
+/// project directory through TC alone — the exact operation that was impossible
+/// in the dogfood round. Dirs sort before files; a file entry carries a size.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_list_dir_through_mcp_on_default_deny_profile() {
+    let data = tmp_data_dir("list");
+    let handle = spawn_live_daemon(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let dir = data.join("proj");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir(dir.join("src")).unwrap();
+    {
+        let mut f = std::fs::File::create(dir.join("Cargo.toml")).unwrap();
+        writeln!(f, "[package]").unwrap();
+    }
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        // The default-deny profile grants no shell/session caps; directory
+        // listing is gated only by the read-path policy, so a readable project
+        // directory enumerates in ONE call.
+        let payload = first_text(
+            &call_tool(
+                &client,
+                "files",
+                serde_json::json!({"action": "list", "path": dir.to_string_lossy()}),
+            )
+            .await,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("list json");
+        let entries = v["entries"].as_array().expect("entries array");
+        let names: Vec<&str> = entries.iter().filter_map(|e| e["name"].as_str()).collect();
+        assert!(
+            names.contains(&"src"),
+            "listing must include the src dir; payload: {payload}"
+        );
+        assert!(
+            names.contains(&"Cargo.toml"),
+            "listing must include Cargo.toml; payload: {payload}"
+        );
+        // Dirs sort before files: src (dir) precedes Cargo.toml (file).
+        let src_idx = names.iter().position(|n| *n == "src").unwrap();
+        let cargo_idx = names.iter().position(|n| *n == "Cargo.toml").unwrap();
+        assert!(
+            src_idx < cargo_idx,
+            "dirs must sort before files; got {names:?}"
+        );
+        let src = entries.iter().find(|e| e["name"] == "src").unwrap();
+        assert_eq!(src["kind"], "dir");
+        let cargo = entries.iter().find(|e| e["name"] == "Cargo.toml").unwrap();
+        assert_eq!(cargo["kind"], "file");
+        assert!(
+            cargo["size_bytes"].as_u64().is_some(),
+            "a file entry must carry size_bytes; payload: {payload}"
+        );
+        assert_eq!(v["truncated"], false);
+        assert!(v["total_entries"].as_u64().unwrap_or(0) >= 2);
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
 /// TC22 A3 end-to-end: file_write to a default-deny sensitive path is denied
 /// through the MCP adapter and creates no file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
