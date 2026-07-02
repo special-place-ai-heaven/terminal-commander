@@ -32,6 +32,7 @@
 //! spawns. JS bridge (`lib/wsl/spawn.js`) intentionally does NOT — WWS04 EDR
 //! legitimacy ritual. See `docs/release/windows-wsl-bridge-contract.md` §4.4.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -954,45 +955,65 @@ impl CommandRuntime {
             },
         );
 
+        // Windows: resolve a bare argv[0] against PATH + PATHEXT so .cmd/.bat
+        // shims (npm, npx, yarn, pnpm, corepack, ...) start by bare name --
+        // std::process::Command only appends .exe, never PATHEXT. `req.argv`
+        // stays untouched (audit / pack-hint / receipt / job record keep the
+        // bare name as typed); ONLY the OS spawn sees the resolved absolute
+        // path. Runs AFTER the shell-interpreter denylist above, so a denied
+        // interpreter can never reach resolution. No-op on Unix.
+        let spawn_argv: Cow<'_, [String]> = match resolve_windows_argv0(&req.argv[0]) {
+            Some(full) => {
+                let mut v = req.argv.clone();
+                v[0] = full;
+                Cow::Owned(v)
+            }
+            None => Cow::Borrowed(req.argv.as_slice()),
+        };
+
         // Spawn the probe. If this fails, we audit and bail without
         // creating a job record.
         // Windows: ProcessProbe::spawn applies CREATE_NO_WINDOW for combed runtime
         // spawns. JS bridge (lib/wsl/spawn.js) intentionally does NOT — WWS04 EDR
         // legitimacy ritual. See docs/release/windows-wsl-bridge-contract.md §4.4.
-        let mut probe =
-            match ProcessProbe::spawn(&req.argv, &probe_cfg, Arc::clone(&self.rings), sifter, sink)
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    // Eviction-on-spawn-failure: the job never came to
-                    // life, so drop its fingerprint immediately. A leaked
-                    // entry must NEVER block a legitimate identical retry.
-                    self.dedup.lock().remove(&dedup_k);
-                    self.audit(
-                        "command_start",
-                        &subject_for_argv(&req.argv),
-                        "error",
-                        Some(format!("spawn failed: {e}")),
-                        Some(format_argv_metadata(&req.argv)),
-                    );
-                    // F7: carve out "program not found" (OS spawn returned
-                    // `ErrorKind::NotFound`) from the generic Spawn error.
-                    // It is a CALLER-fixable command attempt (typo / wrong
-                    // PATH), not a daemon fault, so the IPC boundary can
-                    // surface a structured `program_not_found` receipt
-                    // instead of an opaque `Internal` MCP error. Every
-                    // other spawn failure keeps its current `Spawn` ->
-                    // `Internal` behavior unchanged.
-                    if let terminal_commander_probes::ProcessProbeError::Io(io_err) = &e
-                        && io_err.kind() == std::io::ErrorKind::NotFound
-                    {
-                        return Err(CommandError::ProgramNotFound {
-                            argv0: req.argv.first().cloned().unwrap_or_default(),
-                        });
-                    }
-                    return Err(CommandError::Spawn(e));
+        let mut probe = match ProcessProbe::spawn(
+            &spawn_argv,
+            &probe_cfg,
+            Arc::clone(&self.rings),
+            sifter,
+            sink,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                // Eviction-on-spawn-failure: the job never came to
+                // life, so drop its fingerprint immediately. A leaked
+                // entry must NEVER block a legitimate identical retry.
+                self.dedup.lock().remove(&dedup_k);
+                self.audit(
+                    "command_start",
+                    &subject_for_argv(&req.argv),
+                    "error",
+                    Some(format!("spawn failed: {e}")),
+                    Some(format_argv_metadata(&req.argv)),
+                );
+                // F7: carve out "program not found" (OS spawn returned
+                // `ErrorKind::NotFound`) from the generic Spawn error.
+                // It is a CALLER-fixable command attempt (typo / wrong
+                // PATH), not a daemon fault, so the IPC boundary can
+                // surface a structured `program_not_found` receipt
+                // instead of an opaque `Internal` MCP error. Every
+                // other spawn failure keeps its current `Spawn` ->
+                // `Internal` behavior unchanged.
+                if let terminal_commander_probes::ProcessProbeError::Io(io_err) = &e
+                    && io_err.kind() == std::io::ErrorKind::NotFound
+                {
+                    return Err(CommandError::ProgramNotFound {
+                        argv0: req.argv.first().cloned().unwrap_or_default(),
+                    });
                 }
-            };
+                return Err(CommandError::Spawn(e));
+            }
+        };
 
         // TC-3: take the probe's cancel handle out NOW, while we still own
         // `probe` by value and BEFORE it is moved into the lifecycle closure
@@ -1691,6 +1712,80 @@ fn merge_active_and_inline(
             .cloned(),
     );
     out
+}
+
+/// Resolve a bare `argv[0]` on Windows against `PATH` + `PATHEXT`, returning
+/// the first matching absolute path, or `None` when no pre-resolution is
+/// needed/possible.
+///
+/// WHY: `std::process::Command::new` on Windows only appends `.exe` to a bare
+/// program name during its own PATH search -- it never consults `PATHEXT`. So
+/// every `.cmd`/`.bat` shim (npm, npx, yarn, pnpm, corepack, ...) is unfindable
+/// by bare name even though `cmd.exe`/PowerShell would find it. This helper
+/// replicates the OS/shell search so `["npm", "--version"]` starts.
+///
+/// A name that already contains a path separator is an explicit path: return
+/// `None` so `Command` handles it verbatim (matches today's absolute-path
+/// behavior). A genuinely-missing program also returns `None`, so the spawn
+/// still yields `ErrorKind::NotFound` -> `ProgramNotFound` unchanged.
+///
+/// SECURITY: this runs AFTER the `SHELL_INTERPRETERS_DENY` guard on the raw
+/// `argv[0]`, so a bare `cmd`/`powershell`/`pwsh` is already rejected and never
+/// reaches resolution. PATH+PATHEXT lookup only maps a name to a file of the
+/// SAME name, so the only bare name that could resolve to `cmd.exe` is `cmd` --
+/// which is denied. No shell interpreter can slip through here.
+#[cfg(windows)]
+fn resolve_windows_argv0(argv0: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    // Fall back to the Windows built-in default when PATHEXT is unset.
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+    resolve_on_path(argv0, path.as_os_str(), &pathext)
+}
+
+/// PATH+PATHEXT search core, split out so tests can drive a synthetic `PATH`
+/// and `PATHEXT` without mutating process-global env. Resolution is
+/// deterministic: PATH entries are tried in order, and within each directory
+/// the PATHEXT extensions are tried in their listed order. First hit wins.
+#[cfg(windows)]
+fn resolve_on_path(argv0: &str, path: &std::ffi::OsStr, pathext: &str) -> Option<String> {
+    // Explicit path (already carries a separator): let the OS resolve it.
+    if argv0.contains('\\') || argv0.contains('/') {
+        return None;
+    }
+    let exts: Vec<&str> = pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .collect();
+    // A name that already carries an extension is tried verbatim; a bare name
+    // (no extension) is tried only with each PATHEXT extension appended, which
+    // is what makes `.cmd`/`.bat` shims findable.
+    let has_ext = std::path::Path::new(argv0).extension().is_some();
+    for dir in std::env::split_paths(path) {
+        if has_ext {
+            let literal = dir.join(argv0);
+            if literal.is_file() {
+                return Some(literal.to_string_lossy().into_owned());
+            }
+            continue;
+        }
+        for ext in &exts {
+            let cand = dir.join(format!("{argv0}{ext}"));
+            if cand.is_file() {
+                return Some(cand.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Non-Windows: `Command` already resolves a bare name via the OS `execvp`
+/// PATH search, so nothing needs pre-resolution. A uniform no-op keeps the
+/// spawn site platform-agnostic.
+#[cfg(not(windows))]
+#[inline]
+fn resolve_windows_argv0(_argv0: &str) -> Option<String> {
+    None
 }
 
 fn subject_for_argv(argv: &[String]) -> String {
@@ -3104,5 +3199,93 @@ mod redact_tests {
         let env = vec![("OPTS".to_owned(), "a=b=c".to_owned())];
         let out = super::redact_env_pairs(&env);
         assert_eq!(out[0], ("OPTS".to_owned(), "a=b=c".to_owned()));
+    }
+}
+
+/// Windows argv[0] PATH+PATHEXT resolution (npm/.cmd-shim fix).
+#[cfg(test)]
+mod resolve_tests {
+    use super::CommandRuntime;
+
+    /// The shell-interpreter denylist runs on the RAW argv[0] BEFORE any
+    /// PATH+PATHEXT resolution, so bare `cmd`/`powershell`/`pwsh` are rejected
+    /// and never reach the resolver -- no interpreter can slip through as a
+    /// resolved `.exe`. Cross-platform: the guard is platform-independent.
+    #[test]
+    fn shell_interpreters_still_denied_by_bare_name() {
+        for name in ["cmd", "powershell", "pwsh", "cmd.exe", "powershell.exe"] {
+            assert!(
+                CommandRuntime::shell_interpreter_basename(name).is_some(),
+                "shell interpreter '{name}' must remain denied by bare name"
+            );
+        }
+        // A JS toolchain shim is NOT a shell interpreter, so it passes the
+        // guard and reaches PATHEXT resolution.
+        assert!(
+            CommandRuntime::shell_interpreter_basename("npm").is_none(),
+            "npm must not be caught by the shell-interpreter denylist"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bare_name_resolves_cmd_shim_on_synthetic_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let shim = dir.path().join("mytool.cmd");
+        std::fs::write(&shim, b"@echo off\r\n").expect("write shim");
+
+        let resolved =
+            super::resolve_on_path("mytool", dir.path().as_os_str(), ".COM;.EXE;.BAT;.CMD")
+                .expect("bare name must resolve to the .cmd shim via PATHEXT");
+        assert!(
+            resolved.eq_ignore_ascii_case(&shim.to_string_lossy()),
+            "resolved path {resolved} must be the .cmd shim {}",
+            shim.display()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pathext_order_is_deterministic_exe_before_cmd() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("dup.cmd"), b"@echo off\r\n").expect("write cmd");
+        std::fs::write(dir.path().join("dup.exe"), b"MZ").expect("write exe");
+
+        // PATHEXT lists .EXE before .CMD, so the .exe must win regardless of
+        // filesystem enumeration order.
+        let resolved = super::resolve_on_path("dup", dir.path().as_os_str(), ".COM;.EXE;.BAT;.CMD")
+            .expect("dup must resolve");
+        assert!(
+            resolved.to_ascii_lowercase().ends_with("dup.exe"),
+            "PATHEXT order must pick dup.exe first, got {resolved}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_program_does_not_resolve() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(
+            super::resolve_on_path("nope_xyz", dir.path().as_os_str(), ".COM;.EXE;.BAT;.CMD")
+                .is_none(),
+            "a genuinely-missing program must return None so spawn yields ProgramNotFound"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_path_is_left_for_the_os() {
+        // A name that already carries a separator is an explicit path: the
+        // resolver returns None so Command handles it verbatim (matches the
+        // absolute-path case that already works today).
+        assert!(
+            super::resolve_on_path(
+                r"C:\Program Files\nodejs\npm.cmd",
+                std::ffi::OsStr::new(r"C:\Windows\System32"),
+                ".COM;.EXE;.BAT;.CMD",
+            )
+            .is_none(),
+            "an explicit path must not be re-resolved against PATH"
+        );
     }
 }

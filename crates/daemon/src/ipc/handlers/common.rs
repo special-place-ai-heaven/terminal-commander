@@ -142,7 +142,9 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
             argv0.clone(),
             format!(
                 "program not found: '{argv0}'. Remedy: check the spelling of argv[0] and \
-                 ensure the program is on the daemon's PATH (or pass an absolute path)."
+                 ensure the program is on the daemon's PATH (or pass an absolute path). \
+                 On Windows a bare name is also searched with PATHEXT (.COM/.EXE/.BAT/.CMD), \
+                 so .cmd/.bat shims like npm resolve by bare name."
             ),
         ),
         // Genuine server faults (bucket store failure, IO, other spawn

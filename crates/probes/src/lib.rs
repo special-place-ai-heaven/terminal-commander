@@ -28,6 +28,7 @@ pub mod file;
 pub mod noise_pipeline;
 pub mod process;
 pub mod pty;
+pub mod utf16;
 
 pub use ansi::strip_ansi;
 pub use file::{

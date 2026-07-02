@@ -1,12 +1,12 @@
 {
   "integration": "speckit",
-  "version": "0.10.2",
+  "version": "0.12.0",
   "installed_at": "2026-06-16T09:17:22.828942+00:00",
   "files": {
-    ".specify/scripts/powershell/check-prerequisites.ps1": "7302acc26ed7920ed6e8c627be322cd8ae9a46482ead5930f36f5e38aff1f563",
-    ".specify/scripts/powershell/common.ps1": "3846917aff1e3fc68993c7e39b11fd230bea48d9705b920d1970b6a564507f98",
-    ".specify/scripts/powershell/create-new-feature.ps1": "1cd5b716e56c1df148cc1c690bff862a2576a42269380c0c61446b0f1dd5172d",
-    ".specify/scripts/powershell/setup-plan.ps1": "d55b161c13b1a83d10035d2601255698aed6c3a629a44bf0bfa3299c7b42729d",
+    ".specify/scripts/powershell/check-prerequisites.ps1": "aa3cbfb833df9678ebc98f8460c3188f40ed199f7422ddf910b4e46e67ebb0c1",
+    ".specify/scripts/powershell/common.ps1": "e37a9779d78cd80839641a40a0d7ceddab10c92001f343b64f48acbfd55fe3ca",
+    ".specify/scripts/powershell/create-new-feature.ps1": "6eb5f2680da6fb8931cc7e4b4564befc35128a91edf5eff490500ca67aa1afed",
+    ".specify/scripts/powershell/setup-plan.ps1": "b1c92cc1ba52bb4f7f2456809bf6af362d1108aea60043cfa061cd6779c81a19",
     ".specify/scripts/powershell/setup-tasks.ps1": "441f3a6cfa1da236411ed6a68ebf754a391515662df0bb74dd6916106d8caf52",
     ".specify/templates/checklist-template.md": "c37695297e5d3153d64f82c21223509940b13932046c7961c42d1d669516130c",
     ".specify/templates/constitution-template.md": "ce7549540fa45543cca797a150201d868e64495fdff39dc38246fb17bd4024b3",

@@ -220,6 +220,53 @@ deadline-exit. Co-implemented with TC-1b.
 **Scope:** `crates/mcp/src/tools.rs`,
 `tests/fixtures/contracts/mcp-tools/run_and_watch.v1.json`.
 
+### P1.0f — adapter transport misclassifies load-induced failures
+
+**Source:** dogfood round 2026-07-02
+(`docs/dogfood/2026-07-02-tc-0.1.70-dogfood-findings.md`, bug 5).
+**Evidence:** Three live occurrences under heavy compile load against
+a healthy daemon (uptime continuous, `health` succeeding between
+failures): run_and_watch degraded twice with the canned "IPC error
+interrupted the wait" hint, and `bucket_wait` returned
+`daemon_unavailable` twice in a row. Static trace disproves any
+timeout-constant mismatch on the run_and_watch path (1s slices).
+**Impact:** A transient transport hiccup to a live daemon surfaces as
+"daemon unavailable" / opaque degradation; agents draw the wrong
+conclusion and abandon recoverable jobs.
+**Proposed work:** The swallowed-error half is fixed (degraded hint now
+carries the underlying code+message, commit c64652e); remaining:
+retry-once-on-transient before classifying `daemon_unavailable`, and
+align the IPC client connect/read deadline with the longest blocking
+daemon wait it forwards (bucket_wait 30s). Reproduce under load with
+the surfaced error string before choosing the constant.
+**Scope:** `crates/mcp/src/daemon_client.rs`, `crates/ipc/src/client.rs`,
+`crates/ipc/src/pipe_client.rs`.
+
+### P1.0g — dogfood 2026-07-02 ergonomics batch
+
+**Source:** dogfood round 2026-07-02
+(`docs/dogfood/2026-07-02-tc-0.1.70-dogfood-findings.md`, improvements
+1-10 + bug 7).
+**Evidence:** Live session friction, each item reproduced: no
+files-list/glob primitive (Windows + allow_shell=false = no directory
+discovery at all); sub_pull silently ignores `timeout_ms` (honors
+`wait_ms`); no compact projection on wait/events; sub_pull resends full
+liveness[] every pull; event_context requires bucket_id though evt_ ids
+are unique; pty_stdin cannot wait for the signals it provokes; no bulk
+deactivate; file_write has no append; import_pack re-import mints
+identical new versions instead of `skipped`; suggest_from_samples
+misses `npm ERR!`/`TS\d+` shapes; wsl.exe -e bash smuggles a shell
+through the argv denylist (policy stance needed).
+**Impact:** Each is small; together they are the dominant tax on
+agent-driven TC use.
+**Proposed work:** Batch by surface: files facade (list + append),
+command facade (per-action unknown-field rejection, compact on
+wait/events, event_context by event_id alone), subscriptions (liveness
+delta), registry (idempotent import, bulk deactivate, richer suggest
+heuristics), policy (WSL stance doc or gate).
+**Scope:** `crates/mcp/src/tools.rs`, `crates/daemon/src/ipc/handlers/`,
+`crates/daemon/src/registry*`, docs.
+
 ## P1 — Pre-existing high priority follow-ups
 
 ### P1.1 — Explicit daemon-side `frames_suppressed` counter

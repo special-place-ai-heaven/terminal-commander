@@ -27,7 +27,7 @@ use terminal_commander_core::{
     BucketConfig, BucketId, Captures, EventId, EventSource, FrameId, JobId, ProbeId, RuleId,
     RuleRef, Severity, SignalEvent, SourcePointer, SourceStream, SourceType,
 };
-use terminal_commander_ipc::{IpcErrorCode, ProbeKind};
+use terminal_commander_ipc::{IpcErrorCode, Liveness, ProbeKind};
 use terminal_commanderd::{
     BucketSource, DaemonConfig, DaemonState, Predicate, SourceSel, subscription_pull,
 };
@@ -725,6 +725,53 @@ fn pull_cache_invalidates_on_new_bucket_and_auto_joins() {
         let mut want = vec![b1, b2];
         want.sort_by_key(ToString::to_string);
         assert_eq!(got, want, "refreshed cache holds both buckets");
+    });
+    cleanup(&data);
+}
+
+// ---------------------------------------------------------------------------
+// Dogfood regression (2026-07-02): a Pty source's liveness must come from the
+// PTY runtime's job ledger, never a hardcoded Running. A job the runtime does
+// not know reports Stopped (the `PtyRuntime::liveness` contract for a
+// dropped/forgotten record); the pre-fix arm reported Running unconditionally,
+// so a stopped PTY looked alive in every subsequent pull.
+// ---------------------------------------------------------------------------
+
+#[cfg(any(unix, windows))]
+#[test]
+fn pull_liveness_pty_source_not_hardcoded_running() {
+    let (data, state) = boot("pty-liveness");
+    rt().block_on(async {
+        let bucket = BucketId::new();
+        let job = JobId::new(); // never started by the PTY runtime
+        state
+            .buckets
+            .create_bucket(bucket, BucketConfig::default())
+            .unwrap();
+        state.sources.record(
+            bucket,
+            BucketSource {
+                kind: ProbeKind::Pty,
+                job_id: Some(job),
+                probe_id: Some(ProbeId::new()),
+                path: None,
+                tag: None,
+            },
+        );
+        let sub = open_all(&state, Some(Severity::High));
+        append(&state, bucket, Severity::High, "error");
+        let out = subscription_pull(&state, sub, 10, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let src = out
+            .liveness
+            .iter()
+            .find(|s| s.job_id == Some(job))
+            .expect("pty source liveness present");
+        assert!(
+            matches!(src.liveness, Liveness::Stopped),
+            "unknown pty job must report the runtime's answer (Stopped), not a hardcoded Running"
+        );
     });
     cleanup(&data);
 }
