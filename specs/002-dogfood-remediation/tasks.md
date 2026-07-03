@@ -255,12 +255,12 @@ persists or activates.
 
 ### Tests (write first, prove red)
 
-- [ ] T043 [US7] Write failing sifter tests in `crates/sifters/src/suggest.rs` test mod (`detects_npm_err_prefix`, `detects_ts_error_code`, `new_heuristics_set_no_stream_filter_without_evidence`); record the red run (six-line sample currently yields only `error-prefix`)
+- [x] T043 [US7] Write failing sifter tests in `crates/sifters/src/suggest.rs` test mod (`detects_npm_err_prefix`, `detects_ts_error_code`, `new_heuristics_set_no_stream_filter_without_evidence`); record the red run (six-line sample currently yields only `error-prefix`)
 
 ### Implementation
 
-- [ ] T044 [US7] In `crates/sifters/src/suggest.rs`: change `Heuristic.stream` to `Option<StreamKind>` (existing six keep `Some(...)` — zero behavior change; `build_proposal` :262 propagates the Option); insert `npm-error` (`^npm ERR! (?P<message>.+)$`) and `ts-error` (`^error TS(?P<code>[0-9]+): (?P<message>.+)$`) after `coded-error`, before `error-prefix`, both `stream: None` (research D9)
-- [ ] T045 [US7] Verify the existing invariants stay green (`every_proposed_rule_is_draft_and_validates`, `one_proposal_per_heuristic_not_per_line`, `proposed_patterns_compile_under_bounded_regex`) and the e2e guard `crates/mcp/tests/suggest_loop_e2e.rs`; live check: findings-doc sample -> both proposals survive `registry_test` (SC-007); full gate Windows + WSL
+- [x] T044 [US7] In `crates/sifters/src/suggest.rs`: change `Heuristic.stream` to `Option<StreamKind>` (existing six keep `Some(...)` — zero behavior change; `build_proposal` :262 propagates the Option); insert `npm-error` (`^npm ERR! (?P<message>.+)$`) and `ts-error` (`^error TS(?P<code>[0-9]+): (?P<message>.+)$`) after `coded-error`, before `error-prefix`, both `stream: None` (research D9)
+- [x] T045 [US7] Verify the existing invariants stay green (`every_proposed_rule_is_draft_and_validates`, `one_proposal_per_heuristic_not_per_line`, `proposed_patterns_compile_under_bounded_regex`) and the e2e guard `crates/mcp/tests/suggest_loop_e2e.rs`; live check: findings-doc sample -> both proposals survive `registry_test` (SC-007); full gate Windows + WSL
 
 **Checkpoint**: mainstream JS/TS output is recognized out of the box.
 
@@ -277,9 +277,9 @@ outcome.**
 all succeed without entering the client retry loop; clean shutdown leaves no
 orphaned instances.
 
-- [ ] T046 [US9] Decision checkpoint: implement or skip. If skipping, write the rationale into `specs/002-dogfood-remediation/evidence-us9.md` (why, what the client-side retry already covers, what would trigger revisiting) and mark T047-T048 as void
-- [ ] T047 [US9] Restructure `accept_loop` in `crates/daemon/src/ipc/pipe_server.rs:170-306`: fixed pool of N=4 pending instances (accept futures in a `JoinSet`; `first_pipe_instance(true)` only on the very first instance ever; replace each accepted instance immediately); shutdown cancels the idle pending accepts then drains in-flight handlers under the existing `PIPE_DRAIN_CEILING`; per-connection identity/policy/audit untouched (research D11)
-- [ ] T048 [US9] Windows-gated tests in `crates/daemon/tests/pipe_accept_loop.rs` + `pipe_shutdown_drain.rs` (`n_concurrent_first_connects_all_succeed_without_retry`, `pool_per_connection_identity_and_policy_unchanged`, `shutdown_closes_all_pending_instances_cleanly`) plus a connect-storm retry-rate comparison vs the single-instance baseline recorded in `specs/002-dogfood-remediation/evidence-us9.md`; full gate Windows + WSL (Linux gate proves the cfg-gated code still compiles clean)
+- [x] T046 [US9] Decision checkpoint: implement or skip. If skipping, write the rationale into `specs/002-dogfood-remediation/evidence-us9.md` (why, what the client-side retry already covers, what would trigger revisiting) and mark T047-T048 as void
+- [~] T047 (VOID -- US9 skipped per T046 decision; see evidence-us9.md) [US9] Restructure `accept_loop` in `crates/daemon/src/ipc/pipe_server.rs:170-306`: fixed pool of N=4 pending instances (accept futures in a `JoinSet`; `first_pipe_instance(true)` only on the very first instance ever; replace each accepted instance immediately); shutdown cancels the idle pending accepts then drains in-flight handlers under the existing `PIPE_DRAIN_CEILING`; per-connection identity/policy/audit untouched (research D11)
+- [~] T048 (VOID -- US9 skipped per T046 decision; see evidence-us9.md) [US9] Windows-gated tests in `crates/daemon/tests/pipe_accept_loop.rs` + `pipe_shutdown_drain.rs` (`n_concurrent_first_connects_all_succeed_without_retry`, `pool_per_connection_identity_and_policy_unchanged`, `shutdown_closes_all_pending_instances_cleanly`) plus a connect-storm retry-rate comparison vs the single-instance baseline recorded in `specs/002-dogfood-remediation/evidence-us9.md`; full gate Windows + WSL (Linux gate proves the cfg-gated code still compiles clean)
 
 **Checkpoint**: all nine stories resolved (implemented or compliantly
 skipped).
