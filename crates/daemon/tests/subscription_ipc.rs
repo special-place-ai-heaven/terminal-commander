@@ -199,6 +199,7 @@ async fn drain_seqs(client: &DaemonClient, sub_id: &str, base_correlation: u64) 
                     sub_id: sub_id.to_owned(),
                     max: Some(50),
                     timeout_ms: Some(500),
+                    liveness_delta: false,
                 }),
             )
             .await
@@ -266,6 +267,7 @@ fn ac1_pull_returns_high_sev_events_from_both_noisy_commands_tagged_and_bounded(
                         sub_id: sub_id.clone(),
                         max: Some(50),
                         timeout_ms: Some(1_500),
+                        liveness_delta: false,
                     }),
                 )
                 .await
@@ -379,6 +381,7 @@ fn tagged_probe_matched_only_by_matching_tag_predicate() {
                         sub_id: sub_id.clone(),
                         max: Some(50),
                         timeout_ms: Some(1_500),
+                        liveness_delta: false,
                     }),
                 )
                 .await
@@ -450,6 +453,7 @@ fn ac5_idle_pull_returns_empty_events_plus_liveness_not_error() {
                     sub_id,
                     max: Some(50),
                     timeout_ms: Some(200),
+                    liveness_delta: false,
                 }),
             )
             .await
@@ -483,6 +487,7 @@ fn ac7_pull_unknown_sub_id_returns_unknown_subscription() {
                     sub_id: uuid::Uuid::new_v4().to_string(),
                     max: Some(10),
                     timeout_ms: Some(200),
+                    liveness_delta: false,
                 }),
             )
             .await
@@ -498,6 +503,7 @@ fn ac7_pull_unknown_sub_id_returns_unknown_subscription() {
                     sub_id: "not-a-uuid".to_owned(),
                     max: Some(10),
                     timeout_ms: Some(200),
+                    liveness_delta: false,
                 }),
             )
             .await
@@ -854,6 +860,7 @@ fn ac8_two_opens_same_predicate_get_distinct_ids_and_independent_offsets() {
                         sub_id: a.clone(),
                         max: Some(50),
                         timeout_ms: Some(1_000),
+                        liveness_delta: false,
                     }),
                 )
                 .await
@@ -876,6 +883,7 @@ fn ac8_two_opens_same_predicate_get_distinct_ids_and_independent_offsets() {
                         sub_id: b.clone(),
                         max: Some(50),
                         timeout_ms: Some(1_000),
+                        liveness_delta: false,
                     }),
                 )
                 .await
@@ -1011,6 +1019,7 @@ fn subscription_list_reports_true_wall_clock_stamps() {
                     sub_id: sub_id.clone(),
                     max: Some(10),
                     timeout_ms: Some(100),
+                    liveness_delta: false,
                 }),
             )
             .await
@@ -1023,6 +1032,104 @@ fn subscription_list_reports_true_wall_clock_stamps() {
         assert!(
             pulled >= created_first,
             "last_pull_at_ms ({pulled}) must be at or after created_at_ms ({created_first})"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// Issue ONE `subscription_pull` with `liveness_delta: true` and return the
+/// number of liveness entries in the response (US4 / FR-031).
+async fn delta_pull_liveness(client: &DaemonClient, sub_id: &str, correlation: u64) -> usize {
+    let pull = client
+        .call(
+            correlation,
+            IpcRequest::SubscriptionPull(SubscriptionPullParams {
+                sub_id: sub_id.to_owned(),
+                max: Some(50),
+                timeout_ms: Some(200),
+                liveness_delta: true,
+            }),
+        )
+        .await
+        .expect("subscription_pull");
+    match pull {
+        IpcResponse::SubscriptionPull(r) => r.liveness.len(),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// US4 / FR-031: a `subscription_seek` resets the liveness-delta baseline, so
+/// the NEXT delta pull sends a full snapshot again (spec edge case). Driven
+/// through the real IPC seek handler; a fake command source gives each bucket a
+/// STABLE `Stopped` liveness so the only variation is baseline-vs-delta.
+#[test]
+fn pull_delta_seek_resets_baseline_to_full_snapshot() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("delta-seek");
+        let (state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+
+        // Open BEFORE seeding so the from-now offset starts at 0.
+        let open = client
+            .call(
+                1,
+                IpcRequest::SubscriptionOpen(SubscriptionOpenParams {
+                    predicate: SubscriptionPredicate {
+                        severity_min: Some(Severity::High),
+                        kind: None,
+                        sources: SubscriptionSourceSel::All,
+                        tag: None,
+                    },
+                }),
+            )
+            .await
+            .expect("subscription_open");
+        let sub_id = match open {
+            IpcResponse::SubscriptionOpen(r) => r.sub_id,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // One in-scope bucket (fake command source -> stable liveness), three
+        // high-sev events.
+        let (bucket, tail) = seed_bucket(&state, BucketConfig::default(), 3);
+
+        // Delta pull #1: drains the events AND carries the full liveness
+        // baseline (empty map -> baseline).
+        let live1 = delta_pull_liveness(&client, &sub_id, 2).await;
+        assert_eq!(
+            live1, 1,
+            "first delta pull is the baseline (1 in-scope bucket)"
+        );
+
+        // Delta pull #2: no new events, no liveness transition -> empty delta.
+        let live2 = delta_pull_liveness(&client, &sub_id, 3).await;
+        assert_eq!(live2, 0, "steady state sends no liveness delta");
+
+        // Seek forces a fresh baseline (repositions to the tail so pull #3 stays
+        // idle and the liveness we observe is the seek-reset baseline, not event
+        // delivery).
+        let seek = client
+            .call(
+                10,
+                IpcRequest::SubscriptionSeek(SubscriptionSeekParams {
+                    sub_id: sub_id.clone(),
+                    bucket_id: bucket,
+                    seq: tail,
+                }),
+            )
+            .await
+            .expect("subscription_seek");
+        assert!(matches!(seek, IpcResponse::SubscriptionSeek(_)));
+
+        // Delta pull #3: seek cleared the baseline -> full snapshot again.
+        let live3 = delta_pull_liveness(&client, &sub_id, 11).await;
+        assert_eq!(
+            live3, 1,
+            "seek resets the baseline; next delta pull is full"
         );
 
         handle.shutdown().await;

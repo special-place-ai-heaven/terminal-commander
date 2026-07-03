@@ -6,7 +6,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed wait tool. Response carries either non-empty events or heartbeat=true with empty events. Raw stdout/stderr text is never a success shape. TB-8: the cursor param description teaches the pagination protocol (pass 0 on the first call, then the next_cursor from the previous response) and bucket_id carries a bkt_<32hex> format note so the first call succeeds."
+    "note": "Daemon-backed wait tool. Response carries either non-empty events or heartbeat=true with empty events. Raw stdout/stderr text is never a success shape. TB-8: the cursor param description teaches the pagination protocol (pass 0 on the first call, then the next_cursor from the previous response) and bucket_id carries a bkt_<32hex> format note so the first call succeeds. US4/FR-030: the optional compact flag (default false) projects each returned signal to the load-bearing field set {summary, stream, seq, severity} and echoes compact:true; the full records stay re-fetchable by re-reading the same cursor with compact omitted, and compact never changes which events match."
   },
   "tool": "bucket_wait",
   "request_example": {
@@ -95,6 +95,7 @@
     "bucket_id description carries the bkt_ opaque-id format note (TB-8)",
     "heartbeat=true implies events=[]",
     "heartbeat=false implies events is non-empty",
-    "success payload never contains raw stdout or stderr dumps"
+    "success payload never contains raw stdout or stderr dumps",
+    "US4/FR-030: compact:true projects signals to {summary,stream,seq,severity} and echoes compact:true; compact omitted is byte-identical and full records stay re-fetchable by the same cursor"
   ]
 }

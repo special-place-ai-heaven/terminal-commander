@@ -20,7 +20,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed multiplexed, lossless, blocking pull (Phase 3). Drains matched events across all in-scope buckets for one subscription, server-advancing the per-bucket offsets so the next pull continues where this one stopped. Blocks up to timeout_ms (omitted = DEFAULT_PULL_TIMEOUT_MS 5000; clamped to [1, MAX_PULL_TIMEOUT_MS 8000]) until events arrive or the timeout elapses. max is clamped to MAX_PULL_EVENTS (omitted = 50). Returns source-tagged events[] (each carrying bucket_id, optional job_id, the per-bucket seq, and the full SignalEvent) plus per-source liveness[] (one entry per in-scope bucket: starting|running|exited|failed|cancelled|stopped|dropped), and the lagged and truncated flags. An IDLE pull is SUCCESS with empty events[] plus liveness, NEVER an error. lagged=true means an in-scope bucket evicted events under the consumer; truncated=true means the routing scan hit MAX_BUCKETS_PER_SUBSCRIPTION. An unknown/expired/malformed sub_id returns the unknown_subscription IPC code (re-open). The MCP client waits longer than the daemon timeout so the idle path is empty-success, never a JSON-RPC timeout."
+    "note": "Daemon-backed multiplexed, lossless, blocking pull (Phase 3). Drains matched events across all in-scope buckets for one subscription, server-advancing the per-bucket offsets so the next pull continues where this one stopped. Blocks up to timeout_ms (omitted = DEFAULT_PULL_TIMEOUT_MS 5000; clamped to [1, MAX_PULL_TIMEOUT_MS 8000]) until events arrive or the timeout elapses. max is clamped to MAX_PULL_EVENTS (omitted = 50). Returns source-tagged events[] (each carrying bucket_id, optional job_id, the per-bucket seq, and the full SignalEvent) plus per-source liveness[] (starting|running|exited|failed|cancelled|stopped|dropped), and the lagged and truncated flags. US4/FR-031: the adapter always requests the liveness DELTA, so liveness[] carries the full snapshot on a subscription's FIRST pull and right after any subscription_seek, then only entries whose state changed since the last pull; the section is OMITTED entirely when the delta is empty (a steady idle pull). A transition is present in exactly the next pull. An IDLE pull is SUCCESS with empty events[] (and liveness present only as a non-empty delta), NEVER an error. lagged=true means an in-scope bucket evicted events under the consumer; truncated=true means the routing scan hit MAX_BUCKETS_PER_SUBSCRIPTION. An unknown/expired/malformed sub_id returns the unknown_subscription IPC code (re-open). The MCP client waits longer than the daemon timeout so the idle path is empty-success, never a JSON-RPC timeout."
   },
   "response_example": {
     "events": [
@@ -65,7 +65,13 @@
     "truncated": false
   },
   "response_example_idle": {
-    "_note": "An idle pull (no new events before the daemon timeout elapsed) is SUCCESS, not an error: events[] is empty but the per-source liveness[] still reports every in-scope bucket so the consumer keeps a live picture. The agent simply loops subscription_pull again.",
+    "_note": "An idle pull (no new events before the daemon timeout elapsed) is SUCCESS, not an error: events[] is empty. US4/FR-031: liveness is a DELTA, so a steady idle pull whose sources did not change OMITS the liveness section entirely (shown here). The FIRST pull after open/seek instead carries the full liveness baseline. The agent simply loops subscription_pull again.",
+    "events": [],
+    "lagged": false,
+    "truncated": false
+  },
+  "response_example_idle_first_pull_baseline": {
+    "_note": "The FIRST pull after open (or after any subscription_seek) carries the full per-source liveness snapshot as the delta baseline, even when no events are ready.",
     "events": [],
     "liveness": [
       {
@@ -129,8 +135,9 @@
     "sub_id is required; max and timeout_ms are optional",
     "max is clamped to MAX_PULL_EVENTS (omitted = 50); timeout_ms is clamped to [1, MAX_PULL_TIMEOUT_MS 8000] (omitted = DEFAULT_PULL_TIMEOUT_MS 5000)",
     "events are multiplexed across all in-scope buckets and carry bucket_id, optional job_id, the per-bucket seq, and the full SignalEvent",
-    "liveness reports one entry per in-scope bucket using the single authoritative Liveness union (snake_case state tag)",
-    "an idle pull is SUCCESS with empty events[] plus liveness, never an error",
+    "liveness uses the single authoritative Liveness union (snake_case state tag)",
+    "US4/FR-031: the adapter requests the liveness delta -- the full snapshot on the first pull and after any seek, then only changed entries, and the section is omitted when the delta is empty; a transition appears in exactly the next pull",
+    "an idle pull is SUCCESS with empty events[] (liveness present only as a non-empty delta), never an error",
     "lagged=true flags eviction under the consumer; truncated=true flags the routing scan hitting MAX_BUCKETS_PER_SUBSCRIPTION; both ride a successful response",
     "an unknown, expired, or malformed sub_id returns the unknown_subscription IPC code (mapped to invalid_params on the wire); the caller re-opens",
     "the pull server-advances the per-bucket offsets so it is non-idempotent; the next pull continues from where this one stopped",

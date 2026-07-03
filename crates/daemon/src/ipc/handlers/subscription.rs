@@ -117,7 +117,14 @@ pub(in crate::ipc::server) async fn handle_subscription_pull(
         .timeout_ms
         .unwrap_or(DEFAULT_PULL_TIMEOUT_MS)
         .clamp(1, MAX_PULL_TIMEOUT_MS);
-    let outcome = pull::pull(state, sub_id, max, Duration::from_millis(timeout_ms)).await?;
+    let outcome = pull::pull(
+        state,
+        sub_id,
+        max,
+        Duration::from_millis(timeout_ms),
+        params.liveness_delta,
+    )
+    .await?;
     Ok(IpcResponse::SubscriptionPull(pull_outcome_to_wire(outcome)))
 }
 
@@ -240,6 +247,11 @@ pub(in crate::ipc::server) fn handle_subscription_seek(
     // offset keeps it routable).
     let source = state.sources.get(params.bucket_id);
     state.subscriptions.with_sub_mut(sub_id, |s| {
+        // Repositioning invalidates the liveness-delta baseline: the next
+        // `liveness_delta` pull must send a full snapshot (US4 / FR-031). Clear
+        // unconditionally -- a seek is a fresh baseline signal even when the
+        // bucket is out of scope and no offset is written.
+        s.last_liveness.clear();
         // Write the offset only for a bucket this sub actually routes to:
         // in-scope per the live predicate, or already tracked. Seeking an
         // out-of-scope bucket is a no-op -- no dangling offset is created.

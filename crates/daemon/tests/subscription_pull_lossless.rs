@@ -146,7 +146,7 @@ fn pull_fast_path_returns_already_present_event() {
         let sub = open_all(&state, Some(Severity::High));
         // Event present BEFORE the pull -> fast-path returns it immediately.
         append(&state, bucket, Severity::High, "error");
-        let out = subscription_pull(&state, sub, 10, Duration::from_secs(5))
+        let out = subscription_pull(&state, sub, 10, Duration::from_secs(5), false)
             .await
             .unwrap();
         assert_eq!(out.events.len(), 1, "fast-path delivers the present event");
@@ -171,10 +171,9 @@ fn pull_wakes_on_append_after_enrollment_not_timeout() {
 
         let st = Arc::clone(&state);
         let started = Instant::now();
-        let handle =
-            tokio::spawn(
-                async move { subscription_pull(&st, sub, 10, Duration::from_secs(5)).await },
-            );
+        let handle = tokio::spawn(async move {
+            subscription_pull(&st, sub, 10, Duration::from_secs(5), false).await
+        });
 
         // Give the pull time to reach its enroll + await. The fast-path read
         // finds nothing (empty bucket), so it parks in the select.
@@ -209,10 +208,9 @@ fn pull_spurious_wake_reenrolls_and_delivers_later_match() {
         let sub = open_all(&state, Some(Severity::High));
 
         let st = Arc::clone(&state);
-        let handle =
-            tokio::spawn(
-                async move { subscription_pull(&st, sub, 10, Duration::from_secs(5)).await },
-            );
+        let handle = tokio::spawn(async move {
+            subscription_pull(&st, sub, 10, Duration::from_secs(5), false).await
+        });
 
         tokio::time::sleep(Duration::from_millis(150)).await;
         // Spurious wake: a low-severity event that the predicate rejects.
@@ -255,7 +253,7 @@ fn pull_flood_does_not_starve_quiet_bucket() {
         }
         append(&state, quiet, Severity::High, "error");
 
-        let out = subscription_pull(&state, sub, 4, Duration::from_secs(5))
+        let out = subscription_pull(&state, sub, 4, Duration::from_secs(5), false)
             .await
             .unwrap();
         assert!(out.events.len() <= 4, "hard cap honored (<= max)");
@@ -293,7 +291,7 @@ fn pull_two_floods_split_fairly_per_share() {
             append(&state, b, Severity::High, "error");
         }
 
-        let out = subscription_pull(&state, sub, 4, Duration::from_secs(5))
+        let out = subscription_pull(&state, sub, 4, Duration::from_secs(5), false)
             .await
             .unwrap();
         assert_eq!(out.events.len(), 4, "cap honored exactly");
@@ -335,7 +333,7 @@ async fn pull_proportional_share_favors_high_backlog_bucket() {
             append(&state, small, Severity::High, "error");
         }
 
-        let out = subscription_pull(&state, sub, 20, Duration::from_secs(5))
+        let out = subscription_pull(&state, sub, 20, Duration::from_secs(5), false)
             .await
             .unwrap();
         assert!(out.events.len() <= 20, "hard cap honored (<= max)");
@@ -375,7 +373,7 @@ async fn pull_equal_backlogs_behave_like_round_robin() {
             append(&state, b, Severity::High, "error");
         }
 
-        let out = subscription_pull(&state, sub, 4, Duration::from_secs(5))
+        let out = subscription_pull(&state, sub, 4, Duration::from_secs(5), false)
             .await
             .unwrap();
         assert_eq!(out.events.len(), 4, "cap honored exactly");
@@ -414,7 +412,7 @@ fn pull_n_greater_than_max_returns_at_most_max() {
         }
         let sub = open_all(&state, Some(Severity::High));
 
-        let out = subscription_pull(&state, sub, max, Duration::from_secs(5))
+        let out = subscription_pull(&state, sub, max, Duration::from_secs(5), false)
             .await
             .unwrap();
         assert!(
@@ -434,7 +432,7 @@ fn pull_n_zero_returns_idle_without_panic() {
     let (data, state) = boot("nzero");
     rt().block_on(async {
         let sub = open_all(&state, Some(Severity::High));
-        let out = subscription_pull(&state, sub, 10, Duration::from_millis(200))
+        let out = subscription_pull(&state, sub, 10, Duration::from_millis(200), false)
             .await
             .unwrap();
         assert!(out.events.is_empty(), "no buckets -> no events");
@@ -471,7 +469,7 @@ fn pull_eviction_clamp_delivers_survivor_exactly_once_and_flags_lagged() {
         assert_eq!(st.tail_seq, 5, "newest seq is 5");
         assert!(st.dropped_count >= 3, "3 events evicted");
 
-        let out = subscription_pull(&state, sub, 50, Duration::from_secs(5))
+        let out = subscription_pull(&state, sub, 50, Duration::from_secs(5), false)
             .await
             .unwrap();
         let seqs: Vec<u64> = out.events.iter().map(|e| e.origin.seq).collect();
@@ -483,7 +481,7 @@ fn pull_eviction_clamp_delivers_survivor_exactly_once_and_flags_lagged() {
         assert!(out.lagged, "eviction past the offset flags lagged");
 
         // A second pull after committing offset=5 finds nothing new.
-        let out2 = subscription_pull(&state, sub, 50, Duration::from_millis(200))
+        let out2 = subscription_pull(&state, sub, 50, Duration::from_millis(200), false)
             .await
             .unwrap();
         assert!(out2.events.is_empty(), "no double-delivery of the survivor");
@@ -500,7 +498,7 @@ fn pull_unknown_sub_is_typed_error_never_empty() {
     let (data, state) = boot("unknown");
     rt().block_on(async {
         let bogus = Uuid::new_v4();
-        let err = subscription_pull(&state, bogus, 10, Duration::from_secs(5))
+        let err = subscription_pull(&state, bogus, 10, Duration::from_secs(5), false)
             .await
             .unwrap_err();
         assert_eq!(
@@ -518,7 +516,7 @@ fn pull_closed_sub_mid_session_is_unknown() {
     rt().block_on(async {
         let sub = open_all(&state, Some(Severity::High));
         assert!(state.subscriptions.close(sub), "sub closed");
-        let err = subscription_pull(&state, sub, 10, Duration::from_secs(5))
+        let err = subscription_pull(&state, sub, 10, Duration::from_secs(5), false)
             .await
             .unwrap_err();
         assert_eq!(err.code, IpcErrorCode::UnknownSubscription);
@@ -540,13 +538,13 @@ fn two_subs_same_predicate_have_independent_pull_offsets() {
         append(&state, bucket, Severity::High, "error");
 
         // A drains the event.
-        let out_a = subscription_pull(&state, a, 10, Duration::from_secs(5))
+        let out_a = subscription_pull(&state, a, 10, Duration::from_secs(5), false)
             .await
             .unwrap();
         assert_eq!(out_a.events.len(), 1, "A sees the event");
 
         // B's offsets are independent: B still sees the same event.
-        let out_b = subscription_pull(&state, b, 10, Duration::from_secs(5))
+        let out_b = subscription_pull(&state, b, 10, Duration::from_secs(5), false)
             .await
             .unwrap();
         assert_eq!(out_b.events.len(), 1, "B independently sees the same event");
@@ -566,7 +564,7 @@ fn pull_auto_joins_future_bucket() {
         let (bucket, _job) = make_bucket(&state, BucketConfig::default());
         append(&state, bucket, Severity::High, "error");
 
-        let out = subscription_pull(&state, sub, 10, Duration::from_secs(5))
+        let out = subscription_pull(&state, sub, 10, Duration::from_secs(5), false)
             .await
             .unwrap();
         assert_eq!(
@@ -606,7 +604,7 @@ fn pull_caches_scope_and_reuses_when_dirty_epoch_unchanged() {
 
         // First pull populates the cache (no events present -> short timeout).
         let epoch_before = state.sources.dirty_epoch();
-        let out1 = subscription_pull(&state, sub, 10, Duration::from_millis(150))
+        let out1 = subscription_pull(&state, sub, 10, Duration::from_millis(150), false)
             .await
             .unwrap();
         assert!(out1.events.is_empty(), "no events appended yet");
@@ -633,7 +631,7 @@ fn pull_caches_scope_and_reuses_when_dirty_epoch_unchanged() {
             epoch_before,
             "no record() between pulls, so the epoch is unchanged"
         );
-        let out2 = subscription_pull(&state, sub, 10, Duration::from_millis(150))
+        let out2 = subscription_pull(&state, sub, 10, Duration::from_millis(150), false)
             .await
             .unwrap();
         assert!(out2.events.is_empty(), "still no events");
@@ -656,7 +654,7 @@ fn pull_caches_scope_and_reuses_when_dirty_epoch_unchanged() {
         // Now drain an event from a cached bucket to prove the reused scope is
         // behaviorally identical to a fresh rebuild.
         append(&state, b1, Severity::High, "error");
-        let out3 = subscription_pull(&state, sub, 10, Duration::from_secs(5))
+        let out3 = subscription_pull(&state, sub, 10, Duration::from_secs(5), false)
             .await
             .unwrap();
         assert_eq!(out3.events.len(), 1, "reused-cache scope still delivers");
@@ -677,7 +675,7 @@ fn pull_cache_invalidates_on_new_bucket_and_auto_joins() {
         let sub = open_all(&state, Some(Severity::High));
 
         // First pull populates the cache against the current epoch (1 bucket).
-        let out1 = subscription_pull(&state, sub, 10, Duration::from_millis(150))
+        let out1 = subscription_pull(&state, sub, 10, Duration::from_millis(150), false)
             .await
             .unwrap();
         assert!(out1.events.is_empty());
@@ -699,7 +697,7 @@ fn pull_cache_invalidates_on_new_bucket_and_auto_joins() {
         append(&state, b2, Severity::High, "error");
 
         // Next pull MUST rebuild (epoch changed) and auto-join b2.
-        let out2 = subscription_pull(&state, sub, 10, Duration::from_secs(5))
+        let out2 = subscription_pull(&state, sub, 10, Duration::from_secs(5), false)
             .await
             .unwrap();
         assert_eq!(
@@ -760,7 +758,7 @@ fn pull_liveness_pty_source_not_hardcoded_running() {
         );
         let sub = open_all(&state, Some(Severity::High));
         append(&state, bucket, Severity::High, "error");
-        let out = subscription_pull(&state, sub, 10, Duration::from_secs(5))
+        let out = subscription_pull(&state, sub, 10, Duration::from_secs(5), false)
             .await
             .unwrap();
         let src = out
@@ -771,6 +769,137 @@ fn pull_liveness_pty_source_not_hardcoded_running() {
         assert!(
             matches!(src.liveness, Liveness::Stopped),
             "unknown pty job must report the runtime's answer (Stopped), not a hardcoded Running"
+        );
+    });
+    cleanup(&data);
+}
+
+// ---------------------------------------------------------------------------
+// US4 / FR-031: liveness delta on pull (opt-in `liveness_delta` flag).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pull_delta_first_pull_sends_full_liveness_baseline() {
+    // A subscription's FIRST delta pull has an empty baseline map, so the flag
+    // still yields the FULL liveness snapshot (one entry per in-scope bucket).
+    let (data, state) = boot("delta-baseline");
+    rt().block_on(async {
+        let (bucket, _job) = make_bucket(&state, BucketConfig::default());
+        let sub = open_all(&state, None);
+        let out = subscription_pull(&state, sub, 10, Duration::from_millis(200), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.liveness.len(),
+            1,
+            "first delta pull sends the full baseline; got {:?}",
+            out.liveness
+        );
+        assert_eq!(out.liveness[0].bucket_id, bucket);
+    });
+    cleanup(&data);
+}
+
+#[test]
+fn pull_delta_idle_second_pull_sends_no_liveness() {
+    // Two consecutive delta pulls with no liveness transition between them: the
+    // second carries an EMPTY liveness delta (the baseline was recorded on the
+    // first).
+    let (data, state) = boot("delta-idle");
+    rt().block_on(async {
+        let (_bucket, _job) = make_bucket(&state, BucketConfig::default());
+        let sub = open_all(&state, None);
+        let first = subscription_pull(&state, sub, 10, Duration::from_millis(200), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.liveness.len(),
+            1,
+            "baseline present on the first pull"
+        );
+        let second = subscription_pull(&state, sub, 10, Duration::from_millis(200), true)
+            .await
+            .unwrap();
+        assert!(
+            second.liveness.is_empty(),
+            "steady state sends no liveness delta; got {:?}",
+            second.liveness
+        );
+    });
+    cleanup(&data);
+}
+
+#[test]
+fn pull_delta_transition_appears_in_exactly_next_pull() {
+    // A liveness transition surfaces in EXACTLY the next delta pull, once. The
+    // fake command source derives a stable `Stopped`, so we seed the stored
+    // baseline with a DIFFERENT prior-observed state (`Running`) to stand in for
+    // a real transition; the next pull observes `Stopped != Running` and reports
+    // the changed source exactly once, then not again.
+    let (data, state) = boot("delta-transition");
+    rt().block_on(async {
+        let (bucket, _job) = make_bucket(&state, BucketConfig::default());
+        let sub = open_all(&state, None);
+        let baseline = subscription_pull(&state, sub, 10, Duration::from_millis(200), true)
+            .await
+            .unwrap();
+        assert_eq!(baseline.liveness.len(), 1, "baseline recorded");
+
+        // Rewrite the stored baseline to a state that differs from the derived
+        // one, simulating a source whose liveness changed since the last pull.
+        state
+            .subscriptions
+            .with_sub_mut(sub, |s| {
+                s.last_liveness.insert(bucket, Liveness::Running);
+            })
+            .unwrap();
+
+        let transition = subscription_pull(&state, sub, 10, Duration::from_millis(200), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            transition.liveness.len(),
+            1,
+            "the changed source appears in the next pull; got {:?}",
+            transition.liveness
+        );
+        assert_eq!(transition.liveness[0].bucket_id, bucket);
+
+        let after = subscription_pull(&state, sub, 10, Duration::from_millis(200), true)
+            .await
+            .unwrap();
+        assert!(
+            after.liveness.is_empty(),
+            "a delivered transition is not repeated; got {:?}",
+            after.liveness
+        );
+    });
+    cleanup(&data);
+}
+
+#[test]
+fn pull_without_flag_sends_full_liveness_unchanged() {
+    // Wire-compat guard: with the flag false, EVERY pull carries the full
+    // liveness array exactly as before -- no diffing, no suppression.
+    let (data, state) = boot("delta-noflag");
+    rt().block_on(async {
+        let (_bucket, _job) = make_bucket(&state, BucketConfig::default());
+        let sub = open_all(&state, None);
+        let first = subscription_pull(&state, sub, 10, Duration::from_millis(200), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.liveness.len(),
+            1,
+            "full array on the first no-flag pull"
+        );
+        let second = subscription_pull(&state, sub, 10, Duration::from_millis(200), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.liveness.len(),
+            1,
+            "full array on EVERY no-flag pull (no delta suppression)"
         );
     });
     cleanup(&data);
