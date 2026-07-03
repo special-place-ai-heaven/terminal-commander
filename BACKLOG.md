@@ -280,6 +280,24 @@ delta), registry (idempotent import, bulk deactivate, richer suggest
 heuristics), policy (WSL stance doc or gate).
 **Scope:** `crates/mcp/src/tools.rs`, `crates/daemon/src/ipc/handlers/`,
 `crates/daemon/src/registry*`, docs.
+**Resolution (as_of 2026-07-03):** RESOLVED by spec
+`specs/002-dogfood-remediation` (branch `002-dogfood-remediation`, not yet
+pushed). All eleven items shipped as nine user stories, each red->green
+tested, integrated, and gated on Windows + WSL (final gate: Win 868/868,
+WSL 1139/1139 nextest, security 11/11, clean fmt/clippy):
+US1 facade strictness (all-missing-fields-at-once + unknown-for-action
+rejection); US2 registry idempotent import + bulk/pack deactivate; US3
+files-facade directory listing; US4 compact wait/events + sub_pull liveness
+delta (measured 84.7% byte reduction, SC-004); US5 event_context by
+event_id alone + pty_stdin bounded wait; US6 file_write append; US7 npm/TS
+suggest heuristics; US8 WSL nested-shell gate (fail-closed, both argv
+lanes); US9 (optional pipe-instance pool) SKIPPED with rationale
+(`specs/002-dogfood-remediation/evidence-us9.md`). Correction of record:
+the friction was `sub_pull` silently dropping `wait_ms` while honoring
+`timeout_ms` (this entry had the two reversed); US1's strict validator now
+rejects `wait_ms` on `sub_pull` and names `timeout_ms` as the remedy.
+Evidence: `specs/002-dogfood-remediation/evidence-wave1.md`,
+`evidence-wave2.md`, `evidence-sc004.md`.
 
 ## P1 — Pre-existing high priority follow-ups
 

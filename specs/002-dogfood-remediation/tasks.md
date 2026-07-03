@@ -291,10 +291,10 @@ skipped).
 **Purpose**: batch-wide consistency, honest evidence, and the finishing
 checklist.
 
-- [ ] T049 [P] Fixture + discovery sweep: every touched tool fixture under `crates/mcp/tests/fixtures/contracts/mcp-tools/` consistent with shipped schemas; `mcp-tool-fixture-map.v1.json` complete; `system_discover` fixture enumerates all new actions/fields; facade description constants in sync (`facade_consts_match_tool_attribute_descriptions`)
-- [ ] T050 [P] Update `BACKLOG.md` (mark the ten dogfood improvement items resolved with commit refs; P1.0g resolution note) and `docs/dogfood/2026-07-02-tc-0.1.70-dogfood-findings.md` (status column per finding)
-- [ ] T051 Final full verification gate on Windows AND WSL (fmt, clippy `-D warnings`, nextest workspace) + `-p terminal-commanderd --test security`; compare against `baseline.md` — zero new failures
-- [ ] T052 Live dogfood validation pass: drive every story's Independent Test through the running daemon + MCP facades as the agent-user (quickstart per-story transcripts); write the evidence report per quickstart's report shape into `specs/002-dogfood-remediation/evidence-report.md` — honest per-SC status (SC-001..SC-008), mock/blocked/unverified named as such
+- [x] T049 [P] Fixture + discovery sweep: every touched tool fixture under `crates/mcp/tests/fixtures/contracts/mcp-tools/` consistent with shipped schemas; `mcp-tool-fixture-map.v1.json` complete; `system_discover` fixture enumerates all new actions/fields; facade description constants in sync (`facade_consts_match_tool_attribute_descriptions`)
+- [x] T050 [P] Update `BACKLOG.md` (mark the ten dogfood improvement items resolved with commit refs; P1.0g resolution note) and `docs/dogfood/2026-07-02-tc-0.1.70-dogfood-findings.md` (status column per finding)
+- [x] T051 Final full verification gate on Windows AND WSL (fmt, clippy `-D warnings`, nextest workspace) + `-p terminal-commanderd --test security`; compare against `baseline.md` — zero new failures
+- [~] T052 (automated live-daemon evidence complete; installed-MCP agent pass deferred to post-install -- see evidence-report.md) Live dogfood validation pass: drive every story's Independent Test through the running daemon + MCP facades as the agent-user (quickstart per-story transcripts); write the evidence report per quickstart's report shape into `specs/002-dogfood-remediation/evidence-report.md` — honest per-SC status (SC-001..SC-008), mock/blocked/unverified named as such
 
 ---
 
