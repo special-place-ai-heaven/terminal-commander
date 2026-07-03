@@ -60,28 +60,28 @@ use terminal_commanderd::ipc::protocol::{
     BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
     CommandStartParams, CommandStartResponse, CommandStatusParams, CommandStatusResponse,
     CommandStopParams, CommandStopResponse, ContextUnavailableReason, DiscoverResponse,
-    EventContextParams, EventContextResponse, FileReadWindowParams, FileReadWindowResponse,
-    FileSearchParams, FileSearchResponse, FileWatchListResponse, FileWatchStartParams,
-    FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse, FileWriteParams,
-    FileWriteResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest, IpcResponse,
-    ListLimitParams, PolicyCapsView, PolicyStatusResponse, ProbeListResponse, ProbeStatusParams,
-    ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
-    PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
-    PtyCommandWriteStdinResponse, RegistryActivateParams, RegistryActivateResponse,
-    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
-    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
-    RegistrySearchParams, RegistrySearchResponse, RegistrySuggestFromSamplesParams,
-    RegistrySuggestFromSamplesResponse, RegistryTestParams, RegistryTestResponse,
-    RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
-    ShellExecParams, ShellSessionExecParams, ShellSessionExecResponse, ShellSessionListResponse,
-    ShellSessionStartParams, ShellSessionStartResponse, ShellSessionStatusParams,
-    ShellSessionStatusResponse, ShellSessionStopParams, ShellSessionStopResponse,
-    SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionListParams,
-    SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
-    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse,
-    SubscriptionSeekParams, SubscriptionSeekResponse, SubscriptionSourceSel,
-    WorkspaceSnapshotApplyParams, WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams,
-    WorkspaceSnapshotCreateResponse,
+    EventContextParams, EventContextResponse, FileListDirParams, FileListDirResponse,
+    FileReadWindowParams, FileReadWindowResponse, FileSearchParams, FileSearchResponse,
+    FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
+    FileWatchStopResponse, FileWriteParams, FileWriteResponse, IpcContextFrame, IpcError,
+    IpcErrorCode, IpcRequest, IpcResponse, ListLimitParams, PolicyCapsView, PolicyStatusResponse,
+    ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse,
+    PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
+    PtyCommandWriteStdinParams, RegistryActivateParams, RegistryActivateResponse,
+    RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse, RegistryDeactivateParams,
+    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
+    RegistryImportPackResponse, RegistryListActiveResponse, RegistrySearchParams,
+    RegistrySearchResponse, RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse,
+    RegistryTestParams, RegistryTestResponse, RegistryTestSample, RegistryUpsertParams,
+    RegistryUpsertResponse, SelfCheckResponse, ShellExecParams, ShellSessionExecParams,
+    ShellSessionExecResponse, ShellSessionListResponse, ShellSessionStartParams,
+    ShellSessionStartResponse, ShellSessionStatusParams, ShellSessionStatusResponse,
+    ShellSessionStopParams, ShellSessionStopResponse, SubscriptionCloseParams,
+    SubscriptionCloseResponse, SubscriptionListParams, SubscriptionListResponse,
+    SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
+    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSeekParams,
+    SubscriptionSeekResponse, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
+    WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -1614,9 +1614,12 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpBucketEventsSinceParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
+        let compact = params.compact;
         let ipc = params.into_ipc().map_err(invalid_params)?;
         match self.daemon.call(IpcRequest::BucketEventsSince(ipc)).await {
-            Ok(IpcResponse::BucketEventsSince(r)) => json_tool_result(&bucket_events_payload(&r)),
+            Ok(IpcResponse::BucketEventsSince(r)) => {
+                json_tool_result(&bucket_events_payload(&r, compact))
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
@@ -1631,9 +1634,10 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpBucketWaitParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
+        let compact = params.compact;
         let ipc = params.into_ipc().map_err(invalid_params)?;
         match self.daemon.call(IpcRequest::BucketWait(ipc)).await {
-            Ok(IpcResponse::BucketWait(r)) => json_tool_result(&bucket_wait_payload(&r)),
+            Ok(IpcResponse::BucketWait(r)) => json_tool_result(&bucket_wait_payload(&r, compact)),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
@@ -1903,9 +1907,9 @@ impl TerminalCommanderMcpServer {
         }
     }
 
-    /// `registry_deactivate` — remove a rule from the active set.
+    /// `registry_deactivate` — remove a rule, a list, or a whole pack from the active set.
     #[tool(
-        description = "Deactivate (rule_id, version?, scope). version is OPTIONAL: omit it to deactivate the LATEST stored version (the resolved version is echoed in the response), or pass it to target a specific version -- an explicit version is used verbatim, never widened. scope is REQUIRED and must match the scope used at activation (e.g. {kind:'global'}); an omitted scope is rejected. Future commands skip the rule; already-running commands keep the rules they were started with."
+        description = "Deactivate rules under one scope. Provide EXACTLY ONE selector: rule_id (single rule), rule_ids (explicit list, one call), or pack (every member of a seed pack, one call). version is OPTIONAL and only valid with rule_id: omit it to deactivate the LATEST stored version (echoed in the response), or pass it to target a specific version -- used verbatim, never widened. scope is REQUIRED and must match the scope used at activation (e.g. {kind:'global'}); an omitted scope is rejected. Bulk selectors report per-rule outcomes (deactivated / not_active / unknown_rule) -- partial success is never silent. Future commands skip the rule(s); already-running commands keep the rules they were started with."
     )]
     async fn registry_deactivate(
         &self,
@@ -1913,41 +1917,88 @@ impl TerminalCommanderMcpServer {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
         // `scope` is schema-required (TB-5): rmcp rejects an omitted
-        // scope before this handler runs. The wire IPC type keeps
-        // `scope: Option` for backward compatibility, so wrap in `Some`.
-        let scope = Some(params.scope.into_ipc_scope()?);
-        // BUG 2: an omitted `version` resolves to the LATEST stored version of
-        // this rule_id, so a version-less deactivate is symmetric with the
-        // version-less activate that opened the row. The wire IPC carries a
-        // concrete `u32`, so resolve it here with one bounded RegistryGet (the
-        // daemon returns the latest version when the request omits it), then
-        // deactivate the resolved version. An explicit version is used verbatim
-        // (no silent widen); either way the response echoes the version acted on.
-        let version = match params.version {
-            Some(v) => v,
-            None => self.resolve_latest_rule_version(&params.rule_id).await?,
-        };
-        let ipc = RegistryDeactivateParams {
-            rule_id: params.rule_id,
-            version,
-            scope,
-        };
-        match self.daemon.call(IpcRequest::RegistryDeactivate(ipc)).await {
-            Ok(IpcResponse::RegistryDeactivate(RegistryDeactivateResponse {
+        // scope before this handler runs.
+        let scope = params.scope.into_ipc_scope()?;
+
+        // Exactly ONE selector of {rule_id, rule_ids, pack}. All three are
+        // schema-optional; this validator owns required-ness and teaches
+        // the whole set in one error (US2/FR-011).
+        let selector_count = usize::from(params.rule_id.is_some())
+            + usize::from(params.rule_ids.is_some())
+            + usize::from(params.pack.is_some());
+        if selector_count != 1 {
+            return Err(invalid_params(
+                "registry deactivate requires EXACTLY ONE of 'rule_id' (single rule), \
+                 'rule_ids' (list of rule ids), or 'pack' (whole seed pack); you supplied \
+                 none or more than one"
+                    .to_owned(),
+            ));
+        }
+        // `version` is meaningful only with a single `rule_id`.
+        if params.version.is_some() && params.rule_id.is_none() {
+            return Err(invalid_params(
+                "'version' is only valid with 'rule_id'; a bulk deactivate by 'rule_ids' or \
+                 'pack' closes each rule's active version(s) under the scope"
+                    .to_owned(),
+            ));
+        }
+
+        if let Some(rule_id) = params.rule_id {
+            // Single-rule path: byte-identical to the historical behavior.
+            // An omitted version resolves to the LATEST stored version, so a
+            // version-less deactivate is symmetric with the version-less
+            // activate that opened the row. The wire IPC keeps `scope:
+            // Option` for backward compatibility, so wrap in `Some`.
+            let version = match params.version {
+                Some(v) => v,
+                None => self.resolve_latest_rule_version(&rule_id).await?,
+            };
+            let ipc = RegistryDeactivateParams {
                 rule_id,
                 version,
-                was_deactivated,
+                scope: Some(scope),
+            };
+            match self.daemon.call(IpcRequest::RegistryDeactivate(ipc)).await {
+                Ok(IpcResponse::RegistryDeactivate(RegistryDeactivateResponse {
+                    rule_id,
+                    version,
+                    was_deactivated,
+                    scope,
+                    jobs_rebound,
+                })) => json_tool_result(&serde_json::json!({
+                    "rule_id": rule_id,
+                    "version": version,
+                    "was_deactivated": was_deactivated,
+                    "scope": scope,
+                    "jobs_rebound": jobs_rebound,
+                })),
+                Ok(other) => Err(unexpected_variant(&other)),
+                Err(e) => Err(into_mcp_error_for(false, &e)),
+            }
+        } else {
+            // Bulk path: rule_ids or pack -> RegistryDeactivateBulk. The
+            // daemon reports one outcome per requested rule (partial
+            // success is the normal shape) and rebinds live jobs once.
+            let ipc = RegistryDeactivateBulkParams {
+                pack: params.pack,
+                rule_ids: params.rule_ids,
                 scope,
-                jobs_rebound,
-            })) => json_tool_result(&serde_json::json!({
-                "rule_id": rule_id,
-                "version": version,
-                "was_deactivated": was_deactivated,
-                "scope": scope,
-                "jobs_rebound": jobs_rebound,
-            })),
-            Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error_for(false, &e)),
+            };
+            match self
+                .daemon
+                .call(IpcRequest::RegistryDeactivateBulk(ipc))
+                .await
+            {
+                Ok(IpcResponse::RegistryDeactivateBulk(RegistryDeactivateBulkResponse {
+                    outcomes,
+                    jobs_rebound,
+                })) => json_tool_result(&serde_json::json!({
+                    "outcomes": outcomes,
+                    "jobs_rebound": jobs_rebound,
+                })),
+                Ok(other) => Err(unexpected_variant(&other)),
+                Err(e) => Err(into_mcp_error_for(false, &e)),
+            }
         }
     }
 
@@ -2048,6 +2099,39 @@ impl TerminalCommanderMcpServer {
         }
     }
 
+    /// `file_list_dir` — bounded single-level directory listing (US3).
+    ///
+    /// A `files` facade ACTION forwarder, deliberately NOT a granular `#[tool]`,
+    /// so the MCP tool count is unchanged. Thin 1:1 forward to the daemon
+    /// `FileListDir` IPC method: the adapter never touches the filesystem. The
+    /// daemon applies the same read-path policy gate as `read` and returns a
+    /// bounded, deterministically ordered, truncation-flagged listing.
+    async fn file_list_dir(
+        &self,
+        Parameters(params): Parameters<McpFileListDirParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = FileListDirParams {
+            path: params.path,
+            max_entries: params.max_entries,
+        };
+        match self.daemon.call(IpcRequest::FileListDir(ipc)).await {
+            Ok(IpcResponse::FileListDir(FileListDirResponse {
+                path,
+                entries,
+                total_entries,
+                truncated,
+            })) => json_tool_result(&serde_json::json!({
+                "path": path,
+                "entries": entries,
+                "total_entries": total_entries,
+                "truncated": truncated,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
     /// `file_write` — write UTF-8 content to one file (TC22 A3).
     ///
     /// Thin 1:1 forward to the daemon `FileWrite` IPC method, identical in
@@ -2066,6 +2150,7 @@ impl TerminalCommanderMcpServer {
             path: std::path::PathBuf::from(params.path),
             content: params.content,
             create_dirs: params.create_dirs.unwrap_or(false),
+            append: params.append.unwrap_or(false),
         };
         match self.daemon.call(IpcRequest::FileWrite(ipc)).await {
             Ok(IpcResponse::FileWrite(FileWriteResponse {
@@ -2247,21 +2332,19 @@ impl TerminalCommanderMcpServer {
         let ipc = PtyCommandWriteStdinParams {
             job_id,
             bytes: params.bytes,
+            cursor: params.cursor,
+            wait_ms: params.wait_ms,
         };
         match self
             .daemon
             .call(IpcRequest::PtyCommandWriteStdin(ipc))
             .await
         {
-            Ok(IpcResponse::PtyCommandWriteStdin(PtyCommandWriteStdinResponse {
-                job_id,
-                bytes_written,
-                secret_prompt_active,
-            })) => json_tool_result(&serde_json::json!({
-                "job_id": job_id,
-                "bytes_written": bytes_written,
-                "secret_prompt_active": secret_prompt_active,
-            })),
+            // FR-041: serialize the response directly. The combed-batch
+            // fields carry `skip_serializing_if = Option::is_none`, so a
+            // no-wait response omits every one -> byte-identical to today;
+            // a wait_ms response surfaces the combed batch in one call.
+            Ok(IpcResponse::PtyCommandWriteStdin(resp)) => json_tool_result(&resp),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
         }
@@ -2646,6 +2729,11 @@ impl TerminalCommanderMcpServer {
             sub_id: params.sub_id,
             max: params.max,
             timeout_ms: params.timeout_ms,
+            // US4 / FR-031: the adapter ALWAYS requests the liveness delta --
+            // the agent-facing token saving IS the feature (SC-004). The daemon
+            // sends the full snapshot on the first pull and after a seek, then
+            // only changed entries.
+            liveness_delta: true,
         };
         // Route through the dedicated long-poll client: an idle ~8 s pull on the
         // default 5 s client would surface a -32603 (AC13 / MUST-ADD #7).
@@ -2689,12 +2777,18 @@ impl TerminalCommanderMcpServer {
                         })
                         .await;
                 }
-                json_tool_result(&serde_json::json!({
+                // US4 / FR-031: include the liveness section ONLY when the delta
+                // is non-empty (first pull after open/seek = full snapshot;
+                // steady idle = omitted). This is the agent-facing byte saving.
+                let mut payload = serde_json::json!({
                     "events": events,
-                    "liveness": liveness,
                     "lagged": lagged,
                     "truncated": truncated,
-                }))
+                });
+                if !liveness.is_empty() {
+                    payload["liveness"] = serde_json::json!(liveness);
+                }
+                json_tool_result(&payload)
             }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
@@ -2838,8 +2932,8 @@ For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires 
     /// `files` facade — file read/search/write + watch + workspace snapshots.
     #[tool(
         name = "files",
-        description = "File operations: bounded read (action=\"read\"), substring search, \
-atomic write, file-watch start/stop/list, and workspace snapshots \
+        description = "File operations: bounded read (action=\"read\"), directory listing (action=\"list\"), \
+substring search, atomic write, file-watch start/stop/list, and workspace snapshots \
 (snapshot_create, snapshot_apply). All paths must be absolute."
     )]
     pub(crate) async fn files_facade(
@@ -2850,6 +2944,7 @@ atomic write, file-watch start/stop/list, and workspace snapshots \
         match call {
             F::Read(p) => self.file_read_window(Parameters(p)).await,
             F::Search(p) => self.file_search(Parameters(p)).await,
+            F::List(p) => self.file_list_dir(Parameters(p)).await,
             F::Write(p) => self.file_write(Parameters(p)).await,
             F::WatchStart(p) => self.file_watch_start(Parameters(p)).await,
             F::WatchStop(p) => self.file_watch_stop(Parameters(p)).await,
@@ -2969,6 +3064,16 @@ impl ServerHandler for TerminalCommanderMcpServer {
                 .unwrap_or_else(crate::surface::surface_from_env),
             request.name.as_ref(),
         )?;
+        // US1 strictness: for the five facade tools, validate the raw call
+        // object against the advertised action schema BEFORE the router
+        // deserializes the *FacadeCall enum. A well-formed call passes untouched
+        // (byte-identical dispatch); a malformed one gets ONE teaching error
+        // naming the action + every missing/unknown field. Legacy granular tools
+        // are not facades and are not validated here.
+        if crate::surface_list::COMPACT_TOOL_NAMES.contains(&request.name.as_ref()) {
+            let call = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
+            crate::facade_strict::validate_facade_call(request.name.as_ref(), &call)?;
+        }
         // Delegate to the SAME router the macro used -- dispatch still flows
         // through `self.tool_router`; no hand-rolled per-tool match.
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
@@ -4484,6 +4589,12 @@ pub struct McpBucketEventsSinceParams {
     #[serde(default, deserialize_with = "de_opt_usize_lenient")]
     #[schemars(with = "usize")]
     pub limit: Option<usize>,
+    /// When true, each returned signal is projected to the load-bearing field
+    /// set `{summary, stream, seq, severity}` and the payload echoes
+    /// `compact: true`. Presentation only: the full records stay re-fetchable
+    /// by re-reading the same cursor with `compact` omitted.
+    #[serde(default)]
+    pub compact: bool,
 }
 
 impl McpBucketEventsSinceParams {
@@ -4524,6 +4635,12 @@ pub struct McpBucketWaitParams {
     #[serde(default, deserialize_with = "de_opt_u64_lenient")]
     #[schemars(with = "u64")]
     pub timeout_ms: Option<u64>,
+    /// When true, each returned signal is projected to the load-bearing field
+    /// set `{summary, stream, seq, severity}` and the payload echoes
+    /// `compact: true`. Presentation only: the full records stay re-fetchable
+    /// by re-reading the same cursor with `compact` omitted.
+    #[serde(default)]
+    pub compact: bool,
 }
 
 impl McpBucketWaitParams {
@@ -4557,8 +4674,17 @@ pub struct McpBucketSummaryParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpEventContextParams {
     /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
-    /// verbatim, not free-form.
-    pub bucket_id: String,
+    /// verbatim, not free-form. OPTIONAL (US5 / FR-040): omit it to
+    /// resolve the owning bucket from `event_id` alone. When supplied it
+    /// must be the event's real bucket -- a contradiction errors
+    /// (EventNotFound), it is never silently corrected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // `with = "String"` keeps the advertised schema shape a plain string
+    // (matching bucket_id on the `events`/`wait`/`summary` actions) while
+    // `serde(default)` leaves it optional -- so the facade flatten stays
+    // collision-free and the strict validator does not require it.
+    #[schemars(with = "String")]
+    pub bucket_id: Option<String>,
     /// Opaque event id from a bucket read (e.g. `evt_<32hex>`); copy it
     /// verbatim, not free-form.
     pub event_id: String,
@@ -4575,8 +4701,13 @@ pub struct McpEventContextParams {
 
 impl McpEventContextParams {
     fn into_ipc(self) -> Result<EventContextParams, String> {
-        let bucket_id =
-            parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", &self.bucket_id)?;
+        // FR-040: bucket_id is optional. Parse it only when supplied; an
+        // absent bucket_id resolves the owning bucket from event_id alone.
+        let bucket_id = self
+            .bucket_id
+            .as_deref()
+            .map(|b| parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", b))
+            .transpose()?;
         let event_id =
             parse_id::<terminal_commander_core::ids::EventIdKind>("event_id", &self.event_id)?;
         Ok(EventContextParams {
@@ -4628,26 +4759,58 @@ fn command_output_tail_payload(r: &CommandOutputTailResponse) -> serde_json::Val
     })
 }
 
-fn bucket_events_payload(r: &BucketEventsSinceResponse) -> serde_json::Value {
-    serde_json::json!({
+fn bucket_events_payload(r: &BucketEventsSinceResponse, compact: bool) -> serde_json::Value {
+    let mut payload = serde_json::json!({
         "bucket_id": r.bucket_id,
         "cursor_in": r.cursor_in,
         "next_cursor": r.next_cursor,
         "has_more": r.has_more,
         "dropped_count": r.dropped_count,
-        "events": r.events,
-    })
+        "events": project_events(&r.events, compact),
+    });
+    // FR-030: echo `compact:true` ONLY when set, so a full read stays
+    // byte-identical to today's payload.
+    if compact {
+        payload["compact"] = serde_json::json!(true);
+    }
+    payload
 }
 
-fn bucket_wait_payload(r: &BucketWaitResponse) -> serde_json::Value {
-    serde_json::json!({
+fn bucket_wait_payload(r: &BucketWaitResponse, compact: bool) -> serde_json::Value {
+    let mut payload = serde_json::json!({
         "bucket_id": r.bucket_id,
         "cursor_in": r.cursor_in,
         "next_cursor": r.next_cursor,
         "heartbeat": r.heartbeat,
         "dropped_count": r.dropped_count,
-        "events": r.events,
-    })
+        "events": project_events(&r.events, compact),
+    });
+    // FR-030: echo `compact:true` ONLY when set, so a full read stays
+    // byte-identical to today's payload.
+    if compact {
+        payload["compact"] = serde_json::json!(true);
+    }
+    payload
+}
+
+/// Project a bucket read's signals for the wire: full records by default, or
+/// the load-bearing compact set (FR-030) when `compact` is set. Shared by
+/// `bucket_wait` and `bucket_events_since` so both echo the identical shape
+/// `run_and_watch` established.
+fn project_events(
+    events: &[terminal_commander_core::SignalEvent],
+    compact: bool,
+) -> serde_json::Value {
+    if compact {
+        serde_json::json!(
+            events
+                .iter()
+                .map(project_signal_compact)
+                .collect::<Vec<_>>()
+        )
+    } else {
+        serde_json::json!(events)
+    }
 }
 
 fn bucket_summary_payload(s: &BucketSummaryResponse) -> serde_json::Value {
@@ -4861,13 +5024,43 @@ pub struct McpRegistryImportPackParams {
 }
 
 /// MCP-facing parameters for `registry_deactivate`.
+///
+/// Three selectors, EXACTLY ONE required (the schema marks all three
+/// optional; the adapter's exactly-one-of validator owns required-ness
+/// and teaches the whole set in one error -- US2/FR-011):
+/// - `rule_id`: a single rule (byte-identical to the historical path).
+/// - `rule_ids`: an explicit list of rule ids, one call.
+/// - `pack`: every member of a seed pack, one call.
+///
+/// `scope` stays schema-required. `version` is only valid with
+/// `rule_id`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryDeactivateParams {
-    pub rule_id: String,
+    /// Selector: a single rule id. Schema-optional; exactly one of
+    /// `rule_id` / `rule_ids` / `pack` must be supplied. Advertised as a
+    /// plain `string` (like the `rule_id` on other registry actions) so
+    /// the facade flatten stays collision-safe; optionality is expressed
+    /// by absence from the schema `required[]`.
+    #[serde(default)]
+    #[schemars(with = "String")]
+    pub rule_id: Option<String>,
+    /// Selector: deactivate this explicit list of rule ids in one call.
+    /// Per-rule outcomes (deactivated / not_active / unknown_rule) are
+    /// reported; partial success is never silent.
+    #[serde(default)]
+    #[schemars(with = "Vec<String>")]
+    pub rule_ids: Option<Vec<String>>,
+    /// Selector: deactivate every member of this seed pack in one call.
+    /// Pack membership resolves from the embedded pack JSON only.
+    /// Advertised as a plain `string` (matching `import_pack`'s `pack`).
+    #[serde(default)]
+    #[schemars(with = "String")]
+    pub pack: Option<String>,
     /// Omit to deactivate the LATEST stored version (mirrors registry_get /
     /// registry_activate); the adapter resolves it and the response echoes the
     /// resolved version. Provide a value to target a specific version. An
-    /// explicit version is used verbatim -- never silently widened.
+    /// explicit version is used verbatim -- never silently widened. Only
+    /// valid with `rule_id`.
     #[serde(default, deserialize_with = "de_opt_u32_lenient")]
     #[schemars(with = "u32")]
     pub version: Option<u32>,
@@ -4981,6 +5174,21 @@ pub struct McpFileReadWindowParams {
     pub max_bytes: Option<usize>,
 }
 
+/// MCP-facing parameters for the `list` files action (US3 directory listing).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpFileListDirParams {
+    /// Absolute path to the directory to list (e.g. `/home/u/project`).
+    /// Absolute is required: the daemon has no workspace root, so a relative
+    /// path is rejected rather than resolved against the daemon's working
+    /// directory. Gated by the same read-path policy as `read`.
+    pub path: String,
+    /// Max entries returned. Clamped by the daemon to `[1, 500]`; omitted =
+    /// 200. Over-cap listings are truncation-flagged with the true total.
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub max_entries: Option<u32>,
+}
+
 /// MCP-facing parameters for `file_write` (TC22 A3).
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileWriteParams {
@@ -5000,6 +5208,12 @@ pub struct McpFileWriteParams {
     #[serde(default, deserialize_with = "de_opt_bool_lenient")]
     #[schemars(with = "bool")]
     pub create_dirs: Option<bool>,
+    /// Append `content` to the target instead of replacing it. Same policy
+    /// gate, same size cap, same missing-file creation; `bytes_written` is the
+    /// number of bytes appended. Defaults to false (full replace).
+    #[serde(default, deserialize_with = "de_opt_bool_lenient")]
+    #[schemars(with = "bool")]
+    pub append: Option<bool>,
 }
 
 /// MCP-facing parameters for `file_search`.
@@ -5121,6 +5335,19 @@ pub struct McpPtyCommandWriteStdinParams {
     pub job_id: String,
     /// UTF-8 stdin payload. Capped at 4096 bytes by the daemon.
     pub bytes: String,
+    /// Cursor into the PTY job bucket to read the settle window from.
+    /// Omit / `0` for the bucket head; pass the prior response's
+    /// `next_cursor`. Only meaningful with `wait_ms`.
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
+    pub cursor: Option<u64>,
+    /// Bounded wait (ms) for combed signals to appear after the write.
+    /// Clamped daemon-side. Omit for today's immediate return; supply it
+    /// to receive the echo + result signals in the SAME call (US5 /
+    /// FR-041, same shape family as `shell_session_exec`).
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
+    pub wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -6423,15 +6650,23 @@ mod tests {
     fn deactivate_schema_lists_scope_as_required() {
         let schema = schemars::schema_for!(McpRegistryDeactivateParams);
         let required = schema_required(&schema);
-        for field in ["rule_id", "scope"] {
+        // US2/FR-011: scope stays schema-required.
+        assert!(
+            required.iter().any(|f| f == "scope"),
+            "registry_deactivate schema must list scope in required[]; got {required:?}"
+        );
+        // US2/FR-011: rule_id is now schema-OPTIONAL -- it is one of three
+        // selectors {rule_id, rule_ids, pack} and the adapter's
+        // exactly-one-of validator owns required-ness. NONE of the three
+        // selectors is in required[].
+        for selector in ["rule_id", "rule_ids", "pack"] {
             assert!(
-                required.iter().any(|f| f == field),
-                "registry_deactivate schema must list {field} in required[]; got {required:?}"
+                !required.iter().any(|f| f == selector),
+                "selector {selector} must be schema-optional (exactly-one-of validator owns \
+                 required-ness); got {required:?}"
             );
         }
-        // BUG 2: version is now OPTIONAL (omit = latest stored), so it must NOT
-        // be in required[] -- otherwise an omitted version is rejected with the
-        // very "missing field `version`" error this fix removes.
+        // version is OPTIONAL (omit = latest stored) and only valid with rule_id.
         assert!(
             !required.iter().any(|f| f == "version"),
             "version must be optional on deactivate (omit = latest); got {required:?}"
@@ -6447,7 +6682,7 @@ mod tests {
             r#"{"rule_id":"r","scope":{"kind":"global"}}"#,
         )
         .expect("deactivate without version must deserialize (version is optional)");
-        assert_eq!(params.rule_id, "r");
+        assert_eq!(params.rule_id.as_deref(), Some("r"));
         assert_eq!(params.version, None, "omitted version must parse as None");
         assert_eq!(params.scope.kind, "global");
 

@@ -161,6 +161,86 @@ for line in sys.stdin:
     cleanup(&data);
 }
 
+/// US5 / FR-041: one REPL interaction is ONE MCP call. Writing stdin with
+/// `wait_ms` returns the echo + result signals the write provoked in the
+/// SAME response (was two calls: write, then a separate `wait`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pty_stdin_wait_ms_returns_signals_in_one_call_through_mcp() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    let data = tmp_data_dir("stdin-wait");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        // A REPL that emits a rule-matching line for each stdin line, with
+        // an inline rule tagging those lines `kw_result`.
+        let py = "import sys\nfor line in sys.stdin:\n    print('RESULT', eval(line.strip()), flush=True)\n";
+        let start = first_text(
+            &call_tool(
+                &client,
+                "pty_command_start",
+                serde_json::json!({
+                    "argv": ["python3", "-u", "-c", py],
+                    "rules": [{
+                        "keywords": ["RESULT"],
+                        "severity": "medium",
+                        "event_kind": "kw_result",
+                        "summary_template": "repl result"
+                    }],
+                }),
+            )
+            .await,
+        );
+        let start_v: serde_json::Value = serde_json::from_str(&start).expect("start json");
+        let job_id = start_v["job_id"].as_str().unwrap().to_owned();
+
+        // ONE call: write `1+1` + settle-read the signals it produced.
+        let payload = first_text(
+            &call_tool(
+                &client,
+                "pty_command_write_stdin",
+                serde_json::json!({
+                    "job_id": job_id,
+                    "bytes": "1+1\n",
+                    "wait_ms": 5000
+                }),
+            )
+            .await,
+        );
+        let v: serde_json::Value = serde_json::from_str(&payload).expect("stdin json");
+        assert!(
+            v["bytes_written"].as_u64().unwrap_or(0) > 0,
+            "bytes must be written; got {payload}"
+        );
+        assert!(
+            v.get("next_cursor").is_some(),
+            "wait_ms response must carry next_cursor; got {payload}"
+        );
+        let events = v["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("events array must be present with wait_ms; got {payload}"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e["kind"].as_str() == Some("kw_result")),
+            "expected the kw_result signal in the SAME response; got {payload}"
+        );
+
+        let _ = call_tool(
+            &client,
+            "pty_command_stop",
+            serde_json::json!({"job_id": job_id}),
+        )
+        .await;
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pty_secret_prompt_denies_stdin_through_mcp() {
     if !python3_available() {

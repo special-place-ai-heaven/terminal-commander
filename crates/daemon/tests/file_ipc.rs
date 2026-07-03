@@ -17,9 +17,9 @@ use std::time::Duration;
 use terminal_commander_core::{ContextHint, RuleDefinition, RuleStatus, RuleType, Severity};
 use terminal_commander_store::AuditReadRequest;
 use terminal_commanderd::{
-    DaemonClient, DaemonConfig, DaemonState, FileReadWindowParams, FileSearchParams,
-    FileWatchStartParams, FileWatchStopParams, FileWriteParams, FileWriteResponse, IpcErrorCode,
-    IpcRequest, IpcResponse, IpcServer, MAX_FILE_WRITE_BYTES,
+    DaemonClient, DaemonConfig, DaemonState, DirEntryKind, FileListDirParams, FileReadWindowParams,
+    FileSearchParams, FileWatchStartParams, FileWatchStopParams, FileWriteParams,
+    FileWriteResponse, IpcErrorCode, IpcRequest, IpcResponse, IpcServer, MAX_FILE_WRITE_BYTES,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -904,6 +904,7 @@ fn file_write_to_allowed_path_writes_exact_content_and_audits() {
                     path: target.clone(),
                     content: content.to_owned(),
                     create_dirs: true,
+                    append: false,
                 }),
             )
             .await
@@ -960,6 +961,7 @@ fn file_write_to_denied_path_errors_and_creates_no_file() {
                     path: secret.clone(),
                     content: "BEGIN OPENSSH PRIVATE KEY\n".to_owned(),
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1004,6 +1006,7 @@ fn file_write_oversize_content_returns_bounded_error() {
                     path: target.clone(),
                     content: oversize,
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1036,6 +1039,7 @@ fn file_write_rejects_relative_path() {
                     path: PathBuf::from("out.txt"),
                     content: "x".to_owned(),
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1089,6 +1093,7 @@ fn file_write_enforces_write_allow_list() {
                     path: inside.clone(),
                     content: "ok\n".to_owned(),
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1108,6 +1113,7 @@ fn file_write_enforces_write_allow_list() {
                     path: outside.clone(),
                     content: "nope\n".to_owned(),
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1167,6 +1173,7 @@ fn file_write_rejects_dotdot_target_before_creating_artifact() {
                         path: dotdot_target.clone(),
                         content: "escape\n".to_owned(),
                         create_dirs,
+                        append: false,
                     }),
                 )
                 .await
@@ -1220,6 +1227,7 @@ fn file_write_oversize_emits_domain_deny_audit_row() {
                     path: target.clone(),
                     content: oversize,
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1239,6 +1247,456 @@ fn file_write_oversize_emits_domain_deny_audit_row() {
             rows.iter()
                 .map(|r| (r.action.clone(), r.decision.clone()))
                 .collect::<Vec<_>>()
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+// =====================================================================
+// US6 (FR-022): file_write append mode. Same policy gate + size cap +
+// missing-file creation as a full write; the ORIGINAL content is
+// preserved and `content` is appended. bytes_written = bytes appended.
+// =====================================================================
+
+/// AC (SC-008 red): append preserves the existing prefix and reports the
+/// bytes APPENDED (not the total file size). Against pre-change behavior the
+/// daemon ignores the unknown `append` flag and REPLACES the file, dropping
+/// the prefix -- so this test fails until the append branch lands (the
+/// beautiful red). The domain `file_write` allow audit row carries
+/// `"append":true` metadata.
+#[test]
+fn file_write_append_preserves_prefix_and_reports_bytes_appended() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server();
+        let target = data.join("log.txt");
+        // Seed an existing file with a prefix (a plain OS write, not the daemon).
+        write_text(&target, "prefix-line\n");
+
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let addition = "appended-line\n";
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: target.clone(),
+                    content: addition.to_owned(),
+                    create_dirs: false,
+                    append: true,
+                }),
+            )
+            .await
+            .expect("append write");
+        let r: FileWriteResponse = match resp {
+            IpcResponse::FileWrite(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        // bytes_written == bytes APPENDED, not the total file size.
+        assert_eq!(r.bytes_written, addition.len() as u64);
+
+        // The original prefix is preserved and the addition follows it.
+        let on_disk = std::fs::read_to_string(&target).expect("target must exist");
+        assert_eq!(
+            on_disk, "prefix-line\nappended-line\n",
+            "append must preserve the prefix, not replace the file"
+        );
+
+        // Domain audit: a `file_write` allow row whose metadata records the
+        // append mode (`"append":true`).
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter().any(|row| row.action == "file_write"
+                && row.decision == "allow"
+                && row
+                    .metadata_json
+                    .as_deref()
+                    .is_some_and(|m| m.contains("\"append\":true"))),
+            "expected a file_write allow row with append:true metadata; got {:?}",
+            rows.iter()
+                .map(|r| (
+                    r.action.clone(),
+                    r.decision.clone(),
+                    r.metadata_json.clone()
+                ))
+                .collect::<Vec<_>>()
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC: append to a MISSING file creates it (parity with a full write); the
+/// appended content becomes the whole file. `create_dirs: false` because the
+/// parent (the data dir) already exists.
+#[test]
+fn file_write_append_missing_file_creates_it() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let target = data.join("fresh.txt");
+        assert!(!target.exists(), "precondition: target must not exist yet");
+
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let content = "first-append\n";
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: target.clone(),
+                    content: content.to_owned(),
+                    create_dirs: false,
+                    append: true,
+                }),
+            )
+            .await
+            .expect("append to missing file");
+        let r: FileWriteResponse = match resp {
+            IpcResponse::FileWrite(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(r.bytes_written, content.len() as u64);
+        let on_disk = std::fs::read_to_string(&target).expect("target must exist");
+        assert_eq!(
+            on_disk, content,
+            "append to a missing file writes the content"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC: an append to a DENIED path fails with the SAME policy error shape as a
+/// full write (PathDenied) and creates no file. The gate order is unchanged:
+/// resolve_and_authorize runs regardless of append mode.
+#[test]
+fn file_write_append_denied_path_same_policy_error_as_write() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server();
+        // Default-deny sensitive suffix (.ssh/id_rsa), parent built so the DENY
+        // is purely the policy verdict (mirrors file_write_to_denied_path...).
+        let ssh_dir = data.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        let secret = ssh_dir.join("id_rsa");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: secret.clone(),
+                    content: "more-secret\n".to_owned(),
+                    create_dirs: false,
+                    append: true,
+                }),
+            )
+            .await
+            .expect_err("default-deny append target must be rejected");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+        assert!(
+            !secret.exists(),
+            "denied append must not create the target file"
+        );
+
+        // Same domain deny audit row as a full write.
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row.action == "file_write" && row.decision == "deny"),
+            "expected a file_write deny audit row for the denied append"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC: oversize append content (> MAX_FILE_WRITE_BYTES) is rejected with the
+/// bounded OversizedRequest error BEFORE any filesystem touch -- the size cap
+/// is first in the guard order, identical to a full write.
+#[test]
+fn file_write_append_oversize_bounded_error() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let target = data.join("big-append.txt");
+        // Seed a small prefix; the oversize refusal must leave it untouched.
+        write_text(&target, "prefix\n");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+
+        let oversize = "x".repeat(MAX_FILE_WRITE_BYTES + 1);
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: target.clone(),
+                    content: oversize,
+                    create_dirs: false,
+                    append: true,
+                }),
+            )
+            .await
+            .expect_err("oversize append content must be rejected");
+        assert_eq!(err.code, IpcErrorCode::OversizedRequest);
+        // The original prefix is untouched: the cap fires before any FS write.
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "prefix\n",
+            "oversize-rejected append must not modify the original content"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+// =====================================================================
+// US3 (FR-020/021): file_list_dir — bounded, policy-gated single-level
+// directory listing. Same read-path gate + audit as file_read_window.
+// =====================================================================
+
+/// AC1: a readable directory lists its entries with name/kind/size/mtime,
+/// sorted dirs-first then files/symlinks, each group lexicographic. Symlinks
+/// are reported by kind and NEVER followed (size absent).
+#[test]
+fn file_list_dir_returns_sorted_bounded_entries() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server();
+        let dir = data.join("listing");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two subdirs + two files, created OUT of lexicographic order so the
+        // deterministic sort is actually exercised.
+        std::fs::create_dir(dir.join("bdir")).unwrap();
+        std::fs::create_dir(dir.join("adir")).unwrap();
+        write_text(&dir.join("zfile.txt"), "zz\n"); // 3 bytes
+        write_text(&dir.join("afile.txt"), "a\n"); // 2 bytes
+        // A symlink (to a file) sorts in the second group by name and its kind
+        // is `symlink` — proving symlink_metadata is used (never followed).
+        std::os::unix::fs::symlink(dir.join("afile.txt"), dir.join("mlink")).unwrap();
+
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileListDir(FileListDirParams {
+                    path: dir.to_string_lossy().into_owned(),
+                    max_entries: None,
+                }),
+            )
+            .await
+            .expect("list");
+        let r = match resp {
+            IpcResponse::FileListDir(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // Dirs first (adir, bdir), then files/symlinks lexicographic
+        // (afile.txt, mlink, zfile.txt).
+        let names: Vec<&str> = r.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["adir", "bdir", "afile.txt", "mlink", "zfile.txt"]
+        );
+        assert_eq!(r.entries[0].kind, DirEntryKind::Dir);
+        assert_eq!(r.entries[1].kind, DirEntryKind::Dir);
+        assert_eq!(r.entries[2].kind, DirEntryKind::File);
+        assert_eq!(r.entries[3].kind, DirEntryKind::Symlink);
+        assert_eq!(r.entries[4].kind, DirEntryKind::File);
+        // Files carry size; dirs and symlinks omit it (symlink never followed).
+        assert_eq!(r.entries[2].size_bytes, Some(2));
+        assert_eq!(r.entries[4].size_bytes, Some(3));
+        assert!(r.entries[0].size_bytes.is_none(), "dir omits size");
+        assert!(
+            r.entries[3].size_bytes.is_none(),
+            "symlink size omitted (never followed)"
+        );
+        assert!(r.entries[2].mtime_ms.is_some(), "file carries mtime");
+        assert_eq!(r.total_entries, 5);
+        assert!(!r.truncated);
+
+        // FR-021: the listing is audited at dispatch level like other file ops.
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter().any(|row| row.action == "ipc_file_list_dir"),
+            "expected an ipc_file_list_dir audit row; got {:?}",
+            rows.iter().map(|r| r.action.clone()).collect::<Vec<_>>()
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC2: a directory with more entries than the requested cap is
+/// truncation-flagged with the TRUE total, never silently partial. The
+/// returned entries are the deterministic head of the sorted list.
+#[test]
+fn file_list_dir_truncates_with_total_count_over_cap() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let dir = data.join("many");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+            write_text(&dir.join(name), "x\n");
+        }
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+        // Cap of 2 over 5 entries -> truncated, total_entries = 5.
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileListDir(FileListDirParams {
+                    path: dir.to_string_lossy().into_owned(),
+                    max_entries: Some(2),
+                }),
+            )
+            .await
+            .expect("list capped");
+        let r = match resp {
+            IpcResponse::FileListDir(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(r.entries.len(), 2);
+        assert_eq!(r.total_entries, 5);
+        assert!(r.truncated, "over-cap listing must be truncation-flagged");
+        // Deterministic head of the sorted files: a.txt, b.txt.
+        assert_eq!(r.entries[0].name, "a.txt");
+        assert_eq!(r.entries[1].name, "b.txt");
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC3 (FR-021): a policy-denied path returns the SAME denial shape (code AND
+/// message) that `file_read_window` returns for that path — because both route
+/// through the identical `resolve_and_authorize_file` read gate.
+#[test]
+fn file_list_dir_denies_policy_path_same_shape_as_read() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+        // A default-deny path (same one the file_read deny test uses).
+        let denied = std::path::PathBuf::from("/etc/shadow");
+
+        let read_err = client
+            .call(
+                1,
+                IpcRequest::FileReadWindow(FileReadWindowParams {
+                    path: denied.clone(),
+                    start_line: None,
+                    max_lines: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .expect_err("read of a default-deny path must be rejected");
+
+        let list_err = client
+            .call(
+                2,
+                IpcRequest::FileListDir(FileListDirParams {
+                    path: denied.to_string_lossy().into_owned(),
+                    max_entries: None,
+                }),
+            )
+            .await
+            .expect_err("list of a default-deny path must be rejected");
+
+        assert_eq!(list_err.code, IpcErrorCode::PathDenied);
+        assert_eq!(
+            list_err.code, read_err.code,
+            "list denial code must match file_read"
+        );
+        assert_eq!(
+            list_err.message, read_err.message,
+            "list denial message must be byte-identical to file_read (same policy gate)"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC4: listing a path that is a FILE (not a directory) errors with a teaching
+/// message naming the files `read` action as the remedy.
+#[test]
+fn file_list_dir_on_file_teaches_read_action() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let file = data.join("afile.txt");
+        write_text(&file, "hello\n");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileListDir(FileListDirParams {
+                    path: file.to_string_lossy().into_owned(),
+                    max_entries: None,
+                }),
+            )
+            .await
+            .expect_err("listing a regular file must be rejected with a teaching error");
+        assert_eq!(err.code, IpcErrorCode::FileNotFound);
+        assert!(
+            err.message.contains("not a directory"),
+            "must explain the target is not a directory; got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("read"),
+            "must name the `read` action as the remedy; got: {}",
+            err.message
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC (absolute-only, mirrors file_read): a relative path is rejected with the
+/// existing teaching `PathDenied` (the daemon has no workspace root).
+#[test]
+fn file_list_dir_rejects_relative_path() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileListDir(FileListDirParams {
+                    path: "some/dir".to_owned(),
+                    max_entries: None,
+                }),
+            )
+            .await
+            .expect_err("relative path must be rejected");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+        assert!(
+            err.message.contains("must be absolute"),
+            "teaching message expected, got: {}",
+            err.message
         );
 
         handle.shutdown().await;

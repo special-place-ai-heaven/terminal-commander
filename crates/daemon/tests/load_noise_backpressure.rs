@@ -905,7 +905,7 @@ fn event_context_window_stays_bounded() {
             .call(
                 5,
                 IpcRequest::EventContext(EventContextParams {
-                    bucket_id: started.bucket_id,
+                    bucket_id: Some(started.bucket_id),
                     event_id,
                     before: Some(MAX_CONTEXT_FRAMES + 100),
                     after: Some(MAX_CONTEXT_FRAMES + 100),

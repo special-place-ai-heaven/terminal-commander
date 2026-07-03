@@ -1288,3 +1288,258 @@ fn start_combed_reusing_same_bucket_yields_distinct_jobs_one_bucket() {
         cleanup(&data);
     });
 }
+
+// ------------------------------------------------------------------
+// US8 (FR-060): WSL nested-shell gate. The argv lane must classify a
+// `wsl`/`wsl.exe` carrier the same way it classifies a bare interpreter:
+// a shell smuggled through the WSL boundary is denied under
+// allow_shell=false. Classification is pure argv logic (no WSL needed to
+// run these); the spellings matrix is normative in policy-wsl.md.
+// ------------------------------------------------------------------
+
+/// Default (allow_shell=false) argv request builder for the WSL cases.
+fn wsl_req(argv: &[&str]) -> CommandStartRequest {
+    CommandStartRequest {
+        argv: argv.iter().map(|s| (*s).to_owned()).collect(),
+        cwd: None,
+        env: vec![],
+        bucket_config: None,
+        rules: vec![],
+        grace: None,
+        tag: None,
+        dedup_nonce: None,
+        strip_ansi: true,
+        peer_discriminator: None,
+    }
+}
+
+/// The canonical live-repro: `wsl.exe -e bash -lc "..."` slipped past the
+/// argv[0] denylist before US8. Now it is denied with the WSL-carrier
+/// teaching error and a `command_rejected` deny row, and NO job spawns.
+#[test]
+fn wsl_nested_shell_denied_under_allow_shell_false() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("wsl-deny");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let job_count_before = state.jobs.list().len();
+        let err = state
+            .command
+            .start_combed(wsl_req(&["wsl.exe", "-e", "bash", "-lc", "echo hi"]))
+            .unwrap_err();
+        match err {
+            CommandError::WslNestedShellDenied {
+                ref interpreter,
+                ref carrier,
+            } => {
+                assert_eq!(interpreter, "bash", "must name the nested interpreter");
+                assert_eq!(carrier, "wsl.exe", "must name the wsl carrier");
+            }
+            other => panic!("expected WslNestedShellDenied, got {other:?}"),
+        }
+        // Guard runs BEFORE policy/spawn: no process started.
+        assert_eq!(state.jobs.list().len(), job_count_before);
+
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.action == "command_rejected" && r.decision == "deny"),
+            "expected a command_rejected deny row: {rows:?}"
+        );
+        cleanup(&data);
+    });
+}
+
+/// Every deny spelling in policy-wsl.md classifies identically to a nested
+/// shell (or fails closed), regardless of `-e`/`--`/bare, distro selectors,
+/// or an absolute Windows path to wsl.exe.
+#[test]
+fn wsl_nested_shell_all_spellings_classified_identically() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("wsl-spellings");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        // (argv, expected interpreter). Matrix from policy-wsl.md deny table.
+        let cases: &[(&[&str], &str)] = &[
+            (&["wsl.exe", "-e", "bash", "-lc", "echo hi"], "bash"),
+            (&["wsl", "bash"], "bash"),
+            (&["wsl.exe", "--", "sh", "-c", "echo hi"], "sh"),
+            (&["wsl.exe", "-d", "Ubuntu", "-e", "zsh"], "zsh"),
+            (&[r"C:\Windows\System32\wsl.exe", "-e", "bash"], "bash"),
+            (&["wsl.exe", "--exec", "busybox", "sh"], "busybox"),
+            (
+                &["wsl.exe", "echo", "$(id)"],
+                "default shell interpretation",
+            ),
+            (&["wsl.exe", "~"], "default shell"),
+        ];
+
+        for (argv, expected) in cases {
+            let err = state.command.start_combed(wsl_req(argv)).unwrap_err();
+            match err {
+                CommandError::WslNestedShellDenied {
+                    ref interpreter, ..
+                } => {
+                    assert_eq!(
+                        interpreter, expected,
+                        "argv={argv:?} expected interpreter {expected}, got {interpreter}"
+                    );
+                }
+                other => panic!("argv={argv:?} expected WslNestedShellDenied, got {other:?}"),
+            }
+        }
+        cleanup(&data);
+    });
+}
+
+/// Non-shell payloads via `-e`/`--exec` and WSL management flags are NOT
+/// touched by the gate: they reach spawn exactly as before US8 (on a host
+/// without wsl.exe they surface ProgramNotFound, never a policy denial).
+#[test]
+fn wsl_exec_introduced_non_shell_payload_and_management_flags_run_unchanged() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("wsl-passthrough");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let cases: &[&[&str]] = &[
+            &["wsl.exe", "-e", "cargo", "build"],
+            &["wsl.exe", "-d", "Ubuntu", "-e", "uname", "-a"],
+            &["wsl.exe", "--list", "--verbose"],
+            &["wsl.exe", "--status"],
+        ];
+        for argv in cases {
+            let res = state.command.start_combed(wsl_req(argv));
+            assert!(
+                !matches!(
+                    res,
+                    Err(CommandError::WslNestedShellDenied { .. }
+                        | CommandError::ShellInterpreterDenied(_)
+                        | CommandError::PolicyDenied(_))
+                ),
+                "argv={argv:?} must NOT be denied by the WSL gate: {res:?}"
+            );
+        }
+        cleanup(&data);
+    });
+}
+
+/// A payload NOT introduced by `-e`/`--exec` is handed to the distro's
+/// default shell by WSL itself (shell-interpreted), so it is a nested shell
+/// even when the named program is not a shell (`echo`).
+#[test]
+fn wsl_bare_payload_without_exec_is_shell_interpreted_and_denied() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("wsl-bare-payload");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let err = state
+            .command
+            .start_combed(wsl_req(&["wsl.exe", "echo", "hello"]))
+            .unwrap_err();
+        match err {
+            CommandError::WslNestedShellDenied {
+                ref interpreter, ..
+            } => {
+                assert_eq!(
+                    interpreter, "default shell interpretation",
+                    "a bare (no -e) payload is shell-interpreted by WSL"
+                );
+            }
+            other => panic!("expected WslNestedShellDenied, got {other:?}"),
+        }
+        cleanup(&data);
+    });
+}
+
+/// `~` is the start-in-home selector, never a payload: it is skipped and the
+/// token after it is the payload. `wsl.exe ~ bash` therefore classifies as a
+/// bash nested shell, not a "default shell interpretation" of `~`.
+#[test]
+fn wsl_tilde_shorthand_is_selector_not_payload() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("wsl-tilde");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let err = state
+            .command
+            .start_combed(wsl_req(&["wsl.exe", "~", "bash"]))
+            .unwrap_err();
+        match err {
+            CommandError::WslNestedShellDenied {
+                ref interpreter, ..
+            } => {
+                assert_eq!(
+                    interpreter, "bash",
+                    "~ must be skipped as a selector so bash is the payload"
+                );
+            }
+            other => panic!("expected WslNestedShellDenied, got {other:?}"),
+        }
+        cleanup(&data);
+    });
+}
+
+/// An unrecognized flag in payload position fails closed: it is treated as a
+/// potential shell payload and denied under allow_shell=false.
+#[test]
+fn wsl_unknown_construction_fails_closed() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("wsl-unknown");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let err = state
+            .command
+            .start_combed(wsl_req(&["wsl.exe", "--some-future-flag", "x"]))
+            .unwrap_err();
+        assert!(
+            matches!(err, CommandError::WslNestedShellDenied { .. }),
+            "unknown WSL construction must fail closed: {err:?}"
+        );
+
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.action == "command_rejected" && r.decision == "deny"),
+            "expected a command_rejected deny row: {rows:?}"
+        );
+        cleanup(&data);
+    });
+}
+
+/// A bare `wsl.exe` with no command launches the distro's default
+/// interactive shell, which is a nested shell -> denied.
+#[test]
+fn wsl_bare_invocation_is_default_shell_and_denied() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("wsl-bare");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let err = state
+            .command
+            .start_combed(wsl_req(&["wsl.exe"]))
+            .unwrap_err();
+        match err {
+            CommandError::WslNestedShellDenied {
+                ref interpreter, ..
+            } => {
+                assert_eq!(interpreter, "default shell");
+            }
+            other => panic!("expected WslNestedShellDenied, got {other:?}"),
+        }
+        cleanup(&data);
+    });
+}

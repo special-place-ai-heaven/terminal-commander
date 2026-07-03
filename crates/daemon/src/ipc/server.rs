@@ -433,10 +433,12 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::RegistryActivate(_) => "registry_activate",
         IpcRequest::RegistryImportPack(_) => "registry_import_pack",
         IpcRequest::RegistryDeactivate(_) => "registry_deactivate",
+        IpcRequest::RegistryDeactivateBulk(_) => "registry_deactivate_bulk",
         IpcRequest::RegistryListActive(_) => "registry_list_active",
         IpcRequest::RegistrySuggestFromSamples(_) => "registry_suggest_from_samples",
         IpcRequest::FileReadWindow(_) => "file_read_window",
         IpcRequest::FileSearch(_) => "file_search",
+        IpcRequest::FileListDir(_) => "file_list_dir",
         IpcRequest::FileWrite(_) => "file_write",
         IpcRequest::FileWatchStart(_) => "file_watch_start",
         IpcRequest::FileWatchStop(_) => "file_watch_stop",
@@ -492,9 +494,11 @@ pub(crate) const DISCOVERABLE_METHODS: &[&str] = &[
     "registry_activate",
     "registry_import_pack",
     "registry_deactivate",
+    "registry_deactivate_bulk",
     "registry_list_active",
     "file_read_window",
     "file_search",
+    "file_list_dir",
     "file_write",
     "file_watch_start",
     "file_watch_stop",
@@ -663,6 +667,12 @@ async fn dispatch(
                 Err(e) => IpcResult::Err { error: e },
             }
         }
+        IpcRequest::RegistryDeactivateBulk(p) => {
+            match handlers::registry::handle_registry_deactivate_bulk(state, p) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
         IpcRequest::RegistryListActive(p) => {
             let r = handlers::registry::handle_registry_list_active(state, p);
             IpcResult::Ok { response: r }
@@ -677,6 +687,10 @@ async fn dispatch(
             Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::FileSearch(p) => match handlers::file::handle_file_search(state, p) {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
+        IpcRequest::FileListDir(p) => match handlers::file::handle_file_list_dir(state, p) {
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
         },
@@ -1144,16 +1158,16 @@ mod tests {
     use crate::ipc::protocol::{
         AuditSinceParams, BucketEventsSinceParams, BucketSummaryParams, BucketWaitParams,
         CommandOutputTailParams, CommandStartParams, CommandStatusParams, CommandStopParams,
-        EventContextParams, FileReadWindowParams, FileSearchParams, FileWatchStartParams,
-        FileWatchStopParams, FileWriteParams, ListLimitParams, ProbeStatusParams,
-        PtyCommandStartParams, PtyCommandStopParams, PtyCommandWriteStdinParams,
-        RegistryActivateParams, RegistryDeactivateParams, RegistryGetParams,
-        RegistryImportPackParams, RegistrySearchParams, RegistryTestParams, RegistryUpsertParams,
-        ShellExecParams, ShellSessionExecParams, ShellSessionStartParams, ShellSessionStatusParams,
-        ShellSessionStopParams, SubscriptionCloseParams, SubscriptionListParams,
-        SubscriptionOpenParams, SubscriptionPredicate, SubscriptionPullParams,
-        SubscriptionSeekParams, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
-        WorkspaceSnapshotCreateParams,
+        EventContextParams, FileListDirParams, FileReadWindowParams, FileSearchParams,
+        FileWatchStartParams, FileWatchStopParams, FileWriteParams, ListLimitParams,
+        ProbeStatusParams, PtyCommandStartParams, PtyCommandStopParams, PtyCommandWriteStdinParams,
+        RegistryActivateParams, RegistryDeactivateBulkParams, RegistryDeactivateParams,
+        RegistryGetParams, RegistryImportPackParams, RegistrySearchParams, RegistryTestParams,
+        RegistryUpsertParams, ShellExecParams, ShellSessionExecParams, ShellSessionStartParams,
+        ShellSessionStatusParams, ShellSessionStopParams, SubscriptionCloseParams,
+        SubscriptionListParams, SubscriptionOpenParams, SubscriptionPredicate,
+        SubscriptionPullParams, SubscriptionSeekParams, SubscriptionSourceSel,
+        WorkspaceSnapshotApplyParams, WorkspaceSnapshotCreateParams,
     };
     use std::collections::BTreeSet;
     use terminal_commander_core::{
@@ -1214,7 +1228,7 @@ mod tests {
                 bucket_id: BucketId::new(),
             }),
             IpcRequest::EventContext(EventContextParams {
-                bucket_id: BucketId::new(),
+                bucket_id: Some(BucketId::new()),
                 event_id: EventId::new(),
                 before: None,
                 after: None,
@@ -1283,6 +1297,11 @@ mod tests {
                 version: 1,
                 scope: None,
             }),
+            IpcRequest::RegistryDeactivateBulk(RegistryDeactivateBulkParams {
+                pack: None,
+                rule_ids: Some(vec!["x".to_owned()]),
+                scope: terminal_commander_core::ActivationScope::Global,
+            }),
             IpcRequest::RegistryListActive(ListLimitParams { limit: None }),
             IpcRequest::FileReadWindow(FileReadWindowParams {
                 path: std::path::PathBuf::from("/x"),
@@ -1297,10 +1316,15 @@ mod tests {
                 max_matches: None,
                 max_snippet_bytes: None,
             }),
+            IpcRequest::FileListDir(FileListDirParams {
+                path: "/x".to_owned(),
+                max_entries: None,
+            }),
             IpcRequest::FileWrite(FileWriteParams {
                 path: std::path::PathBuf::from("/x"),
                 content: "x".to_owned(),
                 create_dirs: false,
+                append: false,
             }),
             IpcRequest::FileWatchStart(FileWatchStartParams {
                 path: std::path::PathBuf::from("/x"),
@@ -1327,6 +1351,8 @@ mod tests {
             IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
                 job_id: JobId::new(),
                 bytes: String::new(),
+                cursor: None,
+                wait_ms: None,
             }),
             IpcRequest::PtyCommandStop(PtyCommandStopParams {
                 job_id: JobId::new(),
@@ -1384,6 +1410,7 @@ mod tests {
                 sub_id: "x".to_owned(),
                 max: None,
                 timeout_ms: None,
+                liveness_delta: false,
             }),
             IpcRequest::SubscriptionList(SubscriptionListParams { limit: None }),
             IpcRequest::SubscriptionClose(SubscriptionCloseParams {

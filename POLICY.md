@@ -372,6 +372,57 @@ Full session model, lifecycle, config (`max_sessions` / `idle_ttl_secs`),
 and the best-effort `status.cwd` caveat are in
 `docs/runtime/SHELL_SESSION.md`.
 
+#### WSL nested-shell gate (US8)
+
+The argv shell-interpreter deny (`SHELL_INTERPRETERS_DENY`, `command.rs`)
+catches a bare interpreter in `argv[0]` (`bash`, `sh`, `pwsh`, `cmd`, ...).
+Before US8 it did NOT catch a shell smuggled through a `wsl`/`wsl.exe`
+carrier: `wsl.exe -e bash -lc "<arbitrary shell>"` has `argv[0] = wsl.exe`,
+which is in neither `SHELL_INTERPRETERS_DENY` nor `COMMANDS_DENY`, so both
+argv checks passed while an arbitrary Linux shell ran. US8 closes that gap.
+
+**Stance: the shell capability follows the shell across the WSL boundary.**
+WSL is THIS host's boundary, not a remote machine (`allow_remote` is not
+implicated). A shell reachable through `wsl.exe` is gated by the same
+`allow_shell` capability that gates `shell_exec` -- default deny.
+
+- **Inspected: argv only.** The classifier reads the argv the caller
+  supplied and nothing else. File contents are never read, and there is no
+  second interpreter list -- `SHELL_INTERPRETERS_DENY` is the sole
+  authority, matched by basename (split on both `/` and `\` so a
+  `C:\...\wsl.exe` path classifies the same on every platform).
+- **`-e`/`--exec` vs a bare command line.** `wsl.exe` bypasses the distro
+  shell ONLY for a payload introduced by `-e`/`--exec`; there the first
+  payload token is the program that runs directly (no shell). A payload
+  with NO `-e`/`--exec` -- a bare command line, or one after `--` -- is
+  handed to the distro's DEFAULT SHELL by WSL itself, which interprets it
+  (globs, `$(...)`, redirects). Running such a line IS running a shell,
+  regardless of the program it names, so it is gated. Distro selectors
+  (`~`, `-d`/`--distribution`, `-u`/`--user`, `--cd`, `--system`,
+  `--shell-type`) are skipped to find the payload; `~` is the start-in-home
+  shorthand, a selector, never a payload.
+- **Fail closed.** An unrecognized flag in payload position (a novel WSL
+  option) is treated as potentially carrying a payload and is denied under
+  `allow_shell=false`.
+
+Enforcement matrix -- both argv lanes (`command_start` and
+`pty_command_start`) share ONE classifier, so a payload denied on one lane
+is denied on the other:
+
+| Classification | `allow_shell=false` | `allow_shell=true` |
+|---|---|---|
+| not a wsl carrier / WSL management flag (`--list`, `--status`, ...) / `-e` non-shell program (`cargo`, `uname`, ...) | runs (unchanged) | runs (unchanged) |
+| nested shell (`-e bash`, bare `wsl bash`, `-- sh -c ...`, bare `echo $(id)`, bare `wsl.exe`) | **DENY** -- `shell_interpreter_denied`, naming the interpreter + the wsl carrier + the `allow_shell` gate / `shell_exec` remedy | runs; `command_start` audit row tagged `"nested_shell": "<interpreter>"` |
+| unknown construction (novel WSL flag in payload position) | **DENY** (fail closed) | runs; audit tagged `"wsl_construction": "unknown"` |
+
+**Rationale.** The constitution (Principle II) forbids argv smuggling and
+requires the interpreter deny to stay intact in spirit, not just letter.
+Adding `wsl.exe` wholesale to `SHELL_INTERPRETERS_DENY` was rejected: it
+would break every legitimate non-shell use (`wsl.exe -e cargo build`,
+`wsl --list`). Inspecting the Linux-side binary was rejected: argv-only is
+the constitutional boundary, and file inspection is unreliable across the
+WSL boundary anyway.
+
 ### 4.2 Full profile schema (informative)
 
 ```toml

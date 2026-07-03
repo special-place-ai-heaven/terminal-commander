@@ -38,7 +38,9 @@ mod runtime {
 
     use crate::activation::ActivationRegistry;
     use crate::audit::AuditSink;
-    use crate::command::SHELL_INTERPRETERS_DENY;
+    use crate::command::{
+        SHELL_INTERPRETERS_DENY, WslArgvClass, classify_wsl_nested_shell, wsl_carrier_label,
+    };
     use crate::policy::{PolicyAction, PolicyDecision, PolicyEngine, PolicyProfile};
     use crate::router::Router;
 
@@ -50,6 +52,17 @@ mod runtime {
             "shell interpreter '{0}' is denied by default; pty_command_start is not a shell bridge"
         )]
         ShellInterpreterDenied(String),
+        /// US8 (FR-060): a shell smuggled through a `wsl`/`wsl.exe` carrier on
+        /// the PTY argv lane. Maps to the same `ShellInterpreterDenied` wire
+        /// code as the command lane -- lane parity is a constitutional
+        /// invariant (policy-wsl.md "both lanes, one truth").
+        #[error(
+            "nested shell interpreter '{interpreter}' denied inside a '{carrier}' invocation; pty_command_start is not a shell bridge on either side of the WSL boundary"
+        )]
+        WslNestedShellDenied {
+            interpreter: String,
+            carrier: String,
+        },
         #[error("argv must not be empty")]
         EmptyArgv,
         #[error("bucket create error: {0}")]
@@ -101,6 +114,9 @@ mod runtime {
 
     #[derive(Debug, Clone, Copy)]
     pub struct PtyWriteResponse {
+        /// The PTY job's bucket, so the IPC handler can run the optional
+        /// settle-window read (US5 / FR-041) without a second lookup.
+        pub bucket_id: BucketId,
         pub bytes_written: u64,
         pub secret_prompt_active: bool,
     }
@@ -293,6 +309,49 @@ mod runtime {
                             None,
                         );
                 return Err(PtyRuntimeError::ShellInterpreterDenied(shell.to_owned()));
+            }
+            // WSL nested-shell gate (US8 / FR-060). Same classifier as the
+            // command argv lane -- a shell smuggled through a `wsl`/`wsl.exe`
+            // carrier is denied under allow_shell=false, identically on both
+            // lanes (lane divergence would be a defect).
+            match classify_wsl_nested_shell(&req.argv) {
+                WslArgvClass::NestedShell { interpreter } if !self.policy.caps_allow_shell() => {
+                    let carrier = wsl_carrier_label(&req.argv[0]);
+                    self.audit(
+                        "pty_command_start",
+                        &req.argv[0],
+                        "deny",
+                        Some(format!(
+                            "nested shell interpreter '{interpreter}' denied inside a \
+                             '{carrier}' invocation; pty_command_start is not a shell bridge \
+                             on either side of the WSL boundary (allow_shell gate)"
+                        )),
+                        None,
+                    );
+                    return Err(PtyRuntimeError::WslNestedShellDenied {
+                        interpreter,
+                        carrier,
+                    });
+                }
+                WslArgvClass::UnknownConstruction if !self.policy.caps_allow_shell() => {
+                    let carrier = wsl_carrier_label(&req.argv[0]);
+                    self.audit(
+                        "pty_command_start",
+                        &req.argv[0],
+                        "deny",
+                        Some(format!(
+                            "unrecognized '{carrier}' construction denied (fail closed); \
+                             pty_command_start is not a shell bridge on either side of the \
+                             WSL boundary (allow_shell gate)"
+                        )),
+                        None,
+                    );
+                    return Err(PtyRuntimeError::WslNestedShellDenied {
+                        interpreter: "unrecognized construction".to_owned(),
+                        carrier,
+                    });
+                }
+                _ => {}
             }
             let cwd_for_policy = req.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
             let verdict = self.policy.evaluate(&PolicyAction::CommandStart {
@@ -584,10 +643,10 @@ mod runtime {
             job_id: JobId,
             bytes: &[u8],
         ) -> Result<PtyWriteResponse, PtyRuntimeError> {
-            let probe_handle = {
+            let (probe_handle, bucket_id) = {
                 let g = self.live.read();
                 let binding = g.get(&job_id).ok_or(PtyRuntimeError::UnknownJob(job_id))?;
-                Arc::clone(&binding.probe)
+                (Arc::clone(&binding.probe), binding.bucket_id)
             };
             let guard = probe_handle.lock().await;
             let probe = guard.as_ref().ok_or(PtyRuntimeError::UnknownJob(job_id))?;
@@ -604,6 +663,7 @@ mod runtime {
                         )),
                     );
                     Ok(PtyWriteResponse {
+                        bucket_id,
                         bytes_written: written as u64,
                         secret_prompt_active: probe.is_secret_prompt_active(),
                     })

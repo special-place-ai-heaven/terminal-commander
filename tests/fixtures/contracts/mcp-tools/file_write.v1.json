@@ -20,7 +20,7 @@
     "consumed_by": [
       "TC22"
     ],
-    "note": "Daemon-backed filesystem WRITE (TC22 A3). This is the action that finally makes [policy.paths] write_allow enforceable. SECURITY: the daemon canonicalizes the PARENT directory (the target file may not exist yet), policy-gates the canonical target deny-first against the default-deny sensitive-suffix list, deny_extra, and write_allow (a miss on a non-empty write_allow is denied as no_allow_rule; an empty list is unconfigured and allows). read_only_observer denies file_write outright; repo_only confines it to $REPO_ROOT. CONSTITUTION V: a file_write audit row is emitted BEFORE the bytes land. The content is bounded (192 KiB, comfortably under MAX_FRAME_BYTES); oversize is rejected with OversizedRequest before any filesystem touch. The write is ATOMIC (temp file in the same dir + rename) so a reader never sees a torn write. RETRY-SAFETY: file_write is classified MUTATING / NON-idempotent in IpcRequest::is_idempotent, so the client self-heal layer never auto-retries a write (no double-write). create_dirs creates missing parents only WITHIN an allowed path (the parent must still pass policy)."
+    "note": "Daemon-backed filesystem WRITE (TC22 A3). This is the action that finally makes [policy.paths] write_allow enforceable. SECURITY: the daemon canonicalizes the PARENT directory (the target file may not exist yet), policy-gates the canonical target deny-first against the default-deny sensitive-suffix list, deny_extra, and write_allow (a miss on a non-empty write_allow is denied as no_allow_rule; an empty list is unconfigured and allows). read_only_observer denies file_write outright; repo_only confines it to $REPO_ROOT. CONSTITUTION V: a file_write audit row is emitted BEFORE the bytes land. The content is bounded (192 KiB, comfortably under MAX_FRAME_BYTES); oversize is rejected with OversizedRequest before any filesystem touch. A full (replace) write is ATOMIC (temp file in the same dir + rename) so a reader never sees a torn write. US6/FR-022: the optional `append: bool` (default false) appends `content` to the target instead of replacing it -- same policy gate, same 192 KiB cap per call, same missing-file creation; bytes_written is the number of bytes appended. Append integrity is honest (not all-or-nothing): the original content is never modified and racing appends never interleave (OS append-mode offset atomicity), but a mid-write I/O failure can leave a partial append and surfaces as an error; the append audit row's metadata carries \"append\":true. RETRY-SAFETY: file_write is classified MUTATING / NON-idempotent in IpcRequest::is_idempotent, so the client self-heal layer never auto-retries a write (no double-write). create_dirs creates missing parents only WITHIN an allowed path (the parent must still pass policy)."
   },
   "response_example": {
     "path": "/home/u/project/out/result.txt",
@@ -51,9 +51,10 @@
     "path is required and must be absolute (the daemon has no workspace root)",
     "content is required, UTF-8, and bounded (192 KiB); oversize is rejected with OversizedRequest before any write",
     "create_dirs is optional (default false) and creates parents only within an allowed path; it never widens write_allow",
+    "append is optional (default false); when true, content is appended and bytes_written is the bytes appended; missing-file creation, the policy gate, and the size cap are identical to a full write",
     "the write is policy-gated by paths.write_allow deny-first in canonical form; a `..` traversal escape is denied",
     "an audit row is emitted BEFORE the write (constitution V); a denied write creates no file",
-    "the write is atomic (temp file + rename); a reader never observes a partial write",
+    "a full (replace) write is atomic (temp file + rename); a reader never observes a partial write. append is NOT all-or-nothing: the original content is never modified and racing appends never interleave, but a mid-write I/O failure can leave a partial append and surfaces as an error",
     "file_write is MUTATING / non-idempotent and is never auto-retried by the client self-heal layer"
   ]
 }

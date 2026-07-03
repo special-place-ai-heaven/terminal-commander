@@ -10,13 +10,15 @@ use super::common::{
 };
 use crate::audit::AuditSink;
 use crate::ipc::protocol::{
-    DEFAULT_FILE_READ_BYTES, DEFAULT_FILE_READ_LINES, DEFAULT_FILE_SEARCH_MATCHES,
-    DEFAULT_FILE_SEARCH_SNIPPET_BYTES, FileLine, FileReadWindowParams, FileReadWindowResponse,
+    DEFAULT_FILE_LIST_ENTRIES, DEFAULT_FILE_READ_BYTES, DEFAULT_FILE_READ_LINES,
+    DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES, DirEntry, DirEntryKind,
+    FileLine, FileListDirParams, FileListDirResponse, FileReadWindowParams, FileReadWindowResponse,
     FileSearchMatch, FileSearchParams, FileSearchResponse, FileWatchListEntry,
     FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
     FileWatchStopResponse, FileWriteParams, FileWriteResponse, IpcError, IpcErrorCode, IpcResponse,
-    MAX_COMMAND_INLINE_RULES, MAX_FILE_READ_BYTES, MAX_FILE_READ_LINES, MAX_FILE_SEARCH_MATCHES,
-    MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FILE_WRITE_BYTES,
+    MAX_COMMAND_INLINE_RULES, MAX_FILE_LIST_ENTRIES, MAX_FILE_READ_BYTES, MAX_FILE_READ_LINES,
+    MAX_FILE_SEARCH_MATCHES, MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES,
+    MAX_FILE_WRITE_BYTES,
 };
 use crate::state::DaemonState;
 
@@ -32,6 +34,7 @@ fn emit_file_write_audit(
     decision: &str,
     reason: Option<String>,
     bytes: Option<u64>,
+    append: bool,
 ) {
     let mut entry = AuditEntry::new("file_write", subject, decision)
         .with_actor("file_runtime")
@@ -39,8 +42,20 @@ fn emit_file_write_audit(
     if let Some(r) = reason {
         entry = entry.with_reason(r);
     }
-    if let Some(b) = bytes {
-        entry = entry.with_metadata_json(format!(r#"{{"bytes_written":{b}}}"#));
+    // Metadata JSON: `bytes_written` when known (the allow row) plus `append`
+    // when this is an append-mode write (US6/FR-022). A full-write row with
+    // `append == false` serializes byte-identically to before.
+    match (bytes, append) {
+        (Some(b), true) => {
+            entry = entry.with_metadata_json(format!(r#"{{"bytes_written":{b},"append":true}}"#));
+        }
+        (Some(b), false) => {
+            entry = entry.with_metadata_json(format!(r#"{{"bytes_written":{b}}}"#));
+        }
+        (None, true) => {
+            entry = entry.with_metadata_json(r#"{"append":true}"#.to_owned());
+        }
+        (None, false) => {}
     }
     let sink: Arc<dyn AuditSink> = Arc::clone(&state.audit) as Arc<dyn AuditSink>;
     let _ = sink.emit(&entry);
@@ -265,9 +280,141 @@ pub(in crate::ipc::server) fn handle_file_search(
     }))
 }
 
+/// Map a filesystem [`std::fs::FileType`] to the wire [`DirEntryKind`]. A
+/// symlink is reported as `symlink` REGARDLESS of its target: the caller stat'd
+/// with `symlink_metadata`, so the link is never followed.
+fn dir_entry_kind(ft: std::fs::FileType) -> DirEntryKind {
+    if ft.is_symlink() {
+        DirEntryKind::Symlink
+    } else if ft.is_dir() {
+        DirEntryKind::Dir
+    } else {
+        DirEntryKind::File
+    }
+}
+
+/// Convert a `SystemTime` to milliseconds since the Unix epoch. A time before
+/// the epoch yields a negative value; an out-of-`i64`-range value yields `None`.
+fn system_time_to_millis(t: std::time::SystemTime) -> Option<i64> {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_millis()).ok(),
+        Err(e) => i64::try_from(e.duration().as_millis()).ok().map(|v| -v),
+    }
+}
+
+/// `file_list_dir` (US3 FR-020/021): bounded, single-level directory listing.
+///
+/// Uses the IDENTICAL read gate as `file_read_window`
+/// (`resolve_and_authorize_file` -> absolute-only + canonicalize +
+/// `PolicyAction::FileRead`), so a policy-denied path returns the SAME denial
+/// shape (FR-021) by construction, and a relative path / missing directory
+/// reuse the existing typed errors. The listing is single level: entries are
+/// stat'd with `symlink_metadata` (a symlink/reparse point is reported by kind
+/// and NEVER followed), sorted dirs-first then files/symlinks (each group
+/// lexicographic by name), and capped with a truthful `total_entries` +
+/// `truncated` flag (Constitution III). An entry that vanishes between
+/// enumeration and stat is returned with partial metadata (or omitted when even
+/// its readdir file-type is gone) -- never a whole-listing error. The dispatch
+/// layer emits the `ipc_file_list_dir` audit row (consistent with read/search).
+pub(in crate::ipc::server) fn handle_file_list_dir(
+    state: &Arc<DaemonState>,
+    params: &FileListDirParams,
+) -> Result<IpcResponse, IpcError> {
+    // Same read gate as file_read_window: absolute-only, canonicalize (resolving
+    // symlinks), then PolicyAction::FileRead on the canonical target. A denied
+    // path yields the identical PathDenied shape file_read produces (FR-021).
+    let resolved = resolve_and_authorize_file(state, std::path::Path::new(&params.path), false)?;
+
+    // The target must be a directory. A regular-file (or special-file) target
+    // teaches the `read` action rather than returning an odd/empty listing.
+    if !resolved.is_dir() {
+        return Err(IpcError::new(
+            IpcErrorCode::FileNotFound,
+            format!(
+                "'{}' is not a directory; use the files `read` action (file_read_window) \
+                 to read a file",
+                resolved.display()
+            ),
+        ));
+    }
+
+    // Clamp the entry cap into [1, MAX_FILE_LIST_ENTRIES]; omitted = default.
+    let cap = params
+        .max_entries
+        .map_or(DEFAULT_FILE_LIST_ENTRIES, |n| (n as usize).max(1))
+        .min(MAX_FILE_LIST_ENTRIES);
+
+    let rd = std::fs::read_dir(&resolved).map_err(|e| {
+        IpcError::new(
+            IpcErrorCode::Internal,
+            format!("read_dir '{}': {e}", resolved.display()),
+        )
+    })?;
+
+    let mut collected: Vec<DirEntry> = Vec::new();
+    for ent in rd {
+        // A per-entry readdir error (rare) is skipped, not a whole-listing fault.
+        let Ok(ent) = ent else { continue };
+        let name = ent.file_name().to_string_lossy().into_owned();
+        // `symlink_metadata`: NEVER follow symlinks / reparse points.
+        if let Ok(meta) = std::fs::symlink_metadata(ent.path()) {
+            let kind = dir_entry_kind(meta.file_type());
+            let size_bytes = if kind == DirEntryKind::File {
+                Some(meta.len())
+            } else {
+                None
+            };
+            let mtime_ms = meta.modified().ok().and_then(system_time_to_millis);
+            collected.push(DirEntry {
+                name,
+                kind,
+                size_bytes,
+                mtime_ms,
+            });
+        } else if let Ok(ft) = ent.file_type() {
+            // Race: the entry vanished between enumeration and stat. Fall back to
+            // the cheap readdir file-type (captured without a separate stat and
+            // NOT symlink-following) with metadata absent. If even that is gone,
+            // omit the entry entirely (never counted).
+            collected.push(DirEntry {
+                name,
+                kind: dir_entry_kind(ft),
+                size_bytes: None,
+                mtime_ms: None,
+            });
+        }
+    }
+
+    // Deterministic order: dirs first, then files/symlinks together; each group
+    // lexicographic by name.
+    collected.sort_by(|a, b| {
+        let a_dir = matches!(a.kind, DirEntryKind::Dir);
+        let b_dir = matches!(b.kind, DirEntryKind::Dir);
+        b_dir.cmp(&a_dir).then_with(|| a.name.cmp(&b.name))
+    });
+
+    let total_entries = collected.len() as u64;
+    let truncated = collected.len() > cap;
+    collected.truncate(cap);
+
+    Ok(IpcResponse::FileListDir(FileListDirResponse {
+        path: resolved.display().to_string(),
+        entries: collected,
+        total_entries,
+        truncated,
+    }))
+}
+
 /// `file_write` (TC22 A3): write UTF-8 `content` to a single regular file
 /// under the `paths.write_allow` policy gate. Audit-before-write, bounded
-/// size, atomic (temp file + rename). MUTATING + non-idempotent.
+/// size, atomic (temp file + rename) for a full write. MUTATING +
+/// non-idempotent.
+///
+/// `params.append` (US6/FR-022) selects APPEND instead of full replace: the
+/// same steps 1-3 (size cap, policy gate, allow-audit) run unchanged, then
+/// step 4 opens with append+create and does a single `write_all` + `sync_all`.
+/// Append is honestly NOT all-or-nothing (see step 4a); the full-write
+/// temp+rename path below is untouched.
 ///
 /// Order of operations (security-critical, do not reorder):
 ///  1. BOUND the content size BEFORE any filesystem touch (oversize ->
@@ -286,6 +433,8 @@ pub(in crate::ipc::server) fn handle_file_search(
 ///  4. WRITE ATOMICALLY: content goes to a temp file in the SAME directory,
 ///     which is then renamed over the target. A reader never observes a
 ///     partial/torn write, and the rename is atomic on the same filesystem.
+///     (Append mode instead does open-append + `write_all` + `sync_all`.)
+#[allow(clippy::too_many_lines)] // ordered do-not-reorder security pipeline; splitting hurts clarity
 pub(in crate::ipc::server) fn handle_file_write(
     state: &Arc<DaemonState>,
     params: &FileWriteParams,
@@ -309,6 +458,7 @@ pub(in crate::ipc::server) fn handle_file_write(
             "deny",
             Some(msg.clone()),
             None,
+            params.append,
         );
         return Err(IpcError::new(IpcErrorCode::OversizedRequest, msg));
     }
@@ -335,6 +485,7 @@ pub(in crate::ipc::server) fn handle_file_write(
                 decision,
                 Some(e.message.clone()),
                 None,
+                params.append,
             );
             return Err(e);
         }
@@ -358,6 +509,7 @@ pub(in crate::ipc::server) fn handle_file_write(
             "deny",
             Some(msg.clone()),
             None,
+            params.append,
         );
         return Err(IpcError::new(IpcErrorCode::PathDenied, msg));
     }
@@ -370,7 +522,37 @@ pub(in crate::ipc::server) fn handle_file_write(
         "allow",
         None,
         Some(content_len as u64),
+        params.append,
     );
+
+    // (4a) APPEND mode (US6/FR-022): open with append + create and do a single
+    // `write_all` + `sync_all`. The original content is never modified and the
+    // OS append-mode offset serializes racing appenders (no interleave). This
+    // is honestly NOT all-or-nothing: a mid-write I/O failure can leave a
+    // partial append and surfaces as an error -- the temp-file+rename atomicity
+    // of a full write does not apply here (append cannot stage a rename). A
+    // missing file is created, matching full-write parity.
+    if params.append {
+        let append_result = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&resolved)?;
+            f.write_all(params.content.as_bytes())?;
+            f.sync_all()?;
+            Ok(())
+        })();
+        if let Err(e) = append_result {
+            return Err(IpcError::new(
+                IpcErrorCode::Internal,
+                format!("append '{}': {e}", resolved.display()),
+            ));
+        }
+        return Ok(IpcResponse::FileWrite(FileWriteResponse {
+            path: resolved,
+            bytes_written: content_len as u64,
+        }));
+    }
 
     // (4) Atomic write: stage in a temp file in the SAME directory, then
     // rename over the target. `persist`-style temp+rename avoids a torn

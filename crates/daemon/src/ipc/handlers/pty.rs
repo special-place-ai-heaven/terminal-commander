@@ -3,15 +3,15 @@
 
 use std::sync::Arc;
 
+#[cfg(any(unix, windows))]
+use crate::ipc::protocol::{
+    DEFAULT_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS, MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES,
+    MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES, PtyCommandListEntry, PtyCommandListResponse,
+    PtyCommandStartResponse, PtyCommandStopResponse, PtyCommandWriteStdinResponse,
+};
 use crate::ipc::protocol::{
     IpcError, IpcErrorCode, IpcResponse, IpcResult, PtyCommandStartParams, PtyCommandStopParams,
     PtyCommandWriteStdinParams,
-};
-#[cfg(any(unix, windows))]
-use crate::ipc::protocol::{
-    MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES, MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES,
-    PtyCommandListEntry, PtyCommandListResponse, PtyCommandStartResponse, PtyCommandStopResponse,
-    PtyCommandWriteStdinResponse,
 };
 use crate::state::DaemonState;
 
@@ -125,6 +125,21 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
         Err(crate::pty_command::PtyRuntimeError::ShellInterpreterDenied(shell)) => {
             Err(IpcError::new(IpcErrorCode::ShellInterpreterDenied, shell))
         }
+        // US8 (FR-060): wsl-carrier nested shell on the PTY argv lane. Same
+        // wire code as the command lane, carrier-aware teaching message.
+        Err(crate::pty_command::PtyRuntimeError::WslNestedShellDenied {
+            interpreter,
+            carrier,
+        }) => Err(IpcError::new(
+            IpcErrorCode::ShellInterpreterDenied,
+            format!(
+                "shell interpreter '{interpreter}' denied inside a '{carrier}' invocation; \
+                     the pty argv lane is not a shell bridge on either side of the WSL boundary. \
+                     Remedy: invoke the Linux program directly ({carrier} -e <program> ...); for \
+                     pipelines/redirects use the shell_exec tool, gated by the allow_shell policy \
+                     cap."
+            ),
+        )),
         Err(crate::pty_command::PtyRuntimeError::EmptyArgv) => Err(IpcError::new(
             IpcErrorCode::ArgvInvalid,
             "argv must not be empty",
@@ -152,13 +167,52 @@ pub(in crate::ipc::server) async fn handle_pty_command_write_stdin(
         ));
     }
     match state.pty.write_stdin(params.job_id, bytes).await {
-        Ok(r) => Ok(IpcResponse::PtyCommandWriteStdin(
-            PtyCommandWriteStdinResponse {
-                job_id: params.job_id,
-                bytes_written: r.bytes_written,
-                secret_prompt_active: r.secret_prompt_active,
-            },
-        )),
+        Ok(r) => {
+            // FR-041: an optional bounded settle read over the PTY job's
+            // bucket, mirroring `shell_session_exec`. The write already
+            // happened above (secret-prompt denial fired BEFORE it, inside
+            // `write_stdin`). Absent `wait_ms` -> every combed field is
+            // `None`, so the response serializes byte-identically to today.
+            let (cursor_in, next_cursor, has_more, dropped_count, events) = if let Some(wait_ms) =
+                params.wait_ms
+            {
+                use terminal_commander_core::BucketWaitRequest;
+                let wait_ms = wait_ms.min(MAX_BUCKET_WAIT_MS);
+                let req = BucketWaitRequest {
+                    cursor: params.cursor.unwrap_or(0),
+                    severity_min: None,
+                    kind_filter: None,
+                    limit: Some(DEFAULT_BUCKET_READ_LIMIT),
+                    timeout: std::time::Duration::from_millis(wait_ms),
+                };
+                let settled = state
+                    .router
+                    .bucket_wait(r.bucket_id, req)
+                    .await
+                    .map_err(super::common::map_bucket_error)?;
+                (
+                    Some(settled.cursor_in),
+                    Some(settled.next_cursor),
+                    Some(!settled.heartbeat && settled.events.len() >= DEFAULT_BUCKET_READ_LIMIT),
+                    Some(settled.dropped_count),
+                    Some(settled.events),
+                )
+            } else {
+                (None, None, None, None, None)
+            };
+            Ok(IpcResponse::PtyCommandWriteStdin(
+                PtyCommandWriteStdinResponse {
+                    job_id: params.job_id,
+                    bytes_written: r.bytes_written,
+                    secret_prompt_active: r.secret_prompt_active,
+                    cursor_in,
+                    next_cursor,
+                    has_more,
+                    dropped_count,
+                    events,
+                },
+            ))
+        }
         Err(crate::pty_command::PtyRuntimeError::SecretInputDenied) => Err(IpcError::new(
             IpcErrorCode::SecretInputDenied,
             "secret prompt active; LLM-supplied input denied",

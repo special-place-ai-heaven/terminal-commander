@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use terminal_commander_core::{ContextHint, RuleDefinition, RuleStatus, RuleType, Severity};
 use terminal_commander_store::AuditReadRequest;
 use terminal_commanderd::{
     DaemonClient, DaemonConfig, DaemonState, IpcErrorCode, IpcRequest, IpcResponse, IpcServer,
@@ -50,6 +51,54 @@ fn python3_available() -> bool {
         }
     }
     false
+}
+
+fn keyword_rule(id: &str, kw: &str, severity: Severity, kind: &str) -> RuleDefinition {
+    RuleDefinition {
+        id: id.to_owned(),
+        version: 1,
+        kind: RuleType::Keyword,
+        status: RuleStatus::Active,
+        severity,
+        event_kind: kind.to_owned(),
+        stream: None,
+        description: None,
+        pattern: None,
+        keywords: Some(vec![kw.to_owned()]),
+        captures: vec![],
+        summary_template: format!("matched {kw}"),
+        tags: vec![],
+        rate_limit_per_min: None,
+        redact: vec![],
+        context_hint: ContextHint::default(),
+        examples: vec![],
+    }
+}
+
+/// Poll the live list until `job_id` appears, so a stdin write never races
+/// the PTY spawn. Panics past the deadline.
+async fn wait_until_live(client: &DaemonClient, job_id: terminal_commander_core::JobId) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut seq = 900u64;
+    loop {
+        let listed = match client
+            .call(seq, IpcRequest::PtyCommandList)
+            .await
+            .expect("list")
+        {
+            IpcResponse::PtyCommandList(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        seq += 1;
+        if listed.entries.iter().any(|e| e.job_id == job_id) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pty job never became live"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 fn build_server() -> (PathBuf, Arc<DaemonState>, terminal_commanderd::ServerHandle) {
@@ -184,6 +233,47 @@ fn pty_command_rejects_shell_interpreter() {
     });
 }
 
+/// US8 (FR-060): the PTY argv lane enforces the WSL nested-shell gate
+/// identically to the command argv lane. `wsl.exe -e bash -lc "..."` is
+/// denied under allow_shell=false with the same `ShellInterpreterDenied`
+/// wire code -- lane divergence would be a defect.
+#[test]
+fn pty_wsl_nested_shell_denied_like_argv_lane() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
+                    argv: vec![
+                        "wsl.exe".to_owned(),
+                        "-e".to_owned(),
+                        "bash".to_owned(),
+                        "-lc".to_owned(),
+                        "echo hi".to_owned(),
+                    ],
+                    cwd: None,
+                    env: vec![],
+                    bucket_config: None,
+                    rules: vec![],
+                    rows: None,
+                    cols: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect_err("wsl nested shell must be denied on the pty argv lane");
+        assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
 #[test]
 fn pty_command_rejects_empty_argv() {
     let runtime = rt();
@@ -260,6 +350,8 @@ fn pty_write_stdin_oversized_is_rejected() {
                 IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
                     job_id: started.job_id,
                     bytes: huge,
+                    cursor: None,
+                    wait_ms: None,
                 }),
             )
             .await
@@ -292,6 +384,8 @@ fn pty_write_stdin_unknown_job_returns_typed_error() {
                 IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
                     job_id: terminal_commander_core::JobId::new(),
                     bytes: "hello".to_owned(),
+                    cursor: None,
+                    wait_ms: None,
                 }),
             )
             .await
@@ -388,6 +482,8 @@ time.sleep(2)
                 IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
                     job_id: started.job_id,
                     bytes: "should-not-be-sent\n".to_owned(),
+                    cursor: None,
+                    wait_ms: None,
                 }),
             )
             .await
@@ -513,6 +609,313 @@ fn pty_command_list_reflects_live_then_stopped_state() {
             listed.entries
         );
 
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+// US5 / FR-041: `pty_command_write_stdin` gains an optional bounded
+// `wait_ms` settle window that returns the combed signals the write
+// provoked in the SAME call (cursor in, signals + next cursor out) --
+// the same shape family as `shell_session_exec`. Omitted = today's
+// immediate return, byte-identical.
+
+#[test]
+fn pty_stdin_wait_ms_returns_combed_signals_with_cursor() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(8));
+
+        // A REPL that emits a rule-matching line for each stdin line.
+        let py =
+            "import sys\nfor line in sys.stdin:\n    print('RESULT', eval(line.strip()), flush=True)\n";
+        let resp = client
+            .call(
+                1,
+                IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
+                    argv: vec![
+                        "python3".to_owned(),
+                        "-u".to_owned(),
+                        "-c".to_owned(),
+                        py.to_owned(),
+                    ],
+                    cwd: None,
+                    env: vec![],
+                    bucket_config: None,
+                    rules: vec![keyword_rule(
+                        "test.result",
+                        "RESULT",
+                        Severity::Medium,
+                        "kw_result",
+                    )],
+                    rows: None,
+                    cols: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect("pty start");
+        let started = match resp {
+            IpcResponse::PtyCommandStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+        wait_until_live(&client, started.job_id).await;
+
+        // ONE call: write stdin + settle-read the signals it provoked.
+        let resp = client
+            .call(
+                2,
+                IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
+                    job_id: started.job_id,
+                    bytes: "1+1\n".to_owned(),
+                    cursor: Some(0),
+                    wait_ms: Some(5000),
+                }),
+            )
+            .await
+            .expect("pty stdin wait");
+        let r = match resp {
+            IpcResponse::PtyCommandWriteStdin(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(r.bytes_written > 0, "bytes must be written");
+        assert_eq!(r.cursor_in, Some(0), "cursor_in echoes the requested cursor");
+        let events = r.events.expect("wait_ms must return an events batch");
+        assert!(
+            events.iter().any(|e| e.kind == "kw_result"),
+            "expected kw_result signal from the REPL; got {events:?}"
+        );
+        let next = r.next_cursor.expect("wait_ms must return next_cursor");
+        assert!(next > 0, "next cursor must advance past the head");
+        assert!(r.has_more.is_some(), "has_more present when waited");
+        assert!(r.dropped_count.is_some(), "dropped_count present when waited");
+
+        let _ = client
+            .call(
+                3,
+                IpcRequest::PtyCommandStop(PtyCommandStopParams {
+                    job_id: started.job_id,
+                }),
+            )
+            .await;
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn pty_stdin_without_wait_is_byte_identical_to_today() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(6));
+
+        let py = "import sys\nfor line in sys.stdin:\n    sys.stdout.write('echoed: ' + line)\n    sys.stdout.flush()\n";
+        let resp = client
+            .call(
+                1,
+                IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
+                    argv: vec![
+                        "python3".to_owned(),
+                        "-u".to_owned(),
+                        "-c".to_owned(),
+                        py.to_owned(),
+                    ],
+                    cwd: None,
+                    env: vec![],
+                    bucket_config: None,
+                    rules: vec![],
+                    rows: None,
+                    cols: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect("pty start");
+        let started = match resp {
+            IpcResponse::PtyCommandStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+        wait_until_live(&client, started.job_id).await;
+
+        // No cursor / wait_ms -> immediate return, today's legacy shape.
+        let resp = client
+            .call(
+                2,
+                IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
+                    job_id: started.job_id,
+                    bytes: "hello\n".to_owned(),
+                    cursor: None,
+                    wait_ms: None,
+                }),
+            )
+            .await
+            .expect("pty stdin no wait");
+        let r = match resp {
+            IpcResponse::PtyCommandWriteStdin(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(r.bytes_written, 6);
+        assert!(r.cursor_in.is_none());
+        assert!(r.next_cursor.is_none());
+        assert!(r.has_more.is_none());
+        assert!(r.dropped_count.is_none());
+        assert!(r.events.is_none());
+
+        // Byte-identical wire: the serialized response is EXACTLY today's
+        // three keys -- the new optional fields skip-serialize when absent.
+        let json = serde_json::to_value(&r).expect("serialize response");
+        let keys: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .expect("response is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["job_id", "bytes_written", "secret_prompt_active"]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            keys, expected,
+            "no-wait response must serialize byte-identically to today"
+        );
+
+        let _ = client
+            .call(
+                3,
+                IpcRequest::PtyCommandStop(PtyCommandStopParams {
+                    job_id: started.job_id,
+                }),
+            )
+            .await;
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // cohesive end-to-end secret-prompt flow
+fn pty_stdin_secret_prompt_denial_unchanged_by_wait() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(6));
+
+        // Emit a `[sudo] password for dev:` prompt (flagged secret).
+        let py = r#"
+import sys, time
+sys.stdout.write("[sudo] password for dev: ")
+sys.stdout.flush()
+time.sleep(2)
+"#;
+        let resp = client
+            .call(
+                1,
+                IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
+                    argv: vec![
+                        "python3".to_owned(),
+                        "-u".to_owned(),
+                        "-c".to_owned(),
+                        py.to_owned(),
+                    ],
+                    cwd: None,
+                    env: vec![],
+                    bucket_config: None,
+                    rules: vec![],
+                    rows: None,
+                    cols: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect("pty start");
+        let started = match resp {
+            IpcResponse::PtyCommandStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // Poll the read-only live list until the prompt is flagged secret.
+        let mut seq = 2u64;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let listed = match client
+                .call(seq, IpcRequest::PtyCommandList)
+                .await
+                .expect("pty list")
+            {
+                IpcResponse::PtyCommandList(r) => r,
+                other => panic!("unexpected: {other:?}"),
+            };
+            seq += 1;
+            let flagged = listed
+                .entries
+                .iter()
+                .find(|e| e.job_id == started.job_id)
+                .is_some_and(|e| e.secret_prompt_active);
+            if flagged {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "secret prompt never flagged active within deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Denial fires BEFORE the write and is unchanged by wait_ms/cursor:
+        // no settle read happens, the typed error is identical to today.
+        let err = client
+            .call(
+                seq,
+                IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
+                    job_id: started.job_id,
+                    bytes: "should-not-be-sent\n".to_owned(),
+                    cursor: Some(0),
+                    wait_ms: Some(3000),
+                }),
+            )
+            .await
+            .expect_err("secret prompt must reject stdin even with wait_ms");
+        assert_eq!(err.code, IpcErrorCode::SecretInputDenied);
+
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        let deny_row = rows
+            .iter()
+            .find(|r| r.action == "pty_command_write_stdin" && r.decision == "deny")
+            .expect("deny audit row");
+        let metadata = deny_row.metadata_json.as_deref().unwrap_or("");
+        assert!(
+            !metadata.contains("should-not-be-sent"),
+            "audit metadata must NOT carry the typed payload; got: {metadata}"
+        );
+
+        let _ = client
+            .call(
+                3,
+                IpcRequest::PtyCommandStop(PtyCommandStopParams {
+                    job_id: started.job_id,
+                }),
+            )
+            .await;
         handle.shutdown().await;
         cleanup(&data);
     });

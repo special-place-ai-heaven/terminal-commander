@@ -34,7 +34,7 @@ pub use audit::{
 };
 pub use import::{
     ImportResult, RULE_PACK_DFA_SIZE_LIMIT, RULE_PACK_REGEX_SIZE_LIMIT, RulePackFile, RulePackMeta,
-    known_pack_names, resolve_pack_json,
+    known_pack_names, pack_member_ids, resolve_pack_json,
 };
 pub use job_receipt::JobReceiptRow;
 pub use registry::{

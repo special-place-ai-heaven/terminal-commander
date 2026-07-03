@@ -14,14 +14,16 @@
 //!   `registry_upsert` -> `registry_activate` loop to make a rule live
 //!   (constitution VII: suggest-never-auto-activate).
 //!
-//! Heuristics detected, in priority order:
+//! Heuristics detected, in priority order (specific before generic):
 //!
 //! 1. `error[Ennnn]: ...` coded-error prefixes (rustc/TS-style);
-//! 2. `error: ...` / `ERROR ...` plain error prefixes;
-//! 3. `warning: ...` / `WARNING ...` warning prefixes;
-//! 4. `FAILED` / `FAIL` test-style failure tokens;
-//! 5. `path/to/file:line[:col]:` file:line locators;
-//! 6. exit-summary lines (`exited with code N`, `Error: process ...`).
+//! 2. `npm ERR! ...` npm failure lines;
+//! 3. `error TS<code>: ...` TypeScript diagnostics;
+//! 4. `error: ...` / `ERROR ...` plain error prefixes;
+//! 5. `warning: ...` / `WARNING ...` warning prefixes;
+//! 6. `FAILED` / `FAIL` test-style failure tokens;
+//! 7. `path/to/file:line[:col]:` file:line locators;
+//! 8. exit-summary lines (`exited with code N`, `Error: process ...`).
 //!
 //! Empty or low-signal input yields an EMPTY proposal set plus an
 //! explanation string, never a junk rule (FR-007 acceptance #1).
@@ -89,7 +91,10 @@ struct Heuristic {
     detector: Regex,
     severity: Severity,
     event_kind: &'static str,
-    stream: SourceStream,
+    /// Stream filter for the proposed rule. `None` means the heuristic
+    /// has NO stream evidence, so the proposal must not constrain the
+    /// stream (FR-050: no stream filter without stream evidence).
+    stream: Option<SourceStream>,
     summary_template: &'static str,
     /// Named captures the template + rule declare.
     captures: &'static [&'static str],
@@ -111,10 +116,37 @@ fn heuristics() -> Vec<Heuristic> {
                 .expect("coded-error pattern compiles"),
             severity: Severity::High,
             event_kind: "compile_error",
-            stream: SourceStream::Stderr,
+            stream: Some(SourceStream::Stderr),
             summary_template: "${code}: ${message}",
             captures: &["code", "message"],
             description: "Coded diagnostic prefix (e.g. E0432, TS2304).",
+        },
+        // npm/TS shapes come BEFORE the generic `error-prefix`: the table
+        // is priority-ordered, so specific detectors must precede the
+        // catch-all. Both use `stream: None` -- `sample_lines` carry no
+        // stream attribution, and guessing (npm ERR! -> stderr, tsc -> stdout)
+        // would trip `registry_test` stream_mismatches (FR-050).
+        Heuristic {
+            id_suffix: "npm-error",
+            detector: Regex::new(r"^npm ERR! (?P<message>.+)$")
+                .expect("npm-error pattern compiles"),
+            severity: Severity::High,
+            event_kind: "error-class",
+            stream: None,
+            summary_template: "npm ERR! ${message}",
+            captures: &["message"],
+            description: "An `npm ERR!`-prefixed npm failure line.",
+        },
+        Heuristic {
+            id_suffix: "ts-error",
+            detector: Regex::new(r"^error TS(?P<code>[0-9]+): (?P<message>.+)$")
+                .expect("ts-error pattern compiles"),
+            severity: Severity::High,
+            event_kind: "compile_error",
+            stream: None,
+            summary_template: "TS${code}: ${message}",
+            captures: &["code", "message"],
+            description: "A TypeScript `error TS<code>:` diagnostic.",
         },
         Heuristic {
             id_suffix: "error-prefix",
@@ -122,7 +154,7 @@ fn heuristics() -> Vec<Heuristic> {
                 .expect("error-prefix pattern compiles"),
             severity: Severity::High,
             event_kind: "error",
-            stream: SourceStream::Stderr,
+            stream: Some(SourceStream::Stderr),
             summary_template: "error: ${message}",
             captures: &["message"],
             description: "Plain `error:`/`ERROR ` line prefix.",
@@ -133,7 +165,7 @@ fn heuristics() -> Vec<Heuristic> {
                 .expect("warning-prefix pattern compiles"),
             severity: Severity::Low,
             event_kind: "warning",
-            stream: SourceStream::Stderr,
+            stream: Some(SourceStream::Stderr),
             summary_template: "warning: ${message}",
             captures: &["message"],
             description: "Plain `warning:`/`WARNING `/`WARN ` line prefix.",
@@ -144,7 +176,7 @@ fn heuristics() -> Vec<Heuristic> {
                 .expect("failed-token pattern compiles"),
             severity: Severity::High,
             event_kind: "test_failed",
-            stream: SourceStream::Stdout,
+            stream: Some(SourceStream::Stdout),
             summary_template: "failure: ${token}${rest}",
             captures: &["token", "rest"],
             description: "A `FAILED`/`FAIL` test-style failure token.",
@@ -157,7 +189,7 @@ fn heuristics() -> Vec<Heuristic> {
             .expect("file-line pattern compiles"),
             severity: Severity::Medium,
             event_kind: "source_location",
-            stream: SourceStream::Stderr,
+            stream: Some(SourceStream::Stderr),
             summary_template: "at ${file}:${line}",
             captures: &["file", "line", "col"],
             description: "A `file:line[:col]` source locator prefix.",
@@ -170,7 +202,7 @@ fn heuristics() -> Vec<Heuristic> {
             .expect("exit-summary pattern compiles"),
             severity: Severity::Medium,
             event_kind: "command_failed",
-            stream: SourceStream::Stderr,
+            stream: Some(SourceStream::Stderr),
             summary_template: "exited with code ${code}",
             captures: &["code"],
             description: "An exit-code summary line.",
@@ -268,7 +300,7 @@ fn build_proposal(h: &Heuristic) -> RuleDefinition {
         status: RuleStatus::Draft,
         severity: h.severity,
         event_kind: h.event_kind.to_owned(),
-        stream: Some(h.stream.clone()),
+        stream: h.stream.clone(),
         description: Some(h.description.to_owned()),
         pattern: Some(h.detector.as_str().to_owned()),
         keywords: None,
@@ -453,6 +485,104 @@ mod tests {
                 .iter()
                 .any(|r| r.id == "suggest.exit-summary"),
             "expected exit-summary proposal"
+        );
+    }
+
+    /// US7 / FR-050: an `npm ERR!`-prefixed line yields a dedicated
+    /// `npm-error` proposal that captures the message body. Without the
+    /// heuristic the line matches nothing (it is neither a coded-error
+    /// nor an `error`-prefix shape).
+    #[test]
+    fn detects_npm_err_prefix() {
+        let set = suggest_rules(&s(&["npm ERR! code ERESOLVE"]), None);
+        let r = set
+            .proposed_rules
+            .iter()
+            .find(|r| r.id == "suggest.npm-error")
+            .expect("npm-error proposal");
+        assert_eq!(r.severity, Severity::High);
+        assert!(r.captures.contains(&"message".to_owned()));
+        // Must be a well-formed Draft the downstream loop accepts verbatim
+        // (bounded-regex + forbidden-construct gate, same as registry_test).
+        assert_eq!(r.status, RuleStatus::Draft);
+        r.validate().expect("npm-error proposal validates");
+
+        // The reused detector must bind the `message` capture so a live
+        // rule renders the npm error body.
+        let pat = r.pattern.as_deref().expect("npm proposal has a pattern");
+        let re = Regex::new(pat).expect("proposed pattern compiles");
+        let caps = re
+            .captures("npm ERR! code ERESOLVE")
+            .expect("npm line matches the proposed pattern");
+        assert_eq!(&caps["message"], "code ERESOLVE");
+    }
+
+    /// US7 / FR-050: an `error TS<digits>:` diagnostic yields a
+    /// `ts-error` proposal capturing both the numeric code and the
+    /// message. The generic `error-prefix` heuristic also fires, but the
+    /// specific TS proposal must be present and carry the code capture.
+    #[test]
+    fn detects_ts_error_code() {
+        let set = suggest_rules(
+            &s(&["error TS2345: Argument of type 'string' is not assignable"]),
+            None,
+        );
+        let r = set
+            .proposed_rules
+            .iter()
+            .find(|r| r.id == "suggest.ts-error")
+            .expect("ts-error proposal");
+        assert_eq!(r.event_kind, "compile_error");
+        assert!(r.captures.contains(&"code".to_owned()));
+        assert!(r.captures.contains(&"message".to_owned()));
+        assert_eq!(r.status, RuleStatus::Draft);
+        r.validate().expect("ts-error proposal validates");
+
+        let pat = r.pattern.as_deref().expect("ts proposal has a pattern");
+        let re = Regex::new(pat).expect("proposed pattern compiles");
+        let caps = re
+            .captures("error TS2345: Argument of type 'string' is not assignable")
+            .expect("ts line matches the proposed pattern");
+        assert_eq!(&caps["code"], "2345");
+    }
+
+    /// US7 / FR-050 "no stream filter without stream evidence":
+    /// `suggest_from_samples` input is plain `Vec<String>` with no stream
+    /// attribution, so the two new heuristics MUST leave the proposal's
+    /// stream filter unset (`None` = any stream). Guessing a stream would
+    /// produce `stream_mismatches` failures in `registry_test` (npm ERR!
+    /// is stderr but tsc writes diagnostics to stdout). The pre-existing
+    /// heuristics keep their hardcoded streams unchanged.
+    #[test]
+    fn new_heuristics_set_no_stream_filter_without_evidence() {
+        let set = suggest_rules(
+            &s(&[
+                "npm ERR! code ERESOLVE",
+                "error TS2345: boom",
+                "error: plain",
+            ]),
+            None,
+        );
+        for id in ["suggest.npm-error", "suggest.ts-error"] {
+            let r = set
+                .proposed_rules
+                .iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id} proposal"));
+            assert!(
+                r.stream.is_none(),
+                "{id} must not set a stream filter without stream evidence"
+            );
+        }
+        // Regression: a pre-existing heuristic still carries its stream.
+        let ep = set
+            .proposed_rules
+            .iter()
+            .find(|r| r.id == "suggest.error-prefix")
+            .expect("error-prefix proposal");
+        assert!(
+            ep.stream.is_some(),
+            "existing heuristics keep their hardcoded stream"
         );
     }
 
