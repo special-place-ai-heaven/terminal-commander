@@ -67,22 +67,21 @@ use terminal_commanderd::ipc::protocol::{
     IpcErrorCode, IpcRequest, IpcResponse, ListLimitParams, PolicyCapsView, PolicyStatusResponse,
     ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse,
     PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
-    PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RegistryActivateParams,
-    RegistryActivateResponse, RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse,
-    RegistryDeactivateParams, RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse,
-    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
-    RegistrySearchParams, RegistrySearchResponse, RegistrySuggestFromSamplesParams,
-    RegistrySuggestFromSamplesResponse, RegistryTestParams, RegistryTestResponse,
-    RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse, SelfCheckResponse,
-    ShellExecParams, ShellSessionExecParams, ShellSessionExecResponse, ShellSessionListResponse,
-    ShellSessionStartParams, ShellSessionStartResponse, ShellSessionStatusParams,
-    ShellSessionStatusResponse, ShellSessionStopParams, ShellSessionStopResponse,
-    SubscriptionCloseParams, SubscriptionCloseResponse, SubscriptionListParams,
-    SubscriptionListResponse, SubscriptionOpenParams, SubscriptionOpenResponse,
-    SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse,
-    SubscriptionSeekParams, SubscriptionSeekResponse, SubscriptionSourceSel,
-    WorkspaceSnapshotApplyParams, WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams,
-    WorkspaceSnapshotCreateResponse,
+    PtyCommandWriteStdinParams, RegistryActivateParams, RegistryActivateResponse,
+    RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse, RegistryDeactivateParams,
+    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
+    RegistryImportPackResponse, RegistryListActiveResponse, RegistrySearchParams,
+    RegistrySearchResponse, RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse,
+    RegistryTestParams, RegistryTestResponse, RegistryTestSample, RegistryUpsertParams,
+    RegistryUpsertResponse, SelfCheckResponse, ShellExecParams, ShellSessionExecParams,
+    ShellSessionExecResponse, ShellSessionListResponse, ShellSessionStartParams,
+    ShellSessionStartResponse, ShellSessionStatusParams, ShellSessionStatusResponse,
+    ShellSessionStopParams, ShellSessionStopResponse, SubscriptionCloseParams,
+    SubscriptionCloseResponse, SubscriptionListParams, SubscriptionListResponse,
+    SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
+    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSeekParams,
+    SubscriptionSeekResponse, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
+    WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -2332,21 +2331,19 @@ impl TerminalCommanderMcpServer {
         let ipc = PtyCommandWriteStdinParams {
             job_id,
             bytes: params.bytes,
+            cursor: params.cursor,
+            wait_ms: params.wait_ms,
         };
         match self
             .daemon
             .call(IpcRequest::PtyCommandWriteStdin(ipc))
             .await
         {
-            Ok(IpcResponse::PtyCommandWriteStdin(PtyCommandWriteStdinResponse {
-                job_id,
-                bytes_written,
-                secret_prompt_active,
-            })) => json_tool_result(&serde_json::json!({
-                "job_id": job_id,
-                "bytes_written": bytes_written,
-                "secret_prompt_active": secret_prompt_active,
-            })),
+            // FR-041: serialize the response directly. The combed-batch
+            // fields carry `skip_serializing_if = Option::is_none`, so a
+            // no-wait response omits every one -> byte-identical to today;
+            // a wait_ms response surfaces the combed batch in one call.
+            Ok(IpcResponse::PtyCommandWriteStdin(resp)) => json_tool_result(&resp),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
         }
@@ -4676,8 +4673,17 @@ pub struct McpBucketSummaryParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpEventContextParams {
     /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
-    /// verbatim, not free-form.
-    pub bucket_id: String,
+    /// verbatim, not free-form. OPTIONAL (US5 / FR-040): omit it to
+    /// resolve the owning bucket from `event_id` alone. When supplied it
+    /// must be the event's real bucket -- a contradiction errors
+    /// (EventNotFound), it is never silently corrected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // `with = "String"` keeps the advertised schema shape a plain string
+    // (matching bucket_id on the `events`/`wait`/`summary` actions) while
+    // `serde(default)` leaves it optional -- so the facade flatten stays
+    // collision-free and the strict validator does not require it.
+    #[schemars(with = "String")]
+    pub bucket_id: Option<String>,
     /// Opaque event id from a bucket read (e.g. `evt_<32hex>`); copy it
     /// verbatim, not free-form.
     pub event_id: String,
@@ -4694,8 +4700,13 @@ pub struct McpEventContextParams {
 
 impl McpEventContextParams {
     fn into_ipc(self) -> Result<EventContextParams, String> {
-        let bucket_id =
-            parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", &self.bucket_id)?;
+        // FR-040: bucket_id is optional. Parse it only when supplied; an
+        // absent bucket_id resolves the owning bucket from event_id alone.
+        let bucket_id = self
+            .bucket_id
+            .as_deref()
+            .map(|b| parse_id::<terminal_commander_core::ids::BucketIdKind>("bucket_id", b))
+            .transpose()?;
         let event_id =
             parse_id::<terminal_commander_core::ids::EventIdKind>("event_id", &self.event_id)?;
         Ok(EventContextParams {
@@ -5317,6 +5328,19 @@ pub struct McpPtyCommandWriteStdinParams {
     pub job_id: String,
     /// UTF-8 stdin payload. Capped at 4096 bytes by the daemon.
     pub bytes: String,
+    /// Cursor into the PTY job bucket to read the settle window from.
+    /// Omit / `0` for the bucket head; pass the prior response's
+    /// `next_cursor`. Only meaningful with `wait_ms`.
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
+    pub cursor: Option<u64>,
+    /// Bounded wait (ms) for combed signals to appear after the write.
+    /// Clamped daemon-side. Omit for today's immediate return; supply it
+    /// to receive the echo + result signals in the SAME call (US5 /
+    /// FR-041, same shape family as `shell_session_exec`).
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "u64")]
+    pub wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

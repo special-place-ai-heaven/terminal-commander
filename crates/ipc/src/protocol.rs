@@ -1038,7 +1038,13 @@ pub struct SeverityHistogram {
 /// pointer and returns bounded context around that frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventContextParams {
-    pub bucket_id: BucketId,
+    /// NOW OPTIONAL (US5 / FR-040). Supplied: exactly today's
+    /// single-bucket resolution (event absent from that bucket =
+    /// `EventNotFound`, so a contradicting `bucket_id` is an error, never
+    /// silently ignored). Absent: the daemon resolves the owning bucket
+    /// by scanning in-scope buckets for the globally-unique `event_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_id: Option<BucketId>,
     pub event_id: EventId,
     /// Frames to include BEFORE the anchor. Clamped to
     /// `MAX_CONTEXT_FRAMES`. Omitted = `DEFAULT_CONTEXT_BEFORE`.
@@ -1983,6 +1989,17 @@ pub struct PtyCommandWriteStdinParams {
     /// JSON string; non-UTF-8 input must be base64-pre-encoded by the
     /// caller (TC44 surface accepts UTF-8 only).
     pub bytes: String,
+    /// NEW (US5 / FR-041): bucket cursor to read the settle window from
+    /// (default `0` = the PTY job bucket head). Only meaningful with
+    /// `wait_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<u64>,
+    /// NEW (US5 / FR-041): bounded settle window (ms) to wait for combed
+    /// signals AFTER the write, clamped server-side like the
+    /// `shell_session_exec` settle window. Absent = immediate return
+    /// (today's byte-identical behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1992,6 +2009,20 @@ pub struct PtyCommandWriteStdinResponse {
     /// Echoes the post-write secret-prompt-active flag so the LLM
     /// can avoid a follow-up write that would also be rejected.
     pub secret_prompt_active: bool,
+    /// NEW (US5 / FR-041): the following combed-batch fields are present
+    /// ONLY when `wait_ms` was supplied on the request. A no-wait
+    /// response omits every one of them, serializing byte-identically to
+    /// the pre-US5 shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_in: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<SignalEvent>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3041,6 +3072,8 @@ mod tests {
                 IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
                     job_id: JobId::new(),
                     bytes: "x".to_owned(),
+                    cursor: None,
+                    wait_ms: None,
                 }),
                 false,
             ),
@@ -3183,7 +3216,7 @@ mod tests {
             ),
             (
                 IpcRequest::EventContext(EventContextParams {
-                    bucket_id: BucketId::new(),
+                    bucket_id: Some(BucketId::new()),
                     event_id: EventId::new(),
                     before: None,
                     after: None,
