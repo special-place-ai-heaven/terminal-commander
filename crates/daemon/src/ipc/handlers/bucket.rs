@@ -104,42 +104,79 @@ pub(in crate::ipc::server) fn handle_event_context(
     state: &Arc<DaemonState>,
     params: &EventContextParams,
 ) -> Result<IpcResponse, IpcError> {
-    use terminal_commander_core::{BucketReadRequest, Severity};
+    use terminal_commander_core::{BucketId, BucketReadRequest, Severity, SignalEvent};
 
-    // 1. Locate the event in the bucket by event_id. We scan from
-    //    cursor 0 in MAX_BUCKET_READ_LIMIT pages. Buckets are
-    //    bounded by retention (TC07) so the scan terminates.
-    let mut cursor: u64 = 0;
-    let target_event = loop {
-        let page = state
-            .router
-            .bucket_events_since(
-                params.bucket_id,
-                &BucketReadRequest {
-                    cursor,
-                    severity_min: None,
-                    kind_filter: None,
-                    limit: Some(MAX_BUCKET_READ_LIMIT),
-                },
-            )
-            .map_err(map_bucket_error)?;
-        if let Some(ev) = page.events.iter().find(|e| e.event_id == params.event_id) {
-            break Some(ev.clone());
+    // 1. Resolve the owning bucket + the anchor event by event_id. We
+    //    scan a bucket from cursor 0 in MAX_BUCKET_READ_LIMIT pages;
+    //    buckets are bounded rings (TC07) so every scan terminates.
+    //
+    //    - `bucket_id` supplied (FR-040): exactly today's single-bucket
+    //      path. The event being absent from THAT bucket is
+    //      `EventNotFound` (a contradicting bucket_id is an error, never
+    //      silently corrected), byte-identical to today.
+    //    - `bucket_id` absent: scan in-scope buckets for the
+    //      globally-unique event id (UUIDv7 -> at most one owner). Not
+    //      found in ANY live bucket (including an evicted owner) is the
+    //      same honest `EventNotFound`, phrased WITHOUT a bucket name.
+    let scan_bucket = |bucket_id: BucketId| -> Result<Option<SignalEvent>, IpcError> {
+        let mut cursor: u64 = 0;
+        loop {
+            let page = state
+                .router
+                .bucket_events_since(
+                    bucket_id,
+                    &BucketReadRequest {
+                        cursor,
+                        severity_min: None,
+                        kind_filter: None,
+                        limit: Some(MAX_BUCKET_READ_LIMIT),
+                    },
+                )
+                .map_err(map_bucket_error)?;
+            if let Some(ev) = page.events.iter().find(|e| e.event_id == params.event_id) {
+                return Ok(Some(ev.clone()));
+            }
+            if !page.has_more {
+                return Ok(None);
+            }
+            cursor = page.next_cursor;
         }
-        if !page.has_more {
-            break None;
-        }
-        cursor = page.next_cursor;
     };
-    let Some(event) = target_event else {
-        return Err(IpcError::new(
-            IpcErrorCode::EventNotFound,
-            format!(
-                "event {} not found in bucket {}",
-                params.event_id.to_wire_string(),
-                params.bucket_id.to_wire_string()
-            ),
-        ));
+
+    let (bucket_id, event) = if let Some(requested) = params.bucket_id {
+        match scan_bucket(requested)? {
+            Some(ev) => (requested, ev),
+            None => {
+                return Err(IpcError::new(
+                    IpcErrorCode::EventNotFound,
+                    format!(
+                        "event {} not found in bucket {}",
+                        params.event_id.to_wire_string(),
+                        requested.to_wire_string()
+                    ),
+                ));
+            }
+        }
+    } else {
+        let mut resolved = None;
+        for bid in state.buckets.list_bucket_ids() {
+            if let Some(ev) = scan_bucket(bid)? {
+                resolved = Some((bid, ev));
+                break;
+            }
+        }
+        match resolved {
+            Some(pair) => pair,
+            None => {
+                return Err(IpcError::new(
+                    IpcErrorCode::EventNotFound,
+                    format!(
+                        "event {} not found in any live bucket",
+                        params.event_id.to_wire_string()
+                    ),
+                ));
+            }
+        }
     };
 
     // 2. Pointer / unavailable-reason path. Below-Medium events
@@ -156,7 +193,7 @@ pub(in crate::ipc::server) fn handle_event_context(
             ContextUnavailableReason::SyntheticEvent
         };
         return Ok(IpcResponse::EventContext(EventContextResponse {
-            bucket_id: params.bucket_id,
+            bucket_id,
             event_id: params.event_id,
             anchor_missing: false,
             unavailable_reason: Some(reason),
@@ -196,7 +233,7 @@ pub(in crate::ipc::server) fn handle_event_context(
     // 5. anchor_missing path (ring eviction).
     if window.anchor_missing {
         return Ok(IpcResponse::EventContext(EventContextResponse {
-            bucket_id: params.bucket_id,
+            bucket_id,
             event_id: params.event_id,
             anchor_missing: true,
             unavailable_reason: Some(ContextUnavailableReason::AnchorEvicted),
@@ -229,7 +266,7 @@ pub(in crate::ipc::server) fn handle_event_context(
         || window.truncated_bytes
         || window.truncated_frames;
     Ok(IpcResponse::EventContext(EventContextResponse {
-        bucket_id: params.bucket_id,
+        bucket_id,
         event_id: params.event_id,
         anchor_missing: false,
         unavailable_reason: None,

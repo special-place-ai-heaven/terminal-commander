@@ -19,12 +19,43 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed bounded PTY stdin write. The request field is bytes; writes are denied while a secret prompt is active so LLM-supplied secrets are not forwarded. TB-7: job_id carries an opaque-id format note (copy verbatim, e.g. job_<32hex>; from pty_command_start) so the first call uses the right id."
+    "note": "Daemon-backed bounded PTY stdin write. The request field is bytes; writes are denied while a secret prompt is active so LLM-supplied secrets are not forwarded. TB-7: job_id carries an opaque-id format note (copy verbatim, e.g. job_<32hex>; from pty_command_start) so the first call uses the right id. US5/FR-041: an optional bounded wait_ms (with optional cursor, default 0) runs a settle-window read over the PTY job bucket AFTER the write and returns the combed signals the write provoked in the SAME response (cursor_in, next_cursor, has_more, dropped_count, events) -- the same shape family as shell_session_exec. The secret-prompt denial fires BEFORE the write and is unchanged by wait_ms. Omit wait_ms for today's immediate return, which serializes byte-identically (the combed fields are absent)."
   },
   "response_example": {
     "job_id": "job_018f0000000000000000000000000003",
     "bytes_written": 6,
     "secret_prompt_active": false
+  },
+  "request_example_with_wait": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "pty_command_write_stdin",
+      "arguments": {
+        "job_id": "job_018f0000000000000000000000000003",
+        "bytes": "1+1\n",
+        "wait_ms": 3000
+      }
+    }
+  },
+  "response_example_with_wait": {
+    "job_id": "job_018f0000000000000000000000000003",
+    "bytes_written": 4,
+    "secret_prompt_active": false,
+    "cursor_in": 0,
+    "next_cursor": 1,
+    "has_more": false,
+    "dropped_count": 0,
+    "events": [
+      {
+        "event_id": "evt_018f0000000000000000000000000009",
+        "bucket_id": "bkt_018f0000000000000000000000000001",
+        "kind": "kw_result",
+        "severity": "medium",
+        "summary": "repl result"
+      }
+    ]
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -60,10 +91,11 @@
     }
   },
   "invariants": [
-    "job_id and bytes are required",
+    "job_id and bytes are required; cursor and wait_ms are optional (US5/FR-041)",
     "bytes is a UTF-8 string capped at 4096 bytes by the daemon",
-    "response reports bytes_written and post-write secret_prompt_active only",
-    "secret prompts produce a typed SecretInputDenied error and the bytes are not written",
-    "success payload never contains echoed stdin, PTY output, or screen content"
+    "without wait_ms the response reports bytes_written and post-write secret_prompt_active only, byte-identical to the pre-US5 shape",
+    "with wait_ms the response adds the combed batch cursor_in/next_cursor/has_more/dropped_count/events (same shape family as shell_session_exec)",
+    "secret prompts produce a typed SecretInputDenied error BEFORE the write, unchanged by wait_ms; the bytes are not written and no settle read runs",
+    "success payload never contains echoed stdin, PTY output, or screen content; events are structured signals only"
   ]
 }

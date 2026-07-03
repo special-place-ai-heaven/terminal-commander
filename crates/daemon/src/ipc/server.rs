@@ -1228,7 +1228,7 @@ mod tests {
                 bucket_id: BucketId::new(),
             }),
             IpcRequest::EventContext(EventContextParams {
-                bucket_id: BucketId::new(),
+                bucket_id: Some(BucketId::new()),
                 event_id: EventId::new(),
                 before: None,
                 after: None,
@@ -1350,6 +1350,8 @@ mod tests {
             IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
                 job_id: JobId::new(),
                 bytes: String::new(),
+                cursor: None,
+                wait_ms: None,
             }),
             IpcRequest::PtyCommandStop(PtyCommandStopParams {
                 job_id: JobId::new(),

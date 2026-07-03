@@ -101,6 +101,9 @@ mod runtime {
 
     #[derive(Debug, Clone, Copy)]
     pub struct PtyWriteResponse {
+        /// The PTY job's bucket, so the IPC handler can run the optional
+        /// settle-window read (US5 / FR-041) without a second lookup.
+        pub bucket_id: BucketId,
         pub bytes_written: u64,
         pub secret_prompt_active: bool,
     }
@@ -584,10 +587,10 @@ mod runtime {
             job_id: JobId,
             bytes: &[u8],
         ) -> Result<PtyWriteResponse, PtyRuntimeError> {
-            let probe_handle = {
+            let (probe_handle, bucket_id) = {
                 let g = self.live.read();
                 let binding = g.get(&job_id).ok_or(PtyRuntimeError::UnknownJob(job_id))?;
-                Arc::clone(&binding.probe)
+                (Arc::clone(&binding.probe), binding.bucket_id)
             };
             let guard = probe_handle.lock().await;
             let probe = guard.as_ref().ok_or(PtyRuntimeError::UnknownJob(job_id))?;
@@ -604,6 +607,7 @@ mod runtime {
                         )),
                     );
                     Ok(PtyWriteResponse {
+                        bucket_id,
                         bytes_written: written as u64,
                         secret_prompt_active: probe.is_secret_prompt_active(),
                     })

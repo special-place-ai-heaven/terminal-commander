@@ -413,7 +413,7 @@ fn event_context_returns_bounded_window_around_event_pointer() {
             .call(
                 4,
                 IpcRequest::EventContext(EventContextParams {
-                    bucket_id: start.bucket_id,
+                    bucket_id: Some(start.bucket_id),
                     event_id,
                     before: Some(2),
                     after: Some(2),
@@ -487,7 +487,7 @@ fn event_context_returns_no_pointer_for_below_medium_event() {
             .call(
                 5,
                 IpcRequest::EventContext(EventContextParams {
-                    bucket_id,
+                    bucket_id: Some(bucket_id),
                     event_id: ev.event_id,
                     before: None,
                     after: None,
@@ -557,7 +557,7 @@ fn event_context_unknown_event_returns_typed_error() {
             .call(
                 9,
                 IpcRequest::EventContext(EventContextParams {
-                    bucket_id,
+                    bucket_id: Some(bucket_id),
                     event_id: terminal_commander_core::EventId::new(),
                     before: None,
                     after: None,
@@ -567,6 +567,302 @@ fn event_context_unknown_event_returns_typed_error() {
             .await
             .unwrap_err();
         assert_eq!(err.code, IpcErrorCode::EventNotFound);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+// US5 / FR-040: `event_context` resolves by `event_id` alone. `bucket_id`
+// is optional; supplied it is byte-identical single-bucket resolution,
+// absent the daemon scans in-scope buckets for the globally-unique event.
+
+/// Run a BOOM command, wait for exit, and return the (bucket_id,
+/// kw_boom event_id) so the event_context tests can address the same
+/// anchor with or without a bucket_id.
+async fn boom_event(
+    state: &Arc<DaemonState>,
+    handle: &terminal_commanderd::ServerHandle,
+) -> (
+    terminal_commander_core::BucketId,
+    terminal_commander_core::EventId,
+) {
+    let rule = keyword_rule("test.boom", "BOOM", Severity::High, "kw_boom");
+    let start = state
+        .command
+        .start_combed(CommandStartRequest {
+            argv: py_argv_with_marker("BOOM", 4),
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![rule],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            strip_ansi: true,
+            peer_discriminator: None,
+        })
+        .unwrap();
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        if matches!(
+            state.command.job_record(start.job_id).map(|r| r.state),
+            Some(JobState::Exited | JobState::Failed | JobState::Cancelled)
+        ) {
+            break;
+        }
+    }
+    let client =
+        DaemonClient::new(handle.socket_path().to_path_buf()).with_timeout(Duration::from_secs(2));
+    let bes = client
+        .call(
+            80,
+            IpcRequest::BucketEventsSince(BucketEventsSinceParams {
+                bucket_id: start.bucket_id,
+                cursor: 0,
+                severity_min: None,
+                kind_filter: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let event_id = match bes {
+        IpcResponse::BucketEventsSince(b) => b
+            .events
+            .iter()
+            .find(|e| e.kind == "kw_boom")
+            .map(|e| e.event_id)
+            .expect("kw_boom should be present"),
+        other => panic!("unexpected: {other:?}"),
+    };
+    (start.bucket_id, event_id)
+}
+
+#[test]
+fn event_context_resolves_by_event_id_alone() {
+    rt().block_on(async {
+        let data = tmp_data_dir("ctx-idalone");
+        let (state, handle) = build_state_and_server(&data);
+        let (bucket_id, event_id) = boom_event(&state, &handle).await;
+
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        // With bucket_id supplied: today's exact resolution.
+        let with_bkt = client
+            .call(
+                90,
+                IpcRequest::EventContext(EventContextParams {
+                    bucket_id: Some(bucket_id),
+                    event_id,
+                    before: Some(2),
+                    after: Some(2),
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .unwrap();
+        let with_bkt = match with_bkt {
+            IpcResponse::EventContext(c) => c,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // With bucket_id ABSENT: the daemon resolves the owning bucket.
+        let id_alone = client
+            .call(
+                91,
+                IpcRequest::EventContext(EventContextParams {
+                    bucket_id: None,
+                    event_id,
+                    before: Some(2),
+                    after: Some(2),
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .unwrap();
+        let id_alone = match id_alone {
+            IpcResponse::EventContext(c) => c,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // Same window, and the resolved bucket_id is the real owner.
+        assert!(
+            !id_alone.anchor_missing,
+            "id-alone anchor missing: {id_alone:?}"
+        );
+        assert!(id_alone.unavailable_reason.is_none());
+        assert!(
+            !id_alone.frames.is_empty(),
+            "expected frames; got {id_alone:?}"
+        );
+        assert_eq!(
+            id_alone.bucket_id, bucket_id,
+            "resolved bucket must be the owner"
+        );
+        assert_eq!(id_alone.event_id, event_id);
+        assert_eq!(id_alone.frames.len(), with_bkt.frames.len());
+        assert_eq!(id_alone.total_bytes, with_bkt.total_bytes);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn event_context_mismatched_bucket_id_is_error_not_ignored() {
+    rt().block_on(async {
+        let data = tmp_data_dir("ctx-mismatch");
+        let (state, handle) = build_state_and_server(&data);
+        let (_owner, event_id) = boom_event(&state, &handle).await;
+
+        // A DIFFERENT (empty) bucket the event does not live in.
+        let other_bucket = terminal_commander_core::BucketId::new();
+        state
+            .router
+            .bucket_create(
+                other_bucket,
+                terminal_commander_core::BucketConfig::default(),
+            )
+            .unwrap();
+
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        let err = client
+            .call(
+                92,
+                IpcRequest::EventContext(EventContextParams {
+                    bucket_id: Some(other_bucket),
+                    event_id,
+                    before: None,
+                    after: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+        // Contradicting bucket_id is an error, never silently corrected.
+        assert_eq!(err.code, IpcErrorCode::EventNotFound);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn event_context_unknown_event_errors_identically_in_both_modes() {
+    rt().block_on(async {
+        let data = tmp_data_dir("ctx-unknown-both");
+        let (state, handle) = build_state_and_server(&data);
+
+        let bucket_id = terminal_commander_core::BucketId::new();
+        state
+            .router
+            .bucket_create(bucket_id, terminal_commander_core::BucketConfig::default())
+            .unwrap();
+        let event_id = terminal_commander_core::EventId::new();
+
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        let with_bkt = client
+            .call(
+                93,
+                IpcRequest::EventContext(EventContextParams {
+                    bucket_id: Some(bucket_id),
+                    event_id,
+                    before: None,
+                    after: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+        let id_alone = client
+            .call(
+                94,
+                IpcRequest::EventContext(EventContextParams {
+                    bucket_id: None,
+                    event_id,
+                    before: None,
+                    after: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(with_bkt.code, IpcErrorCode::EventNotFound);
+        assert_eq!(id_alone.code, IpcErrorCode::EventNotFound);
+        assert_eq!(with_bkt.code, id_alone.code);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn event_context_by_id_after_bucket_eviction_is_honest_not_found() {
+    rt().block_on(async {
+        let data = tmp_data_dir("ctx-evicted");
+        let (state, handle) = build_state_and_server(&data);
+
+        // Create a bucket, append an event, capture its id.
+        let bucket_id = terminal_commander_core::BucketId::new();
+        state
+            .router
+            .bucket_create(bucket_id, terminal_commander_core::BucketConfig::default())
+            .unwrap();
+        let draft = terminal_commander_core::EventDraft {
+            bucket_id,
+            timestamp: time::OffsetDateTime::now_utc(),
+            severity: Severity::Low,
+            kind: "command_exited".to_owned(),
+            summary: "soon-evicted".to_owned(),
+            rule: None,
+            source: terminal_commander_core::EventSource {
+                probe_id: terminal_commander_core::ProbeId::new(),
+                source_type: terminal_commander_core::SourceType::Process,
+                stream: terminal_commander_core::SourceStream::Meta,
+                job_id: None,
+            },
+            captures: None,
+            pointer: None,
+            pointer_unavailable_reason: None,
+            tags: None,
+            frame_truncated_bytes: 0,
+            count: 1,
+            first_seen: None,
+            last_seen: None,
+            suppressed: false,
+        };
+        let ev = state.router.bucket_append(bucket_id, draft).unwrap();
+
+        // Evict the owning bucket wholesale (models TTL/capacity eviction).
+        assert!(
+            state.buckets.drop_bucket(bucket_id),
+            "bucket should have existed"
+        );
+
+        // id-alone resolution can no longer find the event anywhere ->
+        // the honest EventNotFound, phrased without a bucket name.
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        let err = client
+            .call(
+                95,
+                IpcRequest::EventContext(EventContextParams {
+                    bucket_id: None,
+                    event_id: ev.event_id,
+                    before: None,
+                    after: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, IpcErrorCode::EventNotFound);
+        assert!(
+            !err.message.contains("bkt_"),
+            "id-alone not-found must not name a bucket; got: {}",
+            err.message
+        );
 
         handle.shutdown().await;
         cleanup(&data);

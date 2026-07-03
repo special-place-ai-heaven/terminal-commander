@@ -6,7 +6,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "event_context is the bounded raw-frame retrieval tool. It is the only MCP path in this batch through which frame text reaches the LLM. before/after/max_bytes are optional client hints clamped by daemon caps. TB-8/TB-11: bucket_id and event_id carry opaque-id format notes (copy verbatim, e.g. bkt_/evt_<32hex>); the success body carries frames OR an empty frames list with a typed unavailable_reason (NoPointer/SyntheticEvent/AnchorEvicted) -- that is a success shape, not a JSON-RPC error."
+    "note": "event_context is the bounded raw-frame retrieval tool. It is the only MCP path in this batch through which frame text reaches the LLM. before/after/max_bytes are optional client hints clamped by daemon caps. TB-8/TB-11: bucket_id and event_id carry opaque-id format notes (copy verbatim, e.g. bkt_/evt_<32hex>); the success body carries frames OR an empty frames list with a typed unavailable_reason (NoPointer/SyntheticEvent/AnchorEvicted) -- that is a success shape, not a JSON-RPC error. US5/FR-040: bucket_id is OPTIONAL -- omit it to resolve the owning bucket from event_id alone (event ids are globally unique). A supplied bucket_id that contradicts the event's real bucket is an error (EventNotFound), never silently corrected; an unknown event errors identically in both addressing modes."
   },
   "tool": "event_context",
   "request_example": {
@@ -21,6 +21,17 @@
         "before": 3,
         "after": 5,
         "max_bytes": 4096
+      }
+    }
+  },
+  "request_example_by_event_id_alone": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "event_context",
+      "arguments": {
+        "event_id": "evt_018f0000000000000000000000000002"
       }
     }
   },
@@ -78,7 +89,9 @@
     }
   },
   "invariants": [
-    "bucket_id and event_id are required",
+    "event_id is required; bucket_id is optional (US5/FR-040 id-alone resolution)",
+    "a supplied bucket_id that contradicts the event's real bucket errors (EventNotFound), never silently corrected",
+    "an unknown event errors identically (EventNotFound) in both addressing modes",
     "bucket_id and event_id descriptions carry bkt_/evt_ opaque-id format notes (TB-8)",
     "unavailable_reason is a success-body field, not a JSON-RPC error (TB-11)",
     "frame text is bounded by daemon caps and returned only from event_context",
