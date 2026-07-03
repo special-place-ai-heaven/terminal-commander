@@ -151,16 +151,16 @@ the next pull.
 
 ### Tests (write first, prove red)
 
-- [ ] T020 [P] [US4] Write failing MCP compact tests (`bucket_wait_compact_projects_only_load_bearing_fields`, `bucket_events_compact_full_records_refetchable_by_cursor`, `compact_never_changes_which_events_match`) following the `crates/mcp/tests/ledger_compact_wait_restart.rs` pattern
-- [ ] T021 [P] [US4] Write failing daemon delta tests in `crates/daemon/tests/subscription_pull_lossless.rs` per quickstart US4 list (`pull_delta_first_pull_sends_full_liveness_baseline`, `pull_delta_idle_second_pull_sends_no_liveness`, `pull_delta_transition_appears_in_exactly_next_pull`, `pull_delta_seek_resets_baseline_to_full_snapshot`, `pull_without_flag_sends_full_liveness_unchanged`)
+- [x] T020 [P] [US4] Write failing MCP compact tests (`bucket_wait_compact_projects_only_load_bearing_fields`, `bucket_events_compact_full_records_refetchable_by_cursor`, `compact_never_changes_which_events_match`) following the `crates/mcp/tests/ledger_compact_wait_restart.rs` pattern
+- [x] T021 [P] [US4] Write failing daemon delta tests in `crates/daemon/tests/subscription_pull_lossless.rs` per quickstart US4 list (`pull_delta_first_pull_sends_full_liveness_baseline`, `pull_delta_idle_second_pull_sends_no_liveness`, `pull_delta_transition_appears_in_exactly_next_pull`, `pull_delta_seek_resets_baseline_to_full_snapshot`, `pull_without_flag_sends_full_liveness_unchanged`)
 
 ### Implementation
 
-- [ ] T022 [US4] MCP compact: add `compact: bool #[serde(default)]` to `McpBucketWaitParams` (tools.rs:4509) and `McpBucketEventsSinceParams` (tools.rs:4472); project through the EXISTING `project_signal_compact` (tools.rs:3254) in `bucket_wait` (:1629) and `bucket_events_since` (:1612); echo `"compact": true` in the payload — all in `crates/mcp/src/tools.rs`, zero daemon change (research D5)
-- [ ] T023 [US4] Wire: add `liveness_delta: bool #[serde(default)]` to `SubscriptionPullParams` per ipc-wire.md W3 in `crates/ipc/src/protocol.rs`
-- [ ] T024 [US4] Daemon delta: add `last_liveness: HashMap<BucketId, Liveness>` to `Subscription` in `crates/daemon/src/subscriptions/model.rs`; diff full snapshot vs map and commit the new snapshot at the same point pull offsets advance in `crates/daemon/src/subscriptions/pull.rs` + `crates/daemon/src/ipc/handlers/subscription.rs`; clear the map in `handle_subscription_seek` (subscription.rs:224-257)
-- [ ] T025 [US4] MCP `sub_pull` (tools.rs:2639): always send `liveness_delta: true`; omit the `liveness` payload section when the delta is empty; update `crates/mcp/tests/mcp_subscription_notify.rs` / `mcp_subscriptions_e2e.rs` expectations if pinned to full liveness
-- [ ] T026 [US4] SC-004 evidence: replay the findings-doc repro shapes (quiet long build via compact `wait` + delta `sub_pull`), record before/after serialized response byte counts (target >= 60% reduction) in `specs/002-dogfood-remediation/evidence-sc004.md`; update subscription_pull + bucket wait/events fixtures under `crates/mcp/tests/fixtures/contracts/mcp-tools/`; full gate Windows + WSL
+- [x] T022 [US4] MCP compact: add `compact: bool #[serde(default)]` to `McpBucketWaitParams` (tools.rs:4509) and `McpBucketEventsSinceParams` (tools.rs:4472); project through the EXISTING `project_signal_compact` (tools.rs:3254) in `bucket_wait` (:1629) and `bucket_events_since` (:1612); echo `"compact": true` in the payload — all in `crates/mcp/src/tools.rs`, zero daemon change (research D5)
+- [x] T023 [US4] Wire: add `liveness_delta: bool #[serde(default)]` to `SubscriptionPullParams` per ipc-wire.md W3 in `crates/ipc/src/protocol.rs`
+- [x] T024 [US4] Daemon delta: add `last_liveness: HashMap<BucketId, Liveness>` to `Subscription` in `crates/daemon/src/subscriptions/model.rs`; diff full snapshot vs map and commit the new snapshot at the same point pull offsets advance in `crates/daemon/src/subscriptions/pull.rs` + `crates/daemon/src/ipc/handlers/subscription.rs`; clear the map in `handle_subscription_seek` (subscription.rs:224-257)
+- [x] T025 [US4] MCP `sub_pull` (tools.rs:2639): always send `liveness_delta: true`; omit the `liveness` payload section when the delta is empty; update `crates/mcp/tests/mcp_subscription_notify.rs` / `mcp_subscriptions_e2e.rs` expectations if pinned to full liveness
+- [x] T026 [US4] SC-004 evidence: replay the findings-doc repro shapes (quiet long build via compact `wait` + delta `sub_pull`), record before/after serialized response byte counts (target >= 60% reduction) in `specs/002-dogfood-remediation/evidence-sc004.md`; update subscription_pull + bucket wait/events fixtures under `crates/mcp/tests/fixtures/contracts/mcp-tools/`; full gate Windows + WSL
 
 **Checkpoint**: streaming surfaces stop leaking tokens; wire stays
 compatible for non-adapter clients.
@@ -179,16 +179,16 @@ result signals in one call.
 
 ### Tests (write first, prove red)
 
-- [ ] T027 [P] [US5] Write failing daemon tests in `crates/daemon/tests/ipc_bucket.rs` (`event_context_resolves_by_event_id_alone`, `event_context_mismatched_bucket_id_is_error_not_ignored`, `event_context_unknown_event_errors_identically_in_both_modes`, `event_context_by_id_after_bucket_eviction_is_honest_not_found`) next to `event_context_unknown_event_returns_typed_error`
-- [ ] T028 [P] [US5] Write failing daemon tests in `crates/daemon/tests/pty_ipc.rs` (`pty_stdin_wait_ms_returns_combed_signals_with_cursor`, `pty_stdin_without_wait_is_byte_identical_to_today`, `pty_stdin_secret_prompt_denial_unchanged_by_wait`)
+- [x] T027 [P] [US5] Write failing daemon tests in `crates/daemon/tests/ipc_bucket.rs` (`event_context_resolves_by_event_id_alone`, `event_context_mismatched_bucket_id_is_error_not_ignored`, `event_context_unknown_event_errors_identically_in_both_modes`, `event_context_by_id_after_bucket_eviction_is_honest_not_found`) next to `event_context_unknown_event_returns_typed_error`
+- [x] T028 [P] [US5] Write failing daemon tests in `crates/daemon/tests/pty_ipc.rs` (`pty_stdin_wait_ms_returns_combed_signals_with_cursor`, `pty_stdin_without_wait_is_byte_identical_to_today`, `pty_stdin_secret_prompt_denial_unchanged_by_wait`)
 
 ### Implementation (wire-first)
 
-- [ ] T029 [US5] Wire: `EventContextParams.bucket_id` -> `Option<BucketId>` (W4) and `PtyCommandWriteStdinParams` + `cursor`/`wait_ms`, response + optional settle fields (W5), exact serde posture, in `crates/ipc/src/protocol.rs`
-- [ ] T030 [US5] Daemon event_context: in `handle_event_context` (`crates/daemon/src/ipc/handlers/bucket.rs:103-241`) keep the supplied-bucket path byte-identical; when `bucket_id` absent iterate bucket ids with the same bounded page scan; not-found-anywhere -> `EventNotFound` without a bucket name
-- [ ] T031 [US5] Daemon pty settle: in the pty stdin handler + `crates/daemon/src/pty_command.rs`, after the write (secret-prompt denial untouched, BEFORE write) run the same bounded settle-window bucket read `ShellSessionExec` uses from `cursor` (default 0), daemon-clamped; populate the optional response fields only when `wait_ms` present
-- [ ] T032 [US5] MCP: `McpEventContextParams.bucket_id` -> `Option<String>` (tools.rs:4558, `into_ipc` :4576); `McpPtyCommandWriteStdinParams` + `cursor`/`wait_ms` (tools.rs:5118) and combed-batch payload fields in `pty_command_write_stdin` (:2240) in `crates/mcp/src/tools.rs`
-- [ ] T033 [US5] Update fixtures (`event_context`, pty stdin) under `crates/mcp/tests/fixtures/contracts/mcp-tools/` + map; MCP e2e one-call REPL test in `crates/mcp/tests/pty_tools_live_e2e.rs`; full gate Windows + WSL
+- [x] T029 [US5] Wire: `EventContextParams.bucket_id` -> `Option<BucketId>` (W4) and `PtyCommandWriteStdinParams` + `cursor`/`wait_ms`, response + optional settle fields (W5), exact serde posture, in `crates/ipc/src/protocol.rs`
+- [x] T030 [US5] Daemon event_context: in `handle_event_context` (`crates/daemon/src/ipc/handlers/bucket.rs:103-241`) keep the supplied-bucket path byte-identical; when `bucket_id` absent iterate bucket ids with the same bounded page scan; not-found-anywhere -> `EventNotFound` without a bucket name
+- [x] T031 [US5] Daemon pty settle: in the pty stdin handler + `crates/daemon/src/pty_command.rs`, after the write (secret-prompt denial untouched, BEFORE write) run the same bounded settle-window bucket read `ShellSessionExec` uses from `cursor` (default 0), daemon-clamped; populate the optional response fields only when `wait_ms` present
+- [x] T032 [US5] MCP: `McpEventContextParams.bucket_id` -> `Option<String>` (tools.rs:4558, `into_ipc` :4576); `McpPtyCommandWriteStdinParams` + `cursor`/`wait_ms` (tools.rs:5118) and combed-batch payload fields in `pty_command_write_stdin` (:2240) in `crates/mcp/src/tools.rs`
+- [x] T033 [US5] Update fixtures (`event_context`, pty stdin) under `crates/mcp/tests/fixtures/contracts/mcp-tools/` + map; MCP e2e one-call REPL test in `crates/mcp/tests/pty_tools_live_e2e.rs`; full gate Windows + WSL
 
 **Checkpoint**: one REPL interaction = one call; event inspection needs no
 bucket ceremony.
@@ -209,14 +209,14 @@ nested form runs and the audit row carries the classification.
 
 ### Tests (write first, prove red — cross-platform pure-argv logic)
 
-- [ ] T034 [US8] Write failing tests per quickstart US8 list in `crates/daemon/tests/command_runtime.rs` (`wsl_nested_shell_denied_under_allow_shell_false`, `wsl_nested_shell_all_spellings_classified_identically`, `wsl_exec_introduced_non_shell_payload_and_management_flags_run_unchanged`, `wsl_bare_payload_without_exec_is_shell_interpreted_and_denied`, `wsl_tilde_shorthand_is_selector_not_payload`, `wsl_unknown_construction_fails_closed`, `wsl_bare_invocation_is_default_shell_and_denied`), `crates/daemon/tests/ipc_command.rs` (`wsl_nested_shell_allowed_and_audit_tagged_under_allow_shell_true`), `crates/daemon/tests/pty_ipc.rs` (`pty_wsl_nested_shell_denied_like_argv_lane`); spellings matrix from policy-wsl.md (incl. the no-`-e` shell-interpretation rows and `~`); record the red run (today `wsl.exe -e bash` passes)
+- [x] T034 [US8] Write failing tests per quickstart US8 list in `crates/daemon/tests/command_runtime.rs` (`wsl_nested_shell_denied_under_allow_shell_false`, `wsl_nested_shell_all_spellings_classified_identically`, `wsl_exec_introduced_non_shell_payload_and_management_flags_run_unchanged`, `wsl_bare_payload_without_exec_is_shell_interpreted_and_denied`, `wsl_tilde_shorthand_is_selector_not_payload`, `wsl_unknown_construction_fails_closed`, `wsl_bare_invocation_is_default_shell_and_denied`), `crates/daemon/tests/ipc_command.rs` (`wsl_nested_shell_allowed_and_audit_tagged_under_allow_shell_true`), `crates/daemon/tests/pty_ipc.rs` (`pty_wsl_nested_shell_denied_like_argv_lane`); spellings matrix from policy-wsl.md (incl. the no-`-e` shell-interpretation rows and `~`); record the red run (today `wsl.exe -e bash` passes)
 
 ### Implementation
 
-- [ ] T035 [US8] Implement `WslArgvClass` + `classify_wsl_nested_shell(argv: &[String])` in `crates/daemon/src/command.rs` next to `shell_interpreter_basename` (:500-522), exactly per policy-wsl.md steps 1-4 (carrier detection incl. absolute paths; management-flag list; selector skipping; payload vs `SHELL_INTERPRETERS_DENY`; empty payload = default shell; unknown flag = `UnknownConstruction`)
-- [ ] T036 [US8] Enforce at both lanes: argv guard block (`crates/daemon/src/command.rs:732-746`) and PTY lane (`crates/daemon/src/pty_command.rs:267`); deny path reuses `IpcErrorCode::ShellInterpreterDenied` with the extended carrier-aware teaching message (policy-wsl.md enforcement contract) + existing `command_rejected` audit row; allow path adds `"nested_shell"` / `"wsl_construction"` to audit `metadata_json` and notes it in `reason`
-- [ ] T037 [US8] FR-061: document the stance (argv-only inspection, fail-closed rule, enforcement matrix, boundary rationale) in `docs/security/POLICY.md` alongside the `SHELL_INTERPRETERS_DENY` section
-- [ ] T038 [US8] Full gate Windows + WSL, PLUS `cargo nextest run -p terminal-commanderd --test security` (Constitution: policy work runs the security profile); live Windows proof of the Independent Test transcript
+- [x] T035 [US8] Implement `WslArgvClass` + `classify_wsl_nested_shell(argv: &[String])` in `crates/daemon/src/command.rs` next to `shell_interpreter_basename` (:500-522), exactly per policy-wsl.md steps 1-4 (carrier detection incl. absolute paths; management-flag list; selector skipping; payload vs `SHELL_INTERPRETERS_DENY`; empty payload = default shell; unknown flag = `UnknownConstruction`)
+- [x] T036 [US8] Enforce at both lanes: argv guard block (`crates/daemon/src/command.rs:732-746`) and PTY lane (`crates/daemon/src/pty_command.rs:267`); deny path reuses `IpcErrorCode::ShellInterpreterDenied` with the extended carrier-aware teaching message (policy-wsl.md enforcement contract) + existing `command_rejected` audit row; allow path adds `"nested_shell"` / `"wsl_construction"` to audit `metadata_json` and notes it in `reason`
+- [x] T037 [US8] FR-061: document the stance (argv-only inspection, fail-closed rule, enforcement matrix, boundary rationale) in `docs/security/POLICY.md` alongside the `SHELL_INTERPRETERS_DENY` section
+- [x] T038 [US8] Full gate Windows + WSL, PLUS `cargo nextest run -p terminal-commanderd --test security` (Constitution: policy work runs the security profile); live Windows proof of the Independent Test transcript
 
 **Checkpoint**: zero shell interpreters reachable through the argv lane,
 WSL carriers included (SC-006).
@@ -234,10 +234,10 @@ path -> the write-policy denial.
 
 ### Implementation (wire-first; tests precede the handler)
 
-- [ ] T039 [US6] Wire: `append: bool #[serde(default)]` on `FileWriteParams` per ipc-wire.md W6 in `crates/ipc/src/protocol.rs`
-- [ ] T040 [US6] Write failing daemon tests in `crates/daemon/tests/file_ipc.rs` per quickstart US6 list (`file_write_append_preserves_prefix_and_reports_bytes_appended`, `file_write_append_missing_file_creates_it`, `file_write_append_denied_path_same_policy_error_as_write`, `file_write_append_oversize_bounded_error`)
-- [ ] T041 [US6] Implement the append branch in `handle_file_write` (`crates/daemon/src/ipc/handlers/file.rs:289`): same size-cap-first + `resolve_and_authorize_file_write` gate; append mode = open append + single `write_all` + `sync_all` (OS append-offset atomicity serializes racing appenders per spec edge case); domain audit metadata gains `"append": true`
-- [ ] T042 [US6] MCP: `append` field on `McpFileWriteParams` (tools.rs:4986) in `crates/mcp/src/tools.rs`; update `file_write.v1.json` fixture + map; full gate Windows + WSL
+- [x] T039 [US6] Wire: `append: bool #[serde(default)]` on `FileWriteParams` per ipc-wire.md W6 in `crates/ipc/src/protocol.rs`
+- [x] T040 [US6] Write failing daemon tests in `crates/daemon/tests/file_ipc.rs` per quickstart US6 list (`file_write_append_preserves_prefix_and_reports_bytes_appended`, `file_write_append_missing_file_creates_it`, `file_write_append_denied_path_same_policy_error_as_write`, `file_write_append_oversize_bounded_error`)
+- [x] T041 [US6] Implement the append branch in `handle_file_write` (`crates/daemon/src/ipc/handlers/file.rs:289`): same size-cap-first + `resolve_and_authorize_file_write` gate; append mode = open append + single `write_all` + `sync_all` (OS append-offset atomicity serializes racing appenders per spec edge case); domain audit metadata gains `"append": true`
+- [x] T042 [US6] MCP: `append` field on `McpFileWriteParams` (tools.rs:4986) in `crates/mcp/src/tools.rs`; update `file_write.v1.json` fixture + map; full gate Windows + WSL
 
 **Checkpoint**: log-like workflows stop rewriting whole files.
 
