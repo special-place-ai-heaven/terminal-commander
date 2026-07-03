@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.73](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.72...v0.1.73) (2026-07-03)
+
+
+### Features
+
+* 14 crate fixes -- integrate release-please main (v0.1.72) before promoting to main (+13 more) ([e3d03cd](https://github.com/special-place-ai-heaven/terminal-commander/commit/e3d03cdbb2ce309f63963fd953fdf9013d014f5e))
+
 ## [0.1.72](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.71...v0.1.72) (2026-07-02)
 
 
