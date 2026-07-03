@@ -233,6 +233,47 @@ fn pty_command_rejects_shell_interpreter() {
     });
 }
 
+/// US8 (FR-060): the PTY argv lane enforces the WSL nested-shell gate
+/// identically to the command argv lane. `wsl.exe -e bash -lc "..."` is
+/// denied under allow_shell=false with the same `ShellInterpreterDenied`
+/// wire code -- lane divergence would be a defect.
+#[test]
+fn pty_wsl_nested_shell_denied_like_argv_lane() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
+                    argv: vec![
+                        "wsl.exe".to_owned(),
+                        "-e".to_owned(),
+                        "bash".to_owned(),
+                        "-lc".to_owned(),
+                        "echo hi".to_owned(),
+                    ],
+                    cwd: None,
+                    env: vec![],
+                    bucket_config: None,
+                    rules: vec![],
+                    rows: None,
+                    cols: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect_err("wsl nested shell must be denied on the pty argv lane");
+        assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
 #[test]
 fn pty_command_rejects_empty_argv() {
     let runtime = rt();

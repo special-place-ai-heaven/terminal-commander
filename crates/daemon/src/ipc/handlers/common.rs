@@ -104,6 +104,22 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
                  use the shell_exec tool, which is gated by the allow_shell policy cap."
             ),
         ),
+        // US8 (FR-060): a shell smuggled through a wsl carrier. Reuses the
+        // ShellInterpreterDenied wire code with a carrier-aware teaching
+        // message (policy-wsl.md enforcement contract).
+        CommandError::WslNestedShellDenied {
+            interpreter,
+            carrier,
+        } => IpcError::new(
+            IpcErrorCode::ShellInterpreterDenied,
+            format!(
+                "shell interpreter '{interpreter}' denied inside a '{carrier}' invocation; \
+                 the argv lane is not a shell bridge on either side of the WSL boundary. \
+                 Remedy: invoke the Linux program directly ({carrier} -e <program> ...); \
+                 for pipelines/redirects use the shell_exec tool, gated by the allow_shell \
+                 policy cap."
+            ),
+        ),
         CommandError::EmptyArgv => {
             IpcError::new(IpcErrorCode::ArgvInvalid, "argv must not be empty")
         }
