@@ -1324,6 +1324,7 @@ mod tests {
                 path: std::path::PathBuf::from("/x"),
                 content: "x".to_owned(),
                 create_dirs: false,
+                append: false,
             }),
             IpcRequest::FileWatchStart(FileWatchStartParams {
                 path: std::path::PathBuf::from("/x"),

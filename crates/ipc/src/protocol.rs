@@ -1861,6 +1861,16 @@ pub struct FileWriteParams {
     /// already permits. Defaults to false.
     #[serde(default)]
     pub create_dirs: bool,
+    /// Append `content` to the target instead of replacing it. Same policy
+    /// gate (`FileWrite`), same [`MAX_FILE_WRITE_BYTES`] cap per call, same
+    /// missing-file creation semantics. Defaults to false (full replace).
+    ///
+    /// Integrity (honest): the original content is never modified and racing
+    /// appends never interleave (OS append-mode offset atomicity). All-or-
+    /// nothing is NOT promised: a mid-write I/O failure can leave a partial
+    /// append and surfaces as an error.
+    #[serde(default)]
+    pub append: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3088,6 +3098,7 @@ mod tests {
                     path: "x".into(),
                     content: "data".to_owned(),
                     create_dirs: false,
+                    append: false,
                 }),
                 false,
             ),

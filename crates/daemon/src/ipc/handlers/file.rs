@@ -34,6 +34,7 @@ fn emit_file_write_audit(
     decision: &str,
     reason: Option<String>,
     bytes: Option<u64>,
+    append: bool,
 ) {
     let mut entry = AuditEntry::new("file_write", subject, decision)
         .with_actor("file_runtime")
@@ -41,8 +42,20 @@ fn emit_file_write_audit(
     if let Some(r) = reason {
         entry = entry.with_reason(r);
     }
-    if let Some(b) = bytes {
-        entry = entry.with_metadata_json(format!(r#"{{"bytes_written":{b}}}"#));
+    // Metadata JSON: `bytes_written` when known (the allow row) plus `append`
+    // when this is an append-mode write (US6/FR-022). A full-write row with
+    // `append == false` serializes byte-identically to before.
+    match (bytes, append) {
+        (Some(b), true) => {
+            entry = entry.with_metadata_json(format!(r#"{{"bytes_written":{b},"append":true}}"#));
+        }
+        (Some(b), false) => {
+            entry = entry.with_metadata_json(format!(r#"{{"bytes_written":{b}}}"#));
+        }
+        (None, true) => {
+            entry = entry.with_metadata_json(r#"{"append":true}"#.to_owned());
+        }
+        (None, false) => {}
     }
     let sink: Arc<dyn AuditSink> = Arc::clone(&state.audit) as Arc<dyn AuditSink>;
     let _ = sink.emit(&entry);
@@ -394,7 +407,14 @@ pub(in crate::ipc::server) fn handle_file_list_dir(
 
 /// `file_write` (TC22 A3): write UTF-8 `content` to a single regular file
 /// under the `paths.write_allow` policy gate. Audit-before-write, bounded
-/// size, atomic (temp file + rename). MUTATING + non-idempotent.
+/// size, atomic (temp file + rename) for a full write. MUTATING +
+/// non-idempotent.
+///
+/// `params.append` (US6/FR-022) selects APPEND instead of full replace: the
+/// same steps 1-3 (size cap, policy gate, allow-audit) run unchanged, then
+/// step 4 opens with append+create and does a single `write_all` + `sync_all`.
+/// Append is honestly NOT all-or-nothing (see step 4a); the full-write
+/// temp+rename path below is untouched.
 ///
 /// Order of operations (security-critical, do not reorder):
 ///  1. BOUND the content size BEFORE any filesystem touch (oversize ->
@@ -413,6 +433,8 @@ pub(in crate::ipc::server) fn handle_file_list_dir(
 ///  4. WRITE ATOMICALLY: content goes to a temp file in the SAME directory,
 ///     which is then renamed over the target. A reader never observes a
 ///     partial/torn write, and the rename is atomic on the same filesystem.
+///     (Append mode instead does open-append + `write_all` + `sync_all`.)
+#[allow(clippy::too_many_lines)] // ordered do-not-reorder security pipeline; splitting hurts clarity
 pub(in crate::ipc::server) fn handle_file_write(
     state: &Arc<DaemonState>,
     params: &FileWriteParams,
@@ -436,6 +458,7 @@ pub(in crate::ipc::server) fn handle_file_write(
             "deny",
             Some(msg.clone()),
             None,
+            params.append,
         );
         return Err(IpcError::new(IpcErrorCode::OversizedRequest, msg));
     }
@@ -462,6 +485,7 @@ pub(in crate::ipc::server) fn handle_file_write(
                 decision,
                 Some(e.message.clone()),
                 None,
+                params.append,
             );
             return Err(e);
         }
@@ -485,6 +509,7 @@ pub(in crate::ipc::server) fn handle_file_write(
             "deny",
             Some(msg.clone()),
             None,
+            params.append,
         );
         return Err(IpcError::new(IpcErrorCode::PathDenied, msg));
     }
@@ -497,7 +522,37 @@ pub(in crate::ipc::server) fn handle_file_write(
         "allow",
         None,
         Some(content_len as u64),
+        params.append,
     );
+
+    // (4a) APPEND mode (US6/FR-022): open with append + create and do a single
+    // `write_all` + `sync_all`. The original content is never modified and the
+    // OS append-mode offset serializes racing appenders (no interleave). This
+    // is honestly NOT all-or-nothing: a mid-write I/O failure can leave a
+    // partial append and surfaces as an error -- the temp-file+rename atomicity
+    // of a full write does not apply here (append cannot stage a rename). A
+    // missing file is created, matching full-write parity.
+    if params.append {
+        let append_result = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&resolved)?;
+            f.write_all(params.content.as_bytes())?;
+            f.sync_all()?;
+            Ok(())
+        })();
+        if let Err(e) = append_result {
+            return Err(IpcError::new(
+                IpcErrorCode::Internal,
+                format!("append '{}': {e}", resolved.display()),
+            ));
+        }
+        return Ok(IpcResponse::FileWrite(FileWriteResponse {
+            path: resolved,
+            bytes_written: content_len as u64,
+        }));
+    }
 
     // (4) Atomic write: stage in a temp file in the SAME directory, then
     // rename over the target. `persist`-style temp+rename avoids a torn

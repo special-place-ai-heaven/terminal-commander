@@ -2147,6 +2147,7 @@ impl TerminalCommanderMcpServer {
             path: std::path::PathBuf::from(params.path),
             content: params.content,
             create_dirs: params.create_dirs.unwrap_or(false),
+            append: params.append.unwrap_or(false),
         };
         match self.daemon.call(IpcRequest::FileWrite(ipc)).await {
             Ok(IpcResponse::FileWrite(FileWriteResponse {
@@ -5137,6 +5138,12 @@ pub struct McpFileWriteParams {
     #[serde(default, deserialize_with = "de_opt_bool_lenient")]
     #[schemars(with = "bool")]
     pub create_dirs: Option<bool>,
+    /// Append `content` to the target instead of replacing it. Same policy
+    /// gate, same size cap, same missing-file creation; `bytes_written` is the
+    /// number of bytes appended. Defaults to false (full replace).
+    #[serde(default, deserialize_with = "de_opt_bool_lenient")]
+    #[schemars(with = "bool")]
+    pub append: Option<bool>,
 }
 
 /// MCP-facing parameters for `file_search`.

@@ -904,6 +904,7 @@ fn file_write_to_allowed_path_writes_exact_content_and_audits() {
                     path: target.clone(),
                     content: content.to_owned(),
                     create_dirs: true,
+                    append: false,
                 }),
             )
             .await
@@ -960,6 +961,7 @@ fn file_write_to_denied_path_errors_and_creates_no_file() {
                     path: secret.clone(),
                     content: "BEGIN OPENSSH PRIVATE KEY\n".to_owned(),
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1004,6 +1006,7 @@ fn file_write_oversize_content_returns_bounded_error() {
                     path: target.clone(),
                     content: oversize,
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1036,6 +1039,7 @@ fn file_write_rejects_relative_path() {
                     path: PathBuf::from("out.txt"),
                     content: "x".to_owned(),
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1089,6 +1093,7 @@ fn file_write_enforces_write_allow_list() {
                     path: inside.clone(),
                     content: "ok\n".to_owned(),
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1108,6 +1113,7 @@ fn file_write_enforces_write_allow_list() {
                     path: outside.clone(),
                     content: "nope\n".to_owned(),
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1167,6 +1173,7 @@ fn file_write_rejects_dotdot_target_before_creating_artifact() {
                         path: dotdot_target.clone(),
                         content: "escape\n".to_owned(),
                         create_dirs,
+                        append: false,
                     }),
                 )
                 .await
@@ -1220,6 +1227,7 @@ fn file_write_oversize_emits_domain_deny_audit_row() {
                     path: target.clone(),
                     content: oversize,
                     create_dirs: false,
+                    append: false,
                 }),
             )
             .await
@@ -1239,6 +1247,212 @@ fn file_write_oversize_emits_domain_deny_audit_row() {
             rows.iter()
                 .map(|r| (r.action.clone(), r.decision.clone()))
                 .collect::<Vec<_>>()
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+// =====================================================================
+// US6 (FR-022): file_write append mode. Same policy gate + size cap +
+// missing-file creation as a full write; the ORIGINAL content is
+// preserved and `content` is appended. bytes_written = bytes appended.
+// =====================================================================
+
+/// AC (SC-008 red): append preserves the existing prefix and reports the
+/// bytes APPENDED (not the total file size). Against pre-change behavior the
+/// daemon ignores the unknown `append` flag and REPLACES the file, dropping
+/// the prefix -- so this test fails until the append branch lands (the
+/// beautiful red). The domain `file_write` allow audit row carries
+/// `"append":true` metadata.
+#[test]
+fn file_write_append_preserves_prefix_and_reports_bytes_appended() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server();
+        let target = data.join("log.txt");
+        // Seed an existing file with a prefix (a plain OS write, not the daemon).
+        write_text(&target, "prefix-line\n");
+
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let addition = "appended-line\n";
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: target.clone(),
+                    content: addition.to_owned(),
+                    create_dirs: false,
+                    append: true,
+                }),
+            )
+            .await
+            .expect("append write");
+        let r: FileWriteResponse = match resp {
+            IpcResponse::FileWrite(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        // bytes_written == bytes APPENDED, not the total file size.
+        assert_eq!(r.bytes_written, addition.len() as u64);
+
+        // The original prefix is preserved and the addition follows it.
+        let on_disk = std::fs::read_to_string(&target).expect("target must exist");
+        assert_eq!(
+            on_disk, "prefix-line\nappended-line\n",
+            "append must preserve the prefix, not replace the file"
+        );
+
+        // Domain audit: a `file_write` allow row whose metadata records the
+        // append mode (`"append":true`).
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter().any(|row| row.action == "file_write"
+                && row.decision == "allow"
+                && row
+                    .metadata_json
+                    .as_deref()
+                    .is_some_and(|m| m.contains("\"append\":true"))),
+            "expected a file_write allow row with append:true metadata; got {:?}",
+            rows.iter()
+                .map(|r| (
+                    r.action.clone(),
+                    r.decision.clone(),
+                    r.metadata_json.clone()
+                ))
+                .collect::<Vec<_>>()
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC: append to a MISSING file creates it (parity with a full write); the
+/// appended content becomes the whole file. `create_dirs: false` because the
+/// parent (the data dir) already exists.
+#[test]
+fn file_write_append_missing_file_creates_it() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let target = data.join("fresh.txt");
+        assert!(!target.exists(), "precondition: target must not exist yet");
+
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let content = "first-append\n";
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: target.clone(),
+                    content: content.to_owned(),
+                    create_dirs: false,
+                    append: true,
+                }),
+            )
+            .await
+            .expect("append to missing file");
+        let r: FileWriteResponse = match resp {
+            IpcResponse::FileWrite(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(r.bytes_written, content.len() as u64);
+        let on_disk = std::fs::read_to_string(&target).expect("target must exist");
+        assert_eq!(
+            on_disk, content,
+            "append to a missing file writes the content"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC: an append to a DENIED path fails with the SAME policy error shape as a
+/// full write (PathDenied) and creates no file. The gate order is unchanged:
+/// resolve_and_authorize runs regardless of append mode.
+#[test]
+fn file_write_append_denied_path_same_policy_error_as_write() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server();
+        // Default-deny sensitive suffix (.ssh/id_rsa), parent built so the DENY
+        // is purely the policy verdict (mirrors file_write_to_denied_path...).
+        let ssh_dir = data.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        let secret = ssh_dir.join("id_rsa");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: secret.clone(),
+                    content: "more-secret\n".to_owned(),
+                    create_dirs: false,
+                    append: true,
+                }),
+            )
+            .await
+            .expect_err("default-deny append target must be rejected");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+        assert!(
+            !secret.exists(),
+            "denied append must not create the target file"
+        );
+
+        // Same domain deny audit row as a full write.
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row.action == "file_write" && row.decision == "deny"),
+            "expected a file_write deny audit row for the denied append"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// AC: oversize append content (> MAX_FILE_WRITE_BYTES) is rejected with the
+/// bounded OversizedRequest error BEFORE any filesystem touch -- the size cap
+/// is first in the guard order, identical to a full write.
+#[test]
+fn file_write_append_oversize_bounded_error() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let target = data.join("big-append.txt");
+        // Seed a small prefix; the oversize refusal must leave it untouched.
+        write_text(&target, "prefix\n");
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+
+        let oversize = "x".repeat(MAX_FILE_WRITE_BYTES + 1);
+        let err = client
+            .call(
+                1,
+                IpcRequest::FileWrite(FileWriteParams {
+                    path: target.clone(),
+                    content: oversize,
+                    create_dirs: false,
+                    append: true,
+                }),
+            )
+            .await
+            .expect_err("oversize append content must be rejected");
+        assert_eq!(err.code, IpcErrorCode::OversizedRequest);
+        // The original prefix is untouched: the cap fires before any FS write.
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "prefix\n",
+            "oversize-rejected append must not modify the original content"
         );
 
         handle.shutdown().await;
