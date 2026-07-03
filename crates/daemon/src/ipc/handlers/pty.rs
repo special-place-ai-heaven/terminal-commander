@@ -125,6 +125,21 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
         Err(crate::pty_command::PtyRuntimeError::ShellInterpreterDenied(shell)) => {
             Err(IpcError::new(IpcErrorCode::ShellInterpreterDenied, shell))
         }
+        // US8 (FR-060): wsl-carrier nested shell on the PTY argv lane. Same
+        // wire code as the command lane, carrier-aware teaching message.
+        Err(crate::pty_command::PtyRuntimeError::WslNestedShellDenied {
+            interpreter,
+            carrier,
+        }) => Err(IpcError::new(
+            IpcErrorCode::ShellInterpreterDenied,
+            format!(
+                "shell interpreter '{interpreter}' denied inside a '{carrier}' invocation; \
+                     the pty argv lane is not a shell bridge on either side of the WSL boundary. \
+                     Remedy: invoke the Linux program directly ({carrier} -e <program> ...); for \
+                     pipelines/redirects use the shell_exec tool, gated by the allow_shell policy \
+                     cap."
+            ),
+        )),
         Err(crate::pty_command::PtyRuntimeError::EmptyArgv) => Err(IpcError::new(
             IpcErrorCode::ArgvInvalid,
             "argv must not be empty",

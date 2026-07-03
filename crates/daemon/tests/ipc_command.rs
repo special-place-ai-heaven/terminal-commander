@@ -393,6 +393,84 @@ fn shell_exec_denied_on_default_profile_maps_to_policy_denied() {
     });
 }
 
+/// US8 (FR-060): under `allow_shell=true` the WSL nested-shell gate does NOT
+/// deny -- the payload runs and the command-start audit row carries the
+/// classification tag (`"nested_shell": "bash"`), with the reason noting it.
+/// wsl.exe does not exist on the Linux test host, so the spawn fails with
+/// ProgramNotFound; the tagged command_start row is written regardless.
+#[test]
+fn wsl_nested_shell_allowed_and_audit_tagged_under_allow_shell_true() {
+    use terminal_commanderd::{CommandError, CommandStartRequest, PolicyCapsSection};
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("wsl-allow-tag");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.caps = Some(PolicyCapsSection {
+            allow_shell: true,
+            ..Default::default()
+        });
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let req = CommandStartRequest {
+            argv: vec![
+                "wsl.exe".to_owned(),
+                "-e".to_owned(),
+                "bash".to_owned(),
+                "-lc".to_owned(),
+                "echo hi".to_owned(),
+            ],
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            strip_ansi: true,
+            peer_discriminator: None,
+        };
+        let res = state.command.start_combed(req);
+        assert!(
+            !matches!(
+                res,
+                Err(CommandError::WslNestedShellDenied { .. }
+                    | CommandError::ShellInterpreterDenied(_)
+                    | CommandError::PolicyDenied(_))
+            ),
+            "allow_shell=true must not deny the nested shell: {res:?}"
+        );
+
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        let tagged = rows
+            .iter()
+            .find(|r| {
+                r.action == "command_start"
+                    && r.metadata_json
+                        .as_deref()
+                        .is_some_and(|m| m.contains("nested_shell"))
+            })
+            .expect("a command_start row tagged with nested_shell");
+        assert!(
+            tagged
+                .metadata_json
+                .as_deref()
+                .unwrap_or_default()
+                .contains("bash"),
+            "nested_shell tag must name the interpreter: {:?}",
+            tagged.metadata_json
+        );
+        assert!(
+            tagged
+                .reason
+                .as_deref()
+                .is_some_and(|s| s.contains("nested_shell")),
+            "reason must note the classification: {:?}",
+            tagged.reason
+        );
+        cleanup(&data);
+    });
+}
+
 #[test]
 fn command_start_combed_rejects_empty_argv_with_typed_error() {
     let runtime = rt();
