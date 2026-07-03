@@ -150,9 +150,14 @@ async fn ac13_idle_pull_over_mcp_is_success_empty_plus_liveness_not_32603() {
                 .is_some_and(std::vec::Vec::is_empty),
             "idle pull returns empty events: {pull_payload}"
         );
+        // US4 / FR-031: the adapter requests the liveness delta, so on a
+        // `sources: all` sub with NO in-scope buckets the section is legitimately
+        // OMITTED (an empty delta). When present it is still an array.
         assert!(
-            pull_v["liveness"].is_array(),
-            "idle pull returns a liveness array: {pull_payload}"
+            pull_v
+                .get("liveness")
+                .is_none_or(serde_json::Value::is_array),
+            "liveness, when present, is an array: {pull_payload}"
         );
 
         // A near-server-cap idle pull (close to 8 s) must STILL be SUCCESS,

@@ -490,6 +490,7 @@ pub async fn pull(
     sub_id: Uuid,
     max: usize,
     timeout: Duration,
+    liveness_delta: bool,
 ) -> Result<PullOutcome, IpcError> {
     let cap = if max == 0 {
         DEFAULT_PULL_MAX
@@ -535,8 +536,9 @@ pub async fn pull(
         // return idle + liveness (no ceil(max/0)).
         if n == 0 {
             tokio::time::sleep_until(deadline).await;
+            let liveness = resolve_liveness_delta(state, sub_id, Vec::new(), liveness_delta);
             mark_pulled(state, sub_id);
-            return Ok(PullOutcome::idle(Vec::new(), false, scope.truncated));
+            return Ok(PullOutcome::idle(liveness, false, scope.truncated));
         }
 
         // Build FRESH notified() futures and enable() them to enroll the
@@ -552,6 +554,7 @@ pub async fn pull(
         let drained = drain_fair(state, &scope, &mut offsets, &predicate, cap)?;
         if !drained.events.is_empty() {
             let liveness = liveness_for(state, &scope);
+            let liveness = resolve_liveness_delta(state, sub_id, liveness, liveness_delta);
             commit(state, sub_id, &offsets, drained.next_rr);
             return Ok(PullOutcome {
                 events: drained.events,
@@ -565,6 +568,7 @@ pub async fn pull(
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             let liveness = liveness_for(state, &scope);
+            let liveness = resolve_liveness_delta(state, sub_id, liveness, liveness_delta);
             // No new events, but a clamp may have flagged lag.
             commit(state, sub_id, &offsets, scope.rr_start);
             mark_pulled(state, sub_id);
@@ -574,6 +578,7 @@ pub async fn pull(
         if tokio::time::timeout(remaining, any).await.is_err() {
             // (6) timeout -> idle + liveness.
             let liveness = liveness_for(state, &scope);
+            let liveness = resolve_liveness_delta(state, sub_id, liveness, liveness_delta);
             commit(state, sub_id, &offsets, scope.rr_start);
             mark_pulled(state, sub_id);
             return Ok(PullOutcome::idle(liveness, drained.lagged, scope.truncated));
@@ -616,4 +621,46 @@ fn mark_pulled(state: &Arc<DaemonState>, sub_id: Uuid) {
     let _ = state.subscriptions.with_sub_mut(sub_id, |s| {
         s.last_pull_at = Some(std::time::SystemTime::now());
     });
+}
+
+/// Resolve the liveness a pull should report (US4 / FR-031).
+///
+/// With `delta` false, return the full snapshot unchanged (byte-identical
+/// legacy behavior). With `delta` true, atomically — under one `with_sub_mut`,
+/// the same lock the offset commit uses — diff `full` against the
+/// subscription's stored `last_liveness`, overwrite the map with `full`, and
+/// return ONLY the changed entries. An empty stored map (a subscription's first
+/// pull, or the pull right after a seek clears it) is the baseline case: every
+/// entry counts as changed, so the full snapshot is returned. The read-diff-
+/// write is a single critical section, so a transition observed by this pull is
+/// recorded before the next pull runs — no transition is skippable, and a
+/// delivered transition is not repeated.
+///
+/// If the subscription was closed mid-pull the map cannot be recorded; the full
+/// snapshot is returned rather than hiding liveness.
+fn resolve_liveness_delta(
+    state: &Arc<DaemonState>,
+    sub_id: Uuid,
+    full: Vec<SourceLiveness>,
+    delta: bool,
+) -> Vec<SourceLiveness> {
+    if !delta {
+        return full;
+    }
+    state
+        .subscriptions
+        .with_sub_mut(sub_id, |s| {
+            let baseline = s.last_liveness.is_empty();
+            let changed: Vec<SourceLiveness> = full
+                .iter()
+                .filter(|e| baseline || s.last_liveness.get(&e.bucket_id) != Some(&e.liveness))
+                .cloned()
+                .collect();
+            s.last_liveness = full
+                .iter()
+                .map(|e| (e.bucket_id, e.liveness.clone()))
+                .collect();
+            changed
+        })
+        .unwrap_or(full)
 }

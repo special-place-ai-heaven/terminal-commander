@@ -1407,6 +1407,7 @@ mod tests {
                 sub_id: "x".to_owned(),
                 max: None,
                 timeout_ms: None,
+                liveness_delta: false,
             }),
             IpcRequest::SubscriptionList(SubscriptionListParams { limit: None }),
             IpcRequest::SubscriptionClose(SubscriptionCloseParams {

@@ -1615,9 +1615,12 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpBucketEventsSinceParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
+        let compact = params.compact;
         let ipc = params.into_ipc().map_err(invalid_params)?;
         match self.daemon.call(IpcRequest::BucketEventsSince(ipc)).await {
-            Ok(IpcResponse::BucketEventsSince(r)) => json_tool_result(&bucket_events_payload(&r)),
+            Ok(IpcResponse::BucketEventsSince(r)) => {
+                json_tool_result(&bucket_events_payload(&r, compact))
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
@@ -1632,9 +1635,10 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpBucketWaitParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
+        let compact = params.compact;
         let ipc = params.into_ipc().map_err(invalid_params)?;
         match self.daemon.call(IpcRequest::BucketWait(ipc)).await {
-            Ok(IpcResponse::BucketWait(r)) => json_tool_result(&bucket_wait_payload(&r)),
+            Ok(IpcResponse::BucketWait(r)) => json_tool_result(&bucket_wait_payload(&r, compact)),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
@@ -2727,6 +2731,11 @@ impl TerminalCommanderMcpServer {
             sub_id: params.sub_id,
             max: params.max,
             timeout_ms: params.timeout_ms,
+            // US4 / FR-031: the adapter ALWAYS requests the liveness delta --
+            // the agent-facing token saving IS the feature (SC-004). The daemon
+            // sends the full snapshot on the first pull and after a seek, then
+            // only changed entries.
+            liveness_delta: true,
         };
         // Route through the dedicated long-poll client: an idle ~8 s pull on the
         // default 5 s client would surface a -32603 (AC13 / MUST-ADD #7).
@@ -2770,12 +2779,18 @@ impl TerminalCommanderMcpServer {
                         })
                         .await;
                 }
-                json_tool_result(&serde_json::json!({
+                // US4 / FR-031: include the liveness section ONLY when the delta
+                // is non-empty (first pull after open/seek = full snapshot;
+                // steady idle = omitted). This is the agent-facing byte saving.
+                let mut payload = serde_json::json!({
                     "events": events,
-                    "liveness": liveness,
                     "lagged": lagged,
                     "truncated": truncated,
-                }))
+                });
+                if !liveness.is_empty() {
+                    payload["liveness"] = serde_json::json!(liveness);
+                }
+                json_tool_result(&payload)
             }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
@@ -4576,6 +4591,12 @@ pub struct McpBucketEventsSinceParams {
     #[serde(default, deserialize_with = "de_opt_usize_lenient")]
     #[schemars(with = "usize")]
     pub limit: Option<usize>,
+    /// When true, each returned signal is projected to the load-bearing field
+    /// set `{summary, stream, seq, severity}` and the payload echoes
+    /// `compact: true`. Presentation only: the full records stay re-fetchable
+    /// by re-reading the same cursor with `compact` omitted.
+    #[serde(default)]
+    pub compact: bool,
 }
 
 impl McpBucketEventsSinceParams {
@@ -4616,6 +4637,12 @@ pub struct McpBucketWaitParams {
     #[serde(default, deserialize_with = "de_opt_u64_lenient")]
     #[schemars(with = "u64")]
     pub timeout_ms: Option<u64>,
+    /// When true, each returned signal is projected to the load-bearing field
+    /// set `{summary, stream, seq, severity}` and the payload echoes
+    /// `compact: true`. Presentation only: the full records stay re-fetchable
+    /// by re-reading the same cursor with `compact` omitted.
+    #[serde(default)]
+    pub compact: bool,
 }
 
 impl McpBucketWaitParams {
@@ -4720,26 +4747,58 @@ fn command_output_tail_payload(r: &CommandOutputTailResponse) -> serde_json::Val
     })
 }
 
-fn bucket_events_payload(r: &BucketEventsSinceResponse) -> serde_json::Value {
-    serde_json::json!({
+fn bucket_events_payload(r: &BucketEventsSinceResponse, compact: bool) -> serde_json::Value {
+    let mut payload = serde_json::json!({
         "bucket_id": r.bucket_id,
         "cursor_in": r.cursor_in,
         "next_cursor": r.next_cursor,
         "has_more": r.has_more,
         "dropped_count": r.dropped_count,
-        "events": r.events,
-    })
+        "events": project_events(&r.events, compact),
+    });
+    // FR-030: echo `compact:true` ONLY when set, so a full read stays
+    // byte-identical to today's payload.
+    if compact {
+        payload["compact"] = serde_json::json!(true);
+    }
+    payload
 }
 
-fn bucket_wait_payload(r: &BucketWaitResponse) -> serde_json::Value {
-    serde_json::json!({
+fn bucket_wait_payload(r: &BucketWaitResponse, compact: bool) -> serde_json::Value {
+    let mut payload = serde_json::json!({
         "bucket_id": r.bucket_id,
         "cursor_in": r.cursor_in,
         "next_cursor": r.next_cursor,
         "heartbeat": r.heartbeat,
         "dropped_count": r.dropped_count,
-        "events": r.events,
-    })
+        "events": project_events(&r.events, compact),
+    });
+    // FR-030: echo `compact:true` ONLY when set, so a full read stays
+    // byte-identical to today's payload.
+    if compact {
+        payload["compact"] = serde_json::json!(true);
+    }
+    payload
+}
+
+/// Project a bucket read's signals for the wire: full records by default, or
+/// the load-bearing compact set (FR-030) when `compact` is set. Shared by
+/// `bucket_wait` and `bucket_events_since` so both echo the identical shape
+/// `run_and_watch` established.
+fn project_events(
+    events: &[terminal_commander_core::SignalEvent],
+    compact: bool,
+) -> serde_json::Value {
+    if compact {
+        serde_json::json!(
+            events
+                .iter()
+                .map(project_signal_compact)
+                .collect::<Vec<_>>()
+        )
+    } else {
+        serde_json::json!(events)
+    }
 }
 
 fn bucket_summary_payload(s: &BucketSummaryResponse) -> serde_json::Value {

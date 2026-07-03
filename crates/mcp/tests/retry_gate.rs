@@ -175,6 +175,7 @@ async fn subscription_pull_is_not_resent_on_transport_failure() {
         sub_id: "sub-1".to_owned(),
         max: None,
         timeout_ms: None,
+        liveness_delta: false,
     });
     let result = client.call(req).await;
     assert!(result.is_err(), "transport error expected");

@@ -2640,6 +2640,12 @@ pub struct SubscriptionPullParams {
     /// [`DEFAULT_PULL_TIMEOUT_MS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// When true, `liveness` in the response carries only entries whose state
+    /// changed since the last pull (full snapshot on a subscription's first
+    /// pull and after any seek). Default false = today's full-array behavior,
+    /// byte-identical for existing callers.
+    #[serde(default)]
+    pub liveness_delta: bool,
 }
 
 /// `subscription_pull` response. Idle = empty `events` + liveness (never
@@ -3124,6 +3130,7 @@ mod tests {
                     sub_id: "s".to_owned(),
                     max: None,
                     timeout_ms: None,
+                    liveness_delta: false,
                 }),
                 false,
             ),
@@ -3304,6 +3311,7 @@ mod tests {
                 sub_id: "s".to_owned(),
                 max: None,
                 timeout_ms: None,
+                liveness_delta: false,
             })
             .is_idempotent(),
             "SubscriptionPull must be non-idempotent: per-consumer offsets are \
@@ -3497,6 +3505,7 @@ mod tests {
             sub_id: "sub-1".to_owned(),
             max: Some(25),
             timeout_ms: Some(3_000),
+            liveness_delta: true,
         };
         let req = IpcRequest::SubscriptionPull(params);
         let back: IpcRequest = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
@@ -3505,6 +3514,7 @@ mod tests {
                 assert_eq!(p.sub_id, "sub-1");
                 assert_eq!(p.max, Some(25));
                 assert_eq!(p.timeout_ms, Some(3_000));
+                assert!(p.liveness_delta, "liveness_delta round-trips on the wire");
             }
             other => panic!("unexpected: {other:?}"),
         }

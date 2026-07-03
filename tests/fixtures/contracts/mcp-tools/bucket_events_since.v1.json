@@ -22,7 +22,7 @@
     "consumed_by": [
       "TC45"
     ],
-    "note": "Daemon-backed cursor read. Success returns structured events and cursor metadata; it is not a raw stdout/stderr reader. TB-8: the cursor param description teaches the pagination protocol (pass 0 on the first call, then the next_cursor from the previous response) and bucket_id carries a bkt_<32hex> format note so the first call succeeds."
+    "note": "Daemon-backed cursor read. Success returns structured events and cursor metadata; it is not a raw stdout/stderr reader. TB-8: the cursor param description teaches the pagination protocol (pass 0 on the first call, then the next_cursor from the previous response) and bucket_id carries a bkt_<32hex> format note so the first call succeeds. US4/FR-030: the optional compact flag (default false) projects each returned signal to the load-bearing field set {summary, stream, seq, severity} and echoes compact:true; the full records stay re-fetchable by re-reading the same cursor with compact omitted, and compact never changes which events match."
   },
   "response_example": {
     "bucket_id": "bkt_018f0000000000000000000000000001",
@@ -80,6 +80,7 @@
     "cursor description teaches pass-0-then-next_cursor pagination (TB-8)",
     "bucket_id description carries the bkt_ opaque-id format note (TB-8)",
     "events are structured signal events, not raw terminal streams",
-    "next_cursor is the cursor clients should persist"
+    "next_cursor is the cursor clients should persist",
+    "US4/FR-030: compact:true projects signals to {summary,stream,seq,severity} and echoes compact:true; compact omitted is byte-identical and full records stay re-fetchable by the same cursor"
   ]
 }

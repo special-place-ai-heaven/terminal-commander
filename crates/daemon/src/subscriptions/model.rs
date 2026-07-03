@@ -25,6 +25,7 @@ use std::hash::{Hash, Hasher};
 use std::time::SystemTime;
 
 use terminal_commander_core::{BucketId, JobId, ProbeId, Severity};
+use terminal_commander_ipc::Liveness;
 
 use super::source::BucketSource;
 
@@ -209,6 +210,12 @@ pub struct Subscription {
     /// `None` until the first pull; reused while the epoch is unchanged so a
     /// `sources: all` pull does not re-scan every ever-created bucket.
     pub cached_scope: Option<CachedScope>,
+    /// Last full per-bucket liveness snapshot this consumer was shown. Empty
+    /// until the first delta pull and after any seek (both force a fresh
+    /// baseline). Written on every delta pull at the same point offsets
+    /// advance, so `liveness_delta` sends a transition in exactly the next
+    /// pull. Unused (but always maintained) when the flag is off.
+    pub last_liveness: HashMap<BucketId, Liveness>,
 }
 
 impl Subscription {
@@ -226,6 +233,7 @@ impl Subscription {
             last_pull_at: None,
             rr_start: 0,
             cached_scope: None,
+            last_liveness: HashMap::new(),
         }
     }
 }

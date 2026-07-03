@@ -351,6 +351,9 @@ fn run_subscription_stream(sub_id: &str, max: Option<usize>) -> std::process::Ex
                     // Block up to the server cap so the loop returns promptly on a
                     // match and re-arms the daemon's Notify on the next iteration.
                     timeout_ms: Some(8_000),
+                    // Full liveness on the CLI stream (byte-identical); the
+                    // delta projection is an MCP-adapter concern (US4).
+                    liveness_delta: false,
                 });
             let resp = ipc::connect_or_unavailable_with_timeout(corr, req, pull_timeout).await;
             corr = corr.wrapping_add(1);
@@ -453,6 +456,7 @@ fn run_subscription_pull(
             sub_id: sub_id.to_owned(),
             max,
             timeout_ms: Some(server_timeout_ms),
+            liveness_delta: false,
         });
         let pull = match ipc::connect_or_unavailable_with_timeout(1, req, client_timeout).await {
             Ok(IpcResponse::SubscriptionPull(p)) => p,
