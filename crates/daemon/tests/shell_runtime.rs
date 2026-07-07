@@ -15,15 +15,12 @@
 //!        -> command_shell_start audit + shared spawn core
 //! ```
 //!
-//! Caps wiring note: `DaemonState::bootstrap` now threads
+//! Caps wiring note: `DaemonState::bootstrap` threads
 //! `config.resolved_caps()` into the engine via `with_config_caps` (TC49
-//! Task 6, `state.rs`). To exercise the cap-ON path here deterministically
-//! WITHOUT switching the whole bootstrapped profile, `caps_command_runtime`
-//! reuses a bootstrapped state's wired Arcs (router / rings / jobs / audit /
-//! activation / sources) but builds a SEPARATE `CommandRuntime` whose policy
-//! engine has `allow_shell` flipped on via `PolicyEngine::with_config_caps`.
-//! The default-deny test goes through the real bootstrapped `state.command`
-//! (default config, caps off), proving the default surface stays safe.
+//! Task 6, `state.rs`). The default test goes through the real bootstrapped
+//! `state.command`, proving `developer_local` grants one-shot shell out of
+//! the box. The explicit cap test still uses `caps_command_runtime` to prove
+//! the lower-level cap path works independently.
 
 #![cfg(unix)]
 
@@ -84,24 +81,23 @@ fn caps_command_runtime(
     ))
 }
 
-/// Default profile (`developer_local`), caps OFF: the shell lane must be
-/// denied by `CommandShellStart` -> `PolicyDenied`. This goes through the
-/// REAL bootstrapped command runtime, proving the default surface is safe.
+/// Default profile (`developer_local`): the shell lane is available out of
+/// the box and still returns only a combed job id.
 #[test]
-fn shell_exec_denied_default_profile() {
+fn shell_exec_runs_pipeline_by_default() {
     let runtime = rt();
     runtime.block_on(async {
-        let data = tmp_data_dir("deny-default");
+        let data = tmp_data_dir("pipeline-default");
         let cfg = DaemonConfig::defaults_in(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let shell = ShellRuntime::new(Arc::clone(&state.command));
-        let err = shell
+        let resp = shell
             .exec(ShellExecRequest::line("echo a | wc -c"))
-            .unwrap_err();
+            .expect("pipeline must spawn on the default developer_local profile");
         assert!(
-            matches!(err, CommandError::PolicyDenied(_)),
-            "expected PolicyDenied, got: {err:?}"
+            !resp.job_id.to_wire_string().is_empty(),
+            "spawned job must carry a non-empty job id"
         );
 
         cleanup(&data);

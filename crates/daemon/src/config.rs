@@ -215,7 +215,8 @@ pub struct PolicySection {
     /// three probe-creating ops via `PolicyAction::ProbeCreate`.
     #[serde(default)]
     pub probes: Option<PolicyProbesSection>,
-    /// `[policy.caps]` block (Hybrid trust model). Optional; absent == all false.
+    /// `[policy.caps]` block (Hybrid trust model). Optional grants overlaid on
+    /// the profile defaults; false entries do not revoke profile presets.
     #[serde(default)]
     pub caps: Option<PolicyCapsSection>,
 }
@@ -462,19 +463,14 @@ impl DaemonConfig {
     /// plus explicit `[policy.caps]`, not `full_access`.
     #[must_use]
     pub fn resolved_caps(&self) -> PolicyCaps {
-        let base: PolicyCaps = self
+        let defaults = PolicyCaps::default_for_profile(self.policy.profile);
+        let configured = self
             .policy
             .caps
             .as_ref()
             .map(PolicyCaps::from)
             .unwrap_or_default();
-        let full = matches!(self.policy.profile, PolicyProfile::FullAccess);
-        PolicyCaps {
-            allow_shell: base.allow_shell || full,
-            allow_session: base.allow_session || full,
-            allow_privileged: base.allow_privileged || full,
-            allow_remote: base.allow_remote || full,
-        }
+        defaults.union(configured)
     }
 
     /// Resolve the database path. Always `<data_dir>/terminal-commander.db`.
@@ -966,6 +962,17 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn developer_local_profile_presets_allow_shell_true() {
+        let toml = "[daemon]\ndata_dir = \"/tmp/tc-dev-shell\"\n";
+        let cfg = DaemonConfig::from_toml(toml).expect("parse developer_local defaults");
+        let caps = cfg.resolved_caps();
+        assert!(caps.allow_shell);
+        assert!(!caps.allow_session);
+        assert!(!caps.allow_privileged);
+        assert!(!caps.allow_remote);
+    }
+
     fn full_access_profile_presets_all_caps_true() {
         let toml = "[daemon]\ndata_dir = \"/tmp/tc-fa\"\n[policy]\nprofile = \"full_access\"\n";
         let cfg = DaemonConfig::from_toml(toml).expect("parse full_access");

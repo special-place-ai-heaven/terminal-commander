@@ -342,22 +342,19 @@ fn command_start_combed_denied_when_probe_kind_denied() {
     });
 }
 
-/// TC49 shell-lane round-trip: on the default `developer_local` profile
-/// (caps off), `shell_exec` is denied by the `CommandShellStart` policy
-/// gate. The denial MUST surface as [`IpcErrorCode::PolicyDenied`] -- NOT
-/// [`IpcErrorCode::ShellInterpreterDenied`] (WI-1): the shell lane SKIPS
-/// the `SHELL_INTERPRETERS_DENY` guard, so it can never produce that code.
-/// The runtime records a `command_shell_rejected` deny row (the shell
-/// lane's label), never the argv lane's `command_rejected`.
+/// TC49 shell-lane round-trip: on the default `developer_local` profile,
+/// `shell_exec` is allowed and returns the same bounded command-start response
+/// shape as the argv lane. It records a `command_shell_start` allow row and
+/// never routes through the argv lane's `command_rejected` path.
 #[test]
-fn shell_exec_denied_on_default_profile_maps_to_policy_denied() {
+fn shell_exec_allowed_on_default_profile_returns_combed_start() {
     let runtime = rt();
     runtime.block_on(async {
-        let data = tmp_data_dir("shellexec-deny");
+        let data = tmp_data_dir("shellexec-default");
         let (state, handle) = build_server(&data);
         let client = DaemonClient::new(handle.socket_path().to_path_buf());
 
-        let err = client
+        let resp = client
             .call(
                 21,
                 IpcRequest::ShellExec(ShellExecParams {
@@ -371,28 +368,27 @@ fn shell_exec_denied_on_default_profile_maps_to_policy_denied() {
                 }),
             )
             .await
-            .expect_err("shell_exec must be denied when allow_shell cap is off");
+            .expect("shell_exec should run on default developer_local");
 
-        assert_eq!(
-            err.code,
-            IpcErrorCode::PolicyDenied,
-            "shell-lane denial must map to PolicyDenied, got {:?}: {}",
-            err.code,
-            err.message
-        );
-        assert_ne!(
-            err.code,
-            IpcErrorCode::ShellInterpreterDenied,
-            "the shell lane skips SHELL_INTERPRETERS_DENY; it can NEVER \
-             produce ShellInterpreterDenied (WI-1)"
-        );
+        match resp {
+            IpcResponse::CommandStartCombed(start) => {
+                assert!(
+                    !start.job_id.to_wire_string().is_empty(),
+                    "shell_exec must return a non-empty job_id"
+                );
+            }
+            other => panic!("unexpected shell_exec response: {other:?}"),
+        }
 
         let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
             rows.iter()
-                .any(|r| r.action == "command_shell_rejected" && r.decision == "deny"),
-            "shell-lane deny must record a command_shell_rejected row (not the \
-             argv lane's command_rejected); rows: {rows:?}"
+                .any(|r| r.action == "command_shell_start" && r.decision == "allow"),
+            "shell-lane allow must record a command_shell_start row; rows: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r.action != "command_rejected"),
+            "shell_exec must not route through the argv lane's command_rejected row; rows: {rows:?}"
         );
 
         handle.shutdown().await;

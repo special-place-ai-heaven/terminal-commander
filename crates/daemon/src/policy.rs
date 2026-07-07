@@ -82,9 +82,9 @@ pub enum PolicyAction<'a> {
         cwd: &'a Path,
     },
     /// Shell-lane start (TC49). `shell_line` is the dedicated shell string;
-    /// argv[0] is NOT a user-chosen interpreter here. Gated by `allow_shell`.
-    /// NOTE: `COMMANDS_DENY` is argv[0]-only and deliberately does NOT scan
-    /// `shell_line` (accepted residual risk, Decision 1).
+    /// argv[0] is NOT a user-chosen interpreter here. Gated by `allow_shell`,
+    /// after command positions in `shell_line` are checked against
+    /// `COMMANDS_DENY`.
     CommandShellStart {
         shell_line: &'a str,
         cwd: &'a Path,
@@ -161,6 +161,46 @@ pub struct PolicyCaps {
     pub allow_remote: bool,
 }
 
+impl PolicyCaps {
+    /// Built-in capability grants for a profile before TOML overlays.
+    ///
+    /// Cap entries are grants: explicit config can add capabilities, while
+    /// profile defaults keep zero-config behavior usable.
+    pub const fn default_for_profile(profile: PolicyProfile) -> Self {
+        match profile {
+            PolicyProfile::DeveloperLocal => Self {
+                allow_shell: true,
+                allow_session: false,
+                allow_privileged: false,
+                allow_remote: false,
+            },
+            PolicyProfile::FullAccess => Self {
+                allow_shell: true,
+                allow_session: true,
+                allow_privileged: true,
+                allow_remote: true,
+            },
+            PolicyProfile::RepoOnly
+            | PolicyProfile::ReadOnlyObserver
+            | PolicyProfile::AdminDebug => Self {
+                allow_shell: false,
+                allow_session: false,
+                allow_privileged: false,
+                allow_remote: false,
+            },
+        }
+    }
+
+    pub const fn union(self, grants: Self) -> Self {
+        Self {
+            allow_shell: self.allow_shell || grants.allow_shell,
+            allow_session: self.allow_session || grants.allow_session,
+            allow_privileged: self.allow_privileged || grants.allow_privileged,
+            allow_remote: self.allow_remote || grants.allow_remote,
+        }
+    }
+}
+
 /// The seven binaries that are denied across every profile per the
 /// PRIVILEGE_MODEL.md headline invariant.
 pub const COMMANDS_DENY: &[&str] = &[
@@ -172,6 +212,207 @@ pub const COMMANDS_DENY: &[&str] = &[
     "polkit-agent",
     "polkit-auth-agent-1",
 ];
+
+const SHELL_COMMAND_PREFIX_WORDS: &[&str] = &["command", "exec", "env", "nohup", "time"];
+
+fn denied_command_basename(command: &str) -> Option<&'static str> {
+    let basename = command
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(command);
+    COMMANDS_DENY
+        .iter()
+        .copied()
+        .find(|denied| *denied == basename)
+}
+
+fn shell_word_is_assignment(word: &str) -> bool {
+    let Some((name, _value)) = word.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn finish_shell_word(
+    word: &mut String,
+    expect_command: &mut bool,
+    prefix_active: &mut bool,
+    skip_redirect_target: &mut bool,
+) -> Option<&'static str> {
+    if word.is_empty() {
+        return None;
+    }
+    let current = std::mem::take(word);
+    if *skip_redirect_target {
+        *skip_redirect_target = false;
+        return None;
+    }
+    if !*expect_command {
+        return None;
+    }
+    if shell_word_is_assignment(&current) {
+        return None;
+    }
+    if let Some(denied) = denied_command_basename(&current) {
+        return Some(denied);
+    }
+    if SHELL_COMMAND_PREFIX_WORDS.contains(&current.as_str()) {
+        *prefix_active = true;
+        return None;
+    }
+    if *prefix_active && current.starts_with('-') {
+        return None;
+    }
+    *expect_command = false;
+    *prefix_active = false;
+    None
+}
+
+fn denied_command_in_shell_line(shell_line: &str) -> Option<&'static str> {
+    let mut chars = shell_line.chars().peekable();
+    let mut word = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut expect_command = true;
+    let mut prefix_active = false;
+    let mut skip_redirect_target = false;
+
+    while let Some(ch) = chars.next() {
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            } else {
+                word.push(ch);
+            }
+            continue;
+        }
+        if in_double {
+            match ch {
+                '"' => in_double = false,
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        word.push(next);
+                    }
+                }
+                '$' if chars.peek().is_some_and(|next| *next == '(') => {
+                    if let Some(denied) = finish_shell_word(
+                        &mut word,
+                        &mut expect_command,
+                        &mut prefix_active,
+                        &mut skip_redirect_target,
+                    ) {
+                        return Some(denied);
+                    }
+                    chars.next();
+                    expect_command = true;
+                    prefix_active = false;
+                }
+                _ => word.push(ch),
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            '#' if word.is_empty() => {
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        expect_command = true;
+                        prefix_active = false;
+                        break;
+                    }
+                }
+            }
+            '\n' | ';' | '|' | '&' | '(' | ')' => {
+                if let Some(denied) = finish_shell_word(
+                    &mut word,
+                    &mut expect_command,
+                    &mut prefix_active,
+                    &mut skip_redirect_target,
+                ) {
+                    return Some(denied);
+                }
+                expect_command = true;
+                prefix_active = false;
+            }
+            '<' | '>' => {
+                if let Some(denied) = finish_shell_word(
+                    &mut word,
+                    &mut expect_command,
+                    &mut prefix_active,
+                    &mut skip_redirect_target,
+                ) {
+                    return Some(denied);
+                }
+                skip_redirect_target = true;
+                if chars
+                    .peek()
+                    .is_some_and(|next| *next == '<' || *next == '>')
+                {
+                    chars.next();
+                }
+                if chars.peek().is_some_and(|next| *next == '&') {
+                    chars.next();
+                }
+            }
+            '0'..='9'
+                if word.is_empty()
+                    && chars
+                        .peek()
+                        .is_some_and(|next| *next == '<' || *next == '>') =>
+            {
+                chars.next();
+                skip_redirect_target = true;
+                if chars.peek().is_some_and(|next| *next == '&') {
+                    chars.next();
+                }
+            }
+            '$' if chars.peek().is_some_and(|next| *next == '(') => {
+                if let Some(denied) = finish_shell_word(
+                    &mut word,
+                    &mut expect_command,
+                    &mut prefix_active,
+                    &mut skip_redirect_target,
+                ) {
+                    return Some(denied);
+                }
+                chars.next();
+                expect_command = true;
+                prefix_active = false;
+            }
+            ch if ch.is_whitespace() => {
+                if let Some(denied) = finish_shell_word(
+                    &mut word,
+                    &mut expect_command,
+                    &mut prefix_active,
+                    &mut skip_redirect_target,
+                ) {
+                    return Some(denied);
+                }
+            }
+            _ => word.push(ch),
+        }
+    }
+
+    finish_shell_word(
+        &mut word,
+        &mut expect_command,
+        &mut prefix_active,
+        &mut skip_redirect_target,
+    )
+}
 
 /// Default-deny sensitive path SUFFIXES (matched as `ends_with`).
 /// Mirrors SECURITY.md section 5 (anchored on README.md:294-297).
@@ -288,13 +529,7 @@ impl PolicyEngine {
                 regexes: Vec::new(),
                 had_compile_error: false,
             },
-            // `PolicyCaps::default()` is not const; spell the all-false set out.
-            caps: PolicyCaps {
-                allow_shell: false,
-                allow_session: false,
-                allow_privileged: false,
-                allow_remote: false,
-            },
+            caps: PolicyCaps::default_for_profile(profile),
             // Probe-kind lists default UNCONFIGURED (empty == not enforced ==
             // allow), matching the path/command allow-list posture. The
             // bootstrap path layers them on with `with_probe_kinds`. `Vec::new`
@@ -352,7 +587,7 @@ impl PolicyEngine {
             watch_allow: GlobList::default(),
             write_allow: GlobList::default(),
             deny_extra: GlobList::default(),
-            caps: PolicyCaps::default(),
+            caps: PolicyCaps::default_for_profile(profile),
             // Probe-kind lists default UNCONFIGURED here too; the bootstrap
             // path layers them on with `with_probe_kinds`.
             probe_allow_kinds: Vec::new(),
@@ -591,9 +826,18 @@ impl PolicyEngine {
         // Shell-lane gate (TC49). Evaluated BEFORE the per-profile match so a
         // single deny-first rule covers every profile: shell_exec is allowed
         // (AllowWithAudit) ONLY on an exec-capable profile with `allow_shell`
-        // on; otherwise denied. NOTE: COMMANDS_DENY is argv[0]-only and does
-        // NOT scan `shell_line` (accepted residual risk, Decision 1).
-        if let PolicyAction::CommandShellStart { .. } = action {
+        // on, and the structural command deny set is scanned against command
+        // positions inside the shell line before any allow verdict.
+        if let PolicyAction::CommandShellStart { shell_line, .. } = action {
+            if let Some(denied) = denied_command_in_shell_line(shell_line) {
+                return PolicyVerdict {
+                    decision: PolicyDecision::Deny,
+                    reason: format!(
+                        "command '{denied}' is in the closed deny set \
+                         (sudo/doas/su/pkexec/kexec) inside shell_line"
+                    ),
+                };
+            }
             let exec_profile = matches!(
                 self.profile,
                 PolicyProfile::DeveloperLocal
@@ -1115,21 +1359,52 @@ mod tests {
     }
 
     #[test]
-    fn shell_start_denied_by_default() {
-        // developer_local is exec-capable, but caps default all-false, so the
-        // shell lane is denied with no explicit opt-in.
+    fn shell_start_allowed_by_default() {
+        // developer_local is exec-capable and grants one-shot shell by default so
+        // zero-config Terminal Commander can run pipelines and redirects.
         let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
         let v = e.evaluate(&PolicyAction::CommandShellStart {
             shell_line: "echo a | wc -c",
             cwd: Path::new("."),
             shell: "/bin/bash",
         });
-        assert_eq!(v.decision, PolicyDecision::Deny);
-        assert!(
-            v.reason.contains("shell execution denied"),
-            "policy reason must be surface-neutral, got: {}",
-            v.reason
-        );
+        assert_eq!(v.decision, PolicyDecision::AllowWithAudit);
+    }
+
+    #[test]
+    fn shell_start_denies_structural_commands_in_shell_line() {
+        let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
+        for shell_line in [
+            "echo x | sudo tee /tmp/out",
+            "/usr/bin/pkexec id",
+            "PATH=/usr/bin env -i sudo id",
+            "echo $(doas id)",
+        ] {
+            let v = e.evaluate(&PolicyAction::CommandShellStart {
+                shell_line,
+                cwd: Path::new("."),
+                shell: "/bin/bash",
+            });
+            assert_eq!(v.decision, PolicyDecision::Deny, "{shell_line}");
+            assert!(v.reason.contains("inside shell_line"), "{}", v.reason);
+        }
+    }
+
+    #[test]
+    fn shell_start_deny_scan_ignores_data_words_and_redirect_targets() {
+        let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
+        for shell_line in ["echo sudo", "printf '%s\\n' sudo", "echo ok > sudo"] {
+            let v = e.evaluate(&PolicyAction::CommandShellStart {
+                shell_line,
+                cwd: Path::new("."),
+                shell: "/bin/bash",
+            });
+            assert_eq!(
+                v.decision,
+                PolicyDecision::AllowWithAudit,
+                "{shell_line} should not be treated as a denied command"
+            );
+        }
     }
 
     #[test]

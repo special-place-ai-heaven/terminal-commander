@@ -150,8 +150,9 @@ fn policy_status_reports_active_caps() {
                 assert_eq!(p.bucket_read_limit, state.config.limits.bucket_read_limit);
                 assert!(p.commands_deny_count > 0);
                 assert!(p.default_deny_path_suffix_count > 0);
-                // Default base profile carries NO caps: all four read false.
-                assert!(!p.caps.allow_shell, "default profile must not enable shell");
+                // Default developer_local grants one-shot shell, while longer-lived
+                // sessions, privilege elevation, and remote routing remain off.
+                assert!(p.caps.allow_shell, "default profile must enable shell");
                 assert!(!p.caps.allow_session);
                 assert!(!p.caps.allow_privileged);
                 assert!(!p.caps.allow_remote);
