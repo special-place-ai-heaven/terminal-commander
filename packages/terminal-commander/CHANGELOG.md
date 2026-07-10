@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.74](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.73...v0.1.74) (2026-07-10)
+
+
+### Bug Fixes
+
+* clarify compact facade recovery contracts ([#148](https://github.com/special-place-ai-heaven/terminal-commander/issues/148)) ([594f879](https://github.com/special-place-ai-heaven/terminal-commander/commit/594f879afd97ef4a24c0a40c6eaff7807ccb980c))
+
 ## [0.1.73](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.72...v0.1.73) (2026-07-03)
 
 
