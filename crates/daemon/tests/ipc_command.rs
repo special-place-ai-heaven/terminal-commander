@@ -241,6 +241,13 @@ fn command_start_combed_denies_shell_interpreter_and_audits() {
             "error message should name the shell, got: {}",
             err.message
         );
+        assert!(
+            err.message.contains("command")
+                && err.message.contains("action=\"exec\"")
+                && err.message.contains("shell_exec"),
+            "remedy must name both compact and full shell lanes, got: {}",
+            err.message
+        );
 
         let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(

@@ -1265,7 +1265,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint}. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; poll command_status with the returned job_id for the final exit_code/signals — do not treat it as finished. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then poll command_status with the job_id (see recover_hint) — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters denied. Prefer plain shell for tiny one-off commands whose full verbatim output you want."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint}. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters denied. Prefer plain shell for tiny one-off commands whose full verbatim output you want."
     )]
     async fn run_and_watch(
         &self,
@@ -2873,11 +2873,13 @@ impl TerminalCommanderMcpServer {
     /// `command` -- run + observe + stream a one-shot command (compact surface).
     #[tool(
         name = "command",
-        description = "Run and observe a one-shot command. To run a command and \
-get its result in ONE call, use action=\"run_and_watch\" (it does start + bounded \
-wait + collect for you). Other actions: run, exec, status, output_tail, stop, \
-events, wait, summary, event_context, sub_open, sub_pull, sub_seek, sub_close, \
-sub_list."
+        description = "Run and observe a one-shot command. Key contracts: \
+`run_and_watch`: `argv` + `wait_ms` (default 5,000; max 60,000; not `timeout_ms`). \
+If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` \
+(not `job_id` or `wait_ms`), and check state with `status`: `job_id`. \
+`summary`: `bucket_id` only (no `compact`). `exec`: `shell_line` (policy-gated). \
+Other actions: run, output_tail, stop, events, event_context, sub_open, sub_pull, \
+sub_seek, sub_close, sub_list."
     )]
     pub(crate) async fn command_facade(
         &self,
@@ -2959,7 +2961,8 @@ substring search, atomic write, file-watch start/stop/list, and workspace snapsh
         name = "registry",
         description = "Rule registry: search, get, upsert, test (dry-run), activate, deactivate, \
 list_active, import_pack (25 built-in packs), suggest_from_samples (heuristic DRAFT proposals). \
-Rules comb command output into structured signals."
+`import_pack` requires `pack`; activate=true additionally requires a `scope` object, \
+usually {\"kind\":\"global\"}. Rules comb command output into structured signals."
     )]
     pub(crate) async fn registry_facade(
         &self,
@@ -3402,6 +3405,8 @@ fn run_and_watch_result(
     } else {
         last_observed_state.map_or((false, true), run_and_watch_completion)
     };
+    let recover_hint = recover_hint
+        .or_else(|| (!degraded && wait_exhausted).then_some(RUN_AND_WATCH_WAIT_EXHAUSTED_HINT));
     // State honesty: report the last observed state, or "unknown" when we never
     // got one -- never a silent "running".
     let state_json = last_observed_state.map_or_else(
@@ -4395,10 +4400,12 @@ const MAX_WAIT_SLICE_MS: u64 = 1_000;
 /// rather than busy-spinning. Matches the wait-slice cadence.
 const RUN_AND_WATCH_POLL_HINT_MS: u64 = 1_000;
 
+const RUN_AND_WATCH_WAIT_EXHAUSTED_HINT: &str = "Wait budget exhausted; command is still running. Continue signal collection with command.wait (full surface: bucket_wait) using bucket_id, cursor, and timeout_ms=poll_hint_ms; carry forward next_cursor. Check state/exit_code with command.status (full surface: command_status) using job_id. Do not re-run.";
+
 /// Recovery guidance attached to a degraded `run_and_watch` result (TC-1b).
 /// An IPC error interrupted the wait, but the job is still tracked by the
 /// daemon, so the agent should confirm liveness before polling -- not re-run.
-const RUN_AND_WATCH_RECOVER_HINT: &str = "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with the `health` tool, then poll command_status with this job_id for the final state and signals. Do not re-run the command.";
+const RUN_AND_WATCH_RECOVER_HINT: &str = "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with status action=\"health\" (full surface: health). Then continue signal collection with command.wait (full surface: bucket_wait) using bucket_id, cursor, and timeout_ms=poll_hint_ms; carry forward next_cursor. Check state/exit_code with command.status (full surface: command_status) using job_id. Do not re-run.";
 
 /// [`RUN_AND_WATCH_RECOVER_HINT`] with the underlying error appended. A
 /// daemon-returned code and a transport drop need different recovery, and a
@@ -7004,6 +7011,38 @@ mod tests {
                 "{state:?} returned non-terminal -> wait_exhausted"
             );
         }
+    }
+
+    #[test]
+    fn run_and_watch_wait_exhaustion_teaches_both_resume_identities() {
+        let v = build_run_and_watch_json(
+            Some(terminal_commander_core::JobState::Running),
+            None,
+            false,
+        );
+        assert_eq!(v["complete"], serde_json::json!(false));
+        assert_eq!(v["wait_exhausted"], serde_json::json!(true));
+        assert_eq!(
+            v["recover_hint"],
+            serde_json::json!(
+                "Wait budget exhausted; command is still running. Continue signal collection with command.wait (full surface: bucket_wait) using bucket_id, cursor, and timeout_ms=poll_hint_ms; carry forward next_cursor. Check state/exit_code with command.status (full surface: command_status) using job_id. Do not re-run."
+            )
+        );
+        assert!(
+            v["job_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("job_"))
+        );
+        assert!(
+            v["bucket_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("bkt_"))
+        );
+        assert_eq!(v["cursor"], serde_json::json!(7));
+        assert_eq!(
+            v["poll_hint_ms"],
+            serde_json::json!(RUN_AND_WATCH_POLL_HINT_MS)
+        );
     }
 
     #[test]

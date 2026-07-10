@@ -603,13 +603,15 @@ impl PolicyEngine {
             if exec_profile && self.caps.allow_shell {
                 return PolicyVerdict {
                     decision: PolicyDecision::AllowWithAudit,
-                    reason: "shell_exec allowed by allow_shell capability (audited)".to_owned(),
+                    reason: "shell execution allowed by allow_shell capability (audited)"
+                        .to_owned(),
                 };
             }
             return PolicyVerdict {
                 decision: PolicyDecision::Deny,
-                reason: "shell_exec denied: allow_shell capability is off or profile forbids shell"
-                    .to_owned(),
+                reason:
+                    "shell execution denied: allow_shell capability is off or profile forbids shell"
+                        .to_owned(),
             };
         }
 
@@ -1123,6 +1125,11 @@ mod tests {
             shell: "/bin/bash",
         });
         assert_eq!(v.decision, PolicyDecision::Deny);
+        assert!(
+            v.reason.contains("shell execution denied"),
+            "policy reason must be surface-neutral, got: {}",
+            v.reason
+        );
     }
 
     #[test]

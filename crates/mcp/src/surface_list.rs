@@ -25,11 +25,13 @@ use crate::surface::Surface;
 /// Description for the `command` facade. Kept identical to the `#[tool]`
 /// attribute on `command_facade` in `tools.rs` so the compact-surface entry
 /// matches the router-advertised entry verbatim.
-pub(crate) const COMMAND_FACADE_DESCRIPTION: &str = "Run and observe a one-shot command. To run a command and \
-get its result in ONE call, use action=\"run_and_watch\" (it does start + bounded \
-wait + collect for you). Other actions: run, exec, status, output_tail, stop, \
-events, wait, summary, event_context, sub_open, sub_pull, sub_seek, sub_close, \
-sub_list.";
+pub(crate) const COMMAND_FACADE_DESCRIPTION: &str = "Run and observe a one-shot command. Key contracts: \
+`run_and_watch`: `argv` + `wait_ms` (default 5,000; max 60,000; not `timeout_ms`). \
+If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` \
+(not `job_id` or `wait_ms`), and check state with `status`: `job_id`. \
+`summary`: `bucket_id` only (no `compact`). `exec`: `shell_line` (policy-gated). \
+Other actions: run, output_tail, stop, events, event_context, sub_open, sub_pull, \
+sub_seek, sub_close, sub_list.";
 
 /// Description for the `session` facade.
 pub(crate) const SESSION_FACADE_DESCRIPTION: &str = "PTY commands and persistent shell sessions. To start a PTY command use \
@@ -44,7 +46,8 @@ substring search, atomic write, file-watch start/stop/list, and workspace snapsh
 /// Description for the `registry` facade.
 pub(crate) const REGISTRY_FACADE_DESCRIPTION: &str = "Rule registry: search, get, upsert, test (dry-run), activate, deactivate, \
 list_active, import_pack (25 built-in packs), suggest_from_samples (heuristic DRAFT proposals). \
-Rules comb command output into structured signals.";
+`import_pack` requires `pack`; activate=true additionally requires a `scope` object, \
+usually {\"kind\":\"global\"}. Rules comb command output into structured signals.";
 
 /// Description for the `status` facade.
 pub(crate) const STATUS_FACADE_DESCRIPTION: &str = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
@@ -296,6 +299,27 @@ mod tests {
         );
         // Exactly 5 tools (one per facade).
         assert_eq!(names.len(), 5, "compact surface must have exactly 5 tools");
+    }
+
+    #[test]
+    fn compact_facade_descriptions_teach_action_specific_contracts() {
+        for expected in [
+            "`run_and_watch`: `argv` + `wait_ms`",
+            "`wait`: `bucket_id` + `cursor` + `timeout_ms`",
+            "`summary`: `bucket_id` only",
+            "60,000",
+        ] {
+            assert!(
+                COMMAND_FACADE_DESCRIPTION.contains(expected),
+                "command facade description must contain {expected:?}"
+            );
+        }
+        for expected in ["activate=true", "scope", r#"{"kind":"global"}"#] {
+            assert!(
+                REGISTRY_FACADE_DESCRIPTION.contains(expected),
+                "registry facade description must contain {expected:?}"
+            );
+        }
     }
 
     #[test]

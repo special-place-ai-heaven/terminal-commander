@@ -101,7 +101,8 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
                 "shell interpreter '{shell}' denied; the argv lane is not a shell bridge. \
                  Remedy: invoke the program directly as argv (e.g. [\"cargo\",\"build\"] \
                  instead of [\"{shell}\",\"-c\",\"cargo build\"]); for pipelines/redirects \
-                 use the shell_exec tool, which is gated by the allow_shell policy cap."
+                 use command with action=\"exec\" on the compact MCP surface, or the shell_exec \
+                 tool on the full surface; both are gated by the allow_shell policy cap."
             ),
         ),
         // US8 (FR-060): a shell smuggled through a wsl carrier. Reuses the
@@ -116,8 +117,9 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
                 "shell interpreter '{interpreter}' denied inside a '{carrier}' invocation; \
                  the argv lane is not a shell bridge on either side of the WSL boundary. \
                  Remedy: invoke the Linux program directly ({carrier} -e <program> ...); \
-                 for pipelines/redirects use the shell_exec tool, gated by the allow_shell \
-                 policy cap."
+                 for pipelines/redirects use command with action=\"exec\" on the compact MCP \
+                 surface, or the shell_exec tool on the full surface; both are gated by the \
+                 allow_shell policy cap."
             ),
         ),
         CommandError::EmptyArgv => {
