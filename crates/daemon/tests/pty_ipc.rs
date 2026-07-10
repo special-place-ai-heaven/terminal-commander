@@ -268,6 +268,13 @@ fn pty_wsl_nested_shell_denied_like_argv_lane() {
             .await
             .expect_err("wsl nested shell must be denied on the pty argv lane");
         assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
+        assert!(
+            err.message.contains("command")
+                && err.message.contains("action=\"exec\"")
+                && err.message.contains("shell_exec"),
+            "remedy must name both compact and full shell lanes, got: {}",
+            err.message
+        );
 
         handle.shutdown().await;
         cleanup(&data);
