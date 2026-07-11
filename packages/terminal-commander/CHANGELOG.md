@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.75](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.74...v0.1.75) (2026-07-11)
+
+
+### Bug Fixes
+
+* 2 crate fixes -- harden runtime detection and daemon recovery (+1 more) ([373a13e](https://github.com/special-place-ai-heaven/terminal-commander/commit/373a13eee35e016b71547d912919ed610405d320))
+* harden runtime detection and daemon recovery ([48a699b](https://github.com/special-place-ai-heaven/terminal-commander/commit/48a699bc28c5bf13372ad2f6022c58914f8a7c4b))
+
 ## [0.1.74](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.73...v0.1.74) (2026-07-10)
 
 
