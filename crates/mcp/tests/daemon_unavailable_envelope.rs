@@ -148,6 +148,7 @@ fn minimal_tool_args(tool: &str) -> serde_json::Value {
         "workspace_snapshot_apply" => {
             serde_json::json!({ "snapshot_id": "snap_x", "session_id": "ses_x" })
         }
+        "audit_since" => serde_json::json!({ "cursor": 0 }),
         "bucket_events_since" | "bucket_wait" => {
             serde_json::json!({ "bucket_id": "bkt_x", "cursor": 0 })
         }
@@ -241,8 +242,8 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
         "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
     assert_eq!(
-        checked, 48,
-        "expected 48 daemon-backed tools (50 catalogue entries minus system_discover and target_list)"
+        checked, 49,
+        "expected 49 daemon-backed tools (51 catalogue entries minus system_discover and target_list)"
     );
 
     let _ = client.cancel().await;

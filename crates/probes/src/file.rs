@@ -321,6 +321,14 @@ impl FileProbe {
         self.metrics.lock().clone()
     }
 
+    /// Whether the probe task has reached a terminal state.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.join
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
+
     pub fn cancel(&mut self) {
         if let Some(tx) = self.cancel_tx.take() {
             let _ = tx.send(());
@@ -450,6 +458,15 @@ async fn run(
             Err(e) => return Err(FileProbeError::Io(e)),
             Ok(mut f) => {
                 let meta = f.metadata().await?;
+                if !meta.is_file() {
+                    return Err(FileProbeError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "watched path '{}' is no longer a regular file",
+                            config.path.display()
+                        ),
+                    )));
+                }
                 let size = meta.len();
                 let identity = FileIdentity::capture(&f, &meta);
                 // Initial seek for FollowEnd on first open.
@@ -533,6 +550,7 @@ async fn run(
                             let mut m = metrics.lock();
                             noise_pipeline.process_frame(
                                 &frame,
+                                &terminal_commander_core::SourceType::File,
                                 config.bucket_id,
                                 &runtime,
                                 sink.as_ref(),
@@ -781,7 +799,15 @@ mod tests {
             let m = probe.metrics();
             assert!(m.frames_total >= 2, "frames: {}", m.frames_total);
             assert!(m.events_emitted >= 1, "events: {}", m.events_emitted);
-            assert!(!sink.is_empty());
+            let events = sink.drain();
+            assert!(!events.is_empty());
+            assert!(
+                events
+                    .iter()
+                    .all(|event| event.source.source_type
+                        == terminal_commander_core::SourceType::File),
+                "file probe emitted a non-file source: {events:?}"
+            );
             let _ = std::fs::remove_file(&p);
         });
     }

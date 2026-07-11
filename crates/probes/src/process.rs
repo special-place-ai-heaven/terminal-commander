@@ -759,6 +759,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
             let mut m = metrics.lock();
             pipeline.process_frame(
                 &sift_frame,
+                &terminal_commander_core::SourceType::Process,
                 bucket_id,
                 &runtime,
                 sink.as_ref(),

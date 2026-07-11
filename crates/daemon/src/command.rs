@@ -1276,6 +1276,7 @@ impl CommandRuntime {
             argv: req.argv,
             bucket_id,
             probe_id,
+            source_type: terminal_commander_core::SourceType::Process,
             grace_secs: req
                 .grace
                 .unwrap_or(terminal_commander_probes::DEFAULT_GRACE)
@@ -1567,19 +1568,24 @@ impl CommandRuntime {
             };
             let bucket_id = b.bucket_id;
             // Snapshot the LIVE probe metrics (real frame/byte/event counts),
-            // not the binding's `metrics` field which stays default until exit.
+            // not the binding's terminal aggregate.
             let metrics = b.metrics_live.lock().clone();
-            // Already terminal -> no-op, return the terminal state. (Cosmetic
-            // race window with a natural exit, identical to the PTY design --
-            // documented.)
+            // Already terminal -> no-op. Preserve and return the terminal
+            // aggregate, which includes the synthetic lifecycle event. Replacing
+            // it with the live probe snapshot would drop that event on a
+            // redundant stop.
             if self.jobs.get(job_id).is_some_and(|r| {
                 matches!(
                     r.state,
                     JobState::Exited | JobState::Failed | JobState::Cancelled
                 )
             }) {
-                return Ok((bucket_id, metrics));
+                return Ok((bucket_id, b.metrics.clone()));
             }
+            // `status()` switches to the terminal snapshot as soon as the job
+            // ledger becomes terminal. Publish the live counters before
+            // cancellation so already-observed work cannot disappear.
+            b.metrics = metrics.clone();
             let handle = b.cancel.take();
             // Set Cancelled under the held live lock so the waiter (blocked on
             // live.write) observes terminal and guards out.

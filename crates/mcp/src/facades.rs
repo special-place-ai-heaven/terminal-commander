@@ -117,6 +117,8 @@ pub enum StatusFacadeCall {
     SelfCheck,
     /// Active policy profile + caps. No additional fields required.
     PolicyStatus,
+    /// Bounded cursor read of persistent audit rows.
+    AuditSince(crate::tools::McpAuditSinceParams),
     RuntimeState(McpListLimitParams),
     ProbeList(McpListLimitParams),
     ProbeStatus(McpProbeStatusParams),
@@ -226,6 +228,12 @@ mod tests {
         )
         .expect("probe_status must parse");
         assert!(matches!(v, StatusFacadeCall::ProbeStatus(_)));
+
+        let v: StatusFacadeCall = serde_json::from_value(
+            serde_json::json!({"action":"audit_since","cursor":"42","limit":"10"}),
+        )
+        .expect("audit_since must parse");
+        assert!(matches!(v, StatusFacadeCall::AuditSince(_)));
     }
 
     #[test]

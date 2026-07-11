@@ -17,14 +17,15 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 50 live
+//! [`tool_catalogue`] is the single source of truth for the 51 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry
 //! (including `registry_suggest_from_samples`),
 //! file, PTY, persistent shell sessions + workspace snapshots
 //! (`shell_session_*`, `workspace_snapshot_*`), aggregate runtime views,
 //! predicate-routed subscriptions
-//! (`subscription_open/pull/list/close/seek`), and remote federation
+//! (`subscription_open/pull/list/close/seek`), persistent audit reads
+//! (`audit_since`), and remote federation
 //! (`target_list`, `target_probe`). Each daemon-backed tool maps 1:1 to a
 //! daemon IPC method. `system_discover` and `target_list` are
 //! local-daemon-independent (they answer from adapter-side state); every
@@ -37,7 +38,7 @@
 //! (constitution IV: no public TCP; constitution I: the adapter never
 //! spawns -- the `ssh -L` tunnel is the OPERATOR's, not ours).
 //!
-//! Source-status: live; all 50 tools forward through daemon IPC.
+//! Source-status: live; all 51 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -148,6 +149,11 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "self_check",
             status: ToolStatus::Live,
             description: "Re-run the daemon self-check; bounded text report.",
+        },
+        ToolCatalogueEntry {
+            name: "audit_since",
+            status: ToolStatus::Live,
+            description: "Cursor read of the daemon-global persistent audit trail, including operation subjects/paths. Bounded; exact action and decision filters supported.",
         },
         ToolCatalogueEntry {
             name: "command_start_combed",
@@ -2645,6 +2651,28 @@ impl TerminalCommanderMcpServer {
         }
     }
 
+    /// `audit_since` — bounded cursor read of the persistent audit trail.
+    #[tool(
+        description = "Read daemon-global persistent audit rows after a cursor, including operation subjects/paths from other clients of this daemon. Read-only and bounded. Omit cursor (or pass 0) first, then reuse next_cursor; optional exact action_filter and decision_filter narrow results."
+    )]
+    async fn audit_since(
+        &self,
+        Parameters(params): Parameters<McpAuditSinceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = terminal_commanderd::ipc::protocol::AuditSinceParams {
+            cursor: params.cursor.unwrap_or(0),
+            action_filter: params.action_filter,
+            decision_filter: params.decision_filter,
+            limit: params.limit,
+        };
+        match self.daemon.call(IpcRequest::AuditSince(ipc)).await {
+            Ok(IpcResponse::AuditSince(response)) => json_tool_result(&response),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(error) => Err(into_mcp_error(&error)),
+        }
+    }
+
     /// `probe_list` — flat list of every live probe.
     #[tool(
         description = "Flat list of every live probe across command / pty / file-watch runtimes."
@@ -2985,12 +3013,12 @@ usually {\"kind\":\"global\"}. Rules comb command output into structured signals
         }
     }
 
-    /// `status` facade — health, policy, runtime state, probes, targets.
+    /// `status` facade — health, policy, audit, runtime state, probes, targets.
     #[tool(
         name = "status",
         description = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
-policy_status, runtime_state (aggregate snapshot), probe_list, probe_status, system_discover, \
-target_list, target_probe."
+policy_status, audit_since (daemon-global operation metadata; optional cursor/action_filter/decision_filter/limit), runtime_state \
+(aggregate snapshot), probe_list, probe_status, system_discover, target_list, target_probe."
     )]
     pub(crate) async fn status_facade(
         &self,
@@ -3001,6 +3029,7 @@ target_list, target_probe."
             St::Health => self.health().await,
             St::SelfCheck => self.self_check().await,
             St::PolicyStatus => self.policy_status().await,
+            St::AuditSince(p) => self.audit_since(Parameters(p)).await,
             St::RuntimeState(p) => self.runtime_state(Parameters(p)).await,
             St::ProbeList(p) => self.probe_list(Parameters(p)).await,
             St::ProbeStatus(p) => self.probe_status(Parameters(p)).await,
@@ -3015,7 +3044,7 @@ target_list, target_probe."
 // the `tools/list` and `tools/call` paths can honor `TC_SURFACE`:
 //   - `list_tools` advertises the compact facade(s) under `TC_SURFACE=compact`,
 //     else the unchanged granular tools (with facade names filtered OUT so the
-//     full surface stays EXACTLY the 50 legacy tools).
+//     full surface stays EXACTLY the 51 granular tools).
 //   - `call_tool` runs the admission gate, then delegates to the SAME router
 //     the macro used (`ToolCallContext` + `self.tool_router.call`).
 //   - `get_tool` mirrors the macro (router lookup) to preserve task-support
@@ -3039,7 +3068,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
             .unwrap_or_else(crate::surface::surface_from_env)
         {
             crate::surface::Surface::Compact => crate::surface_list::compact_surface_tools(),
-            // `full` keeps the granular surface EXACTLY the 50 legacy tools:
+            // `full` keeps the granular surface EXACTLY the 51 granular tools:
             // the facade handler is registered on the same router, so filter
             // its name(s) OUT of `list_all()` -- the facade must not leak into
             // the full list.
@@ -5464,6 +5493,26 @@ pub struct McpProbeStatusParams {
     pub probe_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpAuditSinceParams {
+    /// Pagination cursor. Omit (or pass 0) on the first call, then pass the
+    /// returned next_cursor to continue without rereading rows.
+    #[serde(default, deserialize_with = "de_opt_u64_lenient")]
+    #[schemars(with = "Option<u64>")]
+    pub cursor: Option<u64>,
+    /// Optional exact action name, such as "command_stop" or "file_write".
+    #[serde(default)]
+    pub action_filter: Option<String>,
+    /// Optional exact decision, such as "allow", "deny", "info", or "error".
+    #[serde(default)]
+    pub decision_filter: Option<String>,
+    /// Maximum rows to return. Omitted uses the daemon default; the daemon
+    /// clamps oversized values to its audit-read cap.
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
+    pub limit: Option<usize>,
+}
+
 // =====================================================================
 // Bounded-ledger + subscriptions MCP DTOs.
 // =====================================================================
@@ -6172,7 +6221,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_fifty_live_tools() {
+    fn catalogue_lists_fifty_one_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -6185,6 +6234,7 @@ mod tests {
                 "health",
                 "policy_status",
                 "self_check",
+                "audit_since",
                 "command_start_combed",
                 "run_and_watch",
                 "command_status",
@@ -6256,6 +6306,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "audit_since".to_owned(),
                 "bucket_events_since".to_owned(),
                 "bucket_summary".to_owned(),
                 "bucket_wait".to_owned(),

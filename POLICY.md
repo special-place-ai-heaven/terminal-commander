@@ -29,7 +29,7 @@ In MVP:
 - Policy is **declarative**: a TOML profile names allowed paths,
   allowed command roots, allowed probe kinds, and rate/size limits.
 - Policy is **advisory**: enforcement happens in TC's own process
-  via cap-std `Dir` handles plus in-process path/argv checks. Kernel
+  via canonical path resolution plus in-process path/argv checks. Kernel
   enforcement (Landlock, seccomp-bpf) is a documented roadmap, not
   an MVP feature. See `docs/security/PRIVILEGE_MODEL.md`.
 - Policy is **auditable**: every decision (allow, deny, error) emits
@@ -57,16 +57,20 @@ against their own repos.
 
 ```text
 permits:
-  - read+watch under $HOME/projects/**, $REPO_ROOT/**, and an
-    operator-listed allow-set.
-  - command execution under $REPO_ROOT/** with a curated command
-    allow-list (cargo, npm, pytest, make, etc.; see TC14 seed pack).
-  - PTY commands under $REPO_ROOT/** with prompt-detection enabled.
+  - zero-config read+watch for paths accessible to the operator, except
+    the mandatory SECURITY.md section-5 deny set. A non-empty operator
+    allow-set narrows this surface and is authoritative.
+  - direct-argv command and PTY execution except the closed structural
+    deny set. A non-empty command allow-list narrows this surface.
+  - PTY prompt detection and bounded signal/context delivery.
   - registry CRUD by the operator over the admin CLI; LLM-driven
     registry create/test allowed, activate gated.
 denies (in addition to default-deny):
   - command execution outside the allow-list.
-  - file reads outside the allow-set without explicit profile edit.
+    This applies when the operator configured a non-empty allow-list;
+    an empty list is the documented zero-config posture.
+  - file reads outside a configured non-empty path allow-set.
+  - paths matching `paths.deny_extra`.
   - any sudo/doas/polkit invocation.
 limits:
   - max active jobs: 16
@@ -85,7 +89,7 @@ the current repository tree.
 
 ```text
 permits:
-  - read+watch under $REPO_ROOT/** (rooted via cap-std Dir).
+  - read+watch under $REPO_ROOT/** (canonicalized before the policy gate).
   - command execution under $REPO_ROOT/** with the same allow-list
     as developer_local.
 denies (in addition to default-deny):
@@ -520,14 +524,17 @@ deployment, an operator who enables the write lane MUST set a non-empty
 writes; leaving `write_allow` empty there is an open write surface.
 
 **Operator notes on path globs.**
-- Globs are CASE-SENSITIVE (`/Home/**` does not match `/home/...`).
+- Globs follow host filesystem semantics: CASE-SENSITIVE on Unix;
+  case-folded with `/` and `\` treated as equivalent on Windows.
 - `**` matches any run of characters INCLUDING `/` (cross-segment);
   a single `*` matches within ONE segment (stops at `/`); `?` matches
   one non-separator character. Write `**` AFTER a `/` separator
   (`/home/me/projects/**`, not `/home/me/projects**`) so it expands a
   whole subtree rather than gluing onto a partial path component.
 - Subjects are matched in CANONICAL form, so author globs against the
-  real on-disk path (symlinks resolved, `..` collapsed).
+  real on-disk path (symlinks resolved, `..` collapsed). Windows
+  verbatim prefixes, alternate-data-stream suffixes, and trailing
+  dot/space aliases are normalized before matching.
 
 ## 5. Default-deny override mechanism
 
@@ -624,8 +631,8 @@ A goal that adds behavior MUST be able to answer YES to:
 2. Does every decision emit an audit record before the action?
 3. Does the new code path respect `commands.shell_passthrough = false`
    (no joined-string shell invocation)?
-4. Does any new path access go through a cap-std `Dir` rooted at an
-   allowed path?
+4. Is every path canonicalized before its policy gate, and does the
+   caller access the same canonical path that was authorized?
 5. Is the new behavior testable under `read_only_observer` (negative
    test: it MUST be denied there if it is a write-class action)?
 

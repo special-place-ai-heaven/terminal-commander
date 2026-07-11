@@ -138,6 +138,7 @@ def main() -> int:
         ):
             call_tool(name)
 
+        call_tool("audit_since", {"cursor": 0, "limit": 5})
         call_tool("registry_search", {"query": "smoke", "limit": 5})
 
         rule_def = {

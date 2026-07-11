@@ -22,6 +22,7 @@
     "health": "ensure_daemon_status_v1",
     "policy_status": "ensure_daemon_status_v1",
     "self_check": "ensure_daemon_status_v1",
+    "audit_since": "ensure_daemon_status_v1",
     "command_start_combed": "ensure_daemon_status_v1",
     "run_and_watch": "ensure_daemon_status_v1",
     "command_status": "ensure_daemon_status_v1",
@@ -88,6 +89,11 @@
     {
       "name": "self_check",
       "fixture": "mcp-tools/self_check.v1.json",
+      "status": "covered_live"
+    },
+    {
+      "name": "audit_since",
+      "fixture": "mcp-tools/audit_since.v1.json",
       "status": "covered_live"
     },
     {
@@ -323,8 +329,8 @@
   ],
   "obsolete_fixtures": [],
   "counts": {
-    "live_tools": 50,
-    "covered_live": 50,
+    "live_tools": 51,
+    "covered_live": 51,
     "placeholder_for_live_tool": 0,
     "missing_fixture": 0,
     "obsolete_fixture_present": 0

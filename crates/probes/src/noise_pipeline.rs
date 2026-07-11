@@ -127,6 +127,7 @@ impl ProbeNoisePipeline {
     pub fn process_frame(
         &mut self,
         frame: &SourceFrame,
+        source_type: &SourceType,
         bucket_id: BucketId,
         runtime: &SifterRuntime,
         sink: &dyn EventSink,
@@ -140,6 +141,12 @@ impl ProbeNoisePipeline {
         // zero drafts; a matched rule is never silently dropped.
         let mut drafts = runtime.evaluate(frame, bucket_id);
         drafts.extend(extra_drafts);
+        // The sifter is probe-agnostic and therefore cannot infer whether a
+        // stdout frame came from a process or a terminal. The probe boundary
+        // is authoritative: stamp every draft before dedupe and emission.
+        for draft in &mut drafts {
+            draft.source.source_type = source_type.clone();
+        }
 
         if drafts.is_empty()
             && self.policy.drop_progress_frames
@@ -305,6 +312,7 @@ mod tests {
         let mut events = 0u64;
         pipeline.process_frame(
             &frame,
+            &SourceType::Process,
             bucket_id,
             &runtime,
             &sink,
@@ -334,6 +342,7 @@ mod tests {
         let mut events = 0u64;
         pipeline.process_frame(
             &frame,
+            &SourceType::Process,
             bucket_id,
             &runtime,
             &sink,
@@ -373,7 +382,7 @@ mod tests {
             }),
             source: EventSource {
                 probe_id,
-                source_type: SourceType::Process,
+                source_type: SourceType::Other,
                 stream: SourceStream::Stdout,
                 job_id: None,
             },
@@ -393,6 +402,7 @@ mod tests {
         };
         pipeline.process_frame(
             &frame,
+            &SourceType::Process,
             bucket_id,
             &runtime,
             &sink,
@@ -404,6 +414,11 @@ mod tests {
         assert_eq!(metrics.inner.frames_suppressed_dedupe, 1);
         assert_eq!(sink.0.lock().len(), 1);
         assert_eq!(sink.0.lock()[0].count, 2);
+        assert_eq!(
+            sink.0.lock()[0].source.source_type,
+            SourceType::Process,
+            "the probe boundary must overwrite a stale draft source type"
+        );
     }
 
     #[test]
@@ -424,6 +439,7 @@ mod tests {
         let d2 = password_prompt_draft(&frame, bucket_id);
         pipeline.process_frame(
             &frame,
+            &SourceType::Terminal,
             bucket_id,
             &runtime,
             &sink,
@@ -433,7 +449,13 @@ mod tests {
         );
         assert_eq!(events, 2);
         assert_eq!(metrics.inner.frames_suppressed_dedupe, 0);
-        assert_eq!(sink.0.lock().len(), 2);
+        let emitted = sink.0.lock();
+        assert_eq!(emitted.len(), 2);
+        assert!(
+            emitted
+                .iter()
+                .all(|event| event.source.source_type == SourceType::Terminal)
+        );
     }
 
     #[test]
@@ -451,6 +473,7 @@ mod tests {
             let frame = SourceFrame::new(probe_id, SourceStream::Stdout, "REPEAT_ME".to_owned());
             pipeline.process_frame(
                 &frame,
+                &SourceType::Process,
                 bucket_id,
                 &runtime,
                 &sink,
@@ -486,6 +509,7 @@ mod tests {
         let mut events = 0u64;
         pipeline.process_frame(
             &frame,
+            &SourceType::Process,
             bucket_id,
             &runtime,
             &sink,

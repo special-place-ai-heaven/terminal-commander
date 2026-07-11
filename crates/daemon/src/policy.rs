@@ -419,6 +419,25 @@ pub const DEFAULT_DENY_PATH_SUFFIXES: &[&str] = &[
     ".vault-token",
 ];
 
+/// Directory-scoped entries from SECURITY.md section 5. Matching on path
+/// components rather than a few filenames protects non-standard SSH keys and
+/// entire credential stores.
+const DEFAULT_DENY_PATH_TREES: &[&str] = &[
+    "/.ssh/",
+    "/.gnupg/",
+    "/.config/gcloud/",
+    "/etc/sudoers.d/",
+    "/etc/ssl/private/",
+    "/.mozilla/",
+    "/.config/google-chrome/",
+    "/.config/chromium/",
+    "/.config/op/",
+    "/.config/bw/",
+];
+
+/// Sensitive filename families from SECURITY.md section 5.
+const DEFAULT_DENY_PATH_PREFIXES: &[&str] = &["/etc/ssh/ssh_host_"];
+
 /// Policy engine. Thread-safe via `&self`. Holds the active profile and,
 /// for `repo_only`, the canonicalized repo-root used for containment.
 ///
@@ -1079,10 +1098,16 @@ impl PolicyEngine {
     }
 
     fn path_default_denied(path: &Path) -> bool {
-        let s = path.to_string_lossy();
+        let normalized = normalize_policy_path(path);
         DEFAULT_DENY_PATH_SUFFIXES
             .iter()
-            .any(|suf| s.ends_with(suf))
+            .any(|suffix| normalized.ends_with(suffix))
+            || DEFAULT_DENY_PATH_TREES.iter().any(|tree| {
+                normalized.contains(tree) || normalized.ends_with(tree.trim_end_matches('/'))
+            })
+            || DEFAULT_DENY_PATH_PREFIXES
+                .iter()
+                .any(|prefix| normalized.contains(prefix))
     }
 }
 
@@ -1118,6 +1143,54 @@ fn canonicalize_lexical(candidate: &Path) -> PathBuf {
     // No ancestor canonicalizes (e.g. a bare relative path with no
     // existing root): fall back to the lexical form.
     candidate.to_path_buf()
+}
+
+/// Convert a policy subject to the same comparison alphabet used by compiled
+/// path globs. POSIX paths retain their case and literal backslashes; Windows
+/// paths fold case, separators, verbatim prefixes, trailing dot/space aliases,
+/// and NTFS alternate-data-stream suffixes.
+fn normalize_policy_path(path: &Path) -> String {
+    normalize_policy_text(&path.to_string_lossy())
+}
+
+fn normalize_policy_glob(glob: &str) -> String {
+    normalize_policy_text(glob)
+}
+
+#[cfg(not(windows))]
+fn normalize_policy_text(input: &str) -> String {
+    input.to_owned()
+}
+
+#[cfg(windows)]
+fn normalize_policy_text(input: &str) -> String {
+    let normalized = input.replace('\\', "/").to_lowercase();
+    let normalized = normalized.strip_prefix("//?/unc/").map_or_else(
+        || {
+            normalized
+                .strip_prefix("//?/")
+                .or_else(|| normalized.strip_prefix("//./"))
+                .map_or_else(|| normalized.clone(), str::to_owned)
+        },
+        |rest| format!("//{rest}"),
+    );
+
+    normalized
+        .split('/')
+        .map(|component| {
+            let bytes = component.as_bytes();
+            let is_drive = bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+            let base = if is_drive {
+                component
+            } else {
+                component
+                    .split_once(':')
+                    .map_or(component, |(base, _)| base)
+            };
+            base.trim_end_matches([' ', '.'])
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Translate one profile path-glob into an ANCHORED regex source string.
@@ -1202,7 +1275,8 @@ impl GlobList {
         let mut regexes = Vec::with_capacity(configured);
         let mut had_compile_error = false;
         for g in globs {
-            match regex::Regex::new(&glob_to_regex_src(g)) {
+            let normalized = normalize_policy_glob(g);
+            match regex::Regex::new(&glob_to_regex_src(&normalized)) {
                 Ok(re) => regexes.push(re),
                 Err(err) => {
                     had_compile_error = true;
@@ -1238,8 +1312,8 @@ impl GlobList {
 
     /// Does `path` match ANY glob in this list?
     fn matches(&self, path: &Path) -> bool {
-        let s = path.to_string_lossy();
-        self.regexes.iter().any(|re| re.is_match(&s))
+        let normalized = normalize_policy_path(path);
+        self.regexes.iter().any(|re| re.is_match(&normalized))
     }
 
     /// Allow-list verdict for `path`:
@@ -1325,10 +1399,74 @@ mod tests {
             "/etc/shadow",
             "/home/dev/.aws/credentials",
             "/home/dev/.kube/config",
+            "/home/dev/.ssh/config",
+            "/home/dev/.ssh/id_dsa",
+            "/home/dev/.gnupg/secring.gpg",
+            "/home/dev/.config/gcloud/credentials.db",
+            "/etc/sudoers.d/operator",
+            "/etc/ssh/ssh_host_rsa_key",
+            "/etc/ssl/private/server.key",
+            "/home/dev/.mozilla/firefox/profile/logins.json",
+            "/home/dev/.config/google-chrome/Default/Login Data",
+            "/home/dev/.config/chromium/Default/Login Data",
+            "/home/dev/.config/op/config",
+            "/home/dev/.config/bw/data.json",
         ] {
             let p = PathBuf::from(s);
             let v = e.evaluate(&PolicyAction::FileRead { path: &p });
             assert_eq!(v.decision, PolicyDecision::Deny, "{s}");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn default_deny_path_normalizes_windows_aliases() {
+        let engine = PolicyEngine::default_engine();
+        let paths = [
+            PathBuf::from(r"C:\Users\Dev\.SSH\ID_RSA"),
+            PathBuf::from(r"C:\Users\Dev\.ssh\id_rsa."),
+            PathBuf::from(r"C:\Users\Dev\.ssh\id_rsa "),
+            PathBuf::from(r"C:\Users\Dev\.ssh\id_rsa::$DATA"),
+            PathBuf::from(r"\\?\C:\Users\Dev\.SSH\ID_RSA"),
+            PathBuf::from("C:/Users/Dev/.SSH/ID_RSA"),
+        ];
+
+        for path in &paths {
+            for action in [
+                PolicyAction::FileRead { path },
+                PolicyAction::FileWatch { path },
+                PolicyAction::FileWrite { path },
+            ] {
+                assert_eq!(
+                    engine.evaluate(&action).decision,
+                    PolicyDecision::Deny,
+                    "Windows sensitive path alias must be denied: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn documented_default_deny_set_is_enforced() {
+        for path in [
+            "/home/dev/.ssh/config",
+            "/home/dev/.ssh/id_dsa",
+            "/home/dev/.gnupg/secring.gpg",
+            "/home/dev/.config/gcloud/credentials.db",
+            "/etc/sudoers.d/operator",
+            "/etc/ssh/ssh_host_rsa_key",
+            "/etc/ssl/private/server.key",
+            "/home/dev/.mozilla/firefox/profile/logins.json",
+            "/home/dev/.config/google-chrome/Default/Login Data",
+            "/home/dev/.config/chromium/Default/Login Data",
+            "/home/dev/.config/op/config",
+            "/home/dev/.config/bw/data.json",
+        ] {
+            assert!(
+                PolicyEngine::path_default_denied(Path::new(path)),
+                "SECURITY.md section 5 requires denying {path}"
+            );
         }
     }
 
@@ -1939,6 +2077,30 @@ mod tests {
             v.reason.contains("default_deny_match"),
             "deny_extra reason must carry default_deny_match: {}",
             v.reason
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_operator_globs_share_policy_path_normalization() {
+        let denied = PathBuf::from(r"\\?\C:\SECRETS\nested\data.txt");
+        let deny_engine = paths_engine(&[], &[], &["C:/secrets/**"]);
+        assert_eq!(
+            deny_engine
+                .evaluate(&PolicyAction::FileRead { path: &denied })
+                .decision,
+            PolicyDecision::Deny,
+            "deny_extra must not be bypassable with a verbatim, mixed-case Windows path"
+        );
+
+        let allowed = PathBuf::from(r"\\?\C:\ALLOWED\nested\data.txt");
+        let allow_engine = paths_engine(&["C:/allowed/**"], &[], &[]);
+        assert_eq!(
+            allow_engine
+                .evaluate(&PolicyAction::FileRead { path: &allowed })
+                .decision,
+            PolicyDecision::Allow,
+            "allow globs and canonical subjects must use the same Windows form"
         );
     }
 

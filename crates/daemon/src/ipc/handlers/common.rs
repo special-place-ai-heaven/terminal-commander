@@ -400,19 +400,32 @@ pub(in crate::ipc::server) fn resolve_and_authorize_file_write(
         ));
     }
 
-    // (5) Build the canonical target and gate IT. A symlinked parent is now
-    // resolved, so the gate sees the real target tree.
+    // (5) Build the target. If it already exists, canonicalize the target
+    // itself before gating and writing. This resolves file symlinks, Windows
+    // 8.3 aliases, and case aliases to the real on-disk name. A missing target
+    // is a legitimate create, so only NotFound falls back to the canonical
+    // parent plus requested filename.
     let canonical_target = canonical_parent.join(file_name);
+    let authorized_target = match std::fs::canonicalize(&canonical_target) {
+        Ok(existing) => existing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => canonical_target,
+        Err(e) => {
+            return Err(IpcError::new(
+                IpcErrorCode::Internal,
+                format!("resolve write target '{}': {e}", canonical_target.display()),
+            ));
+        }
+    };
     let verdict = state
         .policy
         .evaluate(&crate::policy::PolicyAction::FileWrite {
-            path: &canonical_target,
+            path: &authorized_target,
         });
     if verdict.decision == crate::policy::PolicyDecision::Deny {
         return Err(IpcError::new(IpcErrorCode::PathDenied, verdict.reason));
     }
 
-    Ok(canonical_target)
+    Ok(authorized_target)
 }
 
 pub(in crate::ipc::server) fn require_regular_file(
@@ -602,6 +615,49 @@ mod tests {
         // both sides to tolerate the Windows `\\?\` verbatim prefix).
         let expect = std::fs::canonicalize(&file).expect("canonicalize");
         assert_eq!(resolved, expect);
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Sensitive-path policy must be enforced on the platform-native canonical
+    /// path, including Windows backslash separators.
+    #[test]
+    fn native_sensitive_path_is_denied_before_file_access() {
+        let data = unique_data_dir("sensitive");
+        let state = state_for(&data);
+        let ssh_dir = data.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).expect("create fake sensitive parent");
+        let secret = ssh_dir.join("id_rsa");
+        std::fs::write(&secret, b"FAKE TEST KEY\n").expect("create fake sensitive file");
+
+        let read_err = resolve_and_authorize_file(&state, &secret, false)
+            .expect_err("native sensitive read path must be denied");
+        assert_eq!(read_err.code, IpcErrorCode::PathDenied);
+
+        let write_err = resolve_and_authorize_file_write(&state, &secret, false)
+            .expect_err("native sensitive write path must be denied");
+        assert_eq!(write_err.code, IpcErrorCode::PathDenied);
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_write_symlink_is_authorized_by_its_real_target() {
+        use std::os::unix::fs::symlink;
+
+        let data = unique_data_dir("write-symlink");
+        let state = state_for(&data);
+        let ssh_dir = data.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).expect("create fake sensitive parent");
+        let secret = ssh_dir.join("id_rsa");
+        std::fs::write(&secret, b"FAKE TEST KEY\n").expect("create fake sensitive file");
+        let alias = data.join("harmless-output");
+        symlink(&secret, &alias).expect("create write symlink");
+
+        let err = resolve_and_authorize_file_write(&state, &alias, false)
+            .expect_err("write authorization must gate the existing symlink target");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
 
         let _ = std::fs::remove_dir_all(&data);
     }

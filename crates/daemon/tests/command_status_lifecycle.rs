@@ -79,6 +79,19 @@ fn command_status_counts_lifecycle_event_when_no_rules_match() {
         let status = state.command.status(resp.job_id).expect("status ok");
         assert_eq!(status.events_emitted, 1);
 
+        state
+            .command
+            .stop(resp.job_id, "test-peer")
+            .expect("redundant stop is idempotent");
+        let after_stop = state
+            .command
+            .status(resp.job_id)
+            .expect("status after stop");
+        assert_eq!(
+            after_stop.events_emitted, 1,
+            "redundant stop must not clobber the terminal lifecycle-event count"
+        );
+
         cleanup(&data);
     });
 }
@@ -495,6 +508,56 @@ fn command_status_counters_are_live_mid_run() {
             observed_live,
             "mid-run command_status must report captured frames/bytes \
              (exit-final-only counters are the pinned S1 failure mode)"
+        );
+
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn command_status_counters_survive_operator_cancel() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("cancel-counters");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+        let resp = start_linger_child(&state);
+
+        let live = loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let status = state.command.status(resp.job_id).expect("status ok");
+            if status.frames_total > 0 && status.bytes_total > 0 {
+                break status;
+            }
+            assert!(
+                !matches!(
+                    status.state,
+                    JobState::Exited | JobState::Failed | JobState::Cancelled
+                ),
+                "linger child terminated before emitting output: {status:?}"
+            );
+        };
+
+        state
+            .command
+            .stop(resp.job_id, "test-cancel")
+            .expect("cancel running command");
+        let cancelled = state
+            .command
+            .status(resp.job_id)
+            .expect("cancelled status remains available");
+
+        assert_eq!(cancelled.state, JobState::Cancelled);
+        assert!(
+            cancelled.frames_total >= live.frames_total,
+            "terminal status lost captured frames: live={live:?}, cancelled={cancelled:?}"
+        );
+        assert!(
+            cancelled.bytes_total >= live.bytes_total,
+            "terminal status lost captured bytes: live={live:?}, cancelled={cancelled:?}"
         );
 
         cleanup(&data);

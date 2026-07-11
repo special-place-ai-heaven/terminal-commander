@@ -622,6 +622,7 @@ mod pty_core {
             let mut m = metrics.lock();
             pipeline.process_frame(
                 &frame,
+                &terminal_commander_core::SourceType::Terminal,
                 bucket_id,
                 &runtime,
                 sink.as_ref(),

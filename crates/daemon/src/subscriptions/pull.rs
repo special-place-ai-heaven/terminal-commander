@@ -425,15 +425,21 @@ fn liveness_for(state: &Arc<DaemonState>, scope: &Scope) -> Vec<SourceLiveness> 
     for scoped in &scope.buckets {
         let source = &scoped.source;
         let liveness = match source.kind {
-            ProbeKind::Command => source.job_id.map_or(Liveness::Running, |job| {
+            ProbeKind::Command => source.job_id.map_or(Liveness::Stopped, |job| {
                 state.command.status(job).map_or(Liveness::Stopped, |s| {
                     crate::liveness::command_liveness(s.state, s.exit_code, s.signal)
                 })
             }),
-            // File-watch has no exit-code surface on this path: present in
-            // the side-table -> Running (the side-table is immortal, so a
-            // stopped watch still appears Running here).
-            ProbeKind::FileWatch => Liveness::Running,
+            // Source records intentionally outlive stopped watches. Consult
+            // the runtime's live-handle registry so a retained subscription
+            // observes the watch's transition to Stopped.
+            ProbeKind::FileWatch => source.job_id.map_or(Liveness::Stopped, |watch_id| {
+                if state.watch.is_live(watch_id) {
+                    Liveness::Running
+                } else {
+                    Liveness::Stopped
+                }
+            }),
             // PTY bindings LINGER in the runtime's job ledger after exit
             // (like command's), so the authoritative terminal state is one
             // lookup away — mirror the command arm instead of reporting a
@@ -441,11 +447,11 @@ fn liveness_for(state: &Arc<DaemonState>, scope: &Scope) -> Vec<SourceLiveness> 
             #[cfg(any(unix, windows))]
             ProbeKind::Pty => source
                 .job_id
-                .map_or(Liveness::Running, |job| state.pty.liveness(job)),
+                .map_or(Liveness::Stopped, |job| state.pty.liveness(job)),
             // No PTY backend on this platform: a Pty source cannot exist,
             // but the match must stay exhaustive.
             #[cfg(not(any(unix, windows)))]
-            ProbeKind::Pty => Liveness::Running,
+            ProbeKind::Pty => Liveness::Stopped,
         };
         out.push(SourceLiveness {
             bucket_id: scoped.bucket_id,
@@ -663,4 +669,158 @@ fn resolve_liveness_delta(
             changed
         })
         .unwrap_or(full)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DaemonConfig;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use terminal_commander_core::BucketConfig;
+    use terminal_commander_ipc::ProbeKind;
+
+    fn temp_data_dir() -> std::path::PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "tc-pull-file-liveness-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn stopped_file_watch_reports_stopped_liveness() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        runtime.block_on(async {
+            let data = temp_data_dir();
+            std::fs::create_dir_all(&data).expect("create test data dir");
+            let watched = data.join("watch.log");
+            std::fs::write(&watched, "ready\n").expect("create watched file");
+
+            let state = Arc::new(
+                DaemonState::bootstrap(DaemonConfig::defaults_in(&data)).expect("bootstrap daemon"),
+            );
+            let (watch_id, bucket_id, probe_id) = state
+                .watch
+                .start(
+                    watched.clone(),
+                    BucketConfig::default(),
+                    Vec::new(),
+                    false,
+                    None,
+                )
+                .expect("start file watch");
+            let scope = Scope {
+                buckets: vec![ScopedBucket {
+                    bucket_id,
+                    source: BucketSource {
+                        kind: ProbeKind::FileWatch,
+                        job_id: Some(watch_id),
+                        probe_id: Some(probe_id),
+                        path: Some(watched),
+                        tag: None,
+                    },
+                }],
+                offsets: HashMap::new(),
+                rr_start: 0,
+                truncated: false,
+            };
+
+            assert_eq!(liveness_for(&state, &scope)[0].liveness, Liveness::Running);
+            state.watch.stop(watch_id).expect("stop file watch");
+            assert_eq!(liveness_for(&state, &scope)[0].liveness, Liveness::Stopped);
+
+            drop(state);
+            let _ = std::fs::remove_dir_all(data);
+        });
+    }
+
+    #[test]
+    fn naturally_terminated_file_watch_reports_stopped_liveness() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        runtime.block_on(async {
+            let data = temp_data_dir();
+            std::fs::create_dir_all(&data).expect("create test data dir");
+            let watched = data.join("watch.log");
+            std::fs::write(&watched, "ready\n").expect("create watched file");
+
+            let state = Arc::new(
+                DaemonState::bootstrap(DaemonConfig::defaults_in(&data)).expect("bootstrap daemon"),
+            );
+            let (watch_id, bucket_id, probe_id) = state
+                .watch
+                .start(
+                    watched.clone(),
+                    BucketConfig::default(),
+                    Vec::new(),
+                    false,
+                    None,
+                )
+                .expect("start file watch");
+            let scope = Scope {
+                buckets: vec![ScopedBucket {
+                    bucket_id,
+                    source: BucketSource {
+                        kind: ProbeKind::FileWatch,
+                        job_id: Some(watch_id),
+                        probe_id: Some(probe_id),
+                        path: Some(watched.clone()),
+                        tag: None,
+                    },
+                }],
+                offsets: HashMap::new(),
+                rr_start: 0,
+                truncated: false,
+            };
+
+            std::fs::remove_file(&watched).expect("remove watched file");
+            std::fs::create_dir(&watched).expect("replace watched file with directory");
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            while tokio::time::Instant::now() < deadline
+                && liveness_for(&state, &scope)[0].liveness == Liveness::Running
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert_eq!(liveness_for(&state, &scope)[0].liveness, Liveness::Stopped);
+
+            drop(state);
+            let _ = std::fs::remove_dir_all(data);
+        });
+    }
+
+    #[test]
+    fn source_without_job_id_fails_safe_stopped() {
+        let data = temp_data_dir();
+        std::fs::create_dir_all(&data).expect("create test data dir");
+        let state = Arc::new(
+            DaemonState::bootstrap(DaemonConfig::defaults_in(&data)).expect("bootstrap daemon"),
+        );
+        let scope = Scope {
+            buckets: vec![ScopedBucket {
+                bucket_id: BucketId::new(),
+                source: BucketSource {
+                    kind: ProbeKind::FileWatch,
+                    job_id: None,
+                    probe_id: Some(ProbeId::new()),
+                    path: None,
+                    tag: None,
+                },
+            }],
+            offsets: HashMap::new(),
+            rr_start: 0,
+            truncated: false,
+        };
+
+        assert_eq!(liveness_for(&state, &scope)[0].liveness, Liveness::Stopped);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(data);
+    }
 }

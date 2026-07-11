@@ -34,6 +34,8 @@ pub struct JobConfig {
     pub argv: Vec<String>,
     pub bucket_id: BucketId,
     pub probe_id: ProbeId,
+    /// Source kind that owns this job's lifecycle events.
+    pub source_type: SourceType,
     pub grace_secs: u64,
 }
 
@@ -46,6 +48,7 @@ impl JobConfig {
             argv,
             bucket_id,
             probe_id,
+            source_type: SourceType::Process,
             grace_secs: DEFAULT_JOB_GRACE.as_secs(),
         }
     }
@@ -264,7 +267,7 @@ impl JobManager {
             rule: None,
             source: EventSource {
                 probe_id: config.probe_id,
-                source_type: SourceType::Process,
+                source_type: config.source_type.clone(),
                 stream: SourceStream::Meta,
                 job_id: Some(config.job_id),
             },
@@ -367,6 +370,16 @@ mod tests {
         draft.validate().unwrap();
         let rec = m.get(id).unwrap();
         assert_eq!(rec.state, JobState::Exited);
+    }
+
+    #[test]
+    fn terminal_job_exit_preserves_terminal_source_type() {
+        let m = JobManager::new();
+        let mut config = cfg();
+        config.source_type = SourceType::Terminal;
+        let id = m.start(config);
+        let draft = m.finish(id, Some(0), None).unwrap();
+        assert_eq!(draft.source.source_type, SourceType::Terminal);
     }
 
     #[test]

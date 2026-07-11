@@ -51,8 +51,8 @@ usually {\"kind\":\"global\"}. Rules comb command output into structured signals
 
 /// Description for the `status` facade.
 pub(crate) const STATUS_FACADE_DESCRIPTION: &str = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
-policy_status, runtime_state (aggregate snapshot), probe_list, probe_status, system_discover, \
-target_list, target_probe.";
+policy_status, audit_since (daemon-global operation metadata; optional cursor/action_filter/decision_filter/limit), runtime_state \
+(aggregate snapshot), probe_list, probe_status, system_discover, target_list, target_probe.";
 
 /// The facade tool names advertised + admitted on the compact surface.
 /// KEEP IN SYNC with [`compact_surface_tools`].
@@ -504,6 +504,7 @@ mod tests {
             (
                 "status",
                 &[
+                    "audit_since",
                     "health",
                     "policy_status",
                     "probe_list",

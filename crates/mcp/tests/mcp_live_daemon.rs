@@ -8,9 +8,10 @@
 //! pointed at it, and verifies the live tool round trip:
 //!
 //! - MCP `initialize` succeeds.
-//! - `list_tools` returns the full tool set (39 live tools: TC45 + registry_import_pack + command_stop + shell_exec).
+//! - `list_tools` returns the full 51-tool granular surface.
 //! - `health` forwards through UDS and returns a payload that decodes
 //!   to a real `uptime_secs` field (i.e. the daemon answered).
+//! - `audit_since` forwards through UDS and returns its bounded cursor envelope.
 //! - `system_discover` forwards through UDS, the `daemon` field is
 //!   populated (daemon reachable), and the response stays under the
 //!   IPC response budget.
@@ -85,6 +86,28 @@ async fn paired_against_live_daemon(
     (server, client)
 }
 
+async fn assert_audit_since_roundtrip(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, TestClient>,
+) {
+    let audit = client
+        .call_tool(
+            CallToolRequestParams::new("audit_since").with_arguments(
+                serde_json::from_value(serde_json::json!({
+                    "cursor": 0,
+                    "limit": 5
+                }))
+                .expect("audit args object"),
+            ),
+        )
+        .await
+        .expect("audit_since call should succeed against a live daemon");
+    let audit_body: serde_json::Value =
+        serde_json::from_str(&first_text_content(&audit)).expect("audit_since payload is JSON");
+    assert_eq!(audit_body["cursor_in"], 0);
+    assert!(audit_body["next_cursor"].is_number());
+    assert!(audit_body["rows"].is_array());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_health_roundtrip_through_uds() {
     let data = tmp_data_dir("health");
@@ -98,6 +121,7 @@ async fn live_health_roundtrip_through_uds() {
         assert_eq!(
             names,
             vec![
+                "audit_since".to_owned(),
                 "bucket_events_since".to_owned(),
                 "bucket_summary".to_owned(),
                 "bucket_wait".to_owned(),
@@ -177,6 +201,8 @@ async fn live_health_roundtrip_through_uds() {
             "health payload must carry the live daemon's version; got {body}"
         );
 
+        assert_audit_since_roundtrip(&client).await;
+
         let _ = client.cancel().await;
     }
     handle.shutdown().await;
@@ -230,8 +256,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             .filter(|t| t["status"].as_str() == Some("live"))
             .count();
         assert_eq!(
-            live_count, 50,
-            "tool catalogue must list exactly 50 live tools (49 + TC22 A3 file_write)"
+            live_count, 51,
+            "tool catalogue must list exactly 51 live tools (including audit_since)"
         );
 
         // US6/T056 (FR-023): the payload carries the read-only omni capability

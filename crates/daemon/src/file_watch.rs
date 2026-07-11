@@ -217,6 +217,7 @@ impl WatchRuntime {
     /// Snapshot of live watches. Used by the IPC scope validator.
     #[must_use]
     pub fn live_watches(&self) -> Vec<LiveWatchIdentity> {
+        self.reap_finished();
         let g = self.live.read();
         g.iter()
             .map(|(wid, b)| LiveWatchIdentity {
@@ -225,6 +226,84 @@ impl WatchRuntime {
                 probe_id: b.probe_id,
             })
             .collect()
+    }
+
+    /// Remove probes that terminated without an explicit `stop` call.
+    ///
+    /// The live map owns cancellation handles, but map membership alone is not
+    /// a liveness signal: the underlying task can fail on an I/O error. Reap
+    /// finished tasks before answering any liveness/list query so subscribers
+    /// never observe an involuntarily-dead watch as `Running`.
+    fn reap_finished(&self) {
+        let finished: Vec<JobId> = {
+            let live = self.live.read();
+            live.iter()
+                .filter_map(|(watch_id, binding)| {
+                    binding
+                        .cancel
+                        .lock()
+                        .as_ref()
+                        .is_some_and(FileProbe::is_finished)
+                        .then_some(*watch_id)
+                })
+                .collect()
+        };
+        if finished.is_empty() {
+            return;
+        }
+
+        let removed: Vec<(JobId, WatchBinding)> = {
+            let mut live = self.live.write();
+            finished
+                .into_iter()
+                .filter_map(|watch_id| {
+                    let still_finished = live.get(&watch_id).is_some_and(|binding| {
+                        binding
+                            .cancel
+                            .lock()
+                            .as_ref()
+                            .is_some_and(FileProbe::is_finished)
+                    });
+                    if still_finished {
+                        live.remove(&watch_id).map(|binding| (watch_id, binding))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        for (watch_id, binding) in removed {
+            let probe_metrics = binding
+                .cancel
+                .lock()
+                .as_ref()
+                .map_or_else(FileProbeMetrics::default, FileProbe::metrics);
+            let sink_metrics = binding.metrics.lock().clone();
+            let metrics = combine_file_metrics(&probe_metrics, &sink_metrics);
+            let _ = self.jobs.finish(watch_id, Some(1), None);
+            self.audit(
+                "file_watch_exit",
+                &watch_id.to_wire_string(),
+                "error",
+                Some("file-watch probe terminated unexpectedly".to_owned()),
+                Some(format!(
+                    "{{\"frames\":{},\"events\":{},\"bytes\":{}}}",
+                    metrics.frames_total, metrics.events_emitted, metrics.bytes_total
+                )),
+            );
+        }
+    }
+
+    /// Return whether a watch id still owns a live probe handle.
+    ///
+    /// Bucket-source records intentionally outlive stopped watches so
+    /// subscriptions can retain their routing scope. Liveness must therefore
+    /// come from the runtime's live registry, not from source-record presence.
+    #[must_use]
+    pub fn is_live(&self, watch_id: JobId) -> bool {
+        self.reap_finished();
+        self.live.read().contains_key(&watch_id)
     }
 
     /// Start a file watch. Policy-gates the path, allocates a
@@ -367,6 +446,7 @@ impl WatchRuntime {
             argv: vec![format!("file_watch:{}", path.display())],
             bucket_id,
             probe_id,
+            source_type: terminal_commander_core::SourceType::File,
             grace_secs: 0,
         };
         let _ = self.jobs.start(job_cfg);
@@ -450,6 +530,7 @@ impl WatchRuntime {
     /// counters with the sink snapshot's `events_emitted`.
     #[must_use]
     pub fn list(&self) -> Vec<(JobId, BucketId, ProbeId, PathBuf, FileProbeMetrics)> {
+        self.reap_finished();
         let g = self.live.read();
         g.iter()
             .map(|(wid, b)| {

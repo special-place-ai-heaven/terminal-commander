@@ -529,6 +529,7 @@ mod runtime {
                 argv: req.argv.clone(),
                 bucket_id,
                 probe_id,
+                source_type: terminal_commander_core::SourceType::Terminal,
                 grace_secs: 0,
             };
             let _ = self.jobs.start(job_cfg);

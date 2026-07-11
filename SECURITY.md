@@ -170,14 +170,14 @@ without an explicit opt-in line in the profile and an audit-log
 emission at probe-start time. See `POLICY.md` section 5 for the
 override mechanism.
 
-Implementation enforcement (MVP): `cap-std` `Dir` handles rooted at
-allowed paths plus an in-process path-check in the daemon before any
-`open()`. cap-std is advisory (in-process), not kernel-enforced; see
-section 6.
+Implementation enforcement (MVP): canonical path resolution plus an
+in-process policy check in the daemon before any `open()`/create/truncate.
+The path returned by authorization is the path subsequently accessed;
+see section 6.
 
 ## 6. Enforcement posture
 
-### 6.1 MVP enforcement: advisory + cap-std
+### 6.1 MVP enforcement: advisory in-process checks
 
 Per `docs/research/policy-prior-art.md` and the locked decision in
 `docs/research/_USER_DECISIONS.md`:
@@ -190,8 +190,9 @@ This is the honest framing all goals MUST use. The MVP daemon:
 
 - evaluates policy in-process before every gated action (section 4);
 - writes an audit-log record (section 7) for every gated action;
-- uses `cap-std` `Dir` handles as the filesystem-access primitive so
-  path-traversal mistakes fail closed at the API shape;
+- canonicalizes existing read/watch targets and existing write targets,
+  canonicalizes write parents for new files, rejects write `..` components,
+  and applies policy before opening, creating, or truncating;
 - denies sensitive paths by default (section 5);
 - bounds raw stream exposure to explicit, sized `event_context` calls.
 

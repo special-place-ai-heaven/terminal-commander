@@ -72,6 +72,7 @@ async fn initialize_and_list_tools_returns_full_live_set() {
     assert_eq!(
         names,
         vec![
+            "audit_since".to_owned(),
             "bucket_events_since".to_owned(),
             "bucket_summary".to_owned(),
             "bucket_wait".to_owned(),

@@ -4,7 +4,7 @@
 //! Tool-surface selection.
 //!
 //! `TC_SURFACE=compact` advertises the verb-dispatched facade tools; default
-//! `full` keeps the granular 50-tool surface. Read once per `tools/list` /
+//! `full` keeps the granular 51-tool surface. Read once per `tools/list` /
 //! `tools/call` so an operator can flip it without rebuild.
 
 /// Which MCP tool surface to advertise + admit.
