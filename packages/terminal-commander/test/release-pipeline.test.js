@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 The Terminal Commander Authors
+
+"use strict";
+
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const {
+  resolveReleaseContext,
+} = require("../../../scripts/release/resolve-release-context.js");
+const {
+  validateReleaseInputs,
+} = require("../../../scripts/release/validate-release-inputs.js");
+
+const repoRoot = path.resolve(__dirname, "../../..");
+
+function parseWorkflowJobs(workflow) {
+  const starts = [...workflow.matchAll(/^  ([a-z0-9-]+):\s*$/gm)];
+  const jobs = new Map();
+  for (let index = 0; index < starts.length; index += 1) {
+    const name = starts[index][1];
+    const start = starts[index].index;
+    const end = index + 1 < starts.length ? starts[index + 1].index : workflow.length;
+    const block = workflow.slice(start, end);
+    const inline = block.match(/^    needs:[ \t]*\[([^\]]+)\]/m);
+    const scalar = block.match(/^    needs:[ \t]*([a-z0-9-]+)[ \t]*$/m);
+    const expanded = block.match(
+      /^    needs:[ \t]*\r?\n((?:      - [a-z0-9-]+[ \t]*\r?\n?)+)/m,
+    );
+    const needs = inline
+      ? inline[1].split(",").map((value) => value.trim())
+      : scalar
+        ? [scalar[1]]
+        : expanded
+          ? [...expanded[1].matchAll(/- ([a-z0-9-]+)/g)].map((match) => match[1])
+          : [];
+    const references = [...block.matchAll(/needs\.([a-z0-9-]+)/g)].map((match) => match[1]);
+    jobs.set(name, { needs: new Set(needs), references: new Set(references) });
+  }
+  return jobs;
+}
+
+test("release context selects each supported publish source deterministically", () => {
+  assert.deepEqual(
+    resolveReleaseContext({
+      releasePleaseResult: "success",
+      ensureResult: "skipped",
+      publishVersionResult: "skipped",
+    }),
+    { publish: false, version: "", source: "none" },
+  );
+  assert.deepEqual(
+    resolveReleaseContext({
+      releasePleaseResult: "success",
+      releaseCreated: "true",
+      releaseVersion: "1.2.3",
+      ensureResult: "skipped",
+      publishVersionResult: "skipped",
+    }),
+    { publish: true, version: "1.2.3", source: "release-please" },
+  );
+  assert.deepEqual(
+    resolveReleaseContext({
+      releasePleaseResult: "success",
+      ensureResult: "success",
+      ensurePublish: "true",
+      ensureVersion: "1.2.3",
+      publishVersionResult: "skipped",
+    }),
+    { publish: true, version: "1.2.3", source: "ensure-release" },
+  );
+  assert.deepEqual(
+    resolveReleaseContext({
+      releasePleaseResult: "success",
+      ensureResult: "skipped",
+      publishVersionResult: "success",
+      forcePublish: "true",
+      forceVersion: "1.2.3",
+    }),
+    { publish: true, version: "1.2.3", source: "force-publish" },
+  );
+});
+
+test("release context refuses blank, conflicting, or failed publish sources", () => {
+  assert.throws(
+    () => resolveReleaseContext({ releaseCreated: "true", releaseVersion: "" }),
+    /invalid version/,
+  );
+  assert.throws(
+    () =>
+      resolveReleaseContext({
+        releaseCreated: "true",
+        releaseVersion: "1.2.3",
+        ensurePublish: "true",
+        ensureVersion: "1.2.4",
+      }),
+    /version disagreement/,
+  );
+  assert.throws(
+    () => resolveReleaseContext({ releasePleaseResult: "failure" }),
+    /upstream failed/,
+  );
+});
+
+test("all committed release version anchors agree", () => {
+  const version = require("../package.json").version;
+  const result = validateReleaseInputs(repoRoot, version);
+  assert.ok(result.checkedVersions >= 15);
+  assert.throws(
+    () => validateReleaseInputs(repoRoot, "9.9.9"),
+    /release version mismatch/,
+  );
+});
+
+test("release failure reporting is repository-explicit and uses canonical context", () => {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, ".github", "workflows", "release-please.yml"),
+    "utf8",
+  );
+  assert.match(workflow, /^  release-context:/m);
+  assert.match(workflow, /VER: \$\{\{ needs\.release-context\.outputs\.version \}\}/);
+  assert.match(workflow, /gh issue create --repo "\$GITHUB_REPOSITORY"/);
+});
+
+test("release workflow needs graph is closed and registry publishes are prevalidated", () => {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, ".github", "workflows", "release-please.yml"),
+    "utf8",
+  );
+  const jobs = parseWorkflowJobs(workflow);
+
+  for (const [name, job] of jobs) {
+    assert.ok(!job.needs.has(name), `${name} must not depend on itself`);
+    for (const dependency of job.needs) {
+      assert.ok(jobs.has(dependency), `${name} needs unknown job ${dependency}`);
+    }
+    for (const reference of job.references) {
+      assert.ok(job.needs.has(reference), `${name} references needs.${reference} without declaring it`);
+    }
+  }
+
+  const reachesPrepublishGate = (name, seen = new Set()) => {
+    if (name === "prepublish-gate") return true;
+    if (seen.has(name)) return false;
+    seen.add(name);
+    const job = jobs.get(name);
+    return job && [...job.needs].some((dependency) => reachesPrepublishGate(dependency, seen));
+  };
+  const registryPublishes = [...jobs.keys()].filter(
+    (name) => name === "publish-root" || name.startsWith("publish-linux-") ||
+      name.startsWith("publish-windows-") || name.startsWith("publish-mac-") ||
+      name.startsWith("publish-cargo-"),
+  );
+  for (const name of registryPublishes) {
+    assert.ok(reachesPrepublishGate(name), `${name} can publish without prepublish-gate`);
+  }
+});

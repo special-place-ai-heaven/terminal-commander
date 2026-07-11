@@ -670,7 +670,9 @@ flowchart LR
   Commit["fix: / feat: on main"] --> RP["release-please PR\n(linked npm + Cargo versions)"]
   RP --> Sync["release-pr-sync\nauto-merge feat/fix"]
   Sync --> Tag["tag + GitHub Release"]
-  Tag --> Plat["build + npm publish\n5 platform packages\nlinux · windows · mac"]
+  Tag --> Context["canonical release context\nauto · ensure · force"]
+  Context --> Gate["pre-publish gate\nwrapper tests + version anchors"]
+  Gate --> Plat["build + npm publish\n5 platform packages\nlinux · windows · mac"]
   Plat --> Root["publish root wrapper\nterminal-commander@latest"]
   Root --> Cargo["cargo publish chain\n8 crates in dep order\ncore → sifters → probes → store\n→ supervisor → ipc → daemon → mcp"]
   Cargo --> Verify["post-publish verify\ncontainer smoke per platform"]
@@ -682,7 +684,8 @@ flowchart LR
 | `feat:` | Feature release |
 | `docs:`, `chore:`, `ci:` | No release unless configured otherwise |
 
-Details: [`docs/release/release-please-contract.md`](docs/release/release-please-contract.md).
+Details: [`docs/release/release-please-contract.md`](docs/release/release-please-contract.md) and
+[`docs/release/release-pipeline-invariants.md`](docs/release/release-pipeline-invariants.md).
 
 ## Develop From Source
 

@@ -99,6 +99,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - name: root wrapper unit tests (clean checkout)
+        working-directory: packages/terminal-commander
+        run: npm test
       - uses: taiki-e/install-action@nextest
       - name: pre-build gates (scripts/linux-gate.sh)
         run: bash scripts/linux-gate.sh
@@ -110,6 +113,7 @@ jobs:
       contents: read
     env:
       RUST_TOOLCHAIN: "1.95.0"
+      NODE_VERSION: "20"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -119,6 +123,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: npm-binary-build-pre-gates-windows
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: root wrapper unit tests (clean checkout)
+        working-directory: packages/terminal-commander
+        run: npm test
       - name: pre-build gates (scripts/windows-gate.ps1)
         shell: pwsh
         run: ./scripts/windows-gate.ps1

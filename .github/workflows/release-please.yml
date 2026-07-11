@@ -6,10 +6,13 @@
 # NPM06 portion:
 #   On every push to `main`, run release-please in manifest mode so
 #   Conventional Commits drive a single shared-version release PR
-#   across the three npm packages:
+#   across the six npm packages:
 #     - packages/terminal-commander           (root wrapper)
 #     - packages/terminal-commander-linux-x64 (@terminal-commander/linux-x64)
 #     - packages/terminal-commander-linux-arm64 (@terminal-commander/linux-arm64)
+#     - packages/terminal-commander-windows-x64 (@terminal-commander/windows-x64)
+#     - packages/terminal-commander-mac-x64 (@terminal-commander/mac-x64)
+#     - packages/terminal-commander-mac-arm64 (@terminal-commander/mac-arm64)
 #
 #   The release PR carries the version bump on each `package.json`
 #   plus a CHANGELOG entry. When (and only when) the operator merges
@@ -18,8 +21,10 @@
 #   the merge commit triggers `push: main`).
 #
 # NPM07 portion (publish jobs):
-#   When release-please reports `releases_created == 'true'`, the
-#   downstream publish chain runs on the same workflow invocation:
+#   A single `release-context` job validates and normalizes automatic,
+#   ensure-release, and force-publish entry paths. `prepublish-gate`
+#   then runs all wrapper/config/version checks before any registry write.
+#   When that gate succeeds, the downstream publish chain runs:
 #     - build-<platform> + publish-<platform> for all 5 targets
 #       (linux-x64, linux-arm64, windows-x64, mac-x64, mac-arm64):
 #       each builds the platform binaries and `npm publish`es
@@ -36,8 +41,8 @@
 #   This workflow DOES publish to crates.io. After `publish-root`
 #   succeeds, a strictly dep-ordered chain publishes the workspace
 #   crates with `cargo publish`:
-#     core -> sifters -> probes -> store -> supervisor -> ipc
-#   (the `terminal-commander-ipc` leg was added by PR #85). Each
+#     core -> sifters -> probes -> store -> supervisor -> ipc -> daemon -> mcp
+#   Each
 #   `cargo publish` step authenticates with `CARGO_REGISTRY_TOKEN`
 #   set from `secrets.CARGO_REGISTRY_TOKEN_TC`, then polls the
 #   crates.io HTTP API until the just-published version is visible
@@ -310,8 +315,72 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "publish-version: $version"
 
+  # Collapse the three supported release entry paths into one validated,
+  # canonical context. Downstream jobs must never reconstruct this fallback.
+  release-context:
+    name: release-context
+    needs:
+      - release-please
+      - ensure-release
+      - publish-version
+    if: always() && !cancelled()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.context.outputs.publish }}
+      version: ${{ steps.context.outputs.version }}
+      source: ${{ steps.context.outputs.source }}
+    steps:
+      - name: Checkout released source
+        uses: actions/checkout@v4
+
+      - name: Resolve canonical release context
+        id: context
+        env:
+          RELEASE_PLEASE_RESULT: ${{ needs.release-please.result }}
+          RELEASE_CREATED: ${{ needs.release-please.outputs.releases_created }}
+          RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
+          ENSURE_RESULT: ${{ needs.ensure-release.result }}
+          ENSURE_PUBLISH: ${{ needs.ensure-release.outputs.publish }}
+          ENSURE_VERSION: ${{ needs.ensure-release.outputs.version }}
+          PUBLISH_VERSION_RESULT: ${{ needs.publish-version.result }}
+          FORCE_PUBLISH: ${{ needs.publish-version.outputs.publish }}
+          FORCE_VERSION: ${{ needs.publish-version.outputs.version }}
+        run: node scripts/release/resolve-release-context.js
+
+  # No registry mutation is allowed before this job succeeds. This duplicates
+  # the PR gate intentionally as defense in depth for manual recovery runs.
+  prepublish-gate:
+    name: prepublish-gate
+    needs: release-context
+    if: needs.release-context.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout released source
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Run root wrapper unit tests from a clean checkout
+        working-directory: packages/terminal-commander
+        run: npm test
+
+      - name: Validate release configuration
+        run: node scripts/release/test-release-please-config.js
+
+      - name: Validate every committed version anchor
+        env:
+          EXPECTED_VERSION: ${{ needs.release-context.outputs.version }}
+        run: node scripts/release/validate-release-inputs.js "$EXPECTED_VERSION"
+
   # ----------------------------------------------------------------
-  # JOBS 2-11 — platform build + publish (NPM07).
+  # PLATFORM JOBS — build + publish (NPM07).
   #
   # For each of the 5 platforms (linux-x64, linux-arm64, windows-x64,
   # mac-x64, mac-arm64) there is a pair of jobs:
@@ -344,14 +413,12 @@ jobs:
   # ---------- linux-x64 ----------
   build-linux-x64:
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
+      - prepublish-gate
     if: >-
       always() && !cancelled() &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true' &&
+      needs.prepublish-gate.result == 'success'
     uses: ./.github/workflows/_build-platform-binary.yml
     with:
       platform: linux-x64
@@ -360,16 +427,12 @@ jobs:
   presmoke-linux-x64:
     name: presmoke-linux-x64
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - build-linux-x64
     if: >-
       always() && !cancelled() &&
       needs.build-linux-x64.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -411,18 +474,14 @@ jobs:
   publish-linux-x64:
     name: publish-linux-x64
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - build-linux-x64
       - presmoke-linux-x64
     if: >-
       always() && !cancelled() &&
       needs.build-linux-x64.result == 'success' &&
       needs.presmoke-linux-x64.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -455,7 +514,7 @@ jobs:
       - name: Confirm package version matches release-please output
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(node -p "require('./packages/terminal-commander-linux-x64/package.json').version")
@@ -489,14 +548,12 @@ jobs:
   # ---------- linux-arm64 ----------
   build-linux-arm64:
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
+      - prepublish-gate
     if: >-
       always() && !cancelled() &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true' &&
+      needs.prepublish-gate.result == 'success'
     uses: ./.github/workflows/_build-platform-binary.yml
     with:
       platform: linux-arm64
@@ -505,16 +562,12 @@ jobs:
   presmoke-linux-arm64:
     name: presmoke-linux-arm64
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - build-linux-arm64
     if: >-
       always() && !cancelled() &&
       needs.build-linux-arm64.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -550,18 +603,14 @@ jobs:
   publish-linux-arm64:
     name: publish-linux-arm64
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - build-linux-arm64
       - presmoke-linux-arm64
     if: >-
       always() && !cancelled() &&
       needs.build-linux-arm64.result == 'success' &&
       needs.presmoke-linux-arm64.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -594,7 +643,7 @@ jobs:
       - name: Confirm package version matches release-please output
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(node -p "require('./packages/terminal-commander-linux-arm64/package.json').version")
@@ -627,14 +676,12 @@ jobs:
   # ---------- windows-x64 ----------
   build-windows-x64:
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
+      - prepublish-gate
     if: >-
       always() && !cancelled() &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true' &&
+      needs.prepublish-gate.result == 'success'
     uses: ./.github/workflows/_build-platform-binary.yml
     with:
       platform: windows-x64
@@ -643,16 +690,12 @@ jobs:
   publish-windows-x64:
     name: publish-windows-x64
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - build-windows-x64
     if: >-
       always() && !cancelled() &&
       needs.build-windows-x64.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -685,7 +728,7 @@ jobs:
       - name: Confirm package version matches release-please output
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(node -p "require('./packages/terminal-commander-windows-x64/package.json').version")
@@ -718,14 +761,12 @@ jobs:
   # ---------- mac-x64 ----------
   build-mac-x64:
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
+      - prepublish-gate
     if: >-
       always() && !cancelled() &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true' &&
+      needs.prepublish-gate.result == 'success'
     uses: ./.github/workflows/_build-platform-binary.yml
     with:
       platform: mac-x64
@@ -734,16 +775,12 @@ jobs:
   publish-mac-x64:
     name: publish-mac-x64
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - build-mac-x64
     if: >-
       always() && !cancelled() &&
       needs.build-mac-x64.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -776,7 +813,7 @@ jobs:
       - name: Confirm package version matches release-please output
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(node -p "require('./packages/terminal-commander-mac-x64/package.json').version")
@@ -809,14 +846,12 @@ jobs:
   # ---------- mac-arm64 ----------
   build-mac-arm64:
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
+      - prepublish-gate
     if: >-
       always() && !cancelled() &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true' &&
+      needs.prepublish-gate.result == 'success'
     uses: ./.github/workflows/_build-platform-binary.yml
     with:
       platform: mac-arm64
@@ -825,16 +860,12 @@ jobs:
   publish-mac-arm64:
     name: publish-mac-arm64
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - build-mac-arm64
     if: >-
       always() && !cancelled() &&
       needs.build-mac-arm64.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -867,7 +898,7 @@ jobs:
       - name: Confirm package version matches release-please output
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(node -p "require('./packages/terminal-commander-mac-arm64/package.json').version")
@@ -898,7 +929,7 @@ jobs:
           exit 1
 
   # ----------------------------------------------------------------
-  # JOB 12 — publish-root (NPM07).
+  # ROOT PACKAGE — publish-root (NPM07).
   #
   # Depends on ALL 5 platform publishes succeeding. Only then does the
   # root wrapper publish; its `optionalDependencies` pin the exact
@@ -915,9 +946,7 @@ jobs:
   publish-root:
     name: publish-root
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - publish-linux-x64
       - publish-linux-arm64
       - publish-windows-x64
@@ -925,9 +954,7 @@ jobs:
       - publish-mac-arm64
     if: >-
       always() && !cancelled() &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true') &&
+      needs.release-context.outputs.publish == 'true' &&
       needs.publish-linux-x64.result == 'success' &&
       needs.publish-linux-arm64.result == 'success' &&
       needs.publish-windows-x64.result == 'success' &&
@@ -946,23 +973,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
-      - name: Run resolver unit tests (root wrapper)
-        shell: bash
-        working-directory: packages/terminal-commander
-        run: |
-          npm test
-
-      - name: Sync optionalDependencies to package version
-        shell: bash
-        run: |
-          node scripts/release/sync-optional-dependencies.js
-          node scripts/release/verify-optional-dependencies.js
-
       - name: Confirm package version + optionalDependencies sync
         shell: bash
         working-directory: packages/terminal-commander
         env:
-          EXPECTED_VERSION: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           node <<'NODE'
@@ -1008,7 +1023,7 @@ jobs:
           exit 1
 
   # ----------------------------------------------------------------
-  # JOBS 13-19 — cargo publish chain (7 crates in strict dep order).
+  # CARGO PACKAGES — 8 crates in strict dependency order.
   #
   # Dep order is non-negotiable: each crate's path-deps must already
   # be on the registry when its tarball is uploaded, or cargo rejects
@@ -1031,16 +1046,12 @@ jobs:
   publish-cargo-terminal-commander-core:
     name: publish-cargo-terminal-commander-core
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - publish-root
     if: >-
       always() && !cancelled() &&
       needs.publish-root.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1055,7 +1066,7 @@ jobs:
       - name: Assert crate version matches release-please version
         shell: bash
         env:
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(cargo pkgid -p terminal-commander-core | awk -F'[@#]' '{print $NF}')
@@ -1094,7 +1105,7 @@ jobs:
         shell: bash
         env:
           JOB: ${{ github.job }}
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
           # crates.io sparse-index lag exceeds 60s. Poll instead: query
@@ -1124,16 +1135,12 @@ jobs:
   publish-cargo-terminal-commander-sifters:
     name: publish-cargo-terminal-commander-sifters
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - publish-cargo-terminal-commander-core
     if: >-
       always() && !cancelled() &&
       needs.publish-cargo-terminal-commander-core.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1148,7 +1155,7 @@ jobs:
       - name: Assert crate version matches release-please version
         shell: bash
         env:
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(cargo pkgid -p terminal-commander-sifters | awk -F'[@#]' '{print $NF}')
@@ -1185,7 +1192,7 @@ jobs:
         shell: bash
         env:
           JOB: ${{ github.job }}
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
           # crates.io sparse-index lag exceeds 60s. Poll instead: query
@@ -1215,16 +1222,12 @@ jobs:
   publish-cargo-terminal-commander-probes:
     name: publish-cargo-terminal-commander-probes
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - publish-cargo-terminal-commander-sifters
     if: >-
       always() && !cancelled() &&
       needs.publish-cargo-terminal-commander-sifters.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1239,7 +1242,7 @@ jobs:
       - name: Assert crate version matches release-please version
         shell: bash
         env:
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(cargo pkgid -p terminal-commander-probes | awk -F'[@#]' '{print $NF}')
@@ -1276,7 +1279,7 @@ jobs:
         shell: bash
         env:
           JOB: ${{ github.job }}
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
           # crates.io sparse-index lag exceeds 60s. Poll instead: query
@@ -1306,16 +1309,12 @@ jobs:
   publish-cargo-terminal-commander-store:
     name: publish-cargo-terminal-commander-store
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - publish-cargo-terminal-commander-probes
     if: >-
       always() && !cancelled() &&
       needs.publish-cargo-terminal-commander-probes.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1330,7 +1329,7 @@ jobs:
       - name: Assert crate version matches release-please version
         shell: bash
         env:
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(cargo pkgid -p terminal-commander-store | awk -F'[@#]' '{print $NF}')
@@ -1367,7 +1366,7 @@ jobs:
         shell: bash
         env:
           JOB: ${{ github.job }}
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
           # crates.io sparse-index lag exceeds 60s. Poll instead: query
@@ -1397,16 +1396,12 @@ jobs:
   publish-cargo-terminal-commander-supervisor:
     name: publish-cargo-terminal-commander-supervisor
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - publish-cargo-terminal-commander-store
     if: >-
       always() && !cancelled() &&
       needs.publish-cargo-terminal-commander-store.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1421,7 +1416,7 @@ jobs:
       - name: Assert crate version matches release-please version
         shell: bash
         env:
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(cargo pkgid -p terminal-commander-supervisor | awk -F'[@#]' '{print $NF}')
@@ -1458,7 +1453,7 @@ jobs:
         shell: bash
         env:
           JOB: ${{ github.job }}
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
           # crates.io sparse-index lag exceeds 60s. Poll instead: query
@@ -1497,16 +1492,12 @@ jobs:
   publish-cargo-terminal-commander-ipc:
     name: publish-cargo-terminal-commander-ipc
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - publish-cargo-terminal-commander-supervisor
     if: >-
       always() && !cancelled() &&
       needs.publish-cargo-terminal-commander-supervisor.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1521,7 +1512,7 @@ jobs:
       - name: Assert crate version matches release-please version
         shell: bash
         env:
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(cargo pkgid -p terminal-commander-ipc | awk -F'[@#]' '{print $NF}')
@@ -1558,7 +1549,7 @@ jobs:
         shell: bash
         env:
           JOB: ${{ github.job }}
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
           # crates.io sparse-index lag exceeds 60s. Poll instead: query
@@ -1588,16 +1579,12 @@ jobs:
   publish-cargo-terminal-commanderd:
     name: publish-cargo-terminal-commanderd
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - publish-cargo-terminal-commander-ipc
     if: >-
       always() && !cancelled() &&
       needs.publish-cargo-terminal-commander-ipc.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1612,7 +1599,7 @@ jobs:
       - name: Assert crate version matches release-please version
         shell: bash
         env:
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(cargo pkgid -p terminal-commanderd | awk -F'[@#]' '{print $NF}')
@@ -1649,7 +1636,7 @@ jobs:
         shell: bash
         env:
           JOB: ${{ github.job }}
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
           # crates.io sparse-index lag exceeds 60s. Poll instead: query
@@ -1679,16 +1666,12 @@ jobs:
   publish-cargo-terminal-commander-mcp:
     name: publish-cargo-terminal-commander-mcp
     needs:
-      - release-please
-      - ensure-release
-      - publish-version
+      - release-context
       - publish-cargo-terminal-commanderd
     if: >-
       always() && !cancelled() &&
       needs.publish-cargo-terminal-commanderd.result == 'success' &&
-      (needs.release-please.outputs.releases_created == 'true' ||
-      (needs.ensure-release.result == 'success' && needs.ensure-release.outputs.publish == 'true') ||
-      needs.publish-version.outputs.publish == 'true')
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1703,7 +1686,7 @@ jobs:
       - name: Assert crate version matches release-please version
         shell: bash
         env:
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           actual=$(cargo pkgid -p terminal-commander-mcp | awk -F'[@#]' '{print $NF}')
@@ -1740,7 +1723,7 @@ jobs:
         shell: bash
         env:
           JOB: ${{ github.job }}
-          EXPECTED: ${{ needs.release-please.outputs.version || needs.ensure-release.outputs.version || needs.publish-version.outputs.version }}
+          EXPECTED: ${{ needs.release-context.outputs.version }}
         run: |
           # Codex review I1 (2026-05-25): fixed sleep 60 is fragile when
           # crates.io sparse-index lag exceeds 60s. Poll instead: query
@@ -1774,7 +1757,7 @@ jobs:
   # ----------------------------------------------------------------
   verify-linux-x64:
     name: verify-linux-x64
-    needs: [release-please, publish-root]
+    needs: [release-context, publish-root]
     if: always() && needs.publish-root.result == 'success'
     runs-on: ubuntu-24.04
     permissions: { contents: read, issues: write }
@@ -1783,7 +1766,7 @@ jobs:
         run: sleep 60
       - name: Install from npm + smoke (Node 22-bookworm, glibc — linux-x64 binary is glibc-linked)
         env:
-          VER: ${{ needs.release-please.outputs.version }}
+          VER: ${{ needs.release-context.outputs.version }}
         run: |
           # node:22-alpine uses musl libc. Our binaries are glibc-linked.
           # Use node:22-bookworm-slim instead. Also: --provenance requires npm 11.5.1+
@@ -1803,14 +1786,14 @@ jobs:
 
   verify-linux-arm64:
     name: verify-linux-arm64
-    needs: [release-please, publish-root]
+    needs: [release-context, publish-root]
     if: always() && needs.publish-root.result == 'success'
     runs-on: ubuntu-24.04-arm
     permissions: { contents: read, issues: write }
     steps:
       - run: sleep 60
       - env:
-          VER: ${{ needs.release-please.outputs.version }}
+          VER: ${{ needs.release-context.outputs.version }}
         run: |
           docker run --rm node:22-bookworm-slim sh -c '
             set -e
@@ -1826,7 +1809,7 @@ jobs:
 
   verify-windows-x64:
     name: verify-windows-x64
-    needs: [release-please, publish-root]
+    needs: [release-context, publish-root]
     if: always() && needs.publish-root.result == 'success'
     runs-on: windows-2022
     permissions: { contents: read, issues: write }
@@ -1836,7 +1819,7 @@ jobs:
         with: { node-version: "20" }
       - shell: pwsh
         env:
-          VER: ${{ needs.release-please.outputs.version }}
+          VER: ${{ needs.release-context.outputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
           npm install -g "terminal-commander@$env:VER"
@@ -1870,7 +1853,7 @@ jobs:
 
   verify-mac-x64:
     name: verify-mac-x64
-    needs: [release-please, publish-root]
+    needs: [release-context, publish-root]
     if: always() && needs.publish-root.result == 'success'
     runs-on: macos-15-intel   # Intel — macos-13 retired 2025-12-04; macos-15-intel is the supported Intel image. Keep a runner pinning task in runbook to rotate when GitHub deprecates.
     permissions: { contents: read, issues: write }
@@ -1879,7 +1862,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "20" }     # 0.2.0 ships without --provenance; Node 20 is fine. Task 23 bumps to 22.14+.
       - env:
-          VER: ${{ needs.release-please.outputs.version }}
+          VER: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           npm install -g "terminal-commander@${VER}"
@@ -1913,7 +1896,7 @@ jobs:
 
   verify-mac-arm64:
     name: verify-mac-arm64
-    needs: [release-please, publish-root]
+    needs: [release-context, publish-root]
     if: always() && needs.publish-root.result == 'success'
     runs-on: macos-14   # Apple Silicon
     permissions: { contents: read, issues: write }
@@ -1922,7 +1905,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - env:
-          VER: ${{ needs.release-please.outputs.version }}
+          VER: ${{ needs.release-context.outputs.version }}
         run: |
           set -e
           npm install -g "terminal-commander@${VER}"
@@ -1951,12 +1934,12 @@ jobs:
 
   mark-release-broken:
     name: mark-release-broken
-    # Codex review I6 (2026-05-25): fire on EITHER publish-job failures OR verify failures.
-    # Prior version only listened to verify jobs — but if one platform publish fails,
-    # publish-root + verify jobs SKIP (don't fail), so the issue was never filed.
-    # Now we listen across the whole release path so any failure → P0 issue.
+    # Fire on control-plane, prepublish, publish, or verification failures.
+    # Downstream skips after an earlier failure are expected; the original
+    # failing job remains visible in this explicit result set.
     needs:
-      - release-please
+      - release-context
+      - prepublish-gate
       - publish-linux-x64
       - publish-linux-arm64
       - publish-windows-x64
@@ -1978,7 +1961,9 @@ jobs:
       - verify-mac-arm64
     if: |
       always() && !cancelled() &&
-      (needs.publish-linux-x64.result == 'failure' ||
+      (needs.release-context.result == 'failure' ||
+       needs.prepublish-gate.result == 'failure' ||
+       needs.publish-linux-x64.result == 'failure' ||
        needs.publish-linux-arm64.result == 'failure' ||
        needs.publish-windows-x64.result == 'failure' ||
        needs.publish-mac-x64.result == 'failure' ||
@@ -2002,7 +1987,10 @@ jobs:
     steps:
       - name: Compose issue body to a file (avoids YAML heredoc fragility)
         env:
-          VER: ${{ needs.release-please.outputs.version }}
+          VER: ${{ needs.release-context.outputs.version }}
+          RELEASE_ID: ${{ needs.release-context.outputs.version || github.sha }}
+          RELEASE_CONTEXT: ${{ needs.release-context.result }}
+          PREPUBLISH_GATE: ${{ needs.prepublish-gate.result }}
           # Publish job results
           PUB_LX64: ${{ needs.publish-linux-x64.result }}
           PUB_LARM: ${{ needs.publish-linux-arm64.result }}
@@ -2035,7 +2023,10 @@ jobs:
           # step — so the broken-release issue was never filed. Values are
           # always injected via `%s` (never used as the format), so a value
           # like `-` or an empty `$VER` is rendered literally and safely.
-          printf -- 'Release **%s** failed somewhere in the publish pipeline.\n\n' "$VER" > /tmp/body.md
+          printf -- 'Release **%s** failed somewhere in the publish pipeline.\n\n' "$RELEASE_ID" > /tmp/body.md
+          printf -- 'Control plane:\n' >> /tmp/body.md
+          printf -- '- release-context : %s\n' "$RELEASE_CONTEXT" >> /tmp/body.md
+          printf -- '- prepublish-gate : %s\n\n' "$PREPUBLISH_GATE" >> /tmp/body.md
           printf -- 'NPM publish:\n' >> /tmp/body.md
           printf -- '- linux-x64   : %s\n' "$PUB_LX64"  >> /tmp/body.md
           printf -- '- linux-arm64 : %s\n' "$PUB_LARM"  >> /tmp/body.md
@@ -2059,22 +2050,37 @@ jobs:
           printf -- '- mac-x64     : %s\n' "$RES_MX64"  >> /tmp/body.md
           printf -- '- mac-arm64   : %s\n\n' "$RES_MARM" >> /tmp/body.md
           printf -- '**Action required:**\n' >> /tmp/body.md
-          printf -- '1. Run `bash scripts/release/recover-partial-publish.sh %s` to identify missing artifacts.\n' "$VER" >> /tmp/body.md
-          printf -- '2. If some packages shipped + some failed: re-run release-please.yml with `force_publish: true` (the E409-tolerant pattern republishes only missing).\n' >> /tmp/body.md
-          printf -- '3. If a published version is broken: run `.github/workflows/deprecate-version.yml` for version %s, then patch release.\n\n' "$VER" >> /tmp/body.md
+          if [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            printf -- '1. Run `bash scripts/release/recover-partial-publish.sh %s` to identify missing artifacts.\n' "$VER" >> /tmp/body.md
+            printf -- '2. If some packages shipped + some failed: re-run release-please.yml with `force_publish: true` (the E409-tolerant pattern republishes only missing).\n' >> /tmp/body.md
+            printf -- '3. If a published version is broken: run `.github/workflows/deprecate-version.yml` for version %s, then patch release.\n\n' "$VER" >> /tmp/body.md
+          else
+            printf -- '1. Repair the release-context failure before attempting any publish recovery.\n\n' >> /tmp/body.md
+          fi
           printf -- 'Workflow run: %s\n' "$RUN_URL" >> /tmp/body.md
       - name: Open P0 issue (PAT first, fall back to GITHUB_TOKEN if PAT is the broken one)
         env:
           PAT: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
           GITHUB_TOKEN_FALLBACK: ${{ secrets.GITHUB_TOKEN }}
-          VER: ${{ needs.release-please.outputs.version }}
+          VER: ${{ needs.release-context.outputs.version }}
+          RELEASE_ID: ${{ needs.release-context.outputs.version || github.sha }}
         run: |
           set -e
-          title="release ${VER} smoke FAILED"
+          title="release ${RELEASE_ID} pipeline FAILED"
+          open_or_update_issue() {
+            local token="$1"
+            local existing
+            existing=$(TITLE="$title" GH_TOKEN="$token" gh issue list --repo "$GITHUB_REPOSITORY" --state open --label "release-broken" --limit 100 --json number,title --jq '[.[] | select(.title == env.TITLE)][0].number // empty')
+            if [ -n "$existing" ]; then
+              GH_TOKEN="$token" gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --body-file /tmp/body.md
+            else
+              GH_TOKEN="$token" gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label "release-broken,P0" --body-file /tmp/body.md
+            fi
+          }
           # Try PAT first.
-          if GH_TOKEN="$PAT" gh issue create --title "$title" --label "release-broken,P0" --body-file /tmp/body.md; then
+          if open_or_update_issue "$PAT"; then
             echo "issue filed via RELEASE_PLEASE_TOKEN_TC"
             exit 0
           fi
           echo "::warning::RELEASE_PLEASE_TOKEN_TC failed to open issue; falling back to GITHUB_TOKEN"
-          GH_TOKEN="$GITHUB_TOKEN_FALLBACK" gh issue create --title "$title" --label "release-broken,P0" --body-file /tmp/body.md
+          open_or_update_issue "$GITHUB_TOKEN_FALLBACK"

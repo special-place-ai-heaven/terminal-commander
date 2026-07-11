@@ -10,9 +10,6 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const path = require("node:path");
-const fs = require("node:fs");
-const os = require("node:os");
-const { spawnSync } = require("node:child_process");
 
 const { runRestart, DAEMON_RESTART_CMD } = require("../lib/cli/restart.js");
 const { DETECT_REASONS } = require("../lib/wsl/detect.js");
@@ -21,6 +18,10 @@ const {
   windowsUpdateScopes,
   describeError,
 } = require("../lib/cli/runtime_environment.js");
+const {
+  planUpdatePreflight,
+  executeUpdatePreflight,
+} = require("../lib/cli/update_preflight.js");
 
 // A fake child that emits the given exit code on next tick.
 function fakeChild(code, stdout) {
@@ -249,162 +250,148 @@ test("error diagnostics preserve messages instead of collapsing to unknown", () 
   assert.match(describeError(null), /non-Error rejection/);
 });
 
-test("Windows update launcher reaps npm and stable scopes before npm install", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tc-update-scopes-"));
-  try {
-    const recordPath = path.join(tmp, "spawns.json");
-    const preload = path.join(tmp, "preload.js");
-    const npmCli = path.join(tmp, "npm-cli.js");
-    const prefix = path.join(tmp, "prefix");
-    const freshLauncher = path.join(
-      prefix,
-      "node_modules",
-      "terminal-commander",
-      "bin",
-      "terminal-commander.js",
-    );
-    fs.mkdirSync(path.dirname(freshLauncher), { recursive: true });
-    fs.writeFileSync(freshLauncher, "// mocked fresh launcher\n", "utf8");
-    fs.writeFileSync(npmCli, "// mocked npm cli\n", "utf8");
-    fs.writeFileSync(recordPath, "[]", "utf8");
-    fs.writeFileSync(
-      preload,
-      `
-"use strict";
-Object.defineProperty(process, "platform", { value: "win32" });
-const cp = require("node:child_process");
-const fs = require("node:fs");
-const { EventEmitter } = require("node:events");
-const recordPath = ${JSON.stringify(recordPath)};
-cp.spawn = function mockedSpawn(command, args) {
-  const records = JSON.parse(fs.readFileSync(recordPath, "utf8"));
-  records.push({ command: String(command), args: (args || []).map(String) });
-  fs.writeFileSync(recordPath, JSON.stringify(records), "utf8");
-  const child = new EventEmitter();
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
-  setImmediate(() => child.emit("exit", 0, null));
-  return child;
-};
-`,
-      "utf8",
-    );
+test("Windows update planning is hermetic when the package helper exists", () => {
+  const packageRoot = path.join("tmp", "npm", "node_modules", "terminal-commander");
+  const localAppData = path.join("tmp", "local-app-data");
+  const helperPath = path.join("tmp", "package", "terminal-commander.exe");
+  const plan = planUpdatePreflight({
+    platform: "win32",
+    arch: "x64",
+    env: { LOCALAPPDATA: localAppData },
+    packageRoot,
+    resolveBinary: ({ platform, arch }) => {
+      assert.equal(platform, "win32");
+      assert.equal(arch, "x64");
+      return { reason: "ok", binaryPath: helperPath };
+    },
+    stableBinPath: () => assert.fail("stable helper lookup must not run"),
+  });
 
-    const localAppData = path.join(tmp, "local-app-data");
-    const launcher = path.resolve(__dirname, "../bin/terminal-commander.js");
-    const result = spawnSync(
-      process.execPath,
-      ["--require", preload, launcher, "update"],
-      {
-        encoding: "utf8",
-        timeout: 20_000,
-        shell: false,
-        env: {
-          ...process.env,
-          LOCALAPPDATA: localAppData,
-          npm_execpath: npmCli,
-          npm_config_prefix: prefix,
-        },
-      },
-    );
-    assert.equal(result.status, 0, result.stderr);
-
-    const spawns = JSON.parse(fs.readFileSync(recordPath, "utf8"));
-    const preflights = spawns.filter((spawn) => spawn.args[0] === "update-locks");
-    assert.equal(preflights.length, 2, JSON.stringify(spawns));
-    assert.equal(preflights[0].args[1], "--scope-dir");
-    assert.equal(preflights[0].args[2], path.resolve(__dirname, "../.."));
-    assert.equal(preflights[1].args[1], "--scope-dir");
-    assert.equal(
-      preflights[1].args[2],
-      path.join(localAppData, "terminal-commander", "bin"),
-    );
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
+  assert.equal(plan.status, "ready");
+  assert.deepEqual(
+    plan.commands.map((command) => command.file),
+    [helperPath, helperPath],
+  );
+  assert.deepEqual(
+    plan.commands.map((command) => command.scopeDir),
+    [path.dirname(packageRoot), path.join(localAppData, "terminal-commander", "bin")],
+  );
 });
 
-test("Windows update uses the stable helper when the platform package is missing", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tc-update-stable-fallback-"));
-  try {
-    const recordPath = path.join(tmp, "spawns.json");
-    const preload = path.join(tmp, "preload.js");
-    const npmCli = path.join(tmp, "npm-cli.js");
-    const prefix = path.join(tmp, "prefix");
-    const localAppData = path.join(tmp, "local-app-data");
-    const stableHelper = path.join(
-      localAppData,
-      "terminal-commander",
-      "bin",
-      "terminal-commander.exe",
-    );
-    const freshLauncher = path.join(
-      prefix,
-      "node_modules",
-      "terminal-commander",
-      "bin",
-      "terminal-commander.js",
-    );
-    fs.mkdirSync(path.dirname(stableHelper), { recursive: true });
-    fs.mkdirSync(path.dirname(freshLauncher), { recursive: true });
-    fs.writeFileSync(stableHelper, "stable helper", "utf8");
-    fs.writeFileSync(freshLauncher, "// mocked fresh launcher\n", "utf8");
-    fs.writeFileSync(npmCli, "// mocked npm cli\n", "utf8");
-    fs.writeFileSync(recordPath, "[]", "utf8");
-    fs.writeFileSync(
-      preload,
-      `
-"use strict";
-Object.defineProperty(process, "platform", { value: "win32" });
-const Module = require("node:module");
-const originalLoad = Module._load;
-Module._load = function mockedLoad(request, parent, isMain) {
-  if (String(request).endsWith("lib/resolve-binary.js")) {
-    return {
-      resolveBinary: () => ({ reason: "missing_platform_package" }),
-      formatResolveError: () => "terminal-commander: platform package missing",
-    };
-  }
-  return originalLoad.call(this, request, parent, isMain);
-};
-const cp = require("node:child_process");
-const fs = require("node:fs");
-const { EventEmitter } = require("node:events");
-const recordPath = ${JSON.stringify(recordPath)};
-cp.spawn = function mockedSpawn(command, args) {
-  const records = JSON.parse(fs.readFileSync(recordPath, "utf8"));
-  records.push({ command: String(command), args: (args || []).map(String) });
-  fs.writeFileSync(recordPath, JSON.stringify(records), "utf8");
-  const child = new EventEmitter();
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
-  setImmediate(() => child.emit("exit", 0, null));
-  return child;
-};
-`,
-      "utf8",
-    );
+test("Windows update planning uses an explicitly resolved stable helper", () => {
+  const stableHelper = path.join("tmp", "stable", "terminal-commander.exe");
+  const plan = planUpdatePreflight({
+    platform: "win32",
+    env: { LOCALAPPDATA: path.join("tmp", "local-app-data") },
+    packageRoot: path.join("tmp", "npm", "node_modules", "terminal-commander"),
+    resolveBinary: () => ({ reason: "missing_platform_package" }),
+    formatResolveError: () => "terminal-commander: platform package missing",
+    stableBinPath: () => stableHelper,
+    existsSync: (candidate) => candidate === stableHelper,
+  });
 
-    const launcher = path.resolve(__dirname, "../bin/terminal-commander.js");
-    const result = spawnSync(process.execPath, ["--require", preload, launcher, "update"], {
-      encoding: "utf8",
-      timeout: 20_000,
-      shell: false,
-      env: {
-        ...process.env,
-        LOCALAPPDATA: localAppData,
-        npm_execpath: npmCli,
-        npm_config_prefix: prefix,
-      },
-    });
-    assert.equal(result.status, 0, result.stderr);
+  assert.equal(plan.status, "ready");
+  assert.equal(plan.commands.length, 2);
+  assert.ok(plan.commands.every((command) => command.file === stableHelper));
+  assert.match(plan.diagnostics.join(""), /using stable update helper/);
+});
 
-    const spawns = JSON.parse(fs.readFileSync(recordPath, "utf8"));
-    const preflights = spawns.filter((spawn) => spawn.args[0] === "update-locks");
-    assert.equal(preflights.length, 2, JSON.stringify(spawns));
-    assert.equal(preflights[0].command, stableHelper);
-    assert.equal(preflights[1].command, stableHelper);
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
+test("Windows update planning degrades to npm repair when no helper exists", () => {
+  const plan = planUpdatePreflight({
+    platform: "win32",
+    env: { LOCALAPPDATA: path.join("tmp", "local-app-data") },
+    packageRoot: path.join("tmp", "npm", "node_modules", "terminal-commander"),
+    resolveBinary: () => ({ reason: "missing_platform_package" }),
+    formatResolveError: () => "terminal-commander: platform package missing",
+    stableBinPath: () => path.join("tmp", "stable", "terminal-commander.exe"),
+    existsSync: () => false,
+  });
+
+  assert.equal(plan.status, "degraded_repair");
+  assert.equal(plan.exitCode, 0);
+  assert.deepEqual(plan.commands, []);
+  assert.match(plan.diagnostics.join(""), /continuing with npm repair/);
+});
+
+test("Windows update planning survives resolver and stable lookup exceptions", () => {
+  const plan = planUpdatePreflight({
+    platform: "win32",
+    env: {},
+    packageRoot: path.join("tmp", "npm", "node_modules", "terminal-commander"),
+    resolveBinary: () => {
+      throw new Error("resolver exploded");
+    },
+    stableBinPath: () => {
+      throw new Error("LOCALAPPDATA missing");
+    },
+  });
+
+  assert.equal(plan.status, "degraded_repair");
+  assert.equal(plan.exitCode, 0);
+  assert.match(plan.diagnostics.join(""), /stable update helper lookup failed/);
+  assert.match(plan.diagnostics.join(""), /binary resolver failed: resolver exploded/);
+});
+
+test("Windows update planning rejects malformed scope data before spawning", () => {
+  const plan = planUpdatePreflight({
+    platform: "win32",
+    env: {},
+    packageRoot: "package",
+    resolveBinary: () => ({ reason: "ok", binaryPath: "helper.exe" }),
+    windowsUpdateScopes: () => [],
+  });
+
+  assert.equal(plan.status, "invalid_environment");
+  assert.equal(plan.exitCode, 64);
+  assert.deepEqual(plan.commands, []);
+  assert.match(plan.diagnostics.join(""), /scope resolver returned invalid data/);
+});
+
+test("update preflight execution is sequential and stops on the first failure", async () => {
+  const seen = [];
+  const plan = {
+    exitCode: 0,
+    diagnostics: ["planned\n"],
+    commands: [
+      { file: "helper", args: ["update-locks", "--scope-dir", "one"], scopeDir: "one" },
+      { file: "helper", args: ["update-locks", "--scope-dir", "two"], scopeDir: "two" },
+      { file: "helper", args: ["update-locks", "--scope-dir", "three"], scopeDir: "three" },
+    ],
+  };
+  const diagnostics = [];
+  const code = await executeUpdatePreflight(plan, {
+    env: { TEST: "1" },
+    writeStderr: (message) => diagnostics.push(message),
+    spawn: (file, args, options) => {
+      seen.push({ file, args, options });
+      const child = new EventEmitter();
+      const exitCode = seen.length === 2 ? 7 : 0;
+      setImmediate(() => child.emit("exit", exitCode, null));
+      return child;
+    },
+  });
+
+  assert.equal(code, 7);
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen.map((call) => call.args[2]), ["one", "two"]);
+  assert.ok(seen.every((call) => call.options.shell === false));
+  assert.deepEqual(diagnostics, ["planned\n"]);
+});
+
+test("update preflight maps a malformed spawn result to a clear executable error", async () => {
+  const diagnostics = [];
+  const code = await executeUpdatePreflight(
+    {
+      exitCode: 0,
+      diagnostics: [],
+      commands: [{ file: "helper", args: [], scopeDir: "scope" }],
+    },
+    {
+      spawn: () => null,
+      writeStderr: (message) => diagnostics.push(message),
+    },
+  );
+
+  assert.equal(code, 126);
+  assert.match(diagnostics.join(""), /spawn returned no child process/);
 });

@@ -18,12 +18,8 @@ const https = require("https");
 const path = require("path");
 const pkg = require("../package.json");
 const { resolveBinary, formatResolveError } = require("../lib/resolve-binary.js");
-const { stableBinPath } = require("../lib/harness/stable_bin.js");
-const {
-  detectRuntimeEnvironment,
-  windowsUpdateScopes,
-  describeError,
-} = require("../lib/cli/runtime_environment.js");
+const { describeError } = require("../lib/cli/runtime_environment.js");
+const { runUpdatePreflight } = require("../lib/cli/update_preflight.js");
 
 const args = process.argv.slice(2);
 
@@ -163,7 +159,7 @@ function runUpdate() {
     process.exit(126);
   }
 
-  runUpdatePreflight((preflightCode) => {
+  runUpdatePreflight().then((preflightCode) => {
     if (preflightCode !== 0) {
       process.stderr.write(
         `terminal-commander: update preflight failed with exit code ${preflightCode}; close Terminal Commander processes and retry.\n`,
@@ -201,6 +197,11 @@ function runUpdate() {
       );
       process.exit(126);
     });
+  }).catch((err) => {
+    process.stderr.write(
+      `terminal-commander: update preflight failed unexpectedly: ${describeError(err)}\n`,
+    );
+    process.exit(1);
   });
 }
 
@@ -255,100 +256,6 @@ function reregisterHarnesses(done) {
     );
     done();
   });
-}
-
-function runUpdatePreflight(done) {
-  const environment = detectRuntimeEnvironment({
-    platform: process.platform,
-    env: process.env,
-    flags: {},
-  });
-  if (environment.status !== "ok") {
-    process.stderr.write(
-      `terminal-commander: update preflight unsupported environment (${environment.evidence}).\n`,
-    );
-    done(64);
-    return;
-  }
-  if (process.platform !== "win32") {
-    done(0);
-    return;
-  }
-
-  const result = resolveBinary({ binary: "terminal-commander" });
-  let helperPath = result.reason === "ok" ? result.binaryPath : null;
-  if (!helperPath) {
-    const stableHelper = stableBinPath("terminal-commander", {
-      platform: process.platform,
-      env: process.env,
-    });
-    if (fs.existsSync(stableHelper)) {
-      helperPath = stableHelper;
-      process.stderr.write(
-        `${formatResolveError(result)}; using stable update helper ${stableHelper}.\n`,
-      );
-    } else {
-      process.stderr.write(
-        `${formatResolveError(result)}; no update helper is available, continuing with npm repair.\n`,
-      );
-      done(0);
-      return;
-    }
-  }
-
-  let scopes;
-  try {
-    scopes = windowsUpdateScopes({
-      platform: process.platform,
-      env: process.env,
-      packageRoot: path.dirname(__dirname),
-    });
-  } catch (err) {
-    process.stderr.write(
-      `terminal-commander: update preflight environment error: ${describeError(err)}\n`,
-    );
-    done(64);
-    return;
-  }
-
-  const runScope = (index) => {
-    if (index >= scopes.length) {
-      done(0);
-      return;
-    }
-    const scopeDir = scopes[index];
-    const child = spawn(
-      helperPath,
-      ["update-locks", "--scope-dir", scopeDir],
-      {
-        stdio: "inherit",
-        shell: false,
-        env: process.env,
-      },
-    );
-
-    child.on("exit", (code, signal) => {
-      if (signal) {
-        done(1);
-        return;
-      }
-      const exitCode = code == null ? 1 : code;
-      if (exitCode !== 0) {
-        done(exitCode);
-        return;
-      }
-      runScope(index + 1);
-    });
-
-    child.on("error", (err) => {
-      process.stderr.write(
-        `terminal-commander: failed to start update preflight for ${scopeDir}: ${describeError(err)}\n`,
-      );
-      done(126);
-    });
-  };
-
-  runScope(0);
 }
 
 function writeCliResult(result) {

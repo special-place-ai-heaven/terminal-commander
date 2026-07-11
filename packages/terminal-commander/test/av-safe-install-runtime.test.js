@@ -110,10 +110,15 @@ test("Cursor-facing MCP shim directly spawns the native MCP binary", () => {
 });
 
 test("admin CLI update is explicit npm update with no shell wrapper", () => {
-  const src = fs.readFileSync(
+  const launcherSrc = fs.readFileSync(
     path.join(PKG_ROOT, "bin", "terminal-commander.js"),
     "utf8",
   );
+  const preflightSrc = fs.readFileSync(
+    path.join(PKG_ROOT, "lib", "cli", "update_preflight.js"),
+    "utf8",
+  );
+  const src = `${launcherSrc}\n${preflightSrc}`;
 
   assert.match(src, /terminal-commander@latest/);
   assert.match(src, /update-locks/);
