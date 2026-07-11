@@ -18,6 +18,12 @@ const https = require("https");
 const path = require("path");
 const pkg = require("../package.json");
 const { resolveBinary, formatResolveError } = require("../lib/resolve-binary.js");
+const { stableBinPath } = require("../lib/harness/stable_bin.js");
+const {
+  detectRuntimeEnvironment,
+  windowsUpdateScopes,
+  describeError,
+} = require("../lib/cli/runtime_environment.js");
 
 const args = process.argv.slice(2);
 
@@ -252,56 +258,97 @@ function reregisterHarnesses(done) {
 }
 
 function runUpdatePreflight(done) {
+  const environment = detectRuntimeEnvironment({
+    platform: process.platform,
+    env: process.env,
+    flags: {},
+  });
+  if (environment.status !== "ok") {
+    process.stderr.write(
+      `terminal-commander: update preflight unsupported environment (${environment.evidence}).\n`,
+    );
+    done(64);
+    return;
+  }
   if (process.platform !== "win32") {
     done(0);
     return;
   }
 
   const result = resolveBinary({ binary: "terminal-commander" });
-  if (result.reason !== "ok") {
-    done(0);
+  let helperPath = result.reason === "ok" ? result.binaryPath : null;
+  if (!helperPath) {
+    const stableHelper = stableBinPath("terminal-commander", {
+      platform: process.platform,
+      env: process.env,
+    });
+    if (fs.existsSync(stableHelper)) {
+      helperPath = stableHelper;
+      process.stderr.write(
+        `${formatResolveError(result)}; using stable update helper ${stableHelper}.\n`,
+      );
+    } else {
+      process.stderr.write(
+        `${formatResolveError(result)}; no update helper is available, continuing with npm repair.\n`,
+      );
+      done(0);
+      return;
+    }
+  }
+
+  let scopes;
+  try {
+    scopes = windowsUpdateScopes({
+      platform: process.platform,
+      env: process.env,
+      packageRoot: path.dirname(__dirname),
+    });
+  } catch (err) {
+    process.stderr.write(
+      `terminal-commander: update preflight environment error: ${describeError(err)}\n`,
+    );
+    done(64);
     return;
   }
 
-  // Scope = the `node_modules/` directory that hosts the `terminal-commander`
-  // package. This is the directory under which npm stages new installs and
-  // parks `.terminal-commander-RAND` renamed leftovers, so the preflight must
-  // reap owned binaries loaded from anywhere within it.
-  //
-  // resolveBinary returns:
-  //   <pkg-root>/node_modules/@terminal-commander/<plat>/bin/<exe>
-  // where <pkg-root> is the `terminal-commander/` package dir, and its
-  // parent is the `node_modules/` we want.
-  //
-  // __dirname here is <pkg-root>/bin, so the parent of the package is
-  // path.dirname(__dirname). Compute scope from __dirname (more stable
-  // than walking the resolved platform binary path).
-  const scopeDir = path.dirname(path.dirname(__dirname));
-
-  const child = spawn(result.binaryPath, [
-    "update-locks",
-    "--scope-dir",
-    scopeDir,
-  ], {
-    stdio: "inherit",
-    shell: false,
-    env: process.env,
-  });
-
-  child.on("exit", (code, signal) => {
-    if (signal) {
-      done(1);
+  const runScope = (index) => {
+    if (index >= scopes.length) {
+      done(0);
       return;
     }
-    done(code == null ? 1 : code);
-  });
-
-  child.on("error", (err) => {
-    process.stderr.write(
-      `terminal-commander: failed to start update preflight: ${err.code || err.message}\n`,
+    const scopeDir = scopes[index];
+    const child = spawn(
+      helperPath,
+      ["update-locks", "--scope-dir", scopeDir],
+      {
+        stdio: "inherit",
+        shell: false,
+        env: process.env,
+      },
     );
-    done(126);
-  });
+
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        done(1);
+        return;
+      }
+      const exitCode = code == null ? 1 : code;
+      if (exitCode !== 0) {
+        done(exitCode);
+        return;
+      }
+      runScope(index + 1);
+    });
+
+    child.on("error", (err) => {
+      process.stderr.write(
+        `terminal-commander: failed to start update preflight for ${scopeDir}: ${describeError(err)}\n`,
+      );
+      done(126);
+    });
+  };
+
+  runScope(0);
 }
 
 function writeCliResult(result) {
@@ -319,7 +366,7 @@ function runJsCli() {
     .then(writeCliResult)
     .catch((err) => {
       process.stderr.write(
-        `terminal-commander: CLI internal error: ${err && err.code ? err.code : "unknown"}\n`,
+        `terminal-commander: CLI internal error: ${describeError(err)}\n`,
       );
       process.exit(64);
     });

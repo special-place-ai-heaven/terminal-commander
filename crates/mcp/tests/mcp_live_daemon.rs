@@ -259,18 +259,20 @@ fn assert_omni_status_honest(body: &serde_json::Value) {
     );
     let matrix = &omni["matrix"];
     // Daemon is UP here, so daemon-gated lanes report available iff this host's
-    // platform backend exists AND the policy cap is granted. DeveloperLocal now
-    // grants one-shot shell by default, so shell_exec should be honestly
-    // advertised as available out of the box.
+    // platform backend exists AND the policy cap is granted. BUG 1: the
+    // shell_exec lane is wired but this daemon runs the default DeveloperLocal
+    // profile with `allow_shell` OFF, so a call would be PolicyDenied -- the
+    // matrix must be cap-truthful and report available:false with the reason,
+    // never advertise a call that policy can only reject.
     assert_eq!(
         matrix["shell_exec"]["available"].as_bool(),
-        Some(true),
-        "shell_exec must be available on the default developer_local profile; got {matrix}"
+        Some(false),
+        "shell_exec must be unavailable when allow_shell is off (deny-by-default); got {matrix}"
     );
     assert_eq!(
         matrix["shell_exec"]["reason"].as_str(),
-        None,
-        "shell_exec must not carry an unavailable reason when allow_shell is granted; got {matrix}"
+        Some("allow_shell capability is off in the active policy profile"),
+        "shell_exec must carry the cap-truthful reason when allow_shell is off; got {matrix}"
     );
     // sessions are unix-only; pty is unix(posix)/windows(conpty).
     let sessions_available = matrix["sessions"]["available"]

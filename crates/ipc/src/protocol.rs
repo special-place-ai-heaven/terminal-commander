@@ -1204,9 +1204,8 @@ impl CommandStartParams {
 /// line (pipelines / compounds / redirects) through the comb pipeline
 /// behind the `allow_shell` capability. Mirrors the daemon's
 /// `ShellExecRequest`; carries the dedicated `shell_line` ONLY — there
-/// is NO capability flag on the wire (caps are config/profile policy, never
-/// MCP-flippable). Granted by default on `developer_local`; denied on
-/// profiles/caps without shell.
+/// is NO capability flag on the wire (caps are config/TOML, never
+/// MCP-flippable). Denied by default.
 ///
 /// `wait_ms` is deliberately ABSENT here: like `command_start_combed`,
 /// the bounded-wait control is an MCP-layer concern (`McpShellExecParams`

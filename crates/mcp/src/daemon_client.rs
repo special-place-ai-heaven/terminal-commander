@@ -101,12 +101,17 @@ pub struct DaemonStatusHandle {
     /// Observability + lets tests assert single-flight (concurrent tools
     /// hitting an unavailable status must not each fire a probe).
     probe_count: Arc<AtomicU64>,
+    /// Count of version probes fired before guarded daemon-backed tools.
+    /// Unlike the startup verdict, this keeps checking after a matching start
+    /// so replacing the daemon cannot silently introduce version skew.
+    version_probe_count: Arc<AtomicU64>,
     /// DEFECT B: `Some((daemon_version, adapter_version))` when the ALIVE
     /// daemon's `system_discover` version does not match this adapter (skew in
     /// EITHER direction). `None` => versions matched, or skew could not be
     /// determined (the down-daemon case is the `Unavailable` path, not skew).
-    /// Set once at startup; never mutated, so it needs no lock.
-    version_skew: Option<(String, String)>,
+    /// Shared mutable cache: when a stale daemon is replaced under a live MCP
+    /// adapter, the next guarded tool re-probes and clears this verdict.
+    version_skew: Arc<Mutex<Option<(String, String)>>>,
 }
 
 impl DaemonStatusHandle {
@@ -115,7 +120,8 @@ impl DaemonStatusHandle {
             status: Arc::new(Mutex::new(status)),
             probe_guard: Arc::new(tokio::sync::Mutex::new(())),
             probe_count: Arc::new(AtomicU64::new(0)),
-            version_skew: None,
+            version_probe_count: Arc::new(AtomicU64::new(0)),
+            version_skew: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -130,7 +136,8 @@ impl DaemonStatusHandle {
             status: Arc::new(Mutex::new(status)),
             probe_guard: Arc::new(tokio::sync::Mutex::new(())),
             probe_count: Arc::new(AtomicU64::new(0)),
-            version_skew,
+            version_probe_count: Arc::new(AtomicU64::new(0)),
+            version_skew: Arc::new(Mutex::new(version_skew)),
         }
     }
 
@@ -139,7 +146,11 @@ impl DaemonStatusHandle {
     /// wrong build; `None` when versions matched or skew is unknown.
     #[must_use]
     pub fn version_skew(&self) -> Option<(String, String)> {
-        self.version_skew.clone()
+        self.version_skew.lock().unwrap().clone()
+    }
+
+    fn set_version_skew(&self, version_skew: Option<(String, String)>) {
+        *self.version_skew.lock().unwrap() = version_skew;
     }
 
     /// Number of self-heal `Health` re-probes fired so far. Used by tests
@@ -147,6 +158,12 @@ impl DaemonStatusHandle {
     #[must_use]
     pub fn probe_count(&self) -> u64 {
         self.probe_count.load(Ordering::Relaxed)
+    }
+
+    /// Number of live `SystemDiscover` version probes fired so far.
+    #[must_use]
+    pub fn version_probe_count(&self) -> u64 {
+        self.version_probe_count.load(Ordering::Relaxed)
     }
     #[allow(dead_code)]
     pub fn current(&self) -> EnsureDaemonStatus {
@@ -254,6 +271,31 @@ impl McpDaemonClient {
     #[must_use]
     pub fn socket_path(&self) -> &std::path::Path {
         self.inner.socket_path()
+    }
+
+    /// Re-probe a cached version-skew verdict after an operator replaces the
+    /// daemon under a long-lived MCP adapter. Matching versions clear the cache;
+    /// a still-mismatched daemon replaces it with fresh values. Probe failure
+    /// preserves the prior honest skew verdict instead of guessing.
+    pub async fn refresh_version_skew(&self, adapter_version: &str) -> Option<(String, String)> {
+        let Some(handle) = &self.status else {
+            return None;
+        };
+
+        let _flight = handle.probe_guard.lock().await;
+        let prior = handle.version_skew();
+        handle.version_probe_count.fetch_add(1, Ordering::Relaxed);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let probe = self.inner.call(id, IpcRequest::SystemDiscover);
+        match tokio::time::timeout(SKEW_PROBE_TIMEOUT, probe).await {
+            Ok(Ok(IpcResponse::SystemDiscover(discover))) => {
+                let refreshed = (discover.version != adapter_version)
+                    .then(|| (discover.version, adapter_version.to_owned()));
+                handle.set_version_skew(refreshed.clone());
+                refreshed
+            }
+            _ => prior,
+        }
     }
 
     /// Issue one round trip against the daemon. Returns the typed
@@ -536,6 +578,29 @@ mod tests {
             matched.version_skew(),
             None,
             "new(...) must report no skew (back-compat for existing call sites)"
+        );
+    }
+
+    #[test]
+    fn version_skew_cache_updates_across_handle_clones() {
+        let handle = DaemonStatusHandle::with_skew(
+            EnsureDaemonStatus::AlreadyRunning {
+                endpoint: Endpoint::UnixSocket {
+                    path: "/tmp/tc-skew-refresh.sock".into(),
+                },
+                pid: Some(1),
+            },
+            Some(("0.1.73".to_owned(), "0.1.74".to_owned())),
+        );
+        let clone = handle.clone();
+
+        handle.set_version_skew(None);
+        assert_eq!(clone.version_skew(), None);
+
+        clone.set_version_skew(Some(("0.1.75".to_owned(), "0.1.74".to_owned())));
+        assert_eq!(
+            handle.version_skew(),
+            Some(("0.1.75".to_owned(), "0.1.74".to_owned()))
         );
     }
 

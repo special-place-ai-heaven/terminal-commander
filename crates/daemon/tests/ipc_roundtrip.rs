@@ -150,9 +150,8 @@ fn policy_status_reports_active_caps() {
                 assert_eq!(p.bucket_read_limit, state.config.limits.bucket_read_limit);
                 assert!(p.commands_deny_count > 0);
                 assert!(p.default_deny_path_suffix_count > 0);
-                // Default developer_local grants one-shot shell, while longer-lived
-                // sessions, privilege elevation, and remote routing remain off.
-                assert!(p.caps.allow_shell, "default profile must enable shell");
+                // Default base profile carries NO caps: all four read false.
+                assert!(!p.caps.allow_shell, "default profile must not enable shell");
                 assert!(!p.caps.allow_session);
                 assert!(!p.caps.allow_privileged);
                 assert!(!p.caps.allow_remote);
@@ -175,7 +174,7 @@ fn policy_status_surfaces_explicit_allow_shell_cap() {
         let data = tmp_data_dir("policy-cap-on");
         let mut cfg = DaemonConfig::defaults_in(&data);
         cfg.policy.caps = Some(PolicyCapsSection {
-            allow_shell: true,
+            allow_shell: Some(true),
             ..Default::default()
         });
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());

@@ -141,8 +141,8 @@ impl ShellRuntime {
     /// `argv = [shell, "-lc", shell_line]`, and forwards to
     /// [`CommandRuntime::start_combed_shell`] — which gates on
     /// [`PolicyAction::CommandShellStart`](crate::policy::PolicyAction)
-    /// (granted by default on `developer_local`) and, on allow, emits a
-    /// `command_shell_start` audit row before spawning.
+    /// (denied by default) and, on allow, emits a `command_shell_start`
+    /// audit row before spawning.
     ///
     /// SYNC: `start_combed_shell` never awaits, so the borrows it holds on
     /// `shell_line` / `shell` live only for this call. MUST be called from

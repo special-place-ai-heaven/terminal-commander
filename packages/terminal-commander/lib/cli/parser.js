@@ -295,16 +295,16 @@ NOTE
 const RESTART_USAGE = `terminal-commander restart [--distro <name>] [--force]
 
 Replace the running terminal-commander daemon with the installed binary by
-invoking 'terminal-commanderd update --force'. On Windows the daemon runs
-inside WSL, so the restart is dispatched through the resolved WSL distro.
+invoking 'terminal-commanderd update --force'. Windows uses the native daemon
+by default. WSL is selected only when --distro, TC_WSL_DISTRO, or
+TC_USE_LEGACY_WSL_BRIDGE=1 explicitly requests it.
 
 This does NOT upgrade the npm package. Upgrade with your package manager
 ('npm update -g terminal-commander'), THEN run 'terminal-commander restart'.
 
 FLAGS
-  --distro <name>                     WSL distro to restart the daemon in
-                                      (Windows host). Defaults to TC_WSL_DISTRO
-                                      or the default distro.
+  --distro <name>                     Explicitly restart the daemon in this WSL
+                                      distro instead of native Windows.
   --force                             Always passed to the daemon; documented
                                       here for symmetry. A same-version daemon
                                       is replaced anyway (that is the point).

@@ -640,7 +640,7 @@ pub struct OmniMatrix {
 ///
 /// `available` is the CAP-TRUTHFUL verdict: the lane is WIRED (the `shell_exec`
 /// tool is live and the daemon is reachable) AND the active profile grants
-/// `allow_shell`. A cap-off profile (allow_shell off) reports
+/// `allow_shell`. A deny-by-default profile (allow_shell off) reports
 /// `available: false` with `reason` set, because a call would be PolicyDenied
 /// (BUG 1). `reason` is `None` when available, or when caps could not be read
 /// (the presence-only fallback). The precise cap value is still reported by
@@ -851,8 +851,11 @@ impl TerminalCommanderMcpServer {
         // `daemon_version_skew` error, not a misleading `daemon_unavailable`.
         // `health` / `system_discover` bypass this via `ensure_daemon_reachable`
         // so an operator can still diagnose while skewed.
-        if let Some((daemon_ver, adapter_ver)) = self.daemon.status().and_then(|s| s.version_skew())
-        {
+        let version_skew = self
+            .daemon
+            .refresh_version_skew(env!("CARGO_PKG_VERSION"))
+            .await;
+        if let Some((daemon_ver, adapter_ver)) = version_skew {
             return Err(daemon_version_skew_error(&daemon_ver, &adapter_ver));
         }
         Ok(())
@@ -1541,7 +1544,7 @@ impl TerminalCommanderMcpServer {
     /// Forwards `IpcRequest::ShellExec`; the daemon spawns
     /// `[shell, "-lc", shell_line]` ONLY on an `AllowWithAudit` verdict for
     /// `PolicyAction::CommandShellStart` (gated by the `allow_shell`
-    /// capability; granted by default on `developer_local`). The shell lane skips the
+    /// capability, denied by default). The shell lane skips the
     /// argv `SHELL_INTERPRETERS_DENY` guard, so its denials are
     /// `PolicyDenied`, never `ShellInterpreterDenied`. The reply reuses the
     /// `command_start_combed` bounded shape (`job_id`/`bucket_id`/`probe_id`/
@@ -1550,7 +1553,7 @@ impl TerminalCommanderMcpServer {
     /// MCP carries `shell_line` ONLY — capabilities are config/TOML, never an
     /// MCP-flippable flag.
     #[tool(
-        description = "Run ONE shell line (pipelines/compounds/redirects via [shell,-lc,line]) and get back ONLY the lines your rules match plus exit state, never the raw stream. Requires the allow_shell capability (granted by default on developer_local); a denied daemon returns a policy error. Returns job_id, bucket_id, probe_id, initial cursor. Use command_start_combed (argv only) when you do not need shell syntax; prefer plain shell for tiny one-off commands whose full output you want verbatim."
+        description = "Run ONE shell line (pipelines/compounds/redirects via [shell,-lc,line]) and get back ONLY the lines your rules match plus exit state, never the raw stream. Requires the allow_shell capability (config/TOML, denied by default); a denied daemon returns a policy error. Returns job_id, bucket_id, probe_id, initial cursor. Use command_start_combed (argv only) when you do not need shell syntax; prefer plain shell for tiny one-off commands whose full output you want verbatim."
     )]
     async fn shell_exec(
         &self,
@@ -6474,7 +6477,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} missing from discovered tools"))
         }
 
-        // Daemon up, synthetic every-cap-OFF view.
+        // Daemon up, every cap OFF (the DeveloperLocal deny-by-default posture).
         let denied = discovered_tools(true, Some(PolicyCapsView::default()));
         let shell = entry(&denied, "shell_exec");
         assert!(

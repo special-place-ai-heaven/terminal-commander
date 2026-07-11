@@ -14,9 +14,11 @@
 //! start metadata (job_id/bucket_id/probe_id/cursor) — a combed signal /
 //! receipt — and NEVER a raw stdout dump of the pipeline output.
 //!
-//! Default profile: `developer_local` grants one-shot shell by default, so
-//! the same shell lane works out of the box while still skipping raw stdout
-//! dumps and routing output through the comb/bucket pipeline.
+//! Default-deny (cap OFF): on the default `developer_local` profile the
+//! `allow_shell` capability defaults false, so `shell_exec` is denied at
+//! the `CommandShellStart` policy gate and surfaces a denied/policy error
+//! through MCP — never `ShellInterpreterDenied` (the shell lane skips the
+//! argv shell-interpreter guard by design).
 //!
 //! Mirrors the live-daemon harness in `mcp_live_command_e2e.rs`.
 
@@ -56,8 +58,8 @@ fn cleanup(p: &std::path::Path) {
     let _ = std::fs::remove_dir_all(p);
 }
 
-/// Live daemon on the DEFAULT profile (`developer_local`): one-shot shell is
-/// enabled by default, so the shell lane should run through the comb pipeline.
+/// Live daemon on the DEFAULT profile (`developer_local`): caps default
+/// false, so `allow_shell` is OFF and the shell lane is denied.
 fn spawn_live_daemon(data: &std::path::Path) -> ServerHandle {
     let cfg = DaemonConfig::defaults_in(data);
     spawn_with_config(cfg)
@@ -184,44 +186,35 @@ async fn o01_pipeline_returns_signal_when_cap_on() {
     cleanup(&data);
 }
 
-/// Default profile: `developer_local` grants one-shot shell, so the shell lane
-/// runs through policy and returns a combed bounded response out of the box.
+/// Default-deny: on the default `developer_local` profile the
+/// `allow_shell` capability is OFF, so the shell lane is denied at the
+/// `CommandShellStart` policy gate and MCP surfaces a denied/policy error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_exec_allowed_on_default_profile_e2e() {
-    let data = tmp_data_dir("default-allow");
+async fn shell_exec_denied_on_default_profile_e2e() {
+    let data = tmp_data_dir("default-deny");
     let handle = spawn_live_daemon(&data);
     {
         let (_server, client) = paired_against_live_daemon(&handle).await;
 
-        let payload = first_text(
-            &call_tool(
-                &client,
-                "shell_exec",
-                serde_json::json!({
-                    "shell_line": "echo hi | wc -c",
-                    "wait_ms": 2000,
-                }),
-            )
-            .await,
-        );
-        assert!(
-            payload.len() <= MAX_RESPONSE_BYTES,
-            "default shell_exec payload must respect IPC response budget"
-        );
+        let mut params = CallToolRequestParams::new("shell_exec");
+        params.arguments = serde_json::json!({ "shell_line": "echo hi" })
+            .as_object()
+            .cloned();
+        let err = client
+            .call_tool(params)
+            .await
+            .expect_err("shell_exec must be denied when allow_shell is off");
 
-        let v: serde_json::Value =
-            serde_json::from_str(&payload).expect("shell_exec payload is JSON");
+        let rendered = err.to_string().to_ascii_lowercase();
         assert!(
-            v["job_id"].as_str().is_some_and(|s| !s.is_empty()),
-            "default shell_exec must return a non-empty job_id; got: {payload}"
+            rendered.contains("denied") || rendered.contains("policy"),
+            "default-profile shell denial must surface a denied/policy message; got: {rendered}"
         );
+        // The shell lane skips the argv shell-interpreter guard, so the
+        // denial must NOT be the argv-lane ShellInterpreterDenied verdict.
         assert!(
-            v.get("stdout").is_none(),
-            "shell_exec response must not carry a stdout field; got: {payload}"
-        );
-        assert!(
-            v.get("stderr").is_none(),
-            "shell_exec response must not carry a stderr field; got: {payload}"
+            !rendered.contains("shellinterpreterdenied"),
+            "shell-lane denial must be a policy denial, not the argv ShellInterpreterDenied guard; got: {rendered}"
         );
 
         let _ = client.cancel().await;

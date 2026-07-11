@@ -61,8 +61,7 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
 /// [`handle_command_start_combed`] but routes through the gated shell
 /// lane: it builds a [`ShellExecRequest`] from the wire params and calls
 /// the SYNC [`ShellRuntime::exec`](crate::shell::ShellRuntime::exec),
-/// which gates on `PolicyAction::CommandShellStart` (granted by default on
-/// `developer_local`, denied on profiles/caps without shell).
+/// which gates on `PolicyAction::CommandShellStart` (denied by default).
 ///
 /// The shell lane SKIPS the `SHELL_INTERPRETERS_DENY` guard, so it can
 /// NEVER produce [`CommandError::ShellInterpreterDenied`]; its denials are

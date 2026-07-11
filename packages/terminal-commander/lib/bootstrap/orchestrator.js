@@ -32,6 +32,7 @@ const { harnessNeedsConfiguration } = require("../harness/needs.js");
 const { runWslBashLc } = require("./ensure_wsl_runtime.js");
 const { LINUX_PATH_PREFIX, RUNTIME_VERSION_CMD } = require("./constants.js");
 const { DAEMON_RESTART_CMD } = require("../cli/restart.js");
+const { detectRuntimeEnvironment } = require("../cli/runtime_environment.js");
 
 // Authoritative host runtime version. The WSL runtime must match this: a stale
 // WSL runtime serves `health` but not command execution (daemon skew), so the
@@ -139,12 +140,13 @@ async function runBootstrap(opts) {
   try {
 
     if (platform === "win32") {
-      const wantsWslRuntime =
-        env.TC_USE_LEGACY_WSL_BRIDGE === "1" ||
-        typeof o.distro === "string" ||
-        typeof env.TC_WSL_DISTRO === "string";
+      const runtimeEnvironment = detectRuntimeEnvironment({
+        platform,
+        env,
+        flags: { distro: o.distro },
+      });
 
-      if (!wantsWslRuntime) {
+      if (runtimeEnvironment.runtime !== "wsl") {
         lines.push("terminal-commander: native Windows MCP path selected; WSL bootstrap skipped.");
       } else {
       const detect = o.detect || detectWsl;

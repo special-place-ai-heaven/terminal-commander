@@ -68,9 +68,9 @@ pub enum PolicyProfile {
     ReadOnlyObserver,
     AdminDebug,
     /// Convenience profile (Hybrid trust model -- reconciliation Decision 1).
-    /// Exec-capable like `developer_local`; its loader preset (`resolved_caps`)
-    /// flips ALL `[policy.caps]` true. NEVER short-circuits `evaluate()` -- it
-    /// only sets the caps inputs, so gated actions stay `AllowWithAudit`.
+    /// Exec-capable like `developer_local`; its preset grants every capability
+    /// unless an explicit `[policy.caps]` false override revokes one. It never
+    /// short-circuits `evaluate()`; gated actions stay `AllowWithAudit`.
     FullAccess,
 }
 
@@ -82,9 +82,9 @@ pub enum PolicyAction<'a> {
         cwd: &'a Path,
     },
     /// Shell-lane start (TC49). `shell_line` is the dedicated shell string;
-    /// argv[0] is NOT a user-chosen interpreter here. Gated by `allow_shell`,
-    /// after command positions in `shell_line` are checked against
-    /// `COMMANDS_DENY`.
+    /// argv[0] is NOT a user-chosen interpreter here. Gated by `allow_shell`.
+    /// A best-effort structural scan adds defense in depth for literal denied
+    /// commands, but dynamic shell expansion is not an authorization boundary.
     CommandShellStart {
         shell_line: &'a str,
         cwd: &'a Path,
@@ -164,23 +164,17 @@ pub struct PolicyCaps {
 impl PolicyCaps {
     /// Built-in capability grants for a profile before TOML overlays.
     ///
-    /// Cap entries are grants: explicit config can add capabilities, while
-    /// profile defaults keep zero-config behavior usable.
+    /// Explicit config values may override these presets in either direction.
     pub const fn default_for_profile(profile: PolicyProfile) -> Self {
         match profile {
-            PolicyProfile::DeveloperLocal => Self {
-                allow_shell: true,
-                allow_session: false,
-                allow_privileged: false,
-                allow_remote: false,
-            },
             PolicyProfile::FullAccess => Self {
                 allow_shell: true,
                 allow_session: true,
                 allow_privileged: true,
                 allow_remote: true,
             },
-            PolicyProfile::RepoOnly
+            PolicyProfile::DeveloperLocal
+            | PolicyProfile::RepoOnly
             | PolicyProfile::ReadOnlyObserver
             | PolicyProfile::AdminDebug => Self {
                 allow_shell: false,
@@ -188,15 +182,6 @@ impl PolicyCaps {
                 allow_privileged: false,
                 allow_remote: false,
             },
-        }
-    }
-
-    pub const fn union(self, grants: Self) -> Self {
-        Self {
-            allow_shell: self.allow_shell || grants.allow_shell,
-            allow_session: self.allow_session || grants.allow_session,
-            allow_privileged: self.allow_privileged || grants.allow_privileged,
-            allow_remote: self.allow_remote || grants.allow_remote,
         }
     }
 }
@@ -274,6 +259,7 @@ fn finish_shell_word(
     None
 }
 
+#[allow(clippy::too_many_lines)]
 fn denied_command_in_shell_line(shell_line: &str) -> Option<&'static str> {
     let mut chars = shell_line.chars().peekable();
     let mut word = String::new();
@@ -826,8 +812,8 @@ impl PolicyEngine {
         // Shell-lane gate (TC49). Evaluated BEFORE the per-profile match so a
         // single deny-first rule covers every profile: shell_exec is allowed
         // (AllowWithAudit) ONLY on an exec-capable profile with `allow_shell`
-        // on, and the structural command deny set is scanned against command
-        // positions inside the shell line before any allow verdict.
+        // on. The literal-command scan is defense in depth only; arbitrary
+        // shell expansion cannot be proven safe by source-text inspection.
         if let PolicyAction::CommandShellStart { shell_line, .. } = action {
             if let Some(denied) = denied_command_in_shell_line(shell_line) {
                 return PolicyVerdict {
@@ -1359,21 +1345,32 @@ mod tests {
     }
 
     #[test]
-    fn shell_start_allowed_by_default() {
-        // developer_local is exec-capable and grants one-shot shell by default so
-        // zero-config Terminal Commander can run pipelines and redirects.
+    fn shell_start_denied_by_default() {
         let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
         let v = e.evaluate(&PolicyAction::CommandShellStart {
             shell_line: "echo a | wc -c",
             cwd: Path::new("."),
             shell: "/bin/bash",
         });
-        assert_eq!(v.decision, PolicyDecision::AllowWithAudit);
+        assert_eq!(v.decision, PolicyDecision::Deny);
+        assert!(
+            v.reason.contains("shell execution denied"),
+            "policy reason must be surface-neutral, got: {}",
+            v.reason
+        );
     }
 
     #[test]
     fn shell_start_denies_structural_commands_in_shell_line() {
-        let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
+        let e = PolicyEngine::with_config_caps(
+            PolicyProfile::DeveloperLocal,
+            None,
+            None,
+            PolicyCaps {
+                allow_shell: true,
+                ..Default::default()
+            },
+        );
         for shell_line in [
             "echo x | sudo tee /tmp/out",
             "/usr/bin/pkexec id",
@@ -1392,7 +1389,15 @@ mod tests {
 
     #[test]
     fn shell_start_deny_scan_ignores_data_words_and_redirect_targets() {
-        let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
+        let e = PolicyEngine::with_config_caps(
+            PolicyProfile::DeveloperLocal,
+            None,
+            None,
+            PolicyCaps {
+                allow_shell: true,
+                ..Default::default()
+            },
+        );
         for shell_line in ["echo sudo", "printf '%s\\n' sudo", "echo ok > sudo"] {
             let v = e.evaluate(&PolicyAction::CommandShellStart {
                 shell_line,

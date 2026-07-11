@@ -8,10 +8,10 @@
 // forced-replace path). This is the operator verb for "I upgraded the
 // package; swap the running daemon."
 //
-// On Windows the daemon runs inside WSL, so the restart is dispatched
-// through the resolved WSL distro exactly like `doctor daemon`:
+// Windows defaults to the native daemon. WSL is selected only by explicit
+// operator configuration, then dispatched through the resolved distro:
 //   wsl.exe -d <distro> -- bash -lc '<prefix>terminal-commanderd update --force'
-// On Linux/WSL the daemon binary is invoked directly.
+// Native Windows, Linux, and WSL invoke their local daemon binary directly.
 //
 // NO sudo. NO credential. NO npm install. The distro name is double-
 // validated by resolveDistro (whitelist + live membership) before it
@@ -25,6 +25,8 @@ const { detectWsl } = require("../wsl/detect.js");
 const { LINUX_PATH_PREFIX } = require("../bootstrap/constants.js");
 const { buildFilteredEnv } = require("../wsl/filtered_env.js");
 const { ensureSessionInWslEnv } = require("../wsl/spawn.js");
+const { resolveBinary, formatResolveError } = require("../resolve-binary.js");
+const { detectRuntimeEnvironment } = require("./runtime_environment.js");
 
 // The daemon-side command. `--force` is always passed: restart's whole
 // purpose is to replace even a same-version daemon.
@@ -70,7 +72,16 @@ async function runRestart(opts) {
   const exec = o.exec || defaultExec;
   const wslPath = o.wslPath || "wsl.exe";
 
-  if (platform === "win32") {
+  const environment = detectRuntimeEnvironment({ platform, env, flags });
+  if (environment.status !== "ok") {
+    return {
+      status: "unsupported_environment",
+      exit_code: 64,
+      output: `terminal-commander: restart unsupported environment (${environment.evidence}).\n`,
+    };
+  }
+
+  if (platform === "win32" && environment.runtime === "wsl") {
     const detectResult = await (o.detect || detectWsl)({ platform });
     const resolved = resolveDistro({
       flags: { distro: flags.distro },
@@ -113,6 +124,34 @@ async function runRestart(opts) {
         code === 0
           ? `terminal-commander: daemon restarted in '${resolved.distro}'.\n${tail ? `${tail}\n` : ""}`
           : `terminal-commander: daemon restart failed in '${resolved.distro}' (exit ${code}).\n${tail ? `${tail}\n` : ""}`,
+    };
+  }
+
+  if (platform === "win32") {
+    const resolve = o.resolveBinary || resolveBinary;
+    const arch = o.arch || process.arch;
+    const resolved = resolve({ binary: "terminal-commanderd", platform, arch });
+    if (resolved.reason !== "ok" || !resolved.binaryPath) {
+      return {
+        status: "restart_unavailable",
+        exit_code: 64,
+        output: `${formatResolveError(resolved, { platform, arch })}\n`,
+      };
+    }
+    const child = exec({
+      file: resolved.binaryPath,
+      argv: ["update", "--force"],
+      env: buildFilteredEnv(env),
+    });
+    const { code, out, err } = await collectChild(child);
+    const tail = `${out}${err}`.trim();
+    return {
+      status: code === 0 ? "ok" : "restart_failed",
+      exit_code: code,
+      output:
+        code === 0
+          ? `terminal-commander: native Windows daemon restarted.\n${tail ? `${tail}\n` : ""}`
+          : `terminal-commander: native Windows daemon restart failed (exit ${code}).\n${tail ? `${tail}\n` : ""}`,
     };
   }
 

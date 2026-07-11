@@ -215,8 +215,8 @@ pub struct PolicySection {
     /// three probe-creating ops via `PolicyAction::ProbeCreate`.
     #[serde(default)]
     pub probes: Option<PolicyProbesSection>,
-    /// `[policy.caps]` block (Hybrid trust model). Optional grants overlaid on
-    /// the profile defaults; false entries do not revoke profile presets.
+    /// `[policy.caps]` block (Hybrid trust model). Optional tri-state overrides:
+    /// omitted entries inherit the profile default, while explicit false revokes it.
     #[serde(default)]
     pub caps: Option<PolicyCapsSection>,
 }
@@ -236,31 +236,20 @@ pub struct PolicyCommandsSection {
 
 /// `[policy.caps]` (Hybrid trust model -- reconciliation Decision 1/5).
 ///
-/// Granular opt-in capabilities. ALL default false; deny-first preserved.
-/// `full_access` is the only profile whose loader preset flips these true.
+/// Granular capability overrides. Omitted values inherit the selected profile;
+/// explicit true/false values override that profile's preset.
 // 4 independent opt-in capability flags; a bitfield/enum would hurt the config/serde surface
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyCapsSection {
     #[serde(default)]
-    pub allow_shell: bool,
+    pub allow_shell: Option<bool>,
     #[serde(default)]
-    pub allow_session: bool,
+    pub allow_session: Option<bool>,
     #[serde(default)]
-    pub allow_privileged: bool,
+    pub allow_privileged: Option<bool>,
     #[serde(default)]
-    pub allow_remote: bool,
-}
-
-impl From<&PolicyCapsSection> for PolicyCaps {
-    fn from(s: &PolicyCapsSection) -> Self {
-        Self {
-            allow_shell: s.allow_shell,
-            allow_session: s.allow_session,
-            allow_privileged: s.allow_privileged,
-            allow_remote: s.allow_remote,
-        }
-    }
+    pub allow_remote: Option<bool>,
 }
 
 /// `[policy.paths]` (POLICY.md section 4 / section 5).
@@ -452,25 +441,27 @@ impl DaemonConfig {
 
     /// Resolve the effective capability set fed to the policy engine.
     ///
-    /// Returns the explicit `[policy.caps]` block if present; for the
-    /// `full_access` profile, ANY unset cap defaults to true (`base || full`).
-    /// This is a pure derivation -- it never mutates stored TOML and never
-    /// bypasses `evaluate()`. The caps are inputs to the engine; `full_access`
-    /// only flips the inputs, leaving every gated action at `AllowWithAudit`.
-    ///
-    /// `full_access` semantics are `base || full`: it forces ALL caps on even
-    /// if `[policy.caps]` lists one false. To run a SUBSET, use a base profile
-    /// plus explicit `[policy.caps]`, not `full_access`.
+    /// Starts from the selected profile's preset and applies every explicitly
+    /// configured true/false value. Omitted entries inherit the preset. This
+    /// pure derivation never mutates stored TOML or bypasses `evaluate()`.
     #[must_use]
-    pub fn resolved_caps(&self) -> PolicyCaps {
-        let defaults = PolicyCaps::default_for_profile(self.policy.profile);
-        let configured = self
-            .policy
-            .caps
-            .as_ref()
-            .map(PolicyCaps::from)
-            .unwrap_or_default();
-        defaults.union(configured)
+    pub const fn resolved_caps(&self) -> PolicyCaps {
+        let mut caps = PolicyCaps::default_for_profile(self.policy.profile);
+        if let Some(overrides) = &self.policy.caps {
+            if let Some(value) = overrides.allow_shell {
+                caps.allow_shell = value;
+            }
+            if let Some(value) = overrides.allow_session {
+                caps.allow_session = value;
+            }
+            if let Some(value) = overrides.allow_privileged {
+                caps.allow_privileged = value;
+            }
+            if let Some(value) = overrides.allow_remote {
+                caps.allow_remote = value;
+            }
+        }
+        caps
     }
 
     /// Resolve the database path. Always `<data_dir>/terminal-commander.db`.
@@ -947,10 +938,10 @@ mod tests {
                     [policy.caps]\nallow_shell = true\n";
         let cfg = DaemonConfig::from_toml(toml).expect("must parse [policy.caps]");
         let caps = cfg.policy.caps.as_ref().expect("caps present");
-        assert!(caps.allow_shell);
-        assert!(!caps.allow_session); // unspecified -> false
-        assert!(!caps.allow_privileged);
-        assert!(!caps.allow_remote);
+        assert_eq!(caps.allow_shell, Some(true));
+        assert_eq!(caps.allow_session, None);
+        assert_eq!(caps.allow_privileged, None);
+        assert_eq!(caps.allow_remote, None);
     }
 
     #[test]
@@ -962,17 +953,18 @@ mod tests {
     }
 
     #[test]
-    #[test]
-    fn developer_local_profile_presets_allow_shell_true() {
-        let toml = "[daemon]\ndata_dir = \"/tmp/tc-dev-shell\"\n";
+    fn developer_local_profile_presets_allow_shell_false() {
+        let toml =
+            "[daemon]\ndata_dir = \"/tmp/tc-dev-shell\"\n[policy]\nprofile = \"developer_local\"\n";
         let cfg = DaemonConfig::from_toml(toml).expect("parse developer_local defaults");
         let caps = cfg.resolved_caps();
-        assert!(caps.allow_shell);
+        assert!(!caps.allow_shell);
         assert!(!caps.allow_session);
         assert!(!caps.allow_privileged);
         assert!(!caps.allow_remote);
     }
 
+    #[test]
     fn full_access_profile_presets_all_caps_true() {
         let toml = "[daemon]\ndata_dir = \"/tmp/tc-fa\"\n[policy]\nprofile = \"full_access\"\n";
         let cfg = DaemonConfig::from_toml(toml).expect("parse full_access");
@@ -980,6 +972,17 @@ mod tests {
         assert!(
             caps.allow_shell && caps.allow_session && caps.allow_privileged && caps.allow_remote
         );
+    }
+
+    #[test]
+    fn full_access_explicit_false_revokes_shell() {
+        let toml = "[daemon]\ndata_dir = \"/tmp/tc-fa-revoke\"\n[policy]\nprofile = \"full_access\"\n[policy.caps]\nallow_shell = false\n";
+        let cfg = DaemonConfig::from_toml(toml).expect("parse full_access override");
+        let caps = cfg.resolved_caps();
+        assert!(!caps.allow_shell);
+        assert!(caps.allow_session);
+        assert!(caps.allow_privileged);
+        assert!(caps.allow_remote);
     }
 
     #[test]

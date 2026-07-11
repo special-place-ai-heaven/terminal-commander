@@ -176,6 +176,76 @@ async fn self_heal_flips_unavailable_to_available_against_live_daemon() {
     cleanup(&data);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_version_skew_refreshes_against_replaced_live_daemon() {
+    let data = tmp_data_dir("version-skew-refresh");
+    let handle = spawn_live_daemon(&data);
+    {
+        let status = DaemonStatusHandle::with_skew(
+            EnsureDaemonStatus::AlreadyRunning {
+                endpoint: Endpoint::UnixSocket {
+                    path: handle.socket_path().to_path_buf(),
+                },
+                pid: None,
+            },
+            Some(("0.1.73".to_owned(), env!("CARGO_PKG_VERSION").to_owned())),
+        );
+        let (_server, client) = paired_with_status(&handle, status.clone()).await;
+
+        let result = client
+            .call_tool(CallToolRequestParams::new("policy_status"))
+            .await
+            .expect("matching replacement daemon must clear stale skew and serve the tool");
+        let body: serde_json::Value =
+            serde_json::from_str(&first_text(&result)).expect("policy_status payload is JSON");
+        assert_eq!(
+            body["profile"],
+            serde_json::Value::String("DeveloperLocal".to_owned())
+        );
+        assert_eq!(
+            status.version_skew(),
+            None,
+            "successful system_discover refresh must clear the stale skew cache"
+        );
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn matching_startup_version_is_reprobed_before_guarded_tools() {
+    let data = tmp_data_dir("version-skew-match-reprobe");
+    let handle = spawn_live_daemon(&data);
+    {
+        let status = DaemonStatusHandle::with_skew(
+            EnsureDaemonStatus::AlreadyRunning {
+                endpoint: Endpoint::UnixSocket {
+                    path: handle.socket_path().to_path_buf(),
+                },
+                pid: None,
+            },
+            None,
+        );
+        let (_server, client) = paired_with_status(&handle, status.clone()).await;
+
+        client
+            .call_tool(CallToolRequestParams::new("policy_status"))
+            .await
+            .expect("guarded tool must verify the currently connected daemon version");
+        assert_eq!(
+            status.version_probe_count(),
+            1,
+            "a matching startup verdict must not disable future skew detection"
+        );
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
 /// Single-flight: many concurrent tool calls arriving while the status is
 /// still unavailable must coalesce into AT MOST ONE `Health` re-probe; the
 /// losers re-check under the guard and see the already-healed status. All
