@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.76](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.75...v0.1.76) (2026-07-11)
+
+
+### Bug Fixes
+
+* make updater and release pipeline hermetic ([4a4d394](https://github.com/special-place-ai-heaven/terminal-commander/commit/4a4d39413ae0d8d73bf8187ca1d44a5c991be3ac))
+* make wrapper test discovery cross-platform ([cc6df30](https://github.com/special-place-ai-heaven/terminal-commander/commit/cc6df30e7ed441183e8bcea0e9b68b51433ca3b3))
+
 ## [0.1.75](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.74...v0.1.75) (2026-07-11)
 
 
