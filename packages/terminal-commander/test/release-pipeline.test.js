@@ -161,6 +161,36 @@ test("release failure reporting is repository-explicit and uses canonical contex
   );
   assert.match(workflow, /VER: \$\{\{ needs\.release-context\.outputs\.version \}\}/);
   assert.match(workflow, /gh issue create --repo "\$GITHUB_REPOSITORY"/);
+  assert.doesNotMatch(workflow, /gh issue list[^\n]+--label "release-broken"/);
+  assert.match(workflow, /filing issue without it/);
+});
+
+test("all Cargo release jobs use the checksum-verifying retry state machine", () => {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, ".github", "workflows", "release-please.yml"),
+    "utf8",
+  );
+  const invocations = [
+    ...workflow.matchAll(/node scripts\/release\/publish-cargo-crate\.js --crate ([a-z0-9_-]+)/g),
+  ];
+  assert.deepEqual(
+    invocations.map((match) => match[1]),
+    [
+      "terminal-commander-core",
+      "terminal-commander-sifters",
+      "terminal-commander-probes",
+      "terminal-commander-store",
+      "terminal-commander-supervisor",
+      "terminal-commander-ipc",
+      "terminal-commanderd",
+      "terminal-commander-mcp",
+    ],
+  );
+  assert.doesNotMatch(workflow, /if cargo publish -p/);
+  assert.equal((workflow.match(/Setup Node for release state machine/g) || []).length, 8);
+  assert.equal((workflow.match(/cargo package and verify release archive/g) || []).length, 8);
+  assert.doesNotMatch(workflow, /^\s+run: cargo publish --dry-run/m);
+  assert.doesNotMatch(workflow, /Poll crates\.io until/);
 });
 
 test("release workflow needs graph is closed and registry publishes are prevalidated", () => {

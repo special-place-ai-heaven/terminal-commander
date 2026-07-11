@@ -41,12 +41,19 @@ force-publish ──┘          |                    |                |
    version, and root optional dependencies must equal the canonical version.
 4. **Tests are checkout-independent.** Wrapper tests must not depend on ignored
    native binaries, the developer's host OS, or mutable module-loader hooks.
-5. **Publishing is retry-safe.** Manual `force_publish` recovery treats an
-   already-present registry version as success and continues toward missing
-   artifacts and final verification.
+5. **Publishing is retry-safe and content-exact.** Cargo publication uses one
+   bounded-retry state machine for all crates. It reconciles ambiguous upload
+   failures against crates.io, verifies the downloaded artifact against the
+   registry checksum, and accepts an already-present version only when its
+   canonical package contents match the retained, verified `cargo package`
+   archive. Cargo-generated VCS identity and tar metadata are excluded; source,
+   manifests, lock data, and every other packaged file must match. Manual
+   `force_publish` recovery continues toward missing artifacts and final
+   verification without weakening those checks.
 6. **Failure reporting is independent.** The reporter does not require a Git
    checkout, always passes `--repo`, uses the canonical release identifier, and
-   updates an existing open issue instead of creating duplicates.
+   updates an existing open issue instead of creating duplicates. Labels are
+   bootstrapped when permitted but can never prevent the alarm from being filed.
 7. **Completion is verified.** A release is not healthy merely because a tag or
    some platform packages exist; root npm, the Cargo chain, and all platform
    verification jobs must complete. Unexpected skips fail `release-verdict`.
@@ -54,8 +61,9 @@ force-publish ──┘          |                    |                |
 ## Executable checks
 
 - `npm test` in `packages/terminal-commander` covers release-context selection,
-  version-anchor consistency, workflow dependency closure, and the rule that
-  every registry publish transitively depends on `prepublish-gate`.
+  version-anchor consistency, workflow dependency closure, Cargo retry and
+  checksum reconciliation, and the rule that every registry publish
+  transitively depends on `prepublish-gate`.
 - `node scripts/release/test-release-please-config.js` validates the linked
   package configuration.
 - `node scripts/release/validate-release-inputs.js <version>` validates all
