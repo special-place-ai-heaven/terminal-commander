@@ -83,6 +83,12 @@ test("release context selects each supported publish source deterministically", 
   );
 });
 
+test("wrapper test entrypoint is cross-platform and does not rely on shell globs", () => {
+  const command = require("../package.json").scripts.test;
+  assert.equal(command, "node scripts/run-tests.js");
+  assert.doesNotMatch(command, /[*?\[\]]/);
+});
+
 test("release context refuses blank, conflicting, or failed publish sources", () => {
   assert.throws(
     () => resolveReleaseContext({ releaseCreated: "true", releaseVersion: "" }),

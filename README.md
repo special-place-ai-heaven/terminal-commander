@@ -709,7 +709,7 @@ Fast inner loop:
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace
-node --test packages/terminal-commander/test/*.test.js
+npm --prefix packages/terminal-commander test
 ```
 
 Local package testing:
