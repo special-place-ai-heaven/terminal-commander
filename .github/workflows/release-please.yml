@@ -354,7 +354,10 @@ jobs:
   prepublish-gate:
     name: prepublish-gate
     needs: release-context
-    if: needs.release-context.outputs.publish == 'true'
+    if: >-
+      always() && !cancelled() &&
+      needs.release-context.result == 'success' &&
+      needs.release-context.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1932,6 +1935,52 @@ jobs:
           PY
           echo 'verify-mac-arm64: OK'
 
+  # A publish-intended run is complete only when every required job succeeded.
+  # This converts silent skip propagation into an explicit workflow failure.
+  release-verdict:
+    name: release-verdict
+    needs:
+      - release-context
+      - prepublish-gate
+      - build-linux-x64
+      - presmoke-linux-x64
+      - publish-linux-x64
+      - build-linux-arm64
+      - presmoke-linux-arm64
+      - publish-linux-arm64
+      - build-windows-x64
+      - publish-windows-x64
+      - build-mac-x64
+      - publish-mac-x64
+      - build-mac-arm64
+      - publish-mac-arm64
+      - publish-root
+      - publish-cargo-terminal-commander-core
+      - publish-cargo-terminal-commander-sifters
+      - publish-cargo-terminal-commander-probes
+      - publish-cargo-terminal-commander-store
+      - publish-cargo-terminal-commander-supervisor
+      - publish-cargo-terminal-commander-ipc
+      - publish-cargo-terminal-commanderd
+      - publish-cargo-terminal-commander-mcp
+      - verify-linux-x64
+      - verify-linux-arm64
+      - verify-windows-x64
+      - verify-mac-x64
+      - verify-mac-arm64
+    if: always() && !cancelled()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout released source
+        uses: actions/checkout@v4
+
+      - name: Assert release completion
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node scripts/release/verify-release-results.js
+
   mark-release-broken:
     name: mark-release-broken
     # Fire on control-plane, prepublish, publish, or verification failures.
@@ -1940,6 +1989,7 @@ jobs:
     needs:
       - release-context
       - prepublish-gate
+      - release-verdict
       - publish-linux-x64
       - publish-linux-arm64
       - publish-windows-x64
@@ -1961,7 +2011,8 @@ jobs:
       - verify-mac-arm64
     if: |
       always() && !cancelled() &&
-      (needs.release-context.result == 'failure' ||
+      (needs.release-verdict.result == 'failure' ||
+       needs.release-context.result == 'failure' ||
        needs.prepublish-gate.result == 'failure' ||
        needs.publish-linux-x64.result == 'failure' ||
        needs.publish-linux-arm64.result == 'failure' ||
@@ -1991,6 +2042,7 @@ jobs:
           RELEASE_ID: ${{ needs.release-context.outputs.version || github.sha }}
           RELEASE_CONTEXT: ${{ needs.release-context.result }}
           PREPUBLISH_GATE: ${{ needs.prepublish-gate.result }}
+          RELEASE_VERDICT: ${{ needs.release-verdict.result }}
           # Publish job results
           PUB_LX64: ${{ needs.publish-linux-x64.result }}
           PUB_LARM: ${{ needs.publish-linux-arm64.result }}
@@ -2027,6 +2079,7 @@ jobs:
           printf -- 'Control plane:\n' >> /tmp/body.md
           printf -- '- release-context : %s\n' "$RELEASE_CONTEXT" >> /tmp/body.md
           printf -- '- prepublish-gate : %s\n\n' "$PREPUBLISH_GATE" >> /tmp/body.md
+          printf -- '- release-verdict : %s\n\n' "$RELEASE_VERDICT" >> /tmp/body.md
           printf -- 'NPM publish:\n' >> /tmp/body.md
           printf -- '- linux-x64   : %s\n' "$PUB_LX64"  >> /tmp/body.md
           printf -- '- linux-arm64 : %s\n' "$PUB_LARM"  >> /tmp/body.md

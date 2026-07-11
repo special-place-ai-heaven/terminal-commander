@@ -26,7 +26,7 @@ force-publish ──┘          |                    |                |
                            |                    |                v
                            |                    |       post-publish verification
                            |                    |
-                           └──── any failure ───┴────> idempotent P0 reporter
+                           └──── release-verdict <───┴────> idempotent P0 reporter
 ```
 
 ## Locked invariants
@@ -49,7 +49,7 @@ force-publish ──┘          |                    |                |
    updates an existing open issue instead of creating duplicates.
 7. **Completion is verified.** A release is not healthy merely because a tag or
    some platform packages exist; root npm, the Cargo chain, and all platform
-   verification jobs must complete.
+   verification jobs must complete. Unexpected skips fail `release-verdict`.
 
 ## Executable checks
 

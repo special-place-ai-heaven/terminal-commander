@@ -13,6 +13,10 @@ const {
 const {
   validateReleaseInputs,
 } = require("../../../scripts/release/validate-release-inputs.js");
+const {
+  verifyReleaseResults,
+  EXPECTED_RELEASE_JOBS,
+} = require("../../../scripts/release/verify-release-results.js");
 
 const repoRoot = path.resolve(__dirname, "../../..");
 
@@ -110,6 +114,30 @@ test("release context refuses blank, conflicting, or failed publish sources", ()
   );
 });
 
+test("release verdict distinguishes no-release, complete, and silently skipped runs", () => {
+  assert.deepEqual(
+    verifyReleaseResults({
+      "release-context": { result: "success", outputs: { publish: "false" } },
+    }),
+    { status: "no_release", checkedJobs: 0 },
+  );
+
+  const complete = {
+    "release-context": { result: "success", outputs: { publish: "true" } },
+  };
+  for (const name of EXPECTED_RELEASE_JOBS) complete[name] = { result: "success" };
+  assert.deepEqual(verifyReleaseResults(complete), {
+    status: "complete",
+    checkedJobs: EXPECTED_RELEASE_JOBS.length,
+  });
+
+  complete["prepublish-gate"] = { result: "skipped" };
+  assert.throws(
+    () => verifyReleaseResults(complete),
+    /prepublish-gate=skipped/,
+  );
+});
+
 test("all committed release version anchors agree", () => {
   const version = require("../package.json").version;
   const result = validateReleaseInputs(repoRoot, version);
@@ -126,6 +154,11 @@ test("release failure reporting is repository-explicit and uses canonical contex
     "utf8",
   );
   assert.match(workflow, /^  release-context:/m);
+  assert.match(workflow, /^  release-verdict:/m);
+  assert.match(
+    workflow,
+    /prepublish-gate:[\s\S]*?if: >-\r?\n\s+always\(\) && !cancelled\(\)/,
+  );
   assert.match(workflow, /VER: \$\{\{ needs\.release-context\.outputs\.version \}\}/);
   assert.match(workflow, /gh issue create --repo "\$GITHUB_REPOSITORY"/);
 });
