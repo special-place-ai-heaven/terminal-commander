@@ -36,6 +36,8 @@ logs/
 # Local scratch dirs (agent outputs, ad-hoc task notes)
 outputs/
 tasks/
+/graphify-out/
+/MEMORY.md
 
 # Coverage and profiler outputs
 *.profraw
