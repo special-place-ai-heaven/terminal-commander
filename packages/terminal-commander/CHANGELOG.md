@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.78](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.77...v0.1.78) (2026-07-11)
+
+
+### Bug Fixes
+
+* make Cargo publishing resilient to registry outages ([5146274](https://github.com/special-place-ai-heaven/terminal-commander/commit/51462744c2eb5f52c7bf2a5db43736449d28dacd))
+
 ## [0.1.77](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.76...v0.1.77) (2026-07-11)
 
 
