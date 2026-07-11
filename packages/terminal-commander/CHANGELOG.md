@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.77](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.76...v0.1.77) (2026-07-11)
+
+
+### Bug Fixes
+
+* fail release runs on incomplete pipelines ([19e257b](https://github.com/special-place-ai-heaven/terminal-commander/commit/19e257b9a8d5623c2f6dc2562f4f505bfd658076))
+
 ## [0.1.76](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.75...v0.1.76) (2026-07-11)
 
 
