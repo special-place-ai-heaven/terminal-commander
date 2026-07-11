@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.79](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.78...v0.1.79) (2026-07-11)
+
+
+### Bug Fixes
+
+* harden policy, liveness, and audit observability ([5b7fd37](https://github.com/special-place-ai-heaven/terminal-commander/commit/5b7fd37be1cf17ee84d7ab73b908e3eabb1e54d5))
+
 ## [0.1.78](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.77...v0.1.78) (2026-07-11)
 
 
