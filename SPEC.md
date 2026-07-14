@@ -429,9 +429,11 @@ MVP deliberately deferred).
 The product identity is now **omni**: an LLM agent should never need a
 separate raw terminal tool. The MVP signal-combing core (sections 1-13)
 is unchanged; the omni program added stateful, interactive, parsing, and
-federation lanes on top of it. The live MCP surface is **50 tools** (up
+federation lanes on top of it. The full MCP surface is **51 tools** (up
 from the MVP/runtime-chain count; TC22 A3 added the policy-gated
-filesystem-write tool `file_write`); the rule-pack set is **25 packs** (up
+filesystem-write tool `file_write`, and persistent audit reads added
+`audit_since`); the compact surface exposes five action-dispatched facades.
+The rule-pack set is **25 packs** (up
 from the section-10 seed of six). The authoritative tool list and pack
 list live in `README.md` and `docs/mcp/TOOL_CONTROL_SURFACE.md`; the
 agent lane-selection map is `docs/mcp/OMNI_PLAYBOOK.md`.

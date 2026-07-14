@@ -25,11 +25,12 @@ tool surface for commands, files, PTYs, persistent shell sessions, runtime
 state, and signal context.
 
 The goal is **omni**: an agent should never need a separate raw terminal tool.
-Across the omni program the surface grew to **49 MCP tools** spanning one-shot
-commands, one-shot shell pipelines, persistent stateful sessions, interactive
-PTYs (unix and Windows ConPTY), unknown-output rule suggestion, and
-operator-gated remote hosts. The agent's lane-selection map is
-[`docs/mcp/OMNI_PLAYBOOK.md`](docs/mcp/OMNI_PLAYBOOK.md).
+The same runtime is available through either five compact, action-dispatched
+facades (`command`, `session`, `files`, `registry`, `status`) or the full
+51-tool granular surface. It covers one-shot commands and shell pipelines,
+persistent stateful sessions, interactive PTYs (unix and Windows ConPTY),
+unknown-output rule suggestion, and operator-gated remote hosts. The agent's
+lane-selection map is [`docs/mcp/OMNI_PLAYBOOK.md`](docs/mcp/OMNI_PLAYBOOK.md).
 
 Raw terminal output stays out of the model transcript. The agent defines
 keyword/regex **rules**, runs the command, and receives only the matching
@@ -42,7 +43,9 @@ result is ever silent or misleading.
 > interpreters (`sh`, `bash`, `cmd`, `powershell`, …) are denied, and there is
 > no string-concatenated shell anywhere in the path. Pipelines and redirects
 > live behind the separate `shell_exec` tool, which is disabled unless the
-> operator enables the `allow_shell` policy capability.
+> operator enables the `allow_shell` policy capability. When that lane is
+> enabled and no shell override is supplied, Terminal Commander follows the
+> highest-ranked interpreter route proven by `system_discover`.
 
 ## Contents
 
@@ -62,7 +65,6 @@ result is ever silent or misleading.
 - [Environment](#environment)
 - [Local State](#local-state)
 - [Safety Posture](#safety-posture)
-- [Release Flow](#release-flow)
 - [Develop From Source](#develop-from-source)
 - [Repository Layout](#repository-layout)
 - [License](#license)
@@ -132,6 +134,25 @@ become a bare error — the job handle is preserved and the result arrives with
 agent exactly how to re-attach (`command_status` with the returned `job_id`).
 Mutating RPCs are never auto-retried; idempotent ones may be. A daemon restart
 is detectable via `boot_id` on subscriptions.
+
+### Evidence-backed environment beachheads
+
+`system_discover` probes the host under hard deadlines instead of inferring a
+route from the OS name. It reports terminal evidence, shell and PowerShell
+paths/versions, WSL state, common tools, and confirmed execution status.
+Successful interpreter sentinels become ranked `access_routes`; `beachhead`
+repeats the best route with the exact argv template an LLM can follow. A path
+that merely exists is not advertised as executable, and failed or timed-out
+probes remain explicit evidence.
+
+### Self-healing daemon transport
+
+The adapter re-probes stale availability with a bounded Health call and
+single-flights concurrent recovery. If the daemon disappeared, it can reuse the
+original supervisor plan to restore the local session. Read-only/idempotent
+requests may retry once after recovery; mutating requests are never replayed
+automatically. Version skew is refreshed through Health, and a mid-call loss
+returns a structured recovery contract instead of an opaque pipe error.
 
 ### Buckets, context rings, and subscriptions
 
@@ -210,6 +231,17 @@ Configure detected harnesses explicitly:
 terminal-commander setup harness
 ```
 
+Choose the MCP surface explicitly when the harness benefits from a smaller tool
+list:
+
+```powershell
+terminal-commander setup harness --surface compact
+```
+
+`compact` exposes five action-dispatched facade tools. `full` exposes all 51
+granular tools and is the server default when `TC_SURFACE` is unset. Both views
+reach the same daemon operations and enforce the same policy.
+
 Or target one harness:
 
 ```powershell
@@ -245,7 +277,7 @@ flowchart LR
   end
 
   subgraph mcp["terminal-commander-mcp"]
-    Stdio["rmcp stdio server\n50 live tools\n1:1 facade over IPC"]
+    Stdio["rmcp stdio server\n5 compact facades or 51 full tools\n1:1 facade over IPC"]
   end
 
   subgraph sup["terminal-commander-supervisor (shared lib)"]
@@ -342,45 +374,79 @@ sequenceDiagram
 
 ## How LLMs Should Use It
 
-Use Terminal Commander when raw terminal scrollback would waste context or
-hide the signal.
+Start by discovering the host. Follow the returned beachhead rather than
+assuming Bash, PowerShell, WSL, or a particular executable is available:
+
+```text
+status action=system_discover
+→ environment.access_routes[] + environment.beachhead.argv_template
+```
+
+Use Terminal Commander whenever raw terminal scrollback would waste context or
+hide the signal. Compact-surface examples are shown below; full-surface callers
+can use the granular action names documented in the linked tool contract.
 
 One-shot (most common):
 
 ```text
-run_and_watch argv=["npm","test"] rules=[{"pattern": "FAIL"}]
+command action=run_and_watch argv=["npm","test"] rules=[{"pattern":"FAIL"}]
 → signals + exit_code in one call; quiet runs return a receipt
 ```
 
 Long-running, with live monitoring:
 
 ```text
-command_start_combed argv=["cargo","nextest","run"] rules=[{"pattern":"^\\s+FAIL"}]
-bucket_wait bucket_id=<returned> cursor=0 timeout_ms=10000
-command_status job_id=<returned>          # near-real-time counters mid-run
-event_context bucket_id=… event_id=…      # surrounding lines for one event
-command_output_tail job_id=<returned>     # bounded tail when you don't know what to grep
-command_stop job_id=<returned>            # kills the whole process tree
+command action=run argv=["cargo","nextest","run"] rules=[{"pattern":"^\\s+FAIL"}]
+command action=wait bucket_id=<returned> cursor=0 timeout_ms=10000
+command action=status job_id=<returned>          # near-real-time counters
+command action=event_context bucket_id=… event_id=…
+command action=output_tail job_id=<returned>     # bounded exploratory tail
+command action=stop job_id=<returned>            # kills the whole process tree
 ```
 
 Agent rules:
 
-- Prefer `run_and_watch` for commands that finish within a minute; use
-  `command_start_combed` + `bucket_wait` for longer jobs.
+- Prefer `command action=run_and_watch` for commands that finish within a
+  minute; use `command action=run` + `command action=wait` for longer jobs.
 - A minimal rule is just `{"pattern": "ERROR"}` — id, version, kind, severity,
   and summary default sanely. Severity accepts `error`/`warn`/`fatal` aliases.
-- Use `command_output_tail` for exploratory commands where you don't know what
+- Use `command action=output_tail` for exploratory commands where you don't know what
   to match yet — bounded to 200 lines / 64 KiB, truncation-flagged.
-- Use `subscription_open` + `subscription_pull` instead of N polling loops
+- Use `command action=sub_open` + `command action=sub_pull` instead of N polling loops
   when watching several jobs at once.
-- `wait_exhausted: true` means STILL RUNNING — poll `command_status`; do not
-  treat it as finished. `degraded: true` means follow the `recover_hint`.
+- `wait_exhausted: true` means STILL RUNNING — call `command action=status`;
+  do not treat it as finished. `degraded: true` means follow the `recover_hint`.
+- Keep interpreters out of the argv lane. For a pipeline or compound command,
+  use `command action=exec` only when `status action=policy_status` confirms
+  `allow_shell`; otherwise run the program directly as argv.
+- Do not pipe into shell-side `tail`, `head`, or `grep` when Terminal Commander
+  needs full evidence. Use rules, `command action=output_tail`, or
+  `files action=search` so discarded lines remain observable.
 - Do not ask for unbounded output. Every response is intentionally capped.
 
 ## MCP Tool Surface
 
-`system_discover` advertises the live tool catalogue: **50 live tools**,
-grouped by workflow. All daemon-backed tools return a structured
+Terminal Commander offers two schema views over the same runtime:
+
+| Surface | Tools advertised | Intended use |
+| --- | --- | --- |
+| `compact` | `command`, `session`, `files`, `registry`, `status` | Small, stable action-dispatched surface for LLM harnesses. |
+| `full` | 51 granular tools | Explicit per-operation names for clients that prefer a broad schema. |
+
+Set the view with `TC_SURFACE=compact|full` or `setup harness --surface ...`.
+Unset or unrecognized values select `full`. Compact calls are validated against
+the chosen action before they reach the same handlers used by the full surface.
+
+| Compact facade | Responsibilities |
+| --- | --- |
+| `status` | Discovery, health, policy, audit, runtime/probe state, and targets. |
+| `command` | Start/watch/status/stop, shell execution, buckets/context, and subscriptions. |
+| `registry` | Search, test, version, activate, deactivate, import, and suggest rules. |
+| `files` | Bounded read/search/list/write, file watches, and workspace snapshots. |
+| `session` | PTY commands and persistent shell sessions. |
+
+`status action=system_discover` advertises the full live capability catalogue
+and per-operation availability. All daemon-backed operations return a structured
 `daemon_unavailable` error when the daemon is down instead of leaking raw
 pipe/socket errors, and `system_discover` itself remains callable to explain
 per-tool availability (`requires_daemon`, `available`, `unavailable_reason`).
@@ -391,24 +457,6 @@ ranked `access_routes`; `beachhead` is the highest-ranked route and includes the
 exact argv template an LLM can follow. Unavailable or timed-out candidates stay
 truthful evidence, never inferred availability. Discovery also carries the
 honest `omni_status` capability matrix (see below).
-
-| Group | Tools |
-| --- | --- |
-| Discovery and health | `system_discover`, `health`, `policy_status`, `self_check` |
-| Commands | `run_and_watch`, `command_start_combed`, `command_status`, `command_stop`, `command_output_tail`, `shell_exec` |
-| Buckets and context | `bucket_wait`, `bucket_events_since`, `bucket_summary`, `event_context` |
-| Subscriptions | `subscription_open`, `subscription_pull`, `subscription_list`, `subscription_close`, `subscription_seek` |
-| Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_import_pack`, `registry_deactivate`, `registry_list_active`, `registry_suggest_from_samples` |
-| Files | `file_read_window`, `file_search`, `file_write`, `file_watch_start`, `file_watch_stop`, `file_watch_list` |
-| PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` |
-| Shell sessions | `shell_session_start`, `shell_session_exec`, `shell_session_status`, `shell_session_stop`, `shell_session_list` |
-| Workspace snapshots | `workspace_snapshot_create`, `workspace_snapshot_apply` |
-| Remote targets | `target_list`, `target_probe` |
-| Runtime | `runtime_state`, `probe_status`, `probe_list` |
-
-That is 50 tools: discovery/health (4), commands (6), buckets/context (4),
-subscriptions (5), registry (9), files (6), PTY (4), shell sessions (5),
-workspace snapshots (2), remote targets (2), runtime (3).
 
 Full contract: [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
 Agent lane-selection map: [`docs/mcp/OMNI_PLAYBOOK.md`](docs/mcp/OMNI_PLAYBOOK.md).
@@ -622,6 +670,7 @@ swapped (identity-gated) before tool calls proceed.
 | `TC_SOCKET` | Full endpoint override (pipe name / socket path). Wins over `TC_SESSION`. |
 | `TC_DATA` | State-dir base override (default: `%LOCALAPPDATA%\terminal-commanderd\state` on Windows, `~/.local/share/terminal-commanderd` on Unix). |
 | `TC_IDLE_TTL_SECS` | Idle self-reap TTL in seconds (default 1800; `0` disables). |
+| `TC_SURFACE` | MCP schema view: `compact` (five facades) or `full` (51 granular tools; default). |
 | `TC_USE_LEGACY_WSL_BRIDGE` | `1` opts into the legacy Windows→WSL bridge. |
 | `TC_WSL_DISTRO` | Selects the WSL distro for the legacy bridge. |
 | `TC_SKIP_DAEMON_AUTOSTART` | `1` skips daemon autostart during `setup harness`. |
@@ -664,35 +713,11 @@ Everything lives under the per-session state dir
   is dropped.
 - Daemon idle self-reap reclaims abandoned daemons without an external
   watcher; live work (running commands, watches, PTYs) defers it.
+- Stale daemon availability and version-skew state are refreshed through
+  bounded Health probes; recovery is single-flight, and mutating calls are
+  never replayed automatically.
 
 Security model: [`docs/security/PRIVILEGE_MODEL.md`](docs/security/PRIVILEGE_MODEL.md) and [`SECURITY.md`](SECURITY.md).
-
-## Release Flow
-
-Conventional commits on `main` drive releases through release-please and
-GitHub Actions.
-
-```mermaid
-flowchart LR
-  Commit["fix: / feat: on main"] --> RP["release-please PR\n(linked npm + Cargo versions)"]
-  RP --> Sync["release-pr-sync\nauto-merge feat/fix"]
-  Sync --> Tag["tag + GitHub Release"]
-  Tag --> Context["canonical release context\nauto · ensure · force"]
-  Context --> Gate["pre-publish gate\nwrapper tests + version anchors"]
-  Gate --> Plat["build + npm publish\n5 platform packages\nlinux · windows · mac"]
-  Plat --> Root["publish root wrapper\nterminal-commander@latest"]
-  Root --> Cargo["cargo publish chain\n8 crates in dep order\ncore → sifters → probes → store\n→ supervisor → ipc → daemon → mcp"]
-  Cargo --> Verify["post-publish verify\ncontainer smoke per platform"]
-```
-
-| Commit type | Release effect |
-| --- | --- |
-| `fix:` | Patch release |
-| `feat:` | Feature release |
-| `docs:`, `chore:`, `ci:` | No release unless configured otherwise |
-
-Details: [`docs/release/release-please-contract.md`](docs/release/release-please-contract.md) and
-[`docs/release/release-pipeline-invariants.md`](docs/release/release-pipeline-invariants.md).
 
 ## Develop From Source
 
@@ -743,7 +768,7 @@ crates/                                  Rust workspace (9 crates; 8 published t
   supervisor/                            ensure_daemon, replace_if_stale, session tokens, pidfile
   ipc/                                   wire protocol + framing + clients (UDS / named pipe)
   daemon/                                terminal-commanderd — IPC, policy, router, runtimes
-  mcp/                                   terminal-commander-mcp — rmcp stdio, 49-tool catalogue
+  mcp/                                   terminal-commander-mcp — 5-facade compact / 51-tool full surface
   cli/                                   terminal-commander admin CLI (local only, not on crates.io)
 packages/
   terminal-commander/                    npm root wrapper (@latest)

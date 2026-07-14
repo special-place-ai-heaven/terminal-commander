@@ -2,11 +2,133 @@
 
 ## [0.1.80](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.79...v0.1.80) (2026-07-14)
 
+Version 0.1.80 changes 43 files with 1,731 additions and 244 deletions.
 
-### Features
+### Environment discovery and execution beachheads
 
-* 3 crate fixes -- Merge branch 'agent/fix-compact-facade-contracts' (+2 more) ([1076f2c](https://github.com/special-place-ai-heaven/terminal-commander/commit/1076f2cceae9605f87007495f7e78067cf607f0f))
-* 4 crate fixes -- use health for daemon version refresh (+3 more) ([6c0332a](https://github.com/special-place-ai-heaven/terminal-commander/commit/6c0332a8f5d5122eb7b514553272ff2e163d11cc))
+* `system_discover` now returns a bounded `daemon.environment` snapshot with
+  OS/architecture, terminal evidence, installed shell paths and versions, WSL
+  state, common tool probes, ranked `access_routes`, and a confirmed
+  `beachhead` containing the exact argv template an LLM can follow
+  ([1ee64aa](https://github.com/special-place-ai-heaven/terminal-commander/commit/1ee64aad00aab7e29d523a48b23e8ce06c3ed01e)).
+* Windows discovery probes PowerShell 7, Bash, Windows PowerShell, cmd, and WSL.
+  Unix/macOS discovery probes Bash, sh, zsh, fish, and PowerShell. Common tools
+  include Git, ripgrep, grep, sed, awk, tail, head, curl, jq, Python, Node.js,
+  npm, Cargo, rustc, Go, .NET, Java, CMake, Make, Docker, and GitHub CLI.
+* An interpreter becomes an access route only after a bounded sentinel command
+  succeeds; finding an executable path alone is insufficient. WSL is promoted
+  only after a sentinel crosses the distribution boundary successfully.
+* Probes run concurrently with a two-second per-process bound. Captured version
+  text is credential-redacted, stripped of control characters, and capped at
+  160 characters; WSL distribution output is capped at 16 entries.
+* Terminal evidence covers Windows Terminal, `TERM_PROGRAM` and version,
+  ConEmu, `TERM`, CI, and interactivity. IPC adds the `ProgramProbe`,
+  `TerminalProbe`, `WslProbe`, `AccessRoute`, and `HostEnvironment` types.
+
+### Route-aware shell execution
+
+* `shell_exec` without an explicit shell now follows the highest-ranked
+  confirmed host route. Launch shapes are interpreter-correct: POSIX uses
+  `-lc`, PowerShell uses `-NoLogo -NoProfile -NonInteractive -Command`, cmd uses
+  `/D /S /C`, and WSL uses `wsl -e sh -lc`.
+* Explicit shell overrides remain authoritative. If discovery yields no route,
+  the fallback is `/bin/sh` on Unix and `cmd.exe` on Windows.
+* Audit metadata locates and redacts the actual shell-line argument for each
+  interpreter family instead of assuming a fixed argv index.
+* Compact tool guidance now directs callers to `system_discover` and its
+  beachhead. It also explains that shell-side `tail`, `head`, or `grep` removes
+  evidence before Terminal Commander can observe it, and points callers to
+  rules, bounded output tails, and file search instead.
+
+### Conventional local configuration
+
+* When `--config` is omitted, the daemon automatically loads
+  `<selected-data-dir>/terminal-commander.toml`; a missing file keeps the
+  built-in defaults.
+* Explicit `--config` remains authoritative. An explicit `--data-dir` remains
+  authoritative over `daemon.data_dir` inside the file, preventing the
+  supervisor and daemon from selecting different endpoints.
+* Operators can now keep durable local policy such as `allow_shell` in the
+  conventional per-session data directory without custom launch arguments.
+
+### Daemon and MCP self-healing
+
+* Cached daemon availability is no longer permanent. A bounded Health re-probe
+  can clear stale unavailable state, and concurrent callers share one recovery
+  attempt.
+* The adapter retains its startup supervisor plan and `allow_spawn` decision.
+  When Health fails, it can run supervisor recovery and return structured
+  recovery status.
+* A transport loss during a call invalidates cached availability and returns a
+  structured transport-loss contract. Idempotent requests may retry once after
+  recovery; mutating requests are never resent automatically and instead point
+  callers to `command_status` or `runtime_state` for reconciliation.
+* Daemon failures surface as structured `daemon_unavailable` errors with
+  recovery, remedy, and transport detail rather than opaque internal errors.
+  `health` and `system_discover` remain callable during version skew.
+
+### Live daemon version-skew recovery
+
+* Version skew is refreshed before guarded tools. A matching daemon clears
+  stale skew, a different daemon refreshes it, and a failed or empty probe
+  preserves the last trustworthy result.
+* The refresh path now uses the lightweight Health method, bounded to 750 ms,
+  instead of the more expensive environment discovery request. This also fixes
+  the Linux release-gate regression in the recovery suite
+  ([ba68d96](https://github.com/special-place-ai-heaven/terminal-commander/commit/ba68d96650cd8a509bdf09b86d1622af8fc85190)).
+
+### IPC compatibility
+
+* `DiscoverResponse.environment` is additive and has a serde default, so
+  responses from older daemons still decode. The larger host snapshot is boxed
+  without changing its JSON representation, and the new probe/route types are
+  re-exported for clients.
+
+### Compact and full MCP smoke coverage
+
+* The OMNI smoke runner now reads `tools/list` and routes legacy granular calls
+  through the five compact facades (`command`, `session`, `files`, `registry`,
+  and `status`) when granular names are unavailable.
+* The runner preserves direct granular calls on the full surface and translates
+  compact shell waits from `grace_ms` to `wait_ms`.
+* Portable Python executables replace bare `echo` fixtures. Tests cover every
+  facade mapping, full-surface preservation, translation, and output behavior.
+
+### Verification
+
+* Added bounded environment tests for paths, status, route ordering, beachhead
+  selection, WSL promotion, and interpreter-family launch shapes.
+* Added IPC round-trip and legacy-decode coverage for the environment payload,
+  plus live MCP assertions for the returned access routes.
+* Added recovery coverage for unavailable-to-available transitions, concurrent
+  recovery, matching-version re-probes, stale-skew clearing, transport loss,
+  and supervisor fallback.
+* Updated README, policy, MCP tool-surface, and shell-runtime documentation to
+  describe conventional config, route discovery, and shell selection. A stale
+  branch-name audit was also removed from the repository
+  ([8029884](https://github.com/special-place-ai-heaven/terminal-commander/commit/8029884db4c1532b2e3828e73bc69ba1e4b8bb3b)).
+
+### Compatibility notes
+
+* On Windows, an omitted shell now normally selects a confirmed PowerShell 7
+  route rather than assuming Bash. Callers should use the returned beachhead
+  syntax or provide an explicit shell override.
+* Discovery does not bypass `allow_shell`, session, remote, or privileged policy
+  gates. The wire change is additive and backward-compatible.
+
+### Published artifacts
+
+* npm: `terminal-commander`, `@terminal-commander/linux-x64`,
+  `@terminal-commander/linux-arm64`, `@terminal-commander/windows-x64`,
+  `@terminal-commander/mac-x64`, and `@terminal-commander/mac-arm64`.
+* crates.io: `terminal-commander-core`, `terminal-commander-sifters`,
+  `terminal-commander-probes`, `terminal-commander-store`,
+  `terminal-commander-supervisor`, `terminal-commander-ipc`,
+  `terminal-commanderd`, and `terminal-commander-mcp`.
+* The release workflow passed every Linux and Windows gate, all five native
+  platform builds, npm publication and verification, the eight-crate Cargo
+  publication chain, and the final release verdict
+  ([workflow run](https://github.com/special-place-ai-heaven/terminal-commander/actions/runs/29337130815)).
 
 ## [0.1.79](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.78...v0.1.79) (2026-07-11)
 

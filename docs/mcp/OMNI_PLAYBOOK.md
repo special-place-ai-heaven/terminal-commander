@@ -206,7 +206,7 @@ run_and_watch argv=[...] rules=[...] target_id="build-box"
 - Honest caveat: federation is proven via a second-local-socket
   simulation; real-SSH transit is not yet exercised in CI (no sshd in
   the smoke env). `target_id` is wired on the command path; it is not
-  yet threaded through all 50 tools.
+  yet threaded through all 51 full-surface tools.
 
 ## 7. Privileged system ops: NOT AVAILABLE (plan-only)
 

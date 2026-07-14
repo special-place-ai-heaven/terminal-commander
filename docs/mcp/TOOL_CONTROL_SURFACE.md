@@ -1,6 +1,6 @@
 # MCP Tool Control Surface - Locked Contract
 
-Status: current MCP-facing contract as of 2026-05-25.
+Status: current MCP-facing contract as of 2026-07-14.
 Anchored by: `crates/mcp/src/tools.rs`, `docs/runtime/REALTIME_SIGNAL_CHANNEL.md`.
 Language: ASCII only.
 
@@ -16,7 +16,7 @@ reachability, and the live tool catalogue:
 
 ```json
 {
-  "adapter_version": "0.1.10",
+  "adapter_version": "0.1.80",
   "mcp_spec": "2025-11-25",
   "daemon_available": false,
   "daemon": null,
@@ -52,15 +52,15 @@ the probe deadline.
 
 Availability rules:
 
-- `system_discover` does not require the daemon.
-- Every other MCP tool requires the daemon.
+- `system_discover` and `target_list` do not require the daemon.
+- Every other full-surface MCP tool requires the daemon.
 - When the daemon is unavailable, daemon-backed tools report
   `available: false` and `unavailable_reason: "daemon_unavailable"`.
 - Daemon-backed calls must return a structured `daemon_unavailable`
   error when startup status says the daemon is unavailable. They must
   not leak raw pipe/socket errors as the primary client contract.
 - The advertised list and the registered rmcp router are tested to stay
-  aligned (`catalogue_lists_twenty_nine_live_tools_at_tc45` and
+  aligned (`catalogue_lists_fifty_one_live_tools` and
   `tool_router_exposes_all_live_tools`).
 
 Platform availability (unix-only sessions):
@@ -86,12 +86,16 @@ Machine-readable fixture:
 
 ## 2. Live tool catalogue
 
-The current rmcp stdio adapter exposes 50 live tools.
+The full rmcp stdio surface exposes 51 live tools. With
+`TC_SURFACE=compact`, the adapter instead advertises five action-dispatched
+facades: `command`, `session`, `files`, `registry`, and `status`. Both surfaces
+route to the same handlers and policy boundary.
 
 | Group | Tools |
 |---|---|
-| Discovery and health | `system_discover`, `health`, `policy_status`, `self_check` |
+| Discovery, health, and audit | `system_discover`, `health`, `policy_status`, `self_check`, `audit_since` |
 | Commands and buckets | `command_start_combed`, `run_and_watch`, `command_status`, `command_stop` (forced-kill-only; CommandSignal-gated), `shell_exec` (gated by `allow_shell`; combed, never raw), `command_output_tail`, `bucket_events_since`, `bucket_wait`, `bucket_summary`, `event_context` |
+| Subscriptions | `subscription_open`, `subscription_pull`, `subscription_list`, `subscription_close`, `subscription_seek` |
 | Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_import_pack`, `registry_deactivate`, `registry_list_active`, `registry_suggest_from_samples` (proposals only; NEVER auto-activates) |
 | Sessions and workspace | `shell_session_start`, `shell_session_exec`, `shell_session_status`, `shell_session_stop`, `shell_session_list`, `workspace_snapshot_create`, `workspace_snapshot_apply` (gated by `allow_session`; unix-only; combed, never raw) |
 | Files | `file_read_window`, `file_search`, `file_write` (policy-gated by `paths.write_allow`; audited before write; bounded size; atomic; mutating / non-idempotent), `file_watch_start`, `file_watch_stop`, `file_watch_list` |
@@ -133,7 +137,6 @@ Each catalogue entry returned by `system_discover.tools[]` includes:
 | `command_read_stderr` | Would surface raw stream text. |
 | `file_read_all` | Unbounded file output. |
 | `stream_tail` | Raw stream tail. |
-| `shell_exec` | Generic shell bridge instead of argv-first controlled commands. |
 | `network_listen` | No network listener is allowed in the MCP-facing crate. |
 | `policy_override` | Policy decisions are not bypassable by clients. |
 
