@@ -205,7 +205,7 @@ async fn stale_version_skew_refreshes_against_replaced_live_daemon() {
         assert_eq!(
             status.version_skew(),
             None,
-            "successful system_discover refresh must clear the stale skew cache"
+            "successful Health refresh must clear the stale skew cache"
         );
 
         let _ = client.cancel().await;

@@ -29,9 +29,9 @@ use terminal_commander_supervisor::paths;
 /// this budget only caps the failure case.
 const SELF_HEAL_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 
-/// Bound on the startup version-skew probe (DEFECT B). A co-located WSL daemon
-/// answers `system_discover` in sub-milliseconds; this budget only caps the
-/// failure case so adapter startup never hangs on a slow/absent daemon.
+/// Bound on the cached version-skew probe (DEFECT B). A co-located daemon
+/// answers `Health` in sub-milliseconds; this budget only caps the failure
+/// case so a guarded tool never hangs on a slow/absent daemon.
 const SKEW_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// Resolve the socket path the MCP adapter should connect to.
@@ -342,11 +342,14 @@ impl McpDaemonClient {
         let prior = handle.version_skew();
         handle.version_probe_count.fetch_add(1, Ordering::Relaxed);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let probe = self.inner.call(id, IpcRequest::SystemDiscover);
+        // Health carries the daemon's compile-time version and deliberately
+        // avoids SystemDiscover's bounded environment probes. Rechecking skew
+        // must stay cheap even when discovery has to wait on slow tools.
+        let probe = self.inner.call(id, IpcRequest::Health);
         match tokio::time::timeout(SKEW_PROBE_TIMEOUT, probe).await {
-            Ok(Ok(IpcResponse::SystemDiscover(discover))) => {
-                let refreshed = (discover.version != adapter_version)
-                    .then(|| (discover.version, adapter_version.to_owned()));
+            Ok(Ok(IpcResponse::Health { version, .. })) if !version.is_empty() => {
+                let refreshed =
+                    (version != adapter_version).then(|| (version, adapter_version.to_owned()));
                 handle.set_version_skew(refreshed.clone());
                 refreshed
             }
