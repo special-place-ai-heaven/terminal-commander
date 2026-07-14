@@ -649,6 +649,82 @@ pub enum IpcResponse {
     },
 }
 
+/// Evidence-backed host program probe used by `system_discover`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProgramProbe {
+    pub name: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub evidence: String,
+    pub version_status: String,
+    #[serde(default)]
+    pub execution_status: String,
+}
+
+/// Terminal/session markers inherited by the daemon process.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TerminalProbe {
+    pub kind: String,
+    pub evidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<bool>,
+    pub ci: bool,
+}
+
+/// Bounded WSL availability details on Windows; unavailable elsewhere.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct WslProbe {
+    pub available: bool,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub distributions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_shell: Option<String>,
+    #[serde(default)]
+    pub execution_status: String,
+}
+
+/// A verified way to cross from the daemon host into a command interpreter.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AccessRoute {
+    pub route_id: String,
+    pub rank: u16,
+    pub kind: String,
+    pub family: String,
+    pub executable: String,
+    pub argv_template: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub evidence: String,
+}
+
+/// Bounded, evidence-backed execution environment snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct HostEnvironment {
+    pub os: String,
+    pub arch: String,
+    pub terminal: TerminalProbe,
+    pub shells: Vec<ProgramProbe>,
+    pub tools: Vec<ProgramProbe>,
+    pub wsl: WslProbe,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub access_routes: Vec<AccessRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beachhead: Option<AccessRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_shell: Option<String>,
+    pub discovery_ms: u64,
+}
+
 /// `system_discover` payload. Mirrors the contract laid out in
 /// `docs/mcp/TOOL_CONTROL_SURFACE.md`. The advertised method list is
 /// tied to the dispatcher's actual handler set.
@@ -658,6 +734,10 @@ pub struct DiscoverResponse {
     pub mcp_spec: String,
     pub policy_profile: String,
     pub methods: Vec<String>,
+    /// Host evidence is additive so newer adapters can still decode older
+    /// daemon responses as an empty/unknown snapshot.
+    #[serde(default)]
+    pub environment: Box<HostEnvironment>,
 }
 
 /// The four resolved per-call capabilities (POLICY.md section 4.1).
@@ -2835,6 +2915,18 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let back: IpcError = serde_json::from_str(&json).unwrap();
         assert!(back.is_transport());
+    }
+
+    #[test]
+    fn legacy_discover_without_environment_decodes_as_unknown() {
+        let json = r#"{
+            "version":"0.1.0",
+            "mcp_spec":"2025-11-25",
+            "policy_profile":"default",
+            "methods":["system_discover"]
+        }"#;
+        let decoded: DiscoverResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(*decoded.environment, HostEnvironment::default());
     }
 
     /// F7: the typed `argv0` field is the authoritative carrier for a

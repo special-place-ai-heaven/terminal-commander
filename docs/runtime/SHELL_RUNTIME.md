@@ -129,9 +129,11 @@ inline. It MUST run inside a tokio runtime (`ProcessProbe::spawn` uses
 1. Reject an empty / whitespace `shell_line` (`EmptyArgv`).
 2. Reject a line over `MAX_SHELL_LINE_BYTES`
    (`ArgvItemTooLong { index: 0, .. }`).
-3. Resolve the shell: `req.shell` or `default_shell()` (`/bin/bash` on
-   unix, `bash` otherwise).
-4. Assemble `argv = [shell, "-lc", shell_line]`.
+3. Resolve the shell: `req.shell` or the highest-ranked path-confirmed route
+   from bounded host discovery.
+4. Assemble the interpreter-family argv (`-lc` for POSIX shells,
+   `-NoLogo -NoProfile -NonInteractive -Command` for PowerShell, or
+   `/D /S /C` for `cmd`).
 5. Call `command.start_combed_shell(cmd_req, &shell_line, &shell)`,
    which runs the policy gate, audit, and shared spawn core.
 
@@ -200,9 +202,9 @@ the subject because the flag and its value are distinct whitespace
 tokens.
 
 The full `argv` metadata accompanies the row as the metadata field. For
-the shell lane the line lands WHOLE as `argv[2]` (`[shell, "-lc",
-shell_line]`), so the metadata is built by `format_shell_argv_metadata`,
-which re-redacts `argv[2]` via `redact_shell_line` BEFORE the standard
+the shell lane the line lands WHOLE as one argv item, so the metadata is built
+by `format_shell_argv_metadata`, which finds and re-redacts that item via
+`redact_shell_line` BEFORE the standard
 per-item `redact_argv` pass -- otherwise a space-separated secret inside
 that single token would survive the per-token argv scan. The argv lane
 is unchanged and still uses `format_argv_metadata`.

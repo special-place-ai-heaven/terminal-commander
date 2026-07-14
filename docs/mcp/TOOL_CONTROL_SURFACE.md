@@ -40,6 +40,16 @@ reachability, and the live tool catalogue:
 }
 ```
 
+When the daemon is reachable, `daemon.environment` is a fresh bounded snapshot,
+not a platform guess. It reports terminal markers, installed shell/PowerShell
+paths and versions, WSL state, and common tool probes. Its `access_routes` list
+contains confirmed-only interpreter routes in preference order. Each route has
+a stable id, absolute executable, interpreter family, evidence, and exact
+`argv_template` ending in `{command}`. `beachhead` repeats the highest-ranked
+route so an LLM can establish a working execution path without synthesizing
+flags. WSL is promoted to a route only after a sentinel command succeeds within
+the probe deadline.
+
 Availability rules:
 
 - `system_discover` does not require the daemon.

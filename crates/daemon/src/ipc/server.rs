@@ -893,6 +893,7 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
             .iter()
             .map(|m| (*m).to_owned())
             .collect(),
+        environment: Box::new(crate::environment::discover_host_environment()),
     })
 }
 

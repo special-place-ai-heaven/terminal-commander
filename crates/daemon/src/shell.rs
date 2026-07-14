@@ -15,7 +15,7 @@
 //! ShellRuntime::exec
 //!   -> validate shell_line (non-empty, <= MAX_SHELL_LINE_BYTES)
 //!   -> resolve shell (req.shell or default_shell)
-//!   -> argv = [shell, "-lc", shell_line]
+//!   -> argv = interpreter-family launch shape ending in shell_line
 //!   -> CommandRuntime::start_combed_shell   // StartLane::Shell
 //!        -> SKIP the argv-lane shell-interpreter guard
 //!        -> PolicyAction::CommandShellStart  // allow_shell cap gate
@@ -45,41 +45,43 @@ use crate::command::{CommandError, CommandRuntime, CommandStartRequest, CommandS
 /// Maximum byte length of a single `shell_line`.
 ///
 /// Equal to [`MAX_ARGV_ITEM_BYTES`](crate::command::MAX_ARGV_ITEM_BYTES):
-/// the shell lane assembles `argv = [shell, "-lc", shell_line]`, so
-/// `shell_line` lands as `argv[2]` and is bounded by the same per-item
+/// the shell lane assembles an interpreter-family argv whose final item is
+/// `shell_line`, bounded by the same per-item
 /// argv cap that [`CommandRuntime::start_combed_shell`] enforces via
 /// `validate_argv`. A larger cap here would lie — `validate_argv` would
-/// reject the oversize line as `ArgvItemTooLong { index: 2, .. }`. Raising
-/// this later requires a lane-aware validator that exempts `argv[2]` under
+/// reject the oversize line as `ArgvItemTooLong`. Raising
+/// this later requires a lane-aware validator that exempts the line item under
 /// the shell lane; that is an explicit follow-up, NOT TC49.
 pub const MAX_SHELL_LINE_BYTES: usize = crate::command::MAX_ARGV_ITEM_BYTES;
 
 /// Default shell used when the request does not name one.
 ///
-/// `/bin/bash` on Unix (the platform the shell lane targets); a bare
-/// `bash` elsewhere (resolved via `PATH`). The lane is Unix-first; a
-/// non-Unix host without `bash` on `PATH` fails at spawn, not here.
+/// Resolves the highest-ranked path-confirmed host route (PowerShell-first on
+/// Windows, POSIX-shell-first on Unix). The legacy fallback is used only when
+/// discovery finds no viable interpreter.
 #[must_use]
 fn default_shell() -> String {
-    if cfg!(unix) {
-        "/bin/bash".to_owned()
-    } else {
-        "bash".to_owned()
-    }
+    crate::environment::preferred_shell().unwrap_or_else(|| {
+        if cfg!(unix) {
+            "/bin/sh".to_owned()
+        } else {
+            "cmd.exe".to_owned()
+        }
+    })
 }
 
 /// A daemon-level request to run ONE shell line through the comb pipeline.
 ///
 /// Mirrors [`CommandStartRequest`] field-for-field where the lanes share
 /// inputs, but takes a dedicated `shell_line` instead of a raw `argv`: the
-/// runtime assembles `argv = [shell, "-lc", shell_line]` itself, so the
+/// runtime assembles the correct argv for the selected interpreter family, so the
 /// caller never hand-builds an interpreter argv (which the argv lane would
 /// hard-deny). `shell` is the interpreter override; `None` resolves to
 /// [`default_shell`].
 #[derive(Debug, Clone)]
 pub struct ShellExecRequest {
     /// The shell line to run (pipelines / compounds / redirects allowed).
-    /// Becomes `argv[2]`; bounded by [`MAX_SHELL_LINE_BYTES`].
+    /// Becomes the final argv item; bounded by [`MAX_SHELL_LINE_BYTES`].
     pub shell_line: String,
     /// Interpreter override. `None` -> [`default_shell`].
     pub shell: Option<String>,
@@ -138,7 +140,7 @@ impl ShellRuntime {
     ///
     /// Validates `shell_line` (non-empty after trim, `<=`
     /// [`MAX_SHELL_LINE_BYTES`]), resolves the shell, assembles
-    /// `argv = [shell, "-lc", shell_line]`, and forwards to
+    /// the interpreter-family argv, and forwards to
     /// [`CommandRuntime::start_combed_shell`] — which gates on
     /// [`PolicyAction::CommandShellStart`](crate::policy::PolicyAction)
     /// (denied by default) and, on allow, emits a `command_shell_start`
@@ -153,7 +155,7 @@ impl ShellRuntime {
     /// - [`CommandError::ArgvItemTooLong`] (`index: 0`) if `shell_line`
     ///   exceeds [`MAX_SHELL_LINE_BYTES`]. `index: 0` reports the
     ///   `shell_line` itself (the request's single user input), not its
-    ///   downstream `argv[2]` position.
+    ///   downstream interpreter-specific position.
     /// - [`CommandError::PolicyDenied`] if the `allow_shell` cap is off or
     ///   the profile forbids shell.
     /// - any other [`CommandError`] propagated from the spawn core.
@@ -169,7 +171,7 @@ impl ShellRuntime {
         }
 
         let shell = req.shell.clone().unwrap_or_else(default_shell);
-        let argv = vec![shell.clone(), "-lc".to_owned(), req.shell_line.clone()];
+        let argv = crate::environment::shell_launch_argv(&shell, &req.shell_line);
 
         let cmd_req = CommandStartRequest {
             argv,

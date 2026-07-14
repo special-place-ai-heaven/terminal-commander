@@ -133,7 +133,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "system_discover",
             status: ToolStatus::Live,
-            description: "Return adapter version, MCP spec, policy profile, tool catalogue.",
+            description: "Return adapter/daemon metadata, tool catalogue, and bounded host-environment probes with ranked access routes and an exact beachhead argv template.",
         },
         ToolCatalogueEntry {
             name: "health",
@@ -975,11 +975,13 @@ impl TerminalCommanderMcpServer {
         }
     }
 
-    /// `system_discover` — adapter metadata + tool catalogue.
+    /// `system_discover` — adapter metadata, tool catalogue, and verified host routes.
     /// Forwards to the daemon to fetch live profile/version data; if
     /// the daemon is unreachable the response still carries the
     /// adapter-side catalogue with the daemon error surfaced.
-    #[tool(description = "Return adapter version, MCP spec, policy profile, and tool catalogue.")]
+    #[tool(
+        description = "Discover adapter/daemon metadata and the execution environment. Returns bounded OS, terminal, shell/PowerShell, WSL, and tool probes plus ranked access_routes and an exact beachhead argv template; call this before choosing an interpreter."
+    )]
     async fn system_discover(&self) -> Result<CallToolResult, McpError> {
         let (daemon, daemon_error) = match self.daemon.call(IpcRequest::SystemDiscover).await {
             Ok(IpcResponse::SystemDiscover(d)) => (Some(d), None),
@@ -1566,22 +1568,14 @@ impl TerminalCommanderMcpServer {
         Parameters(params): Parameters<McpShellExecParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
+        // Preserve the original text only for observability classification;
+        // the daemon receives the exact same shell line through into_params.
+        let shell_line = params.shell_line.clone();
         let ipc = params.into_params()?;
         match self.daemon.call(IpcRequest::ShellExec(ipc)).await {
-            Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
-                job_id,
-                bucket_id,
-                probe_id,
-                cursor,
-                // Shell lane: argv[0] is the interpreter, never a tool
-                // pack, so the daemon never sets a hint here.
-                hint: _,
-            })) => json_tool_result(&serde_json::json!({
-                "job_id": job_id,
-                "bucket_id": bucket_id,
-                "probe_id": probe_id,
-                "cursor": cursor,
-            })),
+            Ok(IpcResponse::CommandStartCombed(response)) => {
+                json_tool_result(&shell_exec_payload(&response, &shell_line))
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
         }
@@ -2908,7 +2902,10 @@ impl TerminalCommanderMcpServer {
 `run_and_watch`: `argv` + `wait_ms` (default 5,000; max 60,000; not `timeout_ms`). \
 If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` \
 (not `job_id` or `wait_ms`), and check state with `status`: `job_id`. \
-`summary`: `bucket_id` only (no `compact`). `exec`: `shell_line` (policy-gated). \
+`summary`: `bucket_id` only (no `compact`). `exec`: `shell_line` (policy-gated); common pipelines are \
+executed unchanged and an omitted shell uses the highest-ranked confirmed host route; inspect status \
+system_discover for host-specific syntax. Shell-side tail/head/grep makes the receipt observability-limited because discarded \
+lines never reach TC; use `run_and_watch` + rules or `files` search when full evidence matters. \
 Other actions: run, output_tail, stop, events, event_context, sub_open, sub_pull, \
 sub_seek, sub_close, sub_list."
     )]
@@ -3018,7 +3015,9 @@ usually {\"kind\":\"global\"}. Rules comb command output into structured signals
         name = "status",
         description = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
 policy_status, audit_since (daemon-global operation metadata; optional cursor/action_filter/decision_filter/limit), runtime_state \
-(aggregate snapshot), probe_list, probe_status, system_discover, target_list, target_probe."
+(aggregate snapshot), probe_list, probe_status, system_discover, target_list, target_probe. \
+Call system_discover before choosing an interpreter: its environment contains bounded shell/PowerShell/WSL/tool probes, \
+ranked access_routes, and a beachhead with the exact confirmed argv template to follow."
     )]
     pub(crate) async fn status_facade(
         &self,
@@ -3162,6 +3161,65 @@ fn json_tool_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError>
         McpError::internal_error(Cow::Owned(format!("serialize response: {e}")), None)
     })?;
     Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
+/// Build the shell-start receipt. Common LLM shell pipelines remain valid
+/// and execute byte-for-byte as requested. When an obvious shell-side
+/// prefilter discards output before daemon ingestion, add a factual
+/// observability receipt so the caller knows TC cannot recover those lines.
+fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serde_json::Value {
+    let CommandStartResponse {
+        job_id,
+        bucket_id,
+        probe_id,
+        cursor,
+        hint: _,
+    } = response;
+    let mut payload = serde_json::json!({
+        "job_id": job_id,
+        "bucket_id": bucket_id,
+        "probe_id": probe_id,
+        "cursor": cursor,
+    });
+
+    let lower = shell_line.to_ascii_lowercase();
+    let mut detected = Vec::new();
+    for (name, needles) in [
+        ("tail", &["| tail", "|tail"][..]),
+        ("head", &["| head", "|head"][..]),
+        ("grep", &["| grep", "|grep"][..]),
+        ("findstr", &["| findstr", "|findstr"][..]),
+        (
+            "select-object",
+            &[
+                "| select-object -first",
+                "|select-object -first",
+                "| select-object -last",
+                "|select-object -last",
+            ][..],
+        ),
+        ("select-string", &["| select-string", "|select-string"][..]),
+    ] {
+        if needles.iter().any(|needle| lower.contains(needle)) {
+            detected.push(name);
+        }
+    }
+
+    if !detected.is_empty() {
+        payload.as_object_mut().expect("shell receipt is an object").insert(
+            "observability".into(),
+            serde_json::json!({
+                "status": "limited",
+                "executed_unchanged": true,
+                "reason": "shell_prefilter",
+                "detected_prefilters": detected,
+                "message": "The shell filtered output before TC ingestion; TC executed the line unchanged and cannot recover discarded lines.",
+                "better_route": r#"Run the producer directly with command action="run_and_watch" plus rules; use files action="search" for existing logs."#,
+            }),
+        );
+    }
+
+    payload
 }
 
 /// Map a daemon `IpcError` to an MCP `ErrorData`, honest about the mutability
@@ -5673,6 +5731,41 @@ mod tests {
     fn finalize_one(json: &str) -> Result<RuleDefinition, String> {
         let input: RuleInput = serde_json::from_str(json).expect("RuleInput must deserialize");
         input.finalize(0)
+    }
+
+    fn shell_start_response() -> CommandStartResponse {
+        CommandStartResponse {
+            job_id: terminal_commander_core::JobId::new(),
+            bucket_id: terminal_commander_core::BucketId::new(),
+            probe_id: terminal_commander_core::ProbeId::new(),
+            cursor: 0,
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn shell_exec_payload_marks_prefiltered_input_without_rejecting_it() {
+        let payload = shell_exec_payload(
+            &shell_start_response(),
+            r#"wsl -e bash -lc "build 2>&1 | tail -30""#,
+        );
+
+        assert!(payload.get("job_id").is_some(), "the command still starts");
+        assert_eq!(payload["observability"]["status"], "limited");
+        assert_eq!(payload["observability"]["executed_unchanged"], true);
+        assert_eq!(
+            payload["observability"]["detected_prefilters"],
+            serde_json::json!(["tail"])
+        );
+    }
+
+    #[test]
+    fn shell_exec_payload_keeps_ordinary_shell_receipt_unchanged() {
+        let payload = shell_exec_payload(&shell_start_response(), "echo ready");
+        assert!(
+            payload.get("observability").is_none(),
+            "ordinary shell commands keep the compact legacy receipt"
+        );
     }
 
     #[test]

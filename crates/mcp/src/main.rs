@@ -202,7 +202,10 @@ fn main() -> ExitCode {
         };
 
         let status_handle = DaemonStatusHandle::with_skew(status, version_skew);
-        let daemon = McpDaemonClient::with_status(socket_path, status_handle);
+        // Retain the startup supervisor plan so this long-lived adapter can
+        // recover the same daemon after a later transport loss. The plan
+        // carries allow_spawn, so recovery cannot broaden operator policy.
+        let daemon = McpDaemonClient::with_recovery(socket_path, status_handle, opts);
         // P5: load the remote-federation target registry (targets.toml). The
         // fs read lives in the daemon crate (`terminal_commanderd::load_targets`),
         // NOT in crates/mcp/src, so the adapter no-fs grep guard stays green.

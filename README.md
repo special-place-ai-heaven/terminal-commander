@@ -384,7 +384,13 @@ grouped by workflow. All daemon-backed tools return a structured
 `daemon_unavailable` error when the daemon is down instead of leaking raw
 pipe/socket errors, and `system_discover` itself remains callable to explain
 per-tool availability (`requires_daemon`, `available`, `unavailable_reason`).
-It also carries an honest `omni_status` capability matrix (see below).
+When the daemon is reachable it also probes the execution environment with
+hard time bounds: OS/architecture, terminal evidence, shell and PowerShell
+paths/versions, WSL execution, and core tools. Confirmed interpreters become
+ranked `access_routes`; `beachhead` is the highest-ranked route and includes the
+exact argv template an LLM can follow. Unavailable or timed-out candidates stay
+truthful evidence, never inferred availability. Discovery also carries the
+honest `omni_status` capability matrix (see below).
 
 | Group | Tools |
 | --- | --- |
@@ -627,6 +633,7 @@ Everything lives under the per-session state dir
 
 | Path | Contents |
 | --- | --- |
+| `terminal-commander.toml` | Optional conventional daemon/policy config, auto-loaded when `--config` is omitted. |
 | `terminal-commander.db` | SQLite store: events, rule registry (versioned, FTS5), durable activations, audit rows, workspace snapshots. |
 | `logs/terminal-commanderd.log` | Daemon log (bind, self-checks, idle-reap decisions). |
 | `terminal-commanderd.pid` | Pidfile: pid, version, endpoint (the probe cross-checks it). |

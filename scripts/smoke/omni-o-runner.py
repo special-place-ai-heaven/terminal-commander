@@ -92,6 +92,51 @@ def profile_plan(profile):
         raise SystemExit(f"omni-o-runner: unknown profile {profile!r}")
     return plan
 
+_COMPACT_ROUTES = {
+    "shell_exec": ("command", "exec"),
+    "run_and_watch": ("command", "run_and_watch"),
+    "command_start_combed": ("command", "run"),
+    "command_status": ("command", "status"),
+    "subscription_open": ("command", "sub_open"),
+    "subscription_pull": ("command", "sub_pull"),
+    "subscription_close": ("command", "sub_close"),
+    "registry_suggest_from_samples": ("registry", "suggest_from_samples"),
+    "pty_command_start": ("session", "pty_start"),
+    "pty_command_write_stdin": ("session", "pty_stdin"),
+    "pty_command_stop": ("session", "pty_stop"),
+    "shell_session_start": ("session", "sh_start"),
+    "shell_session_exec": ("session", "sh_exec"),
+    "shell_session_status": ("session", "sh_status"),
+    "shell_session_stop": ("session", "sh_stop"),
+}
+
+
+def _route_call(tool, arguments, available_tools):
+    """Route a granular OMNI call through the compact facade when required."""
+    routed = dict(arguments)
+    if tool in available_tools:
+        return tool, routed
+
+    route = _COMPACT_ROUTES.get(tool)
+    if route is None or route[0] not in available_tools:
+        return tool, routed
+
+    facade, action = route
+    if tool == "shell_exec" and "grace_ms" in routed:
+        routed.setdefault("wait_ms", routed.pop("grace_ms"))
+    routed["action"] = action
+    return facade, routed
+
+
+def _portable_echo(text):
+    """Return argv for a real cross-platform executable that prints one line."""
+    return [
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.write(sys.argv[1] + '\\n')",
+        text,
+    ]
+
 
 # ---------------------------------------------------------------------------
 # Bounded JSON-RPC pump over the MCP adapter stdio transport.
@@ -156,8 +201,19 @@ class Mcp:
         )
         self.proc.stdin.flush()
 
+        list_id = self._send("tools/list", {})
+        listed = self._recv(list_id)
+        if "error" in listed:
+            raise SystemExit(f"omni-o-runner: tools/list failed: {listed['error']}")
+        self._available_tools = {
+            tool["name"]
+            for tool in listed.get("result", {}).get("tools", [])
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+        }
+
     def call(self, tool, arguments, deadline=15.0):
-        """Call one MCP tool; return the decoded inner JSON content."""
+        """Call one MCP tool; route granular names through compact facades."""
+        tool, arguments = _route_call(tool, arguments, self._available_tools)
         cid = self._send(
             "tools/call", {"name": tool, "arguments": arguments}
         )
@@ -311,7 +367,7 @@ def gate_o04(mcp):
     # via run_and_watch (npm-install-style: lots of output, one outcome).
     r = mcp.call(
         "run_and_watch",
-        {"argv": ["echo", "added 1 package in 1s"], "wait_ms": 3000},
+        {"argv": _portable_echo("added 1 package in 1s"), "wait_ms": 3000},
         deadline=12.0,
     )
     if "_error" in r:
@@ -358,7 +414,7 @@ def gate_o11(mcp):
     for i in range(3):
         r = mcp.call(
             "command_start_combed",
-            {"argv": ["echo", f"omni-parallel-{i}"], "grace_ms": 2000},
+            {"argv": _portable_echo(f"omni-parallel-{i}"), "grace_ms": 2000},
         )
         if "_error" in r:
             return False, f"parallel start {i} error: {r['_error']}"
