@@ -317,8 +317,8 @@ pub enum CommandError {
 /// [`CommandRuntime::start_combed_inner`]. `Argv` is the default
 /// command path: `argv[0]` is the program and shell interpreters are a
 /// hard deny (`SHELL_INTERPRETERS_DENY`). `Shell` is the TC49
-/// `shell_exec` lane: `argv` is the daemon-assembled `[shell, "-lc",
-/// shell_line]`, the interpreter guard is skipped, and the verdict comes
+/// `shell_exec` lane: `argv` is assembled for the selected interpreter family,
+/// the interpreter guard is skipped, and the verdict comes
 /// from [`PolicyAction::CommandShellStart`] (gated by `allow_shell`).
 ///
 /// Only THREE sites in `start_combed_inner` branch on this lane: the
@@ -2127,7 +2127,7 @@ fn header_value_span_end(line: &str, tokens: &[String], start: usize) -> usize {
 ///
 /// Joined, then capped at `SHELL_LINE_PREVIEW_BYTES` on a char boundary
 /// (panic-free on multibyte input).
-fn redact_shell_line(line: &str) -> String {
+pub(crate) fn redact_shell_line(line: &str) -> String {
     // Whitespace-tokenize, then strip one surrounding shell-quote pair per
     // token so a quoted secret value is matched on its inner text.
     let mut tokens: Vec<String> = line
@@ -2261,27 +2261,25 @@ fn format_argv_metadata_tagged(argv: &[String], tag: Option<&(&'static str, Stri
     }
 }
 
-/// Builds audit metadata for a TC49 shell-lane argv (`[shell, "-lc",
-/// shell_line]`).
+/// Builds audit metadata for a TC49 shell-lane interpreter argv.
 ///
-/// SECURITY-CRITICAL. The shell line lands WHOLE as `argv[2]`, a single
+/// SECURITY-CRITICAL. The shell line lands WHOLE as one argv item, a single
 /// token, so the generic per-token [`redact_argv`] core cannot apply its
 /// Layer-A flag look-ahead INSIDE it: a space-separated secret
 /// (`... --password SECRET ...`) embedded in that one token would survive.
-/// This helper first replaces `argv[2]` with its [`redact_shell_line`]
+/// This helper first replaces the matching line item with its [`redact_shell_line`]
 /// preview -- which tokenizes the line and runs the SAME two-layer redaction
 /// the subject uses -- then runs the standard argv redaction over the result
-/// so `argv[0]`/`argv[1]` are still bounded and masked. Falls back to the
-/// plain argv path for any argv that is not the expected 3-item shape.
+/// so the interpreter arguments are still bounded and masked.
 fn format_shell_argv_metadata(argv: &[String], shell_line: &str) -> String {
-    // Only the daemon-assembled `[shell, "-lc", shell_line]` shape needs the
-    // shell-line redaction on argv[2]; anything else uses the plain path.
-    if argv.len() == 3 {
-        let mut redacted = argv.to_vec();
-        redacted[2] = redact_shell_line(shell_line);
-        return format_argv_metadata(&redacted);
+    // Every daemon-assembled shell family places the caller's line in one
+    // argv item (currently the final item). Find that exact item so Bash,
+    // PowerShell, and cmd routes share the same secret redaction.
+    let mut redacted = argv.to_vec();
+    if let Some(index) = redacted.iter().rposition(|arg| arg == shell_line) {
+        redacted[index] = redact_shell_line(shell_line);
     }
-    format_argv_metadata(argv)
+    format_argv_metadata(&redacted)
 }
 
 /// Number of leading argv tokens surfaced in a redacted head: the program

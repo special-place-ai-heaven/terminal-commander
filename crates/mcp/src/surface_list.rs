@@ -29,7 +29,10 @@ pub(crate) const COMMAND_FACADE_DESCRIPTION: &str = "Run and observe a one-shot 
 `run_and_watch`: `argv` + `wait_ms` (default 5,000; max 60,000; not `timeout_ms`). \
 If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` \
 (not `job_id` or `wait_ms`), and check state with `status`: `job_id`. \
-`summary`: `bucket_id` only (no `compact`). `exec`: `shell_line` (policy-gated). \
+`summary`: `bucket_id` only (no `compact`). `exec`: `shell_line` (policy-gated); common pipelines are \
+executed unchanged and an omitted shell uses the highest-ranked confirmed host route; inspect status \
+system_discover for host-specific syntax. Shell-side tail/head/grep makes the receipt observability-limited because discarded \
+lines never reach TC; use `run_and_watch` + rules or `files` search when full evidence matters. \
 Other actions: run, output_tail, stop, events, event_context, sub_open, sub_pull, \
 sub_seek, sub_close, sub_list.";
 
@@ -51,8 +54,9 @@ usually {\"kind\":\"global\"}. Rules comb command output into structured signals
 
 /// Description for the `status` facade.
 pub(crate) const STATUS_FACADE_DESCRIPTION: &str = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
-policy_status, runtime_state (aggregate snapshot), probe_list, probe_status, system_discover, \
-target_list, target_probe.";
+policy_status, runtime_state (aggregate snapshot), probe_list, probe_status, target_list, target_probe. \
+Call system_discover before choosing an interpreter: its environment contains bounded shell/PowerShell/WSL/tool probes, \
+ranked access_routes, and a beachhead with the exact confirmed argv template to follow.";
 
 /// The facade tool names advertised + admitted on the compact surface.
 /// KEEP IN SYNC with [`compact_surface_tools`].
@@ -308,6 +312,8 @@ mod tests {
             "`wait`: `bucket_id` + `cursor` + `timeout_ms`",
             "`summary`: `bucket_id` only",
             "60,000",
+            "executed unchanged",
+            "observability-limited",
         ] {
             assert!(
                 COMMAND_FACADE_DESCRIPTION.contains(expected),
@@ -318,6 +324,12 @@ mod tests {
             assert!(
                 REGISTRY_FACADE_DESCRIPTION.contains(expected),
                 "registry facade description must contain {expected:?}"
+            );
+        }
+        for expected in ["environment", "access_routes", "beachhead"] {
+            assert!(
+                STATUS_FACADE_DESCRIPTION.contains(expected),
+                "status facade description must contain {expected:?}"
             );
         }
     }

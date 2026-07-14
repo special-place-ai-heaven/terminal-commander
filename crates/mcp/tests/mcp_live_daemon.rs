@@ -234,6 +234,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             "tool catalogue must list exactly 50 live tools (49 + TC22 A3 file_write)"
         );
 
+        assert_environment_routes(&body);
+
         // US6/T056 (FR-023): the payload carries the read-only omni capability
         // matrix. Assert its shape AND its honesty invariants against this
         // live, local-only daemon.
@@ -243,6 +245,37 @@ async fn live_system_discover_roundtrip_reports_daemon() {
     }
     handle.shutdown().await;
     cleanup(&data);
+}
+
+fn assert_environment_routes(body: &serde_json::Value) {
+    let environment = &body["daemon"]["environment"];
+    assert_eq!(
+        environment["os"].as_str(),
+        Some(std::env::consts::OS),
+        "daemon environment must report the host OS"
+    );
+    let routes = environment["access_routes"]
+        .as_array()
+        .expect("daemon.environment.access_routes must be an array");
+    assert!(
+        !routes.is_empty(),
+        "a live daemon must establish at least one confirmed access route"
+    );
+    assert_eq!(
+        environment.get("beachhead"),
+        routes.first(),
+        "the beachhead must be the highest-ranked confirmed route"
+    );
+    for (index, route) in routes.iter().enumerate() {
+        assert_eq!(route["rank"].as_u64(), Some((index + 1) as u64));
+        assert_eq!(
+            route["argv_template"]
+                .as_array()
+                .and_then(|argv| argv.last())
+                .and_then(serde_json::Value::as_str),
+            Some("{command}")
+        );
+    }
 }
 
 /// US6/T056 (FR-023): assert the omni capability matrix is present and HONEST

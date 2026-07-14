@@ -215,6 +215,13 @@ profile = "developer_local"  # or repo_only, read_only_observer,
 profile_version = "1"
 ```
 
+When `--config` is supplied, that file is authoritative. Otherwise the daemon
+loads `terminal-commander.toml` from the selected data directory when the file
+exists; a missing file preserves the compiled defaults. An explicit
+`--data-dir` remains authoritative over any `daemon.data_dir` value inside
+that conventional file, keeping the supervisor and daemon on the same state
+directory across respawns.
+
 Profile switching at runtime is OUT OF MVP. To change profiles,
 operator stops the daemon, edits config, restarts. This is a
 deliberate constraint: profile changes are easier to audit when they
@@ -321,7 +328,7 @@ never the raw line: the SAME two-layer credential masking the argv
 audits use (Layer-A flag look-ahead over whitespace tokens + Layer-B
 per-token scan), then a 128-byte cap on a char boundary
 (`redact_shell_line` in `command.rs`). The accompanying metadata
-re-redacts the line in `argv[2]` the same way
+re-redacts the matching shell-line argv item the same way
 (`format_shell_argv_metadata`). It is a best-effort PREVIEW over a shell
 line, not a full shell parse. Details and the residual limitation in
 `docs/runtime/SHELL_RUNTIME.md` section 8.

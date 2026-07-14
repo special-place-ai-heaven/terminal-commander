@@ -174,6 +174,39 @@ impl DaemonStatusHandle {
             };
         }
     }
+
+    /// Replace a stale startup availability sample with a truthful transport
+    /// loss status. Endpoint and daemon log evidence are preserved so the
+    /// supervisor and tool envelope can explain and recover the same target.
+    fn set_transport_unavailable(&self, error: &IpcError) {
+        let mut guard = self.status.lock().unwrap();
+        let (endpoint, log_path) = match &*guard {
+            EnsureDaemonStatus::AlreadyRunning { endpoint, .. } => (endpoint.clone(), None),
+            EnsureDaemonStatus::Started {
+                endpoint, log_path, ..
+            } => (endpoint.clone(), Some(log_path.clone())),
+            EnsureDaemonStatus::Unavailable { diagnostics, .. } => {
+                let mut diagnostics = diagnostics.clone();
+                diagnostics.last_error = Some(error.message.clone());
+                *guard = EnsureDaemonStatus::Unavailable {
+                    reason:
+                        terminal_commander_supervisor::ensure::DaemonUnavailableReason::TransportLost,
+                    diagnostics,
+                };
+                return;
+            }
+        };
+        *guard = EnsureDaemonStatus::Unavailable {
+            reason: terminal_commander_supervisor::ensure::DaemonUnavailableReason::TransportLost,
+            diagnostics: terminal_commander_supervisor::ensure::Diagnostics {
+                endpoint,
+                log_path,
+                last_error: Some(error.message.clone()),
+                startup_attempted: false,
+                startup_elapsed_ms: 0,
+            },
+        };
+    }
 }
 
 /// Forwarding wrapper around the daemon's `DaemonClient`. Adds a
@@ -183,6 +216,10 @@ pub struct McpDaemonClient {
     inner: terminal_commander_ipc::DaemonClient,
     next_id: Arc<AtomicU64>,
     status: Option<DaemonStatusHandle>,
+    /// The same supervisor plan used at adapter startup. Retained so a
+    /// long-lived adapter can restore a daemon that exits later while still
+    /// honoring the operator's `allow_spawn` policy.
+    recovery: Option<Arc<terminal_commander_supervisor::ensure::EnsureDaemonOptions>>,
 }
 
 /// Margin added on top of a request's daemon-side blocking budget to form its
@@ -221,6 +258,7 @@ impl McpDaemonClient {
             inner: terminal_commander_ipc::DaemonClient::new(socket_path),
             next_id: Arc::new(AtomicU64::new(1)),
             status: None,
+            recovery: None,
         }
     }
 
@@ -235,6 +273,24 @@ impl McpDaemonClient {
             inner: terminal_commander_ipc::DaemonClient::new(socket_path),
             next_id: Arc::new(AtomicU64::new(1)),
             status: Some(status),
+            recovery: None,
+        }
+    }
+
+    /// Construct a client that can re-run the startup supervisor plan after a
+    /// later transport loss. The plan preserves the operator's spawn policy;
+    /// this constructor does not start or probe anything itself.
+    #[must_use]
+    pub fn with_recovery(
+        socket_path: impl Into<std::path::PathBuf>,
+        status: DaemonStatusHandle,
+        recovery: terminal_commander_supervisor::ensure::EnsureDaemonOptions,
+    ) -> Self {
+        Self {
+            inner: terminal_commander_ipc::DaemonClient::new(socket_path),
+            next_id: Arc::new(AtomicU64::new(1)),
+            status: Some(status),
+            recovery: Some(Arc::new(recovery)),
         }
     }
 
@@ -295,10 +351,16 @@ impl McpDaemonClient {
         match self.call_inner(id, request.clone(), deadline).await {
             Ok(resp) => Ok(resp),
             Err(e) if e.is_transport() => {
-                // Could not reach the daemon mid-call. ALWAYS attempt recovery
-                // (restores cached availability for the next call, even for
-                // mutating RPCs after a daemon replace). `try_self_heal` is a
-                // no-op (returns false) when there is no status handle.
+                // The startup sample is now stale. Publish the transport
+                // loss before recovery so self-heal cannot mistake the cached
+                // available state for proof that the daemon is alive.
+                if let Some(handle) = &self.status {
+                    handle.set_transport_unavailable(&e);
+                }
+                // ALWAYS attempt recovery (restores cached availability for
+                // the next call, even for mutating RPCs after a daemon
+                // replace). `try_self_heal` is a no-op (returns false) when
+                // there is no status handle.
                 let _recovered = self.try_self_heal().await;
                 if request.is_idempotent() {
                     // Safe to re-send: a pure read / idempotent reposition can
@@ -332,51 +394,55 @@ impl McpDaemonClient {
         }
     }
 
-    /// Self-heal the cached daemon availability (audit H1).
+    /// Self-heal cached daemon availability after startup.
     ///
-    /// Called by `ensure_daemon_available` only when the cached status is
-    /// `Unavailable`. Attempts a single, bounded `Health` re-probe; on a
-    /// live daemon it flips the status handle to `Available` and returns
-    /// `true` so the calling tool proceeds. On failure it leaves the
-    /// status untouched and returns `false`, preserving the existing
-    /// `daemon_unavailable` envelope behaviour.
+    /// Called when cached status is unavailable or a mid-call transport error
+    /// invalidates a stale available status. It first performs one bounded Health
+    /// probe. If the endpoint is still down and this adapter retained a supervisor
+    /// plan, it re-runs that plan with the original allow_spawn policy and replaces
+    /// the cached status with the supervisor's structured result.
     ///
-    /// Single-flight: concurrent handlers serialize on the handle's
-    /// `probe_guard`. Whoever loses the race re-reads the (possibly
-    /// already-healed) status under the guard instead of firing a
-    /// redundant probe. Returns `false` if no status handle was set
-    /// (the self-heal path is meaningless without one).
+    /// Single-flight: concurrent handlers serialize on the handle's probe_guard.
+    /// Whoever loses the race re-reads the possibly healed status under the guard,
+    /// so only one recovery path runs at a time. Returns false when no status
+    /// handle exists or recovery cannot make the daemon reachable.
     pub async fn try_self_heal(&self) -> bool {
         let Some(handle) = &self.status else {
             return false;
         };
 
-        // Single-flight: only one probe in flight at a time. Awaiting the
-        // guard means a late arrival blocks until the in-flight probe
-        // resolves, then sees the healed status on the recheck below.
+        // Single-flight: only one probe/recovery sequence is in flight.
         let _flight = handle.probe_guard.lock().await;
 
-        // Recheck under the guard: a concurrent probe may have already
-        // healed (or the status may have changed) since we decided to
-        // probe. If it is no longer unavailable, we are done.
+        // A concurrent caller may already have healed the status.
         if !handle.is_unavailable() {
             return true;
         }
 
-        // Bounded liveness probe. Health is a read-only IPC peek (no
-        // spawn, no privilege escalation) — safe from the mcp crate.
+        // Health is a bounded read-only IPC probe.
         handle.probe_count.fetch_add(1, Ordering::Relaxed);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let probe = self.inner.call(id, IpcRequest::Health);
-        match tokio::time::timeout(SELF_HEAL_PROBE_TIMEOUT, probe).await {
-            Ok(Ok(IpcResponse::Health { .. })) => {
-                handle.set_available();
-                true
-            }
-            // Wrong variant, IPC error, or probe timeout: daemon is not
-            // (yet) reachable. Leave the status unavailable.
-            _ => false,
+        if let Ok(Ok(IpcResponse::Health { .. })) =
+            tokio::time::timeout(SELF_HEAL_PROBE_TIMEOUT, probe).await
+        {
+            handle.set_available();
+            return true;
         }
+
+        // The endpoint is still down. Re-run the startup supervisor plan,
+        // including its explicit allow_spawn policy.
+        let Some(recovery) = &self.recovery else {
+            return false;
+        };
+        let status =
+            terminal_commander_supervisor::ensure::ensure_daemon(recovery.as_ref().clone()).await;
+        let recovered = matches!(
+            status,
+            EnsureDaemonStatus::AlreadyRunning { .. } | EnsureDaemonStatus::Started { .. }
+        );
+        *handle.status.lock().unwrap() = status;
+        recovered
     }
 }
 
@@ -539,12 +605,107 @@ mod tests {
         );
     }
 
+    fn missing_socket_path(label: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        );
+        #[cfg(windows)]
+        {
+            format!(r"\\.\pipe\{unique}").into()
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::temp_dir().join(format!("{unique}.sock"))
+        }
+    }
+
     #[tokio::test]
     async fn try_self_heal_false_without_status_handle() {
         // No status handle => self-heal is meaningless; returns false and
         // never probes.
         let client = McpDaemonClient::new("/nonexistent-tc-self-heal.sock");
         assert!(!client.try_self_heal().await);
+    }
+
+    #[tokio::test]
+    async fn transport_failure_invalidates_cached_available_status() {
+        let socket = missing_socket_path("tc-self-heal-stale-available");
+        let handle = DaemonStatusHandle::new(EnsureDaemonStatus::AlreadyRunning {
+            endpoint: paths::endpoint_from_socket_path(&socket),
+            pid: Some(7),
+        });
+        let client = McpDaemonClient::with_status(&socket, handle.clone())
+            .with_timeout(std::time::Duration::from_millis(25));
+
+        let error = client
+            .call(IpcRequest::Health)
+            .await
+            .expect_err("an absent endpoint must fail");
+        assert!(
+            error.is_transport(),
+            "expected transport error, got {error:?}"
+        );
+        assert!(
+            handle.is_unavailable(),
+            "a transport failure must invalidate stale cached availability"
+        );
+        assert!(
+            matches!(
+                handle.current(),
+                EnsureDaemonStatus::Unavailable {
+                    reason: DaemonUnavailableReason::TransportLost,
+                    ..
+                }
+            ),
+            "the unavailable reason must truthfully identify a lost transport"
+        );
+    }
+
+    #[tokio::test]
+    async fn self_heal_delegates_unreachable_endpoint_to_supervisor() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = missing_socket_path("tc-self-heal-supervisor");
+        let endpoint = paths::endpoint_from_socket_path(&socket);
+        let handle = DaemonStatusHandle::new(EnsureDaemonStatus::Unavailable {
+            reason: DaemonUnavailableReason::TransportLost,
+            diagnostics: Diagnostics {
+                endpoint: endpoint.clone(),
+                log_path: None,
+                last_error: Some("test: transport lost".into()),
+                startup_attempted: false,
+                startup_elapsed_ms: 0,
+            },
+        });
+        let options = terminal_commander_supervisor::ensure::EnsureDaemonOptions {
+            daemon_binary: root.path().join("missing-terminal-commanderd"),
+            state_dir: root.path().join("state"),
+            log_dir: root.path().join("logs"),
+            endpoint,
+            startup_timeout: std::time::Duration::from_millis(100),
+            allow_spawn: true,
+        };
+        let client = McpDaemonClient::with_recovery(&socket, handle.clone(), options)
+            .with_timeout(std::time::Duration::from_millis(25));
+
+        assert!(
+            !client.try_self_heal().await,
+            "a missing daemon binary cannot recover"
+        );
+        assert!(
+            matches!(
+                handle.current(),
+                EnsureDaemonStatus::Unavailable {
+                    reason: DaemonUnavailableReason::BinaryNotFound,
+                    ..
+                }
+            ),
+            "the supervisor's structured recovery result must replace the stale status"
+        );
     }
 
     #[cfg(unix)]

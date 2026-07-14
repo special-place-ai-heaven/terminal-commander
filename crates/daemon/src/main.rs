@@ -236,6 +236,20 @@ const fn default_start_mode() -> StartMode {
     StartMode::IpcServer
 }
 
+const DEFAULT_CONFIG_FILENAME: &str = "terminal-commander.toml";
+
+fn load_data_dir_config(
+    data_dir: &std::path::Path,
+) -> terminal_commanderd::config::Result<DaemonConfig> {
+    let config_path = data_dir.join(DEFAULT_CONFIG_FILENAME);
+    if !config_path.is_file() {
+        return Ok(DaemonConfig::defaults_in(data_dir));
+    }
+
+    let mut config = DaemonConfig::load(config_path)?;
+    config.daemon.data_dir = data_dir.to_path_buf();
+    Ok(config)
+}
 fn resolve_config(cli: &Cli) -> Result<DaemonConfig, ExitCode> {
     let mut cfg = if let Some(p) = cli.config.as_ref() {
         let mut loaded = DaemonConfig::load(p).map_err(|e| {
@@ -246,14 +260,18 @@ fn resolve_config(cli: &Cli) -> Result<DaemonConfig, ExitCode> {
             loaded.daemon.data_dir.clone_from(dd);
         }
         loaded
-    } else if let Some(dd) = cli.data_dir.as_ref() {
-        DaemonConfig::defaults_in(dd)
     } else {
-        // F5: single source of truth -- the daemon's default data dir is
-        // exactly what the supervisor (pidfile reader / socket prober)
-        // resolves, so a daemon started without --data-dir writes its
-        // pidfile where the reader looks.
-        DaemonConfig::defaults_in(terminal_commanderd::config::default_state_dir())
+        // F5: the selected data dir is the supervisor/daemon rendezvous source
+        // of truth. A conventional config inside it may set policy, but cannot
+        // redirect the daemon's state away from the endpoint being supervised.
+        let data_dir = cli
+            .data_dir
+            .clone()
+            .unwrap_or_else(terminal_commanderd::config::default_state_dir);
+        load_data_dir_config(&data_dir).map_err(|e| {
+            eprintln!("terminal-commanderd: config load error: {e}");
+            ExitCode::from(1)
+        })?
     };
     apply_socket_env_override(&mut cfg);
     apply_idle_ttl_env_override(&mut cfg);
@@ -371,5 +389,33 @@ mod tests {
         let before = cfg.daemon.idle_ttl_secs;
         apply_idle_ttl_env_override(&mut cfg);
         assert_eq!(cfg.daemon.idle_ttl_secs, before);
+    }
+
+    #[test]
+    fn data_dir_startup_loads_conventional_config_and_keeps_selected_data_dir() {
+        let data_dir =
+            std::env::temp_dir().join(format!("tc-data-dir-config-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            data_dir.join("terminal-commander.toml"),
+            r#"
+                [daemon]
+                data_dir = "ignored-by-data-dir-startup"
+
+                [policy]
+                profile = "developer_local"
+
+                [policy.caps]
+                allow_shell = true
+            "#,
+        )
+        .unwrap();
+
+        let cfg = load_data_dir_config(&data_dir).unwrap();
+
+        assert!(cfg.resolved_caps().allow_shell);
+        assert_eq!(cfg.daemon.data_dir, data_dir);
+        std::fs::remove_dir_all(&cfg.daemon.data_dir).unwrap();
     }
 }

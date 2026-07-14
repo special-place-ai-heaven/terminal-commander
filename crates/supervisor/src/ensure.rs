@@ -136,6 +136,9 @@ pub enum DaemonUnavailableReason {
     StartupTimeout,
     EndpointBindFailed,
     BinaryNotFound,
+    /// A previously reachable daemon disappeared or stopped answering its
+    /// local IPC endpoint after adapter startup.
+    TransportLost,
 }
 
 #[derive(Debug, Error)]

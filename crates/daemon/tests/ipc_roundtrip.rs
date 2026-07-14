@@ -67,6 +67,10 @@ fn system_discover_round_trip() {
                 assert!(d.methods.iter().any(|m| m == "health"));
                 assert!(d.methods.iter().any(|m| m == "policy_status"));
                 assert!(d.methods.iter().any(|m| m == "self_check"));
+                assert_eq!(d.environment.os, std::env::consts::OS);
+                assert_eq!(d.environment.arch, std::env::consts::ARCH);
+                assert!(!d.environment.shells.is_empty());
+                assert!(d.environment.discovery_ms < 2_000);
             }
             other => panic!("unexpected response: {other:?}"),
         }
