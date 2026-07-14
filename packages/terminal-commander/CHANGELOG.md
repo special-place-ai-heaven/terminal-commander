@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.80](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.79...v0.1.80) (2026-07-14)
+
+
+### Features
+
+* 3 crate fixes -- Merge branch 'agent/fix-compact-facade-contracts' (+2 more) ([1076f2c](https://github.com/special-place-ai-heaven/terminal-commander/commit/1076f2cceae9605f87007495f7e78067cf607f0f))
+* 4 crate fixes -- use health for daemon version refresh (+3 more) ([6c0332a](https://github.com/special-place-ai-heaven/terminal-commander/commit/6c0332a8f5d5122eb7b514553272ff2e163d11cc))
+
 ## [0.1.79](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.78...v0.1.79) (2026-07-11)
 
 
