@@ -35,6 +35,9 @@ function Invoke-Gate([string]$pkg, [string]$bin, [string[]]$extra) {
 # future re-ignored windows regression still EXECUTES here rather than skipping to
 # a false green; the >=1-passed assertion below refuses a 0-tests-run pass.
 Invoke-Gate 'terminal-commander-probes' 'windows_no_console_spawn' @('--include-ignored')
+# Caller-selected daemon readiness deadlines are implemented in the supervisor
+# and require a real Windows named-pipe absence to regress faithfully.
+Invoke-Gate 'terminal-commander-supervisor' 'probe_handshake_windows' @()
 # crates/daemon/tests/windows_spawn_site_coverage.rs tests are NOT ignored.
 Invoke-Gate 'terminal-commanderd' 'windows_spawn_site_coverage' @()
 # T1: collect_probes PTY cfg must admit Windows (headless-safe; live ConPTY is not).
