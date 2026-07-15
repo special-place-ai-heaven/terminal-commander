@@ -183,6 +183,26 @@ fn invalid(message: String) -> McpError {
     McpError::invalid_params(message, None)
 }
 
+/// Normalize safe compact-surface aliases before action-specific validation.
+///
+/// `run` remains an immediate start unless the caller supplies `wait_ms`; in
+/// that case the existing `run_and_watch` action gives the field its real,
+/// bounded wait semantics instead of rejecting or ignoring it.
+pub fn normalize_facade_call(facade: &str, call: &mut Value) {
+    if facade != "command" {
+        return;
+    }
+    let Some(obj) = call.as_object_mut() else {
+        return;
+    };
+    if obj.get("action").and_then(Value::as_str) == Some("run") && obj.contains_key("wait_ms") {
+        obj.insert(
+            "action".to_owned(),
+            Value::String("run_and_watch".to_owned()),
+        );
+    }
+}
+
 /// Compose the single aggregate error naming the action, every missing required
 /// field, and every unknown field with its remedy.
 fn aggregate_error(
@@ -346,6 +366,25 @@ mod tests {
             msg.contains("timeout_ms"),
             "must name the counterpart remedy; got: {msg}"
         );
+    }
+
+    #[test]
+    fn command_run_with_wait_ms_normalizes_to_the_watch_contract() {
+        let mut call = json!({
+            "action": "run",
+            "argv": ["git", "--version"],
+            "wait_ms": 1_000
+        });
+
+        normalize_facade_call("command", &mut call);
+        validate_facade_call("command", &call).expect("normalized run must validate");
+
+        let parsed: crate::facades::CommandFacadeCall =
+            serde_json::from_value(call).expect("normalized run must deserialize");
+        assert!(matches!(
+            parsed,
+            crate::facades::CommandFacadeCall::RunAndWatch(p) if p.wait_ms == Some(1_000)
+        ));
     }
 
     #[test]

@@ -27,6 +27,7 @@ use crate::surface::Surface;
 /// matches the router-advertised entry verbatim.
 pub(crate) const COMMAND_FACADE_DESCRIPTION: &str = "Run and observe a one-shot command. Key contracts: \
 `run_and_watch`: `argv` + `wait_ms` (default 5,000; max 60,000; not `timeout_ms`). \
+`run` starts immediately; `run` + `wait_ms` is accepted as `run_and_watch` so the requested wait is honored. \
 If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` + optional `max_signals` \
 (not `job_id` or `wait_ms`), and check state with `status`: `job_id`. \
 `grace_ms` is start-time policy for `run` / `run_and_watch`; `stop` reuses that policy and accepts `job_id` only. \

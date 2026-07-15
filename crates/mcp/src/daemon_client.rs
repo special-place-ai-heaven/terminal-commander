@@ -391,8 +391,27 @@ impl McpDaemonClient {
     /// happens here: recovery routes through the supervisor-backed self-heal
     /// path, mcp stays a thin client.
     pub async fn call(&self, request: IpcRequest) -> Result<IpcResponse, IpcError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let deadline = blocking_deadline(&request);
+        self.call_with_optional_timeout(request, deadline).await
+    }
+
+    /// Issue one call with an explicit transport deadline while preserving the
+    /// same recovery and idempotent-retry contract as [`Self::call`].
+    pub(crate) async fn call_with_timeout(
+        &self,
+        request: IpcRequest,
+        timeout: Duration,
+    ) -> Result<IpcResponse, IpcError> {
+        self.call_with_optional_timeout(request, Some(timeout))
+            .await
+    }
+
+    async fn call_with_optional_timeout(
+        &self,
+        request: IpcRequest,
+        deadline: Option<Duration>,
+    ) -> Result<IpcResponse, IpcError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         match self.call_inner(id, request.clone(), deadline).await {
             Ok(resp) => Ok(resp),
             Err(e) if e.is_transport() => {

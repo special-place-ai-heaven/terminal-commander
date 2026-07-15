@@ -427,7 +427,9 @@ command action=stop job_id=<returned>            # kills the whole process tree
 Agent rules:
 
 - Prefer `command action=run_and_watch` for commands that finish within a
-  minute; use `command action=run` + `command action=wait` for longer jobs.
+  minute. Compact callers may also send `command action=run` with `wait_ms`;
+  TC honors that request through the same `run_and_watch` contract. Plain
+  `run` remains immediate; pair it with `command action=wait` for longer jobs.
 - A minimal rule is just `{"pattern": "ERROR"}` — id, version, matcher,
   severity, and summary default sanely. `kind` may be the matcher override
   (`regex`/`keyword`) or a natural emitted event label such as `test_result`;

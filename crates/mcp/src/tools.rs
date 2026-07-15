@@ -713,6 +713,11 @@ const SUBSCRIPTION_PULL_CLIENT_TIMEOUT: std::time::Duration = std::time::Duratio
 /// round trip is sub-millisecond; this only caps the failure case.
 const TARGET_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Full environment discovery may spend up to five seconds inside bounded
+/// probes. Keep its transport deadline above that daemon-side contract while
+/// leaving the deliberately short version-skew and remote-target probes alone.
+const SYSTEM_DISCOVER_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(9);
+
 /// MCP server handler. Holds the daemon client and the tool router.
 #[derive(Clone)]
 pub struct TerminalCommanderMcpServer {
@@ -983,7 +988,11 @@ impl TerminalCommanderMcpServer {
         description = "Discover adapter/daemon metadata and the execution environment. Returns bounded OS, terminal, shell/PowerShell, WSL, and tool probes plus capability-filtered ranked access_routes and an exact beachhead argv template; call this before choosing an interpreter. Use direct_argv/wsl_argv with argv actions; shell routes appear only when exec is enabled. Normal path and command policy checks still apply at execution time."
     )]
     async fn system_discover(&self) -> Result<CallToolResult, McpError> {
-        let (daemon, daemon_error) = match self.daemon.call(IpcRequest::SystemDiscover).await {
+        let (daemon, daemon_error) = match self
+            .daemon
+            .call_with_timeout(IpcRequest::SystemDiscover, SYSTEM_DISCOVER_CLIENT_TIMEOUT)
+            .await
+        {
             Ok(IpcResponse::SystemDiscover(d)) => (Some(d), None),
             Ok(_other) => (
                 // M6: stable, bounded code. Do not interpolate the response
@@ -2891,6 +2900,7 @@ impl TerminalCommanderMcpServer {
         name = "command",
         description = "Run and observe a one-shot command. Key contracts: \
 `run_and_watch`: `argv` + `wait_ms` (default 5,000; max 60,000; not `timeout_ms`). \
+`run` starts immediately; `run` + `wait_ms` is accepted as `run_and_watch` so the requested wait is honored. \
 If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` + optional `max_signals` \
 (not `job_id` or `wait_ms`), and check state with `status`: `job_id`. \
 `grace_ms` is start-time policy for `run` / `run_and_watch`; `stop` reuses that policy and accepts `job_id` only. \
@@ -3082,7 +3092,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
 
     async fn call_tool(
         &self,
-        request: CallToolRequestParams,
+        mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         // Admission gate FIRST: under `compact`, reject any name not on the
@@ -3100,8 +3110,10 @@ impl ServerHandler for TerminalCommanderMcpServer {
         // naming the action + every missing/unknown field. Legacy granular tools
         // are not facades and are not validated here.
         if crate::surface_list::COMPACT_TOOL_NAMES.contains(&request.name.as_ref()) {
-            let call = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
+            let mut call = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
+            crate::facade_strict::normalize_facade_call(request.name.as_ref(), &mut call);
             crate::facade_strict::validate_facade_call(request.name.as_ref(), &call)?;
+            request.arguments = call.as_object().cloned();
         }
         // Delegate to the SAME router the macro used -- dispatch still flows
         // through `self.tool_router`; no hand-rolled per-tool match.
