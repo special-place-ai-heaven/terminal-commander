@@ -9,10 +9,11 @@
 # packages/terminal-commander/ so release-please bumps the canonical version
 # source on the next push:main run.
 #
-# Idempotent: a SHA-fingerprint of the in-range crate commits is stored in
-# the sentinel; a matching fingerprint is a no-op (loop guard). The caller
-# SKIPS the release-please action when this script reports trigger_pushed=true,
-# so the pushed commit (not this run) drives the release.
+# Idempotent: the sentinel stores the exact cumulative crate SHA ledger. Only
+# SHAs absent from that ledger are attributed by the next synthetic commit;
+# the fingerprint is audit metadata, never control state. The caller SKIPS the
+# release-please action when this script reports trigger_pushed=true, so the
+# pushed commit (not this run) drives the release.
 #
 # DRY_RUN=1 detects + prints but does not commit/push (local verification).
 set -euo pipefail
@@ -23,6 +24,19 @@ PKG_JSON="packages/terminal-commander/package.json"
 emit() { # emit <key> <value> -> GITHUB_OUTPUT when set, else stdout
   if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "$1=$2" >> "$GITHUB_OUTPUT"; fi
   echo "[synth] $1=$2"
+}
+
+sentinel_has_sha() {
+  local expected="$1"
+  local line=""
+  [ -f "$SENTINEL" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    if [ "$line" = "  - ${expected}" ]; then
+      return 0
+    fi
+  done < "$SENTINEL"
+  return 1
 }
 
 ver=$(node -p "require('./${PKG_JSON}').version")
@@ -47,9 +61,27 @@ if [ "${#crate_shas[@]}" -eq 0 ]; then
   exit 0
 fi
 
+# The sentinel is a cumulative attribution checkpoint. A new crate commit
+# changes the all-SHA fingerprint, but messages for SHAs already recorded in
+# the previous sentinel were emitted by an earlier synthetic commit and must
+# not be emitted again.
+pending_shas=()
+for sha in "${crate_shas[@]}"; do
+  if sentinel_has_sha "$sha"; then
+    continue
+  fi
+  pending_shas+=("$sha")
+done
+if [ "${#pending_shas[@]}" -eq 0 ]; then
+  echo "[synth] no unattributed crate commits since ${base_tag}. Skipping."
+  emit trigger_pushed false
+  exit 0
+fi
+fingerprint=$(printf '%s\n' "${crate_shas[@]}" | sort | sha256sum | cut -c1-16)
+
 strongest=""   # "" < fix < feat < breaking
 breaking_sha=""
-for sha in "${crate_shas[@]}"; do
+for sha in "${pending_shas[@]}"; do
   subject=$(git show -s --format='%s' "$sha")
   type_tok="${subject%%:*}"            # e.g. "feat(daemon)!" or "fix"
   case "$type_tok" in
@@ -68,7 +100,7 @@ for sha in "${crate_shas[@]}"; do
 done
 # Body-level breaking-footer detection. Consume each body completely so
 # pipefail cannot turn an early grep match into a false negative via SIGPIPE.
-for sha in "${crate_shas[@]}"; do
+for sha in "${pending_shas[@]}"; do
   if git show -s --format='%b' "$sha" | grep -E '^BREAKING[ -]CHANGE:' >/dev/null; then
     strongest="breaking"
     breaking_sha="$sha"
@@ -77,15 +109,6 @@ done
 
 if [ -z "$strongest" ]; then
   echo "[synth] crate commits exist but none are feat/fix/perf/breaking. Skipping."
-  emit trigger_pushed false
-  exit 0
-fi
-
-# Loop-guard fingerprint: hash of the sorted in-range crate SHAs.
-fingerprint=$(printf '%s\n' "${crate_shas[@]}" | sort | sha256sum | cut -c1-16)
-
-if [ -f "$SENTINEL" ] && grep -q "fingerprint: ${fingerprint}" "$SENTINEL" 2>/dev/null; then
-  echo "[synth] sentinel already carries fingerprint ${fingerprint}; no-op."
   emit trigger_pushed false
   exit 0
 fi
@@ -100,7 +123,7 @@ is_release_message() {
 strip_cc_type() { printf '%s' "$1" | sed -E 's/^[a-z]+(\([^)]*\))?!?:[[:space:]]*//'; }
 
 release_messages=()
-for sha in "${crate_shas[@]}"; do
+for sha in "${pending_shas[@]}"; do
   while IFS= read -r line; do
     if is_release_message "$line"; then release_messages+=("$line"); fi
   done < <(git show -s --format='%B' "$sha")
@@ -129,7 +152,8 @@ commit_subject="${release_messages[0]}"
 # bottom where its parser treats each as a distinct changelog entry.
 commit_body="Synthesized by synthesize-crates-release-trigger.sh so release-please
 attributes crates/** changes to the canonical version source. Crate commits
-since ${base_tag}: ${#crate_shas[@]} (fingerprint ${fingerprint})."
+newly attributed since ${base_tag}: ${#pending_shas[@]} of ${#crate_shas[@]} total
+(fingerprint ${fingerprint})."
 for message in "${release_messages[@]:1}"; do
   commit_body+=$'\n\n'"$message"
 done
