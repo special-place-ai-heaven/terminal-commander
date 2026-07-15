@@ -39,6 +39,10 @@ use std::time::Duration;
 use rmcp::model::CallToolRequestParams;
 use rmcp::{ClientHandler, ServiceExt};
 
+use terminal_commander_ipc::{
+    IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, ResponseEnvelope, read_request,
+    write_response,
+};
 use terminal_commander_mcp::daemon_client::McpDaemonClient;
 use terminal_commander_mcp::tools::TerminalCommanderMcpServer;
 use terminal_commanderd::{
@@ -86,6 +90,43 @@ fn spawn_with_config(cfg: DaemonConfig) -> ServerHandle {
     let socket = state.config.socket_path();
     let server = IpcServer::new(Arc::clone(&state), socket);
     server.spawn().expect("ipc server spawn")
+}
+
+/// A reachability endpoint that deliberately supports only the cheap Health
+/// request. Full discovery is the wrong liveness probe because its bounded
+/// environment checks may legitimately outlive the remote dial deadline.
+fn spawn_health_only_daemon(socket: &Path) -> tokio::task::JoinHandle<()> {
+    let listener = tokio::net::UnixListener::bind(socket).expect("bind health-only daemon socket");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let Ok(request) = read_request(&mut stream).await else {
+                continue;
+            };
+            let result = match request.request {
+                IpcRequest::Health => IpcResult::Ok {
+                    response: IpcResponse::Health {
+                        uptime_secs: 1,
+                        idle_secs: Some(0),
+                        version: "health-only-test-daemon".to_owned(),
+                    },
+                },
+                _ => IpcResult::Err {
+                    error: IpcError::new(
+                        IpcErrorCode::UnknownMethod,
+                        "reachability must use health",
+                    ),
+                },
+            };
+            let response = ResponseEnvelope {
+                correlation_id: request.correlation_id,
+                result,
+            };
+            let _ = write_response(&mut stream, &response).await;
+        }
+    })
 }
 
 /// Build a target whose `local_forward_socket` IS the second daemon's live
@@ -161,6 +202,42 @@ fn has_needle_signal(body: &serde_json::Value) -> bool {
     body["signals"]
         .as_array()
         .is_some_and(|sigs| !sigs.is_empty())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn target_reachability_uses_health_not_full_environment_discovery() {
+    let local_data = tmp_data_dir("local-health-probe");
+    let remote_data = tmp_data_dir("remote-health-probe");
+    std::fs::create_dir_all(&remote_data).expect("create fake remote data dir");
+    let remote_socket = remote_data.join("health-only.sock");
+    let fake_remote = spawn_health_only_daemon(&remote_socket);
+    let local = spawn_daemon_full_access(&local_data);
+
+    let targets = TargetsConfig {
+        targets: vec![RemoteTarget {
+            target_id: "health-only".to_owned(),
+            transport: RemoteTransport::SshForward,
+            host: "health-only.simulated".to_owned(),
+            identity_file: None,
+            remote_socket: None,
+            local_forward_socket: remote_socket,
+        }],
+    };
+    let (_server, client) = paired_with_targets(&local, targets).await;
+    let list = json_body(&call_tool(&client, "target_list", serde_json::json!({})).await);
+    let reachable = list["targets"][0]["reachable"].clone();
+
+    let _ = client.cancel().await;
+    local.shutdown().await;
+    fake_remote.abort();
+    let _ = fake_remote.await;
+    cleanup(&local_data);
+    cleanup(&remote_data);
+
+    assert_eq!(
+        reachable, true,
+        "remote reachability must use the cheap Health request; got {list}"
+    );
 }
 
 /// Core gate O-09/O-10: a combed command routed with `target_id` runs on the

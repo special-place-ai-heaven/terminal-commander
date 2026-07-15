@@ -965,17 +965,21 @@ impl TerminalCommanderMcpServer {
     /// Probe a single target's forwarded LOCAL socket (P5 / T051).
     ///
     /// Dials the operator-forwarded socket with a SHORT bounded timeout and
-    /// issues one `SystemDiscover`. Returns `Some(daemon_version)` when the
-    /// remote daemon answers, `None` when the socket is unreachable or the
-    /// timeout elapses (a down/unforwarded target is NOT an error here -- the
-    /// caller reports `reachable: false`). Never spawns, never opens TCP.
+    /// issues one cheap `Health` request. A valid Health response is the
+    /// positive readiness signal; the timeout only prevents infinite silence.
+    /// Full environment discovery has its own longer probe budget and must not
+    /// make basic reachability load- or tool-dependent. Returns
+    /// `Some(daemon_version)` when the remote daemon answers, `None` when the
+    /// socket is unreachable or the timeout elapses (a down/unforwarded target
+    /// is NOT an error here -- the caller reports `reachable: false`). Never
+    /// spawns, never opens TCP.
     async fn probe_target(&self, target: &RemoteTarget) -> Option<String> {
         let client = self
             .target_router
             .client_for(target)
             .with_timeout(TARGET_PROBE_TIMEOUT);
-        match client.call(IpcRequest::SystemDiscover).await {
-            Ok(IpcResponse::SystemDiscover(d)) => Some(d.version),
+        match client.call(IpcRequest::Health).await {
+            Ok(IpcResponse::Health { version, .. }) => Some(version),
             _ => None,
         }
     }
