@@ -22,7 +22,7 @@ publish.workspace = true
 notify = { workspace = true }
 parking_lot = "0.12.5"
 terminal-commander-core.workspace = true
-terminal-commander-sifters = { version = "0.1.81", path = "../sifters" } # x-release-please-version
+terminal-commander-sifters = { version = "0.1.82", path = "../sifters" } # x-release-please-version
 thiserror = "2.0.18"
 time = "0.3.47"
 tokio = { workspace = true, features = ["process", "macros", "rt-multi-thread", "io-util", "sync", "time", "fs"] }
