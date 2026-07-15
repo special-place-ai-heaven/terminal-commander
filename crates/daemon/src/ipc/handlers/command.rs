@@ -260,7 +260,7 @@ pub(in crate::ipc::server) fn handle_command_output_tail(
     let max_lines = (params.max_lines as usize).min(MAX_TAIL_LINES);
     let max_bytes = (params.max_bytes as usize).min(MAX_TAIL_BYTES);
     // NotFound = ring absent (job had no ring yet); treat as empty tail
-    let tail = match state.rings.tail_frames(probe_id, max_lines, max_bytes) {
+    let mut tail = match state.rings.tail_frames(probe_id, max_lines, max_bytes) {
         Ok(t) => t,
         Err(terminal_commander_core::ContextError::NotFound(_)) => {
             terminal_commander_core::RingTail {
@@ -271,6 +271,13 @@ pub(in crate::ipc::server) fn handle_command_output_tail(
         }
         Err(e) => return Err(IpcError::new(IpcErrorCode::Internal, e.to_string())),
     };
+    if params.strip_ansi {
+        tail.lines = tail
+            .lines
+            .into_iter()
+            .map(|line| terminal_commander_probes::strip_ansi(&line))
+            .collect();
+    }
     let frame_count = state.rings.frame_count(probe_id);
     // Safe: tail.lines.len() is bounded by MAX_TAIL_LINES (200), fits u32.
     #[allow(clippy::cast_possible_truncation)]

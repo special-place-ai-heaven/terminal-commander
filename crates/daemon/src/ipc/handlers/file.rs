@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 
+use std::collections::VecDeque;
+use std::io::{BufRead as _, Read as _};
+use std::path::Path;
 use std::sync::Arc;
 
 use terminal_commander_store::AuditEntry;
@@ -17,8 +20,8 @@ use crate::ipc::protocol::{
     FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
     FileWatchStopResponse, FileWriteParams, FileWriteResponse, IpcError, IpcErrorCode, IpcResponse,
     MAX_COMMAND_INLINE_RULES, MAX_FILE_LIST_ENTRIES, MAX_FILE_READ_BYTES, MAX_FILE_READ_LINES,
-    MAX_FILE_SEARCH_MATCHES, MAX_FILE_SEARCH_SCAN_BYTES, MAX_FILE_SEARCH_SNIPPET_BYTES,
-    MAX_FILE_WRITE_BYTES,
+    MAX_FILE_SEARCH_ENTRIES, MAX_FILE_SEARCH_MATCHES, MAX_FILE_SEARCH_SCAN_BYTES,
+    MAX_FILE_SEARCH_SNIPPET_BYTES, MAX_FILE_WRITE_BYTES,
 };
 use crate::state::DaemonState;
 
@@ -190,23 +193,290 @@ fn center_snippet(line: &str, col: usize, max_snippet: usize) -> String {
     line[start..end].to_owned()
 }
 
+struct SearchNeedle<'a> {
+    query: &'a str,
+    lower: String,
+    case_insensitive: bool,
+    max_snippet: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SearchBudget {
+    max_matches: u32,
+    max_bytes: u64,
+}
+
+fn search_regular_file(
+    path: &Path,
+    needle: &SearchNeedle<'_>,
+    budget: SearchBudget,
+    include_match_path: bool,
+) -> Result<(Vec<FileSearchMatch>, u64, bool), IpcError> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("open: {e}")))?;
+    let file_bytes = file
+        .metadata()
+        .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("metadata: {e}")))?
+        .len();
+    let mut reader = std::io::BufReader::new(file).take(budget.max_bytes);
+    let mut matches = Vec::new();
+    let mut bytes_scanned = 0_u64;
+    let mut line_no = 0_u64;
+    let mut buf = Vec::new();
+
+    loop {
+        buf.clear();
+        let read = reader
+            .read_until(b'\n', &mut buf)
+            .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("read_line: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        line_no = line_no.saturating_add(1);
+        let line_start = bytes_scanned;
+        bytes_scanned = bytes_scanned.saturating_add(read as u64);
+
+        while matches!(buf.last(), Some(b'\n' | b'\r')) {
+            buf.pop();
+        }
+        let line = match std::str::from_utf8(&buf) {
+            Ok(line) => line,
+            // A byte cap can split the last UTF-8 scalar. Preserve the valid
+            // prefix and report truncation rather than misclassifying the file
+            // as binary. Any interior invalid byte remains a typed binary skip.
+            Err(error) if file_bytes > bytes_scanned && error.error_len().is_none() => {
+                std::str::from_utf8(&buf[..error.valid_up_to()]).unwrap_or_default()
+            }
+            Err(_) => {
+                return Err(IpcError::new(
+                    IpcErrorCode::FileBinary,
+                    format!("'{}' contains non-UTF-8 bytes", path.display()),
+                ));
+            }
+        };
+        let pos = if needle.case_insensitive {
+            line.to_ascii_lowercase().find(&needle.lower)
+        } else {
+            line.find(needle.query)
+        };
+        if let Some(col) = pos {
+            matches.push(FileSearchMatch {
+                path: include_match_path.then(|| path.to_path_buf()),
+                line: line_no,
+                byte_offset: line_start.saturating_add(col as u64),
+                snippet: center_snippet(line, col, needle.max_snippet),
+            });
+            if u32::try_from(matches.len()).unwrap_or(u32::MAX) >= budget.max_matches {
+                return Ok((matches, bytes_scanned, true));
+            }
+        }
+    }
+
+    Ok((matches, bytes_scanned, file_bytes > bytes_scanned))
+}
+
+fn is_version_control_metadata_dir(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        name == std::ffi::OsStr::new(".git")
+            || name == std::ffi::OsStr::new(".hg")
+            || name == std::ffi::OsStr::new(".svn")
+    })
+}
+
+#[cfg(windows)]
+const fn windows_attributes_mark_reparse_point(attributes: u32) -> bool {
+    // FILE_ATTRIBUTE_REPARSE_POINT. Use the stable MetadataExt attribute
+    // surface instead of following the entry to discover what it targets.
+    attributes & 0x0400 != 0
+}
+
+fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        windows_attributes_mark_reparse_point(metadata.file_attributes())
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+struct DirectorySearch<'a> {
+    state: &'a Arc<DaemonState>,
+    needle: &'a SearchNeedle<'a>,
+    max_matches: u32,
+    matches: Vec<FileSearchMatch>,
+    bytes_scanned: u64,
+    files_scanned: u64,
+    entries_visited: u64,
+    entries_skipped: u64,
+    truncated: bool,
+}
+
+impl<'a> DirectorySearch<'a> {
+    const fn new(
+        state: &'a Arc<DaemonState>,
+        needle: &'a SearchNeedle<'a>,
+        max_matches: u32,
+    ) -> Self {
+        Self {
+            state,
+            needle,
+            max_matches,
+            matches: Vec::new(),
+            bytes_scanned: 0,
+            files_scanned: 0,
+            entries_visited: 0,
+            entries_skipped: 0,
+            truncated: false,
+        }
+    }
+
+    fn process_entry(
+        &mut self,
+        entry: &std::fs::DirEntry,
+        child_dirs: &mut Vec<std::path::PathBuf>,
+    ) -> bool {
+        self.entries_visited = self.entries_visited.saturating_add(1);
+        if self.entries_visited > MAX_FILE_SEARCH_ENTRIES {
+            self.truncated = true;
+            return true;
+        }
+
+        let entry_path = entry.path();
+        let Ok(metadata) = std::fs::symlink_metadata(&entry_path) else {
+            self.entries_skipped = self.entries_skipped.saturating_add(1);
+            return false;
+        };
+        let file_type = metadata.file_type();
+        if is_link_or_reparse_point(&metadata) {
+            self.entries_skipped = self.entries_skipped.saturating_add(1);
+        } else if file_type.is_dir() {
+            if is_version_control_metadata_dir(&entry_path) {
+                self.entries_skipped = self.entries_skipped.saturating_add(1);
+            } else {
+                child_dirs.push(entry_path);
+            }
+        } else if file_type.is_file() {
+            return self.process_file(&entry_path, metadata.len());
+        } else {
+            self.entries_skipped = self.entries_skipped.saturating_add(1);
+        }
+        false
+    }
+
+    fn process_file(&mut self, entry_path: &Path, file_bytes: u64) -> bool {
+        let remaining_matches = self
+            .max_matches
+            .saturating_sub(u32::try_from(self.matches.len()).unwrap_or(u32::MAX));
+        let remaining_bytes = MAX_FILE_SEARCH_SCAN_BYTES.saturating_sub(self.bytes_scanned);
+        if remaining_matches == 0 || remaining_bytes == 0 {
+            self.truncated = true;
+            return true;
+        }
+        let Ok(candidate) = resolve_and_authorize_file(self.state, entry_path, false) else {
+            self.entries_skipped = self.entries_skipped.saturating_add(1);
+            return false;
+        };
+        if let Ok((mut file_matches, scanned, file_truncated)) = search_regular_file(
+            &candidate,
+            self.needle,
+            SearchBudget {
+                max_matches: remaining_matches,
+                max_bytes: remaining_bytes,
+            },
+            true,
+        ) {
+            self.files_scanned = self.files_scanned.saturating_add(1);
+            self.bytes_scanned = self.bytes_scanned.saturating_add(scanned);
+            self.matches.append(&mut file_matches);
+            if file_truncated {
+                self.truncated = true;
+                return true;
+            }
+        } else {
+            self.entries_skipped = self.entries_skipped.saturating_add(1);
+            self.bytes_scanned = self
+                .bytes_scanned
+                .saturating_add(file_bytes.min(remaining_bytes));
+            if self.bytes_scanned >= MAX_FILE_SEARCH_SCAN_BYTES {
+                self.truncated = true;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn finish(self, requested_path: std::path::PathBuf) -> FileSearchResponse {
+        FileSearchResponse {
+            path: requested_path,
+            matches: self.matches,
+            truncated: self.truncated,
+            bytes_scanned: self.bytes_scanned,
+            files_scanned: Some(self.files_scanned),
+            entries_skipped: Some(self.entries_skipped),
+        }
+    }
+}
+
+fn search_directory_tree(
+    state: &Arc<DaemonState>,
+    root: &Path,
+    requested_path: std::path::PathBuf,
+    needle: &SearchNeedle<'_>,
+    max_matches: u32,
+) -> Result<FileSearchResponse, IpcError> {
+    let mut search = DirectorySearch::new(state, needle, max_matches);
+    let mut pending = VecDeque::from([root.to_path_buf()]);
+    'walk: while let Some(dir) = pending.pop_front() {
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(read_dir) => read_dir,
+            Err(error) if dir == root => {
+                return Err(IpcError::new(
+                    IpcErrorCode::Internal,
+                    format!("read_dir '{}': {error}", dir.display()),
+                ));
+            }
+            Err(_) => {
+                search.entries_skipped = search.entries_skipped.saturating_add(1);
+                continue;
+            }
+        };
+        let mut entries = Vec::new();
+        for entry in read_dir {
+            if let Ok(entry) = entry {
+                entries.push(entry);
+            } else {
+                search.entries_skipped = search.entries_skipped.saturating_add(1);
+            }
+        }
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        let mut child_dirs = Vec::new();
+        for entry in entries {
+            if search.process_entry(&entry, &mut child_dirs) {
+                break 'walk;
+            }
+        }
+        pending.extend(child_dirs);
+    }
+    Ok(search.finish(requested_path))
+}
+
 pub(in crate::ipc::server) fn handle_file_search(
     state: &Arc<DaemonState>,
     params: &FileSearchParams,
 ) -> Result<IpcResponse, IpcError> {
-    use std::io::{BufRead, BufReader};
-
     if params.query.is_empty() {
         return Err(IpcError::new(
             IpcErrorCode::OversizedRequest,
             "query must be non-empty",
         ));
     }
-    // Resolve to a canonical, policy-authorized path (absolute-only +
-    // symlink-safe default-deny), then open THAT exact path.
     let resolved = resolve_and_authorize_file(state, &params.path, false)?;
-    require_regular_file(&resolved)?;
-
     let max_matches = params
         .max_matches
         .unwrap_or(DEFAULT_FILE_SEARCH_MATCHES)
@@ -216,68 +486,36 @@ pub(in crate::ipc::server) fn handle_file_search(
         .unwrap_or(DEFAULT_FILE_SEARCH_SNIPPET_BYTES)
         .min(MAX_FILE_SEARCH_SNIPPET_BYTES);
     let case_insensitive = params.case_insensitive.unwrap_or(false);
-    let needle_lower = params.query.to_ascii_lowercase();
+    let needle = SearchNeedle {
+        query: &params.query,
+        lower: params.query.to_ascii_lowercase(),
+        case_insensitive,
+        max_snippet,
+    };
 
-    let f = std::fs::File::open(&resolved)
-        .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("open: {e}")))?;
-    let mut reader = BufReader::new(f);
-    let mut matches: Vec<FileSearchMatch> = Vec::new();
-    let mut bytes_scanned: u64 = 0;
-    let mut byte_offset: u64 = 0;
-    let mut line_no: u64 = 0;
-    let mut truncated = false;
-    let mut buf = String::new();
-
-    loop {
-        buf.clear();
-        let read = reader.read_line(&mut buf).map_err(|e| {
-            if matches!(e.kind(), std::io::ErrorKind::InvalidData) {
-                IpcError::new(
-                    IpcErrorCode::FileBinary,
-                    format!("'{}' contains non-UTF-8 bytes", params.path.display()),
-                )
-            } else {
-                IpcError::new(IpcErrorCode::Internal, format!("read_line: {e}"))
-            }
-        })?;
-        if read == 0 {
-            break;
-        }
-        line_no = line_no.saturating_add(1);
-        bytes_scanned = bytes_scanned.saturating_add(read as u64);
-        let line_start = byte_offset;
-        byte_offset = byte_offset.saturating_add(read as u64);
-
-        let line = buf.trim_end_matches('\n').trim_end_matches('\r');
-        let pos = if case_insensitive {
-            line.to_ascii_lowercase().find(&needle_lower)
-        } else {
-            line.find(&params.query)
-        };
-        if let Some(col) = pos {
-            let snippet = center_snippet(line, col, max_snippet);
-            matches.push(FileSearchMatch {
-                line: line_no,
-                byte_offset: line_start.saturating_add(col as u64),
-                snippet,
-            });
-            if u32::try_from(matches.len()).unwrap_or(u32::MAX) >= max_matches {
-                truncated = true;
-                break;
-            }
-        }
-        if bytes_scanned >= MAX_FILE_SEARCH_SCAN_BYTES {
-            truncated = true;
-            break;
-        }
+    if !resolved.is_dir() {
+        require_regular_file(&resolved)?;
+        let (matches, bytes_scanned, truncated) = search_regular_file(
+            &resolved,
+            &needle,
+            SearchBudget {
+                max_matches,
+                max_bytes: MAX_FILE_SEARCH_SCAN_BYTES,
+            },
+            false,
+        )?;
+        return Ok(IpcResponse::FileSearch(FileSearchResponse {
+            path: params.path.clone(),
+            matches,
+            truncated,
+            bytes_scanned,
+            files_scanned: None,
+            entries_skipped: None,
+        }));
     }
 
-    Ok(IpcResponse::FileSearch(FileSearchResponse {
-        path: params.path.clone(),
-        matches,
-        truncated,
-        bytes_scanned,
-    }))
+    search_directory_tree(state, &resolved, params.path.clone(), &needle, max_matches)
+        .map(IpcResponse::FileSearch)
 }
 
 /// Map a filesystem [`std::fs::FileType`] to the wire [`DirEntryKind`]. A
@@ -698,6 +936,14 @@ pub(in crate::ipc::server) fn handle_file_watch_list(state: &Arc<DaemonState>) -
 #[cfg(test)]
 mod tests {
     use super::center_snippet;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reparse_attribute_is_never_treated_as_a_walkable_directory() {
+        assert!(super::windows_attributes_mark_reparse_point(0x0400));
+        assert!(super::windows_attributes_mark_reparse_point(0x0410));
+        assert!(!super::windows_attributes_mark_reparse_point(0x0010));
+    }
 
     /// F12 regression: when the match sits far past `max_snippet` bytes from
     /// column 0, the centered window must still CONTAIN the matched substring.

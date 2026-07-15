@@ -147,13 +147,14 @@ async fn file_tools_full_lifecycle_through_mcp() {
     {
         let (_server, client) = paired_against_live_daemon(&handle).await;
 
-        // 1. file_search finds the preexisting "needle" line.
+        // 1. A natural directory-shaped file_search call finds the
+        // preexisting "needle" line and identifies its owning file.
         let payload = first_text(
             &call_tool(
                 &client,
                 "file_search",
                 serde_json::json!({
-                    "path": file_a.to_string_lossy(),
+                    "path": data.to_string_lossy(),
                     "query": "needle",
                 }),
             )
@@ -163,6 +164,11 @@ async fn file_tools_full_lifecycle_through_mcp() {
         let matches = v["matches"].as_array().expect("matches array");
         assert!(!matches.is_empty(), "search must find preexisting needle");
         assert_eq!(matches[0]["line"].as_u64(), Some(2));
+        assert_eq!(
+            matches[0]["path"].as_str(),
+            Some(file_a.to_string_lossy().as_ref())
+        );
+        assert!(v["files_scanned"].as_u64().is_some());
 
         // 2. file_read_window returns a bounded window.
         let payload = first_text(

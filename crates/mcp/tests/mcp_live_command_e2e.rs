@@ -399,13 +399,14 @@ async fn mcp_command_output_tail_reads_unmatched_output() {
     {
         let (_server, client) = paired_against_live_daemon(&handle).await;
 
-        // printf emits two stdout lines; no rules supplied.
+        // printf emits one ANSI-colored and one plain stdout line; no rules supplied.
         let start_payload = first_text(
             &call_tool(
                 &client,
                 "command_start_combed",
                 serde_json::json!({
-                    "argv": ["/usr/bin/printf", "hello\nworld\n"],
+                    "argv": ["/usr/bin/printf", "\u{1b}[31mhello\u{1b}[0m\nworld\n"],
+                    "strip_ansi": false,
                 }),
             )
             .await,
@@ -429,12 +430,36 @@ async fn mcp_command_output_tail_reads_unmatched_output() {
         )
         .await;
 
-        // command_output_tail must return the two captured lines.
-        let tail_payload = first_text(
+        // The default preserves the raw captured bytes.
+        let raw_tail_payload = first_text(
             &call_tool(
                 &client,
                 "command_output_tail",
                 serde_json::json!({"job_id": job_id, "max_lines": 50}),
+            )
+            .await,
+        );
+        let raw_tail: serde_json::Value =
+            serde_json::from_str(&raw_tail_payload).expect("raw tail payload is JSON");
+        let raw_lines = raw_tail["lines"].as_array().expect("raw lines array");
+        assert!(
+            raw_lines
+                .iter()
+                .any(|line| line.as_str().is_some_and(|text| text.contains('\u{1b}'))),
+            "omitted strip_ansi must preserve raw escapes: {raw_tail_payload}"
+        );
+
+        // An explicit rendering preference strips ANSI without changing the
+        // raw frame store used by future reads and context retrieval.
+        let tail_payload = first_text(
+            &call_tool(
+                &client,
+                "command_output_tail",
+                serde_json::json!({
+                    "job_id": job_id,
+                    "max_lines": 50,
+                    "strip_ansi": true
+                }),
             )
             .await,
         );
@@ -452,6 +477,13 @@ async fn mcp_command_output_tail_reads_unmatched_output() {
         assert!(
             tail["lines"].is_array(),
             "lines field is array; got: {tail_payload}"
+        );
+        let stripped_lines = tail["lines"].as_array().expect("stripped lines array");
+        assert!(
+            stripped_lines
+                .iter()
+                .all(|line| line.as_str().is_none_or(|text| !text.contains('\u{1b}'))),
+            "strip_ansi=true must remove escapes: {tail_payload}"
         );
         assert!(
             tail["returned_lines"].is_number(),

@@ -62,15 +62,23 @@ fn host_discovery_is_bounded_and_evidence_backed() {
     );
     for (index, route) in host.access_routes.iter().enumerate() {
         assert_eq!(usize::from(route.rank), index + 1);
-        assert!(matches!(route.kind.as_str(), "shell" | "wsl_shell"));
+        assert!(matches!(
+            route.kind.as_str(),
+            "shell" | "wsl_shell" | "direct_argv" | "wsl_argv"
+        ));
         assert!(!route.executable.is_empty());
         assert!(std::path::Path::new(&route.executable).is_absolute());
         assert_eq!(route.argv_template.first(), Some(&route.executable));
+        let expected_tail = match route.kind.as_str() {
+            "shell" | "wsl_shell" => "{command}",
+            "direct_argv" | "wsl_argv" => "{args...}",
+            other => panic!("unexpected route kind {other}"),
+        };
         assert_eq!(
             route.argv_template.last().map(String::as_str),
-            Some("{command}")
+            Some(expected_tail)
         );
-        assert!(route.evidence.contains("execution_confirmed"));
+        assert!(route.evidence.contains("confirmed"));
     }
 
     if host.wsl.execution_status == "confirmed" {
@@ -79,13 +87,19 @@ fn host_discovery_is_bounded_and_evidence_backed() {
                 .iter()
                 .any(|route| route.kind == "wsl_shell")
         );
+        assert!(
+            host.access_routes
+                .iter()
+                .any(|route| route.kind == "wsl_argv")
+        );
     }
 
     assert_eq!(host.beachhead, host.access_routes.first().cloned());
     assert_eq!(
         host.preferred_shell.as_deref(),
-        host.beachhead
-            .as_ref()
+        host.access_routes
+            .iter()
+            .find(|route| route.kind == "shell")
             .map(|route| route.executable.as_str())
     );
 }

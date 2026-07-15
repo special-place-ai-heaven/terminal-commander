@@ -95,7 +95,7 @@ impl LiveDaemon {
             .env_remove("TC_SOCKET")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn daemon");
 

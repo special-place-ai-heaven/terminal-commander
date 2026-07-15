@@ -26,15 +26,12 @@ const ERROR_PIPE_BUSY_OS: i32 = windows::Win32::Foundation::ERROR_PIPE_BUSY.0.ca
 /// Under CPU starvation (heavy builds) the gap widens from microseconds to
 /// whole scheduler quanta, so connects land in it routinely (dogfood
 /// 2026-07-02, BACKLOG P1.0f: healthy daemon reported unavailable under
-/// load). Retried on the same bounded budget; a genuinely-absent daemon
-/// still fails, just up to ~1 s later -- the supervisor/self-heal path is
-/// what handles truly-dead daemons, not this loop.
+/// load). Retried until the enclosing call deadline; a genuinely absent
+/// daemon still fails at that caller-selected bound. The supervisor/self-heal
+/// path handles truly dead daemons, not this loop.
 const ERROR_FILE_NOT_FOUND_OS: i32 = windows::Win32::Foundation::ERROR_FILE_NOT_FOUND
     .0
     .cast_signed();
-
-/// Maximum number of retries when the named pipe is busy.
-const PIPE_BUSY_RETRIES: u32 = 50; // 50 × 20 ms = 1 000 ms
 
 /// Delay between retries when the named pipe is busy.
 const PIPE_BUSY_DELAY_MS: u64 = 20;
@@ -119,10 +116,10 @@ impl DaemonClient {
         // Tokio docs recommend retrying on this error:
         // https://docs.rs/tokio/latest/tokio/net/windows/named_pipe/struct.ClientOptions.html
         //
-        // Budget: PIPE_BUSY_RETRIES × PIPE_BUSY_DELAY_MS = 1 000 ms, well within
-        // the outer 5-second request timeout set in `call`.
+        // `call_with_timeout` owns the one authoritative deadline. A second,
+        // shorter retry budget here made healthy but CPU-starved daemons look
+        // absent before the caller's promised timeout elapsed.
         let mut client = {
-            let mut attempt = 0u32;
             loop {
                 match ClientOptions::new().open(&pipe_name) {
                     Ok(p) => break p,
@@ -137,12 +134,6 @@ impl DaemonClient {
                             Some(ERROR_PIPE_BUSY_OS | ERROR_FILE_NOT_FOUND_OS)
                         ) =>
                     {
-                        attempt += 1;
-                        if attempt >= PIPE_BUSY_RETRIES {
-                            return Err(IpcError::transport(format!(
-                                "pipe connect: still failing after {attempt} retries: {e}"
-                            )));
-                        }
                         tokio::time::sleep(Duration::from_millis(PIPE_BUSY_DELAY_MS)).await;
                     }
                     Err(e) => {
@@ -169,5 +160,55 @@ impl DaemonClient {
             }
         })?;
         decode_payload::<ResponseEnvelope>(&payload)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    #[tokio::test]
+    async fn client_retries_transient_absence_until_the_call_deadline() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let pipe_name = format!(
+            r"\\.\pipe\terminal-commander-delayed-{}-{nonce}",
+            std::process::id()
+        );
+        let server_name = pipe_name.clone();
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let mut pipe = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&server_name)
+                .expect("create delayed pipe");
+            pipe.connect().await.expect("accept delayed client");
+
+            let payload = read_frame(&mut pipe).await.expect("read health request");
+            let request = decode_payload::<RequestEnvelope>(&payload).expect("decode request");
+            let response = ResponseEnvelope {
+                correlation_id: request.correlation_id,
+                result: IpcResult::Ok {
+                    response: IpcResponse::Health {
+                        uptime_secs: 1,
+                        idle_secs: Some(0),
+                        version: "test".to_owned(),
+                    },
+                },
+            };
+            let frame = crate::protocol::encode_frame(&response).expect("encode response");
+            pipe.write_all(&frame).await.expect("write health response");
+        });
+
+        let response = DaemonClient::new(&pipe_name)
+            .with_timeout(Duration::from_secs(3))
+            .call(1, IpcRequest::Health)
+            .await
+            .expect("client must keep retrying until the call deadline");
+        assert!(matches!(response, IpcResponse::Health { .. }));
+        server.await.expect("delayed server task");
     }
 }

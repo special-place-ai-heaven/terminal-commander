@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rmcp::model::CallToolRequestParams;
 use rmcp::{ClientHandler, ServiceExt};
@@ -157,12 +157,12 @@ async fn activate_while_command_runs_drives_signal_then_deactivate_silences_it()
         )
         .await;
 
-        // Long-running emitter: prints "midrun-token" eight times,
-        // 250 ms apart. Total ~2 seconds. Plenty of window for a
-        // mid-run activation + deactivation cycle.
+        // Long-running emitter: prints "midrun-token" 24 times,
+        // 250 ms apart. The six-second lifetime leaves room for a
+        // mid-run activation + deactivation cycle under CI load.
         let py = r#"
 import sys, time
-for i in range(8):
+for i in range(24):
     print("midrun-token", flush=True)
     time.sleep(0.25)
 "#;
@@ -216,30 +216,42 @@ for i in range(8):
         )
         .await;
 
-        // Phase 3: drain bucket for ~900 ms after activation. The
-        // running command should fire `midrun_match` events on
-        // subsequent emitted lines.
-        let post = first_text(
-            &call_tool(
-                &client,
-                "bucket_wait",
-                serde_json::json!({
-                    "bucket_id": bucket_id,
-                    "cursor": pre_cursor,
-                    "timeout_ms": 900
-                }),
-            )
-            .await,
-        );
-        let post_v: serde_json::Value = serde_json::from_str(&post).expect("post json");
-        let post_events = post_v["events"].as_array().cloned().unwrap_or_default();
+        // Phase 3: wait for the first post-activation match within a bounded
+        // deadline. Repeated shorter waits tolerate a CPU-starved child that
+        // emits no line during one scheduler window without weakening the
+        // assertion that the live rebind must eventually affect this job.
+        let post_deadline = Instant::now() + Duration::from_secs(3);
+        let mut post_cursor = pre_cursor;
+        let mut post_events = Vec::new();
+        let mut post_payload = String::new();
+        while Instant::now() < post_deadline
+            && !post_events
+                .iter()
+                .any(|e: &serde_json::Value| e["kind"].as_str() == Some("midrun_match"))
+        {
+            post_payload = first_text(
+                &call_tool(
+                    &client,
+                    "bucket_wait",
+                    serde_json::json!({
+                        "bucket_id": bucket_id,
+                        "cursor": post_cursor,
+                        "timeout_ms": 500
+                    }),
+                )
+                .await,
+            );
+            let post_v: serde_json::Value = serde_json::from_str(&post_payload).expect("post json");
+            post_cursor = post_v["next_cursor"].as_u64().unwrap_or(post_cursor);
+            post_events.extend(post_v["events"].as_array().cloned().unwrap_or_default());
+        }
         assert!(
             post_events
                 .iter()
                 .any(|e| e["kind"].as_str() == Some("midrun_match")),
-            "mid-run activation must produce a midrun_match event from the running command; payload: {post}"
+            "mid-run activation must produce a midrun_match event from the running command; last payload: {post_payload}"
         );
-        let after_active_cursor = post_v["next_cursor"].as_u64().unwrap_or(pre_cursor);
+        let after_active_cursor = post_cursor;
 
         // Phase 4: deactivate while still running.
         let _ = call_tool(

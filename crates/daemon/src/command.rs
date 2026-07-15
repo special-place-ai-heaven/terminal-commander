@@ -447,6 +447,11 @@ struct JobBinding {
     /// waiter at child exit; read by `status()`. `None` until exit, or
     /// when any rule matched.
     receipt: Option<CommandReceipt>,
+    /// Natural completion is externally visible only after the waiter has
+    /// appended the lifecycle event, released dedup, published final metrics,
+    /// and written the exit audit row. Cancellation remains immediately
+    /// visible because `stop()` is itself the committing authority.
+    completion_committed: bool,
     /// Bounded, ALREADY-REDACTED argv head (TC-4 Phase 4a): program name
     /// plus up to two tokens with credential spans masked. Computed once
     /// at `start_combed` via `redact_argv_head`; never holds a raw secret.
@@ -1293,6 +1298,7 @@ impl CommandRuntime {
                 bucket_id,
                 probe_id,
                 receipt: None,
+                completion_committed: false,
                 // TC-4: store the redacted, bounded argv head so probe
                 // listings can surface it without re-touching the raw argv.
                 // Computed from the `argv_for_meta` clone (req.argv was
@@ -1501,6 +1507,15 @@ impl CommandRuntime {
             }
             entry = entry.with_metadata_json(format_argv_metadata(&argv_for_meta));
             let _ = waiter_audit.emit(&entry);
+
+            // Publish the terminal state last. `JobManager::finish` must run
+            // earlier to build the authoritative lifecycle draft, so status
+            // and job_record mask natural Exited/Failed states until this
+            // commit bit proves every externally promised side effect above
+            // is observable too.
+            if let Some(b) = waiter_live.write().get_mut(&job_id) {
+                b.completion_committed = true;
+            }
         });
 
         Ok(CommandStartResponse {
@@ -1793,8 +1808,7 @@ impl CommandRuntime {
     /// status concluded "no output yet" and misjudged progress.
     pub fn status(&self, job_id: JobId) -> Result<CommandStatusResponse, CommandError> {
         let rec = self
-            .jobs
-            .get(job_id)
+            .job_record(job_id)
             .ok_or(CommandError::UnknownJob(job_id))?;
         let exited = rec.exit_info.is_some();
         let (metrics, receipt) = self
@@ -1836,7 +1850,20 @@ impl CommandRuntime {
     /// Test helper.
     #[must_use]
     pub fn job_record(&self, job_id: JobId) -> Option<JobRecord> {
-        self.jobs.get(job_id)
+        let mut record = self.jobs.get(job_id)?;
+        let natural_completion_pending =
+            matches!(record.state, JobState::Exited | JobState::Failed)
+                && self
+                    .live
+                    .read()
+                    .get(&job_id)
+                    .is_some_and(|binding| !binding.completion_committed);
+        if natural_completion_pending {
+            record.state = JobState::Running;
+            record.ended_at = None;
+            record.exit_info = None;
+        }
+        Some(record)
     }
 }
 

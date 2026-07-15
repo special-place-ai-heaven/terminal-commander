@@ -359,6 +359,19 @@ impl DaemonState {
         })
     }
 
+    /// Probe the host and return only execution routes compatible with this
+    /// state's resolved shell capability. This is the shared discovery entry
+    /// point for IPC and in-process embedders; it does not start an IPC server.
+    #[must_use]
+    pub fn discover_environment(&self) -> crate::ipc::protocol::HostEnvironment {
+        let mut environment = crate::environment::discover_host_environment();
+        crate::environment::apply_shell_capability(
+            &mut environment,
+            self.policy.caps_allow_shell(),
+        );
+        environment
+    }
+
     /// Record that a real (non-peek) IPC request was served.
     pub fn bump_activity(&self) {
         *self.last_activity.lock() = std::time::Instant::now();
@@ -550,6 +563,27 @@ mod tests {
         let b = state.boot_id;
         assert_eq!(a, b, "boot_id is stable for the life of the process");
         assert!(!a.is_nil(), "boot_id must be a real (non-nil) uuid");
+        cleanup(&data);
+    }
+
+    #[test]
+    fn embedded_discovery_applies_the_state_policy_capability() {
+        let data = temp_data_dir("embedded-discovery");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let environment = state.discover_environment();
+        assert!(
+            environment
+                .access_routes
+                .iter()
+                .all(|route| matches!(route.kind.as_str(), "direct_argv" | "wsl_argv")),
+            "an embedder must see the same shell-capability filtering as IPC"
+        );
+        assert_eq!(
+            environment.beachhead,
+            environment.access_routes.first().cloned()
+        );
         cleanup(&data);
     }
 

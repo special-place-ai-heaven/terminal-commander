@@ -1333,6 +1333,10 @@ pub struct CommandOutputTailParams {
     pub max_lines: u32,
     #[serde(default = "default_tail_bytes")]
     pub max_bytes: u32,
+    /// Strip ANSI escape sequences from the returned rendering. The frame
+    /// store remains raw. Omitted/false preserves the historical wire shape.
+    #[serde(default)]
+    pub strip_ansi: bool,
 }
 
 const fn default_tail_lines() -> u32 {
@@ -1753,6 +1757,10 @@ pub const DEFAULT_FILE_SEARCH_SNIPPET_BYTES: usize = 240;
 /// Hard cap on bytes scanned by a single `file_search` call. Protects
 /// the daemon from a request that asks to search a gigabyte file.
 pub const MAX_FILE_SEARCH_SCAN_BYTES: u64 = 16 * 1024 * 1024;
+/// Hard cap on directory entries visited by one recursive `file_search`.
+/// This bounds trees containing many empty directories or tiny files even
+/// when the byte and match caps would not stop the walk.
+pub const MAX_FILE_SEARCH_ENTRIES: u64 = 20_000;
 /// Hard cap on entries returned by `file_list_dir` in a single call.
 ///
 /// (US3 FR-020.) Bounds a single-level directory listing the same way the
@@ -1843,6 +1851,10 @@ pub struct FileSearchParams {
 /// arbitrary bytes — `snippet` is capped at `max_snippet_bytes`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSearchMatch {
+    /// Canonical owning file for a directory search. Omitted for the legacy
+    /// single-file shape, whose response-level `path` already identifies it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<std::path::PathBuf>,
     /// 1-based line number.
     pub line: u64,
     /// Byte offset of the matching position within the file.
@@ -1863,6 +1875,16 @@ pub struct FileSearchResponse {
     /// Bytes actually scanned (may be lower than file size when the
     /// scan-bytes budget tripped first).
     pub bytes_scanned: u64,
+    /// Directory-search diagnostic: regular files successfully scanned.
+    /// Omitted for the legacy single-file response shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_scanned: Option<u64>,
+    /// Directory-search diagnostic: entries skipped because they were binary,
+    /// unreadable, policy-denied, symlinks/reparse points, special files, or
+    /// version-control metadata directories.
+    /// Omitted for the legacy single-file response shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entries_skipped: Option<u64>,
 }
 
 /// Kind of a single directory entry, from `symlink_metadata` (never
@@ -3285,6 +3307,7 @@ mod tests {
                     job_id: JobId::new(),
                     max_lines: 10,
                     max_bytes: 1024,
+                    strip_ansi: false,
                 }),
                 true,
             ),
@@ -3755,6 +3778,7 @@ mod tests {
             job_id: JobId::new(),
             max_lines: 50,
             max_bytes: 65_536,
+            strip_ansi: true,
         };
         let json = serde_json::to_string(&params).unwrap();
         let back: CommandOutputTailParams = serde_json::from_str(&json).unwrap();
@@ -3764,6 +3788,7 @@ mod tests {
         let def: CommandOutputTailParams = serde_json::from_str(&minimal).unwrap();
         assert_eq!(def.max_lines, 50);
         assert_eq!(def.max_bytes, 65_536);
+        assert!(!def.strip_ansi);
     }
 
     #[test]

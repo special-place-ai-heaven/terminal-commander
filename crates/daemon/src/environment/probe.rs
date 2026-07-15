@@ -16,6 +16,7 @@ const MAX_VERSION_CHARS: usize = 160;
 const MAX_WSL_DISTROS: usize = 16;
 const SHELL_SENTINEL: &str = "terminal-commander-shell-probe";
 const WSL_SENTINEL: &str = "terminal-commander-wsl-probe";
+const WSL_PROGRAM_PLACEHOLDER: &str = "{program}";
 
 #[derive(Clone, Copy)]
 struct ProbeSpec {
@@ -65,6 +66,10 @@ pub fn discover_host_environment() -> HostEnvironment {
     let wsl = wsl_probe(&tools);
     let mut access_routes = shell_access_routes(&shells);
     if let Some(route) = wsl_access_route(&wsl, &tools, access_routes.len() + 1) {
+        access_routes.push(route);
+    }
+    access_routes.extend(direct_argv_routes(&tools, access_routes.len() + 1));
+    if let Some(route) = wsl_argv_access_route(&wsl, &tools, access_routes.len() + 1) {
         access_routes.push(route);
     }
     let beachhead = access_routes.first().cloned();
@@ -257,6 +262,59 @@ fn wsl_access_route(wsl: &WslProbe, tools: &[ProgramProbe], rank: usize) -> Opti
         executable,
         version: wsl.version.clone(),
         evidence: "path_confirmed+wsl_execution_confirmed".to_owned(),
+    })
+}
+
+fn direct_argv_routes(tools: &[ProgramProbe], start_rank: usize) -> Vec<AccessRoute> {
+    tools
+        .iter()
+        .filter(|program| {
+            program.available && program.version_status == "confirmed" && program.name != "wsl"
+        })
+        .filter_map(|program| {
+            let executable = program.path.clone()?;
+            Some((program, executable))
+        })
+        .enumerate()
+        .map(|(index, (program, executable))| AccessRoute {
+            route_id: format!("argv:{}", program.name),
+            rank: u16::try_from(start_rank + index).unwrap_or(u16::MAX),
+            kind: "direct_argv".to_owned(),
+            family: "native".to_owned(),
+            argv_template: vec![executable.clone(), "{args...}".to_owned()],
+            executable,
+            version: program.version.clone(),
+            evidence: "path_confirmed+version_confirmed+direct_argv_structural".to_owned(),
+        })
+        .collect()
+}
+
+fn wsl_argv_access_route(
+    wsl: &WslProbe,
+    tools: &[ProgramProbe],
+    rank: usize,
+) -> Option<AccessRoute> {
+    if wsl.execution_status != "confirmed" {
+        return None;
+    }
+    let program = tools
+        .iter()
+        .find(|probe| probe.name == "wsl" && probe.available)?;
+    let executable = program.path.clone()?;
+    Some(AccessRoute {
+        route_id: "wsl:default:argv".to_owned(),
+        rank: u16::try_from(rank).unwrap_or(u16::MAX),
+        kind: "wsl_argv".to_owned(),
+        family: "posix".to_owned(),
+        argv_template: vec![
+            executable.clone(),
+            "-e".to_owned(),
+            WSL_PROGRAM_PLACEHOLDER.to_owned(),
+            "{args...}".to_owned(),
+        ],
+        executable,
+        version: wsl.version.clone(),
+        evidence: "path_confirmed+wsl_execution_confirmed+direct_argv_structural".to_owned(),
     })
 }
 
@@ -620,4 +678,36 @@ fn bounded_text(bytes: &[u8]) -> String {
         .filter(|ch| !ch.is_control() || *ch == '\n')
         .take(MAX_VERSION_CHARS)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::apply_shell_capability;
+    use super::*;
+
+    #[test]
+    fn shell_disabled_environment_keeps_only_direct_argv_routes() {
+        let mut host = discover_host_environment();
+        apply_shell_capability(&mut host, false);
+
+        assert!(
+            host.access_routes
+                .iter()
+                .all(|route| matches!(route.kind.as_str(), "direct_argv" | "wsl_argv")),
+            "shell-disabled discovery must not promise a shell route: {:?}",
+            host.access_routes
+        );
+        assert_eq!(host.beachhead, host.access_routes.first().cloned());
+        assert_eq!(host.preferred_shell, None);
+        if host
+            .tools
+            .iter()
+            .any(|tool| tool.available && tool.version_status == "confirmed" && tool.name != "wsl")
+        {
+            assert!(
+                !host.access_routes.is_empty(),
+                "confirmed programs must establish at least one direct argv beachhead"
+            );
+        }
+    }
 }

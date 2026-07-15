@@ -140,10 +140,20 @@ is detectable via `boot_id` on subscriptions.
 `system_discover` probes the host under hard deadlines instead of inferring a
 route from the OS name. It reports terminal evidence, shell and PowerShell
 paths/versions, WSL state, common tools, and confirmed execution status.
-Successful interpreter sentinels become ranked `access_routes`; `beachhead`
-repeats the best route with the exact argv template an LLM can follow. A path
-that merely exists is not advertised as executable, and failed or timed-out
-probes remain explicit evidence.
+Confirmed programs become `direct_argv` routes, confirmed WSL adds a
+`wsl_argv` route, and successful interpreter sentinels become shell routes. The
+daemon filters that ranked set against the active shell capability before
+returning `access_routes`; when `allow_shell` is off, it cannot advertise a
+shell beachhead that the validator will reject. `beachhead` repeats the best
+surviving route with the exact argv template an LLM can follow. A path that
+merely exists is not advertised as executable, and failed or timed-out probes
+remain explicit evidence. Normal command/path policy checks still apply when a
+caller supplies its concrete argv and cwd.
+
+In-process embedders construct `DaemonState` with `DaemonState::bootstrap` and
+call `DaemonState::discover_environment`; IPC discovery uses that same method,
+so embedded and daemon clients receive identical capability filtering without
+opening a socket.
 
 ### Self-healing daemon transport
 
@@ -337,6 +347,14 @@ commands or returning bounded file/context data.
 connect. A pre-bound or stale socket that does not answer with our protocol is
 rejected; `ensure_daemon` may spawn a fresh session daemon instead.
 
+### In-process embedding
+
+Host applications can depend on the `terminal-commanderd` library and build the
+full engine with `DaemonState::bootstrap` without starting IPC, MCP, or the CLI.
+The [embedding guide](docs/EMBEDDING.md) documents the exact boundary, the
+capability-filtered discovery API, direct command path, OS restrictions, and
+revision-pinning requirement.
+
 ## The Life Of A Command
 
 ```mermaid
@@ -380,6 +398,8 @@ assuming Bash, PowerShell, WSL, or a particular executable is available:
 ```text
 status action=system_discover
 → environment.access_routes[] + environment.beachhead.argv_template
+→ direct_argv/wsl_argv: command action=run|run_and_watch
+→ shell/wsl_shell: only returned when allow_shell enables the shell lane
 ```
 
 Use Terminal Commander whenever raw terminal scrollback would waste context or
@@ -397,10 +417,10 @@ Long-running, with live monitoring:
 
 ```text
 command action=run argv=["cargo","nextest","run"] rules=[{"pattern":"^\\s+FAIL"}]
-command action=wait bucket_id=<returned> cursor=0 timeout_ms=10000
+command action=wait bucket_id=<returned> cursor=0 timeout_ms=10000 max_signals=50
 command action=status job_id=<returned>          # near-real-time counters
 command action=event_context bucket_id=… event_id=…
-command action=output_tail job_id=<returned>     # bounded exploratory tail
+command action=output_tail job_id=<returned> strip_ansi=true  # bounded clean tail
 command action=stop job_id=<returned>            # kills the whole process tree
 ```
 
@@ -408,17 +428,24 @@ Agent rules:
 
 - Prefer `command action=run_and_watch` for commands that finish within a
   minute; use `command action=run` + `command action=wait` for longer jobs.
-- A minimal rule is just `{"pattern": "ERROR"}` — id, version, kind, severity,
-  and summary default sanely. Severity accepts `error`/`warn`/`fatal` aliases.
+- A minimal rule is just `{"pattern": "ERROR"}` — id, version, matcher,
+  severity, and summary default sanely. `kind` may be the matcher override
+  (`regex`/`keyword`) or a natural emitted event label such as `test_result`;
+  explicit `event_kind` wins. Severity accepts `error`/`warn`/`fatal` aliases.
 - Use `command action=output_tail` for exploratory commands where you don't know what
-  to match yet — bounded to 200 lines / 64 KiB, truncation-flagged.
+  to match yet — bounded to 200 lines / 64 KiB, truncation-flagged. Optional
+  `strip_ansi` cleans only the returned rendering; stored frames stay raw.
+- `files action=search` accepts an absolute file or directory. Directory searches
+  recurse deterministically with per-file policy checks, never follow links, and
+  remain bounded by match, byte, and entry caps.
 - Use `command action=sub_open` + `command action=sub_pull` instead of N polling loops
   when watching several jobs at once.
 - `wait_exhausted: true` means STILL RUNNING — call `command action=status`;
   do not treat it as finished. `degraded: true` means follow the `recover_hint`.
 - Keep interpreters out of the argv lane. For a pipeline or compound command,
   use `command action=exec` only when `status action=policy_status` confirms
-  `allow_shell`; otherwise run the program directly as argv.
+  `allow_shell`; otherwise follow a returned `direct_argv`/`wsl_argv` route and
+  run each program directly as argv.
 - Do not pipe into shell-side `tail`, `head`, or `grep` when Terminal Commander
   needs full evidence. Use rules, `command action=output_tail`, or
   `files action=search` so discarded lines remain observable.

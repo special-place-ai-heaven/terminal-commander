@@ -27,9 +27,11 @@ use crate::surface::Surface;
 /// matches the router-advertised entry verbatim.
 pub(crate) const COMMAND_FACADE_DESCRIPTION: &str = "Run and observe a one-shot command. Key contracts: \
 `run_and_watch`: `argv` + `wait_ms` (default 5,000; max 60,000; not `timeout_ms`). \
-If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` \
+If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` + optional `max_signals` \
 (not `job_id` or `wait_ms`), and check state with `status`: `job_id`. \
-`summary`: `bucket_id` only (no `compact`). `exec`: `shell_line` (policy-gated); common pipelines are \
+`grace_ms` is start-time policy for `run` / `run_and_watch`; `stop` reuses that policy and accepts `job_id` only. \
+`summary`: `bucket_id` only (no `compact`). `output_tail`: `job_id` plus optional `max_lines`, `max_bytes`, and \
+`strip_ansi` (render-only; raw frames stay intact). `exec`: `shell_line` (policy-gated); common pipelines are \
 executed unchanged and an omitted shell uses the highest-ranked confirmed host route; inspect status \
 system_discover for host-specific syntax. Shell-side tail/head/grep makes the receipt observability-limited because discarded \
 lines never reach TC; use `run_and_watch` + rules or `files` search when full evidence matters. \
@@ -43,7 +45,7 @@ For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires 
 
 /// Description for the `files` facade.
 pub(crate) const FILES_FACADE_DESCRIPTION: &str = "File operations: bounded read (action=\"read\"), directory listing (action=\"list\"), \
-substring search, atomic write, file-watch start/stop/list, and workspace snapshots \
+bounded substring search over a file or directory tree (action=\"search\"), atomic write, file-watch start/stop/list, and workspace snapshots \
 (snapshot_create, snapshot_apply). All paths must be absolute.";
 
 /// Description for the `registry` facade.
@@ -57,7 +59,8 @@ pub(crate) const STATUS_FACADE_DESCRIPTION: &str = "Adapter and daemon status: h
 policy_status, audit_since (daemon-global operation metadata; optional cursor/action_filter/decision_filter/limit), runtime_state \
 (aggregate snapshot), probe_list, probe_status, system_discover, target_list, target_probe. \
 Call system_discover before choosing an interpreter: its environment contains bounded shell/PowerShell/WSL/tool probes, \
-ranked access_routes, and a beachhead with the exact confirmed argv template to follow.";
+capability-filtered ranked access_routes, and a beachhead with the exact confirmed argv template to follow. \
+Use direct_argv/wsl_argv routes with run or run_and_watch; shell routes are advertised only when exec is enabled.";
 
 /// The facade tool names advertised + admitted on the compact surface.
 /// KEEP IN SYNC with [`compact_surface_tools`].

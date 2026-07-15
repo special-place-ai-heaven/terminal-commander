@@ -77,7 +77,7 @@ fn session_reap_token_shuts_down_the_daemon() {
         .env_remove("TC_SOCKET")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .expect("spawn daemon");
 

@@ -36,10 +36,11 @@ if ! git rev-parse -q --verify "refs/tags/${base_tag}" >/dev/null 2>&1; then
 fi
 
 # Releasable crate commits in (base_tag, HEAD]: conventional type feat/fix/perf
-# or breaking (! or BREAKING CHANGE). Subject form: "type(scope)!: ...".
+# or breaking (!, BREAKING CHANGE, or BREAKING-CHANGE). Subject form:
+# "type(scope)!: ...".
 # `perf` is treated as a fix-level bump because user-observable perf changes ship
 # in Rust crates and must produce a release (e.g. PR #47 /proc liveness).
-mapfile -t crate_shas < <(git log --format='%H' "${base_tag}..HEAD" -- crates)
+mapfile -t crate_shas < <(git log --reverse --format='%H' "${base_tag}..HEAD" -- crates)
 if [ "${#crate_shas[@]}" -eq 0 ]; then
   echo "[synth] no crate commits since ${base_tag}. Skipping."
   emit trigger_pushed false
@@ -47,24 +48,32 @@ if [ "${#crate_shas[@]}" -eq 0 ]; then
 fi
 
 strongest=""   # "" < fix < feat < breaking
-# Parse SUBJECTS only (one per line; bodies are not newline-safe in a
-# read loop). Detect breaking separately via a body-aware grep below.
-while IFS= read -r subject; do
-  [ -n "$subject" ] || continue
+breaking_sha=""
+for sha in "${crate_shas[@]}"; do
+  subject=$(git show -s --format='%s' "$sha")
   type_tok="${subject%%:*}"            # e.g. "feat(daemon)!" or "fix"
   case "$type_tok" in
-    *"!"*) strongest="breaking";;
+    *"!"*)
+      if printf '%s\n' "$subject" | grep -E '^[a-z]+(\([^)]*\))?!:[[:space:]]' >/dev/null; then
+        strongest="breaking"
+        breaking_sha="$sha"
+      fi
+      ;;
   esac
   base_type="${type_tok%%(*}"; base_type="${base_type%%!*}"
   if [ "$base_type" = "feat" ] && [ "$strongest" != "breaking" ]; then strongest="feat";
   elif [ "$base_type" = "fix" ] && [ -z "$strongest" ]; then strongest="fix";
   elif [ "$base_type" = "perf" ] && [ -z "$strongest" ]; then strongest="fix";
   fi
-done < <(git log --format='%s' "${base_tag}..HEAD" -- crates)
-# Body-level BREAKING CHANGE detection (newline-safe: grep over full log).
-if git log --format='%b' "${base_tag}..HEAD" -- crates | grep -q "BREAKING CHANGE"; then
-  strongest="breaking"
-fi
+done
+# Body-level breaking-footer detection. Consume each body completely so
+# pipefail cannot turn an early grep match into a false negative via SIGPIPE.
+for sha in "${crate_shas[@]}"; do
+  if git show -s --format='%b' "$sha" | grep -E '^BREAKING[ -]CHANGE:' >/dev/null; then
+    strongest="breaking"
+    breaking_sha="$sha"
+  fi
+done
 
 if [ -z "$strongest" ]; then
   echo "[synth] crate commits exist but none are feat/fix/perf/breaking. Skipping."
@@ -81,50 +90,49 @@ if [ -f "$SENTINEL" ] && grep -q "fingerprint: ${fingerprint}" "$SENTINEL" 2>/de
   exit 0
 fi
 
-case "$strongest" in
-  breaking) commit_type="feat!";;
-  feat)     commit_type="feat";;
-  fix)      commit_type="fix";;
-esac
-
-# Build the synthetic commit message FROM THE REAL crate subjects in range so
-# release-please's generated changelog describes the actual fixes instead of a
-# static "release Rust crate changes" (which buried every real crates/** change
-# -- the bug that produced misleading 0.1.64 / 0.1.65 changelogs).
-#
-# release-please turns ONE commit into ONE changelog bullet (it uses the SUBJECT;
-# the body is parsed only for BREAKING CHANGE footers, not split into bullets).
-# Since this script pushes exactly one synthetic commit, the changelog gets one
-# bullet per release. So: single real fix -> reuse its subject verbatim (perfect
-# bullet); multiple -> a faithful summary subject + every real subject in the
-# body for the audit trail.
-# UPGRADE PATH (only if a real multi-fix release proves it's needed): emit N
-# synthetic commits, or post-process release-please's changelog. Out of scope here.
-mapfile -t crate_subjects < <(git log --format='%s' "${base_tag}..HEAD" -- crates)
-# True if a subject already starts with a conventional-commit type (so release-please
-# will classify it correctly and we can use it verbatim, scope and all).
-is_conventional() { printf '%s' "$1" | grep -Eq '^[a-z]+(\([^)]*\))?!?:[[:space:]]'; }
-# Strip a leading conventional-commit type so we can re-prefix with the canonical
-# ${commit_type} without doubling it (used only for non-conventional / multi cases).
+# release-please supports multiple conventional messages in one commit when the
+# additional messages are placed at the bottom of the body. Preserve every
+# releasable message from crate commit subjects and bodies instead of collapsing
+# the range into one synthetic "N crate fixes" bullet.
+is_release_message() {
+  printf '%s' "$1" | grep -Eq '^(feat|fix|perf)(\([^)]*\))?!?:[[:space:]]'
+}
 strip_cc_type() { printf '%s' "$1" | sed -E 's/^[a-z]+(\([^)]*\))?!?:[[:space:]]*//'; }
-if [ "${#crate_subjects[@]}" -eq 1 ]; then
-  # Single fix: use the real subject VERBATIM when it's already conventional
-  # (keeps the scope, e.g. "fix(daemon): ..."); otherwise prefix the canonical type.
-  if is_conventional "${crate_subjects[0]}"; then
-    commit_subject="${crate_subjects[0]}"
+
+release_messages=()
+for sha in "${crate_shas[@]}"; do
+  while IFS= read -r line; do
+    if is_release_message "$line"; then release_messages+=("$line"); fi
+  done < <(git show -s --format='%B' "$sha")
+done
+
+# A body-only BREAKING CHANGE still needs a breaking conventional header.
+if [ "$strongest" = "breaking" ] && ! printf '%s\n' "${release_messages[@]}" | grep -E '^[^:]+!:' >/dev/null; then
+  if [ "${#release_messages[@]}" -eq 0 ]; then
+    if [ -n "$breaking_sha" ]; then
+      fallback_subject=$(git show -s --format='%s' "$breaking_sha")
+      release_messages+=("feat!: $(strip_cc_type "$fallback_subject")")
+    fi
   else
-    commit_subject="${commit_type}: ${crate_subjects[0]}"
+    release_messages[0]="feat!: $(strip_cc_type "${release_messages[0]}")"
   fi
-else
-  commit_subject="${commit_type}: ${#crate_subjects[@]} crate fixes -- $(strip_cc_type "${crate_subjects[0]}") (+$(( ${#crate_subjects[@]} - 1 )) more)"
 fi
-# Body: provenance + every real subject (audit trail / full attribution).
+
+if [ "${#release_messages[@]}" -eq 0 ]; then
+  echo "[synth] crate commits exist but none are release-please-compatible feat/fix/perf/breaking messages. Skipping."
+  emit trigger_pushed false
+  exit 0
+fi
+
+commit_subject="${release_messages[0]}"
+# Body: provenance first, then every additional release-please message at the
+# bottom where its parser treats each as a distinct changelog entry.
 commit_body="Synthesized by synthesize-crates-release-trigger.sh so release-please
 attributes crates/** changes to the canonical version source. Crate commits
-since ${base_tag}: ${#crate_shas[@]} (fingerprint ${fingerprint}).
-
-Crate changes in this release:
-$(printf '* %s\n' "${crate_subjects[@]}")"
+since ${base_tag}: ${#crate_shas[@]} (fingerprint ${fingerprint})."
+for message in "${release_messages[@]:1}"; do
+  commit_body+=$'\n\n'"$message"
+done
 
 echo "[synth] strongest type: ${strongest} -> commit subject: '${commit_subject}'"
 

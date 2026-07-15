@@ -402,11 +402,29 @@ mod tests {
             CommandFacadeCall::RunAndWatch(_)
         ));
 
-        let wait = json!({ "action": "wait", "bucket_id": "bkt_x", "cursor": 0 });
+        let wait = json!({
+            "action": "wait",
+            "bucket_id": "bkt_x",
+            "cursor": 0,
+            "max_signals": 30
+        });
         validate_facade_call("command", &wait).expect("valid wait");
         assert!(matches!(
             serde_json::from_value::<CommandFacadeCall>(wait).unwrap(),
             CommandFacadeCall::Wait(_)
+        ));
+
+        let output_tail = json!({
+            "action": "output_tail",
+            "job_id": "job_x",
+            "max_lines": 30,
+            "max_bytes": 8_000,
+            "strip_ansi": true
+        });
+        validate_facade_call("command", &output_tail).expect("valid output_tail");
+        assert!(matches!(
+            serde_json::from_value::<CommandFacadeCall>(output_tail).unwrap(),
+            CommandFacadeCall::OutputTail(_)
         ));
 
         let deact =

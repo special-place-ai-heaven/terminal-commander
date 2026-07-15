@@ -294,13 +294,24 @@ fn assert_environment_routes(body: &serde_json::Value) {
     );
     for (index, route) in routes.iter().enumerate() {
         assert_eq!(route["rank"].as_u64(), Some((index + 1) as u64));
-        assert_eq!(
-            route["argv_template"]
-                .as_array()
-                .and_then(|argv| argv.last())
-                .and_then(serde_json::Value::as_str),
-            Some("{command}")
+        let kind = route["kind"].as_str().expect("route kind");
+        assert!(
+            matches!(kind, "direct_argv" | "wsl_argv"),
+            "default policy disables shell execution, so every advertised route must be usable through the argv lane; got {route}"
         );
+        let argv = route["argv_template"]
+            .as_array()
+            .expect("route argv_template");
+        assert_eq!(
+            argv.last().and_then(serde_json::Value::as_str),
+            Some("{args...}")
+        );
+        if kind == "wsl_argv" {
+            assert!(
+                argv.iter().any(|part| part.as_str() == Some("{program}")),
+                "the direct WSL route must leave the Linux program explicit"
+            );
+        }
     }
 }
 

@@ -163,7 +163,7 @@ cargo hack check --workspace --each-feature --no-dev-deps
 cargo hack check --workspace --rust-version
 
 # 6. Tests (nextest for unit + integration, cargo test for doctests).
-cargo nextest run --workspace --profile ci
+cargo nextest run --workspace
 cargo test --workspace --doc
 
 # 7. Unused-dep audit.

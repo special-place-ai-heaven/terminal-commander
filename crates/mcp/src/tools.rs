@@ -62,12 +62,12 @@ use terminal_commanderd::ipc::protocol::{
     CommandStartParams, CommandStartResponse, CommandStatusParams, CommandStatusResponse,
     CommandStopParams, CommandStopResponse, ContextUnavailableReason, DiscoverResponse,
     EventContextParams, EventContextResponse, FileListDirParams, FileListDirResponse,
-    FileReadWindowParams, FileReadWindowResponse, FileSearchParams, FileSearchResponse,
-    FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
-    FileWatchStopResponse, FileWriteParams, FileWriteResponse, IpcContextFrame, IpcError,
-    IpcErrorCode, IpcRequest, IpcResponse, ListLimitParams, PolicyCapsView, PolicyStatusResponse,
-    ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse,
-    PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
+    FileReadWindowParams, FileReadWindowResponse, FileSearchParams, FileWatchListResponse,
+    FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse,
+    FileWriteParams, FileWriteResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest,
+    IpcResponse, ListLimitParams, PolicyCapsView, PolicyStatusResponse, ProbeListResponse,
+    ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams,
+    PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
     PtyCommandWriteStdinParams, RegistryActivateParams, RegistryActivateResponse,
     RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse, RegistryDeactivateParams,
     RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
@@ -183,7 +183,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "command_output_tail",
             status: ToolStatus::Live,
-            description: "Read the last N lines of a command's captured output WITHOUT a rule. For one-off/exploratory commands whose format you don't know (df -h, docker system df): start it, then read its tail here. Bounded: 200 lines / 64 KiB, truncation-flagged. For recurring signals, define a rule instead.",
+            description: "Read the last N lines of a command's captured output WITHOUT a rule. For one-off/exploratory commands whose format you don't know (df -h, docker system df): start it, then read its tail here. Bounded: 200 lines / 64 KiB, truncation-flagged. Optional strip_ansi changes only the returned rendering; raw frames stay intact. For recurring signals, define a rule instead.",
         },
         ToolCatalogueEntry {
             name: "bucket_events_since",
@@ -258,7 +258,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "file_search",
             status: ToolStatus::Live,
-            description: "Bounded substring search over one file. Returns structured match pointers + capped snippets.",
+            description: "Bounded substring search over one file or a directory tree. Directory walks are deterministic, policy-checked per file, and never follow links. Returns structured match pointers + capped snippets.",
         },
         ToolCatalogueEntry {
             name: "file_write",
@@ -980,7 +980,7 @@ impl TerminalCommanderMcpServer {
     /// the daemon is unreachable the response still carries the
     /// adapter-side catalogue with the daemon error surfaced.
     #[tool(
-        description = "Discover adapter/daemon metadata and the execution environment. Returns bounded OS, terminal, shell/PowerShell, WSL, and tool probes plus ranked access_routes and an exact beachhead argv template; call this before choosing an interpreter."
+        description = "Discover adapter/daemon metadata and the execution environment. Returns bounded OS, terminal, shell/PowerShell, WSL, and tool probes plus capability-filtered ranked access_routes and an exact beachhead argv template; call this before choosing an interpreter. Use direct_argv/wsl_argv with argv actions; shell routes appear only when exec is enabled. Normal path and command policy checks still apply at execution time."
     )]
     async fn system_discover(&self) -> Result<CallToolResult, McpError> {
         let (daemon, daemon_error) = match self.daemon.call(IpcRequest::SystemDiscover).await {
@@ -1584,7 +1584,7 @@ impl TerminalCommanderMcpServer {
     /// `command_output_tail` — rule-free bounded read of a job's
     /// captured output. Useful for one-off exploratory commands.
     #[tool(
-        description = "Read the last N lines of a command's captured output WITHOUT a rule. For one-off/exploratory commands whose format you don't know (df -h, docker system df): start it, then read its tail here. Bounded: 200 lines / 64 KiB, truncation-flagged. For recurring signals, define a rule instead."
+        description = "Read the last N lines of a command's captured output WITHOUT a rule. For one-off/exploratory commands whose format you don't know (df -h, docker system df): start it, then read its tail here. Bounded: 200 lines / 64 KiB, truncation-flagged. Optional strip_ansi changes only the returned rendering; raw frames stay intact. For recurring signals, define a rule instead."
     )]
     async fn command_output_tail(
         &self,
@@ -1597,6 +1597,7 @@ impl TerminalCommanderMcpServer {
             job_id,
             max_lines: params.max_lines.unwrap_or(50),
             max_bytes: params.max_bytes.unwrap_or(65_536),
+            strip_ansi: params.strip_ansi,
         };
         match self.daemon.call(IpcRequest::CommandOutputTail(ipc)).await {
             Ok(IpcResponse::CommandOutputTail(r)) => {
@@ -1630,7 +1631,7 @@ impl TerminalCommanderMcpServer {
 
     /// `bucket_wait` — realtime wait; returns heartbeat on timeout.
     #[tool(
-        description = "Realtime wait on a bucket. Returns a heartbeat when the timeout expires without matching events. Bounded by daemon caps."
+        description = "Realtime wait on a bucket. Returns a heartbeat when the timeout expires without matching events. `max_signals` carries forward the run_and_watch signal budget as a real output cap; when `limit` is also present, the stricter cap wins. Bounded by daemon caps."
     )]
     async fn bucket_wait(
         &self,
@@ -2168,9 +2169,9 @@ impl TerminalCommanderMcpServer {
         }
     }
 
-    /// `file_search` — bounded substring search over one file.
+    /// `file_search` — bounded substring search over one file or directory tree.
     #[tool(
-        description = "Search a file for a substring. Returns bounded match pointers + capped snippets only."
+        description = "Search a file or directory tree for a substring. Directory walks are deterministic, policy-checked per file, bounded by matches/bytes/entries, and never follow links. Returns bounded match pointers + capped snippets only."
     )]
     async fn file_search(
         &self,
@@ -2185,17 +2186,7 @@ impl TerminalCommanderMcpServer {
             max_snippet_bytes: params.max_snippet_bytes,
         };
         match self.daemon.call(IpcRequest::FileSearch(ipc)).await {
-            Ok(IpcResponse::FileSearch(FileSearchResponse {
-                path,
-                matches,
-                truncated,
-                bytes_scanned,
-            })) => json_tool_result(&serde_json::json!({
-                "path": path,
-                "matches": matches,
-                "truncated": truncated,
-                "bytes_scanned": bytes_scanned,
-            })),
+            Ok(IpcResponse::FileSearch(response)) => json_tool_result(&response),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
@@ -2900,9 +2891,11 @@ impl TerminalCommanderMcpServer {
         name = "command",
         description = "Run and observe a one-shot command. Key contracts: \
 `run_and_watch`: `argv` + `wait_ms` (default 5,000; max 60,000; not `timeout_ms`). \
-If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` \
+If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` + optional `max_signals` \
 (not `job_id` or `wait_ms`), and check state with `status`: `job_id`. \
-`summary`: `bucket_id` only (no `compact`). `exec`: `shell_line` (policy-gated); common pipelines are \
+`grace_ms` is start-time policy for `run` / `run_and_watch`; `stop` reuses that policy and accepts `job_id` only. \
+`summary`: `bucket_id` only (no `compact`). `output_tail`: `job_id` plus optional `max_lines`, `max_bytes`, \
+and `strip_ansi` (render-only; raw frames stay intact). `exec`: `shell_line` (policy-gated); common pipelines are \
 executed unchanged and an omitted shell uses the highest-ranked confirmed host route; inspect status \
 system_discover for host-specific syntax. Shell-side tail/head/grep makes the receipt observability-limited because discarded \
 lines never reach TC; use `run_and_watch` + rules or `files` search when full evidence matters. \
@@ -2963,7 +2956,8 @@ For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires 
     #[tool(
         name = "files",
         description = "File operations: bounded read (action=\"read\"), directory listing (action=\"list\"), \
-substring search, atomic write, file-watch start/stop/list, and workspace snapshots \
+bounded substring search over a file or directory tree (action=\"search\"), atomic write, \
+file-watch start/stop/list, and workspace snapshots \
 (snapshot_create, snapshot_apply). All paths must be absolute."
     )]
     pub(crate) async fn files_facade(
@@ -3017,7 +3011,8 @@ usually {\"kind\":\"global\"}. Rules comb command output into structured signals
 policy_status, audit_since (daemon-global operation metadata; optional cursor/action_filter/decision_filter/limit), runtime_state \
 (aggregate snapshot), probe_list, probe_status, system_discover, target_list, target_probe. \
 Call system_discover before choosing an interpreter: its environment contains bounded shell/PowerShell/WSL/tool probes, \
-ranked access_routes, and a beachhead with the exact confirmed argv template to follow."
+capability-filtered ranked access_routes, and a beachhead with the exact confirmed argv template to follow. \
+Use direct_argv/wsl_argv routes with run or run_and_watch; shell routes are advertised only when exec is enabled."
     )]
     pub(crate) async fn status_facade(
         &self,
@@ -4024,7 +4019,9 @@ pub struct RuleInput {
     /// Keyword set. Presence (without `pattern`) infers `kind=keyword`.
     #[serde(default)]
     pub keywords: Option<Vec<String>>,
-    /// Override the inferred kind. Live kinds: `keyword`, `regex`.
+    /// Matcher override when set to `keyword` or `regex`. Any other value is
+    /// treated as the emitted event kind, matching the natural compact shape;
+    /// an explicit `event_kind` remains authoritative.
     #[serde(default)]
     pub kind: Option<String>,
     /// Severity. Default `info`. One of trace/debug/info/low/medium/
@@ -4069,18 +4066,17 @@ impl RuleInput {
     fn finalize(self, index: usize) -> Result<RuleDefinition, String> {
         let has_pattern = self.pattern.as_ref().is_some_and(|p| !p.is_empty());
         let has_keywords = self.keywords.as_ref().is_some_and(|k| !k.is_empty());
+        let inferred_event_kind = self
+            .kind
+            .as_deref()
+            .filter(|kind| !matches!(*kind, "keyword" | "regex"))
+            .map(str::to_owned);
 
         // Infer or validate kind.
         let kind = match self.kind.as_deref() {
             Some("keyword") => RuleType::Keyword,
             Some("regex") => RuleType::Regex,
-            Some(other) => {
-                return Err(format!(
-                    "kind '{other}' is not a live rule kind; live kinds: keyword, regex \
-                     (example: {{\"pattern\": \"ERROR\"}})"
-                ));
-            }
-            None => {
+            Some(_) | None => {
                 if has_pattern && has_keywords {
                     return Err(
                         "rule has both `pattern` and `keywords`; set `kind` to disambiguate \
@@ -4149,7 +4145,10 @@ impl RuleInput {
             // immediately, so they ship Active (not the Draft default).
             status: terminal_commander_core::RuleStatus::Active,
             severity,
-            event_kind: self.event_kind.unwrap_or_else(|| "match".to_owned()),
+            event_kind: self
+                .event_kind
+                .or(inferred_event_kind)
+                .unwrap_or_else(|| "match".to_owned()),
             stream,
             description: None,
             pattern: self.pattern,
@@ -4667,6 +4666,10 @@ pub struct McpCommandOutputTailParams {
     #[serde(default, deserialize_with = "de_opt_u32_lenient")]
     #[schemars(with = "u32")]
     pub max_bytes: Option<u32>,
+    /// Strip ANSI escape sequences from returned lines. The captured frame
+    /// store remains raw, and omitted/false preserves existing behavior.
+    #[serde(default)]
+    pub strip_ansi: bool,
 }
 
 /// MCP-facing parameters for `bucket_events_since`.
@@ -4728,6 +4731,12 @@ pub struct McpBucketWaitParams {
     #[serde(default, deserialize_with = "de_opt_usize_lenient")]
     #[schemars(with = "usize")]
     pub limit: Option<usize>,
+    /// Signal budget carried forward naturally from `run_and_watch`.
+    /// This is a real output cap; when `limit` is also present, the stricter
+    /// value wins.
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
+    pub max_signals: Option<usize>,
     /// Wait timeout in milliseconds. Clamped at the daemon.
     #[serde(default, deserialize_with = "de_opt_u64_lenient")]
     #[schemars(with = "u64")]
@@ -4748,12 +4757,19 @@ impl McpBucketWaitParams {
             Some(s) => Some(parse_severity_filter(&s)?),
             None => None,
         };
+        let max_signals = self
+            .max_signals
+            .map(|cap| cap.min(RUN_AND_WATCH_MAX_SIGNALS));
+        let limit = match (self.limit, max_signals) {
+            (Some(limit), Some(max_signals)) => Some(limit.min(max_signals)),
+            (limit, max_signals) => limit.or(max_signals),
+        };
         Ok(BucketWaitParams {
             bucket_id,
             cursor: self.cursor,
             severity_min,
             kind_filter: self.kind_filter,
-            limit: self.limit,
+            limit,
             timeout_ms: self.timeout_ms,
         })
     }
@@ -5316,11 +5332,11 @@ pub struct McpFileWriteParams {
 /// MCP-facing parameters for `file_search`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpFileSearchParams {
-    /// Absolute path to the single regular file to search (e.g.
-    /// `/home/u/project/Cargo.toml`). This is a per-file search, not a
-    /// directory walk. Absolute is required: the daemon has no workspace
-    /// root, so a relative path is rejected rather than resolved against
-    /// the daemon's working directory.
+    /// Absolute path to a regular file or directory tree to search (e.g.
+    /// `/home/u/project`). Directory searches recurse deterministically,
+    /// reapply read policy per file, and never follow links. Absolute is
+    /// required: the daemon has no workspace root, so a relative path is
+    /// rejected rather than resolved against the daemon's working directory.
     pub path: String,
     /// The match expression: a plain SUBSTRING (literal), NOT a regex.
     /// Regex metacharacters are matched literally. Use `case_insensitive`
@@ -5824,9 +5840,14 @@ mod tests {
     }
 
     #[test]
-    fn shorthand_reserved_kind_teaches_live_set() {
-        let err = finalize_one(r#"{"keywords": ["x"], "kind": "exit_code"}"#).unwrap_err();
-        assert!(err.contains("keyword, regex"), "{err}");
+    fn shorthand_natural_kind_becomes_event_kind_and_infers_matcher() {
+        let def =
+            finalize_one(r#"{"pattern":"test result:.*","kind":"test_result","severity":"info"}"#)
+                .expect("a non-matcher kind should name the emitted event");
+
+        assert_eq!(def.kind, RuleType::Regex);
+        assert_eq!(def.event_kind, "test_result");
+        def.validate().unwrap();
     }
 
     #[test]
@@ -5854,6 +5875,30 @@ mod tests {
             Some(terminal_commander_core::SourceStream::Stderr)
         );
         def.validate().unwrap();
+    }
+
+    #[test]
+    fn wait_max_signals_is_a_real_wire_cap() {
+        let params: McpBucketWaitParams = serde_json::from_value(serde_json::json!({
+            "bucket_id": "bkt_00000000000000000000000000000001",
+            "cursor": 4,
+            "max_signals": 30
+        }))
+        .expect("wait should accept the run_and_watch signal budget");
+        assert_eq!(params.into_ipc().unwrap().limit, Some(30));
+
+        let params: McpBucketWaitParams = serde_json::from_value(serde_json::json!({
+            "bucket_id": "bkt_00000000000000000000000000000001",
+            "cursor": 4,
+            "limit": 12,
+            "max_signals": 30
+        }))
+        .unwrap();
+        assert_eq!(
+            params.into_ipc().unwrap().limit,
+            Some(12),
+            "the stricter of two caller-provided caps must win"
+        );
     }
 
     #[test]

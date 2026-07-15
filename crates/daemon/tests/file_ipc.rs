@@ -234,6 +234,9 @@ fn file_search_returns_bounded_matches() {
         assert_eq!(r.matches[0].line, 2);
         assert_eq!(r.matches[1].line, 5);
         assert!(r.matches[0].snippet.contains("needle"));
+        assert!(r.matches.iter().all(|m| m.path.is_none()));
+        assert_eq!(r.files_scanned, None);
+        assert_eq!(r.entries_skipped, None);
 
         // Case-insensitive: 3 matches.
         let resp = client
@@ -275,6 +278,56 @@ fn file_search_returns_bounded_matches() {
         };
         assert_eq!(r.matches.len(), 1);
         assert!(r.truncated);
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
+fn file_search_accepts_a_directory_and_finds_nested_files() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let root = data.join("search-tree");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested search tree");
+        write_text(&root.join("root.txt"), "needle at root\n");
+        write_text(&nested.join("child.txt"), "needle in child\n");
+        write_text(&nested.join("quiet.txt"), "nothing here\n");
+
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileSearch(FileSearchParams {
+                    path: root.clone(),
+                    query: "needle".to_owned(),
+                    case_insensitive: None,
+                    max_matches: Some(10),
+                    max_snippet_bytes: None,
+                }),
+            )
+            .await
+            .expect("directory search");
+        let result = match resp {
+            IpcResponse::FileSearch(result) => result,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        assert_eq!(result.path, root);
+        assert_eq!(result.matches.len(), 2);
+        assert!(result.matches.iter().any(|m| {
+            m.path.as_deref() == Some(root.join("root.txt").as_path()) && m.snippet.contains("root")
+        }));
+        assert!(result.matches.iter().any(|m| {
+            m.path.as_deref() == Some(nested.join("child.txt").as_path())
+                && m.snippet.contains("child")
+        }));
+        assert_eq!(result.files_scanned, Some(3));
+        assert_eq!(result.entries_skipped, Some(0));
+        assert!(!result.truncated);
 
         handle.shutdown().await;
         cleanup(&data);

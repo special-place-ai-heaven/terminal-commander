@@ -893,7 +893,7 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
             .iter()
             .map(|m| (*m).to_owned())
             .collect(),
-        environment: Box::new(crate::environment::discover_host_environment()),
+        environment: Box::new(state.discover_environment()),
     })
 }
 
@@ -1257,6 +1257,7 @@ mod tests {
                 job_id: JobId::new(),
                 max_lines: 1,
                 max_bytes: 1,
+                strip_ansi: false,
             }),
             IpcRequest::ShellExec(ShellExecParams {
                 shell_line: "echo a | wc -c".to_owned(),
@@ -1477,5 +1478,29 @@ mod tests {
                 "system_discover must advertise '{m}'"
             );
         }
+    }
+
+    #[test]
+    fn system_discover_routes_obey_the_active_shell_capability() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let config = crate::config::DaemonConfig::defaults_in(data.path());
+        let state = Arc::new(DaemonState::bootstrap(config).expect("daemon bootstrap"));
+        assert!(!state.policy.caps_allow_shell());
+
+        let IpcResponse::SystemDiscover(response) = handle_system_discover(&state) else {
+            panic!("system_discover response");
+        };
+        assert!(
+            response
+                .environment
+                .access_routes
+                .iter()
+                .all(|route| matches!(route.kind.as_str(), "direct_argv" | "wsl_argv")),
+            "default policy must not advertise a shell route"
+        );
+        assert_eq!(
+            response.environment.beachhead,
+            response.environment.access_routes.first().cloned()
+        );
     }
 }

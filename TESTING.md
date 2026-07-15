@@ -55,7 +55,7 @@ cargo hack check --workspace --each-feature --no-dev-deps
 cargo hack check --workspace --rust-version
 
 # 6. Tests (nextest for unit + integration; cargo test for doctests).
-cargo nextest run --workspace --profile ci
+cargo nextest run --workspace
 cargo test --workspace --doc
 
 # 7. Unused-dep audit.
@@ -114,7 +114,7 @@ the goal commits.
 Pre-commit subset PLUS:
 
 ```bash
-cargo nextest run -p terminal-commander-mcp --tests --profile ci
+cargo nextest run -p terminal-commander-mcp --tests
 # Each new MCP tool must have at least one integration test that
 # exercises it through the daemon IPC end (not just a unit test
 # of the MCP-side handler).
@@ -125,7 +125,7 @@ cargo nextest run -p terminal-commander-mcp --tests --profile ci
 Pre-commit subset PLUS:
 
 ```bash
-cargo nextest run -p terminal-commanderd --tests --profile ci
+cargo nextest run -p terminal-commanderd --tests
 # Probe / job / bucket goals also run their integration fixture
 # from tests/fixtures/<category>/ end-to-end.
 ```
@@ -135,7 +135,7 @@ cargo nextest run -p terminal-commanderd --tests --profile ci
 Pre-commit subset PLUS:
 
 ```bash
-cargo nextest run -p terminal-commander-probes --tests --profile ci
+cargo nextest run -p terminal-commander-probes --tests
 # File-probe goals MUST add at least one PollWatcher test (WSL /mnt/c
 # emulation via fixture mountinfo) — see fixtures/probes/wsl-mountinfo/.
 ```

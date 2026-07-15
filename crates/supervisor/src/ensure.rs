@@ -179,8 +179,18 @@ pub struct EnsureDaemonOptions {
 pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
     let start = Instant::now();
 
-    // 1. Cheap pre-lock probe (fast path: a daemon is already up).
-    if probe_endpoint(&opts.endpoint).await {
+    // 1. Cheap pre-lock probe (fast path: a daemon is already up). A caller
+    // that forbids spawning is already on its only access route, so honor its
+    // selected startup deadline instead of hiding a shorter internal cutoff.
+    let initial_probe_timeout = if opts.allow_spawn {
+        PROBE_TIMEOUT
+    } else {
+        opts.startup_timeout
+    };
+    if probe_endpoint_health_with_timeout(&opts.endpoint, initial_probe_timeout)
+        .await
+        .is_some()
+    {
         return EnsureDaemonStatus::AlreadyRunning {
             endpoint: opts.endpoint,
             pid: None,
@@ -462,12 +472,9 @@ fn pipe_open_error_is_busy(err: &std::io::Error) -> bool {
 /// creates the next one, and `CreateFile` reports that gap as NOT_FOUND
 /// (not BUSY). A single-shot probe therefore misreports a live daemon as
 /// `EndpointBindFailed` under connection churn (S7 residual: CLI tests
-/// probing a freshly-bound test daemon flaked exactly here). The probe
-/// retries NOT_FOUND a bounded number of times; a genuinely-down daemon
-/// only pays `PIPE_NOT_FOUND_RETRIES x PIPE_BUSY_RETRY_DELAY_MS` extra.
-#[cfg(windows)]
-const PIPE_NOT_FOUND_RETRIES: u32 = 8;
-
+/// probing a freshly-bound test daemon flaked exactly here). The enclosing
+/// `PROBE_TIMEOUT` is the one authoritative bound for both BUSY and NOT_FOUND
+/// retries.
 /// Classify a Windows pipe-open error as the instance-gap shape
 /// (`ERROR_FILE_NOT_FOUND`, OS error 2).
 #[cfg(windows)]
@@ -626,9 +633,12 @@ pub async fn probe_endpoint(endpoint: &Endpoint) -> bool {
 /// I/O error, oversize/short frame, non-Health payload, or timeout — i.e.
 /// "not our daemon" or unreachable.
 ///
-/// The entire handshake is bounded by [`PROBE_TIMEOUT`]; a hung or silent
-/// peer returns `None` and never hangs the caller.
-pub async fn probe_endpoint_health(endpoint: &Endpoint) -> Option<ProbeHealth> {
+/// The entire handshake is bounded by the caller-selected `timeout`; a hung or
+/// silent peer returns `None` and never hangs the caller.
+async fn probe_endpoint_health_with_timeout(
+    endpoint: &Endpoint,
+    timeout: Duration,
+) -> Option<ProbeHealth> {
     let handshake = async {
         match endpoint {
             #[cfg(unix)]
@@ -654,23 +664,16 @@ pub async fn probe_endpoint_health(endpoint: &Endpoint) -> Option<ProbeHealth> {
                 // the outer PROBE_TIMEOUT still bounds the whole probe.
                 // Any other open error IS a genuine unreachable peer.
                 use tokio::net::windows::named_pipe::ClientOptions;
-                let mut not_found_left = PIPE_NOT_FOUND_RETRIES;
                 loop {
                     match ClientOptions::new().open(name.as_str()) {
                         Ok(stream) => break health_handshake(stream).await,
-                        Err(e) if pipe_open_error_is_busy(&e) => {
+                        Err(e)
+                            if pipe_open_error_is_busy(&e) || pipe_open_error_is_not_found(&e) =>
+                        {
                             tokio::time::sleep(Duration::from_millis(PIPE_BUSY_RETRY_DELAY_MS))
                                 .await;
-                            // Loop: the outer timeout caps total wait.
-                        }
-                        Err(e) if pipe_open_error_is_not_found(&e) && not_found_left > 0 => {
-                            // Momentary instance gap (see PIPE_NOT_FOUND_RETRIES):
-                            // a live daemon's accept loop is between "client
-                            // connected" and "next instance created". Bounded
-                            // retry so a genuinely-down daemon still fails fast.
-                            not_found_left -= 1;
-                            tokio::time::sleep(Duration::from_millis(PIPE_BUSY_RETRY_DELAY_MS))
-                                .await;
+                            // Loop: the outer timeout caps both transient
+                            // named-pipe gap shapes.
                         }
                         Err(_) => break None,
                     }
@@ -683,7 +686,12 @@ pub async fn probe_endpoint_health(endpoint: &Endpoint) -> Option<ProbeHealth> {
 
     // Bound EVERYTHING: connect + write + read. A silent peer that never
     // answers must make the probe return None, never hang.
-    (tokio::time::timeout(PROBE_TIMEOUT, handshake).await).unwrap_or(None)
+    (tokio::time::timeout(timeout, handshake).await).unwrap_or(None)
+}
+
+/// Probe an endpoint using the supervisor's bounded fast-path deadline.
+pub async fn probe_endpoint_health(endpoint: &Endpoint) -> Option<ProbeHealth> {
+    probe_endpoint_health_with_timeout(endpoint, PROBE_TIMEOUT).await
 }
 
 #[cfg(test)]

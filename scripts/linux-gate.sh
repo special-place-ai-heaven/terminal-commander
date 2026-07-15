@@ -35,6 +35,7 @@ wf_pin="$(grep -E 'RUST_TOOLCHAIN:' .github/workflows/npm-binary-build.yml | hea
 [ "$wf_pin" = "$exp" ] || { echo "tc-gate: workflow RUST_TOOLCHAIN ($wf_pin) != rust-toolchain.toml channel ($exp)" >&2; exit 1; }
 
 echo "== verify-optional-dependencies =="; node scripts/release/verify-optional-dependencies.js
+echo "== verify crate release-note synthesis =="; bash scripts/release/test-synthesize-crates-release-trigger.sh
 echo "== fmt ==";    cargo fmt --all --check
 echo "== clippy =="; cargo clippy --workspace --all-targets -- -D warnings
 echo "== nextest =="; cargo nextest run --workspace

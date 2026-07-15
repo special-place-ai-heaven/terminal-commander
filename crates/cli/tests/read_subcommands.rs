@@ -53,6 +53,30 @@ fn tmp_data_dir(tag: &str) -> PathBuf {
     p
 }
 
+fn wait_for_daemon_ready(endpoint: &str, timeout: Duration) -> bool {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("readiness runtime");
+    let client = DaemonClient::new(endpoint).with_timeout(Duration::from_millis(250));
+    let deadline = Instant::now() + timeout;
+    let mut correlation_id = 1;
+
+    loop {
+        if matches!(
+            runtime.block_on(client.call(correlation_id, IpcRequest::Health)),
+            Ok(IpcResponse::Health { .. })
+        ) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        correlation_id += 1;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// A live daemon under an isolated state dir. Owns cleanup on drop.
 struct LiveDaemon {
     child: std::process::Child,
@@ -63,8 +87,8 @@ struct LiveDaemon {
 }
 
 impl LiveDaemon {
-    /// Spawn a daemon in ipc-server mode, wait for it to bind (pidfile appears),
-    /// and read back the endpoint it recorded.
+    /// Spawn a daemon in ipc-server mode, wait for its recorded endpoint to
+    /// answer a health request, and return the live fixture.
     fn spawn(tag: &str) -> Self {
         let base = tmp_data_dir(tag);
         // S7: the TC_SESSION token must be UNIQUE PER TEST PROCESS. On
@@ -110,7 +134,7 @@ impl LiveDaemon {
             .env_remove("TC_SOCKET")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn daemon");
 
@@ -132,6 +156,13 @@ impl LiveDaemon {
         let endpoint = read_pidfile_raw(&state_dir)
             .expect("pidfile present after bind")
             .endpoint;
+        if !wait_for_daemon_ready(&endpoint, Duration::from_secs(5)) {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_dir_all(&base);
+            panic!("daemon endpoint never became responsive: {endpoint}");
+        }
 
         Self {
             child,

@@ -16,7 +16,7 @@ reachability, and the live tool catalogue:
 
 ```json
 {
-  "adapter_version": "0.1.80",
+  "adapter_version": "<installed version>",
   "mcp_spec": "2025-11-25",
   "daemon_available": false,
   "daemon": null,
@@ -43,12 +43,16 @@ reachability, and the live tool catalogue:
 When the daemon is reachable, `daemon.environment` is a fresh bounded snapshot,
 not a platform guess. It reports terminal markers, installed shell/PowerShell
 paths and versions, WSL state, and common tool probes. Its `access_routes` list
-contains confirmed-only interpreter routes in preference order. Each route has
-a stable id, absolute executable, interpreter family, evidence, and exact
-`argv_template` ending in `{command}`. `beachhead` repeats the highest-ranked
-route so an LLM can establish a working execution path without synthesizing
-flags. WSL is promoted to a route only after a sentinel command succeeds within
-the probe deadline.
+contains confirmed-only routes filtered against the active shell capability.
+Each route has a stable id, absolute executable, family, evidence, and exact
+`argv_template`: `direct_argv` and `wsl_argv` end in `{args...}`, while
+shell-backed routes end in `{command}`. `beachhead` repeats the highest-ranked
+surviving route so an LLM can establish a working execution path without
+synthesizing flags. When `allow_shell` is off, shell routes are omitted rather
+than advertised with an unusable remedy; confirmed direct argv routes remain.
+Normal command/path policy checks still apply after the caller supplies the
+concrete argv and cwd. WSL is promoted only after a sentinel command succeeds
+within the probe deadline.
 
 Availability rules:
 
@@ -102,6 +106,12 @@ route to the same handlers and policy boundary.
 | PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` (POSIX + Windows ConPTY) |
 | Remote | `target_list`, `target_probe` (routes to an operator-forwarded local socket; remote use gated by `allow_remote`; no public TCP) |
 | Runtime | `runtime_state`, `probe_list`, `probe_status` |
+
+`command_output_tail` accepts optional `strip_ansi`; stripping affects only the
+returned rendering and never mutates the raw frame store. `file_search` accepts
+either an absolute regular file or directory. Directory searches are recursive,
+deterministic, policy-checked per candidate file, symlink-safe, and bounded by
+match, byte, and visited-entry ceilings.
 
 Remote routing surface (`target_id`):
 
