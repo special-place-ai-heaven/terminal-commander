@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.81](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.80...v0.1.81) (2026-07-15)
+
+
+### Bug Fixes
+
+* 2 crate fixes -- prevent adapter EOFs and compact runtime state (+1 more) ([8468d79](https://github.com/special-place-ai-heaven/terminal-commander/commit/8468d7933ac26cf80588e9caaf3121bfe9701fee))
+
 ## [0.1.80](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.79...v0.1.80) (2026-07-14)
 
 Version 0.1.80 changes 43 files with 1,731 additions and 244 deletions.
