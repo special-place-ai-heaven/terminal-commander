@@ -2,10 +2,46 @@
 
 ## [0.1.81](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.80...v0.1.81) (2026-07-15)
 
+Version 0.1.81 changes 28 files with 475 additions and 232 deletions from
+v0.1.80.
 
-### Bug Fixes
+### Windows adapter transport stability
 
-* 2 crate fixes -- prevent adapter EOFs and compact runtime state (+1 more) ([8468d79](https://github.com/special-place-ai-heaven/terminal-commander/commit/8468d7933ac26cf80588e9caaf3121bfe9701fee))
+* The Windows named-pipe accept loop now reaps completed connection tasks before
+  creating its next pipe instance. This prevents a completed task from winning
+  the same wait as a pending connection and dropping the newly accepted client
+  ([63322a9](https://github.com/special-place-ai-heaven/terminal-commander/commit/63322a91d4dcdeee9a6b35f00d7185840adec6f4)).
+* Intermittent adapter `read length: early eof` failures no longer interrupt an
+  otherwise healthy daemon. Headless jobs remain daemon-owned across MCP
+  interruption, so reconnecting recovers the original job without starting a
+  duplicate process.
+
+### Compact live runtime state
+
+* `runtime_state` and `probe_list` now report only command and PTY probes that
+  are starting or running. Exited, failed, cancelled, and stopped bindings no
+  longer crowd the aggregate live view.
+* `runtime_state` includes only buckets referenced by live probes instead of
+  hundreds of retained historical buckets. Explicit per-job lifecycle lookups
+  remain available, and file-watch and active-rule reporting are unchanged
+  ([63322a9](https://github.com/special-place-ai-heaven/terminal-commander/commit/63322a91d4dcdeee9a6b35f00d7185840adec6f4)).
+
+### Public documentation accuracy
+
+* README now describes the current five-facade compact surface, 51-tool full
+  surface, environment-discovery beachhead, installation paths, configuration,
+  recovery behavior, and operating limits as current product facts.
+* The MCP contract, integration index, omni playbook, roadmap, specification,
+  and IPC protocol descriptions now use the same current tool counts and
+  capability boundaries, including audit reads and subscriptions
+  ([333f5c8](https://github.com/special-place-ai-heaven/terminal-commander/commit/333f5c8)).
+
+### Release packaging
+
+* Workspace crate versions, the npm wrapper and lockfile, and all five native
+  platform package manifests are synchronized at 0.1.81
+  ([ab962d2](https://github.com/special-place-ai-heaven/terminal-commander/commit/ab962d2),
+  [67f5a19](https://github.com/special-place-ai-heaven/terminal-commander/commit/67f5a19)).
 
 ## [0.1.80](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.79...v0.1.80) (2026-07-14)
 
