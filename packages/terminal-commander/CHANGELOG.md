@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.83](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.82...v0.1.83) (2026-07-15)
+
+
+### Bug Fixes
+
+* **mcp:** accept natural wait requests on compact run ([393a767](https://github.com/special-place-ai-heaven/terminal-commander/commit/393a767cd5d1a29719b0ae7585e72d65df6f3c3c))
+* **mcp:** make remote readiness health-signaled ([a169066](https://github.com/special-place-ai-heaven/terminal-commander/commit/a1690669a515c267f05296670d92822c94bafad9))
+* **mcp:** prevent environment discovery from timing out early ([393a767](https://github.com/special-place-ai-heaven/terminal-commander/commit/393a767cd5d1a29719b0ae7585e72d65df6f3c3c))
+
 ## [0.1.82](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.81...v0.1.82) (2026-07-15)
 
 
