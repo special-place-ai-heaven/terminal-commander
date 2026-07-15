@@ -265,9 +265,8 @@ pub(in crate::ipc::server) fn handle_pty_command_list(state: &Arc<DaemonState>) 
         .pty
         .list()
         .into_iter()
-        // The binding lingers after exit so `collect_probes` can report a
-        // terminal liveness; the operator-facing live list excludes terminal
-        // jobs (Exited/Failed/Cancelled) so it shows only currently-live PTYs.
+        // The binding lingers after exit for per-job lifecycle lookups; the
+        // operator-facing live list excludes terminal jobs.
         .filter(|(job_id, ..)| {
             !matches!(
                 state.pty.liveness(*job_id),

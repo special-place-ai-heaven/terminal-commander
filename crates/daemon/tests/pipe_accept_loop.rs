@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use terminal_commanderd::ipc::pipe_server::PipeServer;
-use terminal_commanderd::{DaemonConfig, DaemonState};
+use terminal_commanderd::{DaemonClient, DaemonConfig, DaemonState, IpcRequest, IpcResponse};
 use tokio::net::windows::named_pipe::ClientOptions;
 use tokio::time::sleep;
 
@@ -64,6 +64,35 @@ async fn first_and_second_client_both_connect() {
     sleep(Duration::from_millis(50)).await;
     let c2 = ClientOptions::new().open(&pipe_name).expect("c2 connect");
     drop(c2);
+
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
+#[tokio::test]
+async fn completed_connections_cannot_drop_the_pending_pipe() {
+    let pipe_name = format!(
+        r"\\.\pipe\tc-test-accept-churn-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    );
+    let (state, data) = make_state("accept-churn");
+    let handle = PipeServer::new(state, pipe_name.clone())
+        .spawn()
+        .expect("spawn pipe server");
+    sleep(Duration::from_millis(50)).await;
+
+    let client = DaemonClient::new(PathBuf::from(&pipe_name)).with_timeout(Duration::from_secs(3));
+    for id in 1..=128 {
+        let response = client.call(id, IpcRequest::Health).await;
+        assert!(
+            matches!(response, Ok(IpcResponse::Health { .. })),
+            "every accepted pipe must return its response; call {id}: {response:?}"
+        );
+    }
 
     handle.shutdown().await;
     cleanup(&data);

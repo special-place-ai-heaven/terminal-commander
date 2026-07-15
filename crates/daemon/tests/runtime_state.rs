@@ -268,19 +268,18 @@ fn probe_status_unknown_probe_returns_typed_error() {
     });
 }
 
-// MUST-ADD #3: an exited command must report `Exited{code}` derived from
-// the job ledger (JobState), NOT `Running` from lingering live-map
-// presence (command bindings are never removed from the live map after
-// exit). `/usr/bin/true` exits 0 immediately.
+// Runtime status is a live-only view. Historical command status remains
+// addressable by job id, but exited probes and their buckets must not bury
+// active work in aggregate listings.
 #[test]
-fn exited_command_reports_exited_liveness_from_jobstate() {
+fn exited_command_is_excluded_from_live_runtime_views() {
     let runtime = rt();
     runtime.block_on(async {
         let (data, _state, handle) = build_server();
         let client = DaemonClient::new(handle.socket_path().to_path_buf())
             .with_timeout(Duration::from_secs(3));
 
-        let _ = client
+        let start = client
             .call(
                 1,
                 IpcRequest::CommandStartCombed(terminal_commanderd::CommandStartParams {
@@ -298,42 +297,62 @@ fn exited_command_reports_exited_liveness_from_jobstate() {
             )
             .await
             .expect("command_start_combed");
+        let job_id = match start {
+            IpcResponse::CommandStartCombed(r) => r.job_id,
+            other => panic!("unexpected: {other:?}"),
+        };
 
-        // Poll runtime_state until the lingering command probe reports a
-        // terminal liveness. Presence in the live map is unconditional;
-        // the liveness must flip to Exited once the waiter calls finish().
-        let mut found: Option<Liveness> = None;
+        // Wait for the authoritative per-job status to become terminal.
         for i in 2..60 {
             tokio::time::sleep(Duration::from_millis(40)).await;
             let resp = client
                 .call(
                     i,
-                    IpcRequest::RuntimeState(terminal_commanderd::ListLimitParams::default()),
+                    IpcRequest::CommandStatus(terminal_commanderd::CommandStatusParams { job_id }),
                 )
                 .await
-                .expect("runtime_state");
-            let r = match resp {
-                IpcResponse::RuntimeState(r) => r,
+                .expect("command_status");
+            let status = match resp {
+                IpcResponse::CommandStatus(r) => r,
                 other => panic!("unexpected: {other:?}"),
             };
-            if let Some(p) = r
-                .probes
-                .iter()
-                .find(|p| matches!(p.kind, ProbeKind::Command))
-            {
-                // The probe lingers regardless of state; wait for terminal.
-                if !matches!(p.liveness, Liveness::Starting | Liveness::Running) {
-                    found = Some(p.liveness.clone());
-                    break;
-                }
+            if !matches!(
+                status.state,
+                terminal_commander_core::JobState::Starting
+                    | terminal_commander_core::JobState::Running
+            ) {
+                break;
             }
         }
 
-        assert_eq!(
-            found,
-            Some(Liveness::Exited { code: 0 }),
-            "exited `true` must report Exited code 0 (not Running from live-map presence)"
-        );
+        let runtime = client
+            .call(
+                62,
+                IpcRequest::RuntimeState(terminal_commanderd::ListLimitParams::default()),
+            )
+            .await
+            .expect("runtime_state");
+        let runtime = match runtime {
+            IpcResponse::RuntimeState(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(runtime.command_jobs, 0);
+        assert_eq!(runtime.bucket_count, 0);
+        assert!(runtime.probes.is_empty());
+        assert!(runtime.buckets.is_empty());
+
+        let probes = client
+            .call(
+                63,
+                IpcRequest::ProbeList(terminal_commanderd::ListLimitParams::default()),
+            )
+            .await
+            .expect("probe_list");
+        let probes = match probes {
+            IpcResponse::ProbeList(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(probes.probes.is_empty());
 
         handle.shutdown().await;
         cleanup(&data);
@@ -452,14 +471,14 @@ fn runtime_state_command_probe_carries_tag_and_redacted_argv_head() {
 // terminal state. PTY cannot run a shell interpreter, so use python3 with an
 // explicit exit code.
 #[test]
-fn exited_pty_reports_exited_liveness_from_jobstate() {
+fn exited_pty_is_excluded_from_live_runtime_views() {
     if !python3_available() {
         eprintln!("skipping: python3 not on PATH");
         return;
     }
     let runtime = rt();
     runtime.block_on(async {
-        let (data, _state, handle) = build_server();
+        let (data, state, handle) = build_server();
         let client = DaemonClient::new(handle.socket_path().to_path_buf())
             .with_timeout(Duration::from_secs(3));
 
@@ -490,30 +509,13 @@ fn exited_pty_reports_exited_liveness_from_jobstate() {
             other => panic!("unexpected: {other:?}"),
         };
 
-        // Poll runtime_state until the lingering PTY probe reports a terminal
-        // liveness. Presence in the live map is unconditional; the liveness
-        // must flip to Exited once the lifecycle waiter calls finish().
-        let mut found: Option<Liveness> = None;
-        for i in 2..80 {
+        // Wait for the authoritative per-job liveness to become terminal.
+        let mut found = None;
+        for _ in 2..80 {
             tokio::time::sleep(Duration::from_millis(40)).await;
-            let resp = client
-                .call(
-                    i,
-                    IpcRequest::RuntimeState(terminal_commanderd::ListLimitParams::default()),
-                )
-                .await
-                .expect("runtime_state");
-            let r = match resp {
-                IpcResponse::RuntimeState(r) => r,
-                other => panic!("unexpected: {other:?}"),
-            };
-            if let Some(p) = r
-                .probes
-                .iter()
-                .find(|p| matches!(p.kind, ProbeKind::Pty) && p.job_id == started.job_id)
-                && !matches!(p.liveness, Liveness::Starting | Liveness::Running)
-            {
-                found = Some(p.liveness.clone());
+            let liveness = state.pty.liveness(started.job_id);
+            if !matches!(liveness, Liveness::Starting | Liveness::Running) {
+                found = Some(liveness);
                 break;
             }
         }
@@ -521,8 +523,37 @@ fn exited_pty_reports_exited_liveness_from_jobstate() {
         assert_eq!(
             found,
             Some(Liveness::Exited { code: 0 }),
-            "an exited PTY must report Exited code 0 (not Running from live-map presence)"
+            "the per-job lifecycle must retain the PTY's clean exit status"
         );
+
+        let runtime = client
+            .call(
+                82,
+                IpcRequest::RuntimeState(terminal_commanderd::ListLimitParams::default()),
+            )
+            .await
+            .expect("runtime_state");
+        let runtime = match runtime {
+            IpcResponse::RuntimeState(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(runtime.pty_jobs, 0);
+        assert_eq!(runtime.bucket_count, 0);
+        assert!(runtime.probes.is_empty());
+        assert!(runtime.buckets.is_empty());
+
+        let probes = client
+            .call(
+                83,
+                IpcRequest::ProbeList(terminal_commanderd::ListLimitParams::default()),
+            )
+            .await
+            .expect("probe_list");
+        let probes = match probes {
+            IpcResponse::ProbeList(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(probes.probes.is_empty());
 
         handle.shutdown().await;
         cleanup(&data);

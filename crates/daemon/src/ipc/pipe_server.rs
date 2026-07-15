@@ -221,6 +221,10 @@ async fn accept_loop(
         if *shutdown.borrow() {
             break;
         }
+        // Reap before creating the next pending instance. Reaping inside the
+        // connect select drops `server` when a completed task wins the race;
+        // a client that just opened that instance then observes early EOF.
+        while conns.try_join_next().is_some() {}
         let mut builder = ServerOptions::new();
         if first {
             builder.first_pipe_instance(true);
@@ -274,13 +278,6 @@ async fn accept_loop(
                     break;
                 }
             }
-            // Reap finished connection tasks as they complete so the
-            // JoinSet does not grow without bound under steady load.
-            // Guarded so `join_next` is only polled when non-empty (it
-            // resolves to `None` immediately on an empty set, which
-            // would otherwise busy-spin this branch). Mirrors the Unix
-            // accept loop.
-            Some(_joined) = conns.join_next(), if !conns.is_empty() => {}
             res = server.connect() => {
                 if res.is_ok() {
                     let state = Arc::clone(&state);

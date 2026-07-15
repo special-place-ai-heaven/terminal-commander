@@ -5,6 +5,7 @@
 
 #![cfg(unix)]
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -167,21 +168,33 @@ async fn run_and_watch_threads_tag_and_redacts_argv_head_through_mcp() {
     {
         let (_server, client) = paired_against_live_daemon(&handle).await;
 
-        // run_and_watch a command carrying a tag and a secret in its argv.
-        // `sleep --password <secret>` exits fast on the invalid flag, but the
-        // command binding lingers in the live map so runtime_state can observe
-        // it. The secret sits at head index 2 and is masked by the
-        // `--password` look-ahead in the recorded, redacted argv head.
-        let _ = call_tool(
-            &client,
-            "run_and_watch",
-            serde_json::json!({
-                "argv": ["sleep", "--password", "E2E-SECRET-XYZ"],
-                "tag": "e2e-4b-tag",
-                "wait_ms": 300
-            }),
+        // Keep the command live while runtime_state observes its metadata.
+        let helper = data.join("slow-command.py");
+        std::fs::write(
+            &helper,
+            "#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n",
         )
-        .await;
+        .expect("write helper");
+        let mut permissions = std::fs::metadata(&helper)
+            .expect("helper metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&helper, permissions).expect("make helper executable");
+        let start_payload = first_text(
+            &call_tool(
+                &client,
+                "run_and_watch",
+                serde_json::json!({
+                    "argv": [helper.to_string_lossy(), "--password", "E2E-SECRET-XYZ"],
+                    "tag": "e2e-4b-tag",
+                    "wait_ms": 100
+                }),
+            )
+            .await,
+        );
+        let start: serde_json::Value =
+            serde_json::from_str(&start_payload).expect("run_and_watch json");
+        let job_id = start["job_id"].as_str().expect("run_and_watch job_id");
 
         // Poll runtime_state until a command probe registers (avoid any
         // registration race between the spawn and the live-map insert).
@@ -228,13 +241,20 @@ async fn run_and_watch_threads_tag_and_redacts_argv_head_through_mcp() {
             "argv_head must mask the secret span: {argv_head}"
         );
         assert!(
-            argv_head.contains("sleep"),
+            argv_head.contains("slow-command.py"),
             "argv_head must keep the program name: {argv_head}"
         );
         assert!(
             argv_head.contains("--password"),
             "argv_head must keep the flag name: {argv_head}"
         );
+
+        let _ = call_tool(
+            &client,
+            "command_stop",
+            serde_json::json!({"job_id": job_id}),
+        )
+        .await;
 
         let _ = client.cancel().await;
     }

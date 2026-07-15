@@ -17,11 +17,14 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
     for j in state.command.live_jobs() {
         let status = state.command.status(j.job_id).ok();
         // Liveness is the authoritative JobState from the ledger, NOT
-        // live-map presence (bindings linger after exit). Missing status
-        // (job dropped between live_jobs() and status()) -> Running.
+        // live-map presence (bindings linger after exit). Terminal bindings
+        // are excluded below. Missing status -> Running.
         let liveness = status.as_ref().map_or(Liveness::Running, |s| {
             crate::liveness::command_liveness(s.state, s.exit_code, s.signal.clone())
         });
+        if !matches!(liveness, Liveness::Starting | Liveness::Running) {
+            continue;
+        }
         out.push(ProbeListEntry {
             kind: ProbeKind::Command,
             job_id: j.job_id,
@@ -73,9 +76,13 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
     // PtyRuntime: list returns (job_id, bucket_id, probe_id, argv, metrics, secret_active).
     // The binding lingers after exit (like command's), so liveness is the
     // authoritative JobState from the ledger via `PtyRuntime::liveness`, NOT
-    // live-map presence: a terminated PTY reports Exited{code}/Failed/Cancelled.
+    // live-map presence. Terminal bindings are excluded below.
     #[cfg(any(unix, windows))]
     for (jid, bid, pid, argv, m, secret) in state.pty.list() {
+        let liveness = state.pty.liveness(jid);
+        if !matches!(liveness, Liveness::Starting | Liveness::Running) {
+            continue;
+        }
         out.push(ProbeListEntry {
             kind: ProbeKind::Pty,
             job_id: jid,
@@ -89,7 +96,7 @@ pub(in crate::ipc::server) fn collect_probes(state: &Arc<DaemonState>) -> Vec<Pr
             secret_prompts_total: m.secret_prompts_total,
             secret_prompt_active: secret,
             path: None,
-            liveness: state.pty.liveness(jid),
+            liveness,
             // TC-4: redact the PTY's argv head at read time (it is not stored
             // pre-redacted like command's binding). `pty.list()` previously
             // discarded this argv.
@@ -134,11 +141,15 @@ pub(in crate::ipc::server) fn handle_runtime_state(
     )
     .unwrap_or(u32::MAX);
 
-    // Bucket counters: walk every live bucket via the new
-    // `BucketManager::list_bucket_ids`. `summary` runs TTL eviction
-    // and returns the bounded counters we surface.
+    // Runtime state is live-only: retained buckets remain addressable by id,
+    // but aggregate status includes only buckets owned by a live probe.
+    let live_bucket_ids: std::collections::HashSet<_> =
+        probes.iter().map(|probe| probe.bucket_id).collect();
     let mut buckets: Vec<RuntimeBucketSummary> = Vec::new();
     for bid in state.buckets.list_bucket_ids() {
+        if !live_bucket_ids.contains(&bid) {
+            continue;
+        }
         if let Ok(s) = state.buckets.summary(bid) {
             buckets.push(RuntimeBucketSummary {
                 bucket_id: bid,
