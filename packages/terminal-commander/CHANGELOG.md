@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.82](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.81...v0.1.82) (2026-07-15)
+
+
+### Features
+
+* **embed:** expose policy-filtered environment discovery in process ([612017d](https://github.com/special-place-ai-heaven/terminal-commander/commit/612017d99031317948447f1d9fd3185a0a858f9c))
+* **files:** search bounded directory trees safely ([612017d](https://github.com/special-place-ai-heaven/terminal-commander/commit/612017d99031317948447f1d9fd3185a0a858f9c))
+* **mcp:** accept natural rule and continuation inputs ([612017d](https://github.com/special-place-ai-heaven/terminal-commander/commit/612017d99031317948447f1d9fd3185a0a858f9c))
+
+
+### Bug Fixes
+
+* **discovery:** advertise only routes permitted by active policy ([612017d](https://github.com/special-place-ai-heaven/terminal-commander/commit/612017d99031317948447f1d9fd3185a0a858f9c))
+* **ipc:** retry transient named-pipe absence until the call deadline ([612017d](https://github.com/special-place-ai-heaven/terminal-commander/commit/612017d99031317948447f1d9fd3185a0a858f9c))
+* **output:** render ANSI-clean tails without mutating evidence ([612017d](https://github.com/special-place-ai-heaven/terminal-commander/commit/612017d99031317948447f1d9fd3185a0a858f9c))
+* **release:** preserve every releasable crate change in release notes ([612017d](https://github.com/special-place-ai-heaven/terminal-commander/commit/612017d99031317948447f1d9fd3185a0a858f9c))
+* **supervisor:** honor caller-selected daemon readiness deadlines ([612017d](https://github.com/special-place-ai-heaven/terminal-commander/commit/612017d99031317948447f1d9fd3185a0a858f9c))
+
 ## [0.1.81](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.80...v0.1.81) (2026-07-15)
 
 Version 0.1.81 changes 28 files with 475 additions and 232 deletions from
