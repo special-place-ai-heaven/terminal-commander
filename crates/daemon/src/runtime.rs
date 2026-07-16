@@ -331,7 +331,12 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     let handle = server
         .spawn()
         .map_err(|e| RuntimeError::Signal(format!("UDS bind: {e}")))?;
-    write_daemon_pidfile(&state_dir, &endpoint);
+    // Identity-gated claim (same decision logic as the 15s self-heal): a
+    // missing/stale pidfile is written, but a DIFFERENT live daemon's record
+    // is never stolen. Observed 2026-07-16: a second daemon sharing this
+    // state dir under another endpoint seized the pidfile at bind and the
+    // rightful owner WARN-stormed every 15s until the interloper idle-reaped.
+    reassert_pidfile_once(&state_dir, &endpoint, true);
     tracing::info!(
         "IPC server bound. \
          Serving {} IPC methods (authoritative set; query system_discover for the list). \
@@ -408,7 +413,8 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     let handle = server
         .spawn()
         .map_err(|e| RuntimeError::Signal(format!("pipe bind: {e}")))?;
-    write_daemon_pidfile(&state_dir, &pipe_name);
+    // Identity-gated claim; see the Unix arm for the 2026-07-16 rationale.
+    reassert_pidfile_once(&state_dir, &pipe_name, true);
     tracing::info!(
         "IPC server bound (Windows named pipe). \
          Send Ctrl-C to shut down."
@@ -630,7 +636,10 @@ fn reassert_decision(
 /// Run one pidfile self-heal pass: read the current pidfile, decide, and
 /// (re)write it iff the decision says so. Best-effort — a failed write is
 /// logged at warn and never fatal, mirroring [`write_daemon_pidfile`].
-fn reassert_pidfile_once(state_dir: &std::path::Path, endpoint: &str) {
+/// `at_bind` selects the Rewrite arm's log level: the first claim at bind is
+/// INFO (an absent pidfile is the normal case there); a later self-heal
+/// rewrite is WARN (the pidfile went missing while we were serving).
+fn reassert_pidfile_once(state_dir: &std::path::Path, endpoint: &str, at_bind: bool) {
     use terminal_commander_supervisor::pidfile;
     let current = pidfile::read_pidfile_raw(state_dir);
     let decision = reassert_decision(
@@ -642,12 +651,22 @@ fn reassert_pidfile_once(state_dir: &std::path::Path, endpoint: &str) {
     match decision {
         ReassertDecision::LeaveOurs => {}
         ReassertDecision::Rewrite => {
-            tracing::warn!(
-                "pidfile missing or stale at bind endpoint {endpoint}; re-asserting it \
-                 (pid {}, version {})",
-                std::process::id(),
-                env!("CARGO_PKG_VERSION"),
-            );
+            if at_bind {
+                // First claim at bind: absent or stale-dead pidfile is the
+                // NORMAL case (clean shutdown removes it), not an anomaly.
+                tracing::info!(
+                    "pidfile claimed at bind endpoint {endpoint} (pid {}, version {})",
+                    std::process::id(),
+                    env!("CARGO_PKG_VERSION"),
+                );
+            } else {
+                tracing::warn!(
+                    "pidfile missing or stale at bind endpoint {endpoint}; re-asserting it \
+                     (pid {}, version {})",
+                    std::process::id(),
+                    env!("CARGO_PKG_VERSION"),
+                );
+            }
             write_daemon_pidfile(state_dir, endpoint);
         }
         ReassertDecision::AnomalyOurEndpoint { pid } => {
@@ -667,7 +686,7 @@ fn reassert_pidfile_once(state_dir: &std::path::Path, endpoint: &str) {
 
 /// Spawn the periodic pidfile self-heal task.
 ///
-/// The daemon writes its pidfile exactly once at bind; this task re-asserts it
+/// The daemon claims its pidfile once at bind (identity-gated); this task re-asserts it
 /// on a bounded [`PIDFILE_REASSERT_TICK_SECS`] interval whenever it goes missing
 /// (or records a dead pid, or records ours with a drifted endpoint), so the
 /// pidfile-less window the version-aware replace path mis-reads as "stale" never
@@ -683,7 +702,7 @@ fn spawn_pidfile_reasserter(state_dir: std::path::PathBuf, endpoint: String) {
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             iv.tick().await;
-            reassert_pidfile_once(&state_dir, &endpoint);
+            reassert_pidfile_once(&state_dir, &endpoint, false);
         }
     });
 }
@@ -850,7 +869,7 @@ mod tests {
         // No pidfile yet.
         assert!(pidfile::read_pidfile_raw(&data).is_none());
 
-        reassert_pidfile_once(&data, &endpoint);
+        reassert_pidfile_once(&data, &endpoint, false);
 
         let got = pidfile::read_pidfile_raw(&data).expect("pidfile recreated");
         assert_eq!(got.pid, std::process::id());
@@ -873,12 +892,53 @@ mod tests {
         pidfile::write_pidfile(&data, &foreign).unwrap();
 
         let our_endpoint = data.join("tc.sock").display().to_string();
-        reassert_pidfile_once(&data, &our_endpoint);
+        reassert_pidfile_once(&data, &our_endpoint, false);
 
         let after = pidfile::read_pidfile_raw(&data).expect("pidfile still present");
         assert_eq!(
             after, foreign,
             "a foreign live daemon's pidfile must not be overwritten"
+        );
+        cleanup(&data);
+    }
+
+    #[test]
+    fn bind_claim_writes_a_missing_pidfile() {
+        use terminal_commander_supervisor::pidfile;
+        let data = temp_data_dir("bind-claim-missing");
+        std::fs::create_dir_all(&data).unwrap();
+        let endpoint = data.join("tc.sock").display().to_string();
+
+        reassert_pidfile_once(&data, &endpoint, true);
+
+        let got = pidfile::read_pidfile_raw(&data).expect("pidfile claimed at bind");
+        assert_eq!(got.pid, std::process::id());
+        assert_eq!(got.endpoint, endpoint);
+        cleanup(&data);
+    }
+
+    // Regression (2026-07-16): the bind-time pidfile write was unconditional,
+    // so a second daemon sharing this state dir under ANOTHER endpoint seized
+    // the pidfile at bind and the rightful owner WARN-stormed every 15s until
+    // the interloper idle-reaped. The bind claim must use the same identity
+    // gate as the self-heal pass.
+    #[cfg(unix)]
+    #[test]
+    fn bind_claim_does_not_steal_a_foreign_live_pidfile() {
+        use terminal_commander_supervisor::pidfile;
+        let data = temp_data_dir("bind-claim-foreign");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let foreign = rec(1, "/run/SOMEONE_ELSE.sock");
+        pidfile::write_pidfile(&data, &foreign).unwrap();
+
+        let our_endpoint = data.join("tc.sock").display().to_string();
+        reassert_pidfile_once(&data, &our_endpoint, true);
+
+        let after = pidfile::read_pidfile_raw(&data).expect("pidfile still present");
+        assert_eq!(
+            after, foreign,
+            "the bind claim must never steal a live foreign daemon's pidfile"
         );
         cleanup(&data);
     }

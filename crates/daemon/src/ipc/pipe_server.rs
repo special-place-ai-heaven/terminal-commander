@@ -284,7 +284,16 @@ async fn accept_loop(
                     let shutdown_for_conn = shutdown.clone();
                     conns.spawn(async move {
                         if let Err(e) = handle_pipe_connection(server, state, boot, shutdown_for_conn).await {
-                            eprintln!("terminal-commanderd: pipe connection error: {e}");
+                            // Per-connection outcome, never daemon-fatal: a client
+                            // closing its pipe mid-call (os error 232) lands here
+                            // while the accept loop keeps serving. Logged via
+                            // tracing (timestamped, leveled) because the bare
+                            // eprintln! form was misread as a daemon-fatal error
+                            // in the 2026-07-16 AAP feature-019 handoff (TC-01).
+                            tracing::warn!(
+                                "pipe connection ended with error: {e} \
+                                 (a client closing its pipe is benign; the daemon continues serving)"
+                            );
                         }
                     });
                 }
