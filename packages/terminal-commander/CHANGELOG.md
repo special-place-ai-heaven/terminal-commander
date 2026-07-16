@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.84](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.83...v0.1.84) (2026-07-16)
+
+
+### Bug Fixes
+
+* **daemon:** identity-gate bind-time pidfile claim; log pipe closes as benign ([0025fd7](https://github.com/special-place-ai-heaven/terminal-commander/commit/0025fd7113a6798d528a41124d46fdbe5d2c878e))
+* **mcp:** accept singular pattern spelling for keyword rules ([0025fd7](https://github.com/special-place-ai-heaven/terminal-commander/commit/0025fd7113a6798d528a41124d46fdbe5d2c878e))
+* **supervisor:** stop 15s focus-stealing terminal popups via native pid liveness ([0025fd7](https://github.com/special-place-ai-heaven/terminal-commander/commit/0025fd7113a6798d528a41124d46fdbe5d2c878e))
+
 ## [0.1.83](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.82...v0.1.83) (2026-07-15)
 
 
