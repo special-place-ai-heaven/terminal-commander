@@ -1744,15 +1744,18 @@ impl TerminalCommanderMcpServer {
     /// `registry_upsert` — create a new immutable version from a JSON
     /// rule definition.
     #[tool(
-        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword). NOTE: `version` is ASSIGNED by the store (monotonic, latest+1); any value you send is ignored and overwritten, and the assigned version (returned in the response) is the one registry_activate/registry_deactivate operate on. `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords; existing versions are never mutated."
+        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword; kind=keyword also accepts a singular `pattern`, normalized into a one-keyword list). NOTE: `version` is ASSIGNED by the store (monotonic, latest+1); any value you send is ignored and overwritten, and the assigned version (returned in the response) is the one registry_activate/registry_deactivate operate on. `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords; existing versions are never mutated."
     )]
     async fn registry_upsert(
         &self,
         Parameters(params): Parameters<McpRegistryUpsertParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
-        let definition: RuleDefinition = serde_json::from_str(&params.definition_json)
+        let mut definition: RuleDefinition = serde_json::from_str(&params.definition_json)
             .map_err(|e| invalid_params(format!("definition_json: {e}")))?;
+        // TC-02: accept the natural singular spelling here too, so the
+        // registry surface and the inline-rule surface agree on shapes.
+        normalize_keyword_pattern(&mut definition);
         let ipc = RegistryUpsertParams { definition };
         match self.daemon.call(IpcRequest::RegistryUpsert(ipc)).await {
             Ok(IpcResponse::RegistryUpsert(RegistryUpsertResponse { rule_id, version })) => {
@@ -4142,7 +4145,7 @@ impl RuleInput {
             }
         };
 
-        Ok(RuleDefinition {
+        let mut def = RuleDefinition {
             id: self.id.unwrap_or_else(|| {
                 // A purely positional `inline-{index}` collides ACROSS calls:
                 // every call's first id-less rule minted "inline-0", so two
@@ -4178,7 +4181,25 @@ impl RuleInput {
             redact: self.redact,
             context_hint: terminal_commander_core::ContextHint::default(),
             examples: vec![],
-        })
+        };
+        normalize_keyword_pattern(&mut def);
+        Ok(def)
+    }
+}
+
+/// TC-02 (AAP feature-019 handoff, 2026-07-16): `kind=keyword` with the
+/// singular `pattern` field (and no `keywords`) is the natural LLM spelling
+/// of a one-keyword rule — regex and the natural-kind shapes all use the
+/// singular field. Move the pattern into the canonical keywords list so
+/// validation accepts it instead of bouncing the call on the daemon's
+/// "requires a non-empty keywords list". A non-empty `keywords` stays
+/// authoritative; `pattern` is then left untouched.
+fn normalize_keyword_pattern(def: &mut RuleDefinition) {
+    if def.kind == RuleType::Keyword
+        && def.keywords.as_deref().unwrap_or(&[]).is_empty()
+        && def.pattern.as_deref().is_some_and(|p| !p.is_empty())
+    {
+        def.keywords = def.pattern.take().map(|p| vec![p]);
     }
 }
 
@@ -5836,6 +5857,36 @@ mod tests {
     fn shorthand_keywords_only_infers_keyword_kind() {
         let def = finalize_one(r#"{"keywords": ["panic", "FAILED"]}"#).unwrap();
         assert_eq!(def.kind, RuleType::Keyword);
+        def.validate().unwrap();
+    }
+
+    #[test]
+    fn shorthand_keyword_kind_with_singular_pattern_normalizes() {
+        // TC-02 (AAP feature-019 handoff, 2026-07-16): the natural spelling
+        // `{"kind":"keyword","pattern":"..."}` used to build keywords=None and
+        // bounce on the daemon's "requires a non-empty keywords list". It must
+        // normalize to a one-keyword rule instead.
+        let def = finalize_one(
+            r#"{"id":"test-result","kind":"keyword","pattern":"test result:","severity":"info"}"#,
+        )
+        .expect("keyword kind with a singular pattern must normalize");
+        assert_eq!(def.kind, RuleType::Keyword);
+        assert_eq!(
+            def.keywords.as_deref(),
+            Some(&["test result:".to_owned()][..])
+        );
+        assert_eq!(def.pattern, None, "the pattern moved into keywords");
+        def.validate().unwrap();
+    }
+
+    #[test]
+    fn shorthand_keyword_kind_explicit_keywords_stay_authoritative() {
+        // Conflicting inputs under an explicit kind=keyword: the canonical
+        // plural field wins and the singular is ignored — fewer bounced calls
+        // beats strictness here (the compact surface's natural-input goal).
+        let def = finalize_one(r#"{"kind":"keyword","pattern":"ignored","keywords":["needle"]}"#)
+            .unwrap();
+        assert_eq!(def.keywords.as_deref(), Some(&["needle".to_owned()][..]));
         def.validate().unwrap();
     }
 
