@@ -467,15 +467,16 @@ pub fn find_daemon_pid_os(state_dir: &Path) -> Option<u32> {
 /// Mirrors the proven pattern in `crates/cli/src/update_locks.rs` and the H2
 /// FFI in `crates/probes/src/file.rs`.
 #[cfg(windows)]
-mod windows_native {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+pub(crate) mod windows_native {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, HANDLE, STILL_ACTIVE};
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
     use windows::Win32::System::Threading::{
-        GetCurrentProcessId, OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess,
+        GetCurrentProcessId, GetExitCodeProcess, OpenProcess, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+        TerminateProcess,
     };
 
     /// The daemon image file name we will authorize a kill against. Compared
@@ -559,6 +560,43 @@ mod windows_native {
         // an io::Error on failure. Exit code 1 mirrors the prior `taskkill /F`.
         unsafe { TerminateProcess(proc.0, 1) }.map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(())
+    }
+
+    /// True when `pid` is a RUNNING process. Native replacement for the old
+    /// `tasklist /FI "PID eq <pid>"` shell-out in `pidfile::pid_alive`: the
+    /// daemon is GUI-subsystem on Windows, so that console child (spawned
+    /// without CREATE_NO_WINDOW) opened a visible, focus-stealing terminal
+    /// window on every 15s pidfile-reassert tick -- and corporate-EDR
+    /// hardening wants no external process probes anyway.
+    ///
+    /// Semantics preserved from the tasklist probe:
+    ///
+    /// * exact-pid match: `OpenProcess` targets exactly `pid` (no CSV parse);
+    /// * open fails access-denied => ALIVE (the pid exists but is protected;
+    ///   tasklist listed such processes too);
+    /// * open fails otherwise (invalid parameter = no such pid) => dead;
+    /// * opened but exit code != STILL_ACTIVE => dead (a terminated process
+    ///   kept visible only by open handles; tasklist did not list those);
+    /// * exit-code query fails => dead, matching the old `.unwrap_or(false)`
+    ///   fail-safe.
+    pub(crate) fn pid_alive(pid: u32) -> bool {
+        // SAFETY: OpenProcess takes a desired-access mask, an inherit BOOL,
+        // and a pid; it returns a valid handle on success or an Err. No
+        // memory is passed. PROCESS_QUERY_LIMITED_INFORMATION is the least
+        // privilege that permits GetExitCodeProcess.
+        let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+            Ok(h) => h,
+            Err(e) => return e.code() == ERROR_ACCESS_DENIED.to_hresult(),
+        };
+        let proc = OwnedHandle(handle);
+        let mut code = 0u32;
+        // SAFETY: `proc.0` is a live handle (just opened) valid for this
+        // call, and `code` is a properly aligned, owned out-param the call
+        // writes the exit code into. The Result is checked before use.
+        match unsafe { GetExitCodeProcess(proc.0, &raw mut code) } {
+            Ok(()) => code == STILL_ACTIVE.0 as u32,
+            Err(_) => false,
+        }
     }
 
     /// Enumerate all processes via a ToolHelp snapshot and return the first

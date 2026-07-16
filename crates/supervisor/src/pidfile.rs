@@ -88,6 +88,10 @@ pub fn read_pidfile_raw(state_dir: &Path) -> Option<RunningDaemon> {
 /// existence answer is identical to the old one for the pids we actually
 /// act on; the kill paths are independently identity-gated, so a cross-user
 /// pid reported alive is never killed.
+///
+/// On Windows this is a native `OpenProcess` + `GetExitCodeProcess` probe
+/// (`replace::windows_native::pid_alive`) -- spawn-free, so the GUI-subsystem
+/// daemon never pops a console window from its liveness ticks.
 #[must_use]
 pub fn pid_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
@@ -111,19 +115,13 @@ pub fn pid_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        // `tasklist /FO CSV /NH` emits one quoted-CSV row per matching
-        // process: "Image Name","PID","Session Name","Session#","Mem Usage".
-        // Parse the PID column (index 1) and compare it EXACTLY -- a bare
-        // substring match would falsely match the pid digits appearing in
-        // the memory-usage column, the session id, or a superstring pid.
-        std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-            .output()
-            .map(|o| {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                csv_row_has_exact_pid(&stdout, pid)
-            })
-            .unwrap_or(false)
+        // Native OpenProcess + GetExitCodeProcess liveness -- NO external
+        // process. The daemon is GUI-subsystem on Windows, so the previous
+        // `tasklist` probe (a console child spawned without CREATE_NO_WINDOW)
+        // opened a visible, focus-stealing terminal window on every 15s
+        // pidfile-reassert tick. See `replace::windows_native::pid_alive`
+        // for the preserved exact-pid / fail-safe semantics.
+        crate::replace::windows_native::pid_alive(pid)
     }
 }
 
@@ -167,45 +165,9 @@ fn join_proc_cmdline(raw: &[u8]) -> Option<String> {
     }
 }
 
-/// Parse `tasklist /FO CSV /NH` output and return true iff some row's PID
-/// column (the second quoted field) equals `pid` exactly. Tolerant of the
-/// "INFO: No tasks..." line tasklist prints when nothing matches.
-#[cfg(windows)]
-fn csv_row_has_exact_pid(stdout: &str, pid: u32) -> bool {
-    let want = pid.to_string();
-    stdout.lines().any(|line| {
-        // Fields are quoted; the PID is the second field.
-        line.split(',')
-            .nth(1)
-            .map(|f| f.trim().trim_matches('"') == want)
-            .unwrap_or(false)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(windows)]
-    #[test]
-    fn csv_pid_match_is_exact_not_substring() {
-        // Real-ish tasklist /FO CSV /NH row. PID column is field index 1.
-        let row = "\"terminal-commanderd.exe\",\"1234\",\"Console\",\"1\",\"12,345 K\"";
-        assert!(csv_row_has_exact_pid(row, 1234), "exact pid must match");
-        // 123 is a substring of the pid 1234 AND of the mem-usage "12,345";
-        // the old substring check matched it -- the column-exact check must not.
-        assert!(
-            !csv_row_has_exact_pid(row, 123),
-            "substring of the pid/mem column must NOT match"
-        );
-        // 12 appears in mem usage "12,345 K" but is not the PID column.
-        assert!(
-            !csv_row_has_exact_pid(row, 12),
-            "digits in the mem-usage column must NOT match"
-        );
-        // The "INFO: No tasks" line tasklist prints on no match.
-        assert!(!csv_row_has_exact_pid("INFO: No tasks are running.", 1234));
-    }
 
     #[test]
     fn write_read_roundtrip() {
@@ -274,6 +236,19 @@ mod tests {
         assert!(
             !pid_alive(0xFFFF_FFF0),
             "an absent high pid must read as dead (no /proc entry)"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pid_alive_true_for_self_false_for_absent_windows() {
+        assert!(
+            pid_alive(std::process::id()),
+            "the running test process must read as alive (native OpenProcess)"
+        );
+        assert!(
+            !pid_alive(0xFFFF_FFF0),
+            "an absent pid must read as dead (OpenProcess invalid-parameter)"
         );
     }
 
