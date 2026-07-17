@@ -72,6 +72,12 @@ Optional platform dependencies:
 Windows uses the native `@terminal-commander/windows-x64` package by default.
 The legacy Windows-to-WSL bridge is opt-in with `TC_USE_LEGACY_WSL_BRIDGE=1`.
 
+## Build Provenance
+
+Current native packages are compiled with Rust 1.97.1. Installing Terminal
+Commander does not require Rust; the workspace's supported MSRV remains a
+separate source-development contract.
+
 ## Documentation
 
 Full README, architecture diagrams, and integration guides:
