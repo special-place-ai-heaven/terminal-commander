@@ -1,74 +1,33 @@
-# MCP Tool Surface - Terminal Commander
+# MCP Tool Surface — Terminal Commander
 
-Status: TC23 baseline.
+`terminal-commander-mcp` is the thin LLM-facing adapter. It serves MCP over
+stdio with rmcp 1.8.0 and forwards tool calls to `terminal-commanderd` over the
+local IPC endpoint. The adapter does not spawn commands, open user files, or
+bind a network listener.
 
-The `terminal-commander-mcp` crate exposes the LLM-facing tool
-surface. Per `docs/security/PRIVILEGE_MODEL.md`, the MCP server
-contains NO command spawn, NO file open outside its own config, and
-NO network listener. Every tool call is forwarded to the daemon
-`Router` via in-process method dispatch.
+## Surfaces
 
-## 1. MVP tool set (TC23)
+- The compact surface exposes five task-oriented facades: `command`, `files`,
+  `registry`, `session`, and `status`.
+- The full surface exposes the granular tools behind those facades.
+- `system_discover` is the runtime authority for available methods, policy,
+  host probes, ranked access routes, and the current beachhead.
 
-| Tool | Status | Description |
-|---|---|---|
-| `system_discover` | live | Reports version, MCP spec revision, active profile, tool list. |
-| `bucket_events_since` | live | Cursor-based bucket read. Bounded by `limit`. |
-| `bucket_wait` | live | Realtime waiter; heartbeat-on-timeout per TC17 contract. |
-| `bucket_summary` | live | Per-bucket counters (events, dropped, by severity / kind). |
-| `event_context` | live | Bounded context window around a source pointer. |
+Set `TC_SURFACE=compact` or `TC_SURFACE=full` before starting the adapter. The
+default is documented in the root [README](../../README.md).
 
-Registry, probe, file, and command tools land in TC24 / TC25 / TC27.
+## Safety and output contract
 
-## 2. Transport
+Authorization is enforced by the daemon policy engine. Command, file, probe,
+session, registry, and remote-target operations retain their existing policy
+gates regardless of which MCP surface invokes them.
 
-MVP exposes the tool surface as a Rust API (`ToolSurface`). The rmcp
-1.7.0 stdio adapter wrapper is deferred to a follow-up goal. Tests
-exercise the surface directly so policy denials and bounded outputs
-are verified before transport wiring.
+Responses are structured and bounded. Command output is sifted into signals;
+raw output remains behind bounded tail/context calls. Bucket reads use cursors,
+file reads and searches have byte/result caps, and long waits have explicit
+deadlines.
 
-## 3. Policy
-
-Every tool call evaluates a `PolicyAction` via the daemon
-`PolicyEngine`. Policy denials are ADVISORY (daemon-side; not kernel-
-enforced) per TC22 framing. The denial surface is `McpError::PolicyDenied`.
-
-## 4. Bounded outputs
-
-All MCP responses are STRUCTURED types from `terminal_commander_core`.
-There is no raw-stream lane:
-
-- `BucketReadResponse.events: Vec<SignalEvent>` (no raw String).
-- `ContextWindowResponse.frames: Vec<ContextLine>` (bounded by
-  `before`/`after`/`max_bytes` and the hard `MAX_WINDOW_BYTES` cap).
-
-## 5. Current limitations
-
-- No real rmcp stdio adapter yet.
-- Registry / probe / file / command_start_combed tools are TC24+.
-- No multi-actor authorization (one MCP client per daemon).
-- Audit emission is the TC21 placeholder; TC22 introduced the
-  policy engine but the persistent audit log writes are deferred.
-
-## 6. Source-status
-
-| Component | Status |
-|---|---|
-| ToolSurface struct + 5 MVP tools | live (TC23) |
-| Policy gate on every call | live (TC23) |
-| rmcp 1.7.0 stdio adapter | reserved (post-MVP) |
-| Registry / probe / file / command tools | reserved (TC24+) |
-
-## 7. Runtime contract anchor (TC34)
-
-Authoritative tool list and per-tool status for the runtime chain
-(TC33-TC48) lives in `docs/mcp/TOOL_CONTROL_SURFACE.md`. This README
-records the TC23 baseline; the TC34 tool-surface lock supersedes the
-"reserved" rows above for any goal in the runtime chain.
-
-TC33 audit drift: this README advertises 5 tools, but on `main` the
-in-process `ToolSurface` actually implements 8 (it omits
-`file_read_window`, `registry_search`, `registry_get`,
-`registry_create`, `registry_activate` from the advertised list).
-TC40 fixes this by tying `system_discover.tools[]` to the live
-dispatcher's handler set.
+The authoritative per-tool contract is
+[TOOL_CONTROL_SURFACE.md](TOOL_CONTROL_SURFACE.md). Installation and client
+configuration live in the root [README](../../README.md) and
+[integration recipes](../integrations/README.md).

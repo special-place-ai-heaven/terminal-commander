@@ -104,7 +104,7 @@ async fn call_tool(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_activate_without_scope_returns_error() {
+async fn mcp_activate_without_scope_returns_tool_error() {
     let data = tmp_data_dir("act");
     let handle = spawn_live_daemon(&data);
     {
@@ -123,23 +123,25 @@ async fn mcp_activate_without_scope_returns_error() {
         .await
         .expect("upsert ok");
 
-        // Omit scope. Daemon must reject with ScopeInvalid -> MCP
-        // invalid_params.
-        let err = call_tool(
+        // Omit scope. rmcp rejects at the typed-handler boundary and returns an
+        // MCP tool error so the LLM receives actionable correction text.
+        let result = call_tool(
             &client,
             "registry_activate",
             serde_json::json!({"rule_id": "tc42d-kw"}),
         )
         .await
-        .expect_err("missing scope must error");
-        let msg = format!("{err}");
+        .expect("input validation must return a tool result");
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "missing scope must be marked as a tool error"
+        );
+        let msg = serde_json::to_string(&result).expect("tool error serializes");
         let lower = msg.to_ascii_lowercase();
-        // TB-5: scope is now machine-readable REQUIRED in the MCP schema,
-        // so an omitted scope is rejected at the wire-form boundary
-        // ("missing field `scope`") BEFORE reaching the daemon. We still
-        // accept the daemon-level remedies ("required"/"scope_invalid")
-        // for any client that bypasses the schema. Either way the LLM
-        // never gets a silent widen-to-Global.
+        // TB-5: scope is machine-readable REQUIRED in the MCP schema, so an
+        // omitted scope is rejected before reaching the daemon. Either way the
+        // LLM never gets a silent widen-to-Global.
         assert!(
             lower.contains("scope")
                 && (lower.contains("required")
@@ -155,27 +157,29 @@ async fn mcp_activate_without_scope_returns_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_deactivate_without_scope_returns_error() {
+async fn mcp_deactivate_without_scope_returns_tool_error() {
     let data = tmp_data_dir("deact");
     let handle = spawn_live_daemon(&data);
     {
         let (_server, client) = paired_against_live_daemon(&handle).await;
 
-        let err = call_tool(
+        let result = call_tool(
             &client,
             "registry_deactivate",
             serde_json::json!({"rule_id": "anything", "version": 1}),
         )
         .await
-        .expect_err("missing scope must error");
-        let msg = format!("{err}");
+        .expect("input validation must return a tool result");
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "missing scope must be marked as a tool error"
+        );
+        let msg = serde_json::to_string(&result).expect("tool error serializes");
         let lower = msg.to_ascii_lowercase();
-        // TB-5: scope is now machine-readable REQUIRED in the MCP schema,
-        // so an omitted scope is rejected at the wire-form boundary
-        // ("missing field `scope`") BEFORE reaching the daemon. We still
-        // accept the daemon-level remedies ("required"/"scope_invalid")
-        // for any client that bypasses the schema. Either way the LLM
-        // never gets a silent widen-to-Global.
+        // TB-5: scope is machine-readable REQUIRED in the MCP schema, so an
+        // omitted scope is rejected before reaching the daemon. Either way the
+        // LLM never gets a silent widen-to-Global.
         assert!(
             lower.contains("scope")
                 && (lower.contains("required")

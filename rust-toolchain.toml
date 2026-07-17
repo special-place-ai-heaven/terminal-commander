@@ -1,7 +1,7 @@
 # Pinned toolchain for Terminal Commander.
 #
 # SPEC.md / docs/research/_USER_DECISIONS.md declare the MSRV floor
-# as 1.92.0 (forced by rmcp =1.7.0).
+# as 1.92.0 (the toolchain used by rmcp =1.8.0).
 #
 # Amendment 2026-07-17: raise the active toolchain to 1.97.1 so
 # optimized release artifacts include Rust's upstream LLVM

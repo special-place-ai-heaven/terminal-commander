@@ -29,7 +29,7 @@ TC is a two-process system (per `docs/research/_USER_DECISIONS.md`):
         |                             |
         v                             v
   terminal-commander-mcp        terminal-commanderd
-  (rmcp 1.7.0 stdio,            (long-running daemon,
+  (rmcp 1.8.0 stdio,            (long-running daemon,
    spawned per-MCP-session)      single instance per user)
         |                             |
         |    local IPC (TC21)         |
@@ -75,7 +75,7 @@ APIs. TC22 verification (and TC29) MUST include a grep-test on the
 
 ## 4. The local transport
 
-The MCP transport for MVP is rmcp 1.7.0 stdio (per
+The MCP transport for MVP is rmcp 1.8.0 stdio (per
 `docs/research/mcp-transport-pattern.md` and the locked decision in
 `_USER_DECISIONS.md`). Implications:
 

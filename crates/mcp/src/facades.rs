@@ -26,6 +26,7 @@ use crate::tools::{
 /// tagged by `action`; the action's remaining fields are the chosen op's params.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]
 pub enum CommandFacadeCall {
     Run(McpCommandStartParams),
     RunAndWatch(McpRunAndWatchParams),
@@ -50,6 +51,7 @@ pub enum CommandFacadeCall {
 /// op's params. Unit variants (`PtyList`, `ShList`) take no additional fields.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]
 pub enum SessionFacadeCall {
     PtyStart(McpPtyCommandStartParams),
     PtyStdin(McpPtyCommandWriteStdinParams),
@@ -70,6 +72,7 @@ pub enum SessionFacadeCall {
 /// op's params. Unit variant (`WatchList`) takes no additional fields.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]
 pub enum FilesFacadeCall {
     Read(McpFileReadWindowParams),
     Search(McpFileSearchParams),
@@ -93,6 +96,7 @@ pub enum FilesFacadeCall {
 /// The alias `samples` is accepted for backward compatibility.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]
 pub enum RegistryFacadeCall {
     Search(McpRegistrySearchParams),
     Get(McpRegistryGetParams),
@@ -110,6 +114,7 @@ pub enum RegistryFacadeCall {
 /// op's params. Unit variants take no additional fields.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]
 pub enum StatusFacadeCall {
     /// Daemon liveness ping. No additional fields required.
     Health,

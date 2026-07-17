@@ -102,8 +102,9 @@ args = []
 
 ## 3. Generic MCP client
 
-Any MCP client that speaks rmcp 1.7.0 stdio should work. Launch the
-binary as a child process; the server emits the MCP initialize
+Any compatible MCP client with stdio transport should work; rmcp is
+the server implementation, not a client protocol requirement. Launch
+the binary as a child process; the server emits the MCP initialize
 handshake on stdout and reads requests on stdin.
 
 ```bash

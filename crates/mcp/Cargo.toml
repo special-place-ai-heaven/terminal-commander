@@ -1,6 +1,6 @@
 [package]
 name = "terminal-commander-mcp"
-description = "Thin MCP server adapter (rmcp 1.7.0 stdio). Forwards every tool call to the daemon over IPC."
+description = "Thin MCP server adapter (rmcp 1.8.0 stdio). Forwards every tool call to the daemon over IPC."
 readme = "README.md"
 keywords = ["terminal-commander", "mcp"]
 categories = ["development-tools"]

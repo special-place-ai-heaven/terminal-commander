@@ -22,7 +22,7 @@ document under `docs/research/` or a README line range.
                                  v
 +----------------------------------------------------------------------+
 |   terminal-commander-mcp   (thin, per-session, unprivileged)         |
-|   - rmcp 1.7.0 server, stdio transport                               |
+|   - rmcp 1.8.0 server, stdio transport                               |
 |   - translates MCP tool calls to daemon IPC calls                    |
 +--------------------------------|-------------------------------------+
                                  |  local IPC (transport: deferred to TC21)

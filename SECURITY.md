@@ -32,7 +32,7 @@ This document tells:
 | The local operator (human running TC) | Trusted | Owns the host; can read TC's audit log, edit config, restart the daemon. |
 | The LLM client over MCP | Semi-trusted | Authoring intent is unverified. May try (accidentally or via prompt injection) to run dangerous commands, read secrets, or exfiltrate output. |
 | A compromised probe child process | Untrusted | A process spawned by TC can be malicious or buggy. Its output is data, not commands. |
-| A remote network attacker | Out of scope | TC has no network listener. The MCP transport is local stdio (rmcp 1.7.0). |
+| A remote network attacker | Out of scope | TC has no network listener. The MCP transport is local stdio (rmcp 1.8.0). |
 | A privileged co-tenant on the host | Out of scope | TC does not defend against root or kernel attackers on the same host. |
 
 ### 2.2 Threats considered
@@ -73,7 +73,7 @@ goal that adds behavior touching them.
 ```text
 +-------------------+      MCP stdio      +-------------------------+
 |  LLM client       | <-----------------> |  terminal-commander-mcp |
-| (Claude Code,     |  rmcp 1.7.0         |  thin adapter           |
+| (Claude Code,     |  rmcp 1.8.0         |  thin adapter           |
 |  Codex, Cline...) |                     |                         |
 +-------------------+                     +-------------------------+
                                                      |

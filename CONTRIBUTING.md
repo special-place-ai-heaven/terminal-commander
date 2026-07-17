@@ -63,7 +63,7 @@ form and stay consistent within a file. Generated files
 
 ## 3. Toolchain
 
-- MSRV floor: Rust 1.92.0 (set by rmcp 1.7.0). Edition 2024. This is
+- MSRV floor: Rust 1.92.0 (aligned with rmcp 1.8.0's upstream toolchain). Edition 2024. This is
   the *documented* minimum-supported version, NOT a CI-enforced gate:
   no workflow runs `cargo hack --rust-version`, so the 1.92.0 claim is
   a promise, not an automated check (see section 6).
