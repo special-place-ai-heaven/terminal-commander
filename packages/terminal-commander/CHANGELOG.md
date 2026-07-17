@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.86](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.85...v0.1.86) (2026-07-17)
+
+
+### Features
+
+* **mcp:** upgrade compact facades to rmcp 1.8 ([0215329](https://github.com/special-place-ai-heaven/terminal-commander/commit/02153297f18fb1a080e71d9840ce52c082c32a2d))
+
+
+### Bug Fixes
+
+* **discovery:** advertise only policy-usable execution routes ([0215329](https://github.com/special-place-ai-heaven/terminal-commander/commit/02153297f18fb1a080e71d9840ce52c082c32a2d))
+* **mcp:** preserve capped signals and truthful recovery ([0215329](https://github.com/special-place-ai-heaven/terminal-commander/commit/02153297f18fb1a080e71d9840ce52c082c32a2d))
+
 ## [0.1.85](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.84...v0.1.85) (2026-07-17)
 
 
