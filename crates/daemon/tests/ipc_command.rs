@@ -479,6 +479,50 @@ fn wsl_nested_shell_allowed_and_audit_tagged_under_allow_shell_true() {
 }
 
 #[test]
+fn wsl_nested_shell_is_denied_when_repo_only_forbids_shell_profile() {
+    use terminal_commanderd::{
+        CommandError, CommandStartRequest, PolicyCapsSection, PolicyProfile,
+    };
+
+    rt().block_on(async {
+        let data = tmp_data_dir("wsl-repo-only-deny");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.profile = PolicyProfile::RepoOnly;
+        cfg.policy.repo_root = Some(data.clone());
+        cfg.policy.caps = Some(PolicyCapsSection {
+            allow_shell: Some(true),
+            ..Default::default()
+        });
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let result = state.command.start_combed(CommandStartRequest {
+            argv: vec![
+                "wsl.exe".to_owned(),
+                "-e".to_owned(),
+                "bash".to_owned(),
+                "-lc".to_owned(),
+                "echo hi".to_owned(),
+            ],
+            cwd: Some(data.clone()),
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            strip_ansi: true,
+            peer_discriminator: None,
+        });
+
+        assert!(
+            matches!(result, Err(CommandError::PolicyDenied(_))),
+            "repo_only must deny WSL nested-shell execution even with allow_shell=true; got {result:?}"
+        );
+        cleanup(&data);
+    });
+}
+
+#[test]
 fn command_start_combed_rejects_empty_argv_with_typed_error() {
     let runtime = rt();
     runtime.block_on(async {

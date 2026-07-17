@@ -153,7 +153,7 @@ TC45 remain the only surface. The bridge is invisible to the LLM.
 | Property | Behavior |
 |----------|----------|
 | Tool catalogue | 29 tools (TC45), unchanged. |
-| Transport | MCP stdio (rmcp 1.7.0). |
+| Transport | MCP stdio (rmcp 1.8.0). |
 | Server name | `terminal-commander`. |
 | Server command | `terminal-commander-mcp`. |
 | Argv | none. `setup cursor-wsl` writes a no-args stanza by default. |
@@ -249,7 +249,7 @@ locked. WWS01 does NOT widen runtime claims.
   job manager, the policy engine, the persistent audit, and every
   probe.
 - `terminal-commander-mcp` (the real one, INSIDE WSL) is still the
-  thin rmcp 1.7.0 stdio adapter. The two MCP guard greps remain
+  thin rmcp 1.8.0 stdio adapter. The two MCP guard greps remain
   clean.
 - `terminal-commander` (the real admin CLI, INSIDE WSL) is
   unchanged.

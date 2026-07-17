@@ -702,6 +702,16 @@ impl PolicyEngine {
         self.caps.allow_session
     }
 
+    /// Representative cwd for environment route discovery. Concrete command
+    /// calls are always re-evaluated with their real cwd; discovery only needs
+    /// a policy-valid anchor so `repo_only` does not depend on the daemon's cwd.
+    pub(crate) fn environment_discovery_cwd(&self) -> Option<&Path> {
+        match self.profile {
+            PolicyProfile::RepoOnly => self.repo_root.as_deref(),
+            _ => Some(Path::new(".")),
+        }
+    }
+
     /// Read-only accessor: the full RESOLVED capability set carried by this
     /// engine.
     ///

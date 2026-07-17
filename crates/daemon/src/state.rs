@@ -365,10 +365,7 @@ impl DaemonState {
     #[must_use]
     pub fn discover_environment(&self) -> crate::ipc::protocol::HostEnvironment {
         let mut environment = crate::environment::discover_host_environment();
-        crate::environment::apply_shell_capability(
-            &mut environment,
-            self.policy.caps_allow_shell(),
-        );
+        crate::environment::apply_execution_policy(&mut environment, &self.policy);
         environment
     }
 
@@ -583,6 +580,78 @@ mod tests {
         assert_eq!(
             environment.beachhead,
             environment.access_routes.first().cloned()
+        );
+        cleanup(&data);
+    }
+
+    #[test]
+    fn embedded_discovery_omits_routes_denied_by_command_policy() {
+        let data = temp_data_dir("embedded-discovery-policy");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.commands = Some(crate::config::PolicyCommandsSection {
+            allow_roots: vec!["no-discovered-command-can-match-this".to_owned()],
+        });
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let environment = state.discover_environment();
+        assert!(
+            environment.access_routes.is_empty(),
+            "discovery must not advertise a route the command policy denies; got {:?}",
+            environment.access_routes
+        );
+        assert!(environment.beachhead.is_none());
+        assert!(environment.preferred_shell.is_none());
+        cleanup(&data);
+    }
+
+    #[test]
+    fn embedded_discovery_omits_routes_denied_by_probe_policy() {
+        let data = temp_data_dir("embedded-discovery-probe-policy");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.probes = Some(crate::config::PolicyProbesSection {
+            allow_kinds: Vec::new(),
+            deny_kinds: vec!["command".to_owned()],
+        });
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let environment = state.discover_environment();
+        assert!(
+            environment.access_routes.is_empty(),
+            "discovery must not advertise a route when command probes are denied; got {:?}",
+            environment.access_routes
+        );
+        assert!(environment.beachhead.is_none());
+        assert!(environment.preferred_shell.is_none());
+        cleanup(&data);
+    }
+
+    #[test]
+    fn embedded_discovery_uses_repo_root_and_omits_shell_routes_in_repo_only() {
+        use crate::config::PolicyCapsSection;
+        use crate::policy::PolicyProfile;
+
+        let data = temp_data_dir("embedded-discovery-repo-only");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.profile = PolicyProfile::RepoOnly;
+        cfg.policy.repo_root = Some(data.clone());
+        cfg.policy.caps = Some(PolicyCapsSection {
+            allow_shell: Some(true),
+            ..Default::default()
+        });
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let environment = state.discover_environment();
+        assert!(
+            !environment.access_routes.is_empty(),
+            "repo_only discovery must evaluate usable routes from the configured repo root"
+        );
+        assert!(
+            environment
+                .access_routes
+                .iter()
+                .all(|route| !matches!(route.kind.as_str(), "shell" | "wsl_shell")),
+            "repo_only forbids shell execution even when allow_shell is explicitly on; got {:?}",
+            environment.access_routes
         );
         cleanup(&data);
     }

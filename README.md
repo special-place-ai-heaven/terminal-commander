@@ -142,13 +142,13 @@ route from the OS name. It reports terminal evidence, shell and PowerShell
 paths/versions, WSL state, common tools, and confirmed execution status.
 Confirmed programs become `direct_argv` routes, confirmed WSL adds a
 `wsl_argv` route, and successful interpreter sentinels become shell routes. The
-daemon filters that ranked set against the active shell capability before
-returning `access_routes`; when `allow_shell` is off, it cannot advertise a
-shell beachhead that the validator will reject. `beachhead` repeats the best
-surviving route with the exact argv template an LLM can follow. A path that
-merely exists is not advertised as executable, and failed or timed-out probes
-remain explicit evidence. Normal command/path policy checks still apply when a
-caller supplies its concrete argv and cwd.
+daemon filters that ranked set through the active command-probe, shell, and
+command policy before returning `access_routes`; `repo_only` uses its configured
+repository root for this discovery check, never the daemon's incidental cwd.
+`beachhead` repeats the best surviving route with the exact argv template an LLM
+can follow. A path that merely exists is not advertised as executable, and
+failed or timed-out probes remain explicit evidence. Every concrete call is
+still rechecked with its real argv and cwd.
 
 In-process embedders construct `DaemonState` with `DaemonState::bootstrap` and
 call `DaemonState::discover_environment`; IPC discovery uses that same method,
@@ -398,8 +398,8 @@ assuming Bash, PowerShell, WSL, or a particular executable is available:
 ```text
 status action=system_discover
 → environment.access_routes[] + environment.beachhead.argv_template
-→ direct_argv/wsl_argv: command action=run|run_and_watch
-→ shell/wsl_shell: only returned when allow_shell enables the shell lane
+→ direct_argv/wsl_argv/wsl_shell: command action=run|run_and_watch with argv_template
+→ shell: command action=exec with shell=<executable> and shell_line=<command>
 ```
 
 Use Terminal Commander whenever raw terminal scrollback would waste context or
@@ -444,6 +444,9 @@ Agent rules:
   when watching several jobs at once.
 - `wait_exhausted: true` means STILL RUNNING — call `command action=status`;
   do not treat it as finished. `degraded: true` means follow the `recover_hint`.
+- The `cursor` returned by `run_and_watch` is a resume cursor. If `max_signals`
+  caps the response, it remains before omitted matches so a later `wait` from
+  that cursor recovers them instead of silently skipping evidence.
 - Keep interpreters out of the argv lane. For a pipeline or compound command,
   use `command action=exec` only when `status action=policy_status` confirms
   `allow_shell`; otherwise follow a returned `direct_argv`/`wsl_argv` route and
@@ -521,8 +524,9 @@ audit row. All other IPC requests bump the idle clock and audit normally.
 > [!TIP]
 > Persistent shell sessions (`shell_session_*`) and workspace snapshots
 > (`workspace_snapshot_*`) let an agent run multi-step work that shares
-> cwd/env. They are gated by `allow_session` (default off) and are UNIX-ONLY;
-> on a non-unix daemon they return `UnsupportedPlatform`. See
+> cwd/env. Availability requires all three gates: a reachable daemon, a UNIX
+> session runtime, and `allow_session` enabled (default off). On a non-unix
+> daemon they return `UnsupportedPlatform`. See
 > [`docs/runtime/SHELL_SESSION.md`](docs/runtime/SHELL_SESSION.md).
 
 ## Per-Harness Sessions

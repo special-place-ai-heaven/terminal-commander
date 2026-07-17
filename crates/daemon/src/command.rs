@@ -924,11 +924,28 @@ impl CommandRuntime {
         // Under `allow_shell=true` the classification is remembered and tagged
         // on the command-start audit row instead of denying. NotWsl /
         // Management / NonShellPayload are byte-identical to pre-US8 behavior.
+        let cwd_for_policy = req.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
         let mut wsl_audit_tag: Option<(&'static str, String)> = None;
         if matches!(mode, StartLane::Argv) {
             match classify_wsl_nested_shell(&req.argv) {
                 WslArgvClass::NestedShell { interpreter } => {
                     if self.policy.caps_allow_shell() {
+                        let shell_verdict =
+                            self.policy.evaluate(&PolicyAction::CommandShellStart {
+                                shell_line: "",
+                                cwd: cwd_for_policy.as_path(),
+                                shell: &interpreter,
+                            });
+                        if shell_verdict.decision == PolicyDecision::Deny {
+                            self.audit(
+                                "command_rejected",
+                                &subject_for_argv(&req.argv),
+                                "deny",
+                                Some(shell_verdict.reason.clone()),
+                                Some(format_argv_metadata(&req.argv)),
+                            );
+                            return Err(CommandError::PolicyDenied(shell_verdict.reason));
+                        }
                         wsl_audit_tag = Some(("nested_shell", interpreter));
                     } else {
                         let carrier = wsl_carrier_label(&req.argv[0]);
@@ -951,6 +968,22 @@ impl CommandRuntime {
                 }
                 WslArgvClass::UnknownConstruction => {
                     if self.policy.caps_allow_shell() {
+                        let shell_verdict =
+                            self.policy.evaluate(&PolicyAction::CommandShellStart {
+                                shell_line: "",
+                                cwd: cwd_for_policy.as_path(),
+                                shell: "unrecognized construction",
+                            });
+                        if shell_verdict.decision == PolicyDecision::Deny {
+                            self.audit(
+                                "command_rejected",
+                                &subject_for_argv(&req.argv),
+                                "deny",
+                                Some(shell_verdict.reason.clone()),
+                                Some(format_argv_metadata(&req.argv)),
+                            );
+                            return Err(CommandError::PolicyDenied(shell_verdict.reason));
+                        }
                         wsl_audit_tag = Some(("wsl_construction", "unknown".to_owned()));
                     } else {
                         let carrier = wsl_carrier_label(&req.argv[0]);
@@ -981,7 +1014,6 @@ impl CommandRuntime {
         // `command_rejected`; a denied shell start is
         // `command_shell_rejected`). The deny path is otherwise identical
         // across lanes.
-        let cwd_for_policy = req.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
         let verdict = match mode {
             StartLane::Argv => self.policy.evaluate(&PolicyAction::CommandStart {
                 argv: &req.argv,
