@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.85](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.84...v0.1.85) (2026-07-17)
+
+
+### Bug Fixes
+
+* **build:** rebuild release artifacts with Rust 1.97.1 ([71d3b62](https://github.com/special-place-ai-heaven/terminal-commander/commit/71d3b62f7d05006a982e134c5ac853a9ec28ecd0))
+
 ## [0.1.84](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.83...v0.1.84) (2026-07-16)
 
 

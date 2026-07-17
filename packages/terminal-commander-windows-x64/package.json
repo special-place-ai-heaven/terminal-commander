@@ -1,6 +1,6 @@
 {
   "name": "@terminal-commander/windows-x64",
-  "version": "0.1.84",
+  "version": "0.1.85",
   "description": "Terminal Commander prebuilt Rust binaries for win32/x86_64. Internal platform package consumed by the `terminal-commander` root wrapper via optionalDependencies; do not depend on this package directly.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "author": "special-place-ai-heaven",
