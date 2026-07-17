@@ -1075,8 +1075,9 @@ impl TerminalCommanderMcpServer {
             None
         };
 
-        // Sessions (US2): unix-only runtime AND a reachable daemon.
-        let sessions_available = session_runtime_available() && daemon_available;
+        // Sessions (US2): unix-only runtime, reachable daemon, and policy grant.
+        let sessions_available =
+            session_runtime_available() && daemon_available && caps.is_none_or(|c| c.allow_session);
 
         // PTY (US3): dual backend (unix pty-process / Windows ConPTY) AND a
         // reachable daemon. `platform` is honest even when the daemon is down.
@@ -1338,6 +1339,11 @@ impl TerminalCommanderMcpServer {
         //    accumulating once the cap is reached, but the loop keeps waiting
         //    for exit, bounded by the SAME `wait_ms` cap (never exceeded).
         let mut signals: Vec<terminal_commander_core::SignalEvent> = Vec::new();
+        // The daemon may keep consuming bucket events after the response signal
+        // cap is full so wait_until_exit can observe process completion. Keep
+        // that observation cursor separate from the caller's resume cursor:
+        // omitted matches must remain recoverable by a subsequent wait.
+        let mut resume_cursor = cursor;
         // TC-6: a wall-clock deadline keeps total wall time bounded by wait_ms
         // plus at most one in-flight slice and the round-trips.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
@@ -1372,7 +1378,7 @@ impl TerminalCommanderMcpServer {
                     return run_and_watch_result(
                         job_id,
                         bucket_id,
-                        cursor,
+                        resume_cursor,
                         last_observed_state,
                         exit_code,
                         &signals,
@@ -1424,8 +1430,12 @@ impl TerminalCommanderMcpServer {
             };
             match daemon.call(IpcRequest::BucketWait(wait)).await {
                 Ok(IpcResponse::BucketWait(r)) => {
+                    let had_signal_capacity = signals.len() < max_signals;
                     cursor = r.next_cursor;
                     collect_rule_signals(r.events, &mut signals, max_signals);
+                    if had_signal_capacity {
+                        resume_cursor = cursor;
+                    }
                 }
                 Ok(other) => return Err(unexpected_variant(&other)),
                 // TC-1b: same as the status arm -- preserve the job handle.
@@ -1433,7 +1443,7 @@ impl TerminalCommanderMcpServer {
                     return run_and_watch_result(
                         job_id,
                         bucket_id,
-                        cursor,
+                        resume_cursor,
                         last_observed_state,
                         exit_code,
                         &signals,
@@ -1473,8 +1483,12 @@ impl TerminalCommanderMcpServer {
                 if let Ok(IpcResponse::BucketWait(r)) =
                     daemon.call(IpcRequest::BucketWait(drain)).await
                 {
+                    let had_signal_capacity = signals.len() < max_signals;
                     cursor = r.next_cursor;
                     collect_rule_signals(r.events, &mut signals, max_signals);
+                    if had_signal_capacity {
+                        resume_cursor = cursor;
+                    }
                 }
                 break;
             }
@@ -1489,7 +1503,7 @@ impl TerminalCommanderMcpServer {
         run_and_watch_result(
             job_id,
             bucket_id,
-            cursor,
+            resume_cursor,
             last_observed_state,
             exit_code,
             &signals,
@@ -2795,6 +2809,10 @@ impl TerminalCommanderMcpServer {
                         .map(|e| e.event.severity)
                         .max()
                         .unwrap_or(Severity::Info);
+                    #[expect(
+                        deprecated,
+                        reason = "the MCP 2024-11-05 compatibility nudge remains tested and best-effort"
+                    )]
                     let _ = ctx
                         .peer
                         .notify_logging_message(LoggingMessageNotificationParam {
@@ -3026,10 +3044,10 @@ usually {\"kind\":\"global\"}. Rules comb command output into structured signals
         name = "status",
         description = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
 policy_status, audit_since (daemon-global operation metadata; optional cursor/action_filter/decision_filter/limit), runtime_state \
-(aggregate snapshot), probe_list, probe_status, system_discover, target_list, target_probe. \
+(aggregate snapshot; use action=\"runtime_state\", limit=0 for counts-only state), probe_list, probe_status, system_discover, target_list, target_probe. \
 Call system_discover before choosing an interpreter: its environment contains bounded shell/PowerShell/WSL/tool probes, \
-capability-filtered ranked access_routes, and a beachhead with the exact confirmed argv template to follow. \
-Use direct_argv/wsl_argv routes with run or run_and_watch; shell routes are advertised only when exec is enabled."
+policy-filtered ranked access_routes, and a confirmed beachhead. Use direct_argv/wsl_argv/wsl_shell routes with run or run_and_watch \
+and their argv_template. Use a native shell route with exec, shell=route.executable, and shell_line=<command>."
     )]
     pub(crate) async fn status_facade(
         &self,
@@ -3062,7 +3080,7 @@ Use direct_argv/wsl_argv routes with run or run_and_watch; shell routes are adve
 //     validation behavior identically.
 // `get_info` / `initialize` are unchanged.
 //
-// Signatures confirmed against rmcp 1.7.0 (`rmcp::handler::server::ServerHandler`
+// Signatures confirmed against rmcp 1.8.0 (`rmcp::handler::server::ServerHandler`
 // + `rmcp-macros` `tool_handler`):
 //   call_tool(&self, CallToolRequestParams, RequestContext<RoleServer>)
 //     -> Result<CallToolResult, McpError>
@@ -3137,16 +3155,19 @@ impl ServerHandler for TerminalCommanderMcpServer {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                // Advertise `logging` so the BEST-EFFORT subscription_pull nudge
-                // (TC_MCP_NOTIFY, off by default) can ride the open stdio pipe
-                // as a `notifications/message`. Delivery of events is ALWAYS the
-                // pull; this capability never makes the notification load-bearing.
-                .enable_logging()
-                .build(),
-        )
+        #[expect(
+            deprecated,
+            reason = "the MCP 2024-11-05 compatibility nudge remains tested and best-effort"
+        )]
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            // Advertise `logging` so the BEST-EFFORT subscription_pull nudge
+            // (TC_MCP_NOTIFY, off by default) can ride the open stdio pipe
+            // as a `notifications/message`. Delivery of events is ALWAYS the
+            // pull; this capability never makes the notification load-bearing.
+            .enable_logging()
+            .build();
+        ServerInfo::new(capabilities)
             .with_server_info(Implementation::new(
                 "terminal-commander-mcp",
                 ADAPTER_VERSION,
@@ -5635,7 +5656,7 @@ pub struct McpAuditSinceParams {
 pub struct McpListLimitParams {
     /// Max rows per list (each of runtime_state's three vecs bounds
     /// independently). Omit for the daemon default/cap. Over-cap sets the
-    /// response `truncated` flag.
+    /// response `truncated` flag. Pass 0 for counts-only runtime state.
     #[serde(default, deserialize_with = "de_opt_usize_lenient")]
     #[schemars(with = "usize")]
     pub limit: Option<usize>,

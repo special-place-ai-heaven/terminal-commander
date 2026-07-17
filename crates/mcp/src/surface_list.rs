@@ -58,10 +58,10 @@ usually {\"kind\":\"global\"}. Rules comb command output into structured signals
 /// Description for the `status` facade.
 pub(crate) const STATUS_FACADE_DESCRIPTION: &str = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
 policy_status, audit_since (daemon-global operation metadata; optional cursor/action_filter/decision_filter/limit), runtime_state \
-(aggregate snapshot), probe_list, probe_status, system_discover, target_list, target_probe. \
+(aggregate snapshot; use action=\"runtime_state\", limit=0 for counts-only state), probe_list, probe_status, system_discover, target_list, target_probe. \
 Call system_discover before choosing an interpreter: its environment contains bounded shell/PowerShell/WSL/tool probes, \
-capability-filtered ranked access_routes, and a beachhead with the exact confirmed argv template to follow. \
-Use direct_argv/wsl_argv routes with run or run_and_watch; shell routes are advertised only when exec is enabled.";
+policy-filtered ranked access_routes, and a confirmed beachhead. Use direct_argv/wsl_argv/wsl_shell routes with run or run_and_watch \
+and their argv_template. Use a native shell route with exec, shell=route.executable, and shell_line=<command>.";
 
 /// The facade tool names advertised + admitted on the compact surface.
 /// KEEP IN SYNC with [`compact_surface_tools`].
@@ -331,7 +331,18 @@ mod tests {
                 "registry facade description must contain {expected:?}"
             );
         }
-        for expected in ["environment", "access_routes", "beachhead"] {
+        for expected in [
+            "environment",
+            "access_routes",
+            "beachhead",
+            "action=\"runtime_state\", limit=0",
+            "counts-only",
+            "direct_argv/wsl_argv/wsl_shell",
+            "run or run_and_watch",
+            "native shell",
+            "shell=route.executable",
+            "shell_line",
+        ] {
             assert!(
                 STATUS_FACADE_DESCRIPTION.contains(expected),
                 "status facade description must contain {expected:?}"

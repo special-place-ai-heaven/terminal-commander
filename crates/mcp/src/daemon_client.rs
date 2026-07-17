@@ -341,17 +341,33 @@ impl McpDaemonClient {
         let _flight = handle.probe_guard.lock().await;
         let prior = handle.version_skew();
         handle.version_probe_count.fetch_add(1, Ordering::Relaxed);
+        let deadline = tokio::time::Instant::now() + SKEW_PROBE_TIMEOUT;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // Health carries the daemon's compile-time version and deliberately
         // avoids SystemDiscover's bounded environment probes. Rechecking skew
-        // must stay cheap even when discovery has to wait on slow tools.
+        // must stay cheap even when discovery has to wait on slow tools. A
+        // legacy Health response omits version, so fall back to the discover
+        // method that legacy daemons already support within the SAME deadline.
         let probe = self.inner.call(id, IpcRequest::Health);
-        match tokio::time::timeout(SKEW_PROBE_TIMEOUT, probe).await {
+        match tokio::time::timeout_at(deadline, probe).await {
             Ok(Ok(IpcResponse::Health { version, .. })) if !version.is_empty() => {
                 let refreshed =
                     (version != adapter_version).then(|| (version, adapter_version.to_owned()));
                 handle.set_version_skew(refreshed.clone());
                 refreshed
+            }
+            Ok(Ok(IpcResponse::Health { version, .. })) if version.is_empty() => {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                let probe = self.inner.call(id, IpcRequest::SystemDiscover);
+                match tokio::time::timeout_at(deadline, probe).await {
+                    Ok(Ok(IpcResponse::SystemDiscover(discovery))) => {
+                        let refreshed = (discovery.version != adapter_version)
+                            .then(|| (discovery.version, adapter_version.to_owned()));
+                        handle.set_version_skew(refreshed.clone());
+                        refreshed
+                    }
+                    _ => prior,
+                }
             }
             _ => prior,
         }
@@ -690,6 +706,62 @@ mod tests {
             handle.version_skew(),
             Some(("0.1.75".to_owned(), "0.1.74".to_owned()))
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_version_skew_falls_back_when_legacy_health_has_no_version() {
+        use terminal_commander_ipc::{
+            DiscoverResponse, IpcResult, ResponseEnvelope, read_request, write_response,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("legacy-version.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind legacy daemon socket");
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept version probe");
+                let request = read_request(&mut stream).await.expect("read version probe");
+                let response = match request.request {
+                    IpcRequest::Health => IpcResponse::Health {
+                        uptime_secs: 1,
+                        idle_secs: Some(0),
+                        version: String::new(),
+                    },
+                    IpcRequest::SystemDiscover => IpcResponse::SystemDiscover(DiscoverResponse {
+                        version: "0.1.0".to_owned(),
+                        mcp_spec: String::new(),
+                        policy_profile: String::new(),
+                        methods: Vec::new(),
+                        environment: Box::default(),
+                    }),
+                    other => panic!("unexpected version probe: {other:?}"),
+                };
+                write_response(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        correlation_id: request.correlation_id,
+                        result: IpcResult::Ok { response },
+                    },
+                )
+                .await
+                .expect("write version probe response");
+            }
+        });
+
+        let handle = DaemonStatusHandle::new(EnsureDaemonStatus::AlreadyRunning {
+            endpoint: Endpoint::UnixSocket {
+                path: socket.clone(),
+            },
+            pid: Some(1),
+        });
+        let client = McpDaemonClient::with_status(&socket, handle.clone());
+
+        let refreshed = client.refresh_version_skew("0.1.85").await;
+        let expected = Some(("0.1.0".to_owned(), "0.1.85".to_owned()));
+        assert_eq!(refreshed, expected);
+        assert_eq!(handle.version_skew(), expected);
+        server.await.expect("legacy version server");
     }
 
     fn missing_socket_path(label: &str) -> std::path::PathBuf {

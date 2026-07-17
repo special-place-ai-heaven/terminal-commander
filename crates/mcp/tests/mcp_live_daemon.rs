@@ -344,10 +344,16 @@ fn assert_omni_status_honest(body: &serde_json::Value) {
         Some("allow_shell capability is off in the active policy profile"),
         "shell_exec must carry the cap-truthful reason when allow_shell is off; got {matrix}"
     );
-    // sessions are unix-only; pty is unix(posix)/windows(conpty).
+    // Sessions require both the unix runtime and allow_session. This daemon's
+    // default DeveloperLocal profile keeps allow_session off on every host.
     let sessions_available = matrix["sessions"]["available"]
         .as_bool()
         .expect("sessions.available bool");
+    assert!(
+        !sessions_available,
+        "sessions must be unavailable when allow_session is off; got {matrix}"
+    );
+    // PTY is unix(posix)/windows(conpty) and is not session-cap-gated.
     let pty_available = matrix["pty"]["available"]
         .as_bool()
         .expect("pty.available bool");
@@ -355,14 +361,9 @@ fn assert_omni_status_honest(body: &serde_json::Value) {
         .as_str()
         .expect("pty.platform string");
     if cfg!(unix) {
-        assert!(sessions_available, "sessions must be available on unix");
         assert!(pty_available, "pty must be available on unix");
         assert_eq!(pty_platform, "posix", "unix pty platform is posix");
     } else if cfg!(windows) {
-        assert!(
-            !sessions_available,
-            "sessions are unix-only => unavailable on windows; got {matrix}"
-        );
         assert!(pty_available, "pty (ConPTY) must be available on windows");
         assert_eq!(
             pty_platform, "windows_conpty",

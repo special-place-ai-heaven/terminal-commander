@@ -1,6 +1,6 @@
 # MCP Tool Control Surface - Locked Contract
 
-Status: current MCP-facing contract as of 2026-07-14.
+Status: current MCP-facing contract as of 2026-07-17.
 Anchored by: `crates/mcp/src/tools.rs`, `docs/runtime/REALTIME_SIGNAL_CHANNEL.md`.
 Language: ASCII only.
 
@@ -43,16 +43,20 @@ reachability, and the live tool catalogue:
 When the daemon is reachable, `daemon.environment` is a fresh bounded snapshot,
 not a platform guess. It reports terminal markers, installed shell/PowerShell
 paths and versions, WSL state, and common tool probes. Its `access_routes` list
-contains confirmed-only routes filtered against the active shell capability.
+contains confirmed-only routes filtered through the active command-probe,
+shell, and command policy. `repo_only` uses its configured repository root as
+the representative discovery cwd; it never depends on the daemon process cwd.
 Each route has a stable id, absolute executable, family, evidence, and exact
 `argv_template`: `direct_argv` and `wsl_argv` end in `{args...}`, while
 shell-backed routes end in `{command}`. `beachhead` repeats the highest-ranked
 surviving route so an LLM can establish a working execution path without
-synthesizing flags. When `allow_shell` is off, shell routes are omitted rather
-than advertised with an unusable remedy; confirmed direct argv routes remain.
-Normal command/path policy checks still apply after the caller supplies the
-concrete argv and cwd. WSL is promoted only after a sentinel command succeeds
-within the probe deadline.
+synthesizing flags. Concrete calls are always rechecked with their real argv and
+cwd. WSL is promoted only after a sentinel command succeeds within the probe
+deadline.
+
+Route actions are part of the contract: use `run` or `run_and_watch` with the
+returned template for `direct_argv`, `wsl_argv`, and `wsl_shell`; use `exec` with
+the returned shell executable and a `shell_line` for native `shell` routes.
 
 Availability rules:
 
@@ -67,19 +71,17 @@ Availability rules:
   aligned (`catalogue_lists_fifty_one_live_tools` and
   `tool_router_exposes_all_live_tools`).
 
-Platform availability (unix-only sessions):
+Session availability:
 
 - Persistent shell sessions and workspace snapshots
-  (`shell_session_*`, `workspace_snapshot_*`) are UNIX-ONLY. On Windows
-  the daemon omits the session IPC handlers, so `system_discover`
-  reports them unavailable on that host:
-  - `system_discover.omni_status.matrix.sessions.available` is `false`
-    on Windows (the session runtime is gated `cfg!(unix)`). This row
-    carries only the boolean; the human-readable reason rides the
-    per-tool catalogue.
+  (`shell_session_*`, `workspace_snapshot_*`) require a reachable daemon,
+  a UNIX session runtime, and the `allow_session` capability. If any gate is
+  closed, `system_discover` reports them unavailable:
+  - `system_discover.omni_status.matrix.sessions.available` is true only when
+    all three gates are open. This row carries only the boolean; the
+    human-readable reason rides the per-tool catalogue.
   - each session/snapshot entry in `system_discover.tools[]` reports
-    `available: false` with `unavailable_reason:
-    "shell-session runtime unavailable on this platform (unix-only)"`.
+    `available: false` with the specific daemon, platform, or capability reason.
 - The PTY command lane (`pty_command_*`) is dual-backend (POSIX +
   Windows ConPTY) and stays available on Windows; only the session
   layer built on top of it is unix-only. See
@@ -168,6 +170,10 @@ instead of raw streams.
 | File search | Bounded matches and capped snippets. |
 | Registry search/test | Bounded hit/sample counts. |
 | Runtime/probe status | Bounded JSON snapshots. |
+
+`run_and_watch.cursor` is a resume cursor, not simply the last internally
+observed event. When `max_signals` caps a response, the cursor remains before
+omitted matches so a later `wait` from that cursor recovers every capped signal.
 
 `bucket_wait` must return one of two response shapes:
 

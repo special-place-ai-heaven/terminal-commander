@@ -332,6 +332,63 @@ async fn run_and_watch_returns_signal_and_exit_in_one_call() {
     cleanup(&data);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_and_watch_capped_cursor_keeps_omitted_match_recoverable() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+
+    let data = tmp_data_dir("capped-cursor");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+        let out = json(
+            &call_tool(
+                &client,
+                "run_and_watch",
+                serde_json::json!({
+                    "argv": [
+                        "python3", "-u", "-c",
+                        "import time\nprint('first needle', flush=True)\ntime.sleep(0.1)\nprint('second needle', flush=True)"
+                    ],
+                    "wait_ms": 3000,
+                    "wait_until": "exit",
+                    "max_signals": 1,
+                    "rules": [{ "keywords": ["needle"], "event_kind": "needle_match" }]
+                }),
+            )
+            .await,
+        );
+        assert_eq!(
+            out["signals"].as_array().map(Vec::len),
+            Some(1),
+            "run_and_watch must honor max_signals; got {out}"
+        );
+
+        let resumed = json(
+            &call_tool(
+                &client,
+                "bucket_wait",
+                serde_json::json!({
+                    "bucket_id": out["bucket_id"],
+                    "cursor": out["cursor"],
+                    "timeout_ms": 1000,
+                    "limit": 10
+                }),
+            )
+            .await,
+        );
+        assert!(
+            has_needle_match(&resumed),
+            "the cursor must not skip a match omitted by max_signals; run={out}, resumed={resumed}"
+        );
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
 /// Council HARD constraint: a quiet command (no rule matches) must NOT
 /// error — run_and_watch returns the bounded exit receipt instead, so TC
 /// never bounces the agent to the shell for running a small command.
