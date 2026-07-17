@@ -67,8 +67,8 @@ form and stay consistent within a file. Generated files
   the *documented* minimum-supported version, NOT a CI-enforced gate:
   no workflow runs `cargo hack --rust-version`, so the 1.92.0 claim is
   a promise, not an automated check (see section 6).
-- Active dev/CI pin: Rust 1.95.0, pinned in `rust-toolchain.toml`
-  (`channel = "1.95.0"`). This is the toolchain the gate scripts and CI
+- Active dev/CI pin: Rust 1.97.1, pinned in `rust-toolchain.toml`
+  (`channel = "1.97.1"`). This is the toolchain the gate scripts and CI
   actually run. Install it via rustup; the repo's `rust-toolchain.toml`
   selects it automatically.
 - Required components: `rustfmt`, `clippy`.
@@ -210,7 +210,7 @@ check and is NOT the PR gate; do not conflate the two.
 One-time WSL provisioning (Windows devs, so `scripts/linux-gate.ps1`
 can run the linux gate):
 
-- rustup, plus the pinned `1.95.0` toolchain (matches
+- rustup, plus the pinned `1.97.1` toolchain (matches
   `rust-toolchain.toml`)
 - `cargo-nextest`
 - `node`

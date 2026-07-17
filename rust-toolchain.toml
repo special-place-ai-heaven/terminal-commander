@@ -1,17 +1,19 @@
 # Pinned toolchain for Terminal Commander.
 #
-# Amendment 2026-05-21: SPEC.md / docs/research/_USER_DECISIONS.md
-# declare the MSRV floor as 1.92.0 (forced by rmcp =1.7.0). The
-# operator chose 1.95.0 for the active toolchain at TC04 start to
-# avoid a rustup download.
+# SPEC.md / docs/research/_USER_DECISIONS.md declare the MSRV floor
+# as 1.92.0 (forced by rmcp =1.7.0).
+#
+# Amendment 2026-07-17: raise the active toolchain to 1.97.1 so
+# optimized release artifacts include Rust's upstream LLVM
+# miscompilation fix. This does not change the supported MSRV.
 #
 # Pin reality (corrected 2026-06-02): 1.92.0 is the DOCUMENTED MSRV
 # floor only — it is NOT CI-enforced (no `cargo-hack --rust-version`
-# gate exists in any workflow). The channel below (1.95.0) is the
+# gate exists in any workflow). The channel below (1.97.1) is the
 # active dev/CI pin, tied to npm-binary-build.yml's RUST_TOOLCHAIN by
 # scripts/linux-gate.sh so the two pins cannot silently drift.
 
 [toolchain]
-channel = "1.95.0"
+channel = "1.97.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

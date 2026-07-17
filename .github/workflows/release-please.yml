@@ -109,7 +109,7 @@ env:
   # (2026-09-16). Run all node20 JS actions on node24 now to clear warnings
   # and pre-empt the cutover without bumping every action major.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  RUST_TOOLCHAIN: "1.95.0"
+  RUST_TOOLCHAIN: "1.97.1"
   NODE_VERSION: "20"
 
 jobs:
@@ -1062,7 +1062,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-publish-terminal-commander-core
@@ -1106,7 +1106,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-publish-terminal-commander-sifters
@@ -1150,7 +1150,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-publish-terminal-commander-probes
@@ -1194,7 +1194,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-publish-terminal-commander-store
@@ -1238,7 +1238,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-publish-terminal-commander-supervisor
@@ -1291,7 +1291,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-publish-terminal-commander-ipc
@@ -1335,7 +1335,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-publish-terminal-commanderd
@@ -1379,7 +1379,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: cargo-publish-terminal-commander-mcp
