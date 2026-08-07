@@ -289,31 +289,36 @@ completes.
 
 ## 13. Acceptance against NPM07 mini-spec
 
-> **STATUS (2026-08-07): this section records the NPM07 DESIGN as accepted at
-> the time. Four of its boxes no longer describe the shipped workflow and are
-> corrected inline below. Do not read this list as current state.**
+> **STATUS (2026-08-07): the NPM07 design is now SHIPPED, after a period of
+> drift.** History kept deliberately, because the drift is the lesson.
 >
-> The publish path was later walked back to token mode for the 0.2.0 line.
-> `release-please.yml` authenticates every publish job with
-> `NODE_AUTH_TOKEN: secrets.NPM_TOKEN_TC` and its own header states that
-> trusted-publisher OIDC is "not yet configured on npmjs.com for all package
-> names". Task 23 owns the cutover back to this design.
+> Between NPM07 and Task 23 the publish path was walked back to token mode for
+> the 0.2.0 line, while this list still showed every box ticked. It therefore
+> asserted OIDC, `--provenance` and "no NPM_TOKEN references" throughout a
+> period when the workflow did the opposite at six call sites.
 >
-> This drift is not academic: the stale operator values in §8 were applied
-> verbatim to the live npm trusted-publisher entry, pointing it at a
-> nonexistent workflow (`npm-publish.yml`) under the pre-transfer owner. It
-> could never match, so every release silently used the token instead.
+> That was not academic. The stale operator values in §8 were applied verbatim
+> to the live npm trusted-publisher entry, pointing it at a nonexistent
+> workflow (`npm-publish.yml`) under the pre-transfer owner. It could never
+> match — so every release quietly authenticated with the token and reported
+> success. A ticked box and a green release together looked like proof.
+>
+> Task 23 (2026-08-07) restored the design: `id-token: write` on the six npm
+> publish jobs, Node 22.14+, `--provenance`, and no `NODE_AUTH_TOKEN` anywhere
+> in the npm path. Removing the token is what makes it honest: a broken
+> trusted publisher now FAILS the publish instead of silently falling back.
 
-- [ ] ~~OIDC `id-token: write` set only on publish jobs.~~ **NOT SHIPPED** —
-      no `id-token` permission exists in `release-please.yml`.
-- [ ] ~~`npm publish --provenance` on every package.~~ **NOT SHIPPED** — no
-      `--provenance` flag; Node 20 ships an npm older than the 11.5.1 it needs.
+- [x] OIDC `id-token: write` set only on publish jobs. *(Task 23; verified by
+      parsing the workflow — six publish jobs have it, no other job does.)*
+- [x] `npm publish --provenance` on every package. *(Task 23; `NODE_PUBLISH_VERSION: 24`
+      supplies the npm >= 11.5.1 that `--provenance` requires.)*
 - [x] `--tag beta` on the first publish.
 - [x] Platform packages publish first, root wrapper last.
-- [ ] ~~No `secrets.NPM_TOKEN` / `_TC` reference anywhere in the workflow.~~
-      **NOT SHIPPED** — six `NODE_AUTH_TOKEN: secrets.NPM_TOKEN_TC` sites.
+- [x] No `secrets.NPM_TOKEN` / `_TC` reference anywhere in the npm publish
+      path. *(Task 23. crates.io still uses `CARGO_REGISTRY_TOKEN_TC` — that
+      cutover is NOT done and is out of scope here.)*
 - [ ] ~~No `cargo publish` / crates.io step.~~ **SUPERSEDED** — the crates.io
-      publish chain was added after NPM07.
+      publish chain was added after NPM07 and is intentionally token-based.
 - [x] Operator setup notes documented in this file §8.
 - [x] Workflow YAML parses.
 - [x] No `crates/**` / `Cargo.toml` / `Cargo.lock` / `rules/**` /

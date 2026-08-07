@@ -32,9 +32,12 @@
 #     - publish-root: depends on all 5 platform publishes; `npm publish`
 #       for the `terminal-commander` root wrapper (latest).
 #     - then the crates.io cargo-publish chain (see below).
-#   npm publish uses `secrets.NPM_TOKEN_TC` via `NODE_AUTH_TOKEN`
-#   (trusted-publisher OIDC not yet configured on npmjs.com for all
-#   package names). The release-please job uses `RELEASE_PLEASE_TOKEN_TC`
+#   npm publish uses OIDC TRUSTED PUBLISHING + `--provenance` (Task 23,
+#   2026-08-07). No npm token is present in any publish job: `npm` exchanges
+#   the GitHub Actions OIDC id-token for a short-lived credential. A
+#   misconfigured trusted publisher now FAILS the publish loudly instead of
+#   silently falling back to a token. The release-please job uses
+#   `RELEASE_PLEASE_TOKEN_TC`
 #   when `GITHUB_TOKEN` cannot open/update the release PR (Bad credentials).
 #
 # crates.io portion (cargo publish chain):
@@ -53,11 +56,12 @@
 #   - call the NPM05 `npm-binary-build` workflow (kept separate as a
 #     non-publishing CI gate),
 #   - auto-merge the release PR (release-pr-sync.yml; feat/fix only),
-#   - request `id-token: write` (OIDC may return after trusted
-#     publisher is configured on npmjs.com / crates.io for all names).
+#   - request `id-token: write` on the release-please or cargo jobs (OIDC is
+#     scoped to the six npm publish jobs only; crates.io still uses a token).
 #
 # NOTE: this workflow DOES reference long-lived secrets
-#   (NPM_TOKEN_TC, CARGO_REGISTRY_TOKEN_TC, RELEASE_PLEASE_TOKEN_TC)
+#   (CARGO_REGISTRY_TOKEN_TC, RELEASE_PLEASE_TOKEN_TC -- npm's NPM_TOKEN_TC
+#   was removed at Task 23; crates.io has no trusted-publishing cutover yet)
 #   and the cargo-publish chain DOES touch `crates/**`, `Cargo.toml`,
 #   and `Cargo.lock` at checkout time. The earlier comment that
 #   claimed otherwise predated the crates.io publish chain.
@@ -117,6 +121,10 @@ env:
   # with `supportedVersions`; the jobs assert that, not just the exit code.
   # Guarded by crates/mcp/tests/protocol_honesty.rs.
   MCP_DISCOVER: '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"smoke","version":"0.0.0"}}}}'
+  # Task 23: `npm publish --provenance` needs npm >= 11.5.1, which ships in
+  # Node 22.14+. Pinned separately so the OIDC cutover does not move Node
+  # for the non-publishing jobs.
+  NODE_PUBLISH_VERSION: "24"
 
 jobs:
   # ----------------------------------------------------------------
@@ -288,7 +296,8 @@ jobs:
         id: ensure
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
+          # No NODE_AUTH_TOKEN: this script only runs `npm view` against
+          # PUBLIC packages to detect a publish gap. It never publishes.
         run: bash scripts/release/ensure-release-complete.sh
 
       - name: release-please finalize (missing tag only)
@@ -408,10 +417,11 @@ jobs:
   #                        runs `npm publish --access public` against
   #                        `@terminal-commander/<platform>`.
   #
-  # 0.2.0 token-mode auth: NODE_AUTH_TOKEN: secrets.NPM_TOKEN_TC.
-  # No `--provenance`, no `id-token: write`, no Node 22.14. Task 23
-  # owns the OIDC cutover after operator one-time UI setup on
-  # npmjs.com (trusted publishers).
+  # Auth (Task 23, 2026-08-07): OIDC trusted publishing. Each publish job
+  # requests `id-token: write`, runs Node 22.14+ (npm >= 11.5.1), and publishes
+  # with `--provenance`. No NODE_AUTH_TOKEN anywhere -- if a package's trusted
+  # publisher is missing or misconfigured, the publish FAILS rather than
+  # quietly using a token, which is how the earlier misconfiguration hid.
   #
   # Drift-proof: every platform binary build flows through the single
   # reusable workflow `_build-platform-binary.yml`, the same workflow
@@ -498,6 +508,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      # Task 23: OIDC trusted publishing. Scoped to publish jobs only.
+      id-token: write
     steps:
       - name: Checkout (released SHA on main)
         uses: actions/checkout@v4
@@ -505,7 +517,7 @@ jobs:
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Download bin.tar artifact
@@ -537,14 +549,12 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
+      - name: npm publish (OIDC trusted publishing + provenance)
         shell: bash
         working-directory: packages/terminal-commander-linux-x64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
           set -e
-          if npm publish --access public; then
+          if npm publish --access public --provenance; then
             exit 0
           fi
           # Recovery: workflow_dispatch + force_publish + already-on-registry → exit 0.
@@ -631,6 +641,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      # Task 23: OIDC trusted publishing. Scoped to publish jobs only.
+      id-token: write
     steps:
       - name: Checkout (released SHA on main)
         uses: actions/checkout@v4
@@ -638,7 +650,7 @@ jobs:
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Download bin.tar artifact
@@ -670,14 +682,12 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
+      - name: npm publish (OIDC trusted publishing + provenance)
         shell: bash
         working-directory: packages/terminal-commander-linux-arm64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
           set -e
-          if npm publish --access public; then
+          if npm publish --access public --provenance; then
             exit 0
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
@@ -716,6 +726,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      # Task 23: OIDC trusted publishing. Scoped to publish jobs only.
+      id-token: write
     steps:
       - name: Checkout (released SHA on main)
         uses: actions/checkout@v4
@@ -723,7 +735,7 @@ jobs:
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Download bin.tar artifact
@@ -755,14 +767,12 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
+      - name: npm publish (OIDC trusted publishing + provenance)
         shell: bash
         working-directory: packages/terminal-commander-windows-x64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
           set -e
-          if npm publish --access public; then
+          if npm publish --access public --provenance; then
             exit 0
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
@@ -801,6 +811,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      # Task 23: OIDC trusted publishing. Scoped to publish jobs only.
+      id-token: write
     steps:
       - name: Checkout (released SHA on main)
         uses: actions/checkout@v4
@@ -808,7 +820,7 @@ jobs:
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Download bin.tar artifact
@@ -840,14 +852,12 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
+      - name: npm publish (OIDC trusted publishing + provenance)
         shell: bash
         working-directory: packages/terminal-commander-mac-x64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
           set -e
-          if npm publish --access public; then
+          if npm publish --access public --provenance; then
             exit 0
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
@@ -886,6 +896,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      # Task 23: OIDC trusted publishing. Scoped to publish jobs only.
+      id-token: write
     steps:
       - name: Checkout (released SHA on main)
         uses: actions/checkout@v4
@@ -893,7 +905,7 @@ jobs:
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Download bin.tar artifact
@@ -925,14 +937,12 @@ jobs:
           fi
           echo "version-match: $actual"
 
-      - name: npm publish --access public (NPM_TOKEN_TC for 0.2.0; OIDC + --provenance at Task 23)
+      - name: npm publish (OIDC trusted publishing + provenance)
         shell: bash
         working-directory: packages/terminal-commander-mac-arm64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
           set -e
-          if npm publish --access public; then
+          if npm publish --access public --provenance; then
             exit 0
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_publish }}" = "true" ]; then
@@ -956,9 +966,9 @@ jobs:
   # The root package has no Rust binaries to build; the `bin/` shims
   # and `lib/resolve-binary.js` are already in the working tree.
   #
-  # Auth: stays on NODE_AUTH_TOKEN + Node 20 for 0.2.0. Task 23 owns
-  # the OIDC + --provenance cutover once npmjs.com trusted-publisher
-  # UI setup is complete for all 6 npm package names.
+  # Auth: OIDC trusted publishing + `--provenance`, same as the platform
+  # packages (Task 23). Publishes LAST so the root wrapper never resolves to
+  # platform versions that are not on the registry yet.
   # ----------------------------------------------------------------
   publish-root:
     name: publish-root
@@ -980,6 +990,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      # Task 23: OIDC trusted publishing. Scoped to publish jobs only.
+      id-token: write
     steps:
       - name: Checkout (released SHA on main)
         uses: actions/checkout@v4
@@ -987,7 +999,7 @@ jobs:
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Confirm package version + optionalDependencies sync
@@ -1016,14 +1028,12 @@ jobs:
           console.log(`deps-exact-pin: ok`);
           NODE
 
-      - name: npm publish
+      - name: npm publish (OIDC trusted publishing + provenance)
         shell: bash
         working-directory: packages/terminal-commander
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN_TC }}
         run: |
           set -e
-          if npm publish; then
+          if npm publish --provenance; then
             exit 0
           fi
           # Recovery: workflow_dispatch + force_publish + already-on-registry → exit 0
