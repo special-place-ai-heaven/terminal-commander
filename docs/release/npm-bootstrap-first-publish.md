@@ -172,7 +172,7 @@ through NPM07's OIDC path.
       three names and configure the trusted publisher in
       `Publishing access → Add trusted publisher`:
   - Publisher: `GitHub Actions`
-  - Repository owner: `special-place-administrator`
+  - Repository owner: `special-place-ai-heaven`
   - Repository name: `terminal-commander`
   - Workflow filename: `release-please.yml` (exact match — NOT
     `npm-bootstrap-publish.yml`)

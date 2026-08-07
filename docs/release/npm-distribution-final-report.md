@@ -221,7 +221,7 @@ binaries replace the placeholders at CI publish time.
    in npmjs.com package settings → "Publishing access" → "Add
    trusted publisher" with:
    - Publisher: `GitHub Actions`
-   - Repository owner: `special-place-administrator`
+   - Repository owner: `special-place-ai-heaven`
    - Repository name: `terminal-commander`
    - Workflow filename: `release-please.yml` (exact match
      required)

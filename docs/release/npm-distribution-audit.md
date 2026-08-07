@@ -245,7 +245,7 @@ packages/
 - Initial dist-tag: `--tag beta`. Promotion to `latest` is an
   operator action recorded in NPM09 / post-chain.
 - npmjs.com side: configure the trusted publisher for each package
-  to accept publishes from `special-place-administrator/terminal-commander`
+  to accept publishes from `special-place-ai-heaven/terminal-commander`
   + the publish workflow file path. Document the steps in
   `docs/release/` so the operator can mirror them.
 - Fallback (fine-grained automation token) ONLY if NPM07 final
@@ -290,7 +290,7 @@ packages/
 ## 15. Open questions for NPM02
 
 - Whether to register the npm org as `@terminal-commander` or as
-  `@special-place-administrator/terminal-commander`. Recommendation:
+  `@special-place-ai-heaven/terminal-commander`. Recommendation:
   `@terminal-commander` for ergonomics; fall back to the
   GitHub-org-mirror name only if unavailable.
 - Whether to bundle a `mcp.json` template inside `packages/terminal-commander/`

@@ -11,7 +11,7 @@ canonical procedure for any future package or crate added to the pipeline.
 
 For each of the 6 npm packages:
 - Pkg → Settings → Publishing access → Trusted Publishers → GitHub Actions
-- Organization: `special-place-administrator`
+- Organization: `special-place-ai-heaven`
 - Repository: `terminal-commander`
 - Workflow filename: `release-please.yml`
 - Environment: (leave blank)
@@ -74,7 +74,7 @@ hatches; they should not rotate on a schedule, but ARE still probed
 weekly for liveness in case we need them for a `force_publish` recovery.
 
 1. Rotate the failing token at its registry UI.
-2. Update repo secret at https://github.com/special-place-administrator/terminal-commander/settings/secrets/actions
+2. Update repo secret at https://github.com/special-place-ai-heaven/terminal-commander/settings/secrets/actions
 3. Manually re-run `secret-health.yml` to confirm green.
 
 ## macOS runner deprecation
