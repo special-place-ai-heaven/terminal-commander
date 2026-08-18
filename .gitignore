@@ -56,3 +56,8 @@ artifacts/
 /CLAUDE.md
 /.mcp.json
 /.claude/
+# ...but share the Claude skills (incl. speckit-*) so `git worktree add`
+# carries them into every worktree. Local state stays ignored above.
+!/.claude/
+/.claude/*
+!/.claude/skills/
