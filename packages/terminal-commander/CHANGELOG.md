@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.92](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.91...v0.1.92) (2026-09-27)
+
+
+### Bug Fixes
+
+* **mcp:** extend shell spawn ACK deadline past 5s ([eb9ea96](https://github.com/special-place-ai-heaven/terminal-commander/commit/eb9ea9657d109b14b8aba296c3355d02c8a1dd87))
+* **mcp:** extend spawn ACK transport deadline past 5s ([8697610](https://github.com/special-place-ai-heaven/terminal-commander/commit/869761009f53d006d0200a73c3df578e357bc552))
+
 ## [0.1.91](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.90...v0.1.91) (2026-09-27)
 
 
