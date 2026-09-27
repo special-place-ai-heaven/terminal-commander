@@ -760,13 +760,7 @@ impl std::fmt::Debug for TerminalCommanderMcpServer {
 
 /// Adapter-level constant tied to `Cargo.toml`.
 const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// MCP spec revision this adapter implements.
-///
-/// rmcp 3.4.1's `ProtocolVersion::LATEST` is still `2025-11-25` (the last
-/// revision with an `initialize` handshake). `2026-07-28` is the modern
-/// revision: `server/discover` plus per-request metadata. `get_info`,
-/// `supported_protocol_versions`, and `system_discover.mcp_spec` all use
-/// this one revision.
+/// MCP revision for `get_info`, negotiation, and `system_discover.mcp_spec`.
 pub(crate) const MCP_SPEC_REVISION: &str = "2026-07-28";
 const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
 
@@ -2823,7 +2817,7 @@ impl TerminalCommanderMcpServer {
                         .unwrap_or(Severity::Info);
                     #[expect(
                         deprecated,
-                        reason = "the MCP 2024-11-05 compatibility nudge remains tested and best-effort"
+                        reason = "best-effort subscription nudge; the pull is the delivery path"
                     )]
                     let _ = ctx
                         .peer
@@ -3097,10 +3091,7 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
 // complete result with `.into()`. This handler re-wraps `Complete` the same
 // way so the manual return stays explicit.
 //
-// Protocol advertisement is `2026-07-28` only. The default `initialize`
-// negotiates against `supported_protocol_versions` and rejects the legacy
-// handshake, because that revision replaced `initialize` with
-// `server/discover`.
+// Advertises MCP `2026-07-28` only, negotiated with `server/discover`.
 impl ServerHandler for TerminalCommanderMcpServer {
     async fn list_tools(
         &self,
@@ -3180,7 +3171,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
     fn get_info(&self) -> ServerConfig {
         #[expect(
             deprecated,
-            reason = "the MCP 2024-11-05 compatibility nudge remains tested and best-effort"
+            reason = "best-effort subscription nudge; the pull is the delivery path"
         )]
         let capabilities = ServerCapabilities::builder()
             .enable_tools()

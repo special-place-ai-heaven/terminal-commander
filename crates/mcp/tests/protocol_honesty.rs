@@ -3,9 +3,8 @@
 
 //! MCP advertisement is one modern revision: `2026-07-28`.
 //!
-//! `get_info`, `supported_protocol_versions`, the negotiated peer version,
-//! and `system_discover.mcp_spec` agree. Legacy `initialize` is rejected.
-//! A discover client that prefers only an older revision does not connect.
+//! `get_info`, negotiation, and `system_discover.mcp_spec` agree on
+//! `2026-07-28`. Any other opener does not connect.
 
 use std::time::Duration;
 

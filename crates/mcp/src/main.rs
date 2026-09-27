@@ -226,9 +226,9 @@ fn main() -> ExitCode {
 
         let service = match server.serve(stdio()).await {
             Ok(svc) => svc,
-            // stdin EOF before the MCP initialize handshake completes (the
-            // transport closed before any message arrived), or cancellation
-            // during init. Treat both as clean shutdown — the host dropped the
+            // stdin EOF before the session is established (the transport
+            // closed before any message arrived), or cancellation during
+            // startup. Treat both as clean shutdown — the host dropped the
             // pipe immediately (e.g. the stdin_eof_survives test).
             Err(ServerInitializeError::ConnectionClosed(_) | ServerInitializeError::Cancelled) => {
                 return ExitCode::SUCCESS;
