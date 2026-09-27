@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.96](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.95...v0.1.96) (2026-09-27)
+
+
+### Features
+
+* **recipe:** import eight local argv seeds ([d7a3b15](https://github.com/special-place-ai-heaven/terminal-commander/commit/d7a3b1553e73f0d6e3fdab8d1c31b62364d2719b))
+* **recipe:** import eight local argv seeds ([d7a3b15](https://github.com/special-place-ai-heaven/terminal-commander/commit/d7a3b1553e73f0d6e3fdab8d1c31b62364d2719b))
+
 ## [0.1.95](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.94...v0.1.95) (2026-09-27)
 
 
