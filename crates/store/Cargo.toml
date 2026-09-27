@@ -14,15 +14,15 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
-regex = "1.12.3"
-# refinery 0.9 pins rusqlite <=0.38; we need 0.39 for FTS5 + recent
-# fixes. Migrations are run manually in lib.rs via execute_batch().
-rusqlite = { version = "0.39.0", features = ["bundled"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+regex = "1.13.1"
+# Migrations run manually in lib.rs via execute_batch() (refinery is not
+# a dependency). 0.40's breaking changes are virtual-table only.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 terminal-commander-core.workspace = true
-thiserror = "2.0.18"
-time = { version = "0.3.47", features = ["formatting", "parsing", "serde-well-known"] }
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting", "parsing", "serde-well-known"] }
 
 [dev-dependencies]
 indexmap = { version = "2", features = ["serde"] }

@@ -21,7 +21,7 @@ uuid = { version = "1", features = ["v7", "serde"] }
 indexmap = { version = "2", features = ["serde"] }
 thiserror = "2"
 parking_lot = "0.12.5"
-regex = "1.12.3"
+regex = "1.13.1"
 tokio = { workspace = true, features = ["sync", "time", "rt"] }
 
 [dev-dependencies]

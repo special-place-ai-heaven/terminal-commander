@@ -61,7 +61,7 @@ fn current_user_sid() -> std::io::Result<String> {
         let s = sid_str.to_string().unwrap_or_default();
         // LocalFree the string buffer allocated by ConvertSidToStringSidW.
         // sid_str.0 is *mut u16; HLOCAL wraps *mut c_void.
-        LocalFree(HLOCAL(sid_str.0.cast::<core::ffi::c_void>()));
+        LocalFree(Some(HLOCAL(sid_str.0.cast::<core::ffi::c_void>())));
         let _ = CloseHandle(token);
         Ok(s)
     }
@@ -138,7 +138,7 @@ pub fn create_named_pipe_with_sddl(
 
         // LocalFree the security descriptor allocated by
         // ConvertStringSecurityDescriptorToSecurityDescriptorW.
-        LocalFree(HLOCAL(sd.0));
+        LocalFree(Some(HLOCAL(sd.0)));
 
         if handle == INVALID_HANDLE_VALUE {
             return Err(std::io::Error::last_os_error());

@@ -14,13 +14,13 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
-aho-corasick = "1.1.4"
-indexmap = "2.14.0"
+aho-corasick = "1.1.5"
+indexmap = "2.14.2"
 parking_lot = "0.12.5"
-regex = "1.12.3"
+regex = "1.13.1"
 terminal-commander-core.workspace = true
-thiserror = "2.0.18"
-time = "0.3.47"
+thiserror = "2.0.21"
+time = "0.3.55"
 uuid = { version = "1", features = ["v5"] }
 
 [lints]
