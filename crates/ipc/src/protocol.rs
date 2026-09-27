@@ -1099,6 +1099,11 @@ pub struct ShellTeach {
     pub denied_capability: Option<String>,
     pub denied_tool: String,
     pub reason: String,
+    /// Activated recipe that matches the denied intent, when exactly one does.
+    /// Absent means argv teach. The MCP adapter reads this; it is not a second
+    /// deny code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe_id: Option<String>,
 }
 
 /// Structured error payload.

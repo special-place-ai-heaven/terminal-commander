@@ -3,7 +3,10 @@
 
 use std::sync::Arc;
 
-use super::common::enrich_shell_teach;
+#[cfg(any(unix, windows))]
+use terminal_commander_core::RecipeTeachIntent;
+
+use super::common::{attach_recipe_steer, enrich_shell_teach};
 #[cfg(any(unix, windows))]
 use crate::ipc::protocol::{
     DEFAULT_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS, MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES,
@@ -154,7 +157,10 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
             format!("pty_command_start: {other}"),
         )),
     };
-    started.map_err(|e| enrich_shell_teach(&state.policy, "pty_command_start", e))
+    started.map_err(|e| {
+        let err = enrich_shell_teach(&state.policy, "pty_command_start", e);
+        attach_recipe_steer(state, RecipeTeachIntent::Argv(&params.argv), err)
+    })
 }
 
 #[cfg(any(unix, windows))]

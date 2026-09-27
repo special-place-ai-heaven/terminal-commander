@@ -3,9 +3,12 @@
 
 use std::sync::Arc;
 
+use terminal_commander_core::RecipeTeachIntent;
 use terminal_commander_supervisor::identity::PeerIdentity;
 
-use super::common::{enrich_shell_teach, identity_audit_subject, map_command_error};
+use super::common::{
+    attach_recipe_steer, enrich_shell_teach, identity_audit_subject, map_command_error,
+};
 use crate::command::CommandStartRequest;
 use crate::ipc::protocol::{
     CommandOutputTailParams, CommandOutputTailResponse, CommandStartParams, CommandStatusParams,
@@ -54,7 +57,8 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
         peer_discriminator: Some(peer_discriminator(peer)),
     };
     let resp = state.command.start_combed(req).map_err(|e| {
-        enrich_shell_teach(&state.policy, "command_start_combed", map_command_error(e))
+        let err = enrich_shell_teach(&state.policy, "command_start_combed", map_command_error(e));
+        attach_recipe_steer(state, RecipeTeachIntent::Argv(&params.argv), err)
     })?;
     Ok(IpcResponse::CommandStartCombed(resp))
 }
@@ -100,10 +104,10 @@ pub(in crate::ipc::server) fn handle_shell_exec(
         bucket_config: params.bucket_config.clone(),
         tag: params.tag.clone(),
     };
-    let resp = state
-        .shell
-        .exec(req)
-        .map_err(|e| enrich_shell_teach(&state.policy, "shell_exec", map_command_error(e)))?;
+    let resp = state.shell.exec(req).map_err(|e| {
+        let err = enrich_shell_teach(&state.policy, "shell_exec", map_command_error(e));
+        attach_recipe_steer(state, RecipeTeachIntent::ShellLine(&params.shell_line), err)
+    })?;
     Ok(IpcResponse::CommandStartCombed(resp))
 }
 
