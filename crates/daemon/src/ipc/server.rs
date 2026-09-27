@@ -38,8 +38,9 @@ use crate::environment::{EnvironmentRouter, RouteOutcome};
 #[cfg(unix)]
 use crate::ipc::peer;
 use crate::ipc::protocol::{
-    DiscoverResponse, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, PolicyCapsView,
-    PolicyStatusResponse, RequestEnvelope, ResponseEnvelope, SelfCheckResponse,
+    DiscoverResponse, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult,
+    MCP_SPEC_REVISION, PolicyCapsView, PolicyStatusResponse, RequestEnvelope, ResponseEnvelope,
+    SelfCheckResponse,
 };
 #[cfg(unix)]
 use crate::ipc::protocol::{MAX_FRAME_BYTES, decode_payload, encode_frame};
@@ -895,7 +896,7 @@ async fn dispatch(
 fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
     IpcResponse::SystemDiscover(DiscoverResponse {
         version: env!("CARGO_PKG_VERSION").to_owned(),
-        mcp_spec: "2025-11-25".to_owned(),
+        mcp_spec: MCP_SPEC_REVISION.to_owned(),
         policy_profile: format!("{:?}", state.policy.profile),
         // M6: advertise EXACTLY the shared method authority. Previously a
         // hand-maintained literal list that drifted from the dispatcher

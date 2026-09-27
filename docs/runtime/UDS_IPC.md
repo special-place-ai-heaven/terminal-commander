@@ -89,7 +89,7 @@ of the TC37 methods take parameters; the `params` field is omitted.
     "response": {
       "method": "system_discover",
       "version": "0.0.0",
-      "mcp_spec": "2025-11-25",
+      "mcp_spec": "2026-07-28",
       "policy_profile": "DeveloperLocal",
       "methods": ["system_discover", "health", "policy_status", "self_check"]
     }

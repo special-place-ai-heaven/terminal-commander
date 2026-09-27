@@ -62,7 +62,7 @@ fn system_discover_round_trip() {
         let resp = client.call(1, IpcRequest::SystemDiscover).await.unwrap();
         match resp {
             IpcResponse::SystemDiscover(d) => {
-                assert_eq!(d.mcp_spec, "2025-11-25");
+                assert_eq!(d.mcp_spec, "2026-07-28");
                 assert!(d.methods.iter().any(|m| m == "system_discover"));
                 assert!(d.methods.iter().any(|m| m == "health"));
                 assert!(d.methods.iter().any(|m| m == "policy_status"));

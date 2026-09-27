@@ -17,7 +17,7 @@ reachability, and the live tool catalogue:
 ```json
 {
   "adapter_version": "<installed version>",
-  "mcp_spec": "2025-11-25",
+  "mcp_spec": "2026-07-28",
   "daemon_available": false,
   "daemon": null,
   "daemon_error": "daemon ipc error [...]: ...",

@@ -805,6 +805,9 @@ pub struct HostEnvironment {
     pub discovery_ms: u64,
 }
 
+/// MCP revision advertised on [`DiscoverResponse::mcp_spec`].
+pub const MCP_SPEC_REVISION: &str = "2026-07-28";
+
 /// `system_discover` payload. Mirrors the contract laid out in
 /// `docs/mcp/TOOL_CONTROL_SURFACE.md`. The advertised method list is
 /// tied to the dispatcher's actual handler set.
