@@ -46,9 +46,8 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
-        LoggingLevel, LoggingMessageNotificationParam, PaginatedRequestParams, ProtocolVersion,
-        ServerCapabilities, ServerInfo,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_router,
@@ -2822,16 +2821,18 @@ impl TerminalCommanderMcpServer {
                     )]
                     let _ = ctx
                         .peer
-                        .notify_logging_message(LoggingMessageNotificationParam {
-                            level: LoggingLevel::Info,
-                            logger: Some("terminal-commander".to_owned()),
-                            data: serde_json::json!({
-                                "subscription": "new_events",
-                                "count": events.len(),
-                                "max_severity": max_sev,
-                                "lagged": lagged,
-                            }),
-                        })
+                        .notify_logging_message(
+                            rmcp::model::LoggingMessageNotificationParam::new(
+                                rmcp::model::LoggingLevel::Info,
+                                serde_json::json!({
+                                    "subscription": "new_events",
+                                    "count": events.len(),
+                                    "max_severity": max_sev,
+                                    "lagged": lagged,
+                                }),
+                            )
+                            .with_logger("terminal-commander"),
+                        )
                         .await;
                 }
                 // US4 / FR-031: include the liveness section ONLY when the delta
@@ -3081,18 +3082,19 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
 //   - `list_tools` advertises the compact facade(s) under `TC_SURFACE=compact`,
 //     else the unchanged granular tools (with facade names filtered OUT so the
 //     full surface stays EXACTLY the 51 granular tools).
-//   - `call_tool` runs the admission gate, then delegates to the SAME router
-//     the macro used (`ToolCallContext` + `self.tool_router.call`).
-//   - `get_tool` mirrors the macro (router lookup) to preserve task-support
-//     validation behavior identically.
-// `get_info` / `initialize` are unchanged.
+//   - `call_tool` runs the admission gate, then facade_strict, THEN the SAME
+//     router the macro used (`ToolCallContext` + `self.tool_router.call`).
+//   - `get_tool` mirrors the macro (router lookup).
 //
-// Signatures confirmed against rmcp 1.8.0 (`rmcp::handler::server::ServerHandler`
-// + `rmcp-macros` `tool_handler`):
-//   call_tool(&self, CallToolRequestParams, RequestContext<RoleServer>)
-//     -> Result<CallToolResult, McpError>
-//   list_tools(&self, Option<PaginatedRequestParams>, RequestContext<RoleServer>)
-//     -> Result<ListToolsResult, McpError>
+// rmcp 3.4.1 (SEP-2322): manual `call_tool` returns `CallToolResponse`.
+// Each `#[tool]` method still returns `CallToolResult`; the router wraps a
+// complete result with `.into()`. This handler re-wraps `Complete` the same
+// way so the manual return stays explicit.
+//
+// TODO(TC-MCP-REWRITE-P2): `get_info` still advertises `V_2024_11_05` while
+// `system_discover.mcp_spec` says `2025-11-25`. Phase 2 declares legacy
+// initialize plus `2026-07-28` via `supported_protocol_versions` and makes
+// the advertised version honest. Do not do that here.
 impl ServerHandler for TerminalCommanderMcpServer {
     async fn list_tools(
         &self,
@@ -3126,7 +3128,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
         &self,
         mut request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         // Admission gate FIRST: under `compact`, reject any name not on the
         // facade set with a clear "set TC_SURFACE=full" message. Under `full`
         // every name is admitted and the router routes by name as before.
@@ -3149,8 +3151,16 @@ impl ServerHandler for TerminalCommanderMcpServer {
         }
         // Delegate to the SAME router the macro used -- dispatch still flows
         // through `self.tool_router`; no hand-rolled per-tool match.
+        // Surface gates and facade_strict stay BEFORE the router.
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        self.tool_router.call(tcc).await
+        self.tool_router
+            .call(tcc)
+            .await
+            .map(|response| match response {
+                // SEP-2322: complete results are `CallToolResult` wrapped with `.into()`.
+                CallToolResponse::Complete(result) => result.into(),
+                other => other,
+            })
     }
 
     fn get_tool(&self, name: &str) -> Option<rmcp::model::Tool> {
@@ -3161,7 +3171,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
         self.tool_router.get(name).cloned()
     }
 
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         #[expect(
             deprecated,
             reason = "the MCP 2024-11-05 compatibility nudge remains tested and best-effort"
@@ -3174,7 +3184,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
             // pull; this capability never makes the notification load-bearing.
             .enable_logging()
             .build();
-        ServerInfo::new(capabilities)
+        ServerConfig::new(capabilities)
             .with_server_info(Implementation::new(
                 "terminal-commander-mcp",
                 ADAPTER_VERSION,
@@ -3195,14 +3205,14 @@ impl ServerHandler for TerminalCommanderMcpServer {
     }
 }
 
-/// Encode a serializable payload as a single MCP `Content::text` JSON
+/// Encode a serializable payload as a single MCP `ContentBlock::text` JSON
 /// blob. Bounded by the daemon-side caps; this helper never reads
 /// unbounded input.
 fn json_tool_result<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
     let text = serde_json::to_string(value).map_err(|e| {
         McpError::internal_error(Cow::Owned(format!("serialize response: {e}")), None)
     })?;
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }
 
 /// Build the shell-start receipt. Common LLM shell pipelines remain valid
