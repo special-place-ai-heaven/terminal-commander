@@ -124,7 +124,32 @@ pub(in crate::ipc::server) fn enrich_shell_teach(
         },
         denied_tool: denied_tool.to_owned(),
         reason,
+        recipe_id: None,
     }));
+    err
+}
+
+/// When this error is a shell-misuse teach, attach `recipe_id` if exactly
+/// one activated recipe matches the denied command. Store failure or no
+/// unique match leaves the argv teach in place.
+pub(in crate::ipc::server) fn attach_recipe_steer(
+    state: &DaemonState,
+    intent: terminal_commander_core::RecipeTeachIntent<'_>,
+    mut err: IpcError,
+) -> IpcError {
+    if err.teach.is_none() {
+        return err;
+    }
+    let Ok(active) = state.store.list_active_recipes() else {
+        return err;
+    };
+    let defs: Vec<_> = active.into_iter().map(|row| row.definition).collect();
+    let Some(id) = terminal_commander_core::match_activated_recipe(intent, &defs) else {
+        return err;
+    };
+    if let Some(teach) = err.teach.as_mut() {
+        teach.recipe_id = Some(id.to_owned());
+    }
     err
 }
 
@@ -855,6 +880,7 @@ mod tests {
         assert_eq!(teach.profile, "DeveloperLocal");
         assert_eq!(teach.denied_capability.as_deref(), Some("allow_shell"));
         assert_eq!(teach.denied_tool, "shell_exec");
+        assert!(teach.recipe_id.is_none());
         assert_eq!(teach.reason, ShellDenyClass::ShellCapabilityOff.reason());
         assert!(!teach.reason.contains("set allow_shell"));
         assert!(!teach.reason.to_ascii_lowercase().contains("enable shell"));

@@ -26,6 +26,7 @@ pub mod job;
 pub mod platform;
 pub mod pointer;
 pub mod recipe;
+mod recipe_match;
 pub mod rule;
 pub mod severity;
 pub mod shell_deny;
@@ -55,6 +56,7 @@ pub use ids::{
 };
 pub use pointer::SourcePointer;
 pub use recipe::{RecipeDefinition, RecipeError, RecipeStatus};
+pub use recipe_match::{RecipeTeachIntent, match_activated_recipe};
 pub use rule::{
     CANONICAL_MATCH_KEY, ContextHint, MAX_CONTEXT_LINES, MAX_EXAMPLES,
     MAX_FULL_MATCH_SUMMARY_BYTES, MAX_PATTERN_BYTES, MAX_RULE_ID_BYTES, MAX_TAG_BYTES, MAX_TAGS,

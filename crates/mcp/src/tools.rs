@@ -7955,6 +7955,7 @@ mod tests {
             denied_capability: Some("allow_shell".to_owned()),
             denied_tool: "shell_exec".to_owned(),
             reason: ShellDenyClass::ShellCapabilityOff.reason().to_owned(),
+            recipe_id: None,
         };
         let mut e = IpcError::new(IpcErrorCode::PolicyDenied, teach.reason.clone());
         e.teach = Some(Box::new(teach.clone()));
