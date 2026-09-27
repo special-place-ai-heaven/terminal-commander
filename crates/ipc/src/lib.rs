@@ -31,6 +31,7 @@ pub mod client;
 #[cfg(windows)]
 pub mod pipe_client;
 
+pub use protocol::MCP_SPEC_REVISION;
 pub use protocol::{
     AccessRoute, AuditRowWire, AuditSinceParams, AuditSinceResponse, BucketEventsSinceParams,
     BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse, BucketWaitParams,

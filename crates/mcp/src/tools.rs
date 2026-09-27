@@ -761,7 +761,7 @@ impl std::fmt::Debug for TerminalCommanderMcpServer {
 /// Adapter-level constant tied to `Cargo.toml`.
 const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// MCP revision for `get_info`, negotiation, and `system_discover.mcp_spec`.
-pub(crate) const MCP_SPEC_REVISION: &str = "2026-07-28";
+pub(crate) use terminal_commander_ipc::MCP_SPEC_REVISION;
 const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
 
 #[tool_router]

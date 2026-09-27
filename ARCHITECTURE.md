@@ -18,7 +18,7 @@ document under `docs/research/` or a README line range.
 |                       LLM / agent harness                            |
 |        (Claude Code, Codex CLI, IDE agent, generic MCP client)       |
 +--------------------------------|-------------------------------------+
-                                 |  MCP stdio (JSON-RPC, 2025-11-25)
+                                 |  MCP stdio (JSON-RPC, 2026-07-28)
                                  v
 +----------------------------------------------------------------------+
 |   terminal-commander-mcp   (thin, per-session, unprivileged)         |
@@ -63,7 +63,7 @@ The product runs as two processes per user.
 ### 2.1 `terminal-commander-mcp` (MCP server)
 
 - Per-session lifetime. Spawned by the LLM harness as a stdio child
-  per the MCP protocol (revision 2025-11-25).
+  per the MCP protocol (revision 2026-07-28).
 - Stateless with respect to product data. The MCP server holds the
   rmcp `Server` handle, the daemon connection, and translation
   glue; it does not own probes, sifters, or storage.
