@@ -1,23 +1,24 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! IPC handlers for the recipe store. CRUD and scoped activation only.
-//! No MCP catalogue and no `recipe_run`.
+//! IPC handlers for the recipe store, dry-run, and argv-lane `recipe_run`.
 
 use std::sync::Arc;
 
 use super::common::validate_scope_against_live_jobs;
 use crate::ipc::protocol::{
-    IpcError, IpcErrorCode, IpcResponse, MAX_LIST_LIMIT, MAX_RECIPE_SEARCH_LIMIT,
-    RecipeActivateParams, RecipeActivateResponse, RecipeActiveEntry, RecipeDeactivateParams,
-    RecipeDeactivateResponse, RecipeGetParams, RecipeGetResponse, RecipeListActiveResponse,
-    RecipeListVersionsParams, RecipeListVersionsResponse, RecipeSearchHit, RecipeSearchParams,
-    RecipeSearchResponse, RecipeTombstoneParams, RecipeTombstoneResponse, RecipeUpsertParams,
-    RecipeUpsertResponse, RecipeVersionEntry,
+    CommandStartParams, IpcError, IpcErrorCode, IpcResponse, MAX_LIST_LIMIT,
+    MAX_RECIPE_SEARCH_LIMIT, RecipeActivateParams, RecipeActivateResponse, RecipeActiveEntry,
+    RecipeDeactivateParams, RecipeDeactivateResponse, RecipeGetParams, RecipeGetResponse,
+    RecipeListActiveResponse, RecipeListVersionsParams, RecipeListVersionsResponse,
+    RecipeRunParams, RecipeRunResponse, RecipeSearchHit, RecipeSearchParams, RecipeSearchResponse,
+    RecipeTestParams, RecipeTestResponse, RecipeTombstoneParams, RecipeTombstoneResponse,
+    RecipeUpsertParams, RecipeUpsertResponse, RecipeVersionEntry,
 };
 use crate::state::DaemonState;
-use terminal_commander_core::RecipeDefinition;
+use terminal_commander_core::{ActivationScope, RecipeDefinition, shell_interpreter_denied};
 use terminal_commander_store::EventStoreError;
+use terminal_commander_supervisor::identity::PeerIdentity;
 use time::format_description::well_known::Rfc3339;
 
 fn map_recipe_store_error(e: EventStoreError) -> IpcError {
@@ -113,10 +114,33 @@ pub(in crate::ipc::server) fn handle_recipe_upsert(
     }))
 }
 
+fn deny_mcp_recipe_activate(state: &DaemonState, from_mcp: bool) -> Result<(), IpcError> {
+    if from_mcp && !state.policy.llm_can_activate_recipes() {
+        return Err(IpcError::new(
+            IpcErrorCode::PolicyDenied,
+            "recipe_activate_requires_admin: llm_can_activate_recipes is false, so MCP \
+             recipe_activate and recipe_deactivate are denied. An operator activates from \
+             the admin CLI. recipe_run is allowed once a recipe is activated.",
+        ));
+    }
+    Ok(())
+}
+
+fn map_recipe_argv_error(err: &terminal_commander_core::RecipeError) -> IpcError {
+    let message = err.to_string();
+    let code = if message.contains("shell interpreter") {
+        IpcErrorCode::ShellInterpreterDenied
+    } else {
+        IpcErrorCode::RecipeInvalid
+    };
+    IpcError::new(code, message)
+}
+
 pub(in crate::ipc::server) fn handle_recipe_activate(
     state: &Arc<DaemonState>,
     params: &RecipeActivateParams,
 ) -> Result<IpcResponse, IpcError> {
+    deny_mcp_recipe_activate(state, params.from_mcp)?;
     let scope = require_scope(params.scope)?;
     let def = lookup_recipe(state, &params.recipe_id, params.version)?;
     let version = def.version;
@@ -155,6 +179,7 @@ pub(in crate::ipc::server) fn handle_recipe_deactivate(
     state: &Arc<DaemonState>,
     params: &RecipeDeactivateParams,
 ) -> Result<IpcResponse, IpcError> {
+    deny_mcp_recipe_activate(state, params.from_mcp)?;
     let scope = require_scope(params.scope)?;
     validate_scope_against_live_jobs(state, scope)?;
     if state
@@ -274,5 +299,140 @@ pub(in crate::ipc::server) fn handle_recipe_tombstone(
     }
     Ok(IpcResponse::RecipeTombstone(RecipeTombstoneResponse {
         recipe_id: params.recipe_id.clone(),
+    }))
+}
+
+pub(in crate::ipc::server) fn handle_recipe_test(
+    state: &Arc<DaemonState>,
+    params: &RecipeTestParams,
+) -> Result<IpcResponse, IpcError> {
+    let definition = match (&params.definition, params.recipe_id.as_deref()) {
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(IpcError::new(
+                IpcErrorCode::RecipeInvalid,
+                "recipe_test requires exactly one of definition or recipe_id",
+            ));
+        }
+        (Some(definition), None) => definition.clone(),
+        (None, Some(recipe_id)) => lookup_recipe(state, recipe_id, params.version)?,
+    };
+    definition
+        .validate()
+        .map_err(|err| map_recipe_argv_error(&err))?;
+    let argv = definition
+        .resolve_argv(&params.fills)
+        .map_err(|err| map_recipe_argv_error(&err))?;
+    let (expects_met, notes) = params.expect_argv0.as_deref().map_or_else(
+        || (true, Vec::new()),
+        |expected| {
+            let met = argv.first().map(String::as_str) == Some(expected);
+            let notes = if met {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "expect_argv0 {expected:?} did not match resolved argv0 {:?}",
+                    argv.first()
+                )]
+            };
+            (met, notes)
+        },
+    );
+    Ok(IpcResponse::RecipeTest(RecipeTestResponse {
+        ok: expects_met,
+        activated: false,
+        argv,
+        expects_met,
+        notes,
+    }))
+}
+
+fn resolve_activated(
+    state: &Arc<DaemonState>,
+    recipe_id: &str,
+    version: Option<u32>,
+    scope: ActivationScope,
+) -> Result<RecipeDefinition, IpcError> {
+    if let Some(version) = version {
+        let _ = lookup_recipe(state, recipe_id, Some(version))?;
+    }
+    let active = state
+        .store
+        .list_active_recipes()
+        .map_err(map_recipe_store_error)?;
+    let mut matches: Vec<RecipeDefinition> = active
+        .into_iter()
+        .filter(|row| {
+            row.definition.recipe_id == recipe_id
+                && row.scope == scope
+                && version.is_none_or(|v| row.definition.version == v)
+        })
+        .map(|row| row.definition)
+        .collect();
+    matches.sort_by_key(|definition| definition.version);
+    matches.pop().ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::RecipeNotActive,
+            format!(
+                "recipe '{recipe_id}' is not activated for scope {}; call recipe_list_active \
+                 or activate it from the admin CLI",
+                scope.kind_label()
+            ),
+        )
+    })
+}
+
+pub(in crate::ipc::server) fn handle_recipe_run(
+    state: &Arc<DaemonState>,
+    params: &RecipeRunParams,
+    peer: &PeerIdentity,
+) -> Result<IpcResponse, IpcError> {
+    let scope = require_scope(params.scope)?;
+    let definition = resolve_activated(state, &params.recipe_id, params.version, scope)?;
+    let argv = definition
+        .resolve_argv(&params.fills)
+        .map_err(|err| map_recipe_argv_error(&err))?;
+    if let Some(shell) = shell_interpreter_denied(argv.first().map_or("", String::as_str)) {
+        return Err(IpcError::new(
+            IpcErrorCode::ShellInterpreterDenied,
+            format!("shell interpreter '{shell}' is denied on recipe_run"),
+        ));
+    }
+    let watched = definition.prefers_watch();
+    let wait_ms = definition.watch_budget_ms().unwrap_or(0);
+    // ponytail: env_allowlist stores names only. The child inherits the daemon
+    // environment; a value-injecting allowlist can replace the empty env later.
+    // ponytail: rule_pack_ids select the watch path only. They do not import packs.
+    let start = CommandStartParams {
+        environment: None,
+        argv: argv.clone(),
+        cwd: definition.cwd.as_ref().map(std::path::PathBuf::from),
+        env: vec![],
+        bucket_config: None,
+        rules: vec![],
+        grace_ms: None,
+        tag: None,
+        dedup_nonce: None,
+        strip_ansi: true,
+    };
+    let started = match super::command::handle_command_start_combed(state, &start, peer)? {
+        IpcResponse::CommandStartCombed(body) => body,
+        other => {
+            return Err(IpcError::new(
+                IpcErrorCode::Internal,
+                format!("recipe_run expected command_start_combed, got {other:?}"),
+            ));
+        }
+    };
+    Ok(IpcResponse::RecipeRun(RecipeRunResponse {
+        recipe_id: definition.recipe_id,
+        version: definition.version,
+        argv,
+        lane: "argv".to_owned(),
+        watched,
+        wait_ms,
+        job_id: started.job_id,
+        bucket_id: started.bucket_id,
+        probe_id: started.probe_id,
+        cursor: started.cursor,
     }))
 }

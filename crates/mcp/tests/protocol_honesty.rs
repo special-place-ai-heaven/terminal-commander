@@ -116,6 +116,31 @@ async fn list_tools_emits_sep2549_ttl_ms_and_cache_scope() {
         Some("public")
     );
     assert!(wire.get("tools").is_some_and(serde_json::Value::is_array));
+    let names: Vec<&str> = wire["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+        .collect();
+    for required in [
+        "recipe_search",
+        "recipe_get",
+        "recipe_upsert",
+        "recipe_test",
+        "recipe_activate",
+        "recipe_deactivate",
+        "recipe_list_active",
+        "recipe_run",
+    ] {
+        assert!(
+            names.contains(&required),
+            "full list_tools must advertise {required}"
+        );
+    }
+    assert!(
+        !names.contains(&"recipe"),
+        "compact facade `recipe` must stay off the full list_tools surface"
+    );
 
     let _ = client.cancel().await;
     let _ = server.cancel().await;

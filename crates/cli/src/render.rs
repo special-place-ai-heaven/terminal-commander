@@ -128,6 +128,10 @@ pub(crate) fn policy(resp: &PolicyStatusResponse) {
         "  caps.allow_remote              : {}",
         resp.caps.allow_remote
     );
+    println!(
+        "  llm_can_activate_recipes       : {}",
+        resp.llm_can_activate_recipes
+    );
 }
 
 /// `buckets show <id>`: counters plus the per-severity histogram.

@@ -8,7 +8,7 @@
 //! pointed at it, and verifies the live tool round trip:
 //!
 //! - MCP `server/discover` negotiates 2026-07-28.
-//! - `list_tools` returns the full 51-tool granular surface.
+//! - `list_tools` returns the full 59-tool granular surface.
 //! - `health` forwards through UDS and returns a payload that decodes
 //!   to a real `uptime_secs` field (i.e. the daemon answered).
 //! - `audit_since` forwards through UDS and returns its bounded cursor envelope.
@@ -149,6 +149,14 @@ async fn live_health_roundtrip_through_uds() {
                 "pty_command_start".to_owned(),
                 "pty_command_stop".to_owned(),
                 "pty_command_write_stdin".to_owned(),
+                "recipe_activate".to_owned(),
+                "recipe_deactivate".to_owned(),
+                "recipe_get".to_owned(),
+                "recipe_list_active".to_owned(),
+                "recipe_run".to_owned(),
+                "recipe_search".to_owned(),
+                "recipe_test".to_owned(),
+                "recipe_upsert".to_owned(),
                 "registry_activate".to_owned(),
                 "registry_deactivate".to_owned(),
                 "registry_get".to_owned(),
@@ -261,8 +269,8 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             .filter(|t| t["status"].as_str() == Some("live"))
             .count();
         assert_eq!(
-            live_count, 51,
-            "tool catalogue must list exactly 51 live tools (including audit_since)"
+            live_count, 59,
+            "tool catalogue must list exactly 59 live tools (including recipe_*)"
         );
 
         assert_environment_routes(&body);

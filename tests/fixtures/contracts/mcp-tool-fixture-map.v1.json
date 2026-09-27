@@ -42,6 +42,14 @@
     "registry_deactivate": "ensure_daemon_status_v1",
     "registry_list_active": "ensure_daemon_status_v1",
     "registry_suggest_from_samples": "ensure_daemon_status_v1",
+    "recipe_search": "ensure_daemon_status_v1",
+    "recipe_get": "ensure_daemon_status_v1",
+    "recipe_upsert": "ensure_daemon_status_v1",
+    "recipe_test": "ensure_daemon_status_v1",
+    "recipe_activate": "ensure_daemon_status_v1",
+    "recipe_deactivate": "ensure_daemon_status_v1",
+    "recipe_list_active": "ensure_daemon_status_v1",
+    "recipe_run": "ensure_daemon_status_v1",
     "file_read_window": "ensure_daemon_status_v1",
     "file_search": "ensure_daemon_status_v1",
     "file_write": "ensure_daemon_status_v1",
@@ -192,6 +200,46 @@
       "status": "covered_live"
     },
     {
+      "name": "recipe_search",
+      "fixture": null,
+      "status": "missing_fixture"
+    },
+    {
+      "name": "recipe_get",
+      "fixture": null,
+      "status": "missing_fixture"
+    },
+    {
+      "name": "recipe_upsert",
+      "fixture": null,
+      "status": "missing_fixture"
+    },
+    {
+      "name": "recipe_test",
+      "fixture": null,
+      "status": "missing_fixture"
+    },
+    {
+      "name": "recipe_activate",
+      "fixture": null,
+      "status": "missing_fixture"
+    },
+    {
+      "name": "recipe_deactivate",
+      "fixture": null,
+      "status": "missing_fixture"
+    },
+    {
+      "name": "recipe_list_active",
+      "fixture": null,
+      "status": "missing_fixture"
+    },
+    {
+      "name": "recipe_run",
+      "fixture": null,
+      "status": "missing_fixture"
+    },
+    {
       "name": "file_read_window",
       "fixture": "mcp-tools/file_read_window.v1.json",
       "status": "covered_live"
@@ -329,10 +377,10 @@
   ],
   "obsolete_fixtures": [],
   "counts": {
-    "live_tools": 51,
+    "live_tools": 59,
     "covered_live": 51,
     "placeholder_for_live_tool": 0,
-    "missing_fixture": 0,
+    "missing_fixture": 8,
     "obsolete_fixture_present": 0
   }
 }

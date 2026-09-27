@@ -219,6 +219,10 @@ pub struct PolicySection {
     /// omitted entries inherit the profile default, while explicit false revokes it.
     #[serde(default)]
     pub caps: Option<PolicyCapsSection>,
+    /// MCP `recipe_activate` / `recipe_deactivate` gate. Default false.
+    /// Admin IPC (`from_mcp: false`) can still activate.
+    #[serde(default)]
+    pub llm_can_activate_recipes: bool,
 }
 
 /// `[policy.commands]` (POLICY.md section 4). `allow_roots` is the
@@ -411,6 +415,7 @@ impl DaemonConfig {
                 paths: None,
                 probes: None,
                 caps: None,
+                llm_can_activate_recipes: false,
             },
             retention: default_retention(),
             audit: default_audit(),
@@ -874,6 +879,29 @@ mod tests {
         "#;
         let cfg = DaemonConfig::from_toml(s).unwrap();
         assert_eq!(cfg.limits.bucket_read_limit, HARD_MAX_READ_LIMIT);
+    }
+
+    #[test]
+    fn llm_can_activate_recipes_defaults_false_and_parses_true() {
+        let omitted = r#"
+            [daemon]
+            data_dir = "/tmp/x"
+
+            [policy]
+            profile = "developer_local"
+        "#;
+        let cfg = DaemonConfig::from_toml(omitted).unwrap();
+        assert!(!cfg.policy.llm_can_activate_recipes);
+        let enabled = r#"
+            [daemon]
+            data_dir = "/tmp/x"
+
+            [policy]
+            profile = "developer_local"
+            llm_can_activate_recipes = true
+        "#;
+        let cfg = DaemonConfig::from_toml(enabled).unwrap();
+        assert!(cfg.policy.llm_can_activate_recipes);
     }
 
     #[test]

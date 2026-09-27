@@ -339,7 +339,8 @@ impl DaemonState {
             &paths.write_allow,
             &paths.deny_extra,
         )
-        .with_probe_kinds(&probes.allow_kinds, &probes.deny_kinds);
+        .with_probe_kinds(&probes.allow_kinds, &probes.deny_kinds)
+        .with_llm_can_activate_recipes(config.policy.llm_can_activate_recipes);
 
         // Restore active rule definitions from the persistent
         // registry. The in-memory ActivationRegistry is the runtime

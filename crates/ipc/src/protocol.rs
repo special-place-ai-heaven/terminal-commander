@@ -22,6 +22,7 @@
 //!
 //! Source-status: live (TC37).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -308,10 +309,11 @@ pub const MAX_PULL_TIMEOUT_MS: u64 = 8_000;
 /// names; the rmcp adapter maps each daemon-backed tool 1:1 to a method.
 /// IPC methods are live, including the `audit_since` read surface, the
 /// supervisor-only `quiesce_for_replace` verb, and the `recipe_*` store
-/// methods (IPC only; not MCP tools).
-/// The full rmcp catalogue exposes 51 granular tools (see
+/// methods (search/get/upsert/activate/list/tombstone plus `recipe_test`
+/// and `recipe_run`).
+/// The full rmcp catalogue exposes 59 granular tools (see
 /// `docs/mcp/TOOL_CONTROL_SURFACE.md` §2); the compact MCP surface instead
-/// advertises five facade tools, gated by `TC_SURFACE=compact`, that forward
+/// advertises six facade tools, gated by `TC_SURFACE=compact`, that forward
 /// to the same IPC methods.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
@@ -391,12 +393,17 @@ pub enum IpcRequest {
     RecipeGet(RecipeGetParams),
     /// Insert a new immutable recipe version. Does not activate.
     RecipeUpsert(RecipeUpsertParams),
+    /// Dry-run argv resolution. Does not store, activate, or spawn.
+    RecipeTest(RecipeTestParams),
     /// Scoped activation of an `active` recipe version.
     RecipeActivate(RecipeActivateParams),
     /// Close the open activation row for one scope.
     RecipeDeactivate(RecipeDeactivateParams),
     /// Open recipe activations. Bounded by [`MAX_LIST_LIMIT`].
     RecipeListActive(ListLimitParams),
+    /// Run an activated recipe on the argv lane (`command_start_combed`).
+    /// Non-idempotent: it spawns a job.
+    RecipeRun(RecipeRunParams),
     /// Immutable versions of one recipe, oldest first.
     RecipeListVersions(RecipeListVersionsParams),
     /// Tombstone a recipe. Versions stay readable; new versions are refused.
@@ -579,6 +586,8 @@ impl IpcRequest {
             | Self::RecipeActivate(_)
             | Self::RecipeDeactivate(_)
             | Self::RecipeTombstone(_)
+            // Spawns a combed argv job. A blind retry would start another one.
+            | Self::RecipeRun(_)
             // File WRITE (TC22 A3): creates or overwrites a file on disk.
             // A blind retry double-writes (or re-truncates) the target, so
             // it MUST be non-idempotent -- the BACKLOG P0.1 client self-heal
@@ -649,6 +658,8 @@ impl IpcRequest {
             | Self::RecipeGet(_)
             | Self::RecipeListActive(_)
             | Self::RecipeListVersions(_)
+            // Validates and resolves argv. Does not store, activate, or spawn.
+            | Self::RecipeTest(_)
             | Self::SubscriptionList(_)
             // Set-position (absolute clamped offset), not advance-position,
             // so a re-send re-applies the same reposition. Caveat: the
@@ -720,9 +731,11 @@ pub enum IpcResponse {
     RecipeSearch(RecipeSearchResponse),
     RecipeGet(RecipeGetResponse),
     RecipeUpsert(RecipeUpsertResponse),
+    RecipeTest(RecipeTestResponse),
     RecipeActivate(RecipeActivateResponse),
     RecipeDeactivate(RecipeDeactivateResponse),
     RecipeListActive(RecipeListActiveResponse),
+    RecipeRun(RecipeRunResponse),
     RecipeListVersions(RecipeListVersionsResponse),
     RecipeTombstone(RecipeTombstoneResponse),
     FileReadWindow(FileReadWindowResponse),
@@ -894,6 +907,10 @@ pub struct PolicyStatusResponse {
     /// and a base profile + `[policy.caps] allow_shell = true` both show the
     /// active set, with no opaque "full_access magic".
     pub caps: PolicyCapsView,
+    /// MCP `recipe_activate` / `recipe_deactivate` gate. Default false:
+    /// an MCP caller is denied with `recipe_activate_requires_admin`.
+    #[serde(default)]
+    pub llm_can_activate_recipes: bool,
 }
 
 /// `self_check` payload.
@@ -1983,6 +2000,11 @@ pub struct RecipeActivateParams {
     pub version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ActivationScope>,
+    /// Set by the MCP adapter. Admin CLI and in-process IPC omit it.
+    /// When true and `llm_can_activate_recipes` is false, the daemon denies
+    /// the call with `recipe_activate_requires_admin`.
+    #[serde(default)]
+    pub from_mcp: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2000,6 +2022,9 @@ pub struct RecipeDeactivateParams {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ActivationScope>,
+    /// See [`RecipeActivateParams::from_mcp`]. Same admin gate.
+    #[serde(default)]
+    pub from_mcp: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2050,6 +2075,61 @@ pub struct RecipeTombstoneParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipeTombstoneResponse {
     pub recipe_id: String,
+}
+
+/// `recipe_test` parameters. Exactly one of `definition` or `recipe_id`.
+/// Does not store, activate, or spawn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeTestParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<RecipeDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fills: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_argv0: Option<String>,
+}
+
+/// Dry-run result. `activated` is always false. An expectation miss is
+/// still `Ok` with `expects_met: false`; validation failures are errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeTestResponse {
+    pub ok: bool,
+    pub activated: bool,
+    pub argv: Vec<String>,
+    pub expects_met: bool,
+    pub notes: Vec<String>,
+}
+
+/// `recipe_run` parameters. `scope` is required at the handler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeRunParams {
+    pub recipe_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ActivationScope>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fills: BTreeMap<String, String>,
+}
+
+/// Argv-lane start metadata. `lane` is always `"argv"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeRunResponse {
+    pub recipe_id: String,
+    pub version: u32,
+    pub argv: Vec<String>,
+    /// Always `"argv"`. The shell lane is not used.
+    pub lane: String,
+    pub watched: bool,
+    pub wait_ms: u64,
+    pub job_id: JobId,
+    pub bucket_id: BucketId,
+    pub probe_id: terminal_commander_core::ProbeId,
+    pub cursor: u64,
 }
 
 // =====================================================================
@@ -3596,6 +3676,7 @@ mod tests {
                     recipe_id: "git.status".to_owned(),
                     version: None,
                     scope: None,
+                    from_mcp: false,
                 }),
                 false,
             ),
@@ -3604,6 +3685,16 @@ mod tests {
                     recipe_id: "git.status".to_owned(),
                     version: 1,
                     scope: None,
+                    from_mcp: false,
+                }),
+                false,
+            ),
+            (
+                IpcRequest::RecipeRun(RecipeRunParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: None,
+                    scope: None,
+                    fills: std::collections::BTreeMap::new(),
                 }),
                 false,
             ),
@@ -3807,6 +3898,16 @@ mod tests {
             (
                 IpcRequest::RecipeListVersions(RecipeListVersionsParams {
                     recipe_id: "git.status".to_owned(),
+                }),
+                true,
+            ),
+            (
+                IpcRequest::RecipeTest(RecipeTestParams {
+                    definition: Some(sample_recipe()),
+                    recipe_id: None,
+                    version: None,
+                    fills: std::collections::BTreeMap::new(),
+                    expect_argv0: None,
                 }),
                 true,
             ),

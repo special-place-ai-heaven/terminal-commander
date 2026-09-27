@@ -172,13 +172,18 @@ fn minimal_tool_args(tool: &str) -> serde_json::Value {
             serde_json::json!({ "rule_id": "rule_x", "scope": { "kind": "global" } })
         }
         "registry_import_pack" => serde_json::json!({ "pack": "cargo" }),
-        "registry_upsert" => serde_json::json!({ "definition_json": "{}" }),
+        "registry_upsert" | "recipe_upsert" => serde_json::json!({ "definition_json": "{}" }),
         "registry_test" => serde_json::json!({ "rule_id": "rule_x", "samples": [] }),
         // samples is required (no default); supply one so the
         // daemon-unavailable guard -- not a schema error -- is tested.
         "registry_suggest_from_samples" => serde_json::json!({ "samples": ["error: x"] }),
         "registry_deactivate" => {
             serde_json::json!({ "rule_id": "rule_x", "version": 1, "scope": { "kind": "global" } })
+        }
+        "recipe_search" => serde_json::json!({ "query": "git" }),
+        "recipe_get" => serde_json::json!({ "recipe_id": "git.status" }),
+        "recipe_activate" | "recipe_deactivate" | "recipe_run" => {
+            serde_json::json!({ "recipe_id": "git.status", "scope": { "kind": "global" } })
         }
         "file_read_window" | "file_watch_start" => {
             serde_json::json!({ "path": "/tmp/tc-unavail" })
@@ -251,8 +256,8 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
         "tools that did not return a daemon_unavailable envelope: {offenders:#?}"
     );
     assert_eq!(
-        checked, 49,
-        "expected 49 daemon-backed tools (51 catalogue entries minus system_discover and target_list)"
+        checked, 57,
+        "expected 57 daemon-backed tools (59 catalogue entries minus system_discover and target_list)"
     );
 
     let _ = client.cancel().await;

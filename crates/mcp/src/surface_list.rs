@@ -4,8 +4,8 @@
 //! Compact-surface `tools/list` construction + the admission gate.
 //!
 //! The compact surface advertises the verb-dispatched facade tools instead of
-//! the granular legacy tools. Five facades cover the full tool surface:
-//! `command`, `session`, `files`, `registry`, `status`.
+//! the granular legacy tools. Six facades cover the full tool surface:
+//! `command`, `session`, `files`, `registry`, `recipe`, `status`.
 //!
 //! The facade `Tool` here is built from the SAME schema source the rmcp
 //! `#[tool]` macro uses (`schema_for_type`), so each entry advertised
@@ -55,6 +55,10 @@ list_active, import_pack (25 built-in packs), suggest_from_samples (heuristic DR
 `import_pack` requires `pack`; activate=true additionally requires a `scope` object, \
 usually {\"kind\":\"global\"}. Rules comb command output into structured signals.";
 
+/// Description for the `recipe` facade. Kept identical to the `#[tool]`
+/// attribute on `recipe_facade`.
+pub(crate) const RECIPE_FACADE_DESCRIPTION: &str = "Argv recipes (not rules): search, get, upsert, test (dry-run; does not activate), activate, deactivate, list_active, run. activate and deactivate are denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin). run executes an activated recipe on the argv lane (run_and_watch when the recipe has a timeout or rule pack; otherwise command_start_combed). Never shell_exec. Example: {\"action\":\"run\",\"recipe_id\":\"git.status\",\"scope\":{\"kind\":\"global\"}}.";
+
 /// Description for the `status` facade.
 pub(crate) const STATUS_FACADE_DESCRIPTION: &str = "Adapter and daemon status: health ping (action=\"health\"), self_check, \
 policy_status, audit_since (daemon-global operation metadata; optional cursor/action_filter/decision_filter/limit), runtime_state \
@@ -65,7 +69,9 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
 
 /// The facade tool names advertised + admitted on the compact surface.
 /// KEEP IN SYNC with [`compact_surface_tools`].
-pub const COMPACT_TOOL_NAMES: &[&str] = &["command", "files", "registry", "session", "status"];
+pub const COMPACT_TOOL_NAMES: &[&str] = &[
+    "command", "files", "recipe", "registry", "session", "status",
+];
 
 /// Walk `v` recursively and collect every `$defs/<name>` referenced by a
 /// `"$ref": "#/$defs/<name>"` string anywhere in the value tree.
@@ -310,13 +316,13 @@ fn command_action_dependent_schemas(raw: &Map<String, Value>) -> Option<Value> {
 
 /// `tools/list` payload for `TC_SURFACE=compact`.
 ///
-/// Returns the five facade `Tool`s: `command`, `session`, `files`, `registry`,
-/// `status`. KEEP IN SYNC with [`COMPACT_TOOL_NAMES`].
+/// Returns the six facade `Tool`s. KEEP IN SYNC with [`COMPACT_TOOL_NAMES`].
 #[must_use]
 pub fn compact_surface_tools() -> Vec<Tool> {
     vec![
         surface_tool::<crate::facades::CommandFacadeCall>("command", COMMAND_FACADE_DESCRIPTION),
         surface_tool::<crate::facades::FilesFacadeCall>("files", FILES_FACADE_DESCRIPTION),
+        surface_tool::<crate::facades::RecipeFacadeCall>("recipe", RECIPE_FACADE_DESCRIPTION),
         surface_tool::<crate::facades::RegistryFacadeCall>("registry", REGISTRY_FACADE_DESCRIPTION),
         surface_tool::<crate::facades::SessionFacadeCall>("session", SESSION_FACADE_DESCRIPTION),
         surface_tool::<crate::facades::StatusFacadeCall>("status", STATUS_FACADE_DESCRIPTION),
@@ -365,8 +371,12 @@ mod tests {
                 .iter()
                 .any(|n| n.starts_with("command_") || n == "run_and_watch")
         );
-        // Exactly 5 tools (one per facade).
-        assert_eq!(names.len(), 5, "compact surface must have exactly 5 tools");
+        // Exactly 6 tools (one per facade).
+        assert_eq!(names.len(), 6, "compact surface must have exactly 6 tools");
+        assert!(
+            !names.iter().any(|n| n.starts_with("recipe_")),
+            "granular recipe_* tools must stay off the compact list"
+        );
     }
 
     #[test]
@@ -584,6 +594,19 @@ mod tests {
                     "list_active",
                     "search",
                     "suggest_from_samples",
+                    "test",
+                    "upsert",
+                ],
+            ),
+            (
+                "recipe",
+                &[
+                    "activate",
+                    "deactivate",
+                    "get",
+                    "list_active",
+                    "run",
+                    "search",
                     "test",
                     "upsert",
                 ],
