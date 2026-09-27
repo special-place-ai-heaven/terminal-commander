@@ -4,11 +4,11 @@ Connect OMP (oh-my-pi) to Terminal Commander through MCP stdio.
 
 `terminal-commander setup` has **no OMP provider**. It will not detect OMP
 and it will not write `~/.omp/agent/mcp.json`. Add the server by hand. This
-is config only: point OMP at the same `terminal-commander-mcp` binary the
-other harnesses already launch. The stanza is `command` and `args` (plus
-`env` only for a non-default `TC_SOCKET`). If a wired session later fails
-the handshake, that is a new finding. The step that is known today is
-writing `mcp.json`.
+wire stays required: point OMP at the same `terminal-commander-mcp` binary
+the other harnesses already launch. The stanza is `command` and `args` (plus
+`env` only for a non-default `TC_SOCKET`). On dogfood OMP **18.3.4** that
+wire does not connect. See
+[After the wire](#after-the-wire-protocol-2026-07-28).
 
 Tip accepts MCP **2026-07-28** only. See
 [MCP protocol floor](README.md#mcp-protocol-floor).
@@ -69,12 +69,41 @@ There is no `--provider omp`. The harness registry today is `cursor`,
 `terminal-commander doctor harness` reports those providers. It does not
 confirm that `~/.omp/agent/mcp.json` contains `terminal_commander`.
 
+## After the wire: protocol 2026-07-28
+
+The manual `mcp.json` entry is necessary and, on current dogfood OMP, not
+sufficient. After `terminal_commander` is wired, OMP still has to speak MCP
+**2026-07-28**. Dogfood OMP **18.3.4** opens `initialize` with
+`protocolVersion` **2025-11-25**. Tip rejects that handshake with JSON-RPC
+`-32022` Unsupported protocol version, and `supported` is only
+`["2026-07-28"]`.
+
+OMP's session warning:
+
+```text
+Warning: MCP server "terminal_commander" failed to connect: MCP error -32022: Unsupported protocol version; its tools are unavailable for this run.
+```
+
+The adapter log pins the requested version:
+
+```text
+terminal-commander-mcp: stdio serve failed: initialize failed: -32022: Unsupported protocol version({"requested":"2025-11-25","supported":["2026-07-28"]})
+```
+
+The live OMP matrix is **banked** as **client-bump / out-of-support**. Tools
+never load, so the teach, argv, and transport runs cannot start. Tip stays
+on **2026-07-28** only. OMP's mcp-schema has no opt-in flag analogous to
+Codex `mcp_2026_07_28`. Keep the manual wire. It remains the right config,
+and it connects only when OMP speaks **2026-07-28**.
+
 ## Verify
 
 1. Confirm `terminal-commander-mcp --help` works from the same user account
    (or that the Windows exe path above exists).
 2. Start a new OMP session so it reloads MCP config.
-3. Ask OMP to list MCP tools and call `system_discover`.
+3. Ask OMP to list MCP tools and call `system_discover`. On OMP **18.3.4**
+   this stops at the handshake in the protocol section above.
+   `system_discover` does not run until OMP speaks **2026-07-28**.
 
 Expected Terminal Commander tools include `system_discover`, `health`,
 `policy_status`, `command_start_combed`, `bucket_wait`,
@@ -87,6 +116,7 @@ Expected Terminal Commander tools include `system_discover`, `health`,
 
 | Symptom | Check |
 | --- | --- |
+| Connect fails with `-32022` (`requested` `2025-11-25`) | The wire can be correct. OMP **18.3.4** is client-bump / out-of-support for this tip. See the protocol section above. mcp-schema has no opt-in flag for **2026-07-28**. |
 | OMP has no `terminal_commander` server | Confirm the stanza is in `~/.omp/agent/mcp.json` (or in `.omp/mcp.json` for this project) and start a new session. |
 | MCP server failed to start | Confirm `terminal-commander-mcp --help` works from the same user account. |
 | Daemon unavailable | Run `terminal-commander doctor daemon`; the MCP adapter normally attempts daemon auto-start on connect. |
@@ -96,4 +126,5 @@ Expected Terminal Commander tools include `system_discover`, `health`,
 
 A provider smoke is live only when an OMP session invokes one Terminal
 Commander tool and the bounded response is visible in the session transcript.
-Writing `mcp.json` is the wiring step, not that smoke.
+Writing `mcp.json` is the wiring step. On OMP **18.3.4** the session still
+fails connect before any tool call, so that smoke stays banked.
