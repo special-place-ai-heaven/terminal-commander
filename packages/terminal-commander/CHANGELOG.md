@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.91](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.90...v0.1.91) (2026-09-27)
+
+
+### Bug Fixes
+
+* **mcp:** argv-first tool descriptions (A2 tone) ([10c9664](https://github.com/special-place-ai-heaven/terminal-commander/commit/10c966420ce768d2c730796ee702ca4abc30d2df))
+* **mcp:** steer ordinary commands to argv, not plain shell ([10c9664](https://github.com/special-place-ai-heaven/terminal-commander/commit/10c966420ce768d2c730796ee702ca4abc30d2df))
+
 ## [0.1.90](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.89...v0.1.90) (2026-09-27)
 
 
