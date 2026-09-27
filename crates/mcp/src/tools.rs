@@ -46,8 +46,9 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
+        CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
+        ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
     tool, tool_router,
@@ -3141,11 +3142,15 @@ impl ServerHandler for TerminalCommanderMcpServer {
                 .filter(|t| !crate::surface_list::COMPACT_TOOL_NAMES.contains(&t.name.as_ref()))
                 .collect(),
         };
+        // Hard-cut 2026-07-28: always emit SEP-2549 hints the rmcp
+        // #[tool_handler] macro sets for this revision (ttlMs 0, public).
         Ok(ListToolsResult {
             tools,
             next_cursor: None,
             ..Default::default()
-        })
+        }
+        .with_ttl_ms(0)
+        .with_cache_scope(CacheScope::Public))
     }
 
     async fn call_tool(
