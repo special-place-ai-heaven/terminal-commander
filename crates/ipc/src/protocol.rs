@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use terminal_commander_core::{
-    ActivationScope, BucketConfig, BucketId, EventId, JobId, RuleDefinition, RuleStatus, SessionId,
-    Severity, SignalEvent, SourceStream,
+    ActivationScope, BucketConfig, BucketId, EventId, JobId, RecipeDefinition, RecipeStatus,
+    RuleDefinition, RuleStatus, SessionId, Severity, SignalEvent, SourceStream,
 };
 
 /// US2 (FR-011): a non-blocking hint that a curated rule pack exists
@@ -306,8 +306,9 @@ pub const MAX_PULL_TIMEOUT_MS: u64 = 8_000;
 ///
 /// Method names are namespaced `<domain>_<verb>` to match the MCP tool
 /// names; the rmcp adapter maps each daemon-backed tool 1:1 to a method.
-/// 50 IPC methods are live, including the `audit_since` read surface and the
-/// supervisor-only `quiesce_for_replace` verb.
+/// IPC methods are live, including the `audit_since` read surface, the
+/// supervisor-only `quiesce_for_replace` verb, and the `recipe_*` store
+/// methods (IPC only; not MCP tools).
 /// The full rmcp catalogue exposes 51 granular tools (see
 /// `docs/mcp/TOOL_CONTROL_SURFACE.md` §2); the compact MCP surface instead
 /// advertises five facade tools, gated by `TC_SURFACE=compact`, that forward
@@ -384,6 +385,22 @@ pub enum IpcRequest {
     /// Read-only: a blind retry recomputes the same deterministic
     /// proposals, so it is idempotent.
     RegistrySuggestFromSamples(RegistrySuggestFromSamplesParams),
+    /// FTS search over persisted argv recipes. Read-only.
+    RecipeSearch(RecipeSearchParams),
+    /// Fetch a recipe by id and optional version.
+    RecipeGet(RecipeGetParams),
+    /// Insert a new immutable recipe version. Does not activate.
+    RecipeUpsert(RecipeUpsertParams),
+    /// Scoped activation of an `active` recipe version.
+    RecipeActivate(RecipeActivateParams),
+    /// Close the open activation row for one scope.
+    RecipeDeactivate(RecipeDeactivateParams),
+    /// Open recipe activations. Bounded by [`MAX_LIST_LIMIT`].
+    RecipeListActive(ListLimitParams),
+    /// Immutable versions of one recipe, oldest first.
+    RecipeListVersions(RecipeListVersionsParams),
+    /// Tombstone a recipe. Versions stay readable; new versions are refused.
+    RecipeTombstone(RecipeTombstoneParams),
     /// Bounded line/byte window read of a regular file. Never
     /// returns the whole file; the daemon clamps the window.
     FileReadWindow(FileReadWindowParams),
@@ -556,6 +573,12 @@ impl IpcRequest {
             // other registry mutators.
             | Self::RegistryDeactivateBulk(_)
             | Self::RegistryImportPack(_)
+            // Recipe mutations create a version, open or close an activation,
+            // or tombstone the parent. A blind retry is a second write.
+            | Self::RecipeUpsert(_)
+            | Self::RecipeActivate(_)
+            | Self::RecipeDeactivate(_)
+            | Self::RecipeTombstone(_)
             // File WRITE (TC22 A3): creates or overwrites a file on disk.
             // A blind retry double-writes (or re-truncates) the target, so
             // it MUST be non-idempotent -- the BACKLOG P0.1 client self-heal
@@ -622,6 +645,10 @@ impl IpcRequest {
             // supplied samples: a retry recomputes the identical
             // proposal set and never activates/persists anything.
             | Self::RegistrySuggestFromSamples(_)
+            | Self::RecipeSearch(_)
+            | Self::RecipeGet(_)
+            | Self::RecipeListActive(_)
+            | Self::RecipeListVersions(_)
             | Self::SubscriptionList(_)
             // Set-position (absolute clamped offset), not advance-position,
             // so a re-send re-applies the same reposition. Caveat: the
@@ -690,6 +717,14 @@ pub enum IpcResponse {
     RegistryDeactivateBulk(RegistryDeactivateBulkResponse),
     RegistryListActive(RegistryListActiveResponse),
     RegistrySuggestFromSamples(RegistrySuggestFromSamplesResponse),
+    RecipeSearch(RecipeSearchResponse),
+    RecipeGet(RecipeGetResponse),
+    RecipeUpsert(RecipeUpsertResponse),
+    RecipeActivate(RecipeActivateResponse),
+    RecipeDeactivate(RecipeDeactivateResponse),
+    RecipeListActive(RecipeListActiveResponse),
+    RecipeListVersions(RecipeListVersionsResponse),
+    RecipeTombstone(RecipeTombstoneResponse),
     FileReadWindow(FileReadWindowResponse),
     FileSearch(FileSearchResponse),
     FileListDir(FileListDirResponse),
@@ -969,6 +1004,15 @@ pub enum IpcErrorCode {
     /// in the message (promote the rule to status=Active and re-upsert)
     /// rather than poisoning the scope. See the agent-ergonomics chain.
     RuleNotActive,
+    /// `recipe_get` / `recipe_activate` / `recipe_deactivate` /
+    /// `recipe_tombstone` referenced a recipe id the daemon does not know.
+    RecipeNotFound,
+    /// `recipe_upsert` failed validation (empty argv, shell interpreter,
+    /// secret value, forbidden field).
+    RecipeInvalid,
+    /// `recipe_activate` targeted a version whose status is not `active`,
+    /// or `recipe_deactivate` found no open row.
+    RecipeNotActive,
     /// `subscription_pull`/`subscription_close` referenced a `sub_id` the
     /// daemon does not know (unknown or reset by a daemon restart). Caller
     /// re-opens. Approved goal-file amendment 2026-06-02.
@@ -1875,6 +1919,137 @@ pub struct RegistryListActiveResponse {
     /// [`MAX_LIST_LIMIT`] / the request `limit`).
     #[serde(default)]
     pub truncated: bool,
+}
+
+/// Maximum hits returned by `recipe_search` in a single call.
+pub const MAX_RECIPE_SEARCH_LIMIT: usize = 200;
+
+/// `recipe_search` parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeSearchParams {
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// One hit returned by `recipe_search`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeSearchHit {
+    pub recipe_id: String,
+    pub version: u32,
+    pub title: String,
+    pub summary: String,
+    pub tags: Vec<String>,
+    pub status: RecipeStatus,
+    pub argv0: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeSearchResponse {
+    pub hits: Vec<RecipeSearchHit>,
+}
+
+/// `recipe_get` parameters. `version: null` means latest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeGetParams {
+    pub recipe_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeGetResponse {
+    pub definition: RecipeDefinition,
+}
+
+/// `recipe_upsert` parameters. Validated, version assigned, not activated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeUpsertParams {
+    pub definition: RecipeDefinition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeUpsertResponse {
+    pub recipe_id: String,
+    pub version: u32,
+}
+
+/// `recipe_activate` parameters. `scope` is required at the handler
+/// (omitted scope is `ScopeInvalid`, not an implicit global).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeActivateParams {
+    pub recipe_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ActivationScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeActivateResponse {
+    pub recipe_id: String,
+    pub version: u32,
+    pub was_already_active: bool,
+    pub scope: ActivationScope,
+}
+
+/// `recipe_deactivate` parameters. `scope` is required at the handler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeDeactivateParams {
+    pub recipe_id: String,
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ActivationScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeDeactivateResponse {
+    pub recipe_id: String,
+    pub version: u32,
+    pub was_deactivated: bool,
+    pub scope: ActivationScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeActiveEntry {
+    pub recipe_id: String,
+    pub version: u32,
+    pub title: String,
+    pub scope: ActivationScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeListActiveResponse {
+    pub entries: Vec<RecipeActiveEntry>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeListVersionsParams {
+    pub recipe_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeVersionEntry {
+    pub version: u32,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeListVersionsResponse {
+    pub recipe_id: String,
+    pub versions: Vec<RecipeVersionEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeTombstoneParams {
+    pub recipe_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeTombstoneResponse {
+    pub recipe_id: String,
 }
 
 // =====================================================================
@@ -3278,6 +3453,20 @@ mod tests {
         // A minimal valid RuleDefinition for the two rule-carrying registry
         // variants. Deserialized rather than hand-built so this test stays
         // decoupled from the full struct shape (it only needs *a* value).
+        fn sample_recipe() -> RecipeDefinition {
+            serde_json::from_str(
+                r#"{
+                    "recipe_id": "git.status",
+                    "version": 1,
+                    "title": "Git status",
+                    "summary": "Short status",
+                    "argv": ["git", "status"],
+                    "status": "draft"
+                }"#,
+            )
+            .expect("sample recipe deserializes")
+        }
+
         fn sample_rule() -> RuleDefinition {
             serde_json::from_str(
                 r#"{
@@ -3393,6 +3582,34 @@ mod tests {
                     pack: "p".to_owned(),
                     activate: false,
                     scope: None,
+                }),
+                false,
+            ),
+            (
+                IpcRequest::RecipeUpsert(RecipeUpsertParams {
+                    definition: sample_recipe(),
+                }),
+                false,
+            ),
+            (
+                IpcRequest::RecipeActivate(RecipeActivateParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: None,
+                    scope: None,
+                }),
+                false,
+            ),
+            (
+                IpcRequest::RecipeDeactivate(RecipeDeactivateParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: 1,
+                    scope: None,
+                }),
+                false,
+            ),
+            (
+                IpcRequest::RecipeTombstone(RecipeTombstoneParams {
+                    recipe_id: "git.status".to_owned(),
                 }),
                 false,
             ),
@@ -3567,6 +3784,30 @@ mod tests {
             ),
             (
                 IpcRequest::RegistryListActive(ListLimitParams { limit: None }),
+                true,
+            ),
+            (
+                IpcRequest::RecipeSearch(RecipeSearchParams {
+                    query: "git".to_owned(),
+                    limit: None,
+                }),
+                true,
+            ),
+            (
+                IpcRequest::RecipeGet(RecipeGetParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: None,
+                }),
+                true,
+            ),
+            (
+                IpcRequest::RecipeListActive(ListLimitParams { limit: None }),
+                true,
+            ),
+            (
+                IpcRequest::RecipeListVersions(RecipeListVersionsParams {
+                    recipe_id: "git.status".to_owned(),
+                }),
                 true,
             ),
             (

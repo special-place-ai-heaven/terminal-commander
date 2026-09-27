@@ -7,6 +7,7 @@ pub(in crate::ipc::server) mod command;
 pub(in crate::ipc::server) mod common;
 pub(in crate::ipc::server) mod file;
 pub(in crate::ipc::server) mod pty;
+pub(in crate::ipc::server) mod recipe;
 pub(in crate::ipc::server) mod registry;
 pub(in crate::ipc::server) mod runtime;
 pub(in crate::ipc::server) mod session;

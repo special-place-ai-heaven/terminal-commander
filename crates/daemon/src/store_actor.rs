@@ -34,10 +34,10 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 
 use parking_lot::Mutex;
-use terminal_commander_core::{ActivationScope, RuleDefinition};
+use terminal_commander_core::{ActivationScope, RecipeDefinition, RuleDefinition};
 use terminal_commander_store::{
-    ActiveRuleDef, AuditEntry, AuditReadRequest, AuditRow, EventStore, EventStoreError,
-    ImportResult, RuleSearchHit,
+    ActiveRecipe, ActiveRuleDef, AuditEntry, AuditReadRequest, AuditRow, EventStore,
+    EventStoreError, ImportResult, RecipeSearchHit, RecipeVersionMeta, RuleSearchHit,
 };
 
 /// Channel depth. Burst capacity before `call` blocks on `send`;
@@ -87,6 +87,36 @@ pub enum StoreOp {
         version: u32,
         scope: ActivationScope,
     },
+    /// `EventStore::ensure_recipes()`
+    EnsureRecipes,
+    /// `RecipeStore::search`
+    SearchRecipes { query: String, limit: Option<usize> },
+    /// `RecipeStore::get_version`
+    GetRecipeVersion { recipe_id: String, version: u32 },
+    /// `RecipeStore::get_latest`
+    GetLatestRecipe { recipe_id: String },
+    /// `RecipeStore::create_recipe_version` -> assigned version
+    CreateRecipeVersion { definition: RecipeDefinition },
+    /// `RecipeStore::record_activation_scoped` -> inserted (false = already open)
+    RecordRecipeActivation {
+        recipe_id: String,
+        version: u32,
+        scope: ActivationScope,
+        profile: Option<String>,
+        actor: Option<String>,
+    },
+    /// `RecipeStore::deactivate_scoped` -> closed
+    DeactivateRecipe {
+        recipe_id: String,
+        version: u32,
+        scope: ActivationScope,
+    },
+    /// `RecipeStore::list_active`
+    ListActiveRecipes,
+    /// `RecipeStore::list_versions`
+    ListRecipeVersions { recipe_id: String },
+    /// `RecipeStore::tombstone` -> parent row existed
+    TombstoneRecipe { recipe_id: String },
     /// `EventStore::ensure_workspace()` (P1 / TC50)
     EnsureWorkspace,
     /// `EventStore::create_workspace_snapshot(...)` -> snapshot id
@@ -145,6 +175,10 @@ pub enum StoreReply {
     SnapshotId(String),
     OptionalSnapshot(Option<terminal_commander_store::WorkspaceSnapshotRow>),
     OptionalJobReceipt(Option<terminal_commander_store::JobReceiptRow>),
+    RecipeSearchHits(Vec<RecipeSearchHit>),
+    OptionalRecipe(Option<RecipeDefinition>),
+    ActiveRecipes(Vec<ActiveRecipe>),
+    RecipeVersions(Vec<RecipeVersionMeta>),
 }
 
 /// Internal envelope on the wire: an op plus the ack channel back
@@ -188,6 +222,7 @@ impl StoreClient {
         // bootstrap discipline in `state.rs`.
         store.ensure_audit()?;
         store.ensure_registry()?;
+        store.ensure_recipes()?;
         store.ensure_workspace()?;
         Self::spawn_with_store(store)
     }
@@ -371,6 +406,139 @@ impl StoreClient {
         })? {
             StoreReply::Import(result) => Ok(result),
             other => Err(unexpected_store_reply("ImportRulePackByName", &other)),
+        }
+    }
+
+    /// Apply the recipe migration eagerly (idempotent).
+    pub fn ensure_recipes(&self) -> Result<(), EventStoreError> {
+        match self.call(StoreOp::EnsureRecipes)? {
+            StoreReply::Unit => Ok(()),
+            other => Err(unexpected_store_reply("EnsureRecipes", &other)),
+        }
+    }
+
+    /// Full-text recipe search.
+    pub fn search_recipes(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<RecipeSearchHit>, EventStoreError> {
+        match self.call(StoreOp::SearchRecipes {
+            query: query.to_owned(),
+            limit,
+        })? {
+            StoreReply::RecipeSearchHits(hits) => Ok(hits),
+            other => Err(unexpected_store_reply("SearchRecipes", &other)),
+        }
+    }
+
+    /// Fetch a specific recipe version.
+    pub fn get_recipe_version(
+        &self,
+        recipe_id: &str,
+        version: u32,
+    ) -> Result<Option<RecipeDefinition>, EventStoreError> {
+        match self.call(StoreOp::GetRecipeVersion {
+            recipe_id: recipe_id.to_owned(),
+            version,
+        })? {
+            StoreReply::OptionalRecipe(def) => Ok(def),
+            other => Err(unexpected_store_reply("GetRecipeVersion", &other)),
+        }
+    }
+
+    /// Fetch the latest recipe version.
+    pub fn get_latest_recipe(
+        &self,
+        recipe_id: &str,
+    ) -> Result<Option<RecipeDefinition>, EventStoreError> {
+        match self.call(StoreOp::GetLatestRecipe {
+            recipe_id: recipe_id.to_owned(),
+        })? {
+            StoreReply::OptionalRecipe(def) => Ok(def),
+            other => Err(unexpected_store_reply("GetLatestRecipe", &other)),
+        }
+    }
+
+    /// Persist a new recipe version. Does not activate.
+    pub fn create_recipe_version(
+        &self,
+        definition: &RecipeDefinition,
+    ) -> Result<u32, EventStoreError> {
+        match self.call(StoreOp::CreateRecipeVersion {
+            definition: definition.clone(),
+        })? {
+            StoreReply::Version(v) => Ok(v),
+            other => Err(unexpected_store_reply("CreateRecipeVersion", &other)),
+        }
+    }
+
+    /// Record a scoped recipe activation. `true` when a new open row was inserted.
+    pub fn record_recipe_activation_scoped(
+        &self,
+        recipe_id: &str,
+        version: u32,
+        scope: ActivationScope,
+        profile: Option<&str>,
+        actor: Option<&str>,
+    ) -> Result<bool, EventStoreError> {
+        match self.call(StoreOp::RecordRecipeActivation {
+            recipe_id: recipe_id.to_owned(),
+            version,
+            scope,
+            profile: profile.map(str::to_owned),
+            actor: actor.map(str::to_owned),
+        })? {
+            StoreReply::Bool(inserted) => Ok(inserted),
+            other => Err(unexpected_store_reply("RecordRecipeActivation", &other)),
+        }
+    }
+
+    /// Close open recipe activation rows. `true` when at least one closed.
+    pub fn deactivate_recipe_scoped(
+        &self,
+        recipe_id: &str,
+        version: u32,
+        scope: ActivationScope,
+    ) -> Result<bool, EventStoreError> {
+        match self.call(StoreOp::DeactivateRecipe {
+            recipe_id: recipe_id.to_owned(),
+            version,
+            scope,
+        })? {
+            StoreReply::Bool(changed) => Ok(changed),
+            other => Err(unexpected_store_reply("DeactivateRecipe", &other)),
+        }
+    }
+
+    /// Open recipe activations.
+    pub fn list_active_recipes(&self) -> Result<Vec<ActiveRecipe>, EventStoreError> {
+        match self.call(StoreOp::ListActiveRecipes)? {
+            StoreReply::ActiveRecipes(rows) => Ok(rows),
+            other => Err(unexpected_store_reply("ListActiveRecipes", &other)),
+        }
+    }
+
+    /// Immutable versions of one recipe, oldest first.
+    pub fn list_recipe_versions(
+        &self,
+        recipe_id: &str,
+    ) -> Result<Vec<RecipeVersionMeta>, EventStoreError> {
+        match self.call(StoreOp::ListRecipeVersions {
+            recipe_id: recipe_id.to_owned(),
+        })? {
+            StoreReply::RecipeVersions(rows) => Ok(rows),
+            other => Err(unexpected_store_reply("ListRecipeVersions", &other)),
+        }
+    }
+
+    /// Tombstone a recipe. `false` when the id is unknown.
+    pub fn tombstone_recipe(&self, recipe_id: &str) -> Result<bool, EventStoreError> {
+        match self.call(StoreOp::TombstoneRecipe {
+            recipe_id: recipe_id.to_owned(),
+        })? {
+            StoreReply::Bool(found) => Ok(found),
+            other => Err(unexpected_store_reply("TombstoneRecipe", &other)),
         }
     }
 
@@ -609,6 +777,59 @@ fn execute(store: &mut EventStore, op: StoreOp) -> Result<StoreReply, EventStore
             scope,
         } => store
             .deactivate_rule_scoped(&rule_id, version, scope)
+            .map(StoreReply::Bool),
+        StoreOp::EnsureRecipes => store.ensure_recipes().map(|()| StoreReply::Unit),
+        StoreOp::SearchRecipes { query, limit } => store
+            .recipe_store()?
+            .search(&query, limit)
+            .map(StoreReply::RecipeSearchHits),
+        StoreOp::GetRecipeVersion { recipe_id, version } => store
+            .recipe_store()?
+            .get_version(&recipe_id, version)
+            .map(StoreReply::OptionalRecipe),
+        StoreOp::GetLatestRecipe { recipe_id } => store
+            .recipe_store()?
+            .get_latest(&recipe_id)
+            .map(StoreReply::OptionalRecipe),
+        StoreOp::CreateRecipeVersion { definition } => store
+            .recipe_store()?
+            .create_recipe_version(&definition)
+            .map(StoreReply::Version),
+        StoreOp::RecordRecipeActivation {
+            recipe_id,
+            version,
+            scope,
+            profile,
+            actor,
+        } => store
+            .recipe_store()?
+            .record_activation_scoped(
+                &recipe_id,
+                version,
+                scope,
+                profile.as_deref(),
+                actor.as_deref(),
+            )
+            .map(StoreReply::Bool),
+        StoreOp::DeactivateRecipe {
+            recipe_id,
+            version,
+            scope,
+        } => store
+            .recipe_store()?
+            .deactivate_scoped(&recipe_id, version, scope)
+            .map(StoreReply::Bool),
+        StoreOp::ListActiveRecipes => store
+            .recipe_store()?
+            .list_active()
+            .map(StoreReply::ActiveRecipes),
+        StoreOp::ListRecipeVersions { recipe_id } => store
+            .recipe_store()?
+            .list_versions(&recipe_id)
+            .map(StoreReply::RecipeVersions),
+        StoreOp::TombstoneRecipe { recipe_id } => store
+            .recipe_store()?
+            .tombstone(&recipe_id)
             .map(StoreReply::Bool),
         StoreOp::EnsureWorkspace => store.ensure_workspace().map(|()| StoreReply::Unit),
         StoreOp::CreateWorkspaceSnapshot {

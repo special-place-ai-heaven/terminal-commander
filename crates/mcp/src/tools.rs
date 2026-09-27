@@ -3454,6 +3454,9 @@ pub fn into_mcp_error_for_tool(
         | IpcErrorCode::SecretInputDenied
         | IpcErrorCode::UnknownProbe
         | IpcErrorCode::RuleNotActive
+        | IpcErrorCode::RecipeNotFound
+        | IpcErrorCode::RecipeInvalid
+        | IpcErrorCode::RecipeNotActive
         | IpcErrorCode::UnknownSubscription
         | IpcErrorCode::SubscriptionLimitExceeded
         // Session lane (P1 / TC50): all caller-fixable. UnknownSession ->
@@ -7535,6 +7538,9 @@ mod tests {
             IpcErrorCode::SecretInputDenied,
             IpcErrorCode::UnknownProbe,
             IpcErrorCode::RuleNotActive,
+            IpcErrorCode::RecipeNotFound,
+            IpcErrorCode::RecipeInvalid,
+            IpcErrorCode::RecipeNotActive,
             // F14: an unsupported platform is caller-ROUTABLE (route to WSL /
             // a different tool), not a server fault -- it must stay
             // invalid_params so the agent reasons instead of abandoning TC.

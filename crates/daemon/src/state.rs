@@ -292,6 +292,7 @@ impl DaemonState {
         // accept `registry_*` calls without a first-call latency
         // spike. The migration is idempotent.
         store.ensure_registry().map_err(BootstrapError::Store)?;
+        store.ensure_recipes().map_err(BootstrapError::Store)?;
 
         // TC-B3 / spec 004: apply the receipt migrations eagerly (V0007 +
         // V0003 + V0008) so the post-restart `command_status` fallback read

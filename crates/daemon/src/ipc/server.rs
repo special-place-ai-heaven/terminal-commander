@@ -437,6 +437,14 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::RegistryDeactivateBulk(_) => "registry_deactivate_bulk",
         IpcRequest::RegistryListActive(_) => "registry_list_active",
         IpcRequest::RegistrySuggestFromSamples(_) => "registry_suggest_from_samples",
+        IpcRequest::RecipeSearch(_) => "recipe_search",
+        IpcRequest::RecipeGet(_) => "recipe_get",
+        IpcRequest::RecipeUpsert(_) => "recipe_upsert",
+        IpcRequest::RecipeActivate(_) => "recipe_activate",
+        IpcRequest::RecipeDeactivate(_) => "recipe_deactivate",
+        IpcRequest::RecipeListActive(_) => "recipe_list_active",
+        IpcRequest::RecipeListVersions(_) => "recipe_list_versions",
+        IpcRequest::RecipeTombstone(_) => "recipe_tombstone",
         IpcRequest::FileReadWindow(_) => "file_read_window",
         IpcRequest::FileSearch(_) => "file_search",
         IpcRequest::FileListDir(_) => "file_list_dir",
@@ -498,6 +506,14 @@ pub(crate) const DISCOVERABLE_METHODS: &[&str] = &[
     "registry_deactivate",
     "registry_deactivate_bulk",
     "registry_list_active",
+    "recipe_search",
+    "recipe_get",
+    "recipe_upsert",
+    "recipe_activate",
+    "recipe_deactivate",
+    "recipe_list_active",
+    "recipe_list_versions",
+    "recipe_tombstone",
     "file_read_window",
     "file_search",
     "file_list_dir",
@@ -685,6 +701,45 @@ async fn dispatch(
             let r = handlers::registry::handle_registry_suggest_from_samples(p);
             IpcResult::Ok { response: r }
         }
+        IpcRequest::RecipeSearch(p) => match handlers::recipe::handle_recipe_search(state, p) {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
+        IpcRequest::RecipeGet(p) => match handlers::recipe::handle_recipe_get(state, p) {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
+        IpcRequest::RecipeUpsert(p) => match handlers::recipe::handle_recipe_upsert(state, p) {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
+        IpcRequest::RecipeActivate(p) => match handlers::recipe::handle_recipe_activate(state, p) {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
+        IpcRequest::RecipeDeactivate(p) => {
+            match handlers::recipe::handle_recipe_deactivate(state, p) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::RecipeListActive(p) => {
+            match handlers::recipe::handle_recipe_list_active(state, p) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::RecipeListVersions(p) => {
+            match handlers::recipe::handle_recipe_list_versions(state, p) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::RecipeTombstone(p) => match handlers::recipe::handle_recipe_tombstone(state, p)
+        {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
         IpcRequest::FileReadWindow(p) => match handlers::file::handle_file_read_window(state, p) {
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
@@ -1177,19 +1232,38 @@ mod tests {
         EventContextParams, FileListDirParams, FileReadWindowParams, FileSearchParams,
         FileWatchStartParams, FileWatchStopParams, FileWriteParams, ListLimitParams,
         ProbeStatusParams, PtyCommandStartParams, PtyCommandStopParams, PtyCommandWriteStdinParams,
-        RegistryActivateParams, RegistryDeactivateBulkParams, RegistryDeactivateParams,
-        RegistryGetParams, RegistryImportPackParams, RegistrySearchParams, RegistryTestParams,
-        RegistryUpsertParams, ShellExecParams, ShellSessionExecParams, ShellSessionStartParams,
-        ShellSessionStatusParams, ShellSessionStopParams, SubscriptionCloseParams,
-        SubscriptionListParams, SubscriptionOpenParams, SubscriptionPredicate,
-        SubscriptionPullParams, SubscriptionSeekParams, SubscriptionSourceSel,
-        WorkspaceSnapshotApplyParams, WorkspaceSnapshotCreateParams,
+        RecipeActivateParams, RecipeDeactivateParams, RecipeGetParams, RecipeListVersionsParams,
+        RecipeSearchParams, RecipeTombstoneParams, RecipeUpsertParams, RegistryActivateParams,
+        RegistryDeactivateBulkParams, RegistryDeactivateParams, RegistryGetParams,
+        RegistryImportPackParams, RegistrySearchParams, RegistryTestParams, RegistryUpsertParams,
+        ShellExecParams, ShellSessionExecParams, ShellSessionStartParams, ShellSessionStatusParams,
+        ShellSessionStopParams, SubscriptionCloseParams, SubscriptionListParams,
+        SubscriptionOpenParams, SubscriptionPredicate, SubscriptionPullParams,
+        SubscriptionSeekParams, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
+        WorkspaceSnapshotCreateParams,
     };
     use std::collections::BTreeSet;
     use terminal_commander_core::{
         BucketId, ContextHint, EventId, JobId, ProbeId, RuleDefinition, RuleStatus, RuleType,
         Severity,
     };
+
+    fn minimal_recipe() -> terminal_commander_core::RecipeDefinition {
+        terminal_commander_core::RecipeDefinition {
+            recipe_id: "git.status".to_owned(),
+            version: 1,
+            title: "Git status".to_owned(),
+            summary: "Short status".to_owned(),
+            argv: vec!["git".to_owned(), "status".to_owned()],
+            status: terminal_commander_core::RecipeStatus::Draft,
+            tags: vec![],
+            cwd: None,
+            env_allowlist: vec![],
+            timeout_ms: None,
+            rule_pack_ids: vec![],
+            placeholders: vec![],
+        }
+    }
 
     fn minimal_rule() -> RuleDefinition {
         RuleDefinition {
@@ -1320,6 +1394,34 @@ mod tests {
                 scope: terminal_commander_core::ActivationScope::Global,
             }),
             IpcRequest::RegistryListActive(ListLimitParams { limit: None }),
+            IpcRequest::RecipeSearch(RecipeSearchParams {
+                query: "git".to_owned(),
+                limit: None,
+            }),
+            IpcRequest::RecipeGet(RecipeGetParams {
+                recipe_id: "git.status".to_owned(),
+                version: None,
+            }),
+            IpcRequest::RecipeUpsert(RecipeUpsertParams {
+                definition: minimal_recipe(),
+            }),
+            IpcRequest::RecipeActivate(RecipeActivateParams {
+                recipe_id: "git.status".to_owned(),
+                version: None,
+                scope: Some(terminal_commander_core::ActivationScope::Global),
+            }),
+            IpcRequest::RecipeDeactivate(RecipeDeactivateParams {
+                recipe_id: "git.status".to_owned(),
+                version: 1,
+                scope: Some(terminal_commander_core::ActivationScope::Global),
+            }),
+            IpcRequest::RecipeListActive(ListLimitParams { limit: None }),
+            IpcRequest::RecipeListVersions(RecipeListVersionsParams {
+                recipe_id: "git.status".to_owned(),
+            }),
+            IpcRequest::RecipeTombstone(RecipeTombstoneParams {
+                recipe_id: "git.status".to_owned(),
+            }),
             IpcRequest::FileReadWindow(FileReadWindowParams {
                 path: std::path::PathBuf::from("/x"),
                 start_line: None,
