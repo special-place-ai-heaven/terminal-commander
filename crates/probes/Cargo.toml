@@ -23,8 +23,8 @@ notify = { workspace = true }
 parking_lot = "0.12.5"
 terminal-commander-core.workspace = true
 terminal-commander-sifters = { version = "0.1.87", path = "../sifters" } # x-release-please-version
-thiserror = "2.0.18"
-time = "0.3.47"
+thiserror = "2.0.21"
+time = "0.3.55"
 tokio = { workspace = true, features = ["process", "macros", "rt-multi-thread", "io-util", "sync", "time", "fs"] }
 vte = "0.15.0"
 
@@ -58,7 +58,7 @@ pty-process = { version = "=0.5.3", features = ["async"] }
 # License: MIT.
 [target.'cfg(windows)'.dependencies]
 portable-pty = "0.9"
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_Security",
@@ -67,7 +67,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",
 ] }

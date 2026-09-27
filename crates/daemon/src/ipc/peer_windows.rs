@@ -92,7 +92,7 @@ fn resolve_sid_and_image(pid: u32) -> Option<(String, Option<PathBuf>)> {
         let sid = sid_str.to_string().unwrap_or_default();
         // LocalFree the string buffer allocated by ConvertSidToStringSidW.
         // sid_str.0 is *mut u16; HLOCAL wraps *mut c_void.
-        LocalFree(HLOCAL(sid_str.0.cast::<core::ffi::c_void>()));
+        LocalFree(Some(HLOCAL(sid_str.0.cast::<core::ffi::c_void>())));
 
         let mut buf16 = vec![0u16; 1024];
         // SAFETY: buf16.len() is 1024, well within u32 range.

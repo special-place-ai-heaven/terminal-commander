@@ -14,7 +14,7 @@ name = "terminal-commander"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 serde_json = "1"
 terminal-commander-core.workspace = true
 terminal-commander-ipc.workspace = true
@@ -22,7 +22,7 @@ terminal-commander-supervisor = { path = "../supervisor" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
