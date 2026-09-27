@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.95](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.94...v0.1.95) (2026-09-27)
+
+
+### Features
+
+* **mcp:** steer shell denies to a matching recipe ([aed1117](https://github.com/special-place-ai-heaven/terminal-commander/commit/aed111723fc70c979c103250a14e84d5e81f00c7))
+
 ## [0.1.94](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.93...v0.1.94) (2026-09-27)
 
 
