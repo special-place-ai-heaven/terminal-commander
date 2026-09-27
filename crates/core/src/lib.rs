@@ -25,8 +25,10 @@ pub mod job;
 #[cfg(windows)]
 pub mod platform;
 pub mod pointer;
+pub mod recipe;
 pub mod rule;
 pub mod severity;
+pub mod shell_deny;
 pub mod source;
 
 pub use activation::ActivationScope;
@@ -52,6 +54,7 @@ pub use ids::{
     TypedId,
 };
 pub use pointer::SourcePointer;
+pub use recipe::{RecipeDefinition, RecipeError, RecipeStatus};
 pub use rule::{
     CANONICAL_MATCH_KEY, ContextHint, MAX_CONTEXT_LINES, MAX_EXAMPLES,
     MAX_FULL_MATCH_SUMMARY_BYTES, MAX_PATTERN_BYTES, MAX_RULE_ID_BYTES, MAX_TAG_BYTES, MAX_TAGS,
@@ -61,4 +64,5 @@ pub use rule::{
     compile_bounded_regex_set, is_reserved_match_key,
 };
 pub use severity::Severity;
+pub use shell_deny::{SHELL_INTERPRETERS_DENY, shell_interpreter_denied};
 pub use source::{EventSource, SourceStream, SourceType};

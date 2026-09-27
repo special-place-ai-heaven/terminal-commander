@@ -66,7 +66,8 @@ pub const MAX_ARGV_ITEM_BYTES: usize = 4096;
 /// This is the **shell-bridge guard**: `command_start_combed` MUST
 /// NOT become an unrestricted shell entry point. Any known shell
 /// interpreter is rejected before the policy engine even sees the
-/// request. Adding new variants requires a goal-file amendment.
+/// request. The canonical list lives in `terminal_commander_core` so
+/// recipe validation cannot drift from this gate.
 ///
 /// Distinct from `policy::COMMANDS_DENY` (which targets privilege
 /// escalators: sudo, doas, su, pkexec, kexec, polkit-agent,
@@ -77,24 +78,7 @@ pub const MAX_ARGV_ITEM_BYTES: usize = 4096;
 /// capability (e.g. `allow_shell: bool` on `CommandStartRequest`,
 /// gated by a new `PolicyAction::CommandShellStart` variant) before
 /// this guard can be bypassed.
-pub const SHELL_INTERPRETERS_DENY: &[&str] = &[
-    "sh",
-    "bash",
-    "dash",
-    "zsh",
-    "fish",
-    "ksh",
-    "csh",
-    "tcsh",
-    "ash",
-    "busybox",
-    "powershell",
-    "powershell.exe",
-    "pwsh",
-    "pwsh.exe",
-    "cmd",
-    "cmd.exe",
-];
+pub use terminal_commander_core::SHELL_INTERPRETERS_DENY;
 
 /// US8 (FR-060): classification of a `wsl`/`wsl.exe` argv for the
 /// nested-shell gate. Inspection is argv-only; `SHELL_INTERPRETERS_DENY` is

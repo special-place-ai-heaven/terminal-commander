@@ -594,7 +594,7 @@ fn parse_status(s: &str) -> Result<RuleStatus> {
 /// and `scope_value = NULL`. Unknown / malformed values surface as
 /// an [`EventStoreError::InvalidPayload`] so the caller can decide
 /// to fail-fast or skip the row.
-fn parse_scope(kind: Option<&str>, value: Option<&str>) -> Result<ActivationScope> {
+pub(crate) fn parse_scope(kind: Option<&str>, value: Option<&str>) -> Result<ActivationScope> {
     let kind = kind.unwrap_or("global");
     match kind {
         "global" => Ok(ActivationScope::Global),
