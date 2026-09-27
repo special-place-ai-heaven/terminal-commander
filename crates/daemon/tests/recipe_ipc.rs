@@ -128,6 +128,7 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
                     recipe_id: "git.status".to_owned(),
                     version: None,
                     scope: Some(scope),
+                    from_mcp: false,
                 }),
             )
             .await
@@ -157,6 +158,7 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
                     recipe_id: "git.status".to_owned(),
                     version: 1,
                     scope: Some(scope),
+                    from_mcp: false,
                 }),
             )
             .await

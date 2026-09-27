@@ -13,7 +13,9 @@ use crate::tools::{
     McpCommandStopParams, McpEventContextParams, McpFileListDirParams, McpFileReadWindowParams,
     McpFileSearchParams, McpFileWatchStartParams, McpFileWatchStopParams, McpFileWriteParams,
     McpListLimitParams, McpProbeStatusParams, McpPtyCommandStartParams, McpPtyCommandStopParams,
-    McpPtyCommandWriteStdinParams, McpRegistryActivateParams, McpRegistryDeactivateParams,
+    McpPtyCommandWriteStdinParams, McpRecipeActivateParams, McpRecipeDeactivateParams,
+    McpRecipeGetParams, McpRecipeRunParams, McpRecipeSearchParams, McpRecipeTestParams,
+    McpRecipeUpsertParams, McpRegistryActivateParams, McpRegistryDeactivateParams,
     McpRegistryGetParams, McpRegistryImportPackParams, McpRegistrySearchParams,
     McpRegistrySuggestFromSamplesParams, McpRegistryTestParams, McpRegistryUpsertParams,
     McpRunAndWatchParams, McpShellExecParams, McpShellSessionExecParams, McpShellSessionRefParams,
@@ -107,6 +109,21 @@ pub enum RegistryFacadeCall {
     ListActive(McpListLimitParams),
     ImportPack(McpRegistryImportPackParams),
     SuggestFromSamples(McpRegistrySuggestFromSamplesParams),
+}
+
+/// `recipe` facade -- argv runbooks. Not the rule registry.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(extend("type" = "object"))]
+pub enum RecipeFacadeCall {
+    Search(McpRecipeSearchParams),
+    Get(McpRecipeGetParams),
+    Upsert(McpRecipeUpsertParams),
+    Test(McpRecipeTestParams),
+    Activate(McpRecipeActivateParams),
+    Deactivate(McpRecipeDeactivateParams),
+    ListActive(McpListLimitParams),
+    Run(McpRecipeRunParams),
 }
 
 /// `status` facade -- health, policy, runtime state, probes, targets.
@@ -263,5 +280,25 @@ mod tests {
         });
         crate::facade_strict::validate_facade_call("registry", &with_canonical)
             .expect("sample_lines must pass strict validation");
+    }
+
+    #[test]
+    fn recipe_run_is_not_a_registry_action() {
+        let run = serde_json::json!({
+            "action": "run",
+            "recipe_id": "git.status",
+            "scope": {"kind": "global"}
+        });
+        crate::facade_strict::validate_facade_call("recipe", &run)
+            .expect("recipe run must pass strict validation");
+        let parsed: RecipeFacadeCall = serde_json::from_value(run.clone()).expect("recipe run");
+        assert!(matches!(parsed, RecipeFacadeCall::Run(_)));
+        assert!(
+            crate::facade_strict::validate_facade_call("registry", &run).is_err(),
+            "registry must not accept recipe run"
+        );
+        assert!(serde_json::from_value::<RegistryFacadeCall>(run).is_err());
+        let missing = serde_json::json!({"action": "run"});
+        assert!(crate::facade_strict::validate_facade_call("recipe", &missing).is_err());
     }
 }

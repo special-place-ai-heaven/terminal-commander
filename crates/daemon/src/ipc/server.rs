@@ -440,9 +440,11 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::RecipeSearch(_) => "recipe_search",
         IpcRequest::RecipeGet(_) => "recipe_get",
         IpcRequest::RecipeUpsert(_) => "recipe_upsert",
+        IpcRequest::RecipeTest(_) => "recipe_test",
         IpcRequest::RecipeActivate(_) => "recipe_activate",
         IpcRequest::RecipeDeactivate(_) => "recipe_deactivate",
         IpcRequest::RecipeListActive(_) => "recipe_list_active",
+        IpcRequest::RecipeRun(_) => "recipe_run",
         IpcRequest::RecipeListVersions(_) => "recipe_list_versions",
         IpcRequest::RecipeTombstone(_) => "recipe_tombstone",
         IpcRequest::FileReadWindow(_) => "file_read_window",
@@ -509,9 +511,11 @@ pub(crate) const DISCOVERABLE_METHODS: &[&str] = &[
     "recipe_search",
     "recipe_get",
     "recipe_upsert",
+    "recipe_test",
     "recipe_activate",
     "recipe_deactivate",
     "recipe_list_active",
+    "recipe_run",
     "recipe_list_versions",
     "recipe_tombstone",
     "file_read_window",
@@ -713,6 +717,10 @@ async fn dispatch(
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
         },
+        IpcRequest::RecipeTest(p) => match handlers::recipe::handle_recipe_test(state, p) {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
         IpcRequest::RecipeActivate(p) => match handlers::recipe::handle_recipe_activate(state, p) {
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
@@ -729,6 +737,10 @@ async fn dispatch(
                 Err(e) => IpcResult::Err { error: e },
             }
         }
+        IpcRequest::RecipeRun(p) => match handlers::recipe::handle_recipe_run(state, p, peer) {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
         IpcRequest::RecipeListVersions(p) => {
             match handlers::recipe::handle_recipe_list_versions(state, p) {
                 Ok(r) => IpcResult::Ok { response: r },
@@ -985,6 +997,7 @@ fn handle_policy_status(state: &Arc<DaemonState>) -> IpcResponse {
             allow_privileged: caps.allow_privileged,
             allow_remote: caps.allow_remote,
         },
+        llm_can_activate_recipes: state.policy.llm_can_activate_recipes(),
     })
 }
 
@@ -1233,10 +1246,11 @@ mod tests {
         FileWatchStartParams, FileWatchStopParams, FileWriteParams, ListLimitParams,
         ProbeStatusParams, PtyCommandStartParams, PtyCommandStopParams, PtyCommandWriteStdinParams,
         RecipeActivateParams, RecipeDeactivateParams, RecipeGetParams, RecipeListVersionsParams,
-        RecipeSearchParams, RecipeTombstoneParams, RecipeUpsertParams, RegistryActivateParams,
-        RegistryDeactivateBulkParams, RegistryDeactivateParams, RegistryGetParams,
-        RegistryImportPackParams, RegistrySearchParams, RegistryTestParams, RegistryUpsertParams,
-        ShellExecParams, ShellSessionExecParams, ShellSessionStartParams, ShellSessionStatusParams,
+        RecipeRunParams, RecipeSearchParams, RecipeTestParams, RecipeTombstoneParams,
+        RecipeUpsertParams, RegistryActivateParams, RegistryDeactivateBulkParams,
+        RegistryDeactivateParams, RegistryGetParams, RegistryImportPackParams,
+        RegistrySearchParams, RegistryTestParams, RegistryUpsertParams, ShellExecParams,
+        ShellSessionExecParams, ShellSessionStartParams, ShellSessionStatusParams,
         ShellSessionStopParams, SubscriptionCloseParams, SubscriptionListParams,
         SubscriptionOpenParams, SubscriptionPredicate, SubscriptionPullParams,
         SubscriptionSeekParams, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
@@ -1405,17 +1419,32 @@ mod tests {
             IpcRequest::RecipeUpsert(RecipeUpsertParams {
                 definition: minimal_recipe(),
             }),
+            IpcRequest::RecipeTest(RecipeTestParams {
+                definition: Some(minimal_recipe()),
+                recipe_id: None,
+                version: None,
+                fills: std::collections::BTreeMap::new(),
+                expect_argv0: None,
+            }),
             IpcRequest::RecipeActivate(RecipeActivateParams {
                 recipe_id: "git.status".to_owned(),
                 version: None,
                 scope: Some(terminal_commander_core::ActivationScope::Global),
+                from_mcp: false,
             }),
             IpcRequest::RecipeDeactivate(RecipeDeactivateParams {
                 recipe_id: "git.status".to_owned(),
                 version: 1,
                 scope: Some(terminal_commander_core::ActivationScope::Global),
+                from_mcp: false,
             }),
             IpcRequest::RecipeListActive(ListLimitParams { limit: None }),
+            IpcRequest::RecipeRun(RecipeRunParams {
+                recipe_id: "git.status".to_owned(),
+                version: None,
+                scope: Some(terminal_commander_core::ActivationScope::Global),
+                fills: std::collections::BTreeMap::new(),
+            }),
             IpcRequest::RecipeListVersions(RecipeListVersionsParams {
                 recipe_id: "git.status".to_owned(),
             }),

@@ -7,6 +7,8 @@
 //! The schema rejects secret fields, `shell_line`, marketplace URLs, and
 //! CAP01 payloads by not having those fields (`deny_unknown_fields`).
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::shell_deny::shell_interpreter_denied;
@@ -33,6 +35,8 @@ pub const MAX_RECIPE_TIMEOUT_MS: u64 = 86_400_000;
 pub const MAX_RECIPE_PACK_IDS: usize = 32;
 /// Maximum named placeholders.
 pub const MAX_RECIPE_PLACEHOLDERS: usize = 32;
+/// MCP watch budget cap. Matches `run_and_watch`'s 60s wall clock.
+pub const RECIPE_WATCH_CAP_MS: u64 = 60_000;
 
 /// Lifecycle status stored on the definition. Only [`Active`](Self::Active)
 /// may be activated.
@@ -137,6 +141,56 @@ impl RecipeDefinition {
         validate_names("rule_pack_ids", &self.rule_pack_ids, MAX_RECIPE_PACK_IDS)?;
         validate_placeholders(&self.placeholders)?;
         Ok(())
+    }
+
+    /// True when run should follow the `run_and_watch` path (timeout or pack hint).
+    #[must_use]
+    pub const fn prefers_watch(&self) -> bool {
+        self.timeout_ms.is_some() || !self.rule_pack_ids.is_empty()
+    }
+
+    /// Bounded wait for [`Self::prefers_watch`]. `None` means combed start only.
+    #[must_use]
+    pub fn watch_budget_ms(&self) -> Option<u64> {
+        if !self.prefers_watch() {
+            return None;
+        }
+        // ponytail: one MCP wait budget, capped like run_and_watch. A longer
+        // daemon-side waiter can replace this if recipes outgrow 60s.
+        Some(
+            self.timeout_ms
+                .unwrap_or(5_000)
+                .clamp(1, RECIPE_WATCH_CAP_MS),
+        )
+    }
+
+    /// Substitute declared placeholders, then re-run the argv / interpreter gate.
+    ///
+    /// # Errors
+    /// Unknown fills, missing fills for tokens that appear in argv, or an argv
+    /// that fails [`validate`](Self::validate)'s argv rules (including shells).
+    pub fn resolve_argv(
+        &self,
+        fills: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>, RecipeError> {
+        let allowed: BTreeSet<String> = self
+            .placeholders
+            .iter()
+            .map(|s| brace_name(s).to_owned())
+            .collect();
+        for key in fills.keys() {
+            if !allowed.contains(key) {
+                return Err(invalid(format!(
+                    "fill '{key}' is not a declared placeholder"
+                )));
+            }
+        }
+        let mut argv = Vec::with_capacity(self.argv.len());
+        for (index, arg) in self.argv.iter().enumerate() {
+            argv.push(apply_fills(arg, &allowed, fills, index)?);
+        }
+        validate_argv(&argv)?;
+        Ok(argv)
     }
 }
 
@@ -289,6 +343,77 @@ fn validate_names(field: &str, names: &[String], max: usize) -> Result<(), Recip
     Ok(())
 }
 
+fn brace_name(slot: &str) -> &str {
+    slot.strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .unwrap_or(slot)
+}
+
+fn reject_fill_value(name: &str, value: &str) -> Result<(), RecipeError> {
+    if value.is_empty() || value.contains('\0') {
+        return Err(invalid(format!("fill '{name}' is empty or contains NUL")));
+    }
+    Ok(())
+}
+
+fn require_fill(
+    name: &str,
+    fills: &BTreeMap<String, String>,
+    index: usize,
+) -> Result<String, RecipeError> {
+    let value = fills.get(name).ok_or_else(|| {
+        invalid(format!(
+            "placeholder '{name}' in argv[{index}] was not filled"
+        ))
+    })?;
+    reject_fill_value(name, value)?;
+    Ok(value.clone())
+}
+
+/// Replace declared `{name}` tokens in the original text only. Fill values
+/// are not scanned again, so a value cannot introduce another slot.
+fn apply_fills(
+    arg: &str,
+    allowed: &BTreeSet<String>,
+    fills: &BTreeMap<String, String>,
+    index: usize,
+) -> Result<String, RecipeError> {
+    let bare = brace_name(arg);
+    let whole = allowed.contains(arg)
+        || (arg.starts_with('{')
+            && arg.ends_with('}')
+            && allowed.contains(bare)
+            && format!("{{{bare}}}") == arg);
+    if whole {
+        let name = if allowed.contains(arg) { arg } else { bare };
+        return require_fill(name, fills, index);
+    }
+    let mut out = String::with_capacity(arg.len());
+    let mut rest = arg;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        if let Some(end) = after.find('}') {
+            let name = &after[..end];
+            if allowed.contains(name) {
+                let value = fills.get(name).ok_or_else(|| {
+                    invalid(format!(
+                        "placeholder '{{{name}}}' in argv[{index}] was not filled"
+                    ))
+                })?;
+                reject_fill_value(name, value)?;
+                out.push_str(value);
+                rest = &after[end + 1..];
+                continue;
+            }
+        }
+        out.push('{');
+        rest = after;
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 fn validate_placeholders(slots: &[String]) -> Result<(), RecipeError> {
     if slots.len() > MAX_RECIPE_PLACEHOLDERS {
         return Err(invalid(format!(
@@ -413,5 +538,51 @@ mod tests {
         assert!(!RecipeStatus::Draft.is_activatable());
         assert!(!RecipeStatus::Tested.is_activatable());
         assert!(RecipeStatus::Active.is_activatable());
+    }
+
+    #[test]
+    fn resolve_argv_fills_declared_slots_and_denies_shell() {
+        let mut def = ok_def();
+        def.argv = vec![
+            "{bin}".to_owned(),
+            "status".to_owned(),
+            "--{flag}".to_owned(),
+        ];
+        def.placeholders = vec!["bin".to_owned(), "{flag}".to_owned()];
+        let argv = def
+            .resolve_argv(&BTreeMap::from([
+                ("bin".to_owned(), "git".to_owned()),
+                ("flag".to_owned(), "short".to_owned()),
+            ]))
+            .unwrap();
+        assert_eq!(argv, vec!["git", "status", "--short"]);
+
+        let err = def
+            .resolve_argv(&BTreeMap::from([
+                ("bin".to_owned(), "bash".to_owned()),
+                ("flag".to_owned(), "short".to_owned()),
+            ]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("shell interpreter"), "{err}");
+
+        let err = def
+            .resolve_argv(&BTreeMap::from([("nope".to_owned(), "git".to_owned())]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a declared placeholder"), "{err}");
+    }
+
+    #[test]
+    fn watch_hint_follows_timeout_or_pack() {
+        let mut def = ok_def();
+        def.timeout_ms = None;
+        def.rule_pack_ids.clear();
+        assert!(!def.prefers_watch());
+        def.timeout_ms = Some(2_000);
+        assert_eq!(def.watch_budget_ms(), Some(2_000));
+        def.timeout_ms = None;
+        def.rule_pack_ids = vec!["git".to_owned()];
+        assert_eq!(def.watch_budget_ms(), Some(5_000));
     }
 }

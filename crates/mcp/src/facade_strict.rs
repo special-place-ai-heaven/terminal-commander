@@ -145,6 +145,7 @@ fn facade_schema(facade: &str) -> Option<&'static FacadeSchema> {
     static SESSION: OnceLock<FacadeSchema> = OnceLock::new();
     static FILES: OnceLock<FacadeSchema> = OnceLock::new();
     static REGISTRY: OnceLock<FacadeSchema> = OnceLock::new();
+    static RECIPE: OnceLock<FacadeSchema> = OnceLock::new();
     static STATUS: OnceLock<FacadeSchema> = OnceLock::new();
     match facade {
         "command" => {
@@ -156,6 +157,9 @@ fn facade_schema(facade: &str) -> Option<&'static FacadeSchema> {
         "files" => Some(FILES.get_or_init(build_facade_schema::<crate::facades::FilesFacadeCall>)),
         "registry" => {
             Some(REGISTRY.get_or_init(build_facade_schema::<crate::facades::RegistryFacadeCall>))
+        }
+        "recipe" => {
+            Some(RECIPE.get_or_init(build_facade_schema::<crate::facades::RecipeFacadeCall>))
         }
         "status" => {
             Some(STATUS.get_or_init(build_facade_schema::<crate::facades::StatusFacadeCall>))

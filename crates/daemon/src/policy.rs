@@ -498,6 +498,9 @@ pub struct PolicyEngine {
     /// Same exact-match semantics as `probe_allow_kinds`. Set by
     /// `with_probe_kinds`.
     probe_deny_kinds: Vec<String>,
+    /// When false (default), MCP `recipe_activate` / `recipe_deactivate`
+    /// are denied. Set by [`Self::with_llm_can_activate_recipes`].
+    llm_can_activate_recipes: bool,
 }
 
 impl PolicyEngine {
@@ -541,6 +544,7 @@ impl PolicyEngine {
             // is const so `new` stays `const fn`.
             probe_allow_kinds: Vec::new(),
             probe_deny_kinds: Vec::new(),
+            llm_can_activate_recipes: false,
         }
     }
 
@@ -563,6 +567,7 @@ impl PolicyEngine {
             caps: PolicyCaps::default(),
             probe_allow_kinds: Vec::new(),
             probe_deny_kinds: Vec::new(),
+            llm_can_activate_recipes: false,
         }
     }
 
@@ -597,6 +602,7 @@ impl PolicyEngine {
             // path layers them on with `with_probe_kinds`.
             probe_allow_kinds: Vec::new(),
             probe_deny_kinds: Vec::new(),
+            llm_can_activate_recipes: false,
         }
     }
 
@@ -664,6 +670,20 @@ impl PolicyEngine {
         self.probe_allow_kinds = allow.to_vec();
         self.probe_deny_kinds = deny.to_vec();
         self
+    }
+
+    /// Record `[policy] llm_can_activate_recipes`. Default remains false
+    /// when this builder is not called.
+    #[must_use]
+    pub const fn with_llm_can_activate_recipes(mut self, enabled: bool) -> Self {
+        self.llm_can_activate_recipes = enabled;
+        self
+    }
+
+    /// Whether MCP may activate or deactivate recipes.
+    #[must_use]
+    pub const fn llm_can_activate_recipes(&self) -> bool {
+        self.llm_can_activate_recipes
     }
 
     /// Build an engine carrying a resolved capability set (Hybrid trust model,

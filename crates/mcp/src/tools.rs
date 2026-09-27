@@ -17,7 +17,7 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 51 live
+//! [`tool_catalogue`] is the single source of truth for the 59 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry
 //! (including `registry_suggest_from_samples`),
@@ -38,7 +38,7 @@
 //! (constitution IV: no public TCP; constitution I: the adapter never
 //! spawns -- the `ssh -L` tunnel is the OPERATOR's, not ours).
 //!
-//! Source-status: live; all 51 tools forward through daemon IPC.
+//! Source-status: live; all 59 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -55,7 +55,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use terminal_commander_core::{BucketConfig, RuleDefinition, RuleType, Severity};
+use terminal_commander_core::{BucketConfig, RecipeDefinition, RuleDefinition, RuleType, Severity};
 use terminal_commanderd::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
@@ -68,21 +68,25 @@ use terminal_commanderd::ipc::protocol::{
     IpcResponse, ListLimitParams, PolicyCapsView, PolicyStatusResponse, ProbeListResponse,
     ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams,
     PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
-    PtyCommandWriteStdinParams, RegistryActivateParams, RegistryActivateResponse,
-    RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse, RegistryDeactivateParams,
-    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
-    RegistryImportPackResponse, RegistryListActiveResponse, RegistrySearchParams,
-    RegistrySearchResponse, RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse,
-    RegistryTestParams, RegistryTestResponse, RegistryTestSample, RegistryUpsertParams,
-    RegistryUpsertResponse, SelfCheckResponse, ShellExecParams, ShellSessionExecParams,
-    ShellSessionExecResponse, ShellSessionListResponse, ShellSessionStartParams,
-    ShellSessionStartResponse, ShellSessionStatusParams, ShellSessionStatusResponse,
-    ShellSessionStopParams, ShellSessionStopResponse, SubscriptionCloseParams,
-    SubscriptionCloseResponse, SubscriptionListParams, SubscriptionListResponse,
-    SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
-    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSeekParams,
-    SubscriptionSeekResponse, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
-    WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
+    PtyCommandWriteStdinParams, RecipeActivateParams, RecipeActivateResponse,
+    RecipeDeactivateParams, RecipeDeactivateResponse, RecipeGetParams, RecipeGetResponse,
+    RecipeListActiveResponse, RecipeRunParams, RecipeRunResponse, RecipeSearchParams,
+    RecipeSearchResponse, RecipeTestParams, RecipeUpsertParams, RecipeUpsertResponse,
+    RegistryActivateParams, RegistryActivateResponse, RegistryDeactivateBulkParams,
+    RegistryDeactivateBulkResponse, RegistryDeactivateParams, RegistryDeactivateResponse,
+    RegistryGetParams, RegistryGetResponse, RegistryImportPackParams, RegistryImportPackResponse,
+    RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse,
+    RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse, RegistryTestParams,
+    RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
+    SelfCheckResponse, ShellExecParams, ShellSessionExecParams, ShellSessionExecResponse,
+    ShellSessionListResponse, ShellSessionStartParams, ShellSessionStartResponse,
+    ShellSessionStatusParams, ShellSessionStatusResponse, ShellSessionStopParams,
+    ShellSessionStopResponse, SubscriptionCloseParams, SubscriptionCloseResponse,
+    SubscriptionListParams, SubscriptionListResponse, SubscriptionOpenParams,
+    SubscriptionOpenResponse, SubscriptionPredicate, SubscriptionPullParams,
+    SubscriptionPullResponse, SubscriptionSeekParams, SubscriptionSeekResponse,
+    SubscriptionSourceSel, WorkspaceSnapshotApplyParams, WorkspaceSnapshotApplyResponse,
+    WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -253,6 +257,46 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
             name: "registry_suggest_from_samples",
             status: ToolStatus::Live,
             description: "Suggest candidate parsing rules from raw output samples via pure heuristics. Returns DRAFT proposals + confidence + the explicit test->upsert->activate next steps. NEVER activates or persists a rule.",
+        },
+        ToolCatalogueEntry {
+            name: "recipe_search",
+            status: ToolStatus::Live,
+            description: "FTS search over persisted argv recipes. Bounded. Recipes are not rules.",
+        },
+        ToolCatalogueEntry {
+            name: "recipe_get",
+            status: ToolStatus::Live,
+            description: "Fetch an argv recipe by id and optional version.",
+        },
+        ToolCatalogueEntry {
+            name: "recipe_upsert",
+            status: ToolStatus::Live,
+            description: "Insert a new immutable recipe version from a JSON definition. Does not activate.",
+        },
+        ToolCatalogueEntry {
+            name: "recipe_test",
+            status: ToolStatus::Live,
+            description: "Dry-run an argv recipe: validate argv and optional expectations. Does not activate and does not start a job.",
+        },
+        ToolCatalogueEntry {
+            name: "recipe_activate",
+            status: ToolStatus::Live,
+            description: "Activate an argv recipe for a scope. Denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin).",
+        },
+        ToolCatalogueEntry {
+            name: "recipe_deactivate",
+            status: ToolStatus::Live,
+            description: "Deactivate an argv recipe for a scope. Same MCP admin gate as recipe_activate.",
+        },
+        ToolCatalogueEntry {
+            name: "recipe_list_active",
+            status: ToolStatus::Live,
+            description: "Snapshot of currently-active argv recipes (id, version, title, scope).",
+        },
+        ToolCatalogueEntry {
+            name: "recipe_run",
+            status: ToolStatus::Live,
+            description: "Run an activated argv recipe through the command argv lane (command_start_combed / run_and_watch). Refuses recipes that are not activated. Never uses shell_exec.",
         },
         ToolCatalogueEntry {
             name: "file_read_window",
@@ -1169,12 +1213,14 @@ impl TerminalCommanderMcpServer {
                 file_window_bytes,
                 bucket_read_limit,
                 caps,
+                llm_can_activate_recipes,
             })) => json_tool_result(&serde_json::json!({
                 "profile": profile,
                 "commands_deny_count": commands_deny_count,
                 "default_deny_path_suffix_count": default_deny_path_suffix_count,
                 "file_window_bytes": file_window_bytes,
                 "bucket_read_limit": bucket_read_limit,
+                "llm_can_activate_recipes": llm_can_activate_recipes,
                 // Resolved per-call caps (POLICY.md section 4.1). Surfacing the
                 // active set keeps `full_access` and explicit `[policy.caps]`
                 // grants visible -- there is no opaque "full_access magic".
@@ -2123,6 +2169,328 @@ impl TerminalCommanderMcpServer {
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
+    }
+
+    /// `recipe_search` — FTS over persisted argv recipes.
+    #[tool(description = "FTS search over persisted argv recipes. Bounded. Recipes are not rules.")]
+    async fn recipe_search(
+        &self,
+        Parameters(params): Parameters<McpRecipeSearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = RecipeSearchParams {
+            query: params.query,
+            limit: params.limit,
+        };
+        match self.daemon.call(IpcRequest::RecipeSearch(ipc)).await {
+            Ok(IpcResponse::RecipeSearch(RecipeSearchResponse { hits })) => {
+                json_tool_result(&serde_json::json!({ "hits": hits }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `recipe_get` — fetch an argv recipe.
+    #[tool(description = "Fetch an argv recipe by id and optional version.")]
+    async fn recipe_get(
+        &self,
+        Parameters(params): Parameters<McpRecipeGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = RecipeGetParams {
+            recipe_id: params.recipe_id,
+            version: params.version,
+        };
+        match self.daemon.call(IpcRequest::RecipeGet(ipc)).await {
+            Ok(IpcResponse::RecipeGet(RecipeGetResponse { definition })) => {
+                json_tool_result(&serde_json::json!({ "definition": definition }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `recipe_upsert` — store a version. Does not activate.
+    #[tool(
+        description = "Insert a new immutable recipe version from a JSON definition. Does not activate."
+    )]
+    async fn recipe_upsert(
+        &self,
+        Parameters(params): Parameters<McpRecipeUpsertParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let definition: RecipeDefinition = serde_json::from_str(&params.definition_json)
+            .map_err(|e| invalid_params(format!("definition_json: {e}")))?;
+        let ipc = RecipeUpsertParams { definition };
+        match self.daemon.call(IpcRequest::RecipeUpsert(ipc)).await {
+            Ok(IpcResponse::RecipeUpsert(RecipeUpsertResponse { recipe_id, version })) => {
+                json_tool_result(&serde_json::json!({
+                    "recipe_id": recipe_id,
+                    "version": version,
+                    "activated": false,
+                }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
+        }
+    }
+
+    /// `recipe_test` — dry-run argv. Does not activate or spawn.
+    #[tool(
+        description = "Dry-run an argv recipe: validate argv and optional expectations. Does not activate and does not start a job."
+    )]
+    async fn recipe_test(
+        &self,
+        Parameters(params): Parameters<McpRecipeTestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        if params.definition_json.is_some() == params.recipe_id.is_some() {
+            return Err(invalid_params(
+                "recipe_test requires exactly one of definition_json or recipe_id".to_owned(),
+            ));
+        }
+        let definition = match params.definition_json.as_deref() {
+            Some(raw) => Some(
+                serde_json::from_str(raw)
+                    .map_err(|e| invalid_params(format!("definition_json: {e}")))?,
+            ),
+            None => None,
+        };
+        let ipc = RecipeTestParams {
+            definition,
+            recipe_id: params.recipe_id,
+            version: params.version,
+            fills: params.fills.unwrap_or_default(),
+            expect_argv0: params.expect_argv0,
+        };
+        match self.daemon.call(IpcRequest::RecipeTest(ipc)).await {
+            Ok(IpcResponse::RecipeTest(body)) => json_tool_result(&body),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `recipe_activate` — MCP-gated. Default deny.
+    #[tool(
+        description = "Activate an argv recipe for a scope. Denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin)."
+    )]
+    async fn recipe_activate(
+        &self,
+        Parameters(params): Parameters<McpRecipeActivateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = RecipeActivateParams {
+            recipe_id: params.recipe_id,
+            version: params.version,
+            scope: Some(params.scope.into_ipc_scope()?),
+            from_mcp: true,
+        };
+        match self.daemon.call(IpcRequest::RecipeActivate(ipc)).await {
+            Ok(IpcResponse::RecipeActivate(RecipeActivateResponse {
+                recipe_id,
+                version,
+                was_already_active,
+                scope,
+            })) => json_tool_result(&serde_json::json!({
+                "recipe_id": recipe_id,
+                "version": version,
+                "was_already_active": was_already_active,
+                "scope": scope,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
+        }
+    }
+
+    /// `recipe_deactivate` — same MCP admin gate as activate.
+    #[tool(
+        description = "Deactivate an argv recipe for a scope. Same MCP admin gate as recipe_activate."
+    )]
+    async fn recipe_deactivate(
+        &self,
+        Parameters(params): Parameters<McpRecipeDeactivateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let scope = params.scope.into_ipc_scope()?;
+        let version = match params.version {
+            Some(version) => version,
+            None => match self
+                .daemon
+                .call(IpcRequest::RecipeGet(RecipeGetParams {
+                    recipe_id: params.recipe_id.clone(),
+                    version: None,
+                }))
+                .await
+            {
+                Ok(IpcResponse::RecipeGet(RecipeGetResponse { definition })) => definition.version,
+                Ok(other) => return Err(unexpected_variant(&other)),
+                Err(e) => return Err(into_mcp_error_for(false, &e)),
+            },
+        };
+        let ipc = RecipeDeactivateParams {
+            recipe_id: params.recipe_id,
+            version,
+            scope: Some(scope),
+            from_mcp: true,
+        };
+        match self.daemon.call(IpcRequest::RecipeDeactivate(ipc)).await {
+            Ok(IpcResponse::RecipeDeactivate(RecipeDeactivateResponse {
+                recipe_id,
+                version,
+                was_deactivated,
+                scope,
+            })) => json_tool_result(&serde_json::json!({
+                "recipe_id": recipe_id,
+                "version": version,
+                "was_deactivated": was_deactivated,
+                "scope": scope,
+            })),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
+        }
+    }
+
+    /// `recipe_list_active` — open recipe activations.
+    #[tool(description = "Snapshot of currently-active argv recipes (id, version, title, scope).")]
+    async fn recipe_list_active(
+        &self,
+        Parameters(params): Parameters<McpListLimitParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        match self
+            .daemon
+            .call(IpcRequest::RecipeListActive(ListLimitParams {
+                limit: params.limit,
+            }))
+            .await
+        {
+            Ok(IpcResponse::RecipeListActive(RecipeListActiveResponse { entries, truncated })) => {
+                json_tool_result(&serde_json::json!({
+                    "entries": entries,
+                    "truncated": truncated,
+                }))
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `recipe_run` — activated recipe, argv lane only.
+    #[tool(
+        description = "Run an activated argv recipe through the command argv lane (command_start_combed / run_and_watch). Refuses recipes that are not activated. Never uses shell_exec."
+    )]
+    async fn recipe_run(
+        &self,
+        Parameters(params): Parameters<McpRecipeRunParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        let ipc = RecipeRunParams {
+            recipe_id: params.recipe_id,
+            version: params.version,
+            scope: Some(params.scope.into_ipc_scope()?),
+            fills: params.fills.unwrap_or_default(),
+        };
+        let started = match self.daemon.call(IpcRequest::RecipeRun(ipc)).await {
+            Ok(IpcResponse::RecipeRun(body)) => body,
+            Ok(other) => return Err(unexpected_variant(&other)),
+            Err(e) => return Err(into_mcp_error_for(false, &e)),
+        };
+        let RecipeRunResponse {
+            recipe_id,
+            version,
+            argv,
+            lane,
+            watched,
+            wait_ms,
+            job_id,
+            bucket_id,
+            probe_id,
+            cursor,
+        } = started;
+        let (state, exit_code, complete, cursor) = if watched {
+            self.watch_recipe_job(job_id, bucket_id, cursor, wait_ms)
+                .await
+        } else {
+            (None, None, false, cursor)
+        };
+        json_tool_result(&serde_json::json!({
+            "recipe_id": recipe_id,
+            "version": version,
+            "argv": argv,
+            "lane": lane,
+            "watched": watched,
+            "wait_ms": wait_ms,
+            "job_id": job_id,
+            "bucket_id": bucket_id,
+            "probe_id": probe_id,
+            "cursor": cursor,
+            "state": state,
+            "exit_code": exit_code,
+            "complete": complete,
+        }))
+    }
+
+    /// Bounded status poll after an argv-lane recipe start.
+    ///
+    /// ponytail: same primitives as `run_and_watch` (bucket_wait + command_status)
+    /// without copying its signal packer. `rule_pack_ids` only choose this path.
+    async fn watch_recipe_job(
+        &self,
+        job_id: terminal_commander_core::JobId,
+        bucket_id: terminal_commander_core::BucketId,
+        mut cursor: u64,
+        wait_ms: u64,
+    ) -> (
+        Option<terminal_commander_core::JobState>,
+        Option<i32>,
+        bool,
+        u64,
+    ) {
+        use terminal_commander_core::JobState;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        loop {
+            let status = self
+                .daemon
+                .call(IpcRequest::CommandStatus(CommandStatusParams { job_id }))
+                .await;
+            if let Ok(IpcResponse::CommandStatus(status)) = status {
+                let terminal = matches!(
+                    status.state,
+                    JobState::Exited | JobState::Cancelled | JobState::Failed
+                );
+                if terminal || std::time::Instant::now() >= deadline {
+                    return (Some(status.state), status.exit_code, terminal, cursor);
+                }
+            } else if std::time::Instant::now() >= deadline {
+                return (None, None, false, cursor);
+            }
+            let remaining_ms = u64::try_from(
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .as_millis(),
+            )
+            .unwrap_or(0);
+            if remaining_ms == 0 {
+                break;
+            }
+            let slice = remaining_ms.clamp(1, MAX_WAIT_SLICE_MS);
+            if let Ok(IpcResponse::BucketWait(wait)) = self
+                .daemon
+                .call(IpcRequest::BucketWait(BucketWaitParams {
+                    bucket_id,
+                    cursor,
+                    severity_min: None,
+                    kind_filter: None,
+                    limit: None,
+                    timeout_ms: Some(slice),
+                }))
+                .await
+            {
+                cursor = wait.next_cursor;
+            }
+        }
+        (None, None, false, cursor)
     }
 
     /// `file_read_window` — bounded line/byte window read of one file.
@@ -3075,6 +3443,28 @@ usually {\"kind\":\"global\"}. Rules comb command output into structured signals
         }
     }
 
+    /// `recipe` facade — argv recipes. Not rules.
+    #[tool(
+        name = "recipe",
+        description = "Argv recipes (not rules): search, get, upsert, test (dry-run; does not activate), activate, deactivate, list_active, run. activate and deactivate are denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin). run executes an activated recipe on the argv lane (run_and_watch when the recipe has a timeout or rule pack; otherwise command_start_combed). Never shell_exec. Example: {\"action\":\"run\",\"recipe_id\":\"git.status\",\"scope\":{\"kind\":\"global\"}}."
+    )]
+    pub(crate) async fn recipe_facade(
+        &self,
+        Parameters(call): Parameters<crate::facades::RecipeFacadeCall>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::facades::RecipeFacadeCall as R;
+        match call {
+            R::Search(p) => self.recipe_search(Parameters(p)).await,
+            R::Get(p) => self.recipe_get(Parameters(p)).await,
+            R::Upsert(p) => self.recipe_upsert(Parameters(p)).await,
+            R::Test(p) => self.recipe_test(Parameters(p)).await,
+            R::Activate(p) => self.recipe_activate(Parameters(p)).await,
+            R::Deactivate(p) => self.recipe_deactivate(Parameters(p)).await,
+            R::ListActive(p) => self.recipe_list_active(Parameters(p)).await,
+            R::Run(p) => self.recipe_run(Parameters(p)).await,
+        }
+    }
+
     /// `status` facade — health, policy, audit, runtime state, probes, targets.
     #[tool(
         name = "status",
@@ -3109,7 +3499,7 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
 // the `tools/list` and `tools/call` paths can honor `TC_SURFACE`:
 //   - `list_tools` advertises the compact facade(s) under `TC_SURFACE=compact`,
 //     else the unchanged granular tools (with facade names filtered OUT so the
-//     full surface stays EXACTLY the 51 granular tools).
+//     full surface stays EXACTLY the 59 granular tools).
 //   - `call_tool` runs the admission gate, then facade_strict, THEN the SAME
 //     router the macro used (`ToolCallContext` + `self.tool_router.call`).
 //   - `get_tool` mirrors the macro (router lookup).
@@ -3131,7 +3521,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
             .unwrap_or_else(crate::surface::surface_from_env)
         {
             crate::surface::Surface::Compact => crate::surface_list::compact_surface_tools(),
-            // `full` keeps the granular surface EXACTLY the 51 granular tools:
+            // `full` keeps the granular surface EXACTLY the 59 granular tools:
             // the facade handler is registered on the same router, so filter
             // its name(s) OUT of `list_all()` -- the facade must not leak into
             // the full list.
@@ -3166,7 +3556,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
                 .unwrap_or_else(crate::surface::surface_from_env),
             request.name.as_ref(),
         )?;
-        // US1 strictness: for the five facade tools, validate the raw call
+        // US1 strictness: for the facade tools, validate the raw call
         // object against the advertised action schema BEFORE the router
         // deserializes the *FacadeCall enum. A well-formed call passes untouched
         // (byte-identical dispatch); a malformed one gets ONE teaching error
@@ -5761,6 +6151,83 @@ pub struct McpAuditSinceParams {
 // Bounded-ledger + subscriptions MCP DTOs.
 // =====================================================================
 
+/// MCP parameters for `recipe_search`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRecipeSearchParams {
+    /// FTS query over argv recipes.
+    pub query: String,
+    /// Result cap. Clamped at the daemon.
+    #[serde(default, deserialize_with = "de_opt_usize_lenient")]
+    #[schemars(with = "usize")]
+    pub limit: Option<usize>,
+}
+
+/// MCP parameters for `recipe_get`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRecipeGetParams {
+    pub recipe_id: String,
+    /// Omit for the latest stored version.
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub version: Option<u32>,
+}
+
+/// MCP parameters for `recipe_upsert`. Does not activate.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRecipeUpsertParams {
+    /// JSON-encoded `RecipeDefinition` (a STRING, not a nested object).
+    pub definition_json: String,
+}
+
+/// MCP parameters for `recipe_test`. Exactly one of `definition_json` or `recipe_id`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRecipeTestParams {
+    /// Inline definition. Mutually exclusive with `recipe_id`.
+    #[serde(default)]
+    pub definition_json: Option<String>,
+    #[serde(default)]
+    pub recipe_id: Option<String>,
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub version: Option<u32>,
+    #[serde(default)]
+    pub fills: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    pub expect_argv0: Option<String>,
+}
+
+/// MCP parameters for `recipe_activate`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRecipeActivateParams {
+    pub recipe_id: String,
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub version: Option<u32>,
+    pub scope: McpActivationScope,
+}
+
+/// MCP parameters for `recipe_deactivate`. `version` omitted means latest stored.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRecipeDeactivateParams {
+    pub recipe_id: String,
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub version: Option<u32>,
+    pub scope: McpActivationScope,
+}
+
+/// MCP parameters for `recipe_run`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpRecipeRunParams {
+    pub recipe_id: String,
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub version: Option<u32>,
+    pub scope: McpActivationScope,
+    #[serde(default)]
+    pub fills: Option<std::collections::BTreeMap<String, String>>,
+}
+
 /// Shared `limit` param for the bounded list snapshots (`runtime_state`,
 /// `probe_list`, `registry_list_active`). Clamped daemon-side to
 /// `MAX_LIST_LIMIT`.
@@ -6593,6 +7060,14 @@ mod tests {
                 "registry_deactivate",
                 "registry_list_active",
                 "registry_suggest_from_samples",
+                "recipe_search",
+                "recipe_get",
+                "recipe_upsert",
+                "recipe_test",
+                "recipe_activate",
+                "recipe_deactivate",
+                "recipe_list_active",
+                "recipe_run",
                 "file_read_window",
                 "file_search",
                 "file_write",
@@ -6670,6 +7145,15 @@ mod tests {
                 "pty_command_start".to_owned(),
                 "pty_command_stop".to_owned(),
                 "pty_command_write_stdin".to_owned(),
+                "recipe".to_owned(),
+                "recipe_activate".to_owned(),
+                "recipe_deactivate".to_owned(),
+                "recipe_get".to_owned(),
+                "recipe_list_active".to_owned(),
+                "recipe_run".to_owned(),
+                "recipe_search".to_owned(),
+                "recipe_test".to_owned(),
+                "recipe_upsert".to_owned(),
                 "registry".to_owned(),
                 "registry_activate".to_owned(),
                 "registry_deactivate".to_owned(),
@@ -6707,12 +7191,12 @@ mod tests {
 
     #[test]
     fn facade_consts_match_tool_attribute_descriptions() {
-        // Drift guard: the 5 facade description consts in surface_list.rs are
+        // Drift guard: the facade description consts in surface_list.rs are
         // hand-copied from the #[tool(description=...)] attributes here. Assert
         // they stay byte-identical so the duplication cannot silently diverge.
         use crate::surface_list::{
-            COMMAND_FACADE_DESCRIPTION, FILES_FACADE_DESCRIPTION, REGISTRY_FACADE_DESCRIPTION,
-            SESSION_FACADE_DESCRIPTION, STATUS_FACADE_DESCRIPTION,
+            COMMAND_FACADE_DESCRIPTION, FILES_FACADE_DESCRIPTION, RECIPE_FACADE_DESCRIPTION,
+            REGISTRY_FACADE_DESCRIPTION, SESSION_FACADE_DESCRIPTION, STATUS_FACADE_DESCRIPTION,
         };
         let router = TerminalCommanderMcpServer::tool_router();
         let cases: &[(&str, &str)] = &[
@@ -6720,6 +7204,7 @@ mod tests {
             ("session", SESSION_FACADE_DESCRIPTION),
             ("files", FILES_FACADE_DESCRIPTION),
             ("registry", REGISTRY_FACADE_DESCRIPTION),
+            ("recipe", RECIPE_FACADE_DESCRIPTION),
             ("status", STATUS_FACADE_DESCRIPTION),
         ];
         for (name, konst) in cases {
