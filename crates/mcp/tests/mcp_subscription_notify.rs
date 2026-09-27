@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use rmcp::model::{CallToolRequestParams, LoggingMessageNotificationParam};
 use rmcp::service::NotificationContext;
-use rmcp::{ClientHandler, ClientServiceExt, RoleClient};
+use rmcp::{ClientHandler, ClientServiceExt, RoleClient, ServiceExt};
 
 use terminal_commander_core::{
     ContextHint, RuleDefinition, RuleStatus, RuleType, Severity, SourceStream,

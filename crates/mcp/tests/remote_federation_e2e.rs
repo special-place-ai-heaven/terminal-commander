@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::model::CallToolRequestParams;
-use rmcp::{ClientHandler, ClientServiceExt};
+use rmcp::{ClientHandler, ClientServiceExt, ServiceExt};
 
 use terminal_commander_ipc::{
     IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, ResponseEnvelope, read_request,

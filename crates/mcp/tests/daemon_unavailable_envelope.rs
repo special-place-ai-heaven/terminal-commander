@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use rmcp::model::CallToolRequestParams;
-use rmcp::{ClientHandler, ClientServiceExt};
+use rmcp::{ClientHandler, ClientServiceExt, ServiceExt};
 
 use terminal_commander_mcp::daemon_client::{DaemonStatusHandle, McpDaemonClient};
 use terminal_commander_mcp::tools::{TerminalCommanderMcpServer, tool_catalogue};
