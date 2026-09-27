@@ -25,7 +25,7 @@ use crate::surface::Surface;
 /// Description for the `command` facade. Kept identical to the `#[tool]`
 /// attribute on `command_facade` in `tools.rs` so the compact-surface entry
 /// matches the router-advertised entry verbatim.
-pub(crate) const COMMAND_FACADE_DESCRIPTION: &str = "Run and observe a one-shot command. Key contracts: \
+pub(crate) const COMMAND_FACADE_DESCRIPTION: &str = "Run and observe a one-shot command. Minimal argv example: {\"action\":\"run_and_watch\",\"argv\":[\"git\",\"status\"]}. Key contracts: \
 `run_and_watch`: `argv` + `wait_ms` (default 5,000; max 60,000; not `timeout_ms`). \
 `run` starts immediately; `run` + `wait_ms` is accepted as `run_and_watch` so the requested wait is honored. \
 If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` + optional `max_signals` \
@@ -245,8 +245,67 @@ fn surface_tool<T>(name: &'static str, description: &'static str) -> Tool
 where
     T: schemars::JsonSchema + std::any::Any,
 {
-    let schema = flatten_facade_schema((*schema_for_type::<T>()).clone());
+    let raw = (*schema_for_type::<T>()).clone();
+    let mut schema = flatten_facade_schema(raw.clone());
+    // ponytail: root oneOf/allOf/anyOf zeros Claude (Anthropic rejects top-level
+    // combinators). Per-action oneOf is derived from the same schemars schema
+    // facade_strict validates, and nested under dependentSchemas so the root
+    // stays a flat object. Hoist it to the root if harness APIs accept
+    // top-level combinators.
+    if name == "command"
+        && let Some(variants) = command_action_dependent_schemas(&raw)
+    {
+        schema.insert("dependentSchemas".to_owned(), variants);
+    }
     Tool::new(name, description, Arc::new(schema))
+}
+
+/// Per-action field sets from schemars' root `oneOf`, nested so tools/list
+/// stays a flat object. Not a second validation language: the branches are
+/// the param structs schemars already emitted.
+fn command_action_dependent_schemas(raw: &Map<String, Value>) -> Option<Value> {
+    let one_of = raw.get("oneOf")?.as_array()?;
+    let defs = raw.get("$defs").and_then(Value::as_object);
+    let mut branches = Vec::new();
+    for branch in one_of {
+        let Some(action) = branch
+            .pointer("/properties/action/const")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let mut properties = Map::new();
+        properties.insert("action".to_owned(), serde_json::json!({ "const": action }));
+        let mut required = Vec::new();
+        if let Some(def_name) = branch
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.rsplit('/').next())
+            && let Some(def) = defs
+                .and_then(|d| d.get(def_name))
+                .and_then(Value::as_object)
+        {
+            if let Some(props) = def.get("properties").and_then(Value::as_object) {
+                for (key, value) in props {
+                    properties.insert(key.clone(), value.clone());
+                }
+            }
+            if let Some(req) = def.get("required").and_then(Value::as_array) {
+                required.extend(req.iter().cloned());
+            }
+        }
+        let mut obj = Map::new();
+        obj.insert("properties".to_owned(), Value::Object(properties));
+        if !required.is_empty() {
+            obj.insert("required".to_owned(), Value::Array(required));
+        }
+        branches.push(Value::Object(obj));
+    }
+    if branches.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!({ "action": { "oneOf": branches } }))
+    }
 }
 
 /// `tools/list` payload for `TC_SURFACE=compact`.
@@ -919,6 +978,70 @@ mod tests {
         assert!(
             bad_upsert.is_err(),
             "upsert missing definition_json must NOT deserialize",
+        );
+    }
+
+    #[test]
+    fn command_facade_advertises_per_action_oneof_from_schemars() {
+        use crate::facades::CommandFacadeCall;
+
+        let raw = schema_for_type::<CommandFacadeCall>();
+        let raw_len = raw
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .expect("schemars emits a root oneOf for the command facade");
+        let tool = compact_surface_tools()
+            .into_iter()
+            .find(|t| t.name.as_ref() == "command")
+            .expect("command facade");
+        assert!(tool.input_schema.get("oneOf").is_none());
+        assert!(tool.input_schema.get("allOf").is_none());
+        let branches = tool
+            .input_schema
+            .get("dependentSchemas")
+            .and_then(|v| v.get("action"))
+            .and_then(|v| v.get("oneOf"))
+            .and_then(Value::as_array)
+            .expect("per-action oneOf nested under dependentSchemas");
+        assert_eq!(branches.len(), raw_len);
+        let required = |action: &str| -> Vec<String> {
+            branches
+                .iter()
+                .find(|branch| {
+                    branch
+                        .pointer("/properties/action/const")
+                        .and_then(Value::as_str)
+                        == Some(action)
+                })
+                .and_then(|branch| branch.get("required"))
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert!(required("run").iter().any(|field| field == "argv"));
+        assert!(
+            required("run_and_watch")
+                .iter()
+                .any(|field| field == "argv")
+        );
+        assert!(
+            !required("run_and_watch")
+                .iter()
+                .any(|field| field == "shell_line")
+        );
+        assert!(required("exec").iter().any(|field| field == "shell_line"));
+        assert!(!required("exec").iter().any(|field| field == "argv"));
+        assert!(
+            COMMAND_FACADE_DESCRIPTION
+                .contains(r#"{"action":"run_and_watch","argv":["git","status"]}"#),
+            "description must carry the copy-paste argv example"
         );
     }
 }

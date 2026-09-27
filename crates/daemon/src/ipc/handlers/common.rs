@@ -10,7 +10,8 @@ use terminal_commander_supervisor::identity::PeerIdentity;
 
 use crate::audit::AuditSink;
 use crate::command::CommandError;
-use crate::ipc::protocol::{IpcError, IpcErrorCode};
+use crate::ipc::protocol::{IpcError, IpcErrorCode, ShellDenyClass, ShellTeach};
+use crate::policy::{PolicyEngine, PolicyProfile};
 use crate::state::DaemonState;
 
 pub(in crate::ipc::server) fn emit_audit(
@@ -89,6 +90,53 @@ pub(in crate::ipc::server) fn map_bucket_error(
     match e {
         BucketError::NotFound(_) => IpcError::new(IpcErrorCode::BucketNotFound, e.to_string()),
         other => IpcError::new(IpcErrorCode::Internal, other.to_string()),
+    }
+}
+
+/// Attach the A2 shell-misuse classification when this error is one of the
+/// three teach classes. Other `PolicyDenied` values (paths, sudo scan,
+/// non-shell commands) stay plain. The short [`ShellDenyClass::reason`]
+/// replaces the daemon's longer remedy so the MCP message does not upsell
+/// enabling shell.
+pub(in crate::ipc::server) fn enrich_shell_teach(
+    policy: &PolicyEngine,
+    denied_tool: &str,
+    mut err: IpcError,
+) -> IpcError {
+    let class = match err.code {
+        IpcErrorCode::ShellInterpreterDenied => Some(ShellDenyClass::ShellInterpreterDenied),
+        IpcErrorCode::PolicyDenied if err.message.contains("shell execution denied") => {
+            Some(classify_shell_policy(policy))
+        }
+        _ => None,
+    };
+    let Some(class) = class else {
+        return err;
+    };
+    let reason = class.reason().to_owned();
+    err.message = reason.clone();
+    err.teach = Some(ShellTeach {
+        deny_class: class,
+        profile: format!("{:?}", policy.profile),
+        denied_capability: match class {
+            ShellDenyClass::ShellCapabilityOff => Some("allow_shell".to_owned()),
+            ShellDenyClass::ShellInterpreterDenied | ShellDenyClass::ProfileForbidsShell => None,
+        },
+        denied_tool: denied_tool.to_owned(),
+        reason,
+    });
+    err
+}
+
+fn classify_shell_policy(policy: &PolicyEngine) -> ShellDenyClass {
+    let exec_capable = matches!(
+        policy.profile,
+        PolicyProfile::DeveloperLocal | PolicyProfile::AdminDebug | PolicyProfile::FullAccess
+    );
+    if exec_capable && !policy.caps_allow_shell() {
+        ShellDenyClass::ShellCapabilityOff
+    } else {
+        ShellDenyClass::ProfileForbidsShell
     }
 }
 
@@ -786,5 +834,75 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn shell_teach_classifies_cap_off_profile_forbid_and_interpreter() {
+        use crate::ipc::protocol::ShellDenyClass;
+        use crate::policy::{PolicyCaps, PolicyEngine, PolicyProfile};
+
+        let local = PolicyEngine::new(PolicyProfile::DeveloperLocal);
+        let cap_off = enrich_shell_teach(
+            &local,
+            "shell_exec",
+            IpcError::new(
+                IpcErrorCode::PolicyDenied,
+                "shell execution denied: allow_shell capability is off or profile forbids shell",
+            ),
+        );
+        let teach = cap_off.teach.expect("cap-off shell deny carries teach");
+        assert_eq!(teach.deny_class, ShellDenyClass::ShellCapabilityOff);
+        assert_eq!(teach.profile, "DeveloperLocal");
+        assert_eq!(teach.denied_capability.as_deref(), Some("allow_shell"));
+        assert_eq!(teach.denied_tool, "shell_exec");
+        assert_eq!(teach.reason, ShellDenyClass::ShellCapabilityOff.reason());
+        assert!(!teach.reason.contains("set allow_shell"));
+        assert!(!teach.reason.to_ascii_lowercase().contains("enable shell"));
+
+        let repo = PolicyEngine::with_config_caps(
+            PolicyProfile::RepoOnly,
+            None,
+            None,
+            PolicyCaps {
+                allow_shell: true,
+                ..PolicyCaps::default()
+            },
+        );
+        let forbidden = enrich_shell_teach(
+            &repo,
+            "shell_exec",
+            IpcError::new(
+                IpcErrorCode::PolicyDenied,
+                "shell execution denied: allow_shell capability is off or profile forbids shell",
+            ),
+        );
+        let teach = forbidden.teach.expect("profile forbid carries teach");
+        assert_eq!(teach.deny_class, ShellDenyClass::ProfileForbidsShell);
+        assert_eq!(teach.profile, "RepoOnly");
+        assert!(teach.denied_capability.is_none());
+
+        let interpreter = enrich_shell_teach(
+            &local,
+            "command_start_combed",
+            IpcError::new(
+                IpcErrorCode::ShellInterpreterDenied,
+                "shell interpreter 'sh' denied; use shell_exec gated by the allow_shell policy cap.",
+            ),
+        );
+        let teach = interpreter.teach.expect("interpreter deny carries teach");
+        assert_eq!(teach.deny_class, ShellDenyClass::ShellInterpreterDenied);
+        assert!(teach.denied_capability.is_none());
+        assert!(
+            !interpreter.message.contains("allow_shell"),
+            "mcp-facing message must not upsell the cap; got: {}",
+            interpreter.message
+        );
+
+        let path = enrich_shell_teach(
+            &local,
+            "file_read_window",
+            IpcError::new(IpcErrorCode::PolicyDenied, "path denied"),
+        );
+        assert!(path.teach.is_none(), "non-shell policy denies stay plain");
     }
 }

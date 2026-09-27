@@ -120,6 +120,10 @@ pub struct DiscoveredToolEntry {
     pub requires_daemon: bool,
     pub available: bool,
     pub unavailable_reason: Option<&'static str>,
+    /// A2 steer when a shell tool is unavailable because the cap is off.
+    /// Same vocabulary as the policy-denied envelope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steer: Option<crate::teach::ArgvSteer>,
 }
 
 /// Static catalogue of every MCP tool the adapter knows about. Tools
@@ -157,12 +161,12 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "command_start_combed",
             status: ToolStatus::Live,
-            description: "Start a non-PTY argv command; bounded metadata response. No raw stdout/stderr.",
+            description: "Start a non-PTY argv command; bounded metadata response. No raw stdout/stderr. Example: {\"argv\":[\"git\",\"status\"]}.",
         },
         ToolCatalogueEntry {
             name: "run_and_watch",
             status: ToolStatus::Live,
-            description: "One-shot: start a command, wait (bounded) for its rule signals + exit, return both. Quiet command returns a receipt, not an error.",
+            description: "One-shot: start a command, wait (bounded) for its rule signals + exit, return both. Quiet command returns a receipt, not an error. Example: {\"argv\":[\"git\",\"status\"]}.",
         },
         ToolCatalogueEntry {
             name: "command_status",
@@ -586,6 +590,13 @@ fn discovered_tools(
             } else {
                 None
             };
+            let steer = if tool.name == "shell_exec"
+                && unavailable_reason == Some(SHELL_CAP_DENIED_REASON)
+            {
+                Some(crate::teach::argv_steer())
+            } else {
+                None
+            };
             DiscoveredToolEntry {
                 name: tool.name,
                 status: tool.status,
@@ -593,6 +604,7 @@ fn discovered_tools(
                 requires_daemon,
                 available,
                 unavailable_reason,
+                steer,
             }
         })
         .collect()
@@ -655,6 +667,10 @@ pub struct ShellExecStatus {
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
+    /// Present when the shell lane is off so discover steers to argv
+    /// without a failed call. Same keys as the deny envelope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steer: Option<crate::teach::ArgvSteer>,
 }
 
 /// Persistent shell-session runtime (US2/TC50).
@@ -1099,6 +1115,7 @@ impl TerminalCommanderMcpServer {
                 shell_exec: ShellExecStatus {
                     available: shell_exec_available,
                     reason: shell_exec_reason,
+                    steer: shell_exec_reason.map(|_| crate::teach::argv_steer()),
                 },
                 sessions: SessionsStatus {
                     available: sessions_available,
@@ -1246,7 +1263,7 @@ impl TerminalCommanderMcpServer {
     /// `command_start_combed` — start a non-PTY argv command on the
     /// daemon and return bounded metadata. Never returns raw output.
     #[tool(
-        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. Argv only; shell interpreters are denied. Prefer plain shell for tiny one-off commands whose full output you want verbatim."
+        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. Argv only; shell interpreters are denied. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Prefer plain shell for tiny one-off commands whose full output you want verbatim."
     )]
     async fn command_start_combed(
         &self,
@@ -1289,7 +1306,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters denied. Prefer plain shell for tiny one-off commands whose full verbatim output you want."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters denied. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Prefer plain shell for tiny one-off commands whose full verbatim output you want."
     )]
     async fn run_and_watch(
         &self,
@@ -1324,7 +1341,9 @@ impl TerminalCommanderMcpServer {
                     ..
                 })) => (job_id, bucket_id, cursor),
                 Ok(other) => return Err(unexpected_variant(&other)),
-                Err(e) => return Err(into_mcp_error_for(false, &e)),
+                Err(e) => {
+                    return Err(into_mcp_error_for_tool(false, &e, Some("run_and_watch")));
+                }
             };
 
         // 2. Wait loop: drain signals until the job is terminal, the
@@ -2931,7 +2950,7 @@ impl TerminalCommanderMcpServer {
     /// `command` -- run + observe + stream a one-shot command (compact surface).
     #[tool(
         name = "command",
-        description = "Run and observe a one-shot command. Key contracts: \
+        description = "Run and observe a one-shot command. Minimal argv example: {\"action\":\"run_and_watch\",\"argv\":[\"git\",\"status\"]}. Key contracts: \
 `run_and_watch`: `argv` + `wait_ms` (default 5,000; max 60,000; not `timeout_ms`). \
 `run` starts immediately; `run` + `wait_ms` is accepted as `run_and_watch` so the requested wait is honored. \
 If incomplete, resume signals with `wait`: `bucket_id` + `cursor` + `timeout_ms` + optional `max_signals` \
@@ -2952,9 +2971,17 @@ sub_seek, sub_close, sub_list."
     ) -> Result<CallToolResult, McpError> {
         use crate::facades::CommandFacadeCall as C;
         match call {
-            C::Run(p) => self.command_start_combed(Parameters(p)).await,
-            C::RunAndWatch(p) => self.run_and_watch(Parameters(p)).await,
-            C::Exec(p) => self.shell_exec(Parameters(p)).await,
+            C::Run(p) => crate::teach::retarget_denied_tool(
+                self.command_start_combed(Parameters(p)).await,
+                "command",
+            ),
+            C::RunAndWatch(p) => crate::teach::retarget_denied_tool(
+                self.run_and_watch(Parameters(p)).await,
+                "command",
+            ),
+            C::Exec(p) => {
+                crate::teach::retarget_denied_tool(self.shell_exec(Parameters(p)).await, "command")
+            }
             C::Status(p) => self.command_status(Parameters(p)).await,
             C::OutputTail(p) => self.command_output_tail(Parameters(p)).await,
             C::Stop(p) => self.command_stop(Parameters(p)).await,
@@ -3279,6 +3306,20 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
 /// classified identically regardless of mutability.
 #[must_use]
 pub fn into_mcp_error_for(request_is_idempotent: bool, e: &IpcError) -> McpError {
+    into_mcp_error_for_tool(request_is_idempotent, e, None)
+}
+
+/// [`into_mcp_error_for`] with an optional `denied_tool` override.
+///
+/// `run_and_watch` shares the `command_start_combed` IPC method. Pass the
+/// harness tool name so the teach envelope names the call the agent made.
+/// `None` keeps the daemon's `denied_tool`.
+#[must_use]
+pub fn into_mcp_error_for_tool(
+    request_is_idempotent: bool,
+    e: &IpcError,
+    denied_tool: Option<&str>,
+) -> McpError {
     // Mid-call TRANSPORT failure (the daemon pipe/socket went away during the
     // call): `McpDaemonClient::call` already attempted self-heal, and re-sent
     // the request once IFF it was idempotent. Surface the clean
@@ -3291,66 +3332,73 @@ pub fn into_mcp_error_for(request_is_idempotent: bool, e: &IpcError) -> McpError
     // transport detail stays out of the top-level message but rides in the
     // structured details as `transport_detail` -- diagnosability beats
     // tidiness (dogfood 2026-07-02: five opaque failures, one lost day).
+    // Transport stays distinct from the A2 policy-denied teach envelope.
     if e.is_transport() {
         return transport_unavailable_error(request_is_idempotent, e);
     }
     let message: Cow<'static, str> = Cow::Owned(format_ipc_error(e));
-    let mut data = serde_json::json!({
-        "ipc_code": format!("{:?}", e.code),
-    });
-    // F7: a non-existent program is a COMMAND ATTEMPT that failed, not a
-    // daemon/transport fault. Enrich the structured `data` payload with the
-    // failure-receipt vocabulary the agent reasons over -- `error_kind`,
-    // `argv0` (read from the TYPED `IpcError::argv0` carrier), and an explicit
-    // null `exit_code` (the process never started) -- so a missing program
-    // reads as a structured `program_not_found` receipt rather than an
-    // opaque error. The code itself is classified `invalid_params` below.
-    if e.code == IpcErrorCode::ProgramNotFound {
-        if let serde_json::Value::Object(map) = &mut data {
-            map.insert(
-                "error_kind".to_owned(),
-                serde_json::Value::String("program_not_found".to_owned()),
-            );
-            map.insert("exit_code".to_owned(), serde_json::Value::Null);
-            // `argv0` rides as a discrete TYPED field on the IpcError (set by
-            // the daemon via `IpcError::program_not_found`), so we copy it
-            // straight into the data payload -- no fragile prose parsing. The
-            // value survives any wording change to `message` and carries
-            // verbatim even when the program name itself contains an
-            // apostrophe (the case the old quote-count parse could not
-            // recover). When `argv0` is None we OMIT the field entirely --
-            // same graceful-degradation contract as before (the message still
-            // names the program).
-            if let Some(argv0) = &e.argv0 {
-                map.insert("argv0".to_owned(), serde_json::Value::String(argv0.clone()));
+    let ipc_code = format!("{:?}", e.code);
+    let data = if let Some(teach) = &e.teach {
+        crate::teach::policy_denied_data(teach, denied_tool, &ipc_code)
+    } else {
+        let mut data = serde_json::json!({
+            "ipc_code": ipc_code,
+        });
+        // F7: a non-existent program is a COMMAND ATTEMPT that failed, not a
+        // daemon/transport fault. Enrich the structured `data` payload with the
+        // failure-receipt vocabulary the agent reasons over -- `error_kind`,
+        // `argv0` (read from the TYPED `IpcError::argv0` carrier), and an explicit
+        // null `exit_code` (the process never started) -- so a missing program
+        // reads as a structured `program_not_found` receipt rather than an
+        // opaque error. The code itself is classified `invalid_params` below.
+        if e.code == IpcErrorCode::ProgramNotFound {
+            if let serde_json::Value::Object(map) = &mut data {
+                map.insert(
+                    "error_kind".to_owned(),
+                    serde_json::Value::String("program_not_found".to_owned()),
+                );
+                map.insert("exit_code".to_owned(), serde_json::Value::Null);
+                // `argv0` rides as a discrete TYPED field on the IpcError (set by
+                // the daemon via `IpcError::program_not_found`), so we copy it
+                // straight into the data payload -- no fragile prose parsing. The
+                // value survives any wording change to `message` and carries
+                // verbatim even when the program name itself contains an
+                // apostrophe (the case the old quote-count parse could not
+                // recover). When `argv0` is None we OMIT the field entirely --
+                // same graceful-degradation contract as before (the message still
+                // names the program).
+                if let Some(argv0) = &e.argv0 {
+                    map.insert("argv0".to_owned(), serde_json::Value::String(argv0.clone()));
+                }
             }
         }
-    }
-    // F14: an unsupported-platform error is a caller-ROUTABLE fact, not a
-    // daemon fault: the session/snapshot tools are unix-only, so on Windows
-    // the agent should route to WSL or a different tool rather than conclude
-    // TC is broken. Enrich the structured `data` with the receipt vocabulary
-    // the agent reasons over -- `error_kind`, the HONEST host `platform`
-    // (`std::env::consts::OS`), and the unavailable `tool` (read from the
-    // TYPED `IpcError::tool` carrier, set by the daemon via
-    // `IpcError::unsupported_platform`). When `tool` is None we OMIT the field
-    // entirely -- same graceful-degradation contract as `argv0`. The code
-    // itself is classified `invalid_params` below.
-    if e.code == IpcErrorCode::UnsupportedPlatform {
-        if let serde_json::Value::Object(map) = &mut data {
-            map.insert(
-                "error_kind".to_owned(),
-                serde_json::Value::String("unsupported_platform".to_owned()),
-            );
-            map.insert(
-                "platform".to_owned(),
-                serde_json::Value::String(std::env::consts::OS.to_owned()),
-            );
-            if let Some(tool) = &e.tool {
-                map.insert("tool".to_owned(), serde_json::Value::String(tool.clone()));
+        // F14: an unsupported-platform error is a caller-ROUTABLE fact, not a
+        // daemon fault: the session/snapshot tools are unix-only, so on Windows
+        // the agent should route to WSL or a different tool rather than conclude
+        // TC is broken. Enrich the structured `data` with the receipt vocabulary
+        // the agent reasons over -- `error_kind`, the HONEST host `platform`
+        // (`std::env::consts::OS`), and the unavailable `tool` (read from the
+        // TYPED `IpcError::tool` carrier, set by the daemon via
+        // `IpcError::unsupported_platform`). When `tool` is None we OMIT the field
+        // entirely -- same graceful-degradation contract as `argv0`. The code
+        // itself is classified `invalid_params` below.
+        if e.code == IpcErrorCode::UnsupportedPlatform {
+            if let serde_json::Value::Object(map) = &mut data {
+                map.insert(
+                    "error_kind".to_owned(),
+                    serde_json::Value::String("unsupported_platform".to_owned()),
+                );
+                map.insert(
+                    "platform".to_owned(),
+                    serde_json::Value::String(std::env::consts::OS.to_owned()),
+                );
+                if let Some(tool) = &e.tool {
+                    map.insert("tool".to_owned(), serde_json::Value::String(tool.clone()));
+                }
             }
         }
-    }
+        data
+    };
     // Trust contract: a caller-fixable error MUST surface as
     // `invalid_params` (JSON-RPC -32602) so the agent corrects its
     // input and keeps routing through Terminal Commander. Mapping such
@@ -6816,6 +6864,16 @@ mod tests {
             "shell_exec must be unavailable when allow_shell is off"
         );
         assert_eq!(shell.unavailable_reason, Some(SHELL_CAP_DENIED_REASON));
+        let steer = shell.steer.expect("cap-off shell_exec must steer to argv");
+        assert_eq!(steer.recover_hint, "retry_with_argv");
+        assert_eq!(steer.intended_tool, "run_and_watch");
+        assert_eq!(
+            steer.intended_example["argv"],
+            serde_json::json!(["git", "status"])
+        );
+        assert!(!crate::teach::recover_hint_upsells_shell(
+            steer.recover_hint
+        ));
         let probe = entry(&denied, "target_probe");
         assert!(
             !probe.available,
@@ -6838,6 +6896,7 @@ mod tests {
             "shell_exec must be available when allow_shell is on"
         );
         assert_eq!(shell.unavailable_reason, None);
+        assert!(shell.steer.is_none(), "no steer when shell is available");
         let probe = entry(&granted, "target_probe");
         assert!(
             probe.available,
@@ -7384,6 +7443,54 @@ mod tests {
         let e = IpcError::new(IpcErrorCode::PolicyDenied, "nope");
         let mcp = into_mcp_error(&e);
         assert!(mcp.message.contains("policy_denied") || mcp.message.contains("PolicyDenied"));
+        let data = mcp.data.expect("policy deny still carries ipc_code");
+        assert!(
+            data.get("deny_class").is_none(),
+            "a non-shell PolicyDenied must not grow the teach envelope; got: {data}"
+        );
+    }
+
+    #[test]
+    fn shell_teach_maps_through_the_shared_serializer() {
+        use terminal_commander_ipc::{ShellDenyClass, ShellTeach};
+        let teach = ShellTeach {
+            deny_class: ShellDenyClass::ShellCapabilityOff,
+            profile: "DeveloperLocal".to_owned(),
+            denied_capability: Some("allow_shell".to_owned()),
+            denied_tool: "shell_exec".to_owned(),
+            reason: ShellDenyClass::ShellCapabilityOff.reason().to_owned(),
+        };
+        let mut e = IpcError::new(IpcErrorCode::PolicyDenied, teach.reason.clone());
+        e.teach = Some(teach.clone());
+        let mcp = into_mcp_error(&e);
+        assert_eq!(mcp.code.0, -32602);
+        let data = mcp.data.expect("teach envelope");
+        assert_eq!(
+            data,
+            crate::teach::policy_denied_data(&teach, None, "PolicyDenied")
+        );
+        let hint = data["recover_hint"].as_str().unwrap_or_default();
+        assert!(!crate::teach::recover_hint_upsells_shell(hint));
+    }
+
+    #[test]
+    fn argv_tool_schemas_require_only_argv() {
+        for schema in [
+            serde_json::to_value(schemars::schema_for!(McpCommandStartParams)).expect("schema"),
+            serde_json::to_value(schemars::schema_for!(McpRunAndWatchParams)).expect("schema"),
+        ] {
+            let required: Vec<_> = schema["required"]
+                .as_array()
+                .expect("required")
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect();
+            assert_eq!(
+                required,
+                vec!["argv"],
+                "argv tools must not require presentational fields: {schema}"
+            );
+        }
     }
 
     #[test]
@@ -7695,6 +7802,10 @@ mod tests {
                 .is_some_and(|d| d.contains("pipe connect")),
             "the underlying transport failure must ride in details.transport_detail \
              (P1.0f: an opaque envelope made the true cause undiagnosable); got: {data}"
+        );
+        assert!(
+            data.get("deny_class").is_none() && data.get("kind").is_none(),
+            "transport daemon_unavailable must stay distinct from policy_denied; got: {data}"
         );
     }
 

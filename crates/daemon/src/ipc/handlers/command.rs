@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use terminal_commander_supervisor::identity::PeerIdentity;
 
-use super::common::{identity_audit_subject, map_command_error};
+use super::common::{enrich_shell_teach, identity_audit_subject, map_command_error};
 use crate::command::CommandStartRequest;
 use crate::ipc::protocol::{
     CommandOutputTailParams, CommandOutputTailResponse, CommandStartParams, CommandStatusParams,
@@ -53,7 +53,9 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
         // never a sibling client guessing another peer's command.
         peer_discriminator: Some(peer_discriminator(peer)),
     };
-    let resp = state.command.start_combed(req).map_err(map_command_error)?;
+    let resp = state.command.start_combed(req).map_err(|e| {
+        enrich_shell_teach(&state.policy, "command_start_combed", map_command_error(e))
+    })?;
     Ok(IpcResponse::CommandStartCombed(resp))
 }
 
@@ -98,7 +100,10 @@ pub(in crate::ipc::server) fn handle_shell_exec(
         bucket_config: params.bucket_config.clone(),
         tag: params.tag.clone(),
     };
-    let resp = state.shell.exec(req).map_err(map_command_error)?;
+    let resp = state
+        .shell
+        .exec(req)
+        .map_err(|e| enrich_shell_teach(&state.policy, "shell_exec", map_command_error(e)))?;
     Ok(IpcResponse::CommandStartCombed(resp))
 }
 

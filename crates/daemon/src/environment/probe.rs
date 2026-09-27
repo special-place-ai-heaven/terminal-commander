@@ -699,6 +699,17 @@ mod tests {
             host.access_routes
         );
         assert_eq!(host.beachhead, host.access_routes.first().cloned());
+        if let Some(beachhead) = &host.beachhead {
+            assert!(
+                matches!(beachhead.kind.as_str(), "direct_argv" | "wsl_argv"),
+                "allow_shell off must not beachhead a native shell route"
+            );
+            assert_eq!(
+                beachhead.argv_template.last().map(String::as_str),
+                Some("{args...}"),
+                "argv beachhead template must end in {{args...}}"
+            );
+        }
         assert_eq!(host.preferred_shell, None);
         if host
             .tools

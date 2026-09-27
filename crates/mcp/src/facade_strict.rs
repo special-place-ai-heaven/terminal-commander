@@ -40,6 +40,10 @@ struct FacadeSchema {
     actions: BTreeMap<String, ActionSchema>,
 }
 
+/// Presentational fields. Actions that do not list them drop them instead of
+/// `-32602`. Fields that change meaning stay hard-rejected when unknown.
+const PRESENTATIONAL_FIELDS: &[&str] = &["compact"];
+
 /// Runtime-only aliases that are deliberately absent from the advertised schema
 /// but must still be accepted (FR-003). Keyed by `(facade, action)`; each entry
 /// is `(alias, canonical_field)`. The alias both passes the unknown-field check
@@ -315,6 +319,10 @@ pub fn validate_facade_call(facade: &str, call: &Value) -> Result<(), McpError> 
         if aliases.iter().any(|&(alias, _)| alias == key.as_str()) {
             continue;
         }
+        if PRESENTATIONAL_FIELDS.contains(&key.as_str()) && !action_schema.properties.contains(key)
+        {
+            continue;
+        }
         unknown.push(key.as_str());
     }
 
@@ -346,6 +354,35 @@ mod tests {
         assert!(msg.contains("bucket_id"), "must name bucket_id; got: {msg}");
         assert!(msg.contains("cursor"), "must name cursor; got: {msg}");
         assert!(msg.contains("missing"), "must say missing; got: {msg}");
+    }
+
+    #[test]
+    fn presentational_compact_is_ignored_when_the_action_does_not_use_it() {
+        validate_facade_call(
+            "command",
+            &json!({"action":"exec","shell_line":"echo hi","compact":true}),
+        )
+        .expect("compact on exec is presentational and must not -32602");
+        validate_facade_call(
+            "command",
+            &json!({"action":"summary","bucket_id":"bkt_x","compact":true}),
+        )
+        .expect("compact on summary is presentational and must not -32602");
+        validate_facade_call(
+            "command",
+            &json!({"action":"run_and_watch","argv":["git","status"],"compact":true}),
+        )
+        .expect("compact on run_and_watch is a real field");
+        let err = validate_facade_call(
+            "command",
+            &json!({"action":"run_and_watch","shell_line":"echo hi"}),
+        )
+        .expect_err("shell_line on run_and_watch is a semantic mismatch");
+        let msg = err.message.to_string();
+        assert!(
+            msg.contains("does not accept"),
+            "semantic mismatches stay hard errors; got: {msg}"
+        );
     }
 
     #[test]
