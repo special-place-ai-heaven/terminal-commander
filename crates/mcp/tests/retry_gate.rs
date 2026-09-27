@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use terminal_commander_ipc::{
-    CommandStartParams, IpcRequest, PtyCommandStartParams, SubscriptionPullParams,
+    CommandStartParams, IpcRequest, PtyCommandStartParams, ShellExecParams, SubscriptionPullParams,
 };
 use terminal_commander_mcp::daemon_client::McpDaemonClient;
 
@@ -157,6 +157,35 @@ async fn pty_start_is_not_resent_on_transport_failure() {
     assert_eq!(
         observed, 1,
         "a MUTATING PtyCommandStart must NOT be re-sent (got {observed})"
+    );
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_exec_is_not_resent_on_transport_failure() {
+    // ShellExec is is_idempotent()==false (fresh shell child + job). The
+    // longer spawn-ACK deadline must not become a blind re-send.
+    let sock = unique_sock("shellexec");
+    let count = spawn_counting_drop_daemon(&sock);
+    let client = McpDaemonClient::new(&sock).with_timeout(Duration::from_millis(500));
+
+    let req = IpcRequest::ShellExec(ShellExecParams {
+        shell_line: "echo a | wc -c".to_owned(),
+        shell: None,
+        cwd: None,
+        env: vec![],
+        rules: vec![],
+        bucket_config: None,
+        tag: None,
+    });
+    let result = client.call(req).await;
+    assert!(result.is_err(), "transport error expected");
+
+    let observed = wait_for_count(&count, 2).await;
+    assert_eq!(
+        observed, 1,
+        "a MUTATING ShellExec must NOT be re-sent (got {observed})"
     );
 
     let _ = std::fs::remove_file(&sock);

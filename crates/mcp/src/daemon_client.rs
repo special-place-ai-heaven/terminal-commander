@@ -245,8 +245,9 @@ pub struct McpDaemonClient {
 /// budget shape (12 s client for an ~8 s daemon hold).
 const BLOCKING_DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// Fixed budget for a spawn ACK (`CommandStartCombed`, `PtyCommandStart`)
-/// before [`BLOCKING_DEADLINE_MARGIN`] is added.
+/// Fixed budget for a spawn ACK (`CommandStartCombed`, `PtyCommandStart`,
+/// `ShellExec`, `ShellSessionStart`) before [`BLOCKING_DEADLINE_MARGIN`]
+/// is added.
 ///
 /// These RPCs return once the child is spawned and the job is recorded. They
 /// do not wait for the child to exit, and they carry no caller `timeout_ms`,
@@ -279,9 +280,12 @@ const SPAWN_ACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(12)
 /// perfectly healthy daemon (dogfood 2026-07-02, BACKLOG P1.0f). The deadline
 /// must COVER the daemon's promised hold.
 ///
-/// Spawn ACKs (`command_start_combed`, `pty_command_start`) use
-/// [`SPAWN_ACK_BUDGET`] plus the same margin. Extending the deadline does not
-/// make a timed-out start safe to re-send.
+/// Spawn ACKs (`command_start_combed`, `pty_command_start`, `shell_exec`,
+/// `shell_session_start`) use [`SPAWN_ACK_BUDGET`] plus the same margin.
+/// `shell_exec` is `start_combed_shell` and `shell_session_start` is
+/// `spawn_pty_job` (session priming is fire-and-forget after the reply),
+/// so both share the spawn budget rather than a caller hold. Extending the
+/// deadline does not make a timed-out start safe to re-send.
 fn blocking_deadline(request: &IpcRequest) -> Option<std::time::Duration> {
     match request {
         IpcRequest::BucketWait(p) => Some(p.timeout() + BLOCKING_DEADLINE_MARGIN),
@@ -290,9 +294,10 @@ fn blocking_deadline(request: &IpcRequest) -> Option<std::time::Duration> {
         }),
         // Spawn ACK: no caller hold. Fixed budget + the same margin.
         // Mutating; a timeout is still not retried (see `McpDaemonClient::call`).
-        IpcRequest::CommandStartCombed(_) | IpcRequest::PtyCommandStart(_) => {
-            Some(SPAWN_ACK_BUDGET + BLOCKING_DEADLINE_MARGIN)
-        }
+        IpcRequest::CommandStartCombed(_)
+        | IpcRequest::PtyCommandStart(_)
+        | IpcRequest::ShellExec(_)
+        | IpcRequest::ShellSessionStart(_) => Some(SPAWN_ACK_BUDGET + BLOCKING_DEADLINE_MARGIN),
         _ => None,
     }
 }
@@ -664,6 +669,38 @@ mod tests {
         .expect("pty_command_start is a spawn ack");
         assert_eq!(start, expected);
         assert_eq!(pty, expected);
+    }
+
+    #[test]
+    fn blocking_deadline_covers_shell_exec() {
+        // shell_exec and shell_session_start return once the child is
+        // spawned. Same budget as command/pty start (12s + 4s margin).
+        let expected = SPAWN_ACK_BUDGET + BLOCKING_DEADLINE_MARGIN;
+        let shell = blocking_deadline(&IpcRequest::ShellExec(
+            terminal_commander_ipc::ShellExecParams {
+                shell_line: "echo a | wc -c".to_owned(),
+                shell: None,
+                cwd: None,
+                env: vec![],
+                rules: vec![],
+                bucket_config: None,
+                tag: None,
+            },
+        ))
+        .expect("shell_exec is a spawn ack");
+        let session = blocking_deadline(&IpcRequest::ShellSessionStart(
+            terminal_commander_ipc::ShellSessionStartParams {
+                shell: None,
+                cwd: None,
+                env: vec![],
+                rules: vec![],
+                bucket_config: None,
+                tag: None,
+            },
+        ))
+        .expect("shell_session_start is a spawn ack");
+        assert_eq!(shell, expected);
+        assert_eq!(session, expected);
     }
 
     // --- FIX D: self-heal handle behaviour ---
