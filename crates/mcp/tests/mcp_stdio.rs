@@ -62,7 +62,11 @@ async fn initialize_and_list_tools_returns_full_live_set() {
     let (_server, client) = paired_service().await;
     let info = client.peer_info().expect("peer info").clone();
     assert_eq!(
-        info.server_info.name, "terminal-commander-mcp",
+        info.server_info
+            .as_ref()
+            .expect("legacy initialize advertises server info")
+            .name,
+        "terminal-commander-mcp",
         "server identity"
     );
 

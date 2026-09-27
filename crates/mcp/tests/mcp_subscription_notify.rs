@@ -20,6 +20,9 @@
 //! Linux/WSL only (UDS direct-seed client + the authoritative gate).
 
 #![cfg(unix)]
+// Records rmcp's deprecated `notifications/message` nudge (SEP-2577). The
+// product path stays best-effort; dropping the nudge is later than Phase 1.
+#![allow(deprecated)]
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

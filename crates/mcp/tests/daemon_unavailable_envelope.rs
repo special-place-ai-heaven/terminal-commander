@@ -98,7 +98,11 @@ async fn initialize_and_list_tools_works_when_daemon_unavailable() {
     let (_server, client) = paired_service_unavailable().await;
     let info = client.peer_info().expect("peer info").clone();
     assert_eq!(
-        info.server_info.name, "terminal-commander-mcp",
+        info.server_info
+            .as_ref()
+            .expect("legacy initialize advertises server info")
+            .name,
+        "terminal-commander-mcp",
         "server identity must be correct even when daemon is unavailable"
     );
 
