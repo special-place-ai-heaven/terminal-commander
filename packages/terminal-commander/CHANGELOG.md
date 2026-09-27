@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.94](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.93...v0.1.94) (2026-09-27)
+
+
+### Features
+
+* **mcp:** recipe_* tools + compact recipe facade + recipe_run (GOAL 2) ([0948baf](https://github.com/special-place-ai-heaven/terminal-commander/commit/0948baffbf17d2e5525dc7fe652a4c41f7f5c428))
+* **mcp:** recipe_* tools + compact recipe facade + recipe_run (GOAL 2) ([0948baf](https://github.com/special-place-ai-heaven/terminal-commander/commit/0948baffbf17d2e5525dc7fe652a4c41f7f5c428))
+
 ## [0.1.93](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.92...v0.1.93) (2026-09-27)
 
 
