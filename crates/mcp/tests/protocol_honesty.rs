@@ -87,6 +87,41 @@ async fn discover_negotiates_2026_07_28_and_system_discover_matches() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_tools_emits_sep2549_ttl_ms_and_cache_scope() {
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let mcp = server();
+    let server_task =
+        tokio::spawn(async move { mcp.serve(server_transport).await.expect("server serve") });
+    let client = TestClient
+        .serve_with_lifecycle(
+            client_transport,
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            },
+        )
+        .await
+        .expect("modern discover");
+    let server = server_task.await.expect("server task join");
+
+    let listed = client.list_tools(None).await.expect("tools/list");
+    // Re-serialize: `skip_serializing_if` drops `None`, so a missing hint fails here.
+    let wire = serde_json::to_value(&listed).expect("tools/list json");
+    let ttl_ms = wire
+        .get("ttlMs")
+        .and_then(serde_json::Value::as_u64)
+        .expect("ttlMs must be a JSON number >= 0");
+    assert_eq!(ttl_ms, 0);
+    assert_eq!(
+        wire.get("cacheScope").and_then(serde_json::Value::as_str),
+        Some("public")
+    );
+    assert!(wire.get("tools").is_some_and(serde_json::Value::is_array));
+
+    let _ = client.cancel().await;
+    let _ = server.cancel().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_initialize_is_rejected() {
     let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
     let mcp = server();
