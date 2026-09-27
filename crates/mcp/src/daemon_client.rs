@@ -245,6 +245,28 @@ pub struct McpDaemonClient {
 /// budget shape (12 s client for an ~8 s daemon hold).
 const BLOCKING_DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// Fixed budget for a spawn ACK (`CommandStartCombed`, `PtyCommandStart`)
+/// before [`BLOCKING_DEADLINE_MARGIN`] is added.
+///
+/// These RPCs return once the child is spawned and the job is recorded. They
+/// do not wait for the child to exit, and they carry no caller `timeout_ms`,
+/// so there is no hold to clamp the way `bucket_wait` does. Under CPU
+/// starvation -- and on Windows, PATH/PATHEXT resolution plus antivirus
+/// around `CreateProcess` -- that spawn can still miss the flat 5 s client
+/// timeout and surface `daemon_unavailable` against a live busy daemon
+/// (residual 1a, same misclass as quiet `bucket_wait`, narrower trigger).
+///
+/// 12 s is the ceiling for that spawn work: longer than the 5 s cliff, the
+/// same order as the subscription-pull client ceiling already documented
+/// beside [`BLOCKING_DEADLINE_MARGIN`], and not a 30 s wait. The transport
+/// deadline is this budget plus the margin (16 s wall): connect retries,
+/// write, and read sit outside the spawn budget, including the Windows pipe
+/// `ERROR_FILE_NOT_FOUND` retry loop that runs until the call deadline. A
+/// start that has not ACKed by then is past "slow" and into "reconcile".
+/// The client returns a transport timeout and does not re-send; these RPCs
+/// stay non-idempotent.
+const SPAWN_ACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(12);
+
 /// The transport deadline for a request that legitimately BLOCKS daemon-side,
 /// or `None` for ordinary requests (client-level timeout applies).
 ///
@@ -256,12 +278,21 @@ const BLOCKING_DEADLINE_MARGIN: std::time::Duration = std::time::Duration::from_
 /// retried, timed out again, and surfaced as `daemon_unavailable` against a
 /// perfectly healthy daemon (dogfood 2026-07-02, BACKLOG P1.0f). The deadline
 /// must COVER the daemon's promised hold.
+///
+/// Spawn ACKs (`command_start_combed`, `pty_command_start`) use
+/// [`SPAWN_ACK_BUDGET`] plus the same margin. Extending the deadline does not
+/// make a timed-out start safe to re-send.
 fn blocking_deadline(request: &IpcRequest) -> Option<std::time::Duration> {
     match request {
         IpcRequest::BucketWait(p) => Some(p.timeout() + BLOCKING_DEADLINE_MARGIN),
         IpcRequest::ShellSessionExec(p) => p.wait_ms.map(|ms| {
             std::time::Duration::from_millis(ms.min(MAX_BUCKET_WAIT_MS)) + BLOCKING_DEADLINE_MARGIN
         }),
+        // Spawn ACK: no caller hold. Fixed budget + the same margin.
+        // Mutating; a timeout is still not retried (see `McpDaemonClient::call`).
+        IpcRequest::CommandStartCombed(_) | IpcRequest::PtyCommandStart(_) => {
+            Some(SPAWN_ACK_BUDGET + BLOCKING_DEADLINE_MARGIN)
+        }
         _ => None,
     }
 }
@@ -590,6 +621,49 @@ mod tests {
             blocking_deadline(&IpcRequest::Health).is_none(),
             "non-blocking requests keep the client-level timeout"
         );
+    }
+
+    #[test]
+    fn blocking_deadline_covers_spawn_ack() {
+        // No caller hold on a start. The deadline must clear the flat 5s
+        // client timeout that reported a live busy daemon as unavailable,
+        // and it must stay finite (budget + margin, not an unbounded wait).
+        let expected = SPAWN_ACK_BUDGET + BLOCKING_DEADLINE_MARGIN;
+        assert!(
+            expected > std::time::Duration::from_secs(5),
+            "spawn ACK deadline must outlast the flat client timeout"
+        );
+        let start = blocking_deadline(&IpcRequest::CommandStartCombed(
+            terminal_commander_ipc::CommandStartParams {
+                environment: None,
+                argv: vec!["true".to_owned()],
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                grace_ms: None,
+                tag: None,
+                dedup_nonce: None,
+                strip_ansi: true,
+            },
+        ))
+        .expect("command_start_combed is a spawn ack");
+        let pty = blocking_deadline(&IpcRequest::PtyCommandStart(
+            terminal_commander_ipc::PtyCommandStartParams {
+                environment: None,
+                argv: vec!["true".to_owned()],
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                rows: None,
+                cols: None,
+                tag: None,
+            },
+        ))
+        .expect("pty_command_start is a spawn ack");
+        assert_eq!(start, expected);
+        assert_eq!(pty, expected);
     }
 
     // --- FIX D: self-heal handle behaviour ---
