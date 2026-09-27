@@ -408,6 +408,9 @@ pub enum IpcRequest {
     RecipeListVersions(RecipeListVersionsParams),
     /// Tombstone a recipe. Versions stay readable; new versions are refused.
     RecipeTombstone(RecipeTombstoneParams),
+    /// Import the built-in argv seed bank. `activate` opens scope rows
+    /// only for an operator (`from_mcp` false, or the recipe activate flag).
+    RecipeImportSeeds(RecipeImportSeedsParams),
     /// Bounded line/byte window read of a regular file. Never
     /// returns the whole file; the daemon clamps the window.
     FileReadWindow(FileReadWindowParams),
@@ -586,6 +589,9 @@ impl IpcRequest {
             | Self::RecipeActivate(_)
             | Self::RecipeDeactivate(_)
             | Self::RecipeTombstone(_)
+            // Seed import writes versions (and may activate). A blind retry
+            // is a second write, same as registry_import_pack.
+            | Self::RecipeImportSeeds(_)
             // Spawns a combed argv job. A blind retry would start another one.
             | Self::RecipeRun(_)
             // File WRITE (TC22 A3): creates or overwrites a file on disk.
@@ -738,6 +744,7 @@ pub enum IpcResponse {
     RecipeRun(RecipeRunResponse),
     RecipeListVersions(RecipeListVersionsResponse),
     RecipeTombstone(RecipeTombstoneResponse),
+    RecipeImportSeeds(RecipeImportSeedsResponse),
     FileReadWindow(FileReadWindowResponse),
     FileSearch(FileSearchResponse),
     FileListDir(FileListDirResponse),
@@ -2080,6 +2087,39 @@ pub struct RecipeTombstoneParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipeTombstoneResponse {
     pub recipe_id: String,
+}
+
+/// Import the compiled-in argv recipe seeds (not a rule pack).
+///
+/// `activate: false` stores each seed as `tested` and activates nothing.
+/// `activate: true` requires `scope`, stores `active`, and opens activation
+/// rows. MCP callers (`from_mcp`) are denied activation while
+/// `llm_can_activate_recipes` is false.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeImportSeedsParams {
+    #[serde(default)]
+    pub activate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ActivationScope>,
+    /// Set by the MCP adapter. The admin CLI omits it.
+    #[serde(default)]
+    pub from_mcp: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeImportSeedsResponse {
+    pub imported: Vec<String>,
+    pub skipped: Vec<String>,
+    pub activated: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<RecipeImportFailure>,
+}
+
+/// One seed whose activation failed after it was stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeImportFailure {
+    pub recipe_id: String,
+    pub reason: String,
 }
 
 /// `recipe_test` parameters. Exactly one of `definition` or `recipe_id`.
@@ -3706,6 +3746,14 @@ mod tests {
             (
                 IpcRequest::RecipeTombstone(RecipeTombstoneParams {
                     recipe_id: "git.status".to_owned(),
+                }),
+                false,
+            ),
+            (
+                IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                    activate: false,
+                    scope: None,
+                    from_mcp: false,
                 }),
                 false,
             ),

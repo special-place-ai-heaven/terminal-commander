@@ -7027,7 +7027,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_fifty_one_live_tools() {
+    fn catalogue_lists_fifty_nine_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))

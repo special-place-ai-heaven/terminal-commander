@@ -38,7 +38,7 @@ pub use import::{
     known_pack_names, pack_member_ids, resolve_pack_json,
 };
 pub use job_receipt::{ABANDONED_END_CAUSE, JobReceiptRow};
-pub use recipe::{ActiveRecipe, RecipeSearchHit, RecipeStore, RecipeVersionMeta};
+pub use recipe::{ActiveRecipe, RecipeSearchHit, RecipeSeedImport, RecipeStore, RecipeVersionMeta};
 pub use registry::{
     ActivationRecord, ActiveRuleDef, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, RuleSearchHit,
 };

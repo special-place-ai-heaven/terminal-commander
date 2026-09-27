@@ -44,6 +44,8 @@ fn daemon_backed_inspection_commands_do_not_fake_empty_success() {
     for args in [
         &["rules", "list"][..],
         &["rules", "show", "missing.rule"],
+        &["recipes", "import"],
+        &["recipes", "import", "--activate"],
         &["buckets", "list"],
         &["buckets", "show", "bkt_00000000000000000000000000000000"],
         &["jobs"],

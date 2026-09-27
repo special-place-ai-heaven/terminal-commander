@@ -41,6 +41,13 @@ pub struct RecipeVersionMeta {
     pub created_at: OffsetDateTime,
 }
 
+/// Outcome of importing the built-in argv seed bank. Not a rule pack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipeSeedImport {
+    pub imported: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
 /// Borrowed writer/reader over the recipe tables.
 pub struct RecipeStore<'a> {
     conn: &'a mut rusqlite::Connection,
@@ -78,6 +85,52 @@ impl EventStore {
             conn: &mut self.conn,
         })
     }
+
+    /// Import the compiled-in argv seed bank.
+    ///
+    /// `promote_active` stores each seed as `active` so a later activation
+    /// gate can open a row. Otherwise seeds stay `tested` and are not
+    /// activatable. Re-import of the same id and status skips that id
+    /// (no extra version). A status change (tested, then active) stores
+    /// a new version. Does not write `rules*` rows and does not activate.
+    pub fn import_recipe_seeds(&mut self, promote_active: bool) -> Result<RecipeSeedImport> {
+        let status = if promote_active {
+            RecipeStatus::Active
+        } else {
+            RecipeStatus::Tested
+        };
+        let mut imported = Vec::new();
+        let mut skipped = Vec::new();
+        for seed in terminal_commander_core::RECIPE_SEEDS {
+            let incoming = seed
+                .definition(status)
+                .map_err(|err| EventStoreError::InvalidPayload(err.to_string()))?;
+            let same = {
+                let store = self.recipe_store()?;
+                store
+                    .get_latest(seed.recipe_id)?
+                    .is_some_and(|latest| recipe_body_eq(&latest, &incoming))
+            };
+            if same {
+                skipped.push(seed.recipe_id.to_owned());
+                continue;
+            }
+            self.recipe_store()?.create_recipe_version(&incoming)?;
+            imported.push(seed.recipe_id.to_owned());
+        }
+        Ok(RecipeSeedImport { imported, skipped })
+    }
+}
+
+/// Content identity for skip-on-reimport. Version is assigned by the
+/// store, so it is not part of the comparison. Status is: promoting
+/// tested seeds to active must mint a new version.
+fn recipe_body_eq(stored: &RecipeDefinition, incoming: &RecipeDefinition) -> bool {
+    let mut left = stored.clone();
+    let mut right = incoming.clone();
+    left.version = 0;
+    right.version = 0;
+    left == right
 }
 
 impl RecipeStore<'_> {
@@ -552,6 +605,75 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM recipes", [], |row| row.get(0))
             .unwrap();
         assert_eq!(recipe_rows, 1);
+    }
+
+    #[test]
+    fn import_recipe_seeds_lists_eight_and_keeps_shells_out() {
+        use terminal_commander_core::shell_interpreter_denied;
+
+        let mut store = EventStore::in_memory().unwrap();
+        store.ensure_registry().unwrap();
+        let rules_before: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM rules", [], |row| row.get(0))
+            .unwrap();
+
+        let first = store.import_recipe_seeds(false).unwrap();
+        assert!(
+            first.imported.len() >= 8,
+            "import must list at least 8, got {:?}",
+            first.imported
+        );
+        assert_eq!(first.imported.len(), 8, "{:?}", first.imported);
+        assert!(first.skipped.is_empty());
+        assert!(!first.imported.iter().any(|id| id == "rg.files"));
+        assert!(
+            store
+                .recipe_store()
+                .unwrap()
+                .list_active()
+                .unwrap()
+                .is_empty()
+        );
+        for id in &first.imported {
+            let def = store
+                .recipe_store()
+                .unwrap()
+                .get_latest(id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(def.status, RecipeStatus::Tested);
+            assert!(!def.argv.is_empty());
+            assert!(
+                shell_interpreter_denied(&def.argv[0]).is_none(),
+                "{id} argv[0]={} is denied",
+                def.argv[0]
+            );
+        }
+
+        let again = store.import_recipe_seeds(false).unwrap();
+        assert!(again.imported.is_empty());
+        assert_eq!(again.skipped.len(), 8);
+
+        let promoted = store.import_recipe_seeds(true).unwrap();
+        assert_eq!(promoted.imported.len(), 8);
+        for id in &promoted.imported {
+            let def = store
+                .recipe_store()
+                .unwrap()
+                .get_latest(id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(def.status, RecipeStatus::Active);
+            assert_eq!(def.version, 2);
+            assert!(shell_interpreter_denied(&def.argv[0]).is_none());
+        }
+
+        let rules_after: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM rules", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rules_before, rules_after);
     }
 
     #[test]

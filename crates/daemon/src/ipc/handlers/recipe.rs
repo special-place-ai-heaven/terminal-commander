@@ -10,6 +10,7 @@ use crate::ipc::protocol::{
     CommandStartParams, IpcError, IpcErrorCode, IpcResponse, MAX_LIST_LIMIT,
     MAX_RECIPE_SEARCH_LIMIT, RecipeActivateParams, RecipeActivateResponse, RecipeActiveEntry,
     RecipeDeactivateParams, RecipeDeactivateResponse, RecipeGetParams, RecipeGetResponse,
+    RecipeImportFailure, RecipeImportSeedsParams, RecipeImportSeedsResponse,
     RecipeListActiveResponse, RecipeListVersionsParams, RecipeListVersionsResponse,
     RecipeRunParams, RecipeRunResponse, RecipeSearchHit, RecipeSearchParams, RecipeSearchResponse,
     RecipeTestParams, RecipeTestResponse, RecipeTombstoneParams, RecipeTombstoneResponse,
@@ -112,6 +113,71 @@ pub(in crate::ipc::server) fn handle_recipe_upsert(
         recipe_id: params.definition.recipe_id.clone(),
         version,
     }))
+}
+
+pub(in crate::ipc::server) fn handle_recipe_import_seeds(
+    state: &Arc<DaemonState>,
+    params: &RecipeImportSeedsParams,
+) -> Result<IpcResponse, IpcError> {
+    if params.from_mcp && params.activate {
+        deny_mcp_recipe_activate(state, true)?;
+    }
+    let activate_scope = if params.activate {
+        Some(params.scope.ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::ScopeInvalid,
+                "scope is required when activate=true; pass {kind:'global'} \
+                 for explicit global activation",
+            )
+        })?)
+    } else {
+        None
+    };
+    let import = state
+        .store
+        .import_recipe_seeds(params.activate)
+        .map_err(map_recipe_store_error)?;
+    let (activated, failed) = if let Some(scope) = activate_scope {
+        // Re-activate skipped ids too, so a second operator import --activate
+        // still opens rows after the definitions were already stored.
+        let mut ids = import.imported.clone();
+        ids.extend(import.skipped.iter().cloned());
+        activate_imported_recipes(state, &ids, scope, params.from_mcp)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    Ok(IpcResponse::RecipeImportSeeds(RecipeImportSeedsResponse {
+        imported: import.imported,
+        skipped: import.skipped,
+        activated,
+        failed,
+    }))
+}
+
+fn activate_imported_recipes(
+    state: &Arc<DaemonState>,
+    recipe_ids: &[String],
+    scope: terminal_commander_core::ActivationScope,
+    from_mcp: bool,
+) -> (Vec<String>, Vec<RecipeImportFailure>) {
+    let mut activated = Vec::new();
+    let mut failed = Vec::new();
+    for recipe_id in recipe_ids {
+        let params = RecipeActivateParams {
+            recipe_id: recipe_id.clone(),
+            version: None,
+            scope: Some(scope),
+            from_mcp,
+        };
+        match handle_recipe_activate(state, &params) {
+            Ok(_) => activated.push(recipe_id.clone()),
+            Err(err) => failed.push(RecipeImportFailure {
+                recipe_id: recipe_id.clone(),
+                reason: err.message,
+            }),
+        }
+    }
+    (activated, failed)
 }
 
 fn deny_mcp_recipe_activate(state: &DaemonState, from_mcp: bool) -> Result<(), IpcError> {

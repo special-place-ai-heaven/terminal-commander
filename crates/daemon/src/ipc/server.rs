@@ -447,6 +447,7 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::RecipeRun(_) => "recipe_run",
         IpcRequest::RecipeListVersions(_) => "recipe_list_versions",
         IpcRequest::RecipeTombstone(_) => "recipe_tombstone",
+        IpcRequest::RecipeImportSeeds(_) => "recipe_import_seeds",
         IpcRequest::FileReadWindow(_) => "file_read_window",
         IpcRequest::FileSearch(_) => "file_search",
         IpcRequest::FileListDir(_) => "file_list_dir",
@@ -518,6 +519,7 @@ pub(crate) const DISCOVERABLE_METHODS: &[&str] = &[
     "recipe_run",
     "recipe_list_versions",
     "recipe_tombstone",
+    "recipe_import_seeds",
     "file_read_window",
     "file_search",
     "file_list_dir",
@@ -752,6 +754,12 @@ async fn dispatch(
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
         },
+        IpcRequest::RecipeImportSeeds(p) => {
+            match handlers::recipe::handle_recipe_import_seeds(state, p) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
         IpcRequest::FileReadWindow(p) => match handlers::file::handle_file_read_window(state, p) {
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
@@ -1245,12 +1253,12 @@ mod tests {
         EventContextParams, FileListDirParams, FileReadWindowParams, FileSearchParams,
         FileWatchStartParams, FileWatchStopParams, FileWriteParams, ListLimitParams,
         ProbeStatusParams, PtyCommandStartParams, PtyCommandStopParams, PtyCommandWriteStdinParams,
-        RecipeActivateParams, RecipeDeactivateParams, RecipeGetParams, RecipeListVersionsParams,
-        RecipeRunParams, RecipeSearchParams, RecipeTestParams, RecipeTombstoneParams,
-        RecipeUpsertParams, RegistryActivateParams, RegistryDeactivateBulkParams,
-        RegistryDeactivateParams, RegistryGetParams, RegistryImportPackParams,
-        RegistrySearchParams, RegistryTestParams, RegistryUpsertParams, ShellExecParams,
-        ShellSessionExecParams, ShellSessionStartParams, ShellSessionStatusParams,
+        RecipeActivateParams, RecipeDeactivateParams, RecipeGetParams, RecipeImportSeedsParams,
+        RecipeListVersionsParams, RecipeRunParams, RecipeSearchParams, RecipeTestParams,
+        RecipeTombstoneParams, RecipeUpsertParams, RegistryActivateParams,
+        RegistryDeactivateBulkParams, RegistryDeactivateParams, RegistryGetParams,
+        RegistryImportPackParams, RegistrySearchParams, RegistryTestParams, RegistryUpsertParams,
+        ShellExecParams, ShellSessionExecParams, ShellSessionStartParams, ShellSessionStatusParams,
         ShellSessionStopParams, SubscriptionCloseParams, SubscriptionListParams,
         SubscriptionOpenParams, SubscriptionPredicate, SubscriptionPullParams,
         SubscriptionSeekParams, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
@@ -1450,6 +1458,11 @@ mod tests {
             }),
             IpcRequest::RecipeTombstone(RecipeTombstoneParams {
                 recipe_id: "git.status".to_owned(),
+            }),
+            IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                activate: false,
+                scope: None,
+                from_mcp: false,
             }),
             IpcRequest::FileReadWindow(FileReadWindowParams {
                 path: std::path::PathBuf::from("/x"),
