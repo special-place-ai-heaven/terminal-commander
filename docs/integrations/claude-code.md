@@ -76,8 +76,10 @@ the opt-in logon-task option.
 3. Run `/mcp` and confirm `terminal_commander` is connected.
 
 Connect uses MCP **2026-07-28** only. See
-[MCP protocol floor](README.md#mcp-protocol-floor). A connected server can
-still hide its tools until the caveat below is closed on tip.
+[MCP protocol floor](README.md#mcp-protocol-floor). Tip `tools/list` emits
+SEP-2549 cache hints `ttlMs: 0` and `cacheScope: "public"` (#191
+emit-conform). Claude Code **2.1.283** and later lists Terminal Commander
+tools on a tip that includes that emit.
 
 Expected Terminal Commander tools include `system_discover`, `health`,
 `policy_status`, `command_start_combed`, `bucket_wait`,
@@ -85,19 +87,6 @@ Expected Terminal Commander tools include `system_discover`, `health`,
 `file_watch_start`, `file_watch_stop`, `file_watch_list`, `pty_command_start`,
 `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list`,
 `registry_*`, `runtime_state`, `probe_list`, and `probe_status`.
-
-## Known tools/list caveat (until tip emit lands)
-
-Claude Code SDK **2.1.283** and later can reject `tools/list` when the result
-omits SEP-2549 fields `ttlMs` (a number) and `cacheScope` (`public` or
-`private`). The session connects, the instructions arrive, and the tools are
-not exposed, so the catalogue stays empty.
-
-Current tip builds that list result without those fields. The tip fix in
-flight emits them on `tools/list` (emit-conform: `ttlMs` as a number,
-`cacheScope` as `public` or `private`). Until that emit lands, a schema
-reject on `tools/list` is this known gap, and the tools stay hidden. That
-emit is what makes the 2026-07-28 list result valid for this SDK.
 
 ## Minimal Flow
 
@@ -109,6 +98,9 @@ Ask Claude Code to:
 4. Call `command_status` with the returned `job_id`.
 
 Every response is bounded JSON.
+
+Claude may paraphrase PolicyDenied in prose instead of echoing A2 wire
+fields. That is harness presentation, not a tip defect.
 
 ## Subscription Notifications (best-effort, default OFF)
 
@@ -135,7 +127,6 @@ pipe in-process (no spawned process, file, or socket).
 
 | Symptom | Check |
 | --- | --- |
-| Connected, but tools fetch failed (`ttlMs` expected number; `cacheScope` must be `public` or `private`) | Known until tip emits those SEP-2549 fields on `tools/list`. See the caveat above. Tools stay hidden until that emit lands. |
 | `/mcp` shows no Terminal Commander server | Confirm Claude Code loaded the config and restart the session. |
 | MCP server failed to start | Confirm `terminal-commander-mcp --help` works from the same user account. |
 | Daemon unavailable | Run `terminal-commander doctor daemon`; the MCP adapter normally attempts daemon auto-start on connect. |
