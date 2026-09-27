@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use rmcp::model::CallToolRequestParams;
-use rmcp::{ClientHandler, ServiceExt};
+use rmcp::{ClientHandler, ClientServiceExt, ServiceExt};
 
 use terminal_commander_mcp::daemon_client::{DaemonStatusHandle, McpDaemonClient};
 use terminal_commander_mcp::surface::Surface;
@@ -102,7 +102,12 @@ async fn paired_service(
     let server_handle =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });
     let client = TestClient
-        .serve(client_transport)
+        .serve_with_lifecycle(
+            client_transport,
+            rmcp::ClientLifecycleMode::Discover {
+                preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
+            },
+        )
         .await
         .expect("client serve");
     let server = server_handle.await.expect("server task join");

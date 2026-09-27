@@ -760,9 +760,9 @@ impl std::fmt::Debug for TerminalCommanderMcpServer {
 
 /// Adapter-level constant tied to `Cargo.toml`.
 const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// MCP spec revision the adapter targets. Matches the in-process
-/// `ToolSurface` for consistency.
-const MCP_SPEC_REVISION: &str = "2025-11-25";
+/// MCP revision for `get_info`, negotiation, and `system_discover.mcp_spec`.
+pub(crate) const MCP_SPEC_REVISION: &str = "2026-07-28";
+const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
 
 #[tool_router]
 impl TerminalCommanderMcpServer {
@@ -2817,7 +2817,7 @@ impl TerminalCommanderMcpServer {
                         .unwrap_or(Severity::Info);
                     #[expect(
                         deprecated,
-                        reason = "the MCP 2024-11-05 compatibility nudge remains tested and best-effort"
+                        reason = "best-effort subscription nudge; the pull is the delivery path"
                     )]
                     let _ = ctx
                         .peer
@@ -3091,10 +3091,7 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
 // complete result with `.into()`. This handler re-wraps `Complete` the same
 // way so the manual return stays explicit.
 //
-// TODO(TC-MCP-REWRITE-P2): `get_info` still advertises `V_2024_11_05` while
-// `system_discover.mcp_spec` says `2025-11-25`. Phase 2 declares legacy
-// initialize plus `2026-07-28` via `supported_protocol_versions` and makes
-// the advertised version honest. Do not do that here.
+// Advertises MCP `2026-07-28` only, negotiated with `server/discover`.
 impl ServerHandler for TerminalCommanderMcpServer {
     async fn list_tools(
         &self,
@@ -3174,7 +3171,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
     fn get_info(&self) -> ServerConfig {
         #[expect(
             deprecated,
-            reason = "the MCP 2024-11-05 compatibility nudge remains tested and best-effort"
+            reason = "best-effort subscription nudge; the pull is the delivery path"
         )]
         let capabilities = ServerCapabilities::builder()
             .enable_tools()
@@ -3189,19 +3186,15 @@ impl ServerHandler for TerminalCommanderMcpServer {
                 "terminal-commander-mcp",
                 ADAPTER_VERSION,
             ))
-            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(
                 "Terminal Commander runs commands and returns STRUCTURED SIGNALS, not raw output: you define keyword/regex rules and get back only the matching events plus exit state, so you can run noisy or long-running commands without flooding your context. This saves you tokens and scrolling and lets you run commands too large to read. If no rule matches, command_status gives you a bounded receipt (exit code, suppressed-line count, short tail), never silence. Use plain shell instead for tiny, interactive, or one-off commands where the full output is small and you want it verbatim; reach for Terminal Commander when output is large, noisy, long-running, or you only care about specific signals. The adapter is a thin facade: each tool forwards 1:1 to a daemon IPC method (discovery, status, command/bucket/event, registry, file, PTY, runtime)."
                     .to_owned(),
             )
     }
 
-    async fn initialize(
-        &self,
-        _request: rmcp::model::InitializeRequestParams,
-        _ctx: RequestContext<RoleServer>,
-    ) -> Result<rmcp::model::InitializeResult, McpError> {
-        Ok(self.get_info())
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(SUPPORTED_PROTOCOL_VERSIONS)
     }
 }
 

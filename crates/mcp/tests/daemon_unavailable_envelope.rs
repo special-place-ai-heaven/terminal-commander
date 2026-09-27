@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use rmcp::model::CallToolRequestParams;
-use rmcp::{ClientHandler, ServiceExt};
+use rmcp::{ClientHandler, ClientServiceExt, ServiceExt};
 
 use terminal_commander_mcp::daemon_client::{DaemonStatusHandle, McpDaemonClient};
 use terminal_commander_mcp::tools::{TerminalCommanderMcpServer, tool_catalogue};
@@ -82,7 +82,12 @@ async fn paired_service_unavailable() -> (
     let server_handle =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });
     let client = TestClient
-        .serve(client_transport)
+        .serve_with_lifecycle(
+            client_transport,
+            rmcp::ClientLifecycleMode::Discover {
+                preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
+            },
+        )
         .await
         .expect("client serve");
     let server = server_handle.await.expect("server task join");
@@ -90,17 +95,17 @@ async fn paired_service_unavailable() -> (
 }
 
 // ---------------------------------------------------------------------------
-// Test: initialize + tool list still works with unavailable status
+// Test: discover handshake + tool list still works with unavailable status
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn initialize_and_list_tools_works_when_daemon_unavailable() {
+async fn discover_and_list_tools_works_when_daemon_unavailable() {
     let (_server, client) = paired_service_unavailable().await;
     let info = client.peer_info().expect("peer info").clone();
     assert_eq!(
         info.server_info
             .as_ref()
-            .expect("legacy initialize advertises server info")
+            .expect("discover advertises server info")
             .name,
         "terminal-commander-mcp",
         "server identity must be correct even when daemon is unavailable"
