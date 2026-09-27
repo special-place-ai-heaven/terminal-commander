@@ -10,27 +10,88 @@ terminal-commander setup harness --provider codex-cli
 ```
 
 The npm install is passive. The setup command is the explicit step that merges
-Terminal Commander into `~/.codex/config.toml`.
+the server block into `~/.codex/config.toml`. It does not turn on Codex's
+MCP 2026-07-28 feature. Add that opt-in yourself, below.
 
-## Config Shape
+## MCP 2026-07-28 opt-in
 
-Codex CLI reads MCP servers from `~/.codex/config.toml`:
+Tip accepts protocol **2026-07-28** only. See
+[MCP protocol floor](README.md#mcp-protocol-floor).
+
+Codex CLI's legacy default (no opt-in) still opens `initialize` with
+**2025-06-18**. Tip rejects that handshake with JSON-RPC `-32022`
+Unsupported protocol version (`requested` `2025-06-18`, `supported`
+`["2026-07-28"]`). That default is out of support for this tip until you
+opt in. Dogfood on **0.157.1** already speaks Discover when the opt-in is
+on, and the same build still sends `2025-06-18` when it is off. The
+connecting change is this opt-in, on `>= 0.147.0` (pin **0.157.1**).
+
+Both of these are required:
+
+1. In `~/.codex/config.toml`, enable the feature:
 
 ```toml
-[mcp_servers.terminal_commander]
-command = "terminal-commander-mcp"
-args = []
+[features]
+mcp_2026_07_28 = true
 ```
 
-Only add an env block when you intentionally use a non-default daemon endpoint:
+2. On the Terminal Commander server env block, set the protocol marker Codex
+   documents for stdio:
 
 ```toml
 [mcp_servers.terminal_commander.env]
-TC_SOCKET = "/path/to/terminal-commanderd.sock"
+CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"
 ```
 
-On Windows, the default endpoint is a local named pipe and normally does not
-need `TC_SOCKET`. On Unix, the default endpoint is a Unix domain socket.
+`terminal-commander setup harness --provider codex-cli` writes
+`[mcp_servers.terminal_commander]` and, when it has values, the env table
+(`TC_SESSION`, plus `TC_SURFACE` or Windows `TC_WSL_DISTRO` when you asked
+for them). Put `CODEX_MCP_PROTOCOL_VERSION` in that same env table and leave
+the setup keys in place. `[features]` sits outside the server table, so a
+later setup leaves it alone. A `--force` rewrite replaces the server block
+and its env table and drops `CODEX_MCP_PROTOCOL_VERSION`; put that line back
+after a force rewrite.
+
+Codex warns that the under-development feature `mcp_2026_07_28` is enabled.
+`suppress_unstable_features_warning = true` in the same file hides that
+warning.
+
+One-shot probes can enable the feature on the command line. The env marker
+on the server block is still required:
+
+```text
+codex exec --enable mcp_2026_07_28 ...
+```
+
+### Version pin
+
+| Item | Value |
+| --- | --- |
+| Package | `@openai/codex` |
+| Floor that can speak Discover | `>= 0.147.0`, with the opt-in above |
+| Dogfood proof | **0.157.1** (`npm i -g @openai/codex@0.157.1`) |
+
+## Config Shape
+
+Codex CLI reads MCP servers from `~/.codex/config.toml`. The feature flag,
+the server block, and the protocol env belong together:
+
+```toml
+[features]
+mcp_2026_07_28 = true
+
+[mcp_servers.terminal_commander]
+command = "terminal-commander-mcp"
+args = []
+
+[mcp_servers.terminal_commander.env]
+CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"
+```
+
+Add `TC_SOCKET = "/path/to/terminal-commanderd.sock"` in that same env table
+only when you intentionally use a non-default daemon endpoint. On Windows,
+the default endpoint is a local named pipe and normally does not need
+`TC_SOCKET`. On Unix, the default endpoint is a Unix domain socket.
 
 ## AV-Safe Direct-Exe Launch
 
@@ -39,9 +100,15 @@ into a stable per-user directory and writes `command` as that exe path with
 `args = []` instead of the bare `terminal-commander-mcp` name:
 
 ```toml
+[features]
+mcp_2026_07_28 = true
+
 [mcp_servers.terminal_commander]
 command = "C:\\Users\\<you>\\AppData\\Local\\terminal-commander\\bin\\terminal-commander-mcp.exe"
 args = []
+
+[mcp_servers.terminal_commander.env]
+CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"
 ```
 
 This removes the npm-shim -> node -> JS-shim launch chain that heuristic
@@ -84,6 +151,7 @@ is PolicyDenied, follow `recover_hint` `retry_with_argv` (argv
 
 | Symptom | Check |
 | --- | --- |
+| Handshake fails with `-32022` Unsupported protocol version (`requested` `2025-06-18`) | Legacy default. Set `[features] mcp_2026_07_28 = true` and `CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"`. Confirm Codex is `>= 0.147.0` (dogfood pin `0.157.1`). |
 | Codex reports the MCP server failed to start | Confirm `terminal-commander-mcp --help` works from the same user account. |
 | No tools listed | Restart Codex CLI or rename the server key to refresh the catalogue. |
 | Daemon unavailable | Run `terminal-commander doctor daemon`; the MCP adapter normally attempts daemon auto-start on connect. |
