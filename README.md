@@ -25,9 +25,9 @@ tool surface for commands, files, PTYs, persistent shell sessions, runtime
 state, and signal context.
 
 The goal is **omni**: an agent should never need a separate raw terminal tool.
-The same runtime is available through either five compact, action-dispatched
-facades (`command`, `session`, `files`, `registry`, `status`) or the full
-51-tool granular surface. It covers one-shot commands and shell pipelines,
+The same runtime is available through either six compact, action-dispatched
+facades (`command`, `files`, `recipe`, `registry`, `session`, `status`) or the full
+59-tool granular surface. It covers one-shot commands and shell pipelines,
 persistent stateful sessions, interactive PTYs (unix and Windows ConPTY),
 unknown-output rule suggestion, and operator-gated remote hosts. The agent's
 lane-selection map is [`docs/mcp/OMNI_PLAYBOOK.md`](docs/mcp/OMNI_PLAYBOOK.md).
@@ -248,7 +248,8 @@ list:
 terminal-commander setup harness --surface compact
 ```
 
-`compact` exposes five action-dispatched facade tools. `full` exposes all 51
+`compact` exposes six action-dispatched facade tools (`command`, `files`,
+`recipe`, `registry`, `session`, `status`). `full` exposes all 59
 granular tools and is the server default when `TC_SURFACE` is unset. Both views
 reach the same daemon operations and enforce the same policy.
 
@@ -287,7 +288,7 @@ flowchart LR
   end
 
   subgraph mcp["terminal-commander-mcp"]
-    Stdio["rmcp stdio server\n5 compact facades or 51 full tools\n1:1 facade over IPC"]
+    Stdio["rmcp stdio server\n6 compact facades or 59 full tools\n1:1 facade over IPC"]
   end
 
   subgraph sup["terminal-commander-supervisor (shared lib)"]
@@ -447,6 +448,9 @@ Agent rules:
 - The `cursor` returned by `run_and_watch` is a resume cursor. If `max_signals`
   caps the response, it remains before omitted matches so a later `wait` from
   that cursor recovers them instead of silently skipping evidence.
+- Prefer an activated argv recipe (`recipe action=run`, full-surface
+  `recipe_run`) or a direct argv call over `shell_exec`. See
+  [`docs/integrations/recipe-registry.md`](docs/integrations/recipe-registry.md).
 - Keep interpreters out of the argv lane. For a pipeline or compound command,
   use `command action=exec` only when `status action=policy_status` confirms
   `allow_shell`; otherwise follow a returned `direct_argv`/`wsl_argv` route and
@@ -462,8 +466,8 @@ Terminal Commander offers two schema views over the same runtime:
 
 | Surface | Tools advertised | Intended use |
 | --- | --- | --- |
-| `compact` | `command`, `session`, `files`, `registry`, `status` | Small, stable action-dispatched surface for LLM harnesses. |
-| `full` | 51 granular tools | Explicit per-operation names for clients that prefer a broad schema. |
+| `compact` | `command`, `files`, `recipe`, `registry`, `session`, `status` | Small, stable action-dispatched surface for LLM harnesses. |
+| `full` | 59 granular tools | Explicit per-operation names for clients that prefer a broad schema. |
 
 Set the view with `TC_SURFACE=compact|full` or `setup harness --surface ...`.
 Unset or unrecognized values select `full`. Compact calls are validated against
@@ -474,6 +478,7 @@ the chosen action before they reach the same handlers used by the full surface.
 | `status` | Discovery, health, policy, audit, runtime/probe state, and targets. |
 | `command` | Start/watch/status/stop, shell execution, buckets/context, and subscriptions. |
 | `registry` | Search, test, version, activate, deactivate, import, and suggest rules. |
+| `recipe` | Argv recipes (not rules): `search`, `get`, `upsert`, `test`, `activate`, `deactivate`, `list_active`, `run`. Activate stays operator-gated. `run` executes an activated recipe on the argv lane. |
 | `files` | Bounded read/search/list/write, file watches, and workspace snapshots. |
 | `session` | PTY commands and persistent shell sessions. |
 
@@ -703,7 +708,7 @@ swapped (identity-gated) before tool calls proceed.
 | `TC_SOCKET` | Full endpoint override (pipe name / socket path). Wins over `TC_SESSION`. |
 | `TC_DATA` | State-dir base override (default: `%LOCALAPPDATA%\terminal-commanderd\state` on Windows, `~/.local/share/terminal-commanderd` on Unix). |
 | `TC_IDLE_TTL_SECS` | Idle self-reap TTL in seconds (default 1800; `0` disables). |
-| `TC_SURFACE` | MCP schema view: `compact` (five facades) or `full` (51 granular tools; default). |
+| `TC_SURFACE` | MCP schema view: `compact` (six facades) or `full` (59 granular tools; default). |
 | `TC_USE_LEGACY_WSL_BRIDGE` | `1` opts into the legacy Windows→WSL bridge. |
 | `TC_WSL_DISTRO` | Selects the WSL distro for the legacy bridge. |
 | `TC_SKIP_DAEMON_AUTOSTART` | `1` skips daemon autostart during `setup harness`. |
@@ -801,7 +806,7 @@ crates/                                  Rust workspace (9 crates; 8 published t
   supervisor/                            ensure_daemon, replace_if_stale, session tokens, pidfile
   ipc/                                   wire protocol + framing + clients (UDS / named pipe)
   daemon/                                terminal-commanderd — IPC, policy, router, runtimes
-  mcp/                                   terminal-commander-mcp — 5-facade compact / 51-tool full surface
+  mcp/                                   terminal-commander-mcp - 6-facade compact / 59-tool full surface
   cli/                                   terminal-commander admin CLI (local only, not on crates.io)
 packages/
   terminal-commander/                    npm root wrapper (@latest)
