@@ -1,7 +1,8 @@
 # Provider Integration Examples - Terminal Commander
 
-Status: current public integration index for the five-facade compact and
-51-tool full MCP surfaces.
+Status: current public integration index for the six-facade compact and
+59-tool full MCP surfaces. Compact facades: `command`, `files`, `recipe`,
+`registry`, `session`, `status`.
 
 Provider-neutral MCP integration recipes. NO secrets, NO machine-
 specific paths. The MCP server is launched by the LLM harness as a
@@ -55,6 +56,10 @@ Real-Time-Active patterns (react to subscription events as they happen): see the
 The universal cross-harness pattern is a background loop over `subscription_pull`.
 
 Operational guides (not provider-specific):
+- [`recipe-registry.md`](recipe-registry.md) - argv recipes versus signal
+  rules. Happy path: search, operator activate, then `recipe_run`. Prefer
+  `recipe_run` or argv over shell. Teach may return `retry_with_recipe`.
+  The MCP protocol floor above is unchanged.
 - [`omni-harness-smoke.md`](omni-harness-smoke.md) - the operator-gated
   provider-harness smoke procedure for the omni surface (command -> wait ->
   status, a persistent shell-session check, and the suggest-loop check)
@@ -83,7 +88,7 @@ requires actually running the provider against one of the configs
 above and observing tool calls in the session transcript.
 
 The rest of this page is the older provider-neutral baseline kept for historical
-context; the modern full surface advertises 51 tools and the per-provider
+context; the modern full surface advertises 59 tools and the per-provider
 walk-throughs above are the authoritative source.
 
 Language: ASCII only.

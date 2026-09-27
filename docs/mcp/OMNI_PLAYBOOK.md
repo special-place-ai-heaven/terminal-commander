@@ -21,6 +21,9 @@ when a call is denied.
 Need to run or observe something?
 |
 +-- DEFAULT: run a program by argv (do this first)
+|     +-- An activated recipe matches the task
+|     |     -> recipe_run { recipe_id }  (compact: recipe action=run)
+|     |        Guide: docs/integrations/recipe-registry.md
 |     +-- It has a rule pack (cargo, pytest, npm, docker, kubectl, git, ...)
 |     |     -> registry_import_pack <pack>   (once)   then
 |     |     -> run_and_watch argv=[...] rules=[...]
@@ -53,9 +56,12 @@ Need to run or observe something?
 |     cue to call it again or to ask for the cap.
 |
 +-- PolicyDenied on shell misuse?
-|     recover_hint = retry_with_argv. Retry run_and_watch with
+|     If recover_hint = retry_with_recipe, call recipe_run with
+|     intended_example {"recipe_id":"..."}.
+|     Otherwise recover_hint = retry_with_argv. Retry run_and_watch with
 |     {"argv":["git","status"]}. Do not thrash the schema. Do not ask
 |     to enable shell. Decision A2 rejects flipping allow_shell on.
+|     Guide: docs/integrations/recipe-registry.md.
 |
 +-- Multi-step work that shares cwd/env (cd build; cmake ..; make)?
 |     -> shell_session_start  then  shell_session_exec (one line per step)
@@ -135,7 +141,8 @@ shell_exec { shell_line: "grep -r TODO src | wc -l" }
 
 Shell misuse returns MCP `-32602` with structured `data`. The
 full-surface tool and the compact `command` facade share that data.
-Golden copy: `crates/mcp/tests/fixtures/a2/shell_capability_off.json`.
+No-match golden copy: `crates/mcp/tests/fixtures/a2/shell_capability_off.json`.
+A matching recipe uses `crates/mcp/tests/fixtures/a2/retry_with_recipe.json`.
 
 - `kind` = `policy_denied`
 - `deny_class` is `shell_capability_off`, `shell_interpreter_denied`,
@@ -145,16 +152,21 @@ Golden copy: `crates/mcp/tests/fixtures/a2/shell_capability_off.json`.
   `shell_line`)
 - `alternatives` lists argv, file, and PTY tools first; `shell_exec`
   is last and tagged `operator_opt_in`
-- `recover_hint` = `retry_with_argv`
+- `recover_hint` = `retry_with_argv` when no recipe matches
 
 The remedy is that hint: call `run_and_watch` or `command_start_combed`
 with an argv array. Do not thrash schema field names. Turning
 `allow_shell` on is not the fix. Decision A2 rejects Finding 1 (flip
 the default shell cap on).
 
-Discover already carries the same steer when the daemon is up and
-`allow_shell` is off, so a failed call is unnecessary. The `shell_exec`
-catalogue row is `available: false` with `unavailable_reason`
+When the daemon sets `recipe_id` on that deny, three fields change:
+`recover_hint` = `retry_with_recipe`, `intended_tool` = `recipe_run`,
+`intended_example` = `{"recipe_id":"..."}`. Alternatives stay the argv
+list above. Operator guide: `docs/integrations/recipe-registry.md`.
+
+Discover's catalogue steer stays the argv default when the daemon is up
+and `allow_shell` is off. The `shell_exec` catalogue row is
+`available: false` with `unavailable_reason`
 `allow_shell capability is off in the active policy profile` and
 `steer` (`intended_tool` `run_and_watch`, `intended_example`
 `{"argv":["git","status"]}`, `recover_hint` `retry_with_argv`).
@@ -269,7 +281,7 @@ run_and_watch argv=[...] rules=[...] target_id="build-box"
 - Honest caveat: federation is proven via a second-local-socket
   simulation; real-SSH transit is not yet exercised in CI (no sshd in
   the smoke env). `target_id` is wired on the command path; it is not
-  yet threaded through all 51 full-surface tools.
+  yet threaded through all 59 full-surface tools.
 
 ## 7. Privileged system ops: NOT AVAILABLE (plan-only)
 
@@ -311,5 +323,8 @@ These apply to every lane:
 - `docs/runtime/SHELL_SESSION.md` -- persistent sessions + snapshots.
 - `POLICY.md` section 4.1 -- the `[policy.caps]` capabilities.
 - `README.md` -- the omni tool surface and safety posture.
-- A2 teach envelopes, tip `4326825` / PR #180. `recover_hint` is
-  `retry_with_argv`; default `allow_shell` stays off.
+- A2 teach envelopes. With no matching recipe, `recover_hint` is
+  `retry_with_argv` and `intended_tool` is `run_and_watch`. When the
+  daemon sets `recipe_id`, `recover_hint` is `retry_with_recipe` and
+  `intended_tool` is `recipe_run`. Default `allow_shell` stays off.
+  Guide: `docs/integrations/recipe-registry.md`.

@@ -1,6 +1,6 @@
 # MCP Tool Control Surface - Locked Contract
 
-Status: current MCP-facing contract as of 2026-07-17.
+Status: current MCP-facing contract. Live catalogue: 59 tools; compact surface: six facades.
 Anchored by: `crates/mcp/src/tools.rs`, `docs/runtime/REALTIME_SIGNAL_CHANNEL.md`.
 Language: ASCII only.
 
@@ -68,8 +68,9 @@ Availability rules:
   error when startup status says the daemon is unavailable. They must
   not leak raw pipe/socket errors as the primary client contract.
 - The advertised list and the registered rmcp router are tested to stay
-  aligned (`catalogue_lists_fifty_one_live_tools` and
-  `tool_router_exposes_all_live_tools`).
+  aligned. The catalogue pin in `crates/mcp/src/tools.rs` is still named
+  `catalogue_lists_fifty_one_live_tools`; that test asserts the live
+  59-tool list. `tool_router_exposes_all_live_tools` checks the router.
 
 Session availability:
 
@@ -92,10 +93,12 @@ Machine-readable fixture:
 
 ## 2. Live tool catalogue
 
-The full rmcp stdio surface exposes 51 live tools. With
-`TC_SURFACE=compact`, the adapter instead advertises five action-dispatched
-facades: `command`, `session`, `files`, `registry`, and `status`. Both surfaces
-route to the same handlers and policy boundary.
+The full rmcp stdio surface exposes 59 live tools. With
+`TC_SURFACE=compact`, the adapter instead advertises six action-dispatched
+facades: `command`, `files`, `recipe`, `registry`, `session`, and `status`.
+Both surfaces route to the same handlers and policy boundary. `recipe` is
+the argv recipe registry. It is separate from `registry` (signal rules).
+Recipe actions are not accepted on the `registry` facade.
 
 | Group | Tools |
 |---|---|
@@ -103,6 +106,7 @@ route to the same handlers and policy boundary.
 | Commands and buckets | `command_start_combed`, `run_and_watch`, `command_status`, `command_stop` (forced-kill-only; CommandSignal-gated), `shell_exec` (gated by `allow_shell`; combed, never raw), `command_output_tail`, `bucket_events_since`, `bucket_wait`, `bucket_summary`, `event_context` |
 | Subscriptions | `subscription_open`, `subscription_pull`, `subscription_list`, `subscription_close`, `subscription_seek` |
 | Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_import_pack`, `registry_deactivate`, `registry_list_active`, `registry_suggest_from_samples` (proposals only; NEVER auto-activates) |
+| Recipe registry | `recipe_search`, `recipe_get`, `recipe_upsert`, `recipe_test` (dry-run; does not activate or start a job), `recipe_activate`, `recipe_deactivate`, `recipe_list_active`, `recipe_run`. Separate from rules. Compact facade `recipe` actions: `search`, `get`, `upsert`, `test`, `activate`, `deactivate`, `list_active`, `run`. MCP `recipe_activate` / `recipe_deactivate` are denied while `llm_can_activate_recipes` is false (default) with `recipe_activate_requires_admin`. `recipe_run` runs an activated recipe on the argv lane (`run_and_watch` when the recipe has a timeout or rule pack; otherwise `command_start_combed`). Never `shell_exec`. |
 | Sessions and workspace | `shell_session_start`, `shell_session_exec`, `shell_session_status`, `shell_session_stop`, `shell_session_list`, `workspace_snapshot_create`, `workspace_snapshot_apply` (gated by `allow_session`; unix-only; combed, never raw) |
 | Files | `file_read_window`, `file_search`, `file_write` (policy-gated by `paths.write_allow`; audited before write; bounded size; atomic; mutating / non-idempotent), `file_watch_start`, `file_watch_stop`, `file_watch_list` |
 | PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` (POSIX + Windows ConPTY) |
@@ -121,8 +125,8 @@ Remote routing surface (`target_id`):
   `allow_remote`) is wired on the COMMAND lane only:
   `command_start_combed`, `run_and_watch`, `command_status`,
   `command_stop`, plus `target_list` / `target_probe`.
-- It is NOT a parameter on `shell_exec`, `pty_*`, `file_*`, or
-  `registry_*` (except `target_list` / `target_probe`). Passing
+- It is NOT a parameter on `shell_exec`, `pty_*`, `file_*`,
+  `registry_*`, or `recipe_*` (except `target_list` / `target_probe`). Passing
   `target_id` to one of those tools does NOT route the call remotely;
   the field is unknown to the schema and the call runs against the LOCAL
   daemon as if no target were named.
@@ -143,10 +147,16 @@ Each catalogue entry returned by `system_discover.tools[]` includes:
 
 When the daemon is up and `allow_shell` is off, the `shell_exec` catalogue
 row is `available: false` with `unavailable_reason` `allow_shell capability
-is off in the active policy profile` and `steer` (`recover_hint`
+is off in the active policy profile`. Discover's catalogue `steer` and
+`omni_status.matrix.shell_exec.steer` stay the argv default (`recover_hint`
 `retry_with_argv`, `intended_tool` `run_and_watch`, `intended_example`
-`{"argv":["git","status"]}`). `omni_status.matrix.shell_exec` repeats
-`available: false`, `reason` (same string), and that `steer`.
+`{"argv":["git","status"]}`). A shell-misuse deny follows the daemon
+`ShellTeach`: when `recipe_id` is set, `recover_hint` is
+`retry_with_recipe`, `intended_tool` is `recipe_run`, and
+`intended_example` is `{"recipe_id":"..."}`. Otherwise the envelope keeps
+`retry_with_argv` / `run_and_watch`. Alternatives still list argv tools.
+The remedy is that hint, not "enable shell". See
+`docs/integrations/recipe-registry.md`.
 
 ## 3. Tools not exposed
 
@@ -176,6 +186,7 @@ instead of raw streams.
 | File reads | Windowed by line/byte limits; no whole-file dump tool. |
 | File search | Bounded matches and capped snippets. |
 | Registry search/test | Bounded hit/sample counts. |
+| Recipe search/test | Bounded hits. Test validates argv and does not activate or start a job. |
 | Runtime/probe status | Bounded JSON snapshots. |
 
 `run_and_watch.cursor` is a resume cursor, not simply the last internally
@@ -201,7 +212,8 @@ layer; it must not become an alternate command executor, policy bypass,
 or hidden shell bridge.
 
 Known policy action families include command start/stdin/signal,
-file read/watch, probe create, registry create/activate, bucket wait/read,
+file read/watch, probe create, registry create/activate, recipe activate
+(MCP-gated by `llm_can_activate_recipes`), bucket wait/read,
 and event context. A new tool that needs a new policy action must add the
 closed-set variant in the same goal that adds the tool.
 
@@ -222,5 +234,6 @@ A future goal must stop and surface a blocker rather than:
 - `crates/mcp/src/tools.rs` - live rmcp tool registration and discovery.
 - `docs/runtime/REALTIME_SIGNAL_CHANNEL.md` - product contract.
 - `docs/mcp/README.md` - adapter overview.
+- `docs/integrations/recipe-registry.md` - recipes vs rules, `recipe_run`, teach.
 - `docs/security/PRIVILEGE_MODEL.md` - privilege boundaries.
 - `docs/contracts/README.md` - wire-shape fixtures.

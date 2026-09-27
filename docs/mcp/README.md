@@ -1,4 +1,4 @@
-# MCP Tool Surface — Terminal Commander
+# MCP Tool Surface - Terminal Commander
 
 `terminal-commander-mcp` is the thin LLM-facing adapter. It serves MCP over
 stdio with rmcp 1.8.0 and forwards tool calls to `terminal-commanderd` over the
@@ -7,9 +7,10 @@ bind a network listener.
 
 ## Surfaces
 
-- The compact surface exposes five task-oriented facades: `command`, `files`,
-  `registry`, `session`, and `status`.
-- The full surface exposes the granular tools behind those facades.
+- The compact surface exposes six task-oriented facades: `command`, `files`,
+  `recipe`, `registry`, `session`, and `status`. `recipe` is argv recipes
+  and is separate from the rule `registry` facade.
+- The full surface exposes the 59 granular tools behind those facades.
 - `system_discover` is the runtime authority for available methods, policy,
   host probes, ranked access routes, and the current beachhead.
 
