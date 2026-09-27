@@ -75,6 +75,11 @@ Ask the assistant to:
 Every response is bounded JSON. Raw stdout/stderr should not be pasted into the
 conversation.
 
+`allow_shell` is off unless an operator sets it in config TOML. If
+`system_discover` shows `shell_exec` `available: false`, or a shell call
+is PolicyDenied, follow `recover_hint` `retry_with_argv` (argv
+`run_and_watch` / `command_start_combed`). Do not ask to enable shell.
+
 ## Troubleshooting
 
 | Symptom | Check |

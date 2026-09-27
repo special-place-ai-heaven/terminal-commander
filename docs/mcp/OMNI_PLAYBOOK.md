@@ -13,35 +13,24 @@ Language: ASCII only.
 
 ## The one-screen decision tree
 
+Default profile: argv first. Decompose pipelines before any shell lane.
+`shell_exec` is operator opt-in, not the first branch and not the remedy
+when a call is denied.
+
 ```text
 Need to run or observe something?
 |
-+-- Run a single program (argv), known signal?
++-- DEFAULT: run a program by argv (do this first)
 |     +-- It has a rule pack (cargo, pytest, npm, docker, kubectl, git, ...)
 |     |     -> registry_import_pack <pack>   (once)   then
-|     |     -> run_and_watch argv=[...] rules=[...]    OR rely on active pack rules
+|     |     -> run_and_watch argv=[...] rules=[...]
+|     |        OR command_start_combed argv=[...] + bucket_wait
+|     |        (active pack rules apply either way)
 |     +-- No pack, but you know what to match
 |           -> run_and_watch argv=[...] rules=[{"pattern":"ERROR"}]
+|              OR command_start_combed argv=[...]
 |
-+-- One-shot pipeline / compound / redirect (grep ... | wc -l, make 2>&1 | tee)?
-|     -> shell_exec { shell_line: "..." }      (needs allow_shell; default off)
-|
-+-- Multi-step work that shares cwd/env (cd build; cmake ..; make)?
-|     -> shell_session_start  then  shell_session_exec (one line per step)
-|        (needs allow_session; default off; UNIX-ONLY)
-|        save/restore with workspace_snapshot_create / _apply
-|
-+-- Interactive program / REPL (python, psql, a prompt that asks back)?
-|     -> pty_command_start  then  pty_command_write_stdin
-|        (dual backend: unix pty-process + Windows ConPTY)
-|
-+-- Output whose format you do NOT know yet?
-|     -> run it, then command_output_tail  (bounded, no rule needed)
-|        -> registry_suggest_from_samples { samples: [...] }   (DRAFT rules)
-|        -> registry_test  ->  registry_upsert  ->  registry_activate
-|        (suggest NEVER auto-activates; you drive the loop)
-|
-+-- Read or write a file (not run a program)?
++-- Read or write a file? Use file tools, not a shell reader.
 |     +-- Read a bounded window / search one file
 |     |     -> file_read_window { path, start_line?, max_lines? }
 |     |     -> file_search { path, query }           (bounded matches + pointers)
@@ -51,6 +40,34 @@ Need to run or observe something?
 |               bounded size; atomic temp+rename, no torn writes; MUTATING /
 |               non-idempotent -- the client never auto-retries it. read_only_observer
 |               denies it; repo_only confines it to $REPO_ROOT.)
+|     NOT type, Get-Content, cat, or a shell pipeline.
+|
++-- Interactive program / REPL (python, psql, a prompt that asks back)?
+|     -> pty_command_start  then  pty_command_write_stdin
+|        (dual backend: unix pty-process + Windows ConPTY)
+|
++-- Pipeline, redirect, compound, or PowerShell one-liner?
+|     DECOMPOSE FIRST into argv steps or the file tools above.
+|     shell_exec comes only after that split, and only if the operator
+|     set allow_shell in config TOML (default OFF). Denied is not a
+|     cue to call it again or to ask for the cap.
+|
++-- PolicyDenied on shell misuse?
+|     recover_hint = retry_with_argv. Retry run_and_watch with
+|     {"argv":["git","status"]}. Do not thrash the schema. Do not ask
+|     to enable shell. Decision A2 rejects flipping allow_shell on.
+|
++-- Multi-step work that shares cwd/env (cd build; cmake ..; make)?
+|     -> shell_session_start  then  shell_session_exec (one line per step)
+|        (needs allow_session; default off; UNIX-ONLY)
+|        save/restore with workspace_snapshot_create / _apply
+|        Not a substitute for a denied shell_exec.
+|
++-- Output whose format you do NOT know yet?
+|     -> run it on the argv lane, then command_output_tail
+|        -> registry_suggest_from_samples { samples: [...] }   (DRAFT rules)
+|        -> registry_test  ->  registry_upsert  ->  registry_activate
+|        (suggest NEVER auto-activates; you drive the loop)
 |
 +-- Run any of the above on a REMOTE host?
 |     -> add target_id=<id> to the tool call  (needs allow_remote; default off;
@@ -90,21 +107,61 @@ rule signals + exit, return both. A quiet command (zero matches) returns
 a RECEIPT (exit code, lines suppressed, short tail), never a bare empty
 success. For longer jobs use `command_start_combed` + `bucket_wait`.
 
-## 2. One-shot pipeline: shell_exec
+## 2. Pipelines and one-liners: decompose first
 
-Some real work is irreducibly a pipeline or compound. The argv lane
-cannot express it (shell interpreters are denied as `argv[0]`). Use
-`shell_exec` for ONE shell line:
+A pipeline, redirect, compound, or PowerShell one-liner is not a reason
+to call `shell_exec`. Split it into argv calls (`run_and_watch` or
+`command_start_combed`, plus a pack when one exists) or into file tools
+(`file_read_window`, `file_search`, `file_write`). Do not read files
+with `type`, `Get-Content`, `cat`, or a shell pipeline. Shell
+interpreters are denied as `argv[0]` on the argv lane; that deny means
+retry with a real argv array, not a shell line.
+
+`shell_exec` is for a line that is still irreducible after that split,
+and only after the operator has set `allow_shell` in the daemon config
+TOML. Default is OFF. It is not an MCP parameter, and it is not the
+first remedy when a call is denied.
 
 ```text
 shell_exec { shell_line: "grep -r TODO src | wc -l" }
 ```
 
-- Gated by `allow_shell` (default OFF; operator config TOML, not an
-  MCP parameter). On the default profile it returns `PolicyDenied`.
+- On the default profile this returns `PolicyDenied` (see below).
 - Output is combed exactly like the argv lane -- never raw.
 - Details and the residual-risk discussion: `docs/runtime/SHELL_RUNTIME.md`
   and `POLICY.md` section 4.1.
+
+### On shell PolicyDenied
+
+Shell misuse returns MCP `-32602` with structured `data`. The
+full-surface tool and the compact `command` facade share that data.
+Golden copy: `crates/mcp/tests/fixtures/a2/shell_capability_off.json`.
+
+- `kind` = `policy_denied`
+- `deny_class` is `shell_capability_off`, `shell_interpreter_denied`,
+  or `profile_forbids_shell`
+- `intended_tool` = `run_and_watch`
+- `intended_example` = `{"argv":["git","status"]}` (argv only; never
+  `shell_line`)
+- `alternatives` lists argv, file, and PTY tools first; `shell_exec`
+  is last and tagged `operator_opt_in`
+- `recover_hint` = `retry_with_argv`
+
+The remedy is that hint: call `run_and_watch` or `command_start_combed`
+with an argv array. Do not thrash schema field names. Turning
+`allow_shell` on is not the fix. Decision A2 rejects Finding 1 (flip
+the default shell cap on).
+
+Discover already carries the same steer when the daemon is up and
+`allow_shell` is off, so a failed call is unnecessary. The `shell_exec`
+catalogue row is `available: false` with `unavailable_reason`
+`allow_shell capability is off in the active policy profile` and
+`steer` (`intended_tool` `run_and_watch`, `intended_example`
+`{"argv":["git","status"]}`, `recover_hint` `retry_with_argv`).
+`omni_status.matrix.shell_exec` repeats `available: false`, `reason`
+(that same string), and the same `steer`. `beachhead` is then a
+`direct_argv` or `wsl_argv` route whose `argv_template` ends in
+`{args...}`.
 
 ## 3. Multi-step shared state: shell sessions
 
@@ -254,3 +311,5 @@ These apply to every lane:
 - `docs/runtime/SHELL_SESSION.md` -- persistent sessions + snapshots.
 - `POLICY.md` section 4.1 -- the `[policy.caps]` capabilities.
 - `README.md` -- the omni tool surface and safety posture.
+- A2 teach envelopes, tip `4326825` / PR #180. `recover_hint` is
+  `retry_with_argv`; default `allow_shell` stays off.

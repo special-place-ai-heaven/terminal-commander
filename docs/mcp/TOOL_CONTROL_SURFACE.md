@@ -141,6 +141,13 @@ Each catalogue entry returned by `system_discover.tools[]` includes:
 - `available`
 - `unavailable_reason`
 
+When the daemon is up and `allow_shell` is off, the `shell_exec` catalogue
+row is `available: false` with `unavailable_reason` `allow_shell capability
+is off in the active policy profile` and `steer` (`recover_hint`
+`retry_with_argv`, `intended_tool` `run_and_watch`, `intended_example`
+`{"argv":["git","status"]}`). `omni_status.matrix.shell_exec` repeats
+`available: false`, `reason` (same string), and that `steer`.
+
 ## 3. Tools not exposed
 
 | Anti-tool | Why it must not exist |
