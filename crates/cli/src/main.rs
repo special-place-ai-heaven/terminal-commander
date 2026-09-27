@@ -56,6 +56,11 @@ enum Command {
         #[command(subcommand)]
         op: RulesOp,
     },
+    /// Built-in argv recipe seeds (not rule packs).
+    Recipes {
+        #[command(subcommand)]
+        op: RecipesOp,
+    },
     /// Bucket inspection.
     Buckets {
         #[command(subcommand)]
@@ -144,6 +149,17 @@ enum SessionOp {
 }
 
 #[derive(Subcommand, Debug)]
+enum RecipesOp {
+    /// Import the eight built-in argv seeds as tested. Does not activate.
+    Import {
+        /// Promote seeds to active and activate them in global scope.
+        /// Operator path only. MCP stays denied while llm_can_activate_recipes is false.
+        #[arg(long)]
+        activate: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum RulesOp {
     /// List rules in the registry.
     List,
@@ -171,6 +187,9 @@ fn run(cli: Cli) -> std::process::ExitCode {
         Command::Rules { op } => match op {
             RulesOp::List => run_rules_list(),
             RulesOp::Show { rule_id } => run_rules_show(&rule_id),
+        },
+        Command::Recipes { op } => match op {
+            RecipesOp::Import { activate } => run_recipes_import(activate),
         },
         Command::Buckets { op } => match op {
             BucketsOp::List => run_buckets_list(),
@@ -253,6 +272,41 @@ fn unexpected_variant(method: &str) -> terminal_commander_ipc::IpcError {
         terminal_commander_ipc::IpcErrorCode::Internal,
         format!("daemon returned an unexpected response variant for {method}"),
     )
+}
+
+/// `recipes import [--activate]` -> built-in argv seeds.
+///
+/// Without `--activate` the seeds are stored as tested and nothing is
+/// activated. With `--activate` the operator promotes them to active and
+/// opens a global activation row for each seed.
+fn run_recipes_import(activate: bool) -> std::process::ExitCode {
+    let request = IpcRequest::RecipeImportSeeds(terminal_commander_ipc::RecipeImportSeedsParams {
+        activate,
+        scope: activate.then_some(terminal_commander_core::ActivationScope::Global),
+        from_mcp: false,
+    });
+    run_daemon_command("recipes import", request, |resp| match resp {
+        IpcResponse::RecipeImportSeeds(report) => {
+            println!("imported: {}", report.imported.join(" "));
+            println!("skipped: {}", report.skipped.join(" "));
+            println!("activated: {}", report.activated.join(" "));
+            if report.failed.is_empty() {
+                Ok(())
+            } else {
+                let detail = report
+                    .failed
+                    .iter()
+                    .map(|fail| format!("{}: {}", fail.recipe_id, fail.reason))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Err(terminal_commander_ipc::IpcError::new(
+                    terminal_commander_ipc::IpcErrorCode::Internal,
+                    format!("recipe import activate failed: {detail}"),
+                ))
+            }
+        }
+        _ => Err(unexpected_variant("recipe_import_seeds")),
+    })
 }
 
 /// `rules list` -> `registry_list_active` -> active-rule table.
@@ -1510,6 +1564,17 @@ mod tests {
         let (pid, version) = resolved_pid(None, &dir, "any-endpoint");
         assert_eq!(pid, "-");
         assert_eq!(version, None);
+    }
+
+    #[test]
+    fn cli_parses_recipes_import_activate() {
+        let cli = Cli::parse_from(["terminal-commander", "recipes", "import", "--activate"]);
+        match cli.cmd {
+            Command::Recipes {
+                op: RecipesOp::Import { activate },
+            } => assert!(activate),
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

@@ -76,6 +76,7 @@ pub use ipc::{
     PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams,
     PtyCommandWriteStdinResponse, RecipeActivateParams, RecipeActivateResponse, RecipeActiveEntry,
     RecipeDeactivateParams, RecipeDeactivateResponse, RecipeGetParams, RecipeGetResponse,
+    RecipeImportFailure, RecipeImportSeedsParams, RecipeImportSeedsResponse,
     RecipeListActiveResponse, RecipeListVersionsParams, RecipeListVersionsResponse,
     RecipeRunParams, RecipeRunResponse, RecipeSearchHit, RecipeSearchParams, RecipeSearchResponse,
     RecipeTestParams, RecipeTestResponse, RecipeTombstoneParams, RecipeTombstoneResponse,

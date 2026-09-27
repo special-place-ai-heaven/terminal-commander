@@ -10,11 +10,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use terminal_commander_core::{ActivationScope, RecipeDefinition, RecipeStatus};
+use terminal_commander_core::{
+    ActivationScope, RecipeDefinition, RecipeStatus, shell_interpreter_denied,
+};
 use terminal_commanderd::{
     DaemonClient, DaemonConfig, DaemonState, IpcErrorCode, IpcRequest, IpcResponse, IpcServer,
-    RecipeActivateParams, RecipeDeactivateParams, RecipeGetParams, RecipeListVersionsParams,
-    RecipeSearchParams, RecipeTombstoneParams, RecipeUpsertParams,
+    ListLimitParams, RecipeActivateParams, RecipeDeactivateParams, RecipeGetParams,
+    RecipeImportSeedsParams, RecipeListVersionsParams, RecipeSearchParams, RecipeTombstoneParams,
+    RecipeUpsertParams,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -192,6 +195,147 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
             .await
             .unwrap();
         assert!(matches!(tombstoned, IpcResponse::RecipeTombstone(_)));
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&data);
+    });
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one import/activate lifecycle, same shape as the test above
+fn recipe_seed_import_stays_tested_until_operator_activates() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("seeds");
+        let cfg = DaemonConfig::defaults_in(&data);
+        assert!(!cfg.policy.llm_can_activate_recipes);
+        let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+        assert!(!state.policy.llm_can_activate_recipes());
+        assert!(!state.policy.caps_allow_shell());
+        let socket = state.config.socket_path();
+        let handle = IpcServer::new(Arc::clone(&state), socket).spawn().unwrap();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let denied = client
+            .call(
+                1,
+                IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                    activate: true,
+                    scope: Some(ActivationScope::Global),
+                    from_mcp: true,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, IpcErrorCode::PolicyDenied);
+        assert!(denied.message.contains("recipe_activate_requires_admin"));
+
+        let imported = client
+            .call(
+                2,
+                IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                    activate: false,
+                    scope: None,
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeImportSeeds(report) = imported else {
+            panic!("import: {imported:?}");
+        };
+        assert!(report.imported.len() >= 8, "{:?}", report.imported);
+        assert_eq!(report.imported.len(), 8);
+        assert!(report.activated.is_empty());
+        assert!(report.failed.is_empty());
+        assert!(!report.imported.iter().any(|id| id == "rg.files"));
+
+        let missing_scope = client
+            .call(
+                3,
+                IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                    activate: true,
+                    scope: None,
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(missing_scope.code, IpcErrorCode::ScopeInvalid);
+
+        for id in &report.imported {
+            let got = client
+                .call(
+                    4,
+                    IpcRequest::RecipeGet(RecipeGetParams {
+                        recipe_id: id.clone(),
+                        version: None,
+                    }),
+                )
+                .await
+                .unwrap();
+            let IpcResponse::RecipeGet(body) = got else {
+                panic!("get {id}: {got:?}");
+            };
+            assert_eq!(body.definition.status, RecipeStatus::Tested);
+            assert!(!body.definition.argv.is_empty());
+            assert!(
+                shell_interpreter_denied(&body.definition.argv[0]).is_none(),
+                "{id}"
+            );
+        }
+
+        let activated = client
+            .call(
+                5,
+                IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                    activate: true,
+                    scope: Some(ActivationScope::Global),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeImportSeeds(live) = activated else {
+            panic!("activate import: {activated:?}");
+        };
+        assert_eq!(live.imported.len(), 8);
+        assert_eq!(live.activated.len(), 8);
+        assert!(live.failed.is_empty());
+
+        let listed = client
+            .call(
+                6,
+                IpcRequest::RecipeListActive(ListLimitParams { limit: None }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeListActive(active) = listed else {
+            panic!("list: {listed:?}");
+        };
+        assert_eq!(active.entries.len(), 8);
+
+        let again = client
+            .call(
+                7,
+                IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                    activate: true,
+                    scope: Some(ActivationScope::Global),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeImportSeeds(second) = again else {
+            panic!("reimport: {again:?}");
+        };
+        assert!(second.imported.is_empty());
+        assert_eq!(second.skipped.len(), 8);
+        assert_eq!(second.activated.len(), 8);
 
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&data);

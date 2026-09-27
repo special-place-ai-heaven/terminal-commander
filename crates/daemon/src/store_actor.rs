@@ -37,7 +37,8 @@ use parking_lot::Mutex;
 use terminal_commander_core::{ActivationScope, RecipeDefinition, RuleDefinition};
 use terminal_commander_store::{
     ActiveRecipe, ActiveRuleDef, AuditEntry, AuditReadRequest, AuditRow, EventStore,
-    EventStoreError, ImportResult, RecipeSearchHit, RecipeVersionMeta, RuleSearchHit,
+    EventStoreError, ImportResult, RecipeSearchHit, RecipeSeedImport, RecipeVersionMeta,
+    RuleSearchHit,
 };
 
 /// Channel depth. Burst capacity before `call` blocks on `send`;
@@ -117,6 +118,8 @@ pub enum StoreOp {
     ListRecipeVersions { recipe_id: String },
     /// `RecipeStore::tombstone` -> parent row existed
     TombstoneRecipe { recipe_id: String },
+    /// `EventStore::import_recipe_seeds(promote_active)`
+    ImportRecipeSeeds { promote_active: bool },
     /// `EventStore::ensure_workspace()` (P1 / TC50)
     EnsureWorkspace,
     /// `EventStore::create_workspace_snapshot(...)` -> snapshot id
@@ -179,6 +182,7 @@ pub enum StoreReply {
     OptionalRecipe(Option<RecipeDefinition>),
     ActiveRecipes(Vec<ActiveRecipe>),
     RecipeVersions(Vec<RecipeVersionMeta>),
+    RecipeSeedImport(RecipeSeedImport),
 }
 
 /// Internal envelope on the wire: an op plus the ack channel back
@@ -532,6 +536,17 @@ impl StoreClient {
         }
     }
 
+    /// Import the built-in argv seed bank. Does not activate.
+    pub fn import_recipe_seeds(
+        &self,
+        promote_active: bool,
+    ) -> Result<RecipeSeedImport, EventStoreError> {
+        match self.call(StoreOp::ImportRecipeSeeds { promote_active })? {
+            StoreReply::RecipeSeedImport(result) => Ok(result),
+            other => Err(unexpected_store_reply("ImportRecipeSeeds", &other)),
+        }
+    }
+
     /// Tombstone a recipe. `false` when the id is unknown.
     pub fn tombstone_recipe(&self, recipe_id: &str) -> Result<bool, EventStoreError> {
         match self.call(StoreOp::TombstoneRecipe {
@@ -831,6 +846,9 @@ fn execute(store: &mut EventStore, op: StoreOp) -> Result<StoreReply, EventStore
             .recipe_store()?
             .tombstone(&recipe_id)
             .map(StoreReply::Bool),
+        StoreOp::ImportRecipeSeeds { promote_active } => store
+            .import_recipe_seeds(promote_active)
+            .map(StoreReply::RecipeSeedImport),
         StoreOp::EnsureWorkspace => store.ensure_workspace().map(|()| StoreReply::Unit),
         StoreOp::CreateWorkspaceSnapshot {
             snapshot_id,
