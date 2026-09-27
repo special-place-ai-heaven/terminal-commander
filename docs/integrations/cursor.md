@@ -181,6 +181,11 @@ Read command_status for the returned job.
 The response should be bounded JSON. Cursor should not paste raw terminal
 scrollback into the chat.
 
+`allow_shell` is off unless an operator sets it in config TOML. If
+`system_discover` shows `shell_exec` `available: false`, or a shell call
+is PolicyDenied, follow `recover_hint` `retry_with_argv` (argv
+`run_and_watch` / `command_start_combed`). Do not ask to enable shell.
+
 ## Troubleshooting
 
 | Symptom | Check |
