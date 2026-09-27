@@ -28,6 +28,7 @@ pub mod facades;
 pub mod surface;
 pub mod surface_list;
 pub mod target_router;
+pub mod teach;
 pub mod tools;
 
 use std::sync::Arc;

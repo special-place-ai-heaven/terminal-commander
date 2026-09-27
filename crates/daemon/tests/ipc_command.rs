@@ -236,18 +236,23 @@ fn command_start_combed_denies_shell_interpreter_and_audits() {
             .await
             .expect_err("shell interpreter must be denied");
         assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
+        let teach = err
+            .teach
+            .expect("interpreter deny carries the A2 teach envelope");
+        assert_eq!(
+            teach.deny_class,
+            terminal_commander_ipc::ShellDenyClass::ShellInterpreterDenied
+        );
+        assert!(teach.denied_capability.is_none());
+        assert_eq!(teach.denied_tool, "command_start_combed");
+        assert_eq!(err.message, teach.reason);
         assert!(
-            err.message.contains("sh") || err.message.contains("shell"),
-            "error message should name the shell, got: {}",
+            err.message.contains("argv"),
+            "remedy is retry with argv, got: {}",
             err.message
         );
-        assert!(
-            err.message.contains("command")
-                && err.message.contains("action=\"exec\"")
-                && err.message.contains("shell_exec"),
-            "remedy must name both compact and full shell lanes, got: {}",
-            err.message
-        );
+        assert!(!err.message.contains("set allow_shell"));
+        assert!(!err.message.to_ascii_lowercase().contains("enable shell"));
 
         let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
@@ -386,6 +391,17 @@ fn shell_exec_denied_on_default_profile_maps_to_policy_denied() {
             "the shell lane skips SHELL_INTERPRETERS_DENY; it can NEVER \
              produce ShellInterpreterDenied (WI-1)"
         );
+        let teach = err
+            .teach
+            .expect("cap-off shell_exec carries the A2 teach envelope");
+        assert_eq!(
+            teach.deny_class,
+            terminal_commander_ipc::ShellDenyClass::ShellCapabilityOff
+        );
+        assert_eq!(teach.profile, "DeveloperLocal");
+        assert_eq!(teach.denied_capability.as_deref(), Some("allow_shell"));
+        assert_eq!(teach.denied_tool, "shell_exec");
+        assert_eq!(err.message, teach.reason);
 
         let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(

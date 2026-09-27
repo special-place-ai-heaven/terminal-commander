@@ -993,6 +993,53 @@ pub enum IpcErrorCode {
     ShuttingDown,
 }
 
+/// Closed set of shell-misuse classes (Decision A2). Not every
+/// [`IpcErrorCode::PolicyDenied`] is one of these — path and command
+/// denials stay plain policy errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellDenyClass {
+    /// Exec-capable profile, `allow_shell` off (`shell_exec` / facade exec).
+    ShellCapabilityOff,
+    /// Argv lane rejected a shell interpreter as `argv[0]` (or a WSL carrier).
+    ShellInterpreterDenied,
+    /// Profile itself forbids shell (for example `repo_only`), even if the cap is on.
+    ProfileForbidsShell,
+}
+
+impl ShellDenyClass {
+    /// Short human sentence. Must not tell the caller to turn shell on.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::ShellCapabilityOff => {
+                "Shell execution is denied on this profile; retry with an argv array."
+            }
+            Self::ShellInterpreterDenied => {
+                "Shell interpreter denied on the argv lane; retry with an argv array."
+            }
+            Self::ProfileForbidsShell => {
+                "This profile forbids shell execution; retry with an argv array."
+            }
+        }
+    }
+}
+
+/// Classification carried on a shell-misuse [`IpcError`]. The MCP adapter
+/// turns this into the policy-denied envelope; stable teach field names
+/// are not rebuilt inside the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellTeach {
+    pub deny_class: ShellDenyClass,
+    /// Active profile id, Debug form (`DeveloperLocal`), matching `policy_status`.
+    pub profile: String,
+    /// `allow_shell` when that cap is the deny; omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied_capability: Option<String>,
+    pub denied_tool: String,
+    pub reason: String,
+}
+
 /// Structured error payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcError {
@@ -1019,6 +1066,11 @@ pub struct IpcError {
     /// from the wire when `None`, so every other error round-trips unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
+    /// A2 shell-misuse classification. Omitted for every other error,
+    /// including transport failures (`daemon_unavailable` stays distinct).
+    /// Boxed so the common `IpcError` stays small enough for `Result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teach: Option<Box<ShellTeach>>,
 }
 
 impl IpcError {
@@ -1044,6 +1096,7 @@ impl IpcError {
             message: message.into(),
             argv0: None,
             tool: None,
+            teach: None,
         }
     }
 
@@ -1059,6 +1112,7 @@ impl IpcError {
             message: message.into(),
             argv0: Some(argv0.into()),
             tool: None,
+            teach: None,
         }
     }
 
@@ -1076,6 +1130,7 @@ impl IpcError {
             message: message.into(),
             argv0: None,
             tool: Some(tool.to_owned()),
+            teach: None,
         }
     }
 
@@ -1091,6 +1146,7 @@ impl IpcError {
             message: format!("{}{}", Self::TRANSPORT_PREFIX, message.as_ref()),
             argv0: None,
             tool: None,
+            teach: None,
         }
     }
 
@@ -3081,8 +3137,13 @@ mod tests {
             value.get("argv0").is_none(),
             "the argv0 key must be absent (not null) when None; got: {value}"
         );
+        assert!(
+            value.get("teach").is_none(),
+            "the teach key must be absent when None; got: {value}"
+        );
         // And the typical constructors default it to None.
         assert!(IpcError::transport("x").argv0.is_none());
+        assert!(IpcError::transport("x").teach.is_none());
     }
 
     // Source-status: test-only. TC-2: the dedup_nonce field is additive and

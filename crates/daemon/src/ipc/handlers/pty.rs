@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use super::common::enrich_shell_teach;
 #[cfg(any(unix, windows))]
 use crate::ipc::protocol::{
     DEFAULT_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS, MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES,
@@ -112,7 +113,7 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
         cols: params.cols,
         tag: params.tag.clone(),
     };
-    match state.pty.start(req) {
+    let started = match state.pty.start(req) {
         Ok(r) => Ok(IpcResponse::PtyCommandStart(PtyCommandStartResponse {
             job_id: r.job_id,
             bucket_id: r.bucket_id,
@@ -152,7 +153,8 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
             IpcErrorCode::Internal,
             format!("pty_command_start: {other}"),
         )),
-    }
+    };
+    started.map_err(|e| enrich_shell_teach(&state.policy, "pty_command_start", e))
 }
 
 #[cfg(any(unix, windows))]

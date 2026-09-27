@@ -349,6 +349,35 @@ fn assert_omni_status_honest(body: &serde_json::Value) {
         Some("allow_shell capability is off in the active policy profile"),
         "shell_exec must carry the cap-truthful reason when allow_shell is off; got {matrix}"
     );
+    assert_eq!(
+        matrix["shell_exec"]["steer"]["recover_hint"].as_str(),
+        Some("retry_with_argv"),
+        "discover must steer argv without a failed call; got {matrix}"
+    );
+    assert_eq!(
+        matrix["shell_exec"]["steer"]["intended_tool"].as_str(),
+        Some("run_and_watch")
+    );
+    assert_eq!(
+        matrix["shell_exec"]["steer"]["intended_example"]["argv"],
+        serde_json::json!(["git", "status"])
+    );
+    let hint = matrix["shell_exec"]["steer"]["recover_hint"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        !hint.contains("allow_shell") && !hint.to_ascii_lowercase().contains("enable shell"),
+        "recover_hint must not upsell enabling shell: {hint}"
+    );
+    let shell_row = body["tools"]
+        .as_array()
+        .and_then(|tools| tools.iter().find(|tool| tool["name"] == "shell_exec"))
+        .expect("catalogue lists shell_exec");
+    assert_eq!(shell_row["available"], serde_json::json!(false));
+    assert_eq!(
+        shell_row["steer"]["recover_hint"],
+        serde_json::json!("retry_with_argv")
+    );
     // Sessions require both the unix runtime and allow_session. This daemon's
     // default DeveloperLocal profile keeps allow_session off on every host.
     let sessions_available = matrix["sessions"]["available"]

@@ -268,13 +268,22 @@ fn pty_wsl_nested_shell_denied_like_argv_lane() {
             .await
             .expect_err("wsl nested shell must be denied on the pty argv lane");
         assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
+        let teach = err
+            .teach
+            .expect("nested shell deny carries the A2 teach envelope");
+        assert_eq!(
+            teach.deny_class,
+            terminal_commander_ipc::ShellDenyClass::ShellInterpreterDenied
+        );
+        assert!(teach.denied_capability.is_none());
+        assert_eq!(teach.denied_tool, "pty_command_start");
+        assert_eq!(err.message, teach.reason);
         assert!(
-            err.message.contains("command")
-                && err.message.contains("action=\"exec\"")
-                && err.message.contains("shell_exec"),
-            "remedy must name both compact and full shell lanes, got: {}",
+            err.message.contains("argv"),
+            "remedy is retry with argv, got: {}",
             err.message
         );
+        assert!(!err.message.contains("set allow_shell"));
 
         handle.shutdown().await;
         cleanup(&data);

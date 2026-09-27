@@ -221,6 +221,10 @@ async fn shell_exec_denied_on_default_profile_e2e() {
             !rendered.contains("shellinterpreterdenied"),
             "shell-lane denial must be a policy denial, not the argv ShellInterpreterDenied guard; got: {rendered}"
         );
+        assert!(
+            !rendered.contains("set allow_shell") && !rendered.contains("enable shell"),
+            "the deny must not upsell enabling shell; got: {rendered}"
+        );
 
         let _ = client.cancel().await;
     }

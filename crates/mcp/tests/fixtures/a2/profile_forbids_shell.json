@@ -1,0 +1,21 @@
+{
+  "ipc_code": "PolicyDenied",
+  "kind": "policy_denied",
+  "deny_class": "profile_forbids_shell",
+  "profile": "RepoOnly",
+  "denied_capability": null,
+  "denied_tool": "shell_exec",
+  "reason": "This profile forbids shell execution; retry with an argv array.",
+  "intended_tool": "run_and_watch",
+  "intended_example": {"argv": ["git", "status"]},
+  "alternatives": [
+    {"tool": "run_and_watch"},
+    {"tool": "command_start_combed"},
+    {"tool": "file_read_window"},
+    {"tool": "file_search"},
+    {"tool": "file_write"},
+    {"tool": "pty_command_start"},
+    {"tool": "shell_exec", "tag": "operator_opt_in"}
+  ],
+  "recover_hint": "retry_with_argv"
+}
