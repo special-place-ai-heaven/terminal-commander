@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.88](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.87...v0.1.88) (2026-09-27)
+
+
+### Features
+
+* **mcp:** compile the stdio adapter against rmcp 3.4.1 ([769be61](https://github.com/special-place-ai-heaven/terminal-commander/commit/769be61219dbbd966cec75c3ab50173531de3497))
+
 ## [0.1.87](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.86...v0.1.87) (2026-08-07)
 
 
