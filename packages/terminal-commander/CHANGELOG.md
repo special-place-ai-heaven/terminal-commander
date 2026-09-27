@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.90](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.89...v0.1.90) (2026-09-27)
+
+
+### Features
+
+* **mcp:** teach argv on shell policy denies ([2ae8e8a](https://github.com/special-place-ai-heaven/terminal-commander/commit/2ae8e8ab221d3858ba0d2adac9d0c9af1325e5e5))
+
+
+### Bug Fixes
+
+* **ipc:** keep shell teach off the hot error path ([2ae8e8a](https://github.com/special-place-ai-heaven/terminal-commander/commit/2ae8e8ab221d3858ba0d2adac9d0c9af1325e5e5))
+
 ## [0.1.89](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.88...v0.1.89) (2026-09-27)
 
 
