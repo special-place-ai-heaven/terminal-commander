@@ -114,8 +114,8 @@ pub(in crate::ipc::server) fn enrich_shell_teach(
         return err;
     };
     let reason = class.reason().to_owned();
-    err.message = reason.clone();
-    err.teach = Some(ShellTeach {
+    err.message.clone_from(&reason);
+    err.teach = Some(Box::new(ShellTeach {
         deny_class: class,
         profile: format!("{:?}", policy.profile),
         denied_capability: match class {
@@ -124,11 +124,11 @@ pub(in crate::ipc::server) fn enrich_shell_teach(
         },
         denied_tool: denied_tool.to_owned(),
         reason,
-    });
+    }));
     err
 }
 
-fn classify_shell_policy(policy: &PolicyEngine) -> ShellDenyClass {
+const fn classify_shell_policy(policy: &PolicyEngine) -> ShellDenyClass {
     let exec_capable = matches!(
         policy.profile,
         PolicyProfile::DeveloperLocal | PolicyProfile::AdminDebug | PolicyProfile::FullAccess

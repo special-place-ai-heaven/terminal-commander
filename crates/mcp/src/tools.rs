@@ -3304,6 +3304,66 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
 /// transport dropped, so the envelope must tell the agent to reconcile, never
 /// to blindly retry. Daemon-RETURNED errors (the code match below) are
 /// classified identically regardless of mutability.
+fn plain_ipc_error_data(e: &IpcError, ipc_code: &str) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "ipc_code": ipc_code,
+    });
+    // F7: a non-existent program is a COMMAND ATTEMPT that failed, not a
+    // daemon/transport fault. Enrich the structured `data` payload with the
+    // failure-receipt vocabulary the agent reasons over -- `error_kind`,
+    // `argv0` (read from the TYPED `IpcError::argv0` carrier), and an explicit
+    // null `exit_code` (the process never started) -- so a missing program
+    // reads as a structured `program_not_found` receipt rather than an
+    // opaque error. The code itself is classified `invalid_params` below.
+    if e.code == IpcErrorCode::ProgramNotFound {
+        if let serde_json::Value::Object(map) = &mut data {
+            map.insert(
+                "error_kind".to_owned(),
+                serde_json::Value::String("program_not_found".to_owned()),
+            );
+            map.insert("exit_code".to_owned(), serde_json::Value::Null);
+            // `argv0` rides as a discrete TYPED field on the IpcError (set by
+            // the daemon via `IpcError::program_not_found`), so we copy it
+            // straight into the data payload -- no fragile prose parsing. The
+            // value survives any wording change to `message` and carries
+            // verbatim even when the program name itself contains an
+            // apostrophe (the case the old quote-count parse could not
+            // recover). When `argv0` is None we OMIT the field entirely --
+            // same graceful-degradation contract as before (the message still
+            // names the program).
+            if let Some(argv0) = &e.argv0 {
+                map.insert("argv0".to_owned(), serde_json::Value::String(argv0.clone()));
+            }
+        }
+    }
+    // F14: an unsupported-platform error is a caller-ROUTABLE fact, not a
+    // daemon fault: the session/snapshot tools are unix-only, so on Windows
+    // the agent should route to WSL or a different tool rather than conclude
+    // TC is broken. Enrich the structured `data` with the receipt vocabulary
+    // the agent reasons over -- `error_kind`, the HONEST host `platform`
+    // (`std::env::consts::OS`), and the unavailable `tool` (read from the
+    // TYPED `IpcError::tool` carrier, set by the daemon via
+    // `IpcError::unsupported_platform`). When `tool` is None we OMIT the field
+    // entirely -- same graceful-degradation contract as `argv0`. The code
+    // itself is classified `invalid_params` below.
+    if e.code == IpcErrorCode::UnsupportedPlatform {
+        if let serde_json::Value::Object(map) = &mut data {
+            map.insert(
+                "error_kind".to_owned(),
+                serde_json::Value::String("unsupported_platform".to_owned()),
+            );
+            map.insert(
+                "platform".to_owned(),
+                serde_json::Value::String(std::env::consts::OS.to_owned()),
+            );
+            if let Some(tool) = &e.tool {
+                map.insert("tool".to_owned(), serde_json::Value::String(tool.clone()));
+            }
+        }
+    }
+    data
+}
+
 #[must_use]
 pub fn into_mcp_error_for(request_is_idempotent: bool, e: &IpcError) -> McpError {
     into_mcp_error_for_tool(request_is_idempotent, e, None)
@@ -3338,67 +3398,10 @@ pub fn into_mcp_error_for_tool(
     }
     let message: Cow<'static, str> = Cow::Owned(format_ipc_error(e));
     let ipc_code = format!("{:?}", e.code);
-    let data = if let Some(teach) = &e.teach {
-        crate::teach::policy_denied_data(teach, denied_tool, &ipc_code)
-    } else {
-        let mut data = serde_json::json!({
-            "ipc_code": ipc_code,
-        });
-        // F7: a non-existent program is a COMMAND ATTEMPT that failed, not a
-        // daemon/transport fault. Enrich the structured `data` payload with the
-        // failure-receipt vocabulary the agent reasons over -- `error_kind`,
-        // `argv0` (read from the TYPED `IpcError::argv0` carrier), and an explicit
-        // null `exit_code` (the process never started) -- so a missing program
-        // reads as a structured `program_not_found` receipt rather than an
-        // opaque error. The code itself is classified `invalid_params` below.
-        if e.code == IpcErrorCode::ProgramNotFound {
-            if let serde_json::Value::Object(map) = &mut data {
-                map.insert(
-                    "error_kind".to_owned(),
-                    serde_json::Value::String("program_not_found".to_owned()),
-                );
-                map.insert("exit_code".to_owned(), serde_json::Value::Null);
-                // `argv0` rides as a discrete TYPED field on the IpcError (set by
-                // the daemon via `IpcError::program_not_found`), so we copy it
-                // straight into the data payload -- no fragile prose parsing. The
-                // value survives any wording change to `message` and carries
-                // verbatim even when the program name itself contains an
-                // apostrophe (the case the old quote-count parse could not
-                // recover). When `argv0` is None we OMIT the field entirely --
-                // same graceful-degradation contract as before (the message still
-                // names the program).
-                if let Some(argv0) = &e.argv0 {
-                    map.insert("argv0".to_owned(), serde_json::Value::String(argv0.clone()));
-                }
-            }
-        }
-        // F14: an unsupported-platform error is a caller-ROUTABLE fact, not a
-        // daemon fault: the session/snapshot tools are unix-only, so on Windows
-        // the agent should route to WSL or a different tool rather than conclude
-        // TC is broken. Enrich the structured `data` with the receipt vocabulary
-        // the agent reasons over -- `error_kind`, the HONEST host `platform`
-        // (`std::env::consts::OS`), and the unavailable `tool` (read from the
-        // TYPED `IpcError::tool` carrier, set by the daemon via
-        // `IpcError::unsupported_platform`). When `tool` is None we OMIT the field
-        // entirely -- same graceful-degradation contract as `argv0`. The code
-        // itself is classified `invalid_params` below.
-        if e.code == IpcErrorCode::UnsupportedPlatform {
-            if let serde_json::Value::Object(map) = &mut data {
-                map.insert(
-                    "error_kind".to_owned(),
-                    serde_json::Value::String("unsupported_platform".to_owned()),
-                );
-                map.insert(
-                    "platform".to_owned(),
-                    serde_json::Value::String(std::env::consts::OS.to_owned()),
-                );
-                if let Some(tool) = &e.tool {
-                    map.insert("tool".to_owned(), serde_json::Value::String(tool.clone()));
-                }
-            }
-        }
-        data
-    };
+    let data = e.teach.as_ref().map_or_else(
+        || plain_ipc_error_data(e, &ipc_code),
+        |teach| crate::teach::policy_denied_data(teach, denied_tool, &ipc_code),
+    );
     // Trust contract: a caller-fixable error MUST surface as
     // `invalid_params` (JSON-RPC -32602) so the agent corrects its
     // input and keeps routing through Terminal Commander. Mapping such
@@ -7461,7 +7464,7 @@ mod tests {
             reason: ShellDenyClass::ShellCapabilityOff.reason().to_owned(),
         };
         let mut e = IpcError::new(IpcErrorCode::PolicyDenied, teach.reason.clone());
-        e.teach = Some(teach.clone());
+        e.teach = Some(Box::new(teach.clone()));
         let mcp = into_mcp_error(&e);
         assert_eq!(mcp.code.0, -32602);
         let data = mcp.data.expect("teach envelope");

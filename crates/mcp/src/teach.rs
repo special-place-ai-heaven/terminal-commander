@@ -11,14 +11,14 @@ use rmcp::ErrorData as McpError;
 use rmcp::model::CallToolResult;
 use serde::Serialize;
 use serde_json::{Value, json};
-use terminal_commander_ipc::{ShellDenyClass, ShellTeach};
+use terminal_commander_ipc::ShellTeach;
 
 pub const KIND: &str = "policy_denied";
 pub const RECOVER_HINT: &str = "retry_with_argv";
 pub const INTENDED_TOOL: &str = "run_and_watch";
 
 /// Discover steer and the error envelope share this object.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ArgvSteer {
     pub intended_tool: &'static str,
     pub intended_example: Value,
@@ -99,24 +99,25 @@ pub fn recover_hint_upsells_shell(hint: &str) -> bool {
         || lower.contains("turn shell on")
 }
 
-fn sample(
-    class: ShellDenyClass,
-    profile: &str,
-    capability: Option<&str>,
-    tool: &str,
-) -> ShellTeach {
-    ShellTeach {
-        deny_class: class,
-        profile: profile.to_owned(),
-        denied_capability: capability.map(str::to_owned),
-        denied_tool: tool.to_owned(),
-        reason: class.reason().to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use terminal_commander_ipc::ShellDenyClass;
+
+    fn sample(
+        class: ShellDenyClass,
+        profile: &str,
+        capability: Option<&str>,
+        tool: &str,
+    ) -> ShellTeach {
+        ShellTeach {
+            deny_class: class,
+            profile: profile.to_owned(),
+            denied_capability: capability.map(str::to_owned),
+            denied_tool: tool.to_owned(),
+            reason: class.reason().to_owned(),
+        }
+    }
 
     fn assert_envelope(data: &Value, class: &str) {
         assert_eq!(data["kind"], json!(KIND));

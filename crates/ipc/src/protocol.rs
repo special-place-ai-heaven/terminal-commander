@@ -1068,8 +1068,9 @@ pub struct IpcError {
     pub tool: Option<String>,
     /// A2 shell-misuse classification. Omitted for every other error,
     /// including transport failures (`daemon_unavailable` stays distinct).
+    /// Boxed so the common `IpcError` stays small enough for `Result`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub teach: Option<ShellTeach>,
+    pub teach: Option<Box<ShellTeach>>,
 }
 
 impl IpcError {
