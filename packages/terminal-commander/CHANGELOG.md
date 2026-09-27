@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.89](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.88...v0.1.89) (2026-09-27)
+
+
+### Features
+
+* **mcp:** advertise MCP 2026-07-28 only ([f05504e](https://github.com/special-place-ai-heaven/terminal-commander/commit/f05504e08a06ace5eeadfe919c92532bc6f31b70))
+* **mcp:** advertise MCP 2026-07-28 only ([f05504e](https://github.com/special-place-ai-heaven/terminal-commander/commit/f05504e08a06ace5eeadfe919c92532bc6f31b70))
+
+
+### Bug Fixes
+
+* **mcp:** keep ServiceExt in scope for server.serve ([f05504e](https://github.com/special-place-ai-heaven/terminal-commander/commit/f05504e08a06ace5eeadfe919c92532bc6f31b70))
+
 ## [0.1.88](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.87...v0.1.88) (2026-09-27)
 
 
