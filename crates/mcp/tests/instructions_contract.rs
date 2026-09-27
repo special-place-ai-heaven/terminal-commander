@@ -5,7 +5,7 @@
 //! string and the command tool descriptions are the surface an agent
 //! reads when deciding whether to use Terminal Commander. This test
 //! pins the agent-selfish contract so a future edit cannot silently
-//! drop the signal model, the Bash routing rule, or the no-silence
+//! drop the signal model, the argv-first routing rule, or the no-silence
 //! receipt promise. `get_info()` does not touch the daemon, so a
 //! lazy client pointed at a nonexistent socket is sufficient.
 
@@ -35,10 +35,14 @@ fn instructions_name_signal_model_pitch_and_routing() {
         lower.contains("token") || lower.contains("context"),
         "instructions must carry the agent-selfish pitch: {instr}"
     );
-    // (c) the Bash routing rule.
+    // (c) argv-first routing: ordinary commands stay on argv tools.
     assert!(
-        lower.contains("shell") || lower.contains("bash"),
-        "instructions must tell the agent when plain shell is right: {instr}"
+        lower.contains("argv"),
+        "instructions must name argv as the primary path: {instr}"
+    );
+    assert!(
+        !lower.contains("plain shell"),
+        "instructions must not steer agents to plain shell: {instr}"
     );
     // (d) the no-silence receipt promise.
     assert!(
