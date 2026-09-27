@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use rmcp::model::{CallToolRequestParams, LoggingMessageNotificationParam};
 use rmcp::service::NotificationContext;
-use rmcp::{ClientHandler, RoleClient, ServiceExt};
+use rmcp::{ClientHandler, ClientServiceExt, RoleClient};
 
 use terminal_commander_core::{
     ContextHint, RuleDefinition, RuleStatus, RuleType, Severity, SourceStream,
@@ -142,7 +142,12 @@ async fn paired(
     let server_handle =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });
     let client = recorder
-        .serve(client_transport)
+        .serve_with_lifecycle(
+            client_transport,
+            rmcp::ClientLifecycleMode::Discover {
+                preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
+            },
+        )
         .await
         .expect("client serve");
     let server = server_handle.await.expect("server task join");

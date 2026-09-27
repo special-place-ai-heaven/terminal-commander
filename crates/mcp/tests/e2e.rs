@@ -89,7 +89,7 @@ fn rt() -> tokio::runtime::Runtime {
 fn e2e_discover_then_create_and_read_bucket() {
     let (s, _) = surface();
     let d = s.system_discover();
-    assert_eq!(d.mcp_spec, "2025-11-25");
+    assert_eq!(d.mcp_spec, "2026-07-28");
     assert!(d.tools.contains(&"bucket_wait".to_owned()));
     let bid = BucketId::new();
     s.router

@@ -85,7 +85,7 @@ impl ToolSurface {
     pub fn system_discover(&self) -> SystemDiscoverResponse {
         SystemDiscoverResponse {
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            mcp_spec: "2025-11-25".to_owned(),
+            mcp_spec: crate::tools::MCP_SPEC_REVISION.to_owned(),
             policy_profile: format!("{:?}", self.policy.profile),
             tools: crate::tools::catalogue_tool_names()
                 .into_iter()
@@ -291,7 +291,7 @@ mod tests {
         let s = surface();
         let d = s.system_discover();
         assert!(d.tools.contains(&"bucket_wait".to_owned()));
-        assert_eq!(d.mcp_spec, "2025-11-25");
+        assert_eq!(d.mcp_spec, "2026-07-28");
     }
 
     #[test]
