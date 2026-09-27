@@ -34,8 +34,9 @@ Unsupported protocol version, and `supported` is only `["2026-07-28"]`.
 - **Codex CLI** still sends `2025-06-18` until you opt in
   (`mcp_2026_07_28 = true` plus `CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"`).
   See [`codex-cli.md`](codex-cli.md).
-- **Claude Code** can finish the 2026-07-28 handshake, then reject
-  `tools/list` until tip emits SEP-2549 `ttlMs` and `cacheScope`. See
+- **Claude Code** finishes the 2026-07-28 handshake. Tip `tools/list`
+  emits SEP-2549 cache hints `ttlMs: 0` and `cacheScope: "public"`.
+  The handshake stays **2026-07-28** only. See
   [`claude-code.md`](claude-code.md).
 - **OMP** still needs `terminal_commander` in `~/.omp/agent/mcp.json` by
   hand (`terminal-commander setup` has no OMP provider). That wire is not
@@ -110,9 +111,6 @@ Verify discovery:
 /mcp
 # Should list terminal-commander with the live tool surface.
 ```
-
-On this tip, `/mcp` can show the server connected while `tools/list` is
-still rejected. See the caveat in [`claude-code.md`](claude-code.md).
 
 Sample prompt (uses bucket_wait):
 

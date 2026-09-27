@@ -48,8 +48,9 @@ Language: ASCII only.
    ```
 
    Codex CLI also needs the MCP 2026-07-28 opt-in in
-   [`codex-cli.md`](codex-cli.md). Claude Code can connect and still reject
-   `tools/list` until the tip emit in [`claude-code.md`](claude-code.md).
+   [`codex-cli.md`](codex-cli.md). Claude Code lists tools on tip
+   (`ttlMs: 0`, `cacheScope: "public"`); see
+   [`claude-code.md`](claude-code.md).
    OMP is not a setup provider; see [`omp.md`](omp.md). The protocol floor
    for every harness is [MCP 2026-07-28 only](README.md#mcp-protocol-floor).
 
