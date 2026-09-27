@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.93](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.92...v0.1.93) (2026-09-27)
+
+
+### Features
+
+* **store:** durable recipe store and IPC (GOAL 1) ([415193d](https://github.com/special-place-ai-heaven/terminal-commander/commit/415193d2a11f8bda11a208cf11245146b280405e))
+
 ## [0.1.92](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.91...v0.1.92) (2026-09-27)
 
 
