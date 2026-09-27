@@ -19,6 +19,25 @@ Per-provider walk-throughs:
   [`examples/provider-harness/cursor/`](../../examples/provider-harness/cursor/).
 - [`gemini.md`](gemini.md) - Gemini stub (INSTALL01; path unverified).
 - [`kimi.md`](kimi.md) - Kimi stub (INSTALL01; path unverified).
+- [`omp.md`](omp.md) - OMP (oh-my-pi) manual MCP stdio config
+  (`~/.omp/agent/mcp.json`). `terminal-commander setup` has no OMP provider.
+
+## MCP protocol floor
+
+Tip Terminal Commander accepts MCP protocol **2026-07-28** only. That is a
+hard cut. A client that opens `initialize` with legacy **2025-06-18** is out
+of support: the server rejects the handshake with JSON-RPC `-32022`
+Unsupported protocol version (`requested` `2025-06-18`, `supported`
+`["2026-07-28"]`).
+
+- **Codex CLI** still sends `2025-06-18` until you opt in
+  (`mcp_2026_07_28 = true` plus `CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"`).
+  See [`codex-cli.md`](codex-cli.md).
+- **Claude Code** can finish the 2026-07-28 handshake, then reject
+  `tools/list` until tip emits SEP-2549 `ttlMs` and `cacheScope`. See
+  [`claude-code.md`](claude-code.md).
+- **OMP** is not a setup provider. Add `terminal_commander` to
+  `~/.omp/agent/mcp.json` by hand. See [`omp.md`](omp.md).
 
 Real-Time-Active patterns (react to subscription events as they happen): see the
 "Real-Time-Active patterns" section in [`claude-code.md`](claude-code.md) -
@@ -43,6 +62,9 @@ the wrapper plus the matching native platform package. Run
 `terminal-commander setup harness` explicitly to merge MCP config for detected
 harnesses, or add `--provider cursor`, `--provider codex-cli`,
 `--provider claude-code`, or `--provider claude-desktop` to target one harness.
+There is no `--provider omp`. Wire OMP by editing `mcp.json` as in
+[`omp.md`](omp.md). Codex setup writes the server block only; the 2026-07-28
+opt-in in [`codex-cli.md`](codex-cli.md) is a separate edit.
 
 A local daemon + MCP stdio smoke (no provider in the loop) lives at
 [`scripts/smoke/verify-runtime-smoke.sh`](../../scripts/smoke/verify-runtime-smoke.sh).
@@ -81,6 +103,9 @@ Verify discovery:
 # Should list terminal-commander with the live tool surface.
 ```
 
+On this tip, `/mcp` can show the server connected while `tools/list` is
+still rejected. See the caveat in [`claude-code.md`](claude-code.md).
+
 Sample prompt (uses bucket_wait):
 
 ```text
@@ -100,12 +125,17 @@ command = "terminal-commander-mcp"
 args = []
 ```
 
+That stanza alone is not enough on this tip. Codex still needs the
+2026-07-28 opt-in in [`codex-cli.md`](codex-cli.md).
+
 ## 3. Generic MCP client
 
-Any compatible MCP client with stdio transport should work; rmcp is
-the server implementation, not a client protocol requirement. Launch
-the binary as a child process; the server emits the MCP initialize
-handshake on stdout and reads requests on stdin.
+A stdio MCP client works when it negotiates protocol **2026-07-28**. rmcp is
+the server implementation, not a promise that every older client handshake
+succeeds. Clients that initialize with `2025-06-18` are rejected; see
+[MCP protocol floor](#mcp-protocol-floor). Launch
+the binary as a child process; the server speaks MCP on stdout and reads
+requests on stdin.
 
 ```bash
 terminal-commander-mcp 2>terminal-commander-mcp.log
@@ -146,7 +176,8 @@ shapes.
 | Codex CLI stanza | live |
 | Cursor MCP stanza | live - see [`cursor.md`](cursor.md) + [`examples/provider-harness/cursor/`](../../examples/provider-harness/cursor/) |
 | Cursor provider smoke transcript | Not Run (operator-driven; no scripted MCP entry point in Cursor today) |
-| Generic MCP-client recipe | live |
+| Generic MCP-client recipe | live (2026-07-28 only) |
+| OMP stanza | manual `~/.omp/agent/mcp.json`; no setup provider - see [`omp.md`](omp.md) |
 | examples/*.md walk-throughs | live |
 | examples/provider-harness/cursor/*.json | live; includes legacy WSL bridge example |
 | rmcp stdio adapter wiring | live |
