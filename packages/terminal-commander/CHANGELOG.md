@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.0](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.2.1...v0.3.0) (2026-09-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **policy:** default to full_access so TC inherits the harness's trust
+* **core,policy:** the one failsafe — TC never deletes OS-critical infrastructure
+
+### Features
+
+* **core,policy:** the one failsafe — TC never deletes OS-critical infrastructure ([6822281](https://github.com/special-place-ai-heaven/terminal-commander/commit/682228142649d8283613a442c50dfc2b6285e2b6))
+* **core:** three-class protected set for the OS-removal failsafe ([6822281](https://github.com/special-place-ai-heaven/terminal-commander/commit/682228142649d8283613a442c50dfc2b6285e2b6))
+* **mcp,daemon:** describe the full_access default and pin hardened denies explicitly ([6822281](https://github.com/special-place-ai-heaven/terminal-commander/commit/682228142649d8283613a442c50dfc2b6285e2b6))
+* **policy:** default to full_access so TC inherits the harness's trust ([6822281](https://github.com/special-place-ai-heaven/terminal-commander/commit/682228142649d8283613a442c50dfc2b6285e2b6))
+
+
+### Bug Fixes
+
+* **core,daemon:** close os_guard parser gaps and guard shell_session_exec ([6822281](https://github.com/special-place-ai-heaven/terminal-commander/commit/682228142649d8283613a442c50dfc2b6285e2b6))
+* **core:** cover device-mapper disks and launcher chdir in the failsafe ([6822281](https://github.com/special-place-ai-heaven/terminal-commander/commit/682228142649d8283613a442c50dfc2b6285e2b6))
+* **core:** trim trailing dots and spaces from every Windows path segment ([6822281](https://github.com/special-place-ai-heaven/terminal-commander/commit/682228142649d8283613a442c50dfc2b6285e2b6))
+* **daemon,mcp,ipc,docs:** honor explicit llm_can_activate_recipes, audit session os_guard denies, fix stale full_access wording ([6822281](https://github.com/special-place-ai-heaven/terminal-commander/commit/682228142649d8283613a442c50dfc2b6285e2b6))
+
 ## [0.2.1](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.2.0...v0.2.1) (2026-09-28)
 
 
