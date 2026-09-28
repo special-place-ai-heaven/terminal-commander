@@ -1443,8 +1443,11 @@ jobs:
     runs-on: ubuntu-24.04
     permissions: { contents: read, issues: write }
     steps:
-      - name: Wait 60s for npm registry propagation
-        run: sleep 60
+      - name: Wait for npm registry propagation
+        shell: bash
+        env:
+          VER: ${{ needs.release-context.outputs.version }}
+        run: bash scripts/release/wait-for-npm-registry.sh "terminal-commander@${VER}" "@terminal-commander/linux-x64@${VER}"
       - name: Install from npm + smoke (Node 22-bookworm, glibc — linux-x64 binary is glibc-linked)
         env:
           VER: ${{ needs.release-context.outputs.version }}
@@ -1475,7 +1478,11 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions: { contents: read, issues: write }
     steps:
-      - run: sleep 60
+      - name: Wait for npm registry propagation
+        shell: bash
+        env:
+          VER: ${{ needs.release-context.outputs.version }}
+        run: bash scripts/release/wait-for-npm-registry.sh "terminal-commander@${VER}" "@terminal-commander/linux-arm64@${VER}"
       - env:
           VER: ${{ needs.release-context.outputs.version }}
         run: |
@@ -1502,7 +1509,11 @@ jobs:
     runs-on: windows-2022
     permissions: { contents: read, issues: write }
     steps:
-      - run: powershell -Command Start-Sleep -Seconds 60
+      - name: Wait for npm registry propagation
+        shell: bash
+        env:
+          VER: ${{ needs.release-context.outputs.version }}
+        run: bash scripts/release/wait-for-npm-registry.sh "terminal-commander@${VER}" "@terminal-commander/windows-x64@${VER}"
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - shell: pwsh
@@ -1512,35 +1523,35 @@ jobs:
           $ErrorActionPreference = 'Stop'
           npm install -g "terminal-commander@$env:VER"
           terminal-commander-mcp --version
-          # Stdio probe: 10s timeout via PowerShell job, Stop-Job + Remove-Job
-          # so we don't leak the runspace. Wait-Job returns $null on timeout.
-          # Linux + Mac verify treat timeout as pass + non-zero quick exit as fail.
-          # Windows must behave the same: only timeout is acceptable; any other
-          # non-success state (Failed, fast non-zero exit) must fail loud.
-          $msg = $env:MCP_DISCOVER
-          $job = Start-Job -ScriptBlock {
-            param($m) $m | terminal-commander-mcp
-          } -ArgumentList $msg
-          $done = Wait-Job $job -Timeout 10
-          $timedOut = ($null -eq $done)
-          if ($timedOut) {
+          # Stdio probe: start the real process directly and wait on IT with a
+          # 10s timeout, instead of a PowerShell background job. Start-Job spins
+          # up its own runspace first; on a slow runner that startup cost alone
+          # could eat the whole 10s budget, so Wait-Job returned $null (timeout)
+          # even when the child process never got a fair run — a false pass.
+          # WaitForExit(10000) times the child process itself, so a real hang
+          # or crash is measured accurately and a failed handshake fails loud.
+          $psi = [System.Diagnostics.ProcessStartInfo]::new()
+          $psi.FileName = "terminal-commander-mcp"
+          $psi.RedirectStandardInput = $true
+          $psi.RedirectStandardOutput = $true
+          $psi.UseShellExecute = $false
+          $proc = [System.Diagnostics.Process]::Start($psi)
+          $proc.StandardInput.WriteLine($env:MCP_DISCOVER)
+          $proc.StandardInput.Close()
+          $completed = $proc.WaitForExit(10000)
+          if (-not $completed) {
             Write-Host "smoke: stdio probe timed out (expected for unbounded server)"
+            try { $proc.Kill() } catch {}
           } else {
-            # Job completed within 10s. Receive output + inspect state.
-            $output = Receive-Job $job -ErrorAction SilentlyContinue
-            if ($output) { $output | ForEach-Object { Write-Host "stdio: $_" } }
-            if ($job.State -ne 'Completed') {
-              Stop-Job $job -ErrorAction SilentlyContinue
-              Remove-Job $job -Force -ErrorAction SilentlyContinue
-              throw "verify-windows-x64: MCP exited fast in state '$($job.State)' — install is broken"
+            $output = $proc.StandardOutput.ReadToEnd()
+            if ($output) { Write-Host "stdio: $output" }
+            if ($proc.ExitCode -ne 0) {
+              throw "verify-windows-x64: MCP exited fast with code $($proc.ExitCode) — install is broken"
             }
-            if (-not ($output -match 'supportedVersions')) {
-              Remove-Job $job -Force -ErrorAction SilentlyContinue
+            if ($output -notmatch 'supportedVersions') {
               throw "verify-windows-x64: stdio probe got no server/discover result"
             }
           }
-          Stop-Job $job -ErrorAction SilentlyContinue
-          Remove-Job $job -Force -ErrorAction SilentlyContinue
           Write-Host "verify-windows-x64: OK"
 
   verify-mac-x64:
@@ -1550,7 +1561,11 @@ jobs:
     runs-on: macos-15-intel   # Intel — macos-13 retired 2025-12-04; macos-15-intel is the supported Intel image. Keep a runner pinning task in runbook to rotate when GitHub deprecates.
     permissions: { contents: read, issues: write }
     steps:
-      - run: sleep 60
+      - name: Wait for npm registry propagation
+        shell: bash
+        env:
+          VER: ${{ needs.release-context.outputs.version }}
+        run: bash scripts/release/wait-for-npm-registry.sh "terminal-commander@${VER}" "@terminal-commander/mac-x64@${VER}"
       - uses: actions/setup-node@v4
         with: { node-version: "20" }     # 0.2.0 ships without --provenance; Node 20 is fine. Task 23 bumps to 22.14+.
       - env:
@@ -1589,7 +1604,11 @@ jobs:
     runs-on: macos-14   # Apple Silicon
     permissions: { contents: read, issues: write }
     steps:
-      - run: sleep 60
+      - name: Wait for npm registry propagation
+        shell: bash
+        env:
+          VER: ${{ needs.release-context.outputs.version }}
+        run: bash scripts/release/wait-for-npm-registry.sh "terminal-commander@${VER}" "@terminal-commander/mac-arm64@${VER}"
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - env:
