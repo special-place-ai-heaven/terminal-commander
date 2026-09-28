@@ -207,7 +207,8 @@ HTTP endpoint (127.0.0.1 only, random >=128-bit token in the path,
 single-use, <=300 s, Host-checked) solely to receive an owner-entered
 credential requested through MCP URL elicitation. Plaintext is confined to the
 host's loopback interface; the value is delivered to the waiting child and
-zeroized, never returned over IPC.
+overwritten best-effort (OS and browser copies are not wiped), never
+returned over IPC.
 
 Under the default `full_access` profile the harness running the LLM is the
 authority boundary: TC grants the same host access that harness grants

@@ -2730,8 +2730,8 @@ pub struct PtyCommandListEntry {
     /// (what the owner is shown), not the typed `argv[0]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<String>,
-    /// With `awaiting_credential`: request env keys that change which
-    /// program runs or what it loads (`PATH`, `LD_PRELOAD`, ...).
+    /// With `awaiting_credential`: every env key the request set (keys
+    /// only), any of which can change what the program runs or loads.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub program_env: Vec<String>,
 }
@@ -2761,13 +2761,16 @@ impl CredentialKind {
     }
 }
 
+/// How many request env keys the owner prompt names before `+N more`.
+pub const OWNER_PROMPT_ENV_KEYS: usize = 8;
+
 /// What the owner is told about a password prompt: the SAME text on every
 /// channel (native dialog, loopback page, `credential provide`).
 ///
 /// `program` is the absolute path the daemon spawned, not the model's
 /// `argv[0]`: a request `PATH` can put any binary behind a familiar name.
-/// `program_env` lists the request env keys that change which program runs
-/// or what it loads (keys only, never values).
+/// `program_env` lists every env key the request set (keys only, never
+/// values); the owner sees at most [`OWNER_PROMPT_ENV_KEYS`] of them.
 #[must_use]
 pub fn owner_prompt_text(
     job_id: JobId,
@@ -2779,10 +2782,19 @@ pub fn owner_prompt_text(
     let warning = if program_env.is_empty() {
         String::new()
     } else {
+        let mut keys = program_env
+            .iter()
+            .take(OWNER_PROMPT_ENV_KEYS)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if program_env.len() > OWNER_PROMPT_ENV_KEYS {
+            keys = format!("{keys} +{} more", program_env.len() - OWNER_PROMPT_ENV_KEYS);
+        }
         format!(
             "\u{26a0} request overrides {}: the program or what it loads may not be what its \
              name suggests.\n",
-            owner_printable(&program_env.join(", "))
+            owner_printable(&keys)
         )
     };
     format!(
@@ -4898,6 +4910,12 @@ mod tests {
         assert!(
             spoofed.contains("\u{26a0} request overrides PATH, LD_PRELOAD"),
             "{spoofed}"
+        );
+        let many: Vec<String> = (0..10).map(|i| format!("K{i}")).collect();
+        let capped = owner_prompt_text(job, CredentialKind::Ssh, "/usr/bin/ssh", &argv, &many);
+        assert!(
+            capped.contains("overrides K0, K1, K2, K3, K4, K5, K6, K7 +2 more:"),
+            "{capped}"
         );
         // Markup, escapes and bidi controls never reach the owner.
         let hostile = owner_prompt_text(

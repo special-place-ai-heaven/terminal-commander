@@ -97,7 +97,7 @@ mod runtime {
         argv: Vec<String>,
         /// Absolute program the spawn ran; shown to the owner.
         program: String,
-        /// Request env keys that change program resolution or loading.
+        /// Every env key the request set (keys only).
         program_env: Vec<String>,
         sifter: Arc<SifterRuntime>,
         inline_rules: Vec<RuleDefinition>,
@@ -1274,28 +1274,16 @@ mod runtime {
             .map(|p| p.to_string_lossy().into_owned())
     }
 
-    /// Request env keys that decide which program runs or what it loads.
-    const PROGRAM_ENV: [&str; 6] = [
-        "PATH",
-        "PATHEXT",
-        "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
-        "SSH_ASKPASS",
-        "SUDO_ASKPASS",
-    ];
-
-    /// Keys only (never values), case-insensitive, first spelling kept.
+    /// Every env key the request set, sorted and deduplicated (keys only,
+    /// never values). No allowlist: almost any variable can redirect what a
+    /// program runs or loads (`GIT_SSH_COMMAND`, `LD_PRELOAD`, `PATH`, ...).
     fn program_env_overrides(env: &[(OsString, OsString)]) -> Vec<String> {
-        let mut keys: Vec<String> = Vec::new();
-        for (key, _) in env {
-            let key = key.to_string_lossy();
-            let upper = key.to_ascii_uppercase();
-            if (PROGRAM_ENV.contains(&upper.as_str()) || upper.starts_with("DYLD_"))
-                && !keys.iter().any(|k| k.eq_ignore_ascii_case(&key))
-            {
-                keys.push(key.into_owned());
-            }
-        }
+        let mut keys: Vec<String> = env
+            .iter()
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        keys.sort();
+        keys.dedup();
         keys
     }
 

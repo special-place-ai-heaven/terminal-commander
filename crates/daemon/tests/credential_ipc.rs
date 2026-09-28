@@ -603,7 +603,15 @@ fn owner_prompt_shows_the_spawned_program_and_warns_on_a_path_override() {
 
         // PATH override: `argv[0]` is a bare name the request's PATH picks.
         let job_id = h
-            .start_child_with_env(&name, vec![("PATH".to_owned(), dir.clone())])
+            .start_child_with_env(
+                &name,
+                vec![
+                    ("PATH".to_owned(), dir.clone()),
+                    // Not a resolution key, but it redirects what git runs:
+                    // every request key is named, no allowlist.
+                    ("GIT_SSH_COMMAND".to_owned(), "true".to_owned()),
+                ],
+            )
             .await;
         h.wait_awaiting(job_id).await;
         let (page, entry) = owner_view(&mut h, job_id).await;
@@ -617,8 +625,14 @@ fn owner_prompt_shows_the_spawned_program_and_warns_on_a_path_override() {
             norm(&page).contains(&norm(&format!("Program: {program}"))),
             "{page}"
         );
-        assert_eq!(entry.program_env, vec!["PATH".to_owned()]);
-        assert!(page.contains("\u{26a0} request overrides PATH"), "{page}");
+        assert_eq!(
+            entry.program_env,
+            vec!["GIT_SSH_COMMAND".to_owned(), "PATH".to_owned()]
+        );
+        assert!(
+            page.contains("\u{26a0} request overrides GIT_SSH_COMMAND, PATH"),
+            "{page}"
+        );
         h.stop(job_id).await;
 
         // No override: still the absolute program, and no warning.

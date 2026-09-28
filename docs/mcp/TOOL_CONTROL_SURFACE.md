@@ -128,12 +128,12 @@ PTY password prompts (owner credential path):
   `awaiting_credential: {kind: "sudo"|"ssh"|"password", since_ms}` for a job
   at such a prompt; the field is omitted otherwise. `pty_command_list` then
   also carries `program` (the absolute program the daemon spawned) and
-  `program_env` (request env keys such as `PATH` or `LD_PRELOAD` that change
-  what runs or loads).
+  `program_env` (every env key the request set, keys only).
 - Every owner channel shows the same text: job id, prompt kind, `Program:`
   (the spawned absolute path, never just the typed `argv[0]`), `Command:`,
-  and a `⚠ request overrides <keys>` line when the request set a
-  program-affecting env key. A familiar command name alone never vouches
+  and a `⚠ request overrides <keys>` line naming every env key the
+  request set (sorted, first 8 then `+N more`): no allowlist, since a
+  variable such as `GIT_SSH_COMMAND` can redirect what a program runs. A familiar command name alone never vouches
   for what receives the password.
 - `credential_request {job_id}` asks the OWNER through a channel the model
   cannot read. First, when the MCP client declared URL-mode elicitation
