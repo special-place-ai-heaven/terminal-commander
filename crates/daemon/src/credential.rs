@@ -144,15 +144,24 @@ fn spawn_owner_prompt(
     outcome: Outcome,
 ) {
     tokio::spawn(async move {
-        let asked = tokio::task::spawn_blocking(move || ask_owner(prompter.as_deref(), &text))
-            .await
-            .unwrap_or(Asked::Unavailable);
+        // A detached thread, not `spawn_blocking`: an owner prompt can stay
+        // open indefinitely, and the runtime waits for blocking-pool tasks on
+        // shutdown, so an unanswered dialog must not hold the daemon up.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("tc-owner-prompt".to_owned())
+            .spawn(move || {
+                let _ = tx.send(ask_owner(prompter.as_deref(), &text));
+            });
+        let asked = match spawned {
+            Ok(_) => rx.await.unwrap_or(Asked::Unavailable),
+            Err(_) => Asked::Unavailable,
+        };
         let status = match asked {
-            Asked::Secret(mut secret) => {
+            Asked::Secret(secret) => {
                 let delivered = pty
-                    .deliver_credential(job_id, &secret, Some(generation), "native")
+                    .deliver_credential(job_id, &secret.0, Some(generation), "native")
                     .await;
-                wipe(&mut secret);
                 // A late answer to a prompt that is gone is dropped, not
                 // typed into whatever the job shows now.
                 if delivered.is_ok() {
@@ -180,9 +189,18 @@ pub(crate) fn wipe(buf: &mut [u8]) {
     std::hint::black_box(buf);
 }
 
+/// Owner-typed bytes, wiped on every drop path.
+struct SecretBuf(Vec<u8>);
+
+impl Drop for SecretBuf {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
+    }
+}
+
 /// What the owner prompt returned. The secret never leaves the daemon.
 enum Asked {
-    Secret(Vec<u8>),
+    Secret(SecretBuf),
     Declined,
     /// No prompt could be shown; fall back to the admin CLI.
     Unavailable,
@@ -239,9 +257,9 @@ fn ask_owner(prompter: Option<&str>, text: &PromptText) -> Asked {
     match prompter {
         None => native::ask(text),
         Some("test-decline") => Asked::Declined,
-        Some(seam) => seam
-            .strip_prefix("test:")
-            .map_or(Asked::Unavailable, |v| Asked::Secret(v.as_bytes().to_vec())),
+        Some(seam) => seam.strip_prefix("test:").map_or(Asked::Unavailable, |v| {
+            Asked::Secret(SecretBuf(v.as_bytes().to_vec()))
+        }),
     }
 }
 
@@ -259,7 +277,7 @@ mod native {
     };
     use windows::core::PCWSTR;
 
-    use super::{Asked, PromptText};
+    use super::{Asked, PromptText, SecretBuf};
 
     /// `CREDUI_MAX_PASSWORD_LENGTH` from wincred.h (not exported by the crate).
     const MAX_PASSWORD_LENGTH: usize = 256;
@@ -312,7 +330,7 @@ mod native {
         };
         let asked = if rc == NO_ERROR {
             let n = pass.iter().position(|&c| c == 0).unwrap_or(pass.len());
-            Asked::Secret(String::from_utf16_lossy(&pass[..n]).into_bytes())
+            Asked::Secret(SecretBuf(String::from_utf16_lossy(&pass[..n]).into_bytes()))
         } else if rc == ERROR_CANCELLED {
             Asked::Declined
         } else {
@@ -329,7 +347,7 @@ mod native {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    use super::{Asked, PromptText, wipe};
+    use super::{Asked, PromptText, SecretBuf, wipe};
 
     /// First available of `$SSH_ASKPASS`, then (on a desktop) `ssh-askpass`,
     /// `zenity`, `kdialog`, `pinentry`. Each is spawned by the daemon with
@@ -374,9 +392,9 @@ mod native {
     fn run_helper(mut helper: Command) -> Option<Asked> {
         let out = helper.stdin(Stdio::null()).output().ok()?;
         if out.status.success() {
-            let mut secret = out.stdout;
-            while secret.last().is_some_and(|b| matches!(b, b'\n' | b'\r')) {
-                secret.pop();
+            let mut secret = SecretBuf(out.stdout);
+            while secret.0.last().is_some_and(|b| matches!(b, b'\n' | b'\r')) {
+                secret.0.pop();
             }
             return Some(Asked::Secret(secret));
         }
@@ -408,7 +426,7 @@ mod native {
             .then(|| {
                 stdout.split(|&b| b == b'\n').find_map(|line| {
                     if let Some(pin) = line.strip_prefix(b"D ") {
-                        Some(Asked::Secret(unescape(pin)))
+                        Some(Asked::Secret(SecretBuf(unescape(pin))))
                     } else if line.starts_with(b"ERR")
                         && line.to_ascii_lowercase().windows(6).any(|w| w == b"cancel")
                     {
@@ -484,13 +502,13 @@ mod tests {
         );
         assert_eq!(text.title, "Terminal Commander: sudo password");
         assert!(text.message.contains(&job.to_wire_string()));
-        assert!(text.message.contains("Command: sudo ?b?x??b??[31m"));
+        assert!(text.message.contains("Command: sudo ?b?x?/b??[31m"));
     }
 
     #[test]
     fn test_seam_never_reaches_a_native_prompt() {
         let text = PromptText::new(JobId::new(), CredentialKind::Password, &[]);
-        assert!(matches!(ask_owner(Some("test:pw"), &text), Asked::Secret(s) if s == b"pw"));
+        assert!(matches!(ask_owner(Some("test:pw"), &text), Asked::Secret(s) if s.0 == b"pw"));
         assert!(matches!(
             ask_owner(Some("test-decline"), &text),
             Asked::Declined

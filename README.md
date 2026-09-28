@@ -27,7 +27,7 @@ state, and signal context.
 The goal is **omni**: an agent should never need a separate raw terminal tool.
 The same runtime is available through either six compact, action-dispatched
 facades (`command`, `files`, `recipe`, `registry`, `session`, `status`) or the full
-59-tool granular surface. It covers one-shot commands and shell pipelines,
+60-tool granular surface. It covers one-shot commands and shell pipelines,
 persistent stateful sessions, interactive PTYs (unix and Windows ConPTY),
 unknown-output rule suggestion, and operator-gated remote hosts. The agent's
 lane-selection map is [`docs/mcp/OMNI_PLAYBOOK.md`](docs/mcp/OMNI_PLAYBOOK.md).
@@ -252,7 +252,7 @@ terminal-commander setup harness --surface compact
 ```
 
 `compact` exposes six action-dispatched facade tools (`command`, `files`,
-`recipe`, `registry`, `session`, `status`). `full` exposes all 59
+`recipe`, `registry`, `session`, `status`). `full` exposes all 60
 granular tools and is the server default when `TC_SURFACE` is unset. Both views
 reach the same daemon operations and enforce the same policy.
 
@@ -291,7 +291,7 @@ flowchart LR
   end
 
   subgraph mcp["terminal-commander-mcp"]
-    Stdio["rmcp stdio server\n6 compact facades or 59 full tools\n1:1 facade over IPC"]
+    Stdio["rmcp stdio server\n6 compact facades or 60 full tools\n1:1 facade over IPC"]
   end
 
   subgraph sup["terminal-commander-supervisor (shared lib)"]
@@ -471,7 +471,7 @@ Terminal Commander offers two schema views over the same runtime:
 | Surface | Tools advertised | Intended use |
 | --- | --- | --- |
 | `compact` | `command`, `files`, `recipe`, `registry`, `session`, `status` | Small, stable action-dispatched surface for LLM harnesses. |
-| `full` | 59 granular tools | Explicit per-operation names for clients that prefer a broad schema. |
+| `full` | 60 granular tools | Explicit per-operation names for clients that prefer a broad schema. |
 
 Set the view with `TC_SURFACE=compact|full` or `setup harness --surface ...`.
 Unset or unrecognized values select `full`. Compact calls are validated against
@@ -531,6 +531,10 @@ audit row. All other IPC requests bump the idle clock and audit normally.
 > full live ConPTY child-output end-to-end remains gated behind
 > `TC_CONPTY_E2E=1` and is not yet closed on every dev host -- check
 > `system_discover` on native Windows before relying on it.
+> A PTY job stopped at a sudo/ssh/password prompt shows `awaiting_credential`;
+> the model calls `credential_request` and the daemon asks the owner directly
+> (a native dialog, else `terminal-commander credential provide <job_id>` in
+> the owner's terminal), so the password never passes through the model.
 
 > [!TIP]
 > Persistent shell sessions (`shell_session_*`) and workspace snapshots
@@ -715,7 +719,7 @@ swapped (identity-gated) before tool calls proceed.
 | `TC_SOCKET` | Full endpoint override (pipe name / socket path). Wins over `TC_SESSION`. |
 | `TC_DATA` | State-dir base override (default: `%LOCALAPPDATA%\terminal-commanderd\state` on Windows, `~/.local/share/terminal-commanderd` on Unix). |
 | `TC_IDLE_TTL_SECS` | Idle self-reap TTL in seconds (default 1800; `0` disables). |
-| `TC_SURFACE` | MCP schema view: `compact` (six facades) or `full` (59 granular tools; default). |
+| `TC_SURFACE` | MCP schema view: `compact` (six facades) or `full` (60 granular tools; default). |
 | `TC_USE_LEGACY_WSL_BRIDGE` | `1` opts into the legacy Windows→WSL bridge. |
 | `TC_WSL_DISTRO` | Selects the WSL distro for the legacy bridge. |
 | `TC_SKIP_DAEMON_AUTOSTART` | `1` skips daemon autostart during `setup harness`. |
@@ -830,7 +834,7 @@ crates/                                  Rust workspace (9 crates; 8 published t
   supervisor/                            ensure_daemon, replace_if_stale, session tokens, pidfile
   ipc/                                   wire protocol + framing + clients (UDS / named pipe)
   daemon/                                terminal-commanderd — IPC, policy, router, runtimes
-  mcp/                                   terminal-commander-mcp - 6-facade compact / 59-tool full surface
+  mcp/                                   terminal-commander-mcp - 6-facade compact / 60-tool full surface
   cli/                                   terminal-commander admin CLI (local only, not on crates.io)
 packages/
   terminal-commander/                    npm root wrapper (@latest)

@@ -194,7 +194,7 @@ not reopen dual-protocol or OMP client work.
 ## See also
 
 - [`docs/mcp/TOOL_CONTROL_SURFACE.md`](../mcp/TOOL_CONTROL_SURFACE.md)
-  -- live catalogue (59 tools; six compact facades, including `recipe`).
+  -- live catalogue (60 tools; six compact facades, including `recipe`).
 - [`docs/mcp/OMNI_PLAYBOOK.md`](../mcp/OMNI_PLAYBOOK.md) -- lane choice
   when no recipe matches.
 - [`POLICY.md`](../../POLICY.md) -- `llm_can_activate_recipes` and

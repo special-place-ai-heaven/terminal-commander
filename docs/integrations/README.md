@@ -1,7 +1,7 @@
 # Provider Integration Examples - Terminal Commander
 
 Status: current public integration index for the six-facade compact and
-59-tool full MCP surfaces. Compact facades: `command`, `files`, `recipe`,
+60-tool full MCP surfaces. Compact facades: `command`, `files`, `recipe`,
 `registry`, `session`, `status`.
 
 Provider-neutral MCP integration recipes. NO secrets, NO machine-
@@ -88,7 +88,7 @@ requires actually running the provider against one of the configs
 above and observing tool calls in the session transcript.
 
 The rest of this page is the older provider-neutral baseline kept for historical
-context; the modern full surface advertises 59 tools and the per-provider
+context; the modern full surface advertises 60 tools and the per-provider
 walk-throughs above are the authoritative source.
 
 Language: ASCII only.

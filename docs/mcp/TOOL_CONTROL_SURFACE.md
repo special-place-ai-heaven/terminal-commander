@@ -1,6 +1,6 @@
 # MCP Tool Control Surface - Locked Contract
 
-Status: current MCP-facing contract. Live catalogue: 59 tools; compact surface: six facades.
+Status: current MCP-facing contract. Live catalogue: 60 tools; compact surface: six facades.
 Anchored by: `crates/mcp/src/tools.rs`, `docs/runtime/REALTIME_SIGNAL_CHANNEL.md`.
 Language: ASCII only.
 
@@ -68,9 +68,9 @@ Availability rules:
   error when startup status says the daemon is unavailable. They must
   not leak raw pipe/socket errors as the primary client contract.
 - The advertised list and the registered rmcp router are tested to stay
-  aligned. The catalogue pin in `crates/mcp/src/tools.rs` is still named
-  `catalogue_lists_fifty_one_live_tools`; that test asserts the live
-  59-tool list. `tool_router_exposes_all_live_tools` checks the router.
+  aligned. The catalogue pin in `crates/mcp/src/tools.rs` is
+  `catalogue_lists_sixty_live_tools`; that test asserts the live
+  60-tool list. `tool_router_exposes_all_live_tools` checks the router.
 
 Session availability:
 
@@ -93,7 +93,7 @@ Machine-readable fixture:
 
 ## 2. Live tool catalogue
 
-The full rmcp stdio surface exposes 59 live tools. With
+The full rmcp stdio surface exposes 60 live tools. With
 `TC_SURFACE=compact`, the adapter instead advertises six action-dispatched
 facades: `command`, `files`, `recipe`, `registry`, `session`, and `status`.
 Both surfaces route to the same handlers and policy boundary. `recipe` is
@@ -109,7 +109,7 @@ Recipe actions are not accepted on the `registry` facade.
 | Recipe registry | `recipe_search`, `recipe_get` (`tombstoned` is true when the id was retired by `recipe_tombstone`), `recipe_upsert`, `recipe_test` (dry-run; does not activate or start a job), `recipe_activate`, `recipe_deactivate`, `recipe_list_active`, `recipe_run`. Separate from rules. Compact facade `recipe` actions: `search`, `get`, `upsert`, `test`, `activate`, `deactivate`, `list_active`, `run`. MCP `recipe_activate` / `recipe_deactivate` are open under the default `full_access` profile; a hardened profile denies them while `llm_can_activate_recipes` is false (its default) with `recipe_activate_requires_admin`. The grant is the `terminal-commander` peer image, not a caller `from_mcp` bit; omitting that field is not admin, and the MCP adapter image cannot claim it. The operator CLI is `terminal-commander recipes activate`, `recipes deactivate`, `recipes tombstone`, and `recipes import [--activate]` (global scope only). `recipe_run` runs an activated recipe on the argv lane. A recipe with `timeout_ms` or `rule_pack_ids` returns a watched response (signals, resume cursor, `degraded` / `recover_hint`, same contract as `run_and_watch`). `rule_pack_ids` only select that path and do not load packs; combing uses registry rules already active on the job. Otherwise the start is `command_start_combed`. Never `shell_exec`. |
 | Sessions and workspace | `shell_session_start`, `shell_session_exec`, `shell_session_status`, `shell_session_stop`, `shell_session_list`, `workspace_snapshot_create`, `workspace_snapshot_apply` (gated by `allow_session`, on under the default `full_access`; unix-only; combed, never raw) |
 | Files | `file_read_window`, `file_search`, `file_write` (policy-gated by `paths.write_allow`; audited before write; bounded size; atomic; mutating / non-idempotent), `file_watch_start`, `file_watch_stop`, `file_watch_list` |
-| PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` (POSIX + Windows ConPTY) |
+| PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list`, `credential_request` (asks the owner for a password a PTY job waits on; status only) (POSIX + Windows ConPTY). Compact `session` action: `credential_request`. |
 | Remote | `target_list`, `target_probe` (routes to an operator-forwarded local socket; remote use gated by `allow_remote`; no public TCP) |
 | Runtime | `runtime_state`, `probe_list`, `probe_status` |
 
@@ -118,6 +118,34 @@ returned rendering and never mutates the raw frame store. `file_search` accepts
 either an absolute regular file or directory. Directory searches are recursive,
 deterministic, policy-checked per candidate file, symlink-safe, and bounded by
 match, byte, and visited-entry ceilings.
+
+PTY password prompts (owner credential path):
+
+- TC44 is unchanged: while a PTY job is at a secret prompt,
+  `pty_command_write_stdin` returns `SecretInputDenied` and writes nothing.
+  The deny message names `credential_request` with the job id.
+- `command_status`, `pty_command_list`, and `pty_command_write_stdin` carry
+  `awaiting_credential: {kind: "sudo"|"ssh"|"password", since_ms}` for a job
+  at such a prompt; the field is omitted otherwise.
+- `credential_request {job_id}` makes the daemon ask the OWNER through a
+  channel the model cannot read: Windows CredUI; on a unix desktop the first
+  of `$SSH_ASKPASS`, `ssh-askpass`, `zenity`, `kdialog`, `pinentry`. The
+  daemon types the answer plus Enter into that job, masks an echoed copy on
+  the next output line, and audits `credential_provided {kind, source}`
+  (never the value or its length). The model receives only
+  `{job_id, status}`: `provided`, `declined`, `timeout` (not answered in
+  60 s; the prompt stays open and a repeat call keeps waiting),
+  `owner_action_required` (plus `command`), or `not_awaiting`. One owner
+  prompt per password prompt; repeats replay, never re-ask.
+- Without a native prompt the owner runs
+  `terminal-commander credential provide <job_id>` in their own terminal. It
+  shows which job asks, reads the password with echo off, and sends
+  `credential_provide`, which the daemon accepts only from the admin CLI
+  image outside its own process tree. There is no MCP tool for it.
+- `run_and_watch` and `command_start_combed` add `credential_hint` when the
+  launched program is `sudo`, `su`, `doas`, or `ssh`: a pipe cannot answer
+  a password prompt, so run it with `pty_command_start` instead. Argv is
+  never rewritten.
 
 Remote routing surface (`target_id`):
 

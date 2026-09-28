@@ -732,6 +732,20 @@ Given request `(actor, action, subject, profile)`:
 This is the algorithm TC22 implements. TC29 fuzz-like tests target
 each branch.
 
+**PTY password prompts.** TC44 is unchanged and not a profile knob: while a
+PTY job is at a sudo/ssh/password prompt, `pty_command_write_stdin` is
+denied (`SecretInputDenied`) in every profile, so the model can never type a
+password. The job reports `awaiting_credential`, and `credential_request`
+makes the daemon ask the OWNER directly (a native dialog the daemon opens,
+else the admin CLI `terminal-commander credential provide <job_id>`). The
+daemon types the owner's answer itself; the model sees only a status, and
+the audit row `credential_provided` records the job, prompt kind, and source,
+never the value or its length. The IPC `credential_provide` is accepted only
+from the `terminal-commander` peer image outside the daemon's process tree
+(the recipe-admin identity check); an MCP-labelled or daemon-started peer is
+denied and no policy setting opens it to the model. Same-user code can still
+exec that CLI: the socket is not a privilege boundary.
+
 ## 7. What policy does NOT cover (MVP)
 
 - **Content-level redaction.** Policy decides whether a path can be
