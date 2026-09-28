@@ -459,6 +459,8 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::PtyCommandWriteStdin(_) => "pty_command_write_stdin",
         IpcRequest::PtyCommandStop(_) => "pty_command_stop",
         IpcRequest::PtyCommandList => "pty_command_list",
+        IpcRequest::CredentialRequest(_) => "credential_request",
+        IpcRequest::CredentialProvide(_) => "credential_provide",
         IpcRequest::ShellSessionStart(_) => "shell_session_start",
         IpcRequest::ShellSessionExec(_) => "shell_session_exec",
         IpcRequest::ShellSessionStatus(_) => "shell_session_status",
@@ -531,6 +533,8 @@ pub(crate) const DISCOVERABLE_METHODS: &[&str] = &[
     "pty_command_write_stdin",
     "pty_command_stop",
     "pty_command_list",
+    "credential_request",
+    "credential_provide",
     "shell_session_start",
     "shell_session_exec",
     "shell_session_status",
@@ -831,6 +835,18 @@ async fn dispatch(
             // authority above wins.
             let (_name, r) = handlers::pty::dispatch_pty_command_list(state);
             r
+        }
+        IpcRequest::CredentialRequest(p) => {
+            match handlers::pty::handle_credential_request(state, p).await {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::CredentialProvide(p) => {
+            match handlers::pty::handle_credential_provide(state, p, peer).await {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
         }
         // Session lane (P1 / TC50). `_start` carries the peer so the
         // handler can resolve a redacted audit subject before the PTY
@@ -1548,6 +1564,14 @@ mod tests {
                 job_id: JobId::new(),
             }),
             IpcRequest::PtyCommandList,
+            IpcRequest::CredentialRequest(terminal_commander_ipc::CredentialRequestParams {
+                job_id: JobId::new(),
+            }),
+            IpcRequest::CredentialProvide(terminal_commander_ipc::CredentialProvideParams {
+                job_id: JobId::new(),
+                secret: terminal_commander_ipc::OwnerSecret::new(String::new()),
+                from_mcp: true,
+            }),
             IpcRequest::ShellSessionStart(ShellSessionStartParams {
                 shell: None,
                 cwd: None,

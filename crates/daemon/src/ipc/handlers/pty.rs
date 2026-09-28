@@ -7,17 +7,18 @@ use std::sync::Arc;
 use terminal_commander_core::RecipeTeachIntent;
 
 use super::common::{attach_recipe_steer, enrich_shell_teach};
+use crate::ipc::protocol::{
+    CredentialProvideParams, CredentialRequestParams, IpcError, IpcErrorCode, IpcResponse,
+    IpcResult, PtyCommandStartParams, PtyCommandStopParams, PtyCommandWriteStdinParams,
+};
 #[cfg(any(unix, windows))]
 use crate::ipc::protocol::{
     DEFAULT_BUCKET_READ_LIMIT, MAX_BUCKET_WAIT_MS, MAX_COMMAND_ENV_ITEMS, MAX_COMMAND_INLINE_RULES,
     MAX_PTY_ARGV_ITEMS, MAX_PTY_STDIN_BYTES, PtyCommandListEntry, PtyCommandListResponse,
     PtyCommandStartResponse, PtyCommandStopResponse, PtyCommandWriteStdinResponse,
 };
-use crate::ipc::protocol::{
-    IpcError, IpcErrorCode, IpcResponse, IpcResult, PtyCommandStartParams, PtyCommandStopParams,
-    PtyCommandWriteStdinParams,
-};
 use crate::state::DaemonState;
+use terminal_commander_supervisor::identity::PeerIdentity;
 
 #[cfg(not(any(unix, windows)))]
 pub(in crate::ipc::server) fn pty_ipc_unsupported() -> IpcError {
@@ -55,6 +56,25 @@ pub(in crate::ipc::server) fn handle_pty_command_stop(
 #[cfg(not(any(unix, windows)))]
 pub(in crate::ipc::server) fn handle_pty_command_list(
     _state: &Arc<DaemonState>,
+) -> Result<IpcResponse, IpcError> {
+    Err(pty_ipc_unsupported())
+}
+
+#[cfg(not(any(unix, windows)))]
+#[allow(clippy::unused_async)] // async matches the PTY-host signature
+pub(in crate::ipc::server) async fn handle_credential_request(
+    _state: &Arc<DaemonState>,
+    _params: &CredentialRequestParams,
+) -> Result<IpcResponse, IpcError> {
+    Err(pty_ipc_unsupported())
+}
+
+#[cfg(not(any(unix, windows)))]
+#[allow(clippy::unused_async)] // async matches the PTY-host signature
+pub(in crate::ipc::server) async fn handle_credential_provide(
+    _state: &Arc<DaemonState>,
+    _params: &CredentialProvideParams,
+    _peer: &PeerIdentity,
 ) -> Result<IpcResponse, IpcError> {
     Err(pty_ipc_unsupported())
 }
@@ -248,6 +268,7 @@ pub(in crate::ipc::server) async fn handle_pty_command_write_stdin(
                     job_id: params.job_id,
                     bytes_written: r.bytes_written,
                     secret_prompt_active: r.secret_prompt_active,
+                    awaiting_credential: state.pty.awaiting_credential(params.job_id),
                     cursor_in,
                     next_cursor,
                     has_more,
@@ -256,9 +277,17 @@ pub(in crate::ipc::server) async fn handle_pty_command_write_stdin(
                 },
             ))
         }
+        // TC44: the model never types into a password prompt. Teach the
+        // owner path instead of a dead end.
         Err(crate::pty_command::PtyRuntimeError::SecretInputDenied) => Err(IpcError::new(
             IpcErrorCode::SecretInputDenied,
-            "secret prompt active; LLM-supplied input denied",
+            format!(
+                "secret prompt active; LLM-supplied input denied. This job is waiting for a \
+                 password; TC never accepts passwords from the model -- call \
+                 credential_request {{\"job_id\":\"{}\"}} and the owner will be asked \
+                 directly; then poll command_status for the job",
+                params.job_id.to_wire_string()
+            ),
         )),
         Err(crate::pty_command::PtyRuntimeError::OversizedStdin) => Err(IpcError::new(
             IpcErrorCode::OversizedRequest,
@@ -330,10 +359,88 @@ pub(in crate::ipc::server) fn handle_pty_command_list(state: &Arc<DaemonState>) 
                 stdin_bytes_written: m.stdin_bytes_written,
                 secret_prompts_total: m.secret_prompts_total,
                 secret_prompt_active,
+                awaiting_credential: state.pty.awaiting_credential(job_id),
             },
         )
         .collect();
     IpcResponse::PtyCommandList(PtyCommandListResponse { entries })
+}
+
+#[cfg(any(unix, windows))]
+fn pty_job_not_live(id: terminal_commander_core::JobId) -> IpcError {
+    IpcError::new(
+        IpcErrorCode::UnknownJob,
+        format!("pty job '{}' is not live", id.to_wire_string()),
+    )
+}
+
+/// `credential_request`: ask the owner for the password a PTY job waits on.
+/// The response is a status only; the secret never enters it.
+#[cfg(any(unix, windows))]
+pub(in crate::ipc::server) async fn handle_credential_request(
+    state: &Arc<DaemonState>,
+    params: &CredentialRequestParams,
+) -> Result<IpcResponse, IpcError> {
+    match state.credentials.request(&state.pty, params.job_id).await {
+        Ok(r) => Ok(IpcResponse::CredentialRequest(r)),
+        Err(crate::pty_command::PtyRuntimeError::UnknownJob(id)) => Err(pty_job_not_live(id)),
+        Err(other) => Err(IpcError::new(
+            IpcErrorCode::Internal,
+            format!("credential_request: {other}"),
+        )),
+    }
+}
+
+/// `credential_provide`: the owner typed a password into the admin CLI.
+/// Only the CLI image from the owner's own terminal passes; an MCP-labelled
+/// or daemon-started peer is denied even if it sends the request raw.
+#[cfg(any(unix, windows))]
+pub(in crate::ipc::server) async fn handle_credential_provide(
+    state: &Arc<DaemonState>,
+    params: &CredentialProvideParams,
+    peer: &PeerIdentity,
+) -> Result<IpcResponse, IpcError> {
+    if !super::recipe::caller_is_owner_cli(state, peer, params.from_mcp) {
+        return Err(IpcError::new(
+            IpcErrorCode::PolicyDenied,
+            "credential_provide_requires_owner: only the admin CLI run from the owner's own \
+             terminal (`terminal-commander credential provide <job_id>`) may answer a password \
+             prompt; the model never supplies a password. From MCP, call credential_request \
+             {job_id} and the owner is asked directly.",
+        ));
+    }
+    if params.secret.as_bytes().len() >= MAX_PTY_STDIN_BYTES {
+        return Err(IpcError::new(
+            IpcErrorCode::OversizedRequest,
+            format!("password exceeds the {MAX_PTY_STDIN_BYTES}-byte PTY stdin cap"),
+        ));
+    }
+    match state
+        .pty
+        .deliver_credential(params.job_id, params.secret.as_bytes(), None, "cli")
+        .await
+    {
+        Ok(generation) => {
+            state.credentials.record_provided(params.job_id, generation);
+            Ok(IpcResponse::CredentialProvide(
+                crate::ipc::protocol::CredentialProvideResponse {
+                    job_id: params.job_id,
+                },
+            ))
+        }
+        Err(crate::pty_command::PtyRuntimeError::UnknownJob(id)) => Err(pty_job_not_live(id)),
+        Err(crate::pty_command::PtyRuntimeError::NotAwaitingCredential(id)) => Err(IpcError::new(
+            IpcErrorCode::UnknownJob,
+            format!(
+                "pty job '{}' is not waiting for a password; nothing was typed",
+                id.to_wire_string()
+            ),
+        )),
+        Err(other) => Err(IpcError::new(
+            IpcErrorCode::Internal,
+            format!("credential_provide: {other}"),
+        )),
+    }
 }
 
 #[cfg(any(unix, windows))]

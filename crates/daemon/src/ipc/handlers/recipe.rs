@@ -376,6 +376,18 @@ fn caller_may_recipe_admin(state: &DaemonState, peer: &PeerIdentity, from_mcp: b
     recipe_admin_grant(peer_program_role(peer), from_mcp, seam)
 }
 
+/// `credential_provide` gate: the admin CLI peer only, from the owner's own
+/// terminal. Same image check as recipe admin (the MCP image is never
+/// admin), plus the refusal of processes the daemon started. No policy knob
+/// opens it to the model.
+pub(in crate::ipc::server) fn caller_is_owner_cli(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    from_mcp: bool,
+) -> bool {
+    caller_may_recipe_admin(state, peer, from_mcp) && !peer_started_by_daemon(peer)
+}
+
 /// Audit actor for recipe admin verbs and `recipe_run`. Known images keep
 /// the FCR-014 actor (`admin` / `mcp`). An unknown peer is never `admin`:
 /// it is `mcp` only when it claims `from_mcp: true` (an under-claim), else

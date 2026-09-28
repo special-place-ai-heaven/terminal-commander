@@ -30,8 +30,10 @@ mod runtime {
         ActivationScope, BucketConfig, BucketError, BucketId, ContextRingManager, EventDraft,
         JobConfig, JobId, JobManager, ProbeId, RuleDefinition, shell_argv_denied,
     };
+    use terminal_commander_ipc::protocol::{AwaitingCredential, CredentialKind};
     use terminal_commander_probes::{
-        EventSink, PtyProbe, PtyProbeConfig, PtyProbeError, PtyProbeMetrics, WriteStdinError,
+        EventSink, PromptKind, PtyProbe, PtyProbeConfig, PtyProbeError, PtyProbeMetrics,
+        WriteStdinError,
     };
     use terminal_commander_sifters::SifterRuntime;
     use terminal_commander_store::AuditEntry;
@@ -79,6 +81,10 @@ mod runtime {
         UnknownJob(JobId),
         #[error("secret prompt active; LLM-supplied input denied")]
         SecretInputDenied,
+        /// Credential delivery to a job with no password prompt up (or a
+        /// different prompt than the one the owner answered).
+        #[error("pty job {0} is not waiting for a password")]
+        NotAwaitingCredential(JobId),
         #[error("stdin payload exceeds bounded cap")]
         OversizedStdin,
         #[error("io error: {0}")]
@@ -114,6 +120,32 @@ mod runtime {
         pub job_id: JobId,
         pub bucket_id: BucketId,
         pub probe_id: ProbeId,
+    }
+
+    /// What `credential_request` needs to know about a PTY job's prompt.
+    #[derive(Debug, Clone)]
+    pub struct CredentialPrompt {
+        /// Secret-prompt generation; one owner answer per generation.
+        pub generation: u64,
+        pub awaiting: Option<AwaitingCredential>,
+        pub argv: Vec<String>,
+    }
+
+    const fn credential_kind(kind: PromptKind) -> CredentialKind {
+        match kind {
+            PromptKind::SudoPassword => CredentialKind::Sudo,
+            PromptKind::SshPassword => CredentialKind::Ssh,
+            _ => CredentialKind::Password,
+        }
+    }
+
+    fn awaiting_of(probe: &PtyProbe) -> Option<AwaitingCredential> {
+        probe
+            .awaiting_credential()
+            .map(|(kind, since_ms)| AwaitingCredential {
+                kind: credential_kind(kind),
+                since_ms,
+            })
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -841,8 +873,99 @@ mod runtime {
                     Err(PtyRuntimeError::OversizedStdin)
                 }
                 Err(WriteStdinError::Closed) => Err(PtyRuntimeError::UnknownJob(job_id)),
+                Err(WriteStdinError::NoSecretPrompt) => {
+                    Err(PtyRuntimeError::NotAwaitingCredential(job_id))
+                }
                 Err(WriteStdinError::Io(e)) => Err(PtyRuntimeError::Io(e)),
             }
+        }
+
+        /// The job's password prompt, if any. Same non-blocking read as
+        /// `list()`: a busy probe reads as "not awaiting" for that instant.
+        #[must_use]
+        pub fn awaiting_credential(&self, job_id: JobId) -> Option<AwaitingCredential> {
+            let probe = Arc::clone(&self.live.read().get(&job_id)?.probe);
+            let guard = probe.try_lock().ok()?;
+            guard.as_ref().and_then(awaiting_of)
+        }
+
+        /// Prompt state for `credential_request`.
+        pub async fn credential_prompt(
+            &self,
+            job_id: JobId,
+        ) -> Result<CredentialPrompt, PtyRuntimeError> {
+            let (probe, argv) = {
+                let g = self.live.read();
+                let b = g.get(&job_id).ok_or(PtyRuntimeError::UnknownJob(job_id))?;
+                (Arc::clone(&b.probe), b.argv.clone())
+            };
+            let guard = probe.lock().await;
+            let probe = guard.as_ref().ok_or(PtyRuntimeError::UnknownJob(job_id))?;
+            Ok(CredentialPrompt {
+                generation: probe.secret_prompt_generation(),
+                awaiting: awaiting_of(probe),
+                argv,
+            })
+        }
+
+        /// Type an OWNER-supplied secret (plus Enter) into the job's
+        /// password prompt. Never reachable with model input: the callers are
+        /// the native owner prompt and the admin-CLI-gated
+        /// `credential_provide`. `generation` pins the prompt the owner saw;
+        /// `None` answers whatever prompt is up. The audit row names the job,
+        /// prompt kind, and source, never the value or its length. Returns
+        /// the answered generation.
+        pub async fn deliver_credential(
+            &self,
+            job_id: JobId,
+            secret: &[u8],
+            generation: Option<u64>,
+            source: &'static str,
+        ) -> Result<u64, PtyRuntimeError> {
+            let probe_handle = {
+                let g = self.live.read();
+                let b = g.get(&job_id).ok_or(PtyRuntimeError::UnknownJob(job_id))?;
+                Arc::clone(&b.probe)
+            };
+            // Held across the write, like `write_stdin`, so no model write
+            // can interleave with the secret.
+            let guard = probe_handle.lock().await;
+            let probe = guard.as_ref().ok_or(PtyRuntimeError::UnknownJob(job_id))?;
+            let current = probe.secret_prompt_generation();
+            let Some(awaiting) = awaiting_of(probe) else {
+                return Err(PtyRuntimeError::NotAwaitingCredential(job_id));
+            };
+            if generation.is_some_and(|g| g != current) {
+                return Err(PtyRuntimeError::NotAwaitingCredential(job_id));
+            }
+            let mut line = Vec::with_capacity(secret.len() + 1);
+            line.extend_from_slice(secret);
+            // Enter, as a keyboard sends it: ConPTY needs CR to end a cooked
+            // line, and a unix tty maps it to NL (ICRNL).
+            line.push(b'\r');
+            let written = probe.write_owner_secret(&line).await;
+            line.fill(0);
+            std::hint::black_box(&line);
+            match written {
+                Ok(()) => {}
+                Err(WriteStdinError::NoSecretPrompt) => {
+                    return Err(PtyRuntimeError::NotAwaitingCredential(job_id));
+                }
+                Err(WriteStdinError::Oversized) => return Err(PtyRuntimeError::OversizedStdin),
+                Err(WriteStdinError::Closed) => return Err(PtyRuntimeError::UnknownJob(job_id)),
+                Err(WriteStdinError::SecretInputActive) => {
+                    return Err(PtyRuntimeError::SecretInputDenied);
+                }
+                Err(WriteStdinError::Io(e)) => return Err(PtyRuntimeError::Io(e)),
+            }
+            self.audit(
+                "credential_provided",
+                &job_id.to_wire_string(),
+                "allow",
+                None,
+                Some(serde_json::json!({ "kind": awaiting.kind, "source": source }).to_string()),
+            );
+            Ok(current)
         }
 
         pub fn stop(&self, job_id: JobId) -> Result<(BucketId, PtyProbeMetrics), PtyRuntimeError> {
@@ -974,22 +1097,25 @@ mod runtime {
         ) -> Option<terminal_commander_ipc::protocol::CommandStatusResponse> {
             use terminal_commander_ipc::protocol::OutcomeTrust;
 
-            let (bucket_id, probe_id, metrics) = {
+            let (bucket_id, probe_id, metrics, awaiting_credential) = {
                 let g = self.live.read();
                 let b = g.get(&job_id)?;
                 // Same read shape as `list()`: prefer the probe's live counters,
                 // fall back to the sink snapshot if the probe is momentarily
                 // busy. Never block a status read.
-                let metrics = if let Ok(guard) = b.probe.try_lock() {
+                let (metrics, awaiting) = if let Ok(guard) = b.probe.try_lock() {
                     let probe_metrics = guard
                         .as_ref()
                         .map_or_else(PtyProbeMetrics::default, PtyProbe::metrics);
                     let sink_snap = b.metrics_snapshot.lock().clone();
-                    combine_pty_metrics(&probe_metrics, &sink_snap)
+                    (
+                        combine_pty_metrics(&probe_metrics, &sink_snap),
+                        guard.as_ref().and_then(awaiting_of),
+                    )
                 } else {
-                    b.metrics_snapshot.lock().clone()
+                    (b.metrics_snapshot.lock().clone(), None)
                 };
-                (b.bucket_id, b.probe_id, metrics)
+                (b.bucket_id, b.probe_id, metrics, awaiting)
             };
             let rec = self.jobs.get(job_id)?;
             Some(terminal_commander_ipc::protocol::CommandStatusResponse {
@@ -1017,6 +1143,7 @@ mod runtime {
                 restarted: false,
                 outcome_trust: OutcomeTrust::Observed,
                 pipeline_exit_masked: false,
+                awaiting_credential,
             })
         }
 

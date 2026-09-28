@@ -380,6 +380,12 @@ pub struct DaemonConfig {
     /// not an IPC field. Production stays false.
     #[serde(skip, default)]
     pub recipe_admin_test_seam: bool,
+    /// In-process tests set this to stand in for the owner's native
+    /// password prompt: `test:<secret>` answers, `test-decline` cancels,
+    /// `none` forces the admin-CLI fallback. Not a TOML key and not an IPC
+    /// field. Production stays `None` (the real prompt).
+    #[serde(skip, default)]
+    pub credential_prompter_test_seam: Option<String>,
 }
 
 const fn default_retention() -> RetentionSection {
@@ -431,6 +437,7 @@ impl DaemonConfig {
             shell_session: default_shell_session(),
             sifters: default_sifters(),
             recipe_admin_test_seam: false,
+            credential_prompter_test_seam: None,
         }
     }
 

@@ -18,6 +18,8 @@ pub mod activation;
 pub mod audit;
 pub mod command;
 pub mod config;
+#[cfg(any(unix, windows))]
+pub mod credential;
 pub mod environment;
 pub mod file_watch;
 pub mod ipc;

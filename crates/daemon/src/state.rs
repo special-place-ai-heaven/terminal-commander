@@ -133,6 +133,10 @@ pub struct DaemonState {
     /// field is absent and the IPC layer returns `UnsupportedPlatform`.
     #[cfg(any(unix, windows))]
     pub pty: Arc<PtyRuntime>,
+    /// Owner credential prompts for PTY password prompts
+    /// (`credential_request`); one owner prompt per prompt generation.
+    #[cfg(any(unix, windows))]
+    pub credentials: Arc<crate::credential::CredentialBroker>,
     /// Persistent shell-session runtime (P1 / TC50). Built ON TOP of the
     /// SAME `Arc<PtyRuntime>` above: a session is a long-lived login-shell
     /// PTY job, so sticky cwd/env come from the persistent shell. Owns the
@@ -437,6 +441,11 @@ impl DaemonState {
             config.shell_session.idle_ttl_secs,
         ));
 
+        #[cfg(any(unix, windows))]
+        let credentials = Arc::new(crate::credential::CredentialBroker::new(
+            config.credential_prompter_test_seam.clone(),
+        ));
+
         // Mint a fresh per-boot identity. A restart produces a new value;
         // surfaced on `subscription_open` as the restart signal (MUST-ADD #6).
         let boot_id = uuid::Uuid::new_v4();
@@ -463,6 +472,8 @@ impl DaemonState {
             watch,
             #[cfg(any(unix, windows))]
             pty,
+            #[cfg(any(unix, windows))]
+            credentials,
             #[cfg(unix)]
             sessions,
             #[cfg(any(test, feature = "test-util"))]

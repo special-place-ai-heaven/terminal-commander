@@ -1968,6 +1968,7 @@ impl CommandRuntime {
             // may treat every number here as a real observation.
             outcome_trust: OutcomeTrust::Observed,
             pipeline_exit_masked,
+            awaiting_credential: None,
         })
     }
 
@@ -2072,6 +2073,7 @@ impl CommandRuntime {
             restarted: outcome_trust != OutcomeTrust::Observed,
             outcome_trust,
             pipeline_exit_masked: false,
+            awaiting_credential: None,
         })
     }
 

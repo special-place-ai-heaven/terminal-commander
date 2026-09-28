@@ -24,6 +24,7 @@ use terminal_commander_supervisor::paths::{
 // probes the daemon first and only constructs a `DaemonClient` once the
 // health handshake confirms it is live. The honest "unavailable; refusing
 // to synthesize" exit-69 path lives in `ipc::CliIpcError::Unavailable`.
+pub(crate) mod credential;
 pub(crate) mod ipc;
 pub(crate) mod render;
 pub(crate) mod update_locks;
@@ -113,6 +114,11 @@ enum Command {
         #[command(subcommand)]
         op: SessionOp,
     },
+    /// Answer a PTY job's password prompt from your own terminal.
+    Credential {
+        #[command(subcommand)]
+        op: CredentialOp,
+    },
     /// Hidden npm-update preflight: stop TC binaries loaded from anywhere under
     /// the npm package scope dir (typically the parent `node_modules`).
     #[command(hide = true)]
@@ -121,6 +127,16 @@ enum Command {
         /// Accepts the legacy `--bin-dir` alias from older JS shims.
         #[arg(long = "scope-dir", alias = "bin-dir")]
         scope_dir: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CredentialOp {
+    /// Read a password with echo off and type it into the waiting PTY job.
+    /// The daemon types it; the AI model never sees it.
+    Provide {
+        /// PTY job id from `credential_request` or `pty_command_list`.
+        job_id: String,
     },
 }
 
@@ -241,6 +257,9 @@ fn run(cli: Cli) -> std::process::ExitCode {
                 idle_secs,
             } => run_session_reap(token.as_deref(), all, idle, idle_secs),
         },
+        Command::Credential {
+            op: CredentialOp::Provide { job_id },
+        } => credential::run_provide(&job_id),
         Command::UpdateLocks { scope_dir } => {
             let result = update_locks::stop_installed_processes(&scope_dir);
             for line in &result.lines {

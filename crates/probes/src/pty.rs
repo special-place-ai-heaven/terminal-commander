@@ -428,6 +428,9 @@ mod pty_core {
         SecretInputActive,
         #[error("input exceeds {MAX_PTY_STDIN_BYTES} byte cap")]
         Oversized,
+        /// `write_owner_secret` with no secret prompt armed.
+        #[error("no secret prompt is waiting for input")]
+        NoSecretPrompt,
         #[error("pty handle no longer available")]
         Closed,
         #[error("io error: {0}")]
@@ -491,6 +494,18 @@ mod pty_core {
         pub(super) generation: Arc<AtomicU64>,
         /// Generation already counted (peek vs completion dedupe, M1).
         pub(super) counted_generation: Arc<AtomicU64>,
+        /// Kind + unix ms of the last armed prompt, for `awaiting_credential`.
+        /// Display only; `active` stays the gate.
+        armed: Arc<Mutex<(PromptKind, u64)>>,
+        /// The armed prompt was seen by the peek path and its line has not
+        /// completed yet.
+        pending: Arc<AtomicBool>,
+        /// The owner answered the pending prompt, so that line's completion is
+        /// not a fresh prompt. Cleared by the next completed line.
+        answered: Arc<AtomicBool>,
+        /// The owner's secret, held until the next completed line so a child
+        /// that left terminal echo on cannot put it in the ring or a bucket.
+        scrub: Arc<Mutex<Option<Vec<u8>>>>,
     }
 
     impl SecretGate {
@@ -499,8 +514,80 @@ mod pty_core {
                 active: Arc::new(AtomicBool::new(false)),
                 generation: Arc::new(AtomicU64::new(0)),
                 counted_generation: Arc::new(AtomicU64::new(0)),
+                armed: Arc::new(Mutex::new((PromptKind::None, 0))),
+                pending: Arc::new(AtomicBool::new(false)),
+                answered: Arc::new(AtomicBool::new(false)),
+                scrub: Arc::new(Mutex::new(None)),
             }
         }
+
+        fn record_arm(&self, kind: PromptKind) {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            *self.armed.lock() = (kind, now_ms);
+        }
+
+        /// The armed secret prompt (kind, unix ms) while the gate is active.
+        pub(super) fn awaiting(&self) -> Option<(PromptKind, u64)> {
+            self.active
+                .load(Ordering::Acquire)
+                .then(|| *self.armed.lock())
+        }
+
+        /// Owner credential delivery: disarm the gate BEFORE the write so the
+        /// answered prompt's own line completion does not re-arm it, while a
+        /// later prompt still does. `false` when no secret prompt is up.
+        pub(super) fn disarm_for_owner(&self) -> bool {
+            if !self.active.load(Ordering::Acquire) {
+                return false;
+            }
+            self.answered
+                .store(self.pending.load(Ordering::Acquire), Ordering::Release);
+            self.active.store(false, Ordering::Release);
+            true
+        }
+
+        /// Undo [`Self::disarm_for_owner`] when the write failed.
+        pub(super) fn rearm(&self) {
+            self.answered.store(false, Ordering::Release);
+            self.active.store(true, Ordering::Release);
+            let secret = self.scrub.lock().take();
+            if let Some(mut secret) = secret {
+                wipe(&mut secret);
+            }
+        }
+
+        /// Mask the owner's secret in the first line completed after it was
+        /// typed (the echo line, if the child left echo on).
+        ///
+        /// ponytail: one line only; a child that re-prints the secret later
+        /// is not covered.
+        pub(super) fn arm_scrub(&self, line: &[u8]) {
+            let secret = line.strip_suffix(b"\n").unwrap_or(line);
+            let secret = secret.strip_suffix(b"\r").unwrap_or(secret);
+            if !secret.is_empty() {
+                *self.scrub.lock() = Some(secret.to_vec());
+            }
+        }
+
+        fn scrub_line(&self, line: &str) -> Option<String> {
+            let mut secret = self.scrub.lock().take()?;
+            let masked = std::str::from_utf8(&secret)
+                .ok()
+                .filter(|s| line.contains(s))
+                .map(|s| line.replace(s, "********"));
+            wipe(&mut secret);
+            masked
+        }
+    }
+
+    /// Best-effort wipe of a stdin buffer that may hold an owner secret.
+    /// ponytail: no `zeroize` in the lock; `black_box` keeps the store from
+    /// being elided, not a guarantee against copies elsewhere.
+    pub(super) fn wipe(buf: &mut [u8]) {
+        buf.fill(0);
+        std::hint::black_box(buf);
     }
 
     /// Run prompt detection over a NON-newline-terminated buffer (the peek
@@ -524,6 +611,11 @@ mod pty_core {
         gate: &SecretGate,
         metrics: &Mutex<PtyProbeMetrics>,
     ) {
+        // The owner answered the prompt still sitting in the pending buffer;
+        // wait for its line to complete before peeking again.
+        if gate.answered.load(Ordering::Acquire) {
+            return;
+        }
         for candidate in candidates {
             if candidate.is_empty() {
                 continue;
@@ -534,6 +626,8 @@ mod pty_core {
                 // M1: record that this generation is counted so the later
                 // `process_line` completion does not double count it.
                 gate.counted_generation.store(new_gen, Ordering::Release);
+                gate.pending.store(true, Ordering::Release);
+                gate.record_arm(kind);
                 let mut m = metrics.lock();
                 m.prompts_total = m.prompts_total.saturating_add(1);
                 m.secret_prompts_total = m.secret_prompts_total.saturating_add(1);
@@ -558,7 +652,17 @@ mod pty_core {
         gate: SecretGate,
         noise_pipeline: SharedProbeNoisePipeline,
     ) {
-        let kind = PromptDetector::classify(line);
+        let masked = gate.scrub_line(line);
+        let line = masked.as_deref().unwrap_or(line);
+        let mut kind = PromptDetector::classify(line);
+        // Any completed line ends the pending peek-armed prompt. If the owner
+        // already answered that prompt, its completion is plain output, not a
+        // fresh prompt to re-arm on.
+        let answered = gate.answered.swap(false, Ordering::AcqRel);
+        gate.pending.store(false, Ordering::Release);
+        if answered && PromptDetector::is_secret(kind) {
+            kind = PromptKind::None;
+        }
         let is_secret = PromptDetector::is_secret(kind);
         // M1: a secret prompt may already have been detected (and
         // counted) by the peek path before its line completed with a
@@ -571,6 +675,7 @@ mod pty_core {
             if !gate.active.swap(true, Ordering::AcqRel) {
                 let new_gen = gate.generation.fetch_add(1, Ordering::AcqRel) + 1;
                 gate.counted_generation.store(new_gen, Ordering::Release);
+                gate.record_arm(kind);
                 flipped_here = true;
             }
         } else if matches!(kind, PromptKind::Shell | PromptKind::YesNo) {
@@ -725,6 +830,98 @@ mod pty_core {
             );
         }
 
+        /// One reader step against a shared gate: completed lines, then the
+        /// peek over the pending buffer, in the order both backends run them.
+        fn feed(gate: &SecretGate, lines: &[&str], pending: &str) {
+            let probe_id = ProbeId::default();
+            let rings = Arc::new(ContextRingManager::new());
+            rings.create_ring_default(probe_id).expect("ring");
+            let sink: Arc<dyn EventSink> = Arc::new(InMemorySink::new());
+            let metrics = Arc::new(Mutex::new(PtyProbeMetrics::default()));
+            let noise: SharedProbeNoisePipeline =
+                Arc::new(Mutex::new(ProbeNoisePipeline::with_default_policy()));
+            for line in lines {
+                process_line(
+                    line,
+                    probe_id,
+                    BucketId::new(),
+                    Arc::clone(&rings),
+                    empty_runtime(),
+                    Arc::clone(&sink),
+                    Arc::clone(&metrics),
+                    gate.clone(),
+                    Arc::clone(&noise),
+                );
+            }
+            classify_pending_secret(&[pending], gate, &metrics);
+        }
+
+        #[test]
+        fn owner_answer_disarms_and_its_line_completion_does_not_rearm() {
+            let gate = SecretGate::new();
+            feed(&gate, &[], "[sudo] password for dev: ");
+            let (kind, since) = gate.awaiting().expect("peek arms the gate");
+            assert_eq!(kind, PromptKind::SudoPassword);
+            assert!(since > 0);
+            assert!(gate.disarm_for_owner());
+            assert!(gate.awaiting().is_none());
+            // More bytes before the newline: the answered prompt is still the
+            // pending buffer and must not re-arm from the peek.
+            feed(&gate, &[], "[sudo] password for dev: ");
+            assert!(
+                gate.awaiting().is_none(),
+                "peek re-armed an answered prompt"
+            );
+            // sudo prints `\n` after reading: the answered line completes.
+            feed(&gate, &["[sudo] password for dev: "], "");
+            assert!(gate.awaiting().is_none(), "completion re-armed");
+            assert_eq!(gate.generation.load(Ordering::Acquire), 1);
+            // A wrong password re-prompts: that is a fresh prompt.
+            feed(&gate, &["Sorry, try again."], "[sudo] password for dev: ");
+            assert!(gate.awaiting().is_some(), "re-prompt must re-arm");
+            assert_eq!(gate.generation.load(Ordering::Acquire), 2);
+        }
+
+        #[test]
+        fn owner_answer_to_completed_prompt_line_rearms_on_next_prompt() {
+            // A prompt that arrived as a whole line has no pending completion
+            // to swallow, so the very next secret line is a fresh prompt.
+            let gate = SecretGate::new();
+            feed(&gate, &["Password:"], "");
+            assert!(gate.disarm_for_owner());
+            feed(&gate, &["Password:"], "");
+            assert!(gate.awaiting().is_some());
+            assert_eq!(gate.generation.load(Ordering::Acquire), 2);
+        }
+
+        #[test]
+        fn owner_secret_echo_is_masked_on_the_next_completed_line_only() {
+            let gate = SecretGate::new();
+            gate.arm_scrub(
+                b"s3cret-marker
+",
+            );
+            assert_eq!(
+                gate.scrub_line("[sudo] password for dev: s3cret-marker")
+                    .as_deref(),
+                Some("[sudo] password for dev: ********")
+            );
+            assert_eq!(gate.scrub_line("s3cret-marker"), None, "one line only");
+        }
+
+        #[test]
+        fn disarm_without_prompt_is_refused_and_rearm_restores() {
+            let gate = SecretGate::new();
+            assert!(!gate.disarm_for_owner());
+            feed(&gate, &[], "password: ");
+            assert!(gate.disarm_for_owner());
+            gate.rearm();
+            assert_eq!(
+                gate.awaiting().map(|(k, _)| k),
+                Some(PromptKind::GenericPassword)
+            );
+        }
+
         /// F-001 (REGRESSION): a writer-path secret denial MUST surface the
         /// typed `WriteStdinError::SecretInputActive`, NOT a generic
         /// `io::Error`. Before the fix the Windows writer thread sent
@@ -784,7 +981,7 @@ mod pty_core {
     clippy::too_many_lines,         // PTY spawn is one tightly-coupled lifecycle
 )]
 mod runtime {
-    use super::AnsiNormalizer;
+    use super::{AnsiNormalizer, PromptKind};
     // Shared platform-neutral surface (types + the secret-gate `process_line`).
     use super::pty_core::{
         self, MAX_PTY_STDIN_BYTES, PtyExitOutcome, PtyProbeConfig, PtyProbeError, PtyProbeMetrics,
@@ -907,12 +1104,7 @@ mod runtime {
                 m.stdin_writes_denied_secret = m.stdin_writes_denied_secret.saturating_add(1);
                 return Err(WriteStdinError::SecretInputActive);
             }
-            let tx = self.stdin_tx.as_ref().ok_or(WriteStdinError::Closed)?;
-            let (reply_tx, reply_rx) = oneshot::channel();
-            tx.send((bytes.to_vec(), reply_tx))
-                .await
-                .map_err(|_| WriteStdinError::Closed)?;
-            let reply = reply_rx.await.map_err(|_| WriteStdinError::Closed)?;
+            let reply = self.queue(bytes).await?;
             let written = match map_writer_reply(reply) {
                 Ok(n) => n,
                 // F-001 parity: a writer-path secret denial is counted with the
@@ -928,6 +1120,43 @@ mod runtime {
             let mut m = self.metrics.lock();
             m.stdin_bytes_written = m.stdin_bytes_written.saturating_add(written as u64);
             Ok(written)
+        }
+
+        /// Queue bytes for the streaming task and await its typed reply.
+        async fn queue(&self, bytes: &[u8]) -> Result<WriterReply, WriteStdinError> {
+            let tx = self.stdin_tx.as_ref().ok_or(WriteStdinError::Closed)?;
+            let (reply_tx, reply_rx) = oneshot::channel();
+            tx.send((bytes.to_vec(), reply_tx))
+                .await
+                .map_err(|_| WriteStdinError::Closed)?;
+            reply_rx.await.map_err(|_| WriteStdinError::Closed)
+        }
+
+        /// The armed secret prompt `(kind, unix ms)` while the TC44 gate is
+        /// up, else `None`. Bounded metadata only, never prompt text.
+        #[must_use]
+        pub fn awaiting_credential(&self) -> Option<(PromptKind, u64)> {
+            self.gate.awaiting()
+        }
+
+        /// Owner credential delivery: the ONE write allowed while a secret
+        /// prompt is up. The daemon calls it only with a secret the owner
+        /// typed (native prompt or the admin CLI), never with model input.
+        /// Not counted in `stdin_bytes_written`, so the length never
+        /// surfaces. `NoSecretPrompt` when no prompt is armed.
+        pub async fn write_owner_secret(&self, bytes: &[u8]) -> Result<(), WriteStdinError> {
+            if bytes.len() > MAX_PTY_STDIN_BYTES {
+                return Err(WriteStdinError::Oversized);
+            }
+            if !self.gate.disarm_for_owner() {
+                return Err(WriteStdinError::NoSecretPrompt);
+            }
+            self.gate.arm_scrub(bytes);
+            let sent = self.queue(bytes).await.and_then(map_writer_reply);
+            if sent.is_err() {
+                self.gate.rearm();
+            }
+            sent.map(|_| ())
         }
 
         /// Cancel the probe. Idempotent.
@@ -1064,11 +1293,12 @@ mod runtime {
                     // check in `write_stdin` already gates secret prompts on
                     // this single-task backend, so the drain only ever reports
                     // a byte count or an io error.
-                    while let Ok((bytes, reply)) = stdin_rx.try_recv() {
+                    while let Ok((mut bytes, reply)) = stdin_rx.try_recv() {
                         let result = match pty.write_all(&bytes).await {
                             Ok(()) => pty.flush().await.map(|()| bytes.len()),
                             Err(e) => Err(e),
                         };
+                        pty_core::wipe(&mut bytes);
                         let _ = reply.send(match result {
                             Ok(n) => WriterReply::Written(n),
                             Err(e) => WriterReply::Io(e),
@@ -1436,11 +1666,11 @@ mod runtime {
     clippy::too_many_lines,         // PTY spawn is one tightly-coupled lifecycle
 )]
 mod runtime_win {
-    use super::AnsiNormalizer;
     use super::pty_core::{
         self, MAX_PTY_STDIN_BYTES, PtyExitOutcome, PtyProbeConfig, PtyProbeError, PtyProbeMetrics,
         SecretGate, WriteStdinError, WriterReply, map_writer_reply,
     };
+    use super::{AnsiNormalizer, PromptKind};
 
     use std::io::{Read, Write};
     use std::sync::Arc;
@@ -1703,11 +1933,7 @@ mod runtime_win {
                 m.stdin_writes_denied_secret = m.stdin_writes_denied_secret.saturating_add(1);
                 return Err(WriteStdinError::SecretInputActive);
             }
-            let tx = self.stdin_tx.as_ref().ok_or(WriteStdinError::Closed)?;
-            let (reply_tx, reply_rx) = oneshot::channel();
-            tx.send(WriterMsg::Stdin(bytes.to_vec(), reply_tx))
-                .map_err(|_| WriteStdinError::Closed)?;
-            let reply = reply_rx.await.map_err(|_| WriteStdinError::Closed)?;
+            let reply = self.queue(bytes).await?;
             let written = match map_writer_reply(reply) {
                 Ok(n) => n,
                 // F-001: the writer thread re-checked the gate and denied
@@ -1728,6 +1954,42 @@ mod runtime_win {
             let mut m = self.metrics.lock();
             m.stdin_bytes_written = m.stdin_bytes_written.saturating_add(written as u64);
             Ok(written)
+        }
+
+        /// Queue bytes for the writer thread and await its typed reply.
+        async fn queue(&self, bytes: &[u8]) -> Result<WriterReply, WriteStdinError> {
+            let tx = self.stdin_tx.as_ref().ok_or(WriteStdinError::Closed)?;
+            let (reply_tx, reply_rx) = oneshot::channel();
+            tx.send(WriterMsg::Stdin(bytes.to_vec(), reply_tx))
+                .map_err(|_| WriteStdinError::Closed)?;
+            reply_rx.await.map_err(|_| WriteStdinError::Closed)
+        }
+
+        /// The armed secret prompt `(kind, unix ms)` while the TC44 gate is
+        /// up, else `None`. Bounded metadata only, never prompt text.
+        #[must_use]
+        pub fn awaiting_credential(&self) -> Option<(PromptKind, u64)> {
+            self.gate.awaiting()
+        }
+
+        /// Owner credential delivery: the ONE write allowed while a secret
+        /// prompt is up. The daemon calls it only with a secret the owner
+        /// typed (native prompt or the admin CLI), never with model input.
+        /// Not counted in `stdin_bytes_written`, so the length never
+        /// surfaces. `NoSecretPrompt` when no prompt is armed.
+        pub async fn write_owner_secret(&self, bytes: &[u8]) -> Result<(), WriteStdinError> {
+            if bytes.len() > MAX_PTY_STDIN_BYTES {
+                return Err(WriteStdinError::Oversized);
+            }
+            if !self.gate.disarm_for_owner() {
+                return Err(WriteStdinError::NoSecretPrompt);
+            }
+            self.gate.arm_scrub(bytes);
+            let sent = self.queue(bytes).await.and_then(map_writer_reply);
+            if sent.is_err() {
+                self.gate.rearm();
+            }
+            sent.map(|_| ())
         }
 
         /// Cancel the probe. Idempotent. CANCEL = kill child (release any
@@ -2026,8 +2288,9 @@ mod runtime_win {
                                     let _ = writer.flush();
                                 }
                             }
-                            WriterMsg::Stdin(bytes, reply) => {
+                            WriterMsg::Stdin(mut bytes, reply) => {
                                 if writer_gate.active.load(Ordering::Acquire) {
+                                    pty_core::wipe(&mut bytes);
                                     // F-001: the reader flipped the gate after
                                     // the daemon's first check but before this
                                     // write applied. Deny with the TYPED
@@ -2039,13 +2302,15 @@ mod runtime_win {
                                     let _ = reply.send(WriterReply::SecretDenied);
                                     continue;
                                 }
-                                let _ = reply.send(match writer.write_all(&bytes) {
+                                let result = match writer.write_all(&bytes) {
                                     Ok(()) => match writer.flush() {
                                         Ok(()) => WriterReply::Written(bytes.len()),
                                         Err(e) => WriterReply::Io(e),
                                     },
                                     Err(e) => WriterReply::Io(e),
-                                });
+                                };
+                                pty_core::wipe(&mut bytes);
+                                let _ = reply.send(result);
                             }
                         }
                     }

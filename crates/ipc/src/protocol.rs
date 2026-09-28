@@ -195,6 +195,9 @@ pub struct CommandStatusResponse {
     /// on reconstructed status, PTY jobs, `cmd /C` or `pwsh -Command` lanes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pipeline_exit_masked: bool,
+    /// PTY only: the job is blocked on a password prompt. Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_credential: Option<AwaitingCredential>,
 }
 
 /// Params for `command_stop` (TC-3): force-kill a running combed
@@ -453,6 +456,14 @@ pub enum IpcRequest {
     PtyCommandStop(PtyCommandStopParams),
     /// Snapshot of every currently-live PTY job.
     PtyCommandList,
+    /// Ask the OWNER for the password a PTY job's prompt is waiting on,
+    /// through a channel the model cannot read (native prompt, else the
+    /// admin CLI). The response carries only a status, never the secret.
+    CredentialRequest(CredentialRequestParams),
+    /// Deliver an owner-typed secret to a PTY job's password prompt.
+    /// Accepted only from the admin CLI peer (`terminal-commander
+    /// credential provide`); an MCP-labelled peer is denied.
+    CredentialProvide(CredentialProvideParams),
     /// Start a persistent shell session (P1 / TC50): a long-lived
     /// login-shell PTY behind the `allow_session` capability. Denied by
     /// default; policy-checked + audited before spawn. Bounded metadata
@@ -568,6 +579,11 @@ impl IpcRequest {
             | Self::PtyCommandStart(_)
             | Self::PtyCommandWriteStdin(_)
             | Self::PtyCommandStop(_)
+            // Credential elicitation can open an owner prompt or type into a
+            // PTY. The daemon replays a prompt's outcome without a second
+            // dialog, but a blind re-send is still not a pure read.
+            | Self::CredentialRequest(_)
+            | Self::CredentialProvide(_)
             // Session lane (P1 / TC50): start spawns a fresh session
             // shell + mints ids; exec writes stdin + advances the read
             // cursor server-side; stop fires a one-shot cancel; the
@@ -762,6 +778,8 @@ pub enum IpcResponse {
     PtyCommandWriteStdin(PtyCommandWriteStdinResponse),
     PtyCommandStop(PtyCommandStopResponse),
     PtyCommandList(PtyCommandListResponse),
+    CredentialRequest(CredentialRequestResponse),
+    CredentialProvide(CredentialProvideResponse),
     ShellSessionStart(ShellSessionStartResponse),
     ShellSessionExec(ShellSessionExecResponse),
     ShellSessionStatus(ShellSessionStatusResponse),
@@ -2650,6 +2668,10 @@ pub struct PtyCommandWriteStdinResponse {
     /// Echoes the post-write secret-prompt-active flag so the LLM
     /// can avoid a follow-up write that would also be rejected.
     pub secret_prompt_active: bool,
+    /// The job is blocked on a password prompt (read after the settle
+    /// window when `wait_ms` was given). Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_credential: Option<AwaitingCredential>,
     /// NEW (US5 / FR-041): the following combed-batch fields are present
     /// ONLY when `wait_ms` was supplied on the request. A no-wait
     /// response omits every one of them, serializing byte-identically to
@@ -2694,11 +2716,114 @@ pub struct PtyCommandListEntry {
     pub stdin_bytes_written: u64,
     pub secret_prompts_total: u64,
     pub secret_prompt_active: bool,
+    /// The job is blocked on a password prompt. Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_credential: Option<AwaitingCredential>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtyCommandListResponse {
     pub entries: Vec<PtyCommandListEntry>,
+}
+
+/// Which password prompt a PTY job is blocked on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialKind {
+    Sudo,
+    Ssh,
+    Password,
+}
+
+/// A PTY job waiting for a password. TC never takes the password from the
+/// model: `credential_request` asks the owner directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AwaitingCredential {
+    pub kind: CredentialKind,
+    /// Unix epoch milliseconds when the prompt appeared.
+    pub since_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRequestParams {
+    pub job_id: JobId,
+}
+
+/// Outcome of a `credential_request`. The only thing the model learns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialStatus {
+    /// The owner answered and the daemon typed it into the prompt.
+    Provided,
+    /// The owner cancelled the prompt.
+    Declined,
+    /// No native prompt is available: the owner runs `command`.
+    OwnerActionRequired,
+    /// The owner has not answered yet; the prompt stays open and a repeat
+    /// call waits on the same prompt.
+    Timeout,
+    /// The job is not blocked on a password prompt.
+    NotAwaiting,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRequestResponse {
+    pub job_id: JobId,
+    pub status: CredentialStatus,
+    /// With `owner_action_required`: the command the owner runs in their
+    /// own terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// A secret the owner typed. `Debug` is redacted and the buffer is
+/// overwritten on drop.
+///
+/// ponytail: best-effort wipe (no `zeroize` in the lock); frame buffers and
+/// the kernel copy are not wiped.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OwnerSecret(String);
+
+impl OwnerSecret {
+    #[must_use]
+    pub const fn new(secret: String) -> Self {
+        Self(secret)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl std::fmt::Debug for OwnerSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OwnerSecret(<redacted>)")
+    }
+}
+
+impl Drop for OwnerSecret {
+    fn drop(&mut self) {
+        let mut bytes = std::mem::take(&mut self.0).into_bytes();
+        bytes.fill(0);
+        std::hint::black_box(&bytes);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialProvideParams {
+    pub job_id: JobId,
+    pub secret: OwnerSecret,
+    /// Caller claim, same gate as [`RecipeActivateParams::from_mcp`]:
+    /// defaults to true, and only the admin CLI image can provide.
+    #[serde(default = "default_true")]
+    pub from_mcp: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialProvideResponse {
+    pub job_id: JobId,
 }
 
 // =====================================================================
@@ -4587,5 +4712,61 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn credential_provide_redacts_debug_and_defaults_from_mcp() {
+        let req = IpcRequest::CredentialProvide(CredentialProvideParams {
+            job_id: JobId::new(),
+            secret: OwnerSecret::new("hunter2-marker".to_owned()),
+            from_mcp: false,
+        });
+        assert!(!format!("{req:?}").contains("hunter2-marker"));
+        let frame = encode_frame(&RequestEnvelope {
+            correlation_id: 1,
+            request: req,
+        })
+        .unwrap();
+        let back: RequestEnvelope = decode_payload(&frame[4..]).unwrap();
+        let IpcRequest::CredentialProvide(p) = back.request else {
+            panic!("wrong variant");
+        };
+        assert_eq!(p.secret.as_bytes(), b"hunter2-marker");
+        assert!(!p.from_mcp);
+        // An omitted claim is not admin.
+        let raw = serde_json::json!({ "job_id": p.job_id, "secret": "x" });
+        let parsed: CredentialProvideParams = serde_json::from_value(raw).unwrap();
+        assert!(parsed.from_mcp);
+    }
+
+    #[test]
+    fn awaiting_credential_is_omitted_when_none() {
+        let entry = PtyCommandListEntry {
+            job_id: JobId::new(),
+            bucket_id: BucketId::new(),
+            probe_id: terminal_commander_core::ProbeId::new(),
+            argv: vec!["sudo".to_owned()],
+            frames_total: 0,
+            events_emitted: 0,
+            bytes_total: 0,
+            stdin_bytes_written: 0,
+            secret_prompts_total: 0,
+            secret_prompt_active: false,
+            awaiting_credential: None,
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        assert!(v.get("awaiting_credential").is_none());
+        let entry = PtyCommandListEntry {
+            awaiting_credential: Some(AwaitingCredential {
+                kind: CredentialKind::Sudo,
+                since_ms: 7,
+            }),
+            ..entry
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            v["awaiting_credential"],
+            serde_json::json!({ "kind": "sudo", "since_ms": 7 })
+        );
     }
 }

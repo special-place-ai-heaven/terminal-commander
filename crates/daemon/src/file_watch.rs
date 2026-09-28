@@ -670,6 +670,7 @@ impl WatchRuntime {
             restarted: false,
             outcome_trust: OutcomeTrust::Observed,
             pipeline_exit_masked: false,
+            awaiting_credential: None,
         })
     }
 
