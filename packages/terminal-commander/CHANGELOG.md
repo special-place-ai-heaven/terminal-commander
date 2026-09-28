@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.99](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.98...v0.1.99) (2026-09-28)
+
+
+### Bug Fixes
+
+* **recipes:** close FCR-003, 004, 005, 010, 012–015 ([7990ccf](https://github.com/special-place-ai-heaven/terminal-commander/commit/7990ccf381ce82681685092e35acc195ed33b8e8))
+* **recipes:** close remaining findings FCR-003..005 and FCR-010/012..015 ([7990ccf](https://github.com/special-place-ai-heaven/terminal-commander/commit/7990ccf381ce82681685092e35acc195ed33b8e8))
+* **recipes:** keep admin IPC tests off the socket grant ([7990ccf](https://github.com/special-place-ai-heaven/terminal-commander/commit/7990ccf381ce82681685092e35acc195ed33b8e8))
+
 ## [0.1.98](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.97...v0.1.98) (2026-09-28)
 
 
