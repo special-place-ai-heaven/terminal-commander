@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.98](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.97...v0.1.98) (2026-09-28)
+
+
+### Bug Fixes
+
+* **recipes:** close lifecycle findings FCR-002 and FCR-006..011 ([fc34211](https://github.com/special-place-ai-heaven/terminal-commander/commit/fc34211a184424d79ff9d3514d424910183acf12))
+
 ## [0.1.97](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.96...v0.1.97) (2026-09-28)
 
 
