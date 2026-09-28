@@ -111,6 +111,12 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   RUST_TOOLCHAIN: "1.97.1"
   NODE_VERSION: "20"
+  # The one stdio probe every presmoke/verify job pipes into the adapter.
+  # MCP 2026-07-28 has no `initialize`: the opener is `server/discover`
+  # with the version + capabilities in `_meta`. A healthy adapter answers
+  # with `supportedVersions`; the jobs assert that, not just the exit code.
+  # Guarded by crates/mcp/tests/protocol_honesty.rs.
+  MCP_DISCOVER: '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"smoke","version":"0.0.0"}}}}'
 
 jobs:
   # ----------------------------------------------------------------
@@ -463,14 +469,18 @@ jobs:
           # `bin` field; the CLI is exposed by the root wrapper, not
           # needed for a load test). rc 0 or 124 (clean timeout) = pass.
           set -euo pipefail
-          docker run --rm -v "$PWD/pkg/bin:/tcbin:ro" node:22-bookworm-slim sh -c '
+          docker run --rm -e MCP_DISCOVER -v "$PWD/pkg/bin:/tcbin:ro" node:22-bookworm-slim sh -c '
             set -e
             /tcbin/terminal-commander-mcp --version
-            echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"presmoke\",\"version\":\"0.0.0\"}}}" \
-              | timeout 10 /tcbin/terminal-commander-mcp; rc=$?
+            rc=0
+            out=$(echo "$MCP_DISCOVER" | timeout 10 /tcbin/terminal-commander-mcp) || rc=$?
+            echo "$out"
             if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
               echo "::error::pre-publish stdio probe exited $rc on bookworm" >&2; exit "$rc"
             fi
+            case "$out" in *supportedVersions*) ;; *)
+              echo "::error::pre-publish stdio probe got no server/discover result" >&2; exit 1 ;;
+            esac
             echo "presmoke-linux-x64: OK (loads + runs on glibc 2.36)"
           '
 
@@ -592,14 +602,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/pkg/bin:/tcbin:ro" node:22-bookworm-slim sh -c '
+          docker run --rm -e MCP_DISCOVER -v "$PWD/pkg/bin:/tcbin:ro" node:22-bookworm-slim sh -c '
             set -e
             /tcbin/terminal-commander-mcp --version
-            echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"presmoke\",\"version\":\"0.0.0\"}}}" \
-              | timeout 10 /tcbin/terminal-commander-mcp; rc=$?
+            rc=0
+            out=$(echo "$MCP_DISCOVER" | timeout 10 /tcbin/terminal-commander-mcp) || rc=$?
+            echo "$out"
             if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
               echo "::error::pre-publish stdio probe exited $rc on bookworm" >&2; exit "$rc"
             fi
+            case "$out" in *supportedVersions*) ;; *)
+              echo "::error::pre-publish stdio probe got no server/discover result" >&2; exit 1 ;;
+            esac
             echo "presmoke-linux-arm64: OK (loads + runs on glibc 2.36)"
           '
 
@@ -1428,16 +1442,19 @@ jobs:
           # node:22-alpine uses musl libc. Our binaries are glibc-linked.
           # Use node:22-bookworm-slim instead. Also: --provenance requires npm 11.5.1+
           # which ships in Node 22.14+. node:22 tag tracks latest 22.x.
-          docker run --rm node:22-bookworm-slim sh -c '
+          docker run --rm -e MCP_DISCOVER node:22-bookworm-slim sh -c '
             set -e
             npm install -g "terminal-commander@'"${VER}"'"
             terminal-commander-mcp --version
-            # MCP initialize stdio probe (10s timeout — exit 124 = clean timeout = pass)
-            echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0.0.0\"}}}" \
-              | timeout 10 terminal-commander-mcp; rc=$?
+            rc=0
+            out=$(echo "$MCP_DISCOVER" | timeout 10 terminal-commander-mcp) || rc=$?
+            echo "$out"
             if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
               echo "::error::stdio probe exited $rc" >&2; exit "$rc"
             fi
+            case "$out" in *supportedVersions*) ;; *)
+              echo "::error::stdio probe got no server/discover result" >&2; exit 1 ;;
+            esac
             echo "verify-linux-x64: OK"
           '
 
@@ -1452,15 +1469,19 @@ jobs:
       - env:
           VER: ${{ needs.release-context.outputs.version }}
         run: |
-          docker run --rm node:22-bookworm-slim sh -c '
+          docker run --rm -e MCP_DISCOVER node:22-bookworm-slim sh -c '
             set -e
             npm install -g "terminal-commander@'"${VER}"'"
             terminal-commander-mcp --version
-            echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0.0.0\"}}}" \
-              | timeout 10 terminal-commander-mcp; rc=$?
+            rc=0
+            out=$(echo "$MCP_DISCOVER" | timeout 10 terminal-commander-mcp) || rc=$?
+            echo "$out"
             if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
               echo "::error::stdio probe exited $rc" >&2; exit "$rc"
             fi
+            case "$out" in *supportedVersions*) ;; *)
+              echo "::error::stdio probe got no server/discover result" >&2; exit 1 ;;
+            esac
             echo "verify-linux-arm64: OK"
           '
 
@@ -1486,7 +1507,7 @@ jobs:
           # Linux + Mac verify treat timeout as pass + non-zero quick exit as fail.
           # Windows must behave the same: only timeout is acceptable; any other
           # non-success state (Failed, fast non-zero exit) must fail loud.
-          $msg = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0.0.0"}}}'
+          $msg = $env:MCP_DISCOVER
           $job = Start-Job -ScriptBlock {
             param($m) $m | terminal-commander-mcp
           } -ArgumentList $msg
@@ -1502,6 +1523,10 @@ jobs:
               Stop-Job $job -ErrorAction SilentlyContinue
               Remove-Job $job -Force -ErrorAction SilentlyContinue
               throw "verify-windows-x64: MCP exited fast in state '$($job.State)' — install is broken"
+            }
+            if (-not ($output -match 'supportedVersions')) {
+              Remove-Job $job -Force -ErrorAction SilentlyContinue
+              throw "verify-windows-x64: stdio probe got no server/discover result"
             }
           }
           Stop-Job $job -ErrorAction SilentlyContinue
@@ -1530,20 +1555,16 @@ jobs:
           # "timed out cleanly" code we treat as success for an unbounded
           # stdio server probe.
           python3 - "$@" <<'PY'
-          import json, subprocess, sys
-          payload = json.dumps({
-              "jsonrpc": "2.0", "id": 1, "method": "initialize",
-              "params": {
-                  "protocolVersion": "2024-11-05",
-                  "capabilities": {},
-                  "clientInfo": {"name": "smoke", "version": "0.0.0"},
-              },
-          })
+          import os, subprocess, sys
+          payload = os.environ["MCP_DISCOVER"]
           try:
               r = subprocess.run(
                   ["terminal-commander-mcp"],
                   input=payload, text=True, capture_output=True, timeout=10,
               )
+              print(r.stdout)
+              if r.returncode == 0 and "supportedVersions" not in r.stdout:
+                  sys.exit("smoke: stdio probe got no server/discover result")
               sys.exit(r.returncode)
           except subprocess.TimeoutExpired:
               print("smoke: stdio probe timed out (expected for unbounded server)")
@@ -1568,20 +1589,16 @@ jobs:
           npm install -g "terminal-commander@${VER}"
           terminal-commander-mcp --version
           python3 - "$@" <<'PY'
-          import json, subprocess, sys
-          payload = json.dumps({
-              "jsonrpc": "2.0", "id": 1, "method": "initialize",
-              "params": {
-                  "protocolVersion": "2024-11-05",
-                  "capabilities": {},
-                  "clientInfo": {"name": "smoke", "version": "0.0.0"},
-              },
-          })
+          import os, subprocess, sys
+          payload = os.environ["MCP_DISCOVER"]
           try:
               r = subprocess.run(
                   ["terminal-commander-mcp"],
                   input=payload, text=True, capture_output=True, timeout=10,
               )
+              print(r.stdout)
+              if r.returncode == 0 and "supportedVersions" not in r.stdout:
+                  sys.exit("smoke: stdio probe got no server/discover result")
               sys.exit(r.returncode)
           except subprocess.TimeoutExpired:
               print("smoke: stdio probe timed out (expected for unbounded server)")

@@ -111,6 +111,14 @@ _COMPACT_ROUTES = {
 }
 
 
+# MCP 2026-07-28 has no `initialize`: every request carries this `_meta`.
+MCP_META = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientCapabilities": {},
+    "io.modelcontextprotocol/clientInfo": {"name": "omni-o-runner", "version": "0.0.0"},
+}
+
+
 def _route_call(tool, arguments, available_tools):
     """Route a granular OMNI call through the compact facade when required."""
     routed = dict(arguments)
@@ -161,9 +169,8 @@ class Mcp:
         self._init()
 
     def _send(self, method, params=None):
-        req = {"jsonrpc": "2.0", "id": self._next_id, "method": method}
-        if params is not None:
-            req["params"] = params
+        req = {"jsonrpc": "2.0", "id": self._next_id, "method": method,
+               "params": {**(params or {}), "_meta": MCP_META}}
         self._next_id += 1
         self.proc.stdin.write(json.dumps(req) + "\n")
         self.proc.stdin.flush()
@@ -187,19 +194,9 @@ class Mcp:
         raise SystemExit(f"omni-o-runner: timed out waiting for id={target_id}")
 
     def _init(self):
-        init_id = self._send(
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "omni-o-runner", "version": "0.0.0"},
-            },
-        )
-        self._recv(init_id)
-        self.proc.stdin.write(
-            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
-        )
-        self.proc.stdin.flush()
+        discovered = self._recv(self._send("server/discover"))
+        if "error" in discovered:
+            raise SystemExit(f"omni-o-runner: server/discover failed: {discovered['error']}")
 
         list_id = self._send("tools/list", {})
         listed = self._recv(list_id)

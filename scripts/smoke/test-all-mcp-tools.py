@@ -42,12 +42,17 @@ def main() -> int:
 
     nid = 1
     results: dict[str, dict] = {}
+    # MCP 2026-07-28 has no `initialize`: every request carries this `_meta`.
+    MCP_META = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "tc-all-tools-smoke", "version": "0.0.0"},
+    }
 
     def send(method: str, params=None) -> int:
         nonlocal nid
-        req = {"jsonrpc": "2.0", "id": nid, "method": method}
-        if params is not None:
-            req["params"] = params
+        req = {"jsonrpc": "2.0", "id": nid, "method": method,
+               "params": {**(params or {}), "_meta": MCP_META}}
         rid = nid
         nid += 1
         assert proc.stdin is not None
@@ -97,23 +102,10 @@ def main() -> int:
         return True
 
     try:
-        init_id = send(
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "tc-all-tools-smoke", "version": "0"},
-            },
-        )
-        init = recv(init_id)
+        init = recv(send("server/discover"))
         if init.get("error"):
-            print("initialize failed:", init, file=sys.stderr)
+            print("server/discover failed:", init, file=sys.stderr)
             return 1
-        assert proc.stdin is not None
-        proc.stdin.write(
-            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
-        )
-        proc.stdin.flush()
 
         # Session supervisor starts the daemon concurrently; allow IPC bind.
         time.sleep(2.0)

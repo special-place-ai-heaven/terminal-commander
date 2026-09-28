@@ -250,19 +250,20 @@ if (-not $wslAvailable) {
             }
         }
     } else {
-        Write-Info "MCP bridge round-trip: runtime_present detected -- driving initialize + tools/list + health through the WWS04 bridge"
+        Write-Info "MCP bridge round-trip: runtime_present detected -- driving server/discover + tools/list + health through the WWS04 bridge"
 
-        # Build a single JSON-RPC initialize+tools/list+health sequence
+        # Build a single JSON-RPC server/discover+tools/list+health sequence
         # sent to the mcp shim over stdin. The shim bridges to WSL via
         # the WWS04 spawn helper; the WSL-side terminal-commander-mcp
         # responds. We collect three JSON-RPC responses on stdout.
-        $rpcInit = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"wws07-smoke","version":"0.0.0"}}}'
-        $rpcInitNotif = '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-        $rpcTools = '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
-        $rpcHealth = '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"health","arguments":{}}}'
+        # MCP 2026-07-28 has no `initialize`: every request carries this `_meta`.
+        $meta = '"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"wws07-smoke","version":"0.0.0"}}'
+        $rpcInit = '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{' + $meta + '}}'
+        $rpcTools = '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{' + $meta + '}}'
+        $rpcHealth = '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"health","arguments":{},' + $meta + '}}'
         $rpcShutdown = '{"jsonrpc":"2.0","id":4,"method":"shutdown"}'
 
-        $stdinPayload = @($rpcInit, $rpcInitNotif, $rpcTools, $rpcHealth, $rpcShutdown) -join "`n"
+        $stdinPayload = @($rpcInit, $rpcTools, $rpcHealth, $rpcShutdown) -join "`n"
         $stdinPayload += "`n"
 
         $env:TC_WSL_SKIP_DOCTOR = "1"  # avoid double probe; CLI already verified runtime_present
@@ -274,9 +275,9 @@ if (-not $wslAvailable) {
                 Write-Fail "MCP bridge round-trip: timeout"
             } else {
                 if ($outBytes -match '"id":1' -and $outBytes -match '"result"') {
-                    Write-Pass "MCP initialize round-trip OK"
+                    Write-Pass "MCP server/discover round-trip OK"
                 } else {
-                    Write-Fail "MCP initialize: no id=1 result on stdout"
+                    Write-Fail "MCP server/discover: no id=1 result on stdout"
                     Write-Info "stderr excerpt: $($errBytes.Substring(0, [Math]::Min(300, $errBytes.Length)))"
                 }
                 if ($outBytes -match '"id":2.*"tools"') {

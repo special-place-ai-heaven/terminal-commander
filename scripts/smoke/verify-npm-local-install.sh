@@ -243,12 +243,15 @@ proc = subprocess.Popen(
     env=env, text=True, bufsize=1,
 )
 
+# MCP 2026-07-28 has no `initialize`: every request carries this `_meta`.
+MCP_META = {"io.modelcontextprotocol/protocolVersion":"2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities":{},
+            "io.modelcontextprotocol/clientInfo":{"name":"npm04-smoke", "version":"0.0.0"}}
 nid = 1
 def send(method, params=None):
     global nid
-    req = {"jsonrpc":"2.0", "id":nid, "method":method}
-    if params is not None:
-        req["params"] = params
+    req = {"jsonrpc":"2.0", "id":nid, "method":method,
+           "params":{**(params or {}), "_meta":MCP_META}}
     nid += 1
     proc.stdin.write(json.dumps(req) + "\n")
     proc.stdin.flush()
@@ -271,14 +274,7 @@ def recv(target_id, deadline=8.0):
 
 results = {}
 try:
-    init_id = send("initialize", {
-        "protocolVersion": "2024-11-05",
-        "capabilities": {},
-        "clientInfo": {"name":"npm04-smoke", "version":"0.0.0"},
-    })
-    results["initialize"] = recv(init_id)
-    proc.stdin.write(json.dumps({"jsonrpc":"2.0","method":"notifications/initialized"}) + "\n")
-    proc.stdin.flush()
+    results["discover"] = recv(send("server/discover"))
 
     tl_id = send("tools/list")
     results["tools_list"] = recv(tl_id)
@@ -319,10 +315,10 @@ def fail(m):
 def ok(m):
     print(f"PASS  {m}", file=sys.stderr)
 
-pv = r.get("initialize", {}).get("result", {}).get("protocolVersion")
-if pv != "2024-11-05":
-    fail(f"initialize protocol version (got: {pv})")
-ok("initialize protocol version")
+sv = r.get("discover", {}).get("result", {}).get("supportedVersions")
+if sv != ["2026-07-28"]:
+    fail(f"server/discover supportedVersions (got: {sv})")
+ok("server/discover supportedVersions")
 
 tools = r.get("tools_list", {}).get("result", {}).get("tools", [])
 if len(tools) < 29:

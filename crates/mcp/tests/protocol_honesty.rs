@@ -6,6 +6,7 @@
 //! `get_info`, negotiation, and `system_discover.mcp_spec` agree on
 //! `2026-07-28`. Any other opener does not connect.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rmcp::model::{CallToolRequestParams, ProtocolVersion};
@@ -208,4 +209,68 @@ async fn discover_refuses_older_preferred_version() {
         .expect("server task join")
         .expect("a modern opener is accepted before version selection fails");
     let _ = running.cancel().await;
+}
+
+/// Release presmoke/verify jobs and smoke scripts hand-roll the MCP opener
+/// instead of using rmcp's client. v0.2.0's release died at presmoke because
+/// they still sent a legacy `initialize`. Every `protocolVersion` they send
+/// must be one this server supports, and none may open with `initialize`.
+#[test]
+fn raw_wire_drivers_speak_a_supported_revision() {
+    let supported: Vec<String> = ServerHandler::supported_protocol_versions(&server())
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for dir in [".github", "scripts"] {
+        collect_files(&root.join(dir), &mut files);
+    }
+    let mut pinned = 0;
+    for path in files {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let rel = path.strip_prefix(&root).unwrap_or(&path).display();
+        assert!(
+            !text.contains("\"initialize\"") && !text.contains("initialize\\\""),
+            "{rel}: opens with a legacy `initialize`; use `server/discover` + `_meta`"
+        );
+        for (at, _) in text.match_indices("protocolVersion") {
+            let tail: String = text[at..].chars().take(48).collect();
+            if let Some(version) = first_date(&tail) {
+                assert!(
+                    supported.contains(&version),
+                    "{rel}: sends protocolVersion {version}; server supports {supported:?}"
+                );
+                pinned += 1;
+            }
+        }
+    }
+    assert!(
+        pinned > 0,
+        "found no raw-wire driver; the guard scans the wrong tree"
+    );
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read_dir").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+/// First `YYYY-MM-DD` in `s`.
+fn first_date(s: &str) -> Option<String> {
+    s.as_bytes().windows(10).find_map(|w| {
+        let is_date = w.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            _ => c.is_ascii_digit(),
+        });
+        is_date.then(|| String::from_utf8_lossy(w).into_owned())
+    })
 }
