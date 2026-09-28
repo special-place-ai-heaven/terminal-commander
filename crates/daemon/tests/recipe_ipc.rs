@@ -11,13 +11,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use terminal_commander_core::{
-    ActivationScope, RecipeDefinition, RecipeStatus, shell_interpreter_denied,
+    ActivationScope, JobId, RecipeDefinition, RecipeStatus, shell_interpreter_denied,
 };
 use terminal_commanderd::{
     DaemonClient, DaemonConfig, DaemonState, IpcErrorCode, IpcRequest, IpcResponse, IpcServer,
     ListLimitParams, RecipeActivateParams, RecipeDeactivateParams, RecipeGetParams,
-    RecipeImportSeedsParams, RecipeListVersionsParams, RecipeSearchParams, RecipeTombstoneParams,
-    RecipeUpsertParams,
+    RecipeImportSeedsParams, RecipeListVersionsParams, RecipeRunParams, RecipeSearchParams,
+    RecipeTombstoneParams, RecipeUpsertParams,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -159,7 +159,7 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
                 7,
                 IpcRequest::RecipeDeactivate(RecipeDeactivateParams {
                     recipe_id: "git.status".to_owned(),
-                    version: 1,
+                    version: Some(1),
                     scope: Some(scope),
                     from_mcp: false,
                 }),
@@ -233,6 +233,11 @@ fn recipe_seed_import_stays_tested_until_operator_activates() {
             .unwrap_err();
         assert_eq!(denied.code, IpcErrorCode::PolicyDenied);
         assert!(denied.message.contains("recipe_activate_requires_admin"));
+        assert!(
+            denied.message.contains("recipes activate"),
+            "deny text must name the operator verb: {}",
+            denied.message
+        );
 
         let imported = client
             .call(
@@ -336,6 +341,398 @@ fn recipe_seed_import_stays_tested_until_operator_activates() {
         assert!(second.imported.is_empty());
         assert_eq!(second.skipped.len(), 8);
         assert_eq!(second.activated.len(), 8);
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&data);
+    });
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one daemon: tombstone, omitted version, dead scope
+fn recipe_tombstone_deactivate_and_dead_scope_are_not_runnable() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("life-close");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+        let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
+            .spawn()
+            .unwrap();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+        let scope = ActivationScope::Global;
+
+        client
+            .call(
+                1,
+                IpcRequest::RecipeUpsert(RecipeUpsertParams {
+                    definition: recipe(RecipeStatus::Active),
+                }),
+            )
+            .await
+            .unwrap();
+        client
+            .call(
+                2,
+                IpcRequest::RecipeActivate(RecipeActivateParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: Some(1),
+                    scope: Some(scope),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        let mut v2 = recipe(RecipeStatus::Active);
+        v2.summary = "Newer stored body".to_owned();
+        client
+            .call(
+                3,
+                IpcRequest::RecipeUpsert(RecipeUpsertParams { definition: v2 }),
+            )
+            .await
+            .unwrap();
+
+        let closed = client
+            .call(
+                4,
+                IpcRequest::RecipeDeactivate(RecipeDeactivateParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: None,
+                    scope: Some(scope),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeDeactivate(de) = closed else {
+            panic!("deactivate: {closed:?}");
+        };
+        assert_eq!(de.version, 1, "omitted version must close the active row");
+
+        client
+            .call(
+                5,
+                IpcRequest::RecipeActivate(RecipeActivateParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: Some(1),
+                    scope: Some(scope),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        client
+            .call(
+                6,
+                IpcRequest::RecipeTombstone(RecipeTombstoneParams {
+                    recipe_id: "git.status".to_owned(),
+                }),
+            )
+            .await
+            .unwrap();
+        let listed = client
+            .call(
+                7,
+                IpcRequest::RecipeListActive(ListLimitParams { limit: None }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeListActive(active) = listed else {
+            panic!("list: {listed:?}");
+        };
+        assert!(
+            active
+                .entries
+                .iter()
+                .all(|entry| entry.recipe_id != "git.status"),
+            "tombstoned recipe must not stay listed: {active:?}"
+        );
+        let found = client
+            .call(
+                8,
+                IpcRequest::RecipeSearch(RecipeSearchParams {
+                    query: "status".to_owned(),
+                    limit: Some(10),
+                }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeSearch(hits) = found else {
+            panic!("search: {found:?}");
+        };
+        assert!(hits.hits.is_empty());
+        let ran = client
+            .call(
+                9,
+                IpcRequest::RecipeRun(RecipeRunParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: None,
+                    scope: Some(scope),
+                    fills: std::collections::BTreeMap::new(),
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(ran.code, IpcErrorCode::RecipeNotActive);
+
+        let mut echo = recipe(RecipeStatus::Active);
+        echo.recipe_id = "echo.true".to_owned();
+        echo.argv = vec!["true".to_owned()];
+        echo.tags.clear();
+        client
+            .call(
+                10,
+                IpcRequest::RecipeUpsert(RecipeUpsertParams { definition: echo }),
+            )
+            .await
+            .unwrap();
+        let job_scope = ActivationScope::Job {
+            job_id: JobId::new(),
+        };
+        let refused = client
+            .call(
+                11,
+                IpcRequest::RecipeActivate(RecipeActivateParams {
+                    recipe_id: "echo.true".to_owned(),
+                    version: Some(1),
+                    scope: Some(job_scope),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, IpcErrorCode::ScopeInvalid);
+        assert!(
+            refused.message.contains("global-only"),
+            "{}",
+            refused.message
+        );
+
+        assert!(
+            state
+                .store
+                .record_recipe_activation_scoped("echo.true", 1, job_scope, None, Some("test"))
+                .unwrap()
+        );
+        let hidden = client
+            .call(
+                12,
+                IpcRequest::RecipeListActive(ListLimitParams { limit: None }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeListActive(hidden_active) = hidden else {
+            panic!("list: {hidden:?}");
+        };
+        assert!(
+            hidden_active
+                .entries
+                .iter()
+                .all(|entry| entry.recipe_id != "echo.true")
+        );
+        let dead_run = client
+            .call(
+                13,
+                IpcRequest::RecipeRun(RecipeRunParams {
+                    recipe_id: "echo.true".to_owned(),
+                    version: None,
+                    scope: Some(job_scope),
+                    fills: std::collections::BTreeMap::new(),
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(dead_run.code, IpcErrorCode::RecipeNotActive);
+        let cleaned = client
+            .call(
+                14,
+                IpcRequest::RecipeDeactivate(RecipeDeactivateParams {
+                    recipe_id: "echo.true".to_owned(),
+                    version: Some(1),
+                    scope: Some(job_scope),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(cleaned, IpcResponse::RecipeDeactivate(_)));
+        assert!(
+            state
+                .store
+                .list_active_recipes()
+                .unwrap()
+                .iter()
+                .all(|row| row.definition.recipe_id != "echo.true")
+        );
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&data);
+    });
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // seed tombstone skip plus single-version reimport
+fn recipe_seed_import_skips_tombstone_and_activates_imported_version() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("seed-life");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+        let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
+            .spawn()
+            .unwrap();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+
+        client
+            .call(
+                1,
+                IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                    activate: false,
+                    scope: None,
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        client
+            .call(
+                2,
+                IpcRequest::RecipeTombstone(RecipeTombstoneParams {
+                    recipe_id: "git.log".to_owned(),
+                }),
+            )
+            .await
+            .unwrap();
+        let imported = client
+            .call(
+                3,
+                IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                    activate: true,
+                    scope: Some(ActivationScope::Global),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeImportSeeds(report) = imported else {
+            panic!("import: {imported:?}");
+        };
+        assert_eq!(report.tombstoned, vec!["git.log".to_owned()]);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(!report.activated.iter().any(|id| id == "git.log"));
+        assert_eq!(report.activated.len(), 7);
+        assert!(!report.imported.iter().any(|id| id == "git.log"));
+
+        let retry = client
+            .call(
+                4,
+                IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                    activate: true,
+                    scope: Some(ActivationScope::Global),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeImportSeeds(again) = retry else {
+            panic!("retry: {retry:?}");
+        };
+        assert!(again.imported.is_empty());
+        assert_eq!(again.tombstoned, vec!["git.log".to_owned()]);
+        assert!(again.failed.is_empty(), "{:?}", again.failed);
+        assert!(!again.activated.iter().any(|id| id == "git.log"));
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&data);
+    });
+
+    runtime.block_on(async {
+        let data = tmp_data_dir("seed-version");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+        let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
+            .spawn()
+            .unwrap();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+        let mut custom = recipe(RecipeStatus::Active);
+        custom.argv = vec![
+            "git".to_owned(),
+            "status".to_owned(),
+            "--porcelain=v2".to_owned(),
+        ];
+        client
+            .call(
+                1,
+                IpcRequest::RecipeUpsert(RecipeUpsertParams { definition: custom }),
+            )
+            .await
+            .unwrap();
+        client
+            .call(
+                2,
+                IpcRequest::RecipeActivate(RecipeActivateParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: Some(1),
+                    scope: Some(ActivationScope::Global),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        client
+            .call(
+                3,
+                IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                    activate: true,
+                    scope: Some(ActivationScope::Global),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        let listed = client
+            .call(
+                4,
+                IpcRequest::RecipeListActive(ListLimitParams { limit: None }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeListActive(active) = listed else {
+            panic!("list: {listed:?}");
+        };
+        let status: Vec<_> = active
+            .entries
+            .iter()
+            .filter(|entry| entry.recipe_id == "git.status")
+            .collect();
+        assert_eq!(status.len(), 1, "one open version per scope: {active:?}");
+        assert_eq!(status[0].version, 2);
+        let got = client
+            .call(
+                5,
+                IpcRequest::RecipeGet(RecipeGetParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: Some(2),
+                }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeGet(body) = got else {
+            panic!("get: {got:?}");
+        };
+        assert_eq!(
+            body.definition.argv,
+            ["git".to_owned(), "status".to_owned(), "--short".to_owned()]
+        );
 
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&data);

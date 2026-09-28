@@ -56,7 +56,7 @@ enum Command {
         #[command(subcommand)]
         op: RulesOp,
     },
-    /// Built-in argv recipe seeds (not rule packs).
+    /// Argv recipe operator path (not rule packs).
     Recipes {
         #[command(subcommand)]
         op: RecipesOp,
@@ -157,6 +157,27 @@ enum RecipesOp {
         #[arg(long)]
         activate: bool,
     },
+    /// Activate one recipe in global scope.
+    Activate {
+        /// Recipe id, for example `git.status`.
+        recipe_id: String,
+        /// Version to activate. Omit for the latest stored version.
+        #[arg(long)]
+        version: Option<u32>,
+    },
+    /// Close the global activation. Omitted version closes the active one.
+    Deactivate {
+        /// Recipe id, for example `git.status`.
+        recipe_id: String,
+        /// Version to close. Omit to close the active version, not the latest stored.
+        #[arg(long)]
+        version: Option<u32>,
+    },
+    /// Retire a recipe id and close its open activations.
+    Tombstone {
+        /// Recipe id, for example `git.status`.
+        recipe_id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -190,6 +211,11 @@ fn run(cli: Cli) -> std::process::ExitCode {
         },
         Command::Recipes { op } => match op {
             RecipesOp::Import { activate } => run_recipes_import(activate),
+            RecipesOp::Activate { recipe_id, version } => run_recipes_activate(&recipe_id, version),
+            RecipesOp::Deactivate { recipe_id, version } => {
+                run_recipes_deactivate(&recipe_id, version)
+            }
+            RecipesOp::Tombstone { recipe_id } => run_recipes_tombstone(&recipe_id),
         },
         Command::Buckets { op } => match op {
             BucketsOp::List => run_buckets_list(),
@@ -289,6 +315,7 @@ fn run_recipes_import(activate: bool) -> std::process::ExitCode {
         IpcResponse::RecipeImportSeeds(report) => {
             println!("imported: {}", report.imported.join(" "));
             println!("skipped: {}", report.skipped.join(" "));
+            println!("tombstoned: {}", report.tombstoned.join(" "));
             println!("activated: {}", report.activated.join(" "));
             if report.failed.is_empty() {
                 Ok(())
@@ -306,6 +333,61 @@ fn run_recipes_import(activate: bool) -> std::process::ExitCode {
             }
         }
         _ => Err(unexpected_variant("recipe_import_seeds")),
+    })
+}
+
+/// `recipes activate <id> [--version N]` opens a global activation.
+fn run_recipes_activate(recipe_id: &str, version: Option<u32>) -> std::process::ExitCode {
+    let request = IpcRequest::RecipeActivate(terminal_commander_ipc::RecipeActivateParams {
+        recipe_id: recipe_id.to_owned(),
+        version,
+        scope: Some(terminal_commander_core::ActivationScope::Global),
+        from_mcp: false,
+    });
+    run_daemon_command("recipes activate", request, |resp| match resp {
+        IpcResponse::RecipeActivate(body) => {
+            println!(
+                "activated: {} v{} scope=global already={}",
+                body.recipe_id, body.version, body.was_already_active
+            );
+            Ok(())
+        }
+        _ => Err(unexpected_variant("recipe_activate")),
+    })
+}
+
+/// `recipes deactivate <id> [--version N]` closes the global activation.
+/// Omitted version closes the active version.
+fn run_recipes_deactivate(recipe_id: &str, version: Option<u32>) -> std::process::ExitCode {
+    let request = IpcRequest::RecipeDeactivate(terminal_commander_ipc::RecipeDeactivateParams {
+        recipe_id: recipe_id.to_owned(),
+        version,
+        scope: Some(terminal_commander_core::ActivationScope::Global),
+        from_mcp: false,
+    });
+    run_daemon_command("recipes deactivate", request, |resp| match resp {
+        IpcResponse::RecipeDeactivate(body) => {
+            println!(
+                "deactivated: {} v{} scope=global",
+                body.recipe_id, body.version
+            );
+            Ok(())
+        }
+        _ => Err(unexpected_variant("recipe_deactivate")),
+    })
+}
+
+/// `recipes tombstone <id>` retires the id and closes open activations.
+fn run_recipes_tombstone(recipe_id: &str) -> std::process::ExitCode {
+    let request = IpcRequest::RecipeTombstone(terminal_commander_ipc::RecipeTombstoneParams {
+        recipe_id: recipe_id.to_owned(),
+    });
+    run_daemon_command("recipes tombstone", request, |resp| match resp {
+        IpcResponse::RecipeTombstone(body) => {
+            println!("tombstoned: {}", body.recipe_id);
+            Ok(())
+        }
+        _ => Err(unexpected_variant("recipe_tombstone")),
     })
 }
 
@@ -1574,6 +1656,46 @@ mod tests {
                 op: RecipesOp::Import { activate },
             } => assert!(activate),
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_recipes_activate_deactivate_tombstone() {
+        let activate = Cli::parse_from([
+            "terminal-commander",
+            "recipes",
+            "activate",
+            "git.status",
+            "--version",
+            "2",
+        ]);
+        match activate.cmd {
+            Command::Recipes {
+                op: RecipesOp::Activate { recipe_id, version },
+            } => {
+                assert_eq!(recipe_id, "git.status");
+                assert_eq!(version, Some(2));
+            }
+            _ => panic!("activate"),
+        }
+        let deactivate =
+            Cli::parse_from(["terminal-commander", "recipes", "deactivate", "git.log"]);
+        match deactivate.cmd {
+            Command::Recipes {
+                op: RecipesOp::Deactivate { recipe_id, version },
+            } => {
+                assert_eq!(recipe_id, "git.log");
+                assert_eq!(version, None);
+            }
+            _ => panic!("deactivate"),
+        }
+        let tombstone =
+            Cli::parse_from(["terminal-commander", "recipes", "tombstone", "git.status"]);
+        match tombstone.cmd {
+            Command::Recipes {
+                op: RecipesOp::Tombstone { recipe_id },
+            } => assert_eq!(recipe_id, "git.status"),
+            _ => panic!("tombstone"),
         }
     }
 

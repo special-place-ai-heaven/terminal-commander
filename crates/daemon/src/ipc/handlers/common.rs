@@ -143,7 +143,13 @@ pub(in crate::ipc::server) fn attach_recipe_steer(
     let Ok(active) = state.store.list_active_recipes() else {
         return err;
     };
-    let defs: Vec<_> = active.into_iter().map(|row| row.definition).collect();
+    // Tombstoned parents are already absent. A job/bucket/probe row whose
+    // job has exited is not a steer target.
+    let defs: Vec<_> = active
+        .into_iter()
+        .filter(|row| recipe_scope_runnable(state, row.scope))
+        .map(|row| row.definition)
+        .collect();
     let Some(id) = terminal_commander_core::match_activated_recipe(intent, &defs) else {
         return err;
     };
@@ -535,7 +541,7 @@ pub(in crate::ipc::server) fn require_regular_file(
 /// first, then activate. A scope referring to a recently-exited job
 /// is treated as invalid for the same reason.
 pub(in crate::ipc::server) fn validate_scope_against_live_jobs(
-    state: &Arc<DaemonState>,
+    state: &DaemonState,
     scope: terminal_commander_core::ActivationScope,
 ) -> Result<(), IpcError> {
     use terminal_commander_core::ActivationScope;
@@ -623,6 +629,16 @@ pub(in crate::ipc::server) fn validate_scope_against_live_jobs(
             }
         }
     }
+}
+
+/// Recipe list, run, and teach steer. Global is always runnable. A
+/// job, bucket, or probe scope is runnable only while that id is live,
+/// so a leftover row cannot stay runnable after the job exits.
+pub(in crate::ipc::server) fn recipe_scope_runnable(
+    state: &DaemonState,
+    scope: terminal_commander_core::ActivationScope,
+) -> bool {
+    validate_scope_against_live_jobs(state, scope).is_ok()
 }
 
 #[cfg(test)]

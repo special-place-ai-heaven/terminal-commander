@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use super::common::validate_scope_against_live_jobs;
+use super::common::recipe_scope_runnable;
 use crate::ipc::protocol::{
     CommandStartParams, IpcError, IpcErrorCode, IpcResponse, MAX_LIST_LIMIT,
     MAX_RECIPE_SEARCH_LIMIT, RecipeActivateParams, RecipeActivateResponse, RecipeActiveEntry,
@@ -18,7 +18,7 @@ use crate::ipc::protocol::{
 };
 use crate::state::DaemonState;
 use terminal_commander_core::{ActivationScope, RecipeDefinition, shell_argv_denied};
-use terminal_commander_store::EventStoreError;
+use terminal_commander_store::{EventStoreError, RecipeSeedRow};
 use terminal_commander_supervisor::identity::PeerIdentity;
 use time::format_description::well_known::Rfc3339;
 
@@ -123,13 +123,15 @@ pub(in crate::ipc::server) fn handle_recipe_import_seeds(
         deny_mcp_recipe_activate(state, true)?;
     }
     let activate_scope = if params.activate {
-        Some(params.scope.ok_or_else(|| {
+        let scope = params.scope.ok_or_else(|| {
             IpcError::new(
                 IpcErrorCode::ScopeInvalid,
                 "scope is required when activate=true; pass {kind:'global'} \
                  for explicit global activation",
             )
-        })?)
+        })?;
+        require_global_recipe_scope(scope)?;
+        Some(scope)
     } else {
         None
     };
@@ -140,39 +142,46 @@ pub(in crate::ipc::server) fn handle_recipe_import_seeds(
     let (activated, failed) = if let Some(scope) = activate_scope {
         // Re-activate skipped ids too, so a second operator import --activate
         // still opens rows after the definitions were already stored.
-        let mut ids = import.imported.clone();
-        ids.extend(import.skipped.iter().cloned());
-        activate_imported_recipes(state, &ids, scope, params.from_mcp)
+        // Activate the version import just stored or recognized, not a
+        // later "latest" lookup.
+        let mut rows = import.imported.clone();
+        rows.extend(import.skipped.iter().cloned());
+        activate_imported_recipes(state, &rows, scope, params.from_mcp)
     } else {
         (Vec::new(), Vec::new())
     };
     Ok(IpcResponse::RecipeImportSeeds(RecipeImportSeedsResponse {
-        imported: import.imported,
-        skipped: import.skipped,
+        imported: seed_ids(&import.imported),
+        skipped: seed_ids(&import.skipped),
         activated,
+        tombstoned: import.tombstoned,
         failed,
     }))
 }
 
+fn seed_ids(rows: &[RecipeSeedRow]) -> Vec<String> {
+    rows.iter().map(|row| row.recipe_id.clone()).collect()
+}
+
 fn activate_imported_recipes(
     state: &Arc<DaemonState>,
-    recipe_ids: &[String],
+    rows: &[RecipeSeedRow],
     scope: terminal_commander_core::ActivationScope,
     from_mcp: bool,
 ) -> (Vec<String>, Vec<RecipeImportFailure>) {
     let mut activated = Vec::new();
     let mut failed = Vec::new();
-    for recipe_id in recipe_ids {
+    for row in rows {
         let params = RecipeActivateParams {
-            recipe_id: recipe_id.clone(),
-            version: None,
+            recipe_id: row.recipe_id.clone(),
+            version: Some(row.version),
             scope: Some(scope),
             from_mcp,
         };
         match handle_recipe_activate(state, &params) {
-            Ok(_) => activated.push(recipe_id.clone()),
+            Ok(_) => activated.push(row.recipe_id.clone()),
             Err(err) => failed.push(RecipeImportFailure {
-                recipe_id: recipe_id.clone(),
+                recipe_id: row.recipe_id.clone(),
                 reason: err.message,
             }),
         }
@@ -180,13 +189,37 @@ fn activate_imported_recipes(
     (activated, failed)
 }
 
+// ponytail: no job-exit hook. Leftover non-global rows stay in the table
+// but list/run/steer ignore a scope that is not live, and deactivate does
+// not require the job to still be live. Add a job-exit closer if scoped
+// recipes become a real binding.
+/// Recipe activations are global. Job, bucket, and probe scopes are
+/// refused: rules do not drop those rows when the job exits, and a
+/// recipe run is a new command, so a sticky scope would stay runnable
+/// with no revoke path.
+fn require_global_recipe_scope(scope: ActivationScope) -> Result<(), IpcError> {
+    if scope == ActivationScope::Global {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        IpcErrorCode::ScopeInvalid,
+        format!(
+            "recipe activation scope must be global-only (got {}); job, bucket, and probe \
+             scopes are refused so an activation cannot stay runnable after that job exits",
+            scope.kind_label()
+        ),
+    ))
+}
+
 fn deny_mcp_recipe_activate(state: &DaemonState, from_mcp: bool) -> Result<(), IpcError> {
     if from_mcp && !state.policy.llm_can_activate_recipes() {
         return Err(IpcError::new(
             IpcErrorCode::PolicyDenied,
             "recipe_activate_requires_admin: llm_can_activate_recipes is false, so MCP \
-             recipe_activate and recipe_deactivate are denied. An operator activates from \
-             the admin CLI. recipe_run is allowed once a recipe is activated.",
+             recipe_activate and recipe_deactivate are denied. An operator runs \
+             `terminal-commander recipes activate` or `terminal-commander recipes deactivate`. \
+             `terminal-commander recipes tombstone` retires an id. recipe_run is allowed \
+             once a recipe is activated.",
         ));
     }
     Ok(())
@@ -208,6 +241,7 @@ pub(in crate::ipc::server) fn handle_recipe_activate(
 ) -> Result<IpcResponse, IpcError> {
     deny_mcp_recipe_activate(state, params.from_mcp)?;
     let scope = require_scope(params.scope)?;
+    require_global_recipe_scope(scope)?;
     let def = lookup_recipe(state, &params.recipe_id, params.version)?;
     let version = def.version;
     if !def.status.is_activatable() {
@@ -221,7 +255,6 @@ pub(in crate::ipc::server) fn handle_recipe_activate(
             ),
         ));
     }
-    validate_scope_against_live_jobs(state, scope)?;
     let profile = format!("{:?}", state.policy.profile);
     let inserted = state
         .store
@@ -247,42 +280,103 @@ pub(in crate::ipc::server) fn handle_recipe_deactivate(
 ) -> Result<IpcResponse, IpcError> {
     deny_mcp_recipe_activate(state, params.from_mcp)?;
     let scope = require_scope(params.scope)?;
-    validate_scope_against_live_jobs(state, scope)?;
+    // A dead job/bucket/probe scope must still be closable. New
+    // activations are global-only; this path is the cleanup for leftovers.
+    let versions = match params.version {
+        Some(version) => {
+            if state
+                .store
+                .get_recipe_version(&params.recipe_id, version)
+                .map_err(map_recipe_store_error)?
+                .is_none()
+            {
+                return Err(IpcError::new(
+                    IpcErrorCode::RecipeNotFound,
+                    format!("recipe '{}' version {version} not found", params.recipe_id),
+                ));
+            }
+            vec![version]
+        }
+        None => open_versions_for_scope(state, &params.recipe_id, scope)?,
+    };
+    let mut closed_version = None;
+    for version in versions {
+        let closed = state
+            .store
+            .deactivate_recipe_scoped(&params.recipe_id, version, scope)
+            .map_err(map_recipe_store_error)?;
+        if closed {
+            closed_version = Some(version);
+        }
+    }
+    let Some(version) = closed_version else {
+        let message = params.version.map_or_else(
+            || {
+                format!(
+                    "no active row for recipe '{}' scope {}; omitted version resolves the \
+                     active version, not the latest stored",
+                    params.recipe_id,
+                    scope.kind_label()
+                )
+            },
+            |version| {
+                format!(
+                    "no active row for recipe '{}' v{version} scope {}",
+                    params.recipe_id,
+                    scope.kind_label()
+                )
+            },
+        );
+        return Err(IpcError::new(IpcErrorCode::RecipeNotActive, message));
+    };
+    Ok(IpcResponse::RecipeDeactivate(RecipeDeactivateResponse {
+        recipe_id: params.recipe_id.clone(),
+        version,
+        was_deactivated: true,
+        scope,
+    }))
+}
+
+/// Open versions for `(recipe_id, scope)`, highest last. Missing id is
+/// `RecipeNotFound`. No open row is `RecipeNotActive`.
+fn open_versions_for_scope(
+    state: &DaemonState,
+    recipe_id: &str,
+    scope: ActivationScope,
+) -> Result<Vec<u32>, IpcError> {
     if state
         .store
-        .get_recipe_version(&params.recipe_id, params.version)
+        .get_latest_recipe(recipe_id)
         .map_err(map_recipe_store_error)?
         .is_none()
     {
         return Err(IpcError::new(
             IpcErrorCode::RecipeNotFound,
-            format!(
-                "recipe '{}' version {} not found",
-                params.recipe_id, params.version
-            ),
+            format!("recipe '{recipe_id}' not found"),
         ));
     }
-    let closed = state
+    let active = state
         .store
-        .deactivate_recipe_scoped(&params.recipe_id, params.version, scope)
+        .list_active_recipes()
         .map_err(map_recipe_store_error)?;
-    if !closed {
+    let mut versions: Vec<u32> = active
+        .into_iter()
+        .filter(|row| row.definition.recipe_id == recipe_id && row.scope == scope)
+        .map(|row| row.definition.version)
+        .collect();
+    if versions.is_empty() {
         return Err(IpcError::new(
             IpcErrorCode::RecipeNotActive,
             format!(
-                "no active row for recipe '{}' v{} scope {}",
-                params.recipe_id,
-                params.version,
+                "no active row for recipe '{recipe_id}' scope {}; omitted version resolves the \
+                 active version, not the latest stored",
                 scope.kind_label()
             ),
         ));
     }
-    Ok(IpcResponse::RecipeDeactivate(RecipeDeactivateResponse {
-        recipe_id: params.recipe_id.clone(),
-        version: params.version,
-        was_deactivated: true,
-        scope,
-    }))
+    versions.sort_unstable();
+    versions.dedup();
+    Ok(versions)
 }
 
 pub(in crate::ipc::server) fn handle_recipe_list_active(
@@ -290,10 +384,7 @@ pub(in crate::ipc::server) fn handle_recipe_list_active(
     params: &crate::ipc::protocol::ListLimitParams,
 ) -> Result<IpcResponse, IpcError> {
     let limit = params.limit.unwrap_or(MAX_LIST_LIMIT).min(MAX_LIST_LIMIT);
-    let all = state
-        .store
-        .list_active_recipes()
-        .map_err(map_recipe_store_error)?;
+    let all = runnable_active_recipes(state)?;
     let truncated = all.len() > limit;
     let entries = all
         .into_iter()
@@ -421,10 +512,7 @@ fn resolve_activated(
     if let Some(version) = version {
         let _ = lookup_recipe(state, recipe_id, Some(version))?;
     }
-    let active = state
-        .store
-        .list_active_recipes()
-        .map_err(map_recipe_store_error)?;
+    let active = runnable_active_recipes(state)?;
     let mut matches: Vec<RecipeDefinition> = active
         .into_iter()
         .filter(|row| {
@@ -440,11 +528,24 @@ fn resolve_activated(
             IpcErrorCode::RecipeNotActive,
             format!(
                 "recipe '{recipe_id}' is not activated for scope {}; call recipe_list_active \
-                 or activate it from the admin CLI",
+                 or run `terminal-commander recipes activate {recipe_id}`",
                 scope.kind_label()
             ),
         )
     })
+}
+
+fn runnable_active_recipes(
+    state: &DaemonState,
+) -> Result<Vec<terminal_commander_store::ActiveRecipe>, IpcError> {
+    let active = state
+        .store
+        .list_active_recipes()
+        .map_err(map_recipe_store_error)?;
+    Ok(active
+        .into_iter()
+        .filter(|row| recipe_scope_runnable(state, row.scope))
+        .collect())
 }
 
 pub(in crate::ipc::server) fn handle_recipe_run(

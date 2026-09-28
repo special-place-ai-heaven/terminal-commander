@@ -136,7 +136,7 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
                 5,
                 IpcRequest::RecipeDeactivate(RecipeDeactivateParams {
                     recipe_id: "echo.true".to_owned(),
-                    version: 1,
+                    version: Some(1),
                     scope: Some(scope),
                     from_mcp: true,
                 }),

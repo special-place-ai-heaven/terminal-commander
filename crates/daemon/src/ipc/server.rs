@@ -1442,7 +1442,7 @@ mod tests {
             }),
             IpcRequest::RecipeDeactivate(RecipeDeactivateParams {
                 recipe_id: "git.status".to_owned(),
-                version: 1,
+                version: Some(1),
                 scope: Some(terminal_commander_core::ActivationScope::Global),
                 from_mcp: false,
             }),
