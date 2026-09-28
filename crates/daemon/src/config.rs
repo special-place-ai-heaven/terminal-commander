@@ -386,6 +386,10 @@ pub struct DaemonConfig {
     /// field. Production stays `None` (the real prompt).
     #[serde(skip, default)]
     pub credential_prompter_test_seam: Option<String>,
+    /// In-process tests shorten the owner page's lifetime (default
+    /// `CREDENTIAL_URL_TTL`, 120 s). Not a TOML key.
+    #[serde(skip, default)]
+    pub credential_url_ttl_test_seam: Option<std::time::Duration>,
 }
 
 const fn default_retention() -> RetentionSection {
@@ -438,6 +442,7 @@ impl DaemonConfig {
             sifters: default_sifters(),
             recipe_admin_test_seam: false,
             credential_prompter_test_seam: None,
+            credential_url_ttl_test_seam: None,
         }
     }
 

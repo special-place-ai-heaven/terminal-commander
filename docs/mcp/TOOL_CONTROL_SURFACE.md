@@ -127,8 +127,16 @@ PTY password prompts (owner credential path):
 - `command_status`, `pty_command_list`, and `pty_command_write_stdin` carry
   `awaiting_credential: {kind: "sudo"|"ssh"|"password", since_ms}` for a job
   at such a prompt; the field is omitted otherwise.
-- `credential_request {job_id}` makes the daemon ask the OWNER through a
-  channel the model cannot read: Windows CredUI; on a unix desktop the first
+- `credential_request {job_id}` asks the OWNER through a channel the model
+  cannot read. First, when the MCP client declared URL-mode elicitation
+  (`elicitation.url`; form mode never carries a password), the daemon opens
+  a one-shot page on `127.0.0.1` (random port, 244-bit token in the path,
+  120 s, one POST, Host header checked) and the adapter sends its URL in an
+  `elicitation/create` with the message "TC needs the owner's password for
+  <kind> in job <id>"; the URL never enters a tool result. Plain HTTP is
+  acceptable there because loopback traffic never leaves the host, and the
+  listener exists only while that prompt is pending. Otherwise the daemon
+  opens a native prompt: Windows CredUI; on a unix desktop the first
   of `$SSH_ASKPASS`, `ssh-askpass`, `zenity`, `kdialog`, `pinentry`. The
   daemon types the answer plus Enter into that job, masks an echoed copy on
   the next output line, and audits `credential_provided {kind, source}`

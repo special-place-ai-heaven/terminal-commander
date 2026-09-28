@@ -8,8 +8,9 @@ use terminal_commander_core::RecipeTeachIntent;
 
 use super::common::{attach_recipe_steer, enrich_shell_teach};
 use crate::ipc::protocol::{
-    CredentialProvideParams, CredentialRequestParams, IpcError, IpcErrorCode, IpcResponse,
-    IpcResult, PtyCommandStartParams, PtyCommandStopParams, PtyCommandWriteStdinParams,
+    CredentialProvideParams, CredentialRequestParams, CredentialUrlParams, IpcError, IpcErrorCode,
+    IpcResponse, IpcResult, PtyCommandStartParams, PtyCommandStopParams,
+    PtyCommandWriteStdinParams,
 };
 #[cfg(any(unix, windows))]
 use crate::ipc::protocol::{
@@ -74,6 +75,16 @@ pub(in crate::ipc::server) async fn handle_credential_request(
 pub(in crate::ipc::server) async fn handle_credential_provide(
     _state: &Arc<DaemonState>,
     _params: &CredentialProvideParams,
+    _peer: &PeerIdentity,
+) -> Result<IpcResponse, IpcError> {
+    Err(pty_ipc_unsupported())
+}
+
+#[cfg(not(any(unix, windows)))]
+#[allow(clippy::unused_async)] // async matches the PTY-host signature
+pub(in crate::ipc::server) async fn handle_credential_url(
+    _state: &Arc<DaemonState>,
+    _params: &CredentialUrlParams,
     _peer: &PeerIdentity,
 ) -> Result<IpcResponse, IpcError> {
     Err(pty_ipc_unsupported())
@@ -439,6 +450,37 @@ pub(in crate::ipc::server) async fn handle_credential_provide(
         Err(other) => Err(IpcError::new(
             IpcErrorCode::Internal,
             format!("credential_provide: {other}"),
+        )),
+    }
+}
+
+/// `credential_url`: the MCP adapter's side of URL-mode elicitation. The
+/// response carries the page URL (a single-use token), so only the MCP
+/// adapter the harness launched may ask; the adapter sends it to the MCP
+/// client, never to the model.
+#[cfg(any(unix, windows))]
+pub(in crate::ipc::server) async fn handle_credential_url(
+    state: &Arc<DaemonState>,
+    params: &CredentialUrlParams,
+    peer: &PeerIdentity,
+) -> Result<IpcResponse, IpcError> {
+    if !super::recipe::caller_is_harness_adapter(state, peer) {
+        return Err(IpcError::new(
+            IpcErrorCode::PolicyDenied,
+            "credential_url_requires_mcp_adapter: only the MCP adapter launched by the \
+             harness may open the owner's password page. Call credential_request {job_id}.",
+        ));
+    }
+    match state
+        .credentials
+        .url(&state.pty, params.job_id, params.op)
+        .await
+    {
+        Ok(r) => Ok(IpcResponse::CredentialUrl(r)),
+        Err(crate::pty_command::PtyRuntimeError::UnknownJob(id)) => Err(pty_job_not_live(id)),
+        Err(other) => Err(IpcError::new(
+            IpcErrorCode::Internal,
+            format!("credential_url: {other}"),
         )),
     }
 }

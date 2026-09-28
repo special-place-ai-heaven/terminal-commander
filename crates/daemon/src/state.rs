@@ -444,6 +444,9 @@ impl DaemonState {
         #[cfg(any(unix, windows))]
         let credentials = Arc::new(crate::credential::CredentialBroker::new(
             config.credential_prompter_test_seam.clone(),
+            config
+                .credential_url_ttl_test_seam
+                .unwrap_or(crate::credential::CREDENTIAL_URL_TTL),
         ));
 
         // Mint a fresh per-boot identity. A restart produces a new value;

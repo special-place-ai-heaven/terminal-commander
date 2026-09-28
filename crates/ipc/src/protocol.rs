@@ -464,6 +464,11 @@ pub enum IpcRequest {
     /// Accepted only from the admin CLI peer (`terminal-commander
     /// credential provide`); an MCP-labelled peer is denied.
     CredentialProvide(CredentialProvideParams),
+    /// MCP-adapter side of URL-mode elicitation: open, decline, or abandon
+    /// the one-shot loopback page the owner types a PTY password into.
+    /// Accepted only from the MCP adapter image; the URL never reaches the
+    /// model.
+    CredentialUrl(CredentialUrlParams),
     /// Start a persistent shell session (P1 / TC50): a long-lived
     /// login-shell PTY behind the `allow_session` capability. Denied by
     /// default; policy-checked + audited before spawn. Bounded metadata
@@ -584,6 +589,7 @@ impl IpcRequest {
             // dialog, but a blind re-send is still not a pure read.
             | Self::CredentialRequest(_)
             | Self::CredentialProvide(_)
+            | Self::CredentialUrl(_)
             // Session lane (P1 / TC50): start spawns a fresh session
             // shell + mints ids; exec writes stdin + advances the read
             // cursor server-side; stop fires a one-shot cancel; the
@@ -780,6 +786,7 @@ pub enum IpcResponse {
     PtyCommandList(PtyCommandListResponse),
     CredentialRequest(CredentialRequestResponse),
     CredentialProvide(CredentialProvideResponse),
+    CredentialUrl(CredentialUrlResponse),
     ShellSessionStart(ShellSessionStartResponse),
     ShellSessionExec(ShellSessionExecResponse),
     ShellSessionStatus(ShellSessionStatusResponse),
@@ -2828,6 +2835,46 @@ pub struct CredentialProvideParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialProvideResponse {
     pub job_id: JobId,
+}
+
+/// How long the owner's loopback page (URL-mode elicitation) stays open.
+pub const CREDENTIAL_URL_TTL_MS: u64 = 120_000;
+
+/// What the MCP adapter does with the owner's loopback page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialUrlOp {
+    /// Open the page for the job's current prompt (or re-find it).
+    Open,
+    /// The owner declined the elicitation: final for that prompt.
+    Declined,
+    /// The client could not show the elicitation: close the page so
+    /// `credential_request` falls back to the native prompt.
+    Abandon,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialUrlParams {
+    pub job_id: JobId,
+    pub op: CredentialUrlOp,
+}
+
+/// Adapter-only: the URL carries a single-use token and is sent to the MCP
+/// client in an `elicitation/create`, never in a tool result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialUrlResponse {
+    pub job_id: JobId,
+    /// The page for the job's current prompt, while it is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elicitation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<CredentialKind>,
+    /// True only for the call that opened the page: one elicitation per
+    /// prompt.
+    #[serde(default)]
+    pub fresh: bool,
 }
 
 // =====================================================================

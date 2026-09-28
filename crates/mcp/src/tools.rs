@@ -60,7 +60,8 @@ use terminal_commanderd::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
     CommandStartParams, CommandStartResponse, CommandStatusParams, CommandStatusResponse,
-    CommandStopParams, CommandStopResponse, ContextUnavailableReason, CredentialRequestParams,
+    CommandStopParams, CommandStopResponse, ContextUnavailableReason, CredentialKind,
+    CredentialRequestParams, CredentialStatus, CredentialUrlOp, CredentialUrlParams,
     DiscoverResponse, EventContextParams, EventContextResponse, FileListDirParams,
     FileListDirResponse, FileReadWindowParams, FileReadWindowResponse, FileSearchParams,
     FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
@@ -351,7 +352,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "credential_request",
             status: ToolStatus::Live,
-            description: "Ask the owner for the password a PTY job is waiting on. The daemon prompts the owner directly and types the answer; returns only a status (provided, declined, timeout, owner_action_required with the CLI command, not_awaiting). Never returns or accepts the password.",
+            description: "Ask the owner for the password a PTY job is waiting on: a one-time local page via URL elicitation when the client supports it, else a prompt the daemon opens, else the admin CLI. The daemon types the answer; returns only a status (provided, declined, timeout, owner_action_required with the CLI command, not_awaiting). Never returns or accepts the password.",
         },
         ToolCatalogueEntry {
             name: "shell_session_start",
@@ -2985,29 +2986,135 @@ impl TerminalCommanderMcpServer {
 
     /// `credential_request` — ask the owner for a PTY job's password.
     ///
-    /// The adapter only forwards the job id; the daemon owns the prompt and
-    /// the write. There is deliberately no MCP tool for `credential_provide`.
+    /// Channel 1 is URL-mode elicitation: the daemon opens a one-shot
+    /// loopback page and the adapter hands its URL to the MCP client (never
+    /// to the model). Then the daemon's own chain: native prompt, admin
+    /// CLI. The daemon owns every write. There is deliberately no MCP tool
+    /// for `credential_provide`.
     #[tool(
-        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). TC never accepts passwords from the model: the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop) and types the answer into that job itself. Returns only {job_id, status}: provided | declined | timeout (not answered within 60 s; the prompt stays open, call again to keep waiting) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls never re-ask. Never returns or accepts the password."
+        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). TC never accepts passwords from the model: if your client supports URL elicitation it shows the owner a link to a one-time local page; otherwise the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop). The daemon types the answer into that job itself. Returns only {job_id, status}: provided | declined | timeout (not answered within 60 s; the prompt stays open, call again to keep waiting) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls never re-ask. Never returns or accepts the password."
     )]
     async fn credential_request(
         &self,
         Parameters(params): Parameters<McpCredentialRequestParams>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
         use terminal_commander_core::ids::JobIdKind;
         let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
-        match self
+        let elicitation_id = if url_elicitation_supported(ctx.client_capabilities().as_ref()) {
+            self.elicit_owner_page(&ctx, job_id).await
+        } else {
+            None
+        };
+        // Waits on the page's outcome when one is open for this prompt;
+        // otherwise the daemon asks through its native prompt or the CLI.
+        let resp = match self
             .daemon
             .call(IpcRequest::CredentialRequest(CredentialRequestParams {
                 job_id,
             }))
             .await
         {
-            Ok(IpcResponse::CredentialRequest(resp)) => json_tool_result(&resp),
-            Ok(other) => Err(unexpected_variant(&other)),
-            Err(e) => Err(into_mcp_error_for(false, &e)),
+            Ok(IpcResponse::CredentialRequest(resp)) => resp,
+            Ok(other) => return Err(unexpected_variant(&other)),
+            Err(e) => return Err(into_mcp_error_for(false, &e)),
+        };
+        if resp.status == CredentialStatus::Provided
+            && let Some(elicitation_id) = elicitation_id
+        {
+            // Closes the client's "waiting for the server" state. rmcp 3.4.1
+            // has no typed `notifications/elicitation/complete`.
+            let _ = ctx
+                .peer
+                .send_notification(rmcp::model::ServerNotification::CustomNotification(
+                    rmcp::model::CustomNotification::new(
+                        "notifications/elicitation/complete",
+                        Some(serde_json::json!({ "elicitationId": elicitation_id })),
+                    ),
+                ))
+                .await;
         }
+        json_tool_result(&resp)
+    }
+
+    /// URL-mode elicitation for `job_id`'s prompt. Returns the elicitation
+    /// id while the owner page is live; `None` sends `credential_request`
+    /// down the daemon's native-prompt / CLI chain. Never errors: every
+    /// failure falls back.
+    async fn elicit_owner_page(
+        &self,
+        ctx: &RequestContext<RoleServer>,
+        job_id: terminal_commander_core::JobId,
+    ) -> Option<String> {
+        use rmcp::model::{
+            ClientResult, ElicitRequest, ElicitRequestParams, ElicitationAction, ServerRequest,
+        };
+        let Ok(IpcResponse::CredentialUrl(opened)) = self
+            .daemon
+            .call(IpcRequest::CredentialUrl(CredentialUrlParams {
+                job_id,
+                op: CredentialUrlOp::Open,
+            }))
+            .await
+        else {
+            return None;
+        };
+        let (Some(url), Some(elicitation_id)) = (opened.url, opened.elicitation_id) else {
+            return None;
+        };
+        if !opened.fresh {
+            // Already shown for this prompt: wait on it, never re-ask.
+            return Some(elicitation_id);
+        }
+        let kind = match opened.kind {
+            Some(CredentialKind::Sudo) => "sudo",
+            Some(CredentialKind::Ssh) => "ssh",
+            Some(CredentialKind::Password) | None => "a password prompt",
+        };
+        let request = ServerRequest::ElicitRequest(ElicitRequest::new(
+            ElicitRequestParams::UrlElicitationParams {
+                meta: None,
+                message: format!(
+                    "TC needs the owner's password for {kind} in job {}",
+                    job_id.to_wire_string()
+                ),
+                url,
+                elicitation_id: elicitation_id.clone(),
+            },
+        ));
+        let answer = match ctx
+            .peer
+            .send_request_with_option(
+                request,
+                rmcp::service::PeerRequestOptions::with_timeout(std::time::Duration::from_millis(
+                    terminal_commanderd::ipc::protocol::CREDENTIAL_REQUEST_WAIT_MS,
+                )),
+            )
+            .await
+        {
+            Ok(handle) => handle.await_response().await,
+            Err(e) => Err(e),
+        };
+        let op = match answer {
+            Ok(ClientResult::ElicitResult(r)) if r.action == ElicitationAction::Accept => {
+                return Some(elicitation_id);
+            }
+            // Not answered yet: the page stays open until its TTL.
+            Err(rmcp::ServiceError::Timeout { .. }) => return Some(elicitation_id),
+            // Decline or cancel: the owner said no to this prompt.
+            Ok(ClientResult::ElicitResult(_)) => CredentialUrlOp::Declined,
+            // The client could not show it: close the page, fall back.
+            _ => CredentialUrlOp::Abandon,
+        };
+        let _ = self
+            .daemon
+            .call(IpcRequest::CredentialUrl(CredentialUrlParams {
+                job_id,
+                op,
+            }))
+            .await;
+        None
     }
 
     /// `shell_session_start` — start a persistent shell session.
@@ -3574,6 +3681,7 @@ For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires 
     pub(crate) async fn session_facade(
         &self,
         Parameters(call): Parameters<crate::facades::SessionFacadeCall>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         use crate::facades::SessionFacadeCall as S;
         match call {
@@ -3581,7 +3689,7 @@ For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires 
             S::PtyStdin(p) => self.pty_command_write_stdin(Parameters(p)).await,
             S::PtyStop(p) => self.pty_command_stop(Parameters(p)).await,
             S::PtyList => self.pty_command_list().await,
-            S::CredentialRequest(p) => self.credential_request(Parameters(p)).await,
+            S::CredentialRequest(p) => self.credential_request(Parameters(p), ctx).await,
             S::ShStart(p) => self.shell_session_start(Parameters(p)).await,
             S::ShExec(p) => self.shell_session_exec(Parameters(p)).await,
             S::ShStatus(p) => self.shell_session_status(Parameters(p)).await,
@@ -6339,6 +6447,14 @@ pub struct McpPtyCommandStopParams {
     pub job_id: String,
 }
 
+/// Channel 1 of `credential_request` needs a client that declared URL-mode
+/// elicitation. A bare `elicitation: {}` means form mode only, and form
+/// mode must never carry a password (MCP spec), so it does not qualify.
+fn url_elicitation_supported(caps: Option<&rmcp::model::ClientCapabilities>) -> bool {
+    caps.and_then(|c| c.elicitation.as_ref())
+        .is_some_and(|e| e.url.is_some())
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpCredentialRequestParams {
     /// Opaque id of a PTY job whose status shows `awaiting_credential`
@@ -7140,6 +7256,29 @@ mod tests {
     }
 
     // --- TC-1b: run_and_watch degraded / superset result builder ---
+
+    #[test]
+    fn only_a_url_elicitation_client_gets_the_owner_page() {
+        let caps = |v: serde_json::Value| -> rmcp::model::ClientCapabilities {
+            serde_json::from_value(v).unwrap()
+        };
+        // No capability, a bare (form-only) one, and form mode all skip to
+        // the daemon's native prompt / CLI chain: form mode must never
+        // carry a password.
+        assert!(!url_elicitation_supported(None));
+        assert!(!url_elicitation_supported(Some(&caps(serde_json::json!(
+            {}
+        )))));
+        assert!(!url_elicitation_supported(Some(&caps(
+            serde_json::json!({"elicitation": {}})
+        ))));
+        assert!(!url_elicitation_supported(Some(&caps(
+            serde_json::json!({"elicitation": {"form": {}}})
+        ))));
+        assert!(url_elicitation_supported(Some(&caps(
+            serde_json::json!({"elicitation": {"form": {}, "url": {}}})
+        ))));
+    }
 
     #[test]
     fn password_prompting_programs_get_the_credential_hint() {

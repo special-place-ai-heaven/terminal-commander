@@ -532,9 +532,10 @@ audit row. All other IPC requests bump the idle clock and audit normally.
 > `TC_CONPTY_E2E=1` and is not yet closed on every dev host -- check
 > `system_discover` on native Windows before relying on it.
 > A PTY job stopped at a sudo/ssh/password prompt shows `awaiting_credential`;
-> the model calls `credential_request` and the daemon asks the owner directly
-> (a native dialog, else `terminal-commander credential provide <job_id>` in
-> the owner's terminal), so the password never passes through the model.
+> the model calls `credential_request` and the owner is asked directly (a
+> one-time local page the MCP client links to, a native dialog, else
+> `terminal-commander credential provide <job_id>` in the owner's terminal),
+> so the password never passes through the model.
 
 > [!TIP]
 > Persistent shell sessions (`shell_session_*`) and workspace snapshots

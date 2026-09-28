@@ -5,11 +5,13 @@
 //!
 //! TC44 is unchanged: `pty_command_write_stdin` never types into a secret
 //! prompt. `credential_request` asks the OWNER instead, through a channel
-//! the model cannot read: a prompt the daemon opens itself (Windows CredUI;
-//! `$SSH_ASKPASS`, `ssh-askpass`, `zenity`, `kdialog`, or `pinentry` on a
-//! unix desktop), else the admin CLI (`terminal-commander credential
-//! provide <job_id>`). The daemon types the answer into the PTY; the model
-//! only ever sees a [`CredentialStatus`].
+//! the model cannot read, in this order: a one-shot loopback page the MCP
+//! client opens through URL-mode elicitation (when the client supports
+//! it); a prompt the daemon opens itself (Windows CredUI; `$SSH_ASKPASS`,
+//! `ssh-askpass`, `zenity`, `kdialog`, or `pinentry` on a unix desktop);
+//! else the admin CLI (`terminal-commander credential provide <job_id>`).
+//! The daemon types the answer into the PTY; the model only ever sees a
+//! [`CredentialStatus`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,8 +19,11 @@ use std::time::Duration;
 
 use terminal_commander_core::JobId;
 use terminal_commander_ipc::protocol::{
-    CredentialKind, CredentialRequestResponse, CredentialStatus,
+    CredentialKind, CredentialRequestResponse, CredentialStatus, CredentialUrlOp,
+    CredentialUrlResponse,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
 use crate::pty_command::{PtyRuntime, PtyRuntimeError};
@@ -37,17 +42,35 @@ pub fn provide_command(job_id: JobId) -> String {
     )
 }
 
+/// How long the owner's loopback page stays open.
+pub const CREDENTIAL_URL_TTL: Duration =
+    Duration::from_millis(terminal_commander_ipc::protocol::CREDENTIAL_URL_TTL_MS);
+
 type Outcome = Arc<watch::Sender<Option<CredentialStatus>>>;
 
-/// One owner prompt per PTY prompt generation.
-///
-/// Per job: the generation the owner was asked about and its outcome (`None`
-/// while the owner prompt is open). A repeat request replays or re-attaches,
-/// never re-asks.
+/// The generation the owner was asked about, its outcome (`None` while the
+/// owner is still being asked), and the loopback page when that is the
+/// channel.
+struct Ask {
+    generation: u64,
+    outcome: Outcome,
+    page: Option<Page>,
+}
+
+#[derive(Clone)]
+struct Page {
+    url: String,
+    elicitation_id: String,
+}
+
+/// One owner prompt per PTY prompt generation. A repeat request replays or
+/// re-attaches, never re-asks.
 pub struct CredentialBroker {
     /// `DaemonConfig::credential_prompter_test_seam`.
     prompter: Option<String>,
-    asked: parking_lot::Mutex<HashMap<JobId, (u64, Outcome)>>,
+    /// Owner page lifetime ([`CREDENTIAL_URL_TTL`] outside tests).
+    url_ttl: Duration,
+    asked: parking_lot::Mutex<HashMap<JobId, Ask>>,
 }
 
 impl std::fmt::Debug for CredentialBroker {
@@ -58,9 +81,10 @@ impl std::fmt::Debug for CredentialBroker {
 
 impl CredentialBroker {
     #[must_use]
-    pub fn new(prompter: Option<String>) -> Self {
+    pub fn new(prompter: Option<String>, url_ttl: Duration) -> Self {
         Self {
             prompter,
+            url_ttl,
             asked: parking_lot::Mutex::new(HashMap::new()),
         }
     }
@@ -75,20 +99,22 @@ impl CredentialBroker {
         let prompt = pty.credential_prompt(job_id).await?;
         let mut rx = {
             let mut asked = self.asked.lock();
-            // ponytail: prune on request, linear in live jobs; a job-exit hook
-            // if PTY job counts grow.
-            let live = pty.live_jobs();
-            asked.retain(|id, _| live.iter().any(|l| l.job_id == *id));
+            prune(&mut asked, pty);
             match asked.get(&job_id) {
-                Some((generation, outcome)) if *generation == prompt.generation => {
-                    outcome.subscribe()
-                }
+                Some(ask) if ask.generation == prompt.generation => ask.outcome.subscribe(),
                 _ => {
                     let Some(awaiting) = prompt.awaiting else {
                         return Ok(response(job_id, CredentialStatus::NotAwaiting));
                     };
                     let outcome: Outcome = Arc::new(watch::channel(None).0);
-                    asked.insert(job_id, (prompt.generation, Arc::clone(&outcome)));
+                    asked.insert(
+                        job_id,
+                        Ask {
+                            generation: prompt.generation,
+                            outcome: Arc::clone(&outcome),
+                            page: None,
+                        },
+                    );
                     let rx = outcome.subscribe();
                     let text = PromptText::new(job_id, awaiting.kind, &prompt.argv);
                     spawn_owner_prompt(
@@ -116,15 +142,150 @@ impl CredentialBroker {
     pub fn record_provided(&self, job_id: JobId, generation: u64) {
         let mut asked = self.asked.lock();
         match asked.get(&job_id) {
-            Some((g, outcome)) if *g == generation => {
-                outcome.send_replace(Some(CredentialStatus::Provided));
+            Some(ask) if ask.generation == generation => {
+                ask.outcome.send_replace(Some(CredentialStatus::Provided));
             }
             _ => {
                 let outcome = Arc::new(watch::channel(Some(CredentialStatus::Provided)).0);
-                asked.insert(job_id, (generation, outcome));
+                asked.insert(
+                    job_id,
+                    Ask {
+                        generation,
+                        outcome,
+                        page: None,
+                    },
+                );
             }
         }
     }
+
+    /// URL-mode elicitation, adapter side. `Open` starts the loopback page
+    /// for the job's current prompt (or re-finds it); `Declined` makes the
+    /// owner's refusal final for that prompt; `Abandon` closes the page so
+    /// `request` falls back to the native prompt. A later `request` for
+    /// the same prompt waits on the page's outcome.
+    pub async fn url(
+        self: &Arc<Self>,
+        pty: &Arc<PtyRuntime>,
+        job_id: JobId,
+        op: CredentialUrlOp,
+    ) -> Result<CredentialUrlResponse, PtyRuntimeError> {
+        let prompt = pty.credential_prompt(job_id).await?;
+        let mut resp = CredentialUrlResponse {
+            job_id,
+            url: None,
+            elicitation_id: None,
+            kind: prompt.awaiting.map(|a| a.kind),
+            fresh: false,
+        };
+        let mut asked = self.asked.lock();
+        prune(&mut asked, pty);
+        let current = asked
+            .get(&job_id)
+            .filter(|ask| ask.generation == prompt.generation);
+        match op {
+            CredentialUrlOp::Open => {
+                if let Some(ask) = current {
+                    if let Some(page) = &ask.page {
+                        resp.url = Some(page.url.clone());
+                        resp.elicitation_id = Some(page.elicitation_id.clone());
+                    }
+                    return Ok(resp);
+                }
+                let Some(awaiting) = prompt.awaiting else {
+                    return Ok(resp);
+                };
+                // No listener: `request` still has the native prompt and CLI.
+                let Ok(listener) = bind_loopback() else {
+                    return Ok(resp);
+                };
+                let Ok(addr) = listener.local_addr() else {
+                    return Ok(resp);
+                };
+                // Two v4 UUIDs: 244 random bits from the OS CSPRNG.
+                let token = format!(
+                    "{}{}",
+                    uuid::Uuid::new_v4().simple(),
+                    uuid::Uuid::new_v4().simple()
+                );
+                let page = Page {
+                    url: format!("http://{addr}/{token}"),
+                    elicitation_id: uuid::Uuid::new_v4().simple().to_string(),
+                };
+                let outcome: Outcome = Arc::new(watch::channel(None).0);
+                asked.insert(
+                    job_id,
+                    Ask {
+                        generation: prompt.generation,
+                        outcome: Arc::clone(&outcome),
+                        page: Some(page.clone()),
+                    },
+                );
+                drop(asked);
+                tokio::spawn(serve_page(
+                    Arc::clone(self),
+                    Arc::clone(pty),
+                    PageJob {
+                        job_id,
+                        generation: prompt.generation,
+                        host: addr.to_string(),
+                        token,
+                        text: PromptText::new(job_id, awaiting.kind, &prompt.argv),
+                        ttl: self.url_ttl,
+                    },
+                    listener,
+                    outcome,
+                ));
+                resp.url = Some(page.url);
+                resp.elicitation_id = Some(page.elicitation_id);
+                resp.fresh = true;
+            }
+            CredentialUrlOp::Declined => {
+                if let Some(ask) = current.filter(|ask| ask.page.is_some()) {
+                    settle(&ask.outcome, CredentialStatus::Declined);
+                }
+            }
+            CredentialUrlOp::Abandon => {
+                if current.is_some_and(|ask| ask.page.is_some() && ask.outcome.borrow().is_none())
+                    && let Some(ask) = asked.remove(&job_id)
+                {
+                    // Stops the listener; the entry is gone, so the next
+                    // `request` opens the native prompt.
+                    settle(&ask.outcome, CredentialStatus::NotAwaiting);
+                }
+            }
+        }
+        Ok(resp)
+    }
+
+    /// An expired page: forget it so the next `Open` starts a fresh one.
+    fn forget_page(&self, job_id: JobId, outcome: &Outcome) {
+        let mut asked = self.asked.lock();
+        if asked
+            .get(&job_id)
+            .is_some_and(|ask| Arc::ptr_eq(&ask.outcome, outcome))
+        {
+            asked.remove(&job_id);
+        }
+    }
+}
+
+// ponytail: prune on request, linear in live jobs; a job-exit hook if PTY job
+// counts grow.
+fn prune(asked: &mut HashMap<JobId, Ask>, pty: &PtyRuntime) {
+    let live = pty.live_jobs();
+    asked.retain(|id, _| live.iter().any(|l| l.job_id == *id));
+}
+
+/// First outcome wins.
+fn settle(outcome: &Outcome, status: CredentialStatus) {
+    outcome.send_if_modified(|current| {
+        let unset = current.is_none();
+        if unset {
+            *current = Some(status);
+        }
+        unset
+    });
 }
 
 fn response(job_id: JobId, status: CredentialStatus) -> CredentialRequestResponse {
@@ -174,14 +335,254 @@ fn spawn_owner_prompt(
             Asked::Unavailable => CredentialStatus::OwnerActionRequired,
         };
         // A CLI answer that landed first wins.
-        outcome.send_if_modified(|current| {
-            let unset = current.is_none();
-            if unset {
-                *current = Some(status);
-            }
-            unset
-        });
+        settle(&outcome, status);
     });
+}
+
+// ---------------------------------------------------------------------
+// The owner's loopback page (URL-mode elicitation).
+//
+// Plain HTTP on 127.0.0.1 only, on a random port, while one prompt is
+// pending: the path carries a single-use random token, the Host header must
+// name that exact address (DNS rebinding), and the page closes after one
+// answer or `CREDENTIAL_URL_TTL`. Loopback traffic never leaves the
+// machine, so there is no TLS.
+
+/// Request head plus the form body; the buffer never grows past this, so no
+/// copy of the password is left behind by a reallocation.
+const MAX_HTTP_REQUEST: usize = 16 * 1024;
+/// ponytail: one connection at a time, each bounded by this; a per-connection
+/// task if owners ever share the page.
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn bind_loopback() -> std::io::Result<TcpListener> {
+    let std_listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    std_listener.set_nonblocking(true)?;
+    TcpListener::from_std(std_listener)
+}
+
+struct PageJob {
+    job_id: JobId,
+    generation: u64,
+    /// `127.0.0.1:<port>`, the only accepted Host header.
+    host: String,
+    token: String,
+    text: PromptText,
+    ttl: Duration,
+}
+
+async fn serve_page(
+    broker: Arc<CredentialBroker>,
+    pty: Arc<PtyRuntime>,
+    job: PageJob,
+    listener: TcpListener,
+    outcome: Outcome,
+) {
+    let mut settled = outcome.subscribe();
+    let expiry = tokio::time::sleep(job.ttl);
+    tokio::pin!(expiry);
+    loop {
+        let mut stream = tokio::select! {
+            () = &mut expiry => {
+                settle(&outcome, CredentialStatus::Timeout);
+                broker.forget_page(job.job_id, &outcome);
+                return;
+            }
+            // Declined, abandoned, or answered through another channel.
+            _ = settled.wait_for(Option::is_some) => return,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => stream,
+                Err(_) => continue,
+            },
+        };
+        let Ok(Some(secret)) =
+            tokio::time::timeout(HTTP_REQUEST_TIMEOUT, read_answer(&mut stream, &job)).await
+        else {
+            continue;
+        };
+        let delivered = pty
+            .deliver_credential(job.job_id, &secret.0, Some(job.generation), "url")
+            .await;
+        drop(secret);
+        let id = job.job_id.to_wire_string();
+        if delivered.is_ok() {
+            settle(&outcome, CredentialStatus::Provided);
+            let _ = reply(
+                &mut stream,
+                "200 OK",
+                &format!("Sent to job {id}. You can close this tab."),
+            )
+            .await;
+        } else {
+            settle(&outcome, CredentialStatus::NotAwaiting);
+            let _ = reply(
+                &mut stream,
+                "409 Conflict",
+                &format!("Job {id} is no longer waiting for this password; nothing was typed."),
+            )
+            .await;
+        }
+        // Single use: the listener closes when this task returns.
+        return;
+    }
+}
+
+/// Serve one request. Returns the typed password for a valid POST; answers
+/// everything else itself.
+async fn read_answer(stream: &mut TcpStream, job: &PageJob) -> Option<SecretBuf> {
+    let mut buf = SecretBuf(Vec::with_capacity(MAX_HTTP_REQUEST));
+    let mut chunk = SecretBuf(vec![0; 2048]);
+    let head_len = loop {
+        if let Some(i) = buf.0.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+        if !read_more(stream, &mut buf, &mut chunk).await? {
+            let _ = reply(stream, "431 Request Header Fields Too Large", "Too large.").await;
+            return None;
+        }
+    };
+    let head = std::str::from_utf8(&buf.0[..head_len]).ok()?;
+    let mut lines = head.split("\r\n");
+    let mut request_line = lines.next()?.split(' ');
+    let (method, target) = (request_line.next()?, request_line.next()?);
+    let mut host = None;
+    let mut content_length = 0_usize;
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("host") {
+                host = Some(value.trim());
+            } else if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().ok()?;
+            }
+        }
+    }
+    if host != Some(job.host.as_str()) {
+        let _ = reply(stream, "403 Forbidden", "Wrong host.").await;
+        return None;
+    }
+    let path = target.split('?').next().unwrap_or_default();
+    if !same_token(path.as_bytes(), format!("/{}", job.token).as_bytes()) {
+        let _ = reply(stream, "404 Not Found", "Not found.").await;
+        return None;
+    }
+    match method {
+        "GET" => {
+            let _ = reply_page(stream, &job.text, job.ttl).await;
+            None
+        }
+        "POST" => {
+            let total = head_len.checked_add(content_length)?;
+            while buf.0.len() < total {
+                if !read_more(stream, &mut buf, &mut chunk).await? {
+                    let _ = reply(stream, "413 Content Too Large", "Too large.").await;
+                    return None;
+                }
+            }
+            form_value(buf.0.get(head_len..total)?, b"password")
+        }
+        _ => {
+            let _ = reply(stream, "405 Method Not Allowed", "Not allowed.").await;
+            None
+        }
+    }
+}
+
+/// Append one read to `buf`. `Some(false)`: the request outgrew the cap;
+/// `None`: the peer closed or errored.
+async fn read_more(
+    stream: &mut TcpStream,
+    buf: &mut SecretBuf,
+    chunk: &mut SecretBuf,
+) -> Option<bool> {
+    let room = MAX_HTTP_REQUEST - buf.0.len();
+    if room == 0 {
+        return Some(false);
+    }
+    let want = room.min(chunk.0.len());
+    let n = stream.read(&mut chunk.0[..want]).await.ok()?;
+    if n == 0 {
+        return None;
+    }
+    buf.0.extend_from_slice(&chunk.0[..n]);
+    Some(true)
+}
+
+/// Constant-time token comparison.
+fn same_token(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0_u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Decode one `application/x-www-form-urlencoded` field.
+fn form_value(body: &[u8], key: &[u8]) -> Option<SecretBuf> {
+    let raw = body.split(|b| *b == b'&').find_map(|pair| {
+        let eq = pair.iter().position(|b| *b == b'=')?;
+        (&pair[..eq] == key).then(|| &pair[eq + 1..])
+    })?;
+    let mut out = SecretBuf(Vec::with_capacity(raw.len()));
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i] {
+            b'+' => out.0.push(b' '),
+            b'%' => {
+                let hex = std::str::from_utf8(raw.get(i + 1..i + 3)?).ok()?;
+                out.0.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 2;
+            }
+            b => out.0.push(b),
+        }
+        i += 1;
+    }
+    Some(out)
+}
+
+async fn reply_page(
+    stream: &mut TcpStream,
+    text: &PromptText,
+    ttl: Duration,
+) -> std::io::Result<()> {
+    // `PromptText` is printable ASCII with `<`, `>` and `&` replaced, so it
+    // is safe as HTML text.
+    let body = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>{title}</title>\
+         <style>body{{font:16px system-ui,sans-serif;margin:3em auto;max-width:36em}}\
+         p{{white-space:pre-line}}</style><h1>{title}</h1><p>{message}</p>\
+         <form method=\"post\"><input type=\"password\" name=\"password\" autofocus \
+         autocomplete=\"off\" aria-label=\"Password\"> <button>Send</button></form>\
+         <p>This page works once and closes after {secs} seconds.</p>",
+        title = text.title,
+        message = text.message,
+        secs = ttl.as_secs(),
+    );
+    write_response(stream, "200 OK", &body).await
+}
+
+async fn reply(stream: &mut TcpStream, status: &str, message: &str) -> std::io::Result<()> {
+    let body = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Terminal Commander</title><p>{message}</p>"
+    );
+    write_response(stream, status, &body).await
+}
+
+async fn write_response(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\
+         X-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; \
+         style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body.as_bytes()).await?;
+    stream.shutdown().await?;
+    // Lingering close: wait for the client's FIN so closing with unread
+    // request bytes does not reset the connection before it reads this.
+    let mut sink = [0_u8; 512];
+    let _ = tokio::time::timeout(Duration::from_secs(1), async {
+        while matches!(stream.read(&mut sink).await, Ok(n) if n > 0) {}
+    })
+    .await;
+    Ok(())
 }
 
 pub(crate) fn wipe(buf: &mut [u8]) {

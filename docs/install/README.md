@@ -74,7 +74,9 @@ adapter. The adapter talks to the local daemon over local IPC:
 
 Daemon startup is owned by the installed adapter/supervisor path when
 the harness invokes `terminal-commander-mcp`, not by npm lifecycle
-scripts. The daemon is local-only; it does not open a network listener.
+scripts. The daemon is local-only; it does not open a network listener
+(the owner's one-shot password page for `credential_request` binds
+`127.0.0.1` only, and only while a PTY password prompt is pending).
 
 Linux operators may still use the user-level systemd example at
 `config/terminal-commanderd.service.example`. The example unit does not
@@ -112,7 +114,7 @@ directory. It is safe to commit because it contains no secrets.
 - No polkit rule.
 - No system-level systemd unit.
 - No privileged helper.
-- No network-listening service.
+- No network-listening service (loopback-only credential page aside).
 - No hidden-window helper.
 - No automatic WSL runtime install.
 

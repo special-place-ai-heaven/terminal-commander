@@ -86,8 +86,11 @@ The MCP transport for MVP is rmcp 1.8.0 stdio (per
 
 - The MCP server is launched by the LLM harness (Claude Code, Codex
   CLI, etc.) as a child process and communicates via stdin/stdout.
-- There is no listening network socket. The host firewall is
-  irrelevant; the kernel never opens a port for TC.
+- There is no network-reachable socket. The host firewall is
+  irrelevant. The one exception is loopback-only and short-lived: while
+  a PTY password prompt is pending, `credential_request` may bind the
+  owner's one-shot password page to `127.0.0.1` (random port, single-use
+  token, 120 s) for URL-mode elicitation.
 - Each MCP session has a fresh `terminal-commander-mcp` process.
 - The daemon transport (MCP <-> daemon IPC) is TC21-deferred.
   Candidate transports MUST be local-only: Unix domain socket with

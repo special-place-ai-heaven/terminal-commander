@@ -32,7 +32,7 @@ This document tells:
 | The local operator (human running TC) | Trusted | Owns the host; can read TC's audit log, edit config, restart the daemon. |
 | The LLM client over MCP | Semi-trusted | Authoring intent is unverified. May try (accidentally or via prompt injection) to run dangerous commands, read secrets, or exfiltrate output. |
 | A compromised probe child process | Untrusted | A process spawned by TC can be malicious or buggy. Its output is data, not commands. |
-| A remote network attacker | Out of scope | TC has no network listener. The MCP transport is local stdio (rmcp 1.8.0). |
+| A remote network attacker | Out of scope | TC has no network-reachable listener. The MCP transport is local stdio (rmcp 1.8.0). The one TCP socket is the owner's password page for `credential_request`: bound to 127.0.0.1 only while a PTY password prompt is pending, single-use token, 120 s. |
 | A privileged co-tenant on the host | Out of scope | TC does not defend against root or kernel attackers on the same host. |
 
 ### 2.2 Threats considered

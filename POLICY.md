@@ -736,8 +736,10 @@ each branch.
 PTY job is at a sudo/ssh/password prompt, `pty_command_write_stdin` is
 denied (`SecretInputDenied`) in every profile, so the model can never type a
 password. The job reports `awaiting_credential`, and `credential_request`
-makes the daemon ask the OWNER directly (a native dialog the daemon opens,
-else the admin CLI `terminal-commander credential provide <job_id>`). The
+makes the daemon ask the OWNER directly (a one-shot `127.0.0.1` page the MCP
+client links the owner to via URL-mode elicitation, else a native dialog the
+daemon opens, else the admin CLI `terminal-commander credential provide
+<job_id>`). The
 daemon types the owner's answer itself; the model sees only a status, and
 the audit row `credential_provided` records the job, prompt kind, and source,
 never the value or its length. The IPC `credential_provide` is accepted only

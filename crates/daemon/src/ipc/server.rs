@@ -461,6 +461,7 @@ const fn method_name(req: &IpcRequest) -> &'static str {
         IpcRequest::PtyCommandList => "pty_command_list",
         IpcRequest::CredentialRequest(_) => "credential_request",
         IpcRequest::CredentialProvide(_) => "credential_provide",
+        IpcRequest::CredentialUrl(_) => "credential_url",
         IpcRequest::ShellSessionStart(_) => "shell_session_start",
         IpcRequest::ShellSessionExec(_) => "shell_session_exec",
         IpcRequest::ShellSessionStatus(_) => "shell_session_status",
@@ -535,6 +536,7 @@ pub(crate) const DISCOVERABLE_METHODS: &[&str] = &[
     "pty_command_list",
     "credential_request",
     "credential_provide",
+    "credential_url",
     "shell_session_start",
     "shell_session_exec",
     "shell_session_status",
@@ -844,6 +846,12 @@ async fn dispatch(
         }
         IpcRequest::CredentialProvide(p) => {
             match handlers::pty::handle_credential_provide(state, p, peer).await {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
+        IpcRequest::CredentialUrl(p) => {
+            match handlers::pty::handle_credential_url(state, p, peer).await {
                 Ok(r) => IpcResult::Ok { response: r },
                 Err(e) => IpcResult::Err { error: e },
             }
@@ -1571,6 +1579,10 @@ mod tests {
                 job_id: JobId::new(),
                 secret: terminal_commander_ipc::OwnerSecret::new(String::new()),
                 from_mcp: true,
+            }),
+            IpcRequest::CredentialUrl(terminal_commander_ipc::CredentialUrlParams {
+                job_id: JobId::new(),
+                op: terminal_commander_ipc::CredentialUrlOp::Open,
             }),
             IpcRequest::ShellSessionStart(ShellSessionStartParams {
                 shell: None,

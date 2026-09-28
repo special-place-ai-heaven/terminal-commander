@@ -388,6 +388,23 @@ pub(in crate::ipc::server) fn caller_is_owner_cli(
     caller_may_recipe_admin(state, peer, from_mcp) && !peer_started_by_daemon(peer)
 }
 
+/// `credential_url` gate: the MCP adapter image the harness launched, never
+/// one a TC job started (that one could hand the page URL to the model).
+///
+/// ponytail: in-process tests run under an unknown image; the
+/// `credential_prompter_test_seam` (serde-skipped) admits them.
+pub(in crate::ipc::server) fn caller_is_harness_adapter(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+) -> bool {
+    let role_ok = match peer_program_role(peer) {
+        ProgramRole::McpAdapter => true,
+        ProgramRole::AdminCli => false,
+        ProgramRole::Unknown => state.config.credential_prompter_test_seam.is_some(),
+    };
+    role_ok && !peer_started_by_daemon(peer)
+}
+
 /// Audit actor for recipe admin verbs and `recipe_run`. Known images keep
 /// the FCR-014 actor (`admin` / `mcp`). An unknown peer is never `admin`:
 /// it is `mcp` only when it claims `from_mcp: true` (an under-claim), else
