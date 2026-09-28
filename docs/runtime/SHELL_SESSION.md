@@ -228,8 +228,9 @@ which governs the WHOLE daemon's idle self-reap, not a single session.
 
 A session start is a gated action. The verdict is `PolicyAction::
 SessionStart { shell, cwd }`, evaluated like the shell lane but behind
-its OWN capability so a persistent session is a separate operator opt-in
-from one-shot `shell_exec`:
+its OWN capability, separate from one-shot `shell_exec`'s `allow_shell`.
+`allow_session` is on by default under the default `full_access` profile;
+a hardened profile makes it an operator opt-in:
 
 - `AllowWithAudit` only on an exec-capable profile (`developer_local`,
   `admin_debug`, `full_access`) WITH `allow_session` on.
@@ -249,7 +250,8 @@ caller-supplied), and the `SessionStart` cap is the gate instead. The
 `shell_line` residual-risk discussion for `shell_exec` (POLICY.md
 section 4.1) applies equally here: once `allow_session` is on, the
 interactive shell can run anything the host shell can, which is why
-sessions are a trusted-profile, opt-in capability rather than always-on.
+sessions are a capability gate at all: always-on under the default
+`full_access` profile, and an opt-in an operator withholds by hardening.
 
 ## 9. Workspace snapshots
 

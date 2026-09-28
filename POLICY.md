@@ -63,8 +63,10 @@ protected system tree (/, /usr, /etc, /boot, /System, C:\Windows, a drive
 root, a raw disk) is refused with the typed `OsCriticalPathProtected` error.
 Writing/editing/creating those paths, and every non-deletion command
 (installers, `systemctl`, `reg add`, ...), stay allowed. It is a string-level
-guard rail: indirect deletion (`find -delete`, a script, a path held in a
-variable) is not caught.
+guard rail, not a kernel boundary: it does not see a removal performed
+indirectly -- through a rename/move, a symlink, variable or `~` expansion, a
+heredoc, a `busybox`/`xargs`/`find` action, a script, or text typed into a
+session/PTY.
 
 ### 2.1 `developer_local`
 

@@ -743,7 +743,11 @@ Everything lives under the per-session state dir
   (`rm -rf /`, `Remove-Item C:\Windows`, `mkfs`/`dd` to a disk, ...) in
   ANY profile — refused with a typed `OsCriticalPathProtected` error, no
   knob. Everything else — install, update, edit, configure, write to any
-  path, run as root — is allowed by default.
+  path, run as root — is allowed by default. It is a string-level guard
+  rail, not a kernel boundary: it does not see a removal performed
+  indirectly — through a rename/move, a symlink, variable or `~`
+  expansion, a heredoc, a `busybox`/`xargs`/`find` action, a script, or
+  text typed into a session/PTY.
 - TC inherits the trust of the harness running the LLM: the default
   `full_access` profile denies nothing else (escalators such as
   `sudo`/`su`, the full filesystem, shell, sessions, remote, recipe admin)

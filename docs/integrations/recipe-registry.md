@@ -50,8 +50,9 @@ recipe action=get recipe_id="git.status"
 ```
 
 3. Operator activates. MCP `recipe_activate` and `recipe_deactivate` are
-   denied while `[policy] llm_can_activate_recipes` is false (the
-   default). The deny text is `recipe_activate_requires_admin`. The
+   open under the default `full_access` profile; a hardened profile
+   denies them while `[policy] llm_can_activate_recipes` is false (its
+   default there). The deny text is `recipe_activate_requires_admin`. The
    operator commands are:
 
 ```text
@@ -94,8 +95,8 @@ terminal-commander recipes tombstone <recipe_id>
    descendant whose intermediate parent has already exited (a double
    fork, `cmd /c start ...`) is not detected -- the gate is a guard
    rail, not a boundary. Where the executable cannot be resolved,
-   the deny says so, and `[policy] llm_can_activate_recipes = true` is
-   the only way to grant activation.
+   the deny says so; under a hardened profile, `[policy]
+   llm_can_activate_recipes = true` grants MCP activation too.
 
 4. Run only an activated recipe. `recipe_run` (compact
    `recipe action=run`) refuses a recipe that is not active for the

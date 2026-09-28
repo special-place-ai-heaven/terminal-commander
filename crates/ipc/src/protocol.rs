@@ -936,8 +936,14 @@ pub struct SelfCheckResponse {
     pub failures: u32,
 }
 
-/// Structured error code. Closed set. Adding a variant requires a
-/// goal-file amendment.
+/// Structured error code. Closed set.
+///
+/// Adding a variant requires a goal-file amendment. The one exception is
+/// [`Self::Unknown`]: a `#[serde(other)]` catch-all so an OLDER adapter can
+/// still decode a newer daemon's error frame (a wire string this build
+/// predates) instead of failing the whole response to deserialize. It
+/// never appears in a deliberate deny path -- only ever arrives on the
+/// wire from a peer built after this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IpcErrorCode {
@@ -1075,6 +1081,12 @@ pub enum IpcErrorCode {
     /// editing, installing, and configuring those paths stay allowed -- only
     /// deletion is refused. Owner decision 2026-09-28.
     OsCriticalPathProtected,
+    /// Forward-compat catch-all (see the enum doc comment): a wire string
+    /// this build does not recognize, deserialized here instead of
+    /// erroring the whole frame. Never constructed by this daemon;
+    /// serializes back to `"unknown"` if ever re-emitted (e.g. a proxy).
+    #[serde(other)]
+    Unknown,
 }
 
 /// Closed set of shell-misuse classes (Decision A2). Not every
@@ -4242,6 +4254,16 @@ mod tests {
             let back: IpcErrorCode = serde_json::from_str(&s).unwrap();
             assert_eq!(back, code);
         }
+    }
+
+    /// An older adapter build decoding a code a newer daemon added (a wire
+    /// string this enum's closed set does not name yet) falls back to
+    /// `Unknown` via `#[serde(other)]` instead of failing to deserialize
+    /// the whole response.
+    #[test]
+    fn unrecognized_error_code_decodes_to_unknown() {
+        let back: IpcErrorCode = serde_json::from_str("\"some_future_code_v99\"").unwrap();
+        assert_eq!(back, IpcErrorCode::Unknown);
     }
 
     #[test]

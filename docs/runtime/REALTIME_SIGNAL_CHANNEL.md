@@ -142,9 +142,10 @@ requires an amendment to this document and to
    transport is a defect.
 9. **Default-deny sensitive paths.** 14 path suffixes (private keys,
    credential stores, sudoers, token caches) deny by default in every
-   profile.
+   hardened profile (the default `full_access` is exempt).
 10. **Sudo / doas / su / pkexec / kexec / polkit-agent /
-    polkit-auth-agent-1 deny in every profile.**
+    polkit-auth-agent-1 deny in every hardened profile (the default
+    `full_access` is exempt).**
 11. **Hot rebind of rules.** Registry activation MUST take effect on
     running probes. A rule activation that only persists to the
     database and does not affect a live `SifterRuntime` is a defect.

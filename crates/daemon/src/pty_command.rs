@@ -237,7 +237,12 @@ mod runtime {
             }
         }
 
-        fn audit(
+        // `pub(crate)`, not private: `ShellSessionRuntime` (a different
+        // module, same crate) reuses this to write the same audit row for
+        // the os_guard refusal on the `shell_session_exec` line as the
+        // `command_rejected` / `command_shell_rejected` rows this runtime's
+        // own deny paths write above.
+        pub(crate) fn audit(
             &self,
             action: &str,
             subject: &str,

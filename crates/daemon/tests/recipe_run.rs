@@ -74,7 +74,7 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
             allow_shell: Some(false),
             ..Default::default()
         });
-        assert!(!cfg.policy.llm_can_activate_recipes);
+        assert!(cfg.policy.llm_can_activate_recipes.is_none());
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         assert!(!state.policy.llm_can_activate_recipes());
         let socket = state.config.socket_path();
@@ -286,7 +286,7 @@ fn llm_can_activate_recipes_true_allows_mcp_actor() {
     runtime.block_on(async {
         let data = tmp_data_dir("flag");
         let mut cfg = DaemonConfig::defaults_in(&data);
-        cfg.policy.llm_can_activate_recipes = true;
+        cfg.policy.llm_can_activate_recipes = Some(true);
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         assert!(state.policy.llm_can_activate_recipes());
         let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())

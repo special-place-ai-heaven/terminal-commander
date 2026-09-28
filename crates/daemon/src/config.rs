@@ -219,10 +219,13 @@ pub struct PolicySection {
     /// omitted entries inherit the profile default, while explicit false revokes it.
     #[serde(default)]
     pub caps: Option<PolicyCapsSection>,
-    /// MCP `recipe_activate` / `recipe_deactivate` gate. Default false.
-    /// Admin IPC (`from_mcp: false`) can still activate.
+    /// MCP `recipe_activate` / `recipe_deactivate` gate, tri-state: omitted
+    /// inherits the profile default (open under `full_access`, denied
+    /// otherwise); an explicit `true`/`false` overrides it, including under
+    /// `full_access`. Admin IPC (`from_mcp: false`) can still activate
+    /// regardless.
     #[serde(default)]
-    pub llm_can_activate_recipes: bool,
+    pub llm_can_activate_recipes: Option<bool>,
 }
 
 /// `[policy.commands]` (POLICY.md section 4). `allow_roots` is the
@@ -420,7 +423,7 @@ impl DaemonConfig {
                 paths: None,
                 probes: None,
                 caps: None,
-                llm_can_activate_recipes: false,
+                llm_can_activate_recipes: None,
             },
             retention: default_retention(),
             audit: default_audit(),
@@ -913,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn llm_can_activate_recipes_defaults_false_and_parses_true() {
+    fn llm_can_activate_recipes_defaults_to_none_and_parses_explicit() {
         let omitted = r#"
             [daemon]
             data_dir = "/tmp/x"
@@ -922,7 +925,7 @@ mod tests {
             profile = "developer_local"
         "#;
         let cfg = DaemonConfig::from_toml(omitted).unwrap();
-        assert!(!cfg.policy.llm_can_activate_recipes);
+        assert_eq!(cfg.policy.llm_can_activate_recipes, None);
         let enabled = r#"
             [daemon]
             data_dir = "/tmp/x"
@@ -932,7 +935,7 @@ mod tests {
             llm_can_activate_recipes = true
         "#;
         let cfg = DaemonConfig::from_toml(enabled).unwrap();
-        assert!(cfg.policy.llm_can_activate_recipes);
+        assert_eq!(cfg.policy.llm_can_activate_recipes, Some(true));
     }
 
     #[test]

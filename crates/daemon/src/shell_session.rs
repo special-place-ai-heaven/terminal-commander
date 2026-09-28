@@ -455,7 +455,20 @@ impl ShellSessionRuntime {
                 cwd.as_deref().map(std::path::Path::new),
             )
         {
-            return Err(SessionError::OsCriticalPathProtected(hit.reason()));
+            let reason = hit.reason();
+            // Same audit row shape as the shell_exec lane's deny path
+            // (`command_shell_rejected` in command.rs): redacted subject,
+            // "deny", the failsafe reason. Reused via `PtyRuntime::audit`
+            // rather than duplicated, since `ShellSessionRuntime` has no
+            // audit sink of its own.
+            self.pty.audit(
+                "shell_session_exec_rejected",
+                &crate::command::redact_shell_line(line),
+                "deny",
+                Some(reason.clone()),
+                None,
+            );
+            return Err(SessionError::OsCriticalPathProtected(reason));
         }
 
         // Append the newline so the shell executes the line. The PTY probe

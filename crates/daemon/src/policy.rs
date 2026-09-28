@@ -12,7 +12,8 @@
 //! - cross-profile command deny set (sudo/doas/su/pkexec/kexec/polkit),
 //!   by basename and absolute path;
 //! - default-deny on the sensitive path SUFFIX list (anchored on
-//!   README.md:294-297) for FileRead / FileWatch in every profile;
+//!   README.md:294-297) for FileRead / FileWatch in every hardened
+//!   profile (the default `full_access` is exempt);
 //! - per-profile mutation gates (`read_only_observer` denies command_*
 //!   and registry_*; `admin_debug` denies registry mutations;
 //!   `registry_activate` is AllowWithAudit for dev_local / repo_only);
@@ -241,8 +242,9 @@ impl PolicyCaps {
     }
 }
 
-/// The seven binaries that are denied across every profile per the
-/// PRIVILEGE_MODEL.md headline invariant.
+/// The seven binaries that are denied in every hardened profile (the
+/// default `full_access` is exempt) per the PRIVILEGE_MODEL.md headline
+/// invariant.
 pub const COMMANDS_DENY: &[&str] = &[
     "sudo",
     "doas",
@@ -553,10 +555,12 @@ pub struct PolicyEngine {
     /// Same exact-match semantics as `probe_allow_kinds`. Set by
     /// `with_probe_kinds`.
     probe_deny_kinds: Vec<String>,
-    /// When false, MCP `recipe_activate` / `recipe_deactivate` are denied on
-    /// a hardened profile (`full_access` ignores it). Set by
-    /// [`Self::with_llm_can_activate_recipes`].
-    llm_can_activate_recipes: bool,
+    /// `[policy] llm_can_activate_recipes`, tri-state: `None` (omitted)
+    /// inherits the profile default (open under `full_access`, denied
+    /// otherwise); `Some(_)` is an explicit override that wins even under
+    /// `full_access`, so an operator can deny MCP recipe activation on the
+    /// default profile too. Set by [`Self::with_llm_can_activate_recipes`].
+    llm_can_activate_recipes: Option<bool>,
     /// `allow_shell` is off only because `allow_roots` withheld the
     /// `developer_local` default. Selects the shell deny text. Set by
     /// [`Self::with_shell_withheld_by_allow_roots`].
@@ -604,7 +608,7 @@ impl PolicyEngine {
             // is const so `new` stays `const fn`.
             probe_allow_kinds: Vec::new(),
             probe_deny_kinds: Vec::new(),
-            llm_can_activate_recipes: false,
+            llm_can_activate_recipes: None,
             shell_withheld_by_allow_roots: false,
         }
     }
@@ -628,7 +632,7 @@ impl PolicyEngine {
             caps: PolicyCaps::default(),
             probe_allow_kinds: Vec::new(),
             probe_deny_kinds: Vec::new(),
-            llm_can_activate_recipes: false,
+            llm_can_activate_recipes: None,
             shell_withheld_by_allow_roots: false,
         }
     }
@@ -664,7 +668,7 @@ impl PolicyEngine {
             // path layers them on with `with_probe_kinds`.
             probe_allow_kinds: Vec::new(),
             probe_deny_kinds: Vec::new(),
-            llm_can_activate_recipes: false,
+            llm_can_activate_recipes: None,
             shell_withheld_by_allow_roots: false,
         }
     }
@@ -735,10 +739,11 @@ impl PolicyEngine {
         self
     }
 
-    /// Record `[policy] llm_can_activate_recipes`. Default remains false
-    /// when this builder is not called.
+    /// Record `[policy] llm_can_activate_recipes`. `None` (not called, or
+    /// the config key was omitted) defers to the profile default in
+    /// [`Self::llm_can_activate_recipes`].
     #[must_use]
-    pub const fn with_llm_can_activate_recipes(mut self, enabled: bool) -> Self {
+    pub const fn with_llm_can_activate_recipes(mut self, enabled: Option<bool>) -> Self {
         self.llm_can_activate_recipes = enabled;
         self
     }
@@ -756,12 +761,16 @@ impl PolicyEngine {
         self.shell_withheld_by_allow_roots
     }
 
-    /// Whether MCP may activate or deactivate recipes. Always under the
-    /// default `full_access` profile; otherwise `[policy]
-    /// llm_can_activate_recipes`.
+    /// Whether MCP may activate or deactivate recipes. An explicit
+    /// `[policy] llm_can_activate_recipes` always wins, including under
+    /// `full_access`; omitted defaults to open under `full_access` and
+    /// denied under every other profile.
     #[must_use]
     pub const fn llm_can_activate_recipes(&self) -> bool {
-        self.llm_can_activate_recipes || matches!(self.profile, PolicyProfile::FullAccess)
+        match self.llm_can_activate_recipes {
+            Some(explicit) => explicit,
+            None => matches!(self.profile, PolicyProfile::FullAccess),
+        }
     }
 
     /// Build an engine carrying a resolved capability set (Hybrid trust model,
@@ -1584,6 +1593,25 @@ mod tests {
         );
         assert!(open.llm_can_activate_recipes());
         assert!(!hardened.llm_can_activate_recipes());
+    }
+
+    /// An explicit `[policy] llm_can_activate_recipes` overrides the
+    /// profile default in both directions, including under `full_access`
+    /// (an absent value used to be indistinguishable from an explicit
+    /// `false`, so `full_access` ignored the override entirely).
+    #[test]
+    fn llm_can_activate_recipes_explicit_override_wins_both_ways() {
+        let full_access_explicit_false =
+            PolicyEngine::default_engine().with_llm_can_activate_recipes(Some(false));
+        assert!(!full_access_explicit_false.llm_can_activate_recipes());
+
+        let hardened_explicit_true = PolicyEngine::new(PolicyProfile::DeveloperLocal)
+            .with_llm_can_activate_recipes(Some(true));
+        assert!(hardened_explicit_true.llm_can_activate_recipes());
+
+        // Absent (None) still falls back to the profile default.
+        assert!(PolicyEngine::default_engine().llm_can_activate_recipes());
+        assert!(!PolicyEngine::new(PolicyProfile::DeveloperLocal).llm_can_activate_recipes());
     }
 
     #[test]

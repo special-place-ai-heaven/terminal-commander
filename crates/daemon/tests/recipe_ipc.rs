@@ -247,7 +247,7 @@ fn recipe_seed_import_stays_tested_until_operator_activates() {
             allow_shell: Some(false),
             ..Default::default()
         });
-        assert!(!cfg.policy.llm_can_activate_recipes);
+        assert!(cfg.policy.llm_can_activate_recipes.is_none());
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         assert!(!state.policy.llm_can_activate_recipes());
         assert!(!state.policy.caps_allow_shell());
@@ -801,7 +801,7 @@ fn recipe_tombstone_requires_admin_peer() {
         let mut denied_cfg = DaemonConfig::defaults_in(&denied_dir);
         denied_cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
         assert!(!denied_cfg.recipe_admin_test_seam);
-        assert!(!denied_cfg.policy.llm_can_activate_recipes);
+        assert!(denied_cfg.policy.llm_can_activate_recipes.is_none());
         let denied_state = Arc::new(DaemonState::bootstrap(denied_cfg).unwrap());
         let denied_handle =
             IpcServer::new(Arc::clone(&denied_state), denied_state.config.socket_path())

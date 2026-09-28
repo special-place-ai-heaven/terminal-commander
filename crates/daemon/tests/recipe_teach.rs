@@ -159,7 +159,7 @@ fn shell_deny_steers_to_matching_activated_recipe_only() {
         let data = tmp_data_dir("steer");
         let mut cfg = shell_off_cfg(&data);
         cfg.recipe_admin_test_seam = true;
-        assert!(!cfg.policy.llm_can_activate_recipes);
+        assert!(cfg.policy.llm_can_activate_recipes.is_none());
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         assert!(!state.policy.llm_can_activate_recipes());
         assert!(!state.policy.caps_allow_shell());

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use terminal_commander_core::{ContextHint, RuleDefinition, RuleStatus, RuleType, Severity};
+use terminal_commanderd::ipc::protocol::{AuditSinceParams, AuditSinceResponse};
 use terminal_commanderd::{
     DaemonClient, DaemonConfig, DaemonState, IpcErrorCode, IpcRequest, IpcResponse, IpcServer,
     PolicyProfile, SessionState, ShellSessionExecParams, ShellSessionStartParams,
@@ -152,6 +153,35 @@ fn session_exec_os_guard_refuses_protected_deletion_and_allows_control() {
             .await
             .expect_err("protected deletion must be refused");
         assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
+
+        // The refusal writes the same kind of audit row the shell_exec lane's
+        // deny path writes (command_shell_rejected): the session lane has no
+        // audit sink of its own, so it reuses PtyRuntime's.
+        let audit = client
+            .call(
+                99,
+                IpcRequest::AuditSince(AuditSinceParams {
+                    cursor: 0,
+                    action_filter: Some("shell_session_exec_rejected".to_owned()),
+                    decision_filter: None,
+                    limit: Some(10),
+                }),
+            )
+            .await
+            .expect("audit_since");
+        let IpcResponse::AuditSince(AuditSinceResponse { rows, .. }) = audit else {
+            panic!("unexpected: {audit:?}");
+        };
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].decision, "deny");
+        assert!(
+            rows[0]
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains("TC's one failsafe")),
+            "{:?}",
+            rows[0].reason
+        );
 
         // A tracked `cd` moves the cwd relative operands resolve against.
         client
