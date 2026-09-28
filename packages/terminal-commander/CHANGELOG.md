@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.100](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.99...v0.1.100) (2026-09-28)
+
+
+### Bug Fixes
+
+* **recipes:** harden shell deny, tombstone gate, and run audit ([5b0401d](https://github.com/special-place-ai-heaven/terminal-commander/commit/5b0401d29a472217133134b46de0b2ab26f69b88))
+
 ## [0.1.99](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.98...v0.1.99) (2026-09-28)
 
 
