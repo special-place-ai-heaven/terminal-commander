@@ -18,7 +18,7 @@ use terminal_commander_mcp::daemon_client::McpDaemonClient;
 use terminal_commander_mcp::tools::TerminalCommanderMcpServer;
 use terminal_commanderd::{
     DaemonClient, DaemonConfig, DaemonState, IpcRequest, IpcServer, RecipeActivateParams,
-    RecipeUpsertParams, ServerHandle,
+    ServerHandle,
 };
 
 #[derive(Default, Clone)]
@@ -51,12 +51,13 @@ fn watched_true() -> RecipeDefinition {
     }
 }
 
-fn spawn_daemon(data: &std::path::Path) -> ServerHandle {
+fn spawn_daemon(data: &std::path::Path) -> (ServerHandle, Arc<DaemonState>) {
     let cfg = DaemonConfig::defaults_in(data);
     let state = Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"));
-    IpcServer::new(Arc::clone(&state), state.config.socket_path())
+    let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
         .spawn()
-        .expect("ipc spawn")
+        .expect("ipc spawn");
+    (handle, state)
 }
 
 async fn paired(
@@ -109,7 +110,7 @@ fn first_text(result: &rmcp::model::CallToolResult) -> String {
 #[allow(clippy::too_many_lines)] // deny gate plus one argv-lane run
 async fn mcp_activate_denied_and_run_uses_argv_lane() {
     let data = tmp_data_dir("e2e");
-    let handle = spawn_daemon(&data);
+    let (handle, state) = spawn_daemon(&data);
     let (_server, client) = paired(&handle).await;
 
     let listed = client.list_all_tools().await.expect("list_tools");
@@ -178,20 +179,13 @@ async fn mcp_activate_denied_and_run_uses_argv_lane() {
         );
     }
 
-    let admin =
+    // This test binary is not the `terminal-commander` image. Release
+    // builds (this e2e links the daemon without cfg(test)) deny the claim.
+    let ipc =
         DaemonClient::new(handle.socket_path().to_path_buf()).with_timeout(Duration::from_secs(5));
-    admin
+    let denied = ipc
         .call(
             1,
-            IpcRequest::RecipeUpsert(RecipeUpsertParams {
-                definition: watched_true(),
-            }),
-        )
-        .await
-        .ok();
-    admin
-        .call(
-            2,
             IpcRequest::RecipeActivate(RecipeActivateParams {
                 recipe_id: "echo.true".to_owned(),
                 version: Some(1),
@@ -200,7 +194,24 @@ async fn mcp_activate_denied_and_run_uses_argv_lane() {
             }),
         )
         .await
-        .expect("admin activate");
+        .expect_err("non-cli peer cannot self-claim admin");
+    assert!(
+        denied.message.contains("recipe_activate_requires_admin"),
+        "{}",
+        denied.message
+    );
+    assert!(
+        state
+            .store
+            .record_recipe_activation_scoped(
+                "echo.true",
+                1,
+                ActivationScope::Global,
+                Some("test"),
+                Some("admin"),
+            )
+            .expect("store activate")
+    );
 
     let ran = call_tool(
         &client,
@@ -221,6 +232,174 @@ async fn mcp_activate_denied_and_run_uses_argv_lane() {
         body["state"] == "exited" || body["complete"] == serde_json::json!(true),
         "bounded watch should observe exit: {body}"
     );
+
+    let _ = client.cancel().await;
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+fn needle_recipe() -> RecipeDefinition {
+    RecipeDefinition {
+        recipe_id: "echo.needle".to_owned(),
+        version: 1,
+        title: "Needle".to_owned(),
+        summary: "Print a keyword the active rule can match".to_owned(),
+        argv: vec!["echo".to_owned(), "FCRNEEDLE".to_owned()],
+        status: RecipeStatus::Active,
+        tags: vec![],
+        cwd: None,
+        env_allowlist: vec![],
+        timeout_ms: Some(5_000),
+        rule_pack_ids: vec!["git".to_owned()],
+        placeholders: vec![],
+    }
+}
+
+fn keyword_rule_json(id: &str, keyword: &str, event_kind: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "id": id,
+        "version": 1,
+        "kind": "keyword",
+        "status": "active",
+        "severity": "medium",
+        "event_kind": event_kind,
+        "stream": null,
+        "description": "fcr watched recipe",
+        "pattern": null,
+        "keywords": [keyword],
+        "captures": [],
+        "summary_template": "matched keyword",
+        "tags": ["test"],
+        "rate_limit_per_min": null,
+        "redact": [],
+        "context_hint": { "before_lines": 0, "after_lines": 0 },
+        "examples": []
+    }))
+    .expect("rule json")
+}
+
+fn rule_event_ids(events: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let mut ids = std::collections::BTreeSet::new();
+    for ev in events.as_array().into_iter().flatten() {
+        if ev.get("rule").is_some_and(|rule| !rule.is_null())
+            && let Some(id) = ev["event_id"].as_str()
+        {
+            ids.insert(id.to_owned());
+        }
+    }
+    ids
+}
+
+async fn events_since(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, TestClient>,
+    bucket_id: &str,
+    mut cursor: u64,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for _ in 0..8 {
+        let page = call_tool(
+            client,
+            "bucket_events_since",
+            serde_json::json!({ "bucket_id": bucket_id, "cursor": cursor }),
+        )
+        .await
+        .expect("events");
+        let body: serde_json::Value =
+            serde_json::from_str(&first_text(&page)).expect("events json");
+        if let Some(events) = body["events"].as_array() {
+            out.extend(events.clone());
+        }
+        let next = body["next_cursor"].as_u64().unwrap_or(cursor);
+        if !body["has_more"].as_bool().unwrap_or(false) || next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watched_recipe_run_returns_signals_and_resume_cursor_loses_nothing() {
+    let data = tmp_data_dir("watch");
+    let (handle, state) = spawn_daemon(&data);
+    let (_server, client) = paired(&handle).await;
+
+    call_tool(
+        &client,
+        "registry_upsert",
+        serde_json::json!({
+            "definition_json": keyword_rule_json("fcr-needle", "FCRNEEDLE", "fcr_needle"),
+        }),
+    )
+    .await
+    .expect("rule upsert");
+    call_tool(
+        &client,
+        "registry_activate",
+        serde_json::json!({"rule_id": "fcr-needle", "scope": {"kind": "global"}}),
+    )
+    .await
+    .expect("rule activate");
+
+    let definition = serde_json::to_string(&needle_recipe()).unwrap();
+    let upserted = call_tool(
+        &client,
+        "recipe_upsert",
+        serde_json::json!({ "definition_json": definition }),
+    )
+    .await
+    .expect("recipe upsert");
+    let upsert_body: serde_json::Value =
+        serde_json::from_str(&first_text(&upserted)).expect("upsert json");
+    let version = u32::try_from(upsert_body["version"].as_u64().expect("version")).unwrap();
+    assert!(
+        state
+            .store
+            .record_recipe_activation_scoped(
+                "echo.needle",
+                version,
+                ActivationScope::Global,
+                Some("test"),
+                Some("admin"),
+            )
+            .expect("store activate")
+    );
+
+    let ran = call_tool(
+        &client,
+        "recipe_run",
+        serde_json::json!({
+            "recipe_id": "echo.needle",
+            "scope": {"kind": "global"}
+        }),
+    )
+    .await
+    .expect("recipe_run");
+    let body: serde_json::Value = serde_json::from_str(&first_text(&ran)).expect("run json");
+    assert_eq!(body["watched"], true);
+    assert_eq!(body["degraded"], false);
+    assert_eq!(body["lane"], "argv");
+    let signal_ids = rule_event_ids(&body["signals"]);
+    assert!(
+        body["signals"].as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["kind"].as_str() == Some("fcr_needle"))
+        }),
+        "watched recipe_run must return the rule signal: {body}"
+    );
+    let bucket_id = body["bucket_id"].as_str().expect("bucket").to_owned();
+    let cursor = body["cursor"].as_u64().expect("cursor");
+    let history = serde_json::Value::Array(events_since(&client, &bucket_id, 0).await);
+    let tail = serde_json::Value::Array(events_since(&client, &bucket_id, cursor).await);
+    let history_ids = rule_event_ids(&history);
+    let tail_ids = rule_event_ids(&tail);
+    assert!(!history_ids.is_empty(), "bucket history has the rule event");
+    for id in &history_ids {
+        assert!(
+            signal_ids.contains(id) || tail_ids.contains(id),
+            "rule event {id} is neither in signals nor after cursor {cursor}"
+        );
+    }
 
     let _ = client.cancel().await;
     handle.shutdown().await;

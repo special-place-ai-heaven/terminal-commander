@@ -372,6 +372,11 @@ pub struct DaemonConfig {
     pub shell_session: ShellSessionSection,
     #[serde(default = "default_sifters")]
     pub sifters: SiftersSection,
+    /// In-process tests set this so an unknown peer with explicit
+    /// `from_mcp: false` can drive recipe admin IPC. Not a TOML key and
+    /// not an IPC field. Production stays false.
+    #[serde(skip, default)]
+    pub recipe_admin_test_seam: bool,
 }
 
 const fn default_retention() -> RetentionSection {
@@ -422,6 +427,7 @@ impl DaemonConfig {
             limits: default_limits(),
             shell_session: default_shell_session(),
             sifters: default_sifters(),
+            recipe_admin_test_seam: false,
         }
     }
 

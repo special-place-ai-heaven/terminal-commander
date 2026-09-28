@@ -47,7 +47,7 @@ use crate::ipc::protocol::{MAX_FRAME_BYTES, decode_payload, encode_frame};
 use crate::state::DaemonState;
 #[cfg(unix)]
 use handlers::common::emit_audit_internal_error;
-use handlers::common::{emit_audit, identity_audit_subject};
+use handlers::common::{emit_audit, emit_audit_rich, identity_audit_subject};
 use terminal_commander_core::EnvironmentSpec;
 
 #[cfg(unix)]
@@ -723,12 +723,14 @@ async fn dispatch(
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
         },
-        IpcRequest::RecipeActivate(p) => match handlers::recipe::handle_recipe_activate(state, p) {
-            Ok(r) => IpcResult::Ok { response: r },
-            Err(e) => IpcResult::Err { error: e },
-        },
+        IpcRequest::RecipeActivate(p) => {
+            match handlers::recipe::handle_recipe_activate(state, p, peer) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
         IpcRequest::RecipeDeactivate(p) => {
-            match handlers::recipe::handle_recipe_deactivate(state, p) {
+            match handlers::recipe::handle_recipe_deactivate(state, p, peer) {
                 Ok(r) => IpcResult::Ok { response: r },
                 Err(e) => IpcResult::Err { error: e },
             }
@@ -755,7 +757,7 @@ async fn dispatch(
             Err(e) => IpcResult::Err { error: e },
         },
         IpcRequest::RecipeImportSeeds(p) => {
-            match handlers::recipe::handle_recipe_import_seeds(state, p) {
+            match handlers::recipe::handle_recipe_import_seeds(state, p, peer) {
                 Ok(r) => IpcResult::Ok { response: r },
                 Err(e) => IpcResult::Err { error: e },
             }
@@ -959,7 +961,22 @@ async fn dispatch(
         } else {
             "error"
         };
-        emit_audit(state, method_name, &subject, decision, None, peer);
+        if let Some((actor, extra)) =
+            handlers::recipe::recipe_audit_overlay(peer, &req_env.request, &response_result)
+        {
+            emit_audit_rich(
+                state,
+                method_name,
+                &subject,
+                decision,
+                None,
+                peer,
+                actor,
+                Some(&extra),
+            );
+        } else {
+            emit_audit(state, method_name, &subject, decision, None, peer);
+        }
     }
 
     ResponseEnvelope {

@@ -112,6 +112,12 @@ pub enum StoreOp {
         version: u32,
         scope: ActivationScope,
     },
+    /// `RecipeStore::get_active` -> one definition, or none
+    GetActiveRecipe {
+        recipe_id: String,
+        version: Option<u32>,
+        scope: ActivationScope,
+    },
     /// `RecipeStore::list_active`
     ListActiveRecipes,
     /// `RecipeStore::list_versions`
@@ -515,6 +521,24 @@ impl StoreClient {
         }
     }
 
+    /// One open activation for `(recipe_id, scope)`. Highest version when
+    /// `version` is omitted. Does not scan every open row.
+    pub fn get_active_recipe(
+        &self,
+        recipe_id: &str,
+        version: Option<u32>,
+        scope: ActivationScope,
+    ) -> Result<Option<RecipeDefinition>, EventStoreError> {
+        match self.call(StoreOp::GetActiveRecipe {
+            recipe_id: recipe_id.to_owned(),
+            version,
+            scope,
+        })? {
+            StoreReply::OptionalRecipe(def) => Ok(def),
+            other => Err(unexpected_store_reply("GetActiveRecipe", &other)),
+        }
+    }
+
     /// Open recipe activations.
     pub fn list_active_recipes(&self) -> Result<Vec<ActiveRecipe>, EventStoreError> {
         match self.call(StoreOp::ListActiveRecipes)? {
@@ -834,6 +858,14 @@ fn execute(store: &mut EventStore, op: StoreOp) -> Result<StoreReply, EventStore
             .recipe_store()?
             .deactivate_scoped(&recipe_id, version, scope)
             .map(StoreReply::Bool),
+        StoreOp::GetActiveRecipe {
+            recipe_id,
+            version,
+            scope,
+        } => store
+            .recipe_store()?
+            .get_active(&recipe_id, version, scope)
+            .map(StoreReply::OptionalRecipe),
         StoreOp::ListActiveRecipes => store
             .recipe_store()?
             .list_active()

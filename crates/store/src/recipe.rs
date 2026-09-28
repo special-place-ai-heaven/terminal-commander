@@ -506,6 +506,62 @@ impl RecipeStore<'_> {
         Ok(changed > 0)
     }
 
+    /// One open activation for `(recipe_id, scope)`, optionally pinned to
+    /// `version`. Highest open version when `version` is omitted.
+    ///
+    /// Uses `idx_recipe_activations_scope` (leading `recipe_id`) instead of
+    /// scanning every open row. `list_active` stays the list API.
+    pub fn get_active(
+        &self,
+        recipe_id: &str,
+        version: Option<u32>,
+        scope: ActivationScope,
+    ) -> Result<Option<RecipeDefinition>> {
+        let scope_kind = scope.kind_label();
+        let scope_value = scope.value_wire();
+        let def_s: Option<String> = match version {
+            Some(version) => self
+                .conn
+                .query_row(
+                    "SELECT rv.definition
+                       FROM recipe_activations ra
+                       JOIN recipe_versions rv
+                         ON rv.recipe_id = ra.recipe_id AND rv.version = ra.version
+                       JOIN recipes ru ON ru.recipe_id = ra.recipe_id
+                      WHERE ra.recipe_id = ?1
+                        AND ra.version = ?2
+                        AND ra.scope_kind = ?3
+                        AND ((?4 IS NULL AND ra.scope_value IS NULL) OR ra.scope_value = ?4)
+                        AND ra.deactivated_at IS NULL
+                        AND ru.tombstoned = 0
+                      LIMIT 1",
+                    params![recipe_id, i64::from(version), scope_kind, scope_value],
+                    |row| row.get(0),
+                )
+                .optional()?,
+            None => self
+                .conn
+                .query_row(
+                    "SELECT rv.definition
+                       FROM recipe_activations ra
+                       JOIN recipe_versions rv
+                         ON rv.recipe_id = ra.recipe_id AND rv.version = ra.version
+                       JOIN recipes ru ON ru.recipe_id = ra.recipe_id
+                      WHERE ra.recipe_id = ?1
+                        AND ra.scope_kind = ?2
+                        AND ((?3 IS NULL AND ra.scope_value IS NULL) OR ra.scope_value = ?3)
+                        AND ra.deactivated_at IS NULL
+                        AND ru.tombstoned = 0
+                      ORDER BY ra.version DESC
+                      LIMIT 1",
+                    params![recipe_id, scope_kind, scope_value],
+                    |row| row.get(0),
+                )
+                .optional()?,
+        };
+        Ok(def_s.map(|raw| sj::from_str(&raw)).transpose()?)
+    }
+
     /// Open activations of non-tombstoned parents, oldest first.
     pub fn list_active(&self) -> Result<Vec<ActiveRecipe>> {
         let mut stmt = self.conn.prepare(
@@ -604,6 +660,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one store: search, activate, get_active, tombstone
     fn lifecycle_search_activate_tombstone_leaves_rules_alone() {
         let mut store = EventStore::in_memory().unwrap();
         store.ensure_registry().unwrap();
@@ -668,6 +725,34 @@ mod tests {
             assert_eq!(listed.len(), 1);
             assert_eq!(listed[0].definition.version, v2);
             assert_eq!(listed[0].scope, ActivationScope::Global);
+            let got = recipes
+                .get_active("git.status", None, ActivationScope::Global)
+                .unwrap()
+                .unwrap();
+            assert_eq!(got.version, v2);
+            assert!(
+                recipes
+                    .get_active("git.status", Some(v1), ActivationScope::Global)
+                    .unwrap()
+                    .is_none(),
+                "opening v2 closed v1"
+            );
+            assert!(
+                recipes
+                    .get_active("other", None, ActivationScope::Global)
+                    .unwrap()
+                    .is_none()
+            );
+            let actor: String = recipes
+                .conn
+                .query_row(
+                    "SELECT actor FROM recipe_activations
+                      WHERE recipe_id = 'git.status' AND deactivated_at IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(actor, "unit");
             assert!(
                 recipes
                     .deactivate_scoped("git.status", v2, ActivationScope::Global)
@@ -979,6 +1064,66 @@ mod tests {
         assert_eq!(
             open[0].definition.argv,
             ["git".to_owned(), "status".to_owned(), "--short".to_owned()]
+        );
+    }
+
+    #[test]
+    fn get_active_uses_the_scope_index() {
+        let mut store = EventStore::in_memory().unwrap();
+        let mut recipes = store.recipe_store().unwrap();
+        let active = def(RecipeStatus::Active);
+        recipes.create_recipe_version(&active).unwrap();
+        recipes
+            .record_activation_scoped(
+                "git.status",
+                1,
+                ActivationScope::Global,
+                None,
+                Some("admin"),
+            )
+            .unwrap();
+        let mut other = def(RecipeStatus::Active);
+        other.recipe_id = "git.diff".to_owned();
+        other.argv = vec!["git".to_owned(), "diff".to_owned()];
+        recipes.create_recipe_version(&other).unwrap();
+        recipes
+            .record_activation_scoped("git.diff", 1, ActivationScope::Global, None, None)
+            .unwrap();
+        let hit = recipes
+            .get_active("git.status", Some(1), ActivationScope::Global)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.recipe_id, "git.status");
+        let mut stmt = recipes
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT rv.definition
+                   FROM recipe_activations ra
+                   JOIN recipe_versions rv
+                     ON rv.recipe_id = ra.recipe_id AND rv.version = ra.version
+                   JOIN recipes ru ON ru.recipe_id = ra.recipe_id
+                  WHERE ra.recipe_id = ?1
+                    AND ra.version = ?2
+                    AND ra.scope_kind = ?3
+                    AND ((?4 IS NULL AND ra.scope_value IS NULL) OR ra.scope_value = ?4)
+                    AND ra.deactivated_at IS NULL
+                    AND ru.tombstoned = 0
+                  LIMIT 1",
+            )
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(
+                params!["git.status", 1_i64, "global", None::<String>],
+                |row| row.get(3),
+            )
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let joined = plan.join(" | ");
+        assert!(
+            joined.contains("idx_recipe_activations_scope"),
+            "expected the scope index, got {joined}"
         );
     }
 }

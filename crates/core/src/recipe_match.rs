@@ -6,8 +6,10 @@
 //! No ML and no fuzzy score. A miss falls back to argv teach, which is
 //! preferred over naming the wrong recipe.
 //!
-//! ponytail: eligibility is argv0 basename equality only. Tags and
-//! `recipe_id` segments break ties; a tag never overrides a different
+//! ponytail: eligibility is argv0 basename equality, or argv0 equal to
+//! the recipe id (the operator typed the id as the command). Later
+//! tokens never count as that id, so `rg git.status` does not steer.
+//! Tags and id segments break ties; a tag never overrides a different
 //! argv0. Leading shell interpreters and a short wrapper-flag list are
 //! stripped, not a real shell parser (`wsl` / `env` carriers miss).
 //! Upgrade path: reuse the daemon's carrier split if those misses show
@@ -40,14 +42,12 @@ pub fn match_activated_recipe<'a>(
     let tokens = intent_tokens(intent);
     let program = tokens.first().map(String::as_str)?;
     let recipes = consistent_active(active);
+    // Command token only. A later token (`rg git.status`, `logs/git.log`)
+    // is not "typed the recipe id as the command".
     let exact: Vec<&RecipeDefinition> = recipes
         .iter()
         .copied()
-        .filter(|recipe| {
-            tokens
-                .iter()
-                .any(|token| token.eq_ignore_ascii_case(&recipe.recipe_id))
-        })
+        .filter(|recipe| program.eq_ignore_ascii_case(&recipe.recipe_id))
         .collect();
     match exact.as_slice() {
         [only] => return Some(only.recipe_id.as_str()),
@@ -372,16 +372,40 @@ mod tests {
     }
 
     #[test]
-    fn exact_recipe_id_token_wins_and_two_ids_miss() {
+    fn exact_recipe_id_matches_only_the_command_token() {
         let active = [
             recipe("git.status", &["git", "status"], &["git"]),
+            recipe("git.log", &["git", "log", "--oneline"], &["git"]),
             recipe("git.diff", &["git", "diff"], &["git"]),
         ];
         assert_eq!(
             matched(line("git.status"), &active).as_deref(),
             Some("git.status")
         );
-        assert_eq!(matched(line("git.status git.diff"), &active), None);
+        // Extra words do not create a second exact hit; argv0 is the id.
+        assert_eq!(
+            matched(line("git.status git.diff"), &active).as_deref(),
+            Some("git.status")
+        );
+        assert_eq!(matched(line("rg git.status"), &active), None);
+        assert_eq!(matched(line("echo git.status"), &active), None);
+        assert_eq!(matched(line("tail -n 20 logs/git.log"), &active), None);
+        let rg = ["rg".to_owned(), "git.status".to_owned()];
+        assert_eq!(matched(RecipeTeachIntent::Argv(&rg), &active), None);
+        let tail = [
+            "tail".to_owned(),
+            "-n".to_owned(),
+            "20".to_owned(),
+            "logs/git.log".to_owned(),
+        ];
+        assert_eq!(matched(RecipeTeachIntent::Argv(&tail), &active), None);
+        let typed = ["git.status".to_owned()];
+        assert_eq!(
+            matched(RecipeTeachIntent::Argv(&typed), &active).as_deref(),
+            Some("git.status")
+        );
+        let echo = ["echo".to_owned(), "git.status".to_owned()];
+        assert_eq!(matched(RecipeTeachIntent::Argv(&echo), &active), None);
     }
 
     #[test]

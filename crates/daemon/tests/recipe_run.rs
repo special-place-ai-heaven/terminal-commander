@@ -65,7 +65,8 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("gate");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = true;
         assert!(!cfg.policy.llm_can_activate_recipes);
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         assert!(!state.policy.llm_can_activate_recipes());
@@ -230,10 +231,32 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
         assert_eq!(shell_denied.code, IpcErrorCode::ShellInterpreterDenied);
 
         // emit_audit stores `ipc_{method}`, so the distinct row is ipc_recipe_run.
-        let recipe_audit = audit_actions(&client, "ipc_recipe_run").await;
+        let recipe_audit = audit_hits(&client, "ipc_recipe_run").await;
         assert!(
             !recipe_audit.is_empty(),
             "recipe_run must emit its own audit action"
+        );
+        assert!(
+            recipe_audit.iter().any(|row| {
+                row.actor.as_deref() == Some("admin")
+                    && row
+                        .metadata_json
+                        .as_deref()
+                        .is_some_and(|meta| meta.contains("echo.true"))
+            }),
+            "recipe_run audit carries recipe_id and actor: {recipe_audit:?}"
+        );
+        let activations = audit_hits(&client, "ipc_recipe_activate").await;
+        assert!(
+            activations.iter().any(|row| {
+                row.actor.as_deref() == Some("admin")
+                    && row.actor.as_deref() != Some("ipc")
+                    && row
+                        .metadata_json
+                        .as_deref()
+                        .is_some_and(|meta| meta.contains("echo.true"))
+            }),
+            "recipe_activate audit carries recipe_id: {activations:?}"
         );
         assert!(audit_actions(&client, "ipc_shell_exec").await.is_empty());
         assert!(
@@ -286,12 +309,24 @@ fn llm_can_activate_recipes_true_allows_mcp_actor() {
             .await
             .unwrap();
         assert!(matches!(activated, IpcResponse::RecipeActivate(_)));
+        let hits = audit_hits(&client, "ipc_recipe_activate").await;
+        assert!(
+            hits.iter().any(|row| row.actor.as_deref() == Some("mcp")),
+            "flag-on MCP activate is actor mcp: {hits:?}"
+        );
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&data);
     });
 }
 
-async fn audit_actions(client: &DaemonClient, action: &str) -> Vec<String> {
+#[derive(Debug)]
+struct AuditHit {
+    action: String,
+    actor: Option<String>,
+    metadata_json: Option<String>,
+}
+
+async fn audit_hits(client: &DaemonClient, action: &str) -> Vec<AuditHit> {
     static ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(100);
     let id = ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let response = client
@@ -309,5 +344,19 @@ async fn audit_actions(client: &DaemonClient, action: &str) -> Vec<String> {
     let IpcResponse::AuditSince(AuditSinceResponse { rows, .. }) = response else {
         panic!("audit: {response:?}");
     };
-    rows.into_iter().map(|row| row.action).collect()
+    rows.into_iter()
+        .map(|row| AuditHit {
+            action: row.action,
+            actor: row.actor,
+            metadata_json: row.metadata_json,
+        })
+        .collect()
+}
+
+async fn audit_actions(client: &DaemonClient, action: &str) -> Vec<String> {
+    audit_hits(client, action)
+        .await
+        .into_iter()
+        .map(|row| row.action)
+        .collect()
 }

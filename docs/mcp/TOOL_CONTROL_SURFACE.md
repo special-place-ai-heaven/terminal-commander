@@ -106,7 +106,7 @@ Recipe actions are not accepted on the `registry` facade.
 | Commands and buckets | `command_start_combed`, `run_and_watch`, `command_status`, `command_stop` (forced-kill-only; CommandSignal-gated), `shell_exec` (gated by `allow_shell`; combed, never raw), `command_output_tail`, `bucket_events_since`, `bucket_wait`, `bucket_summary`, `event_context` |
 | Subscriptions | `subscription_open`, `subscription_pull`, `subscription_list`, `subscription_close`, `subscription_seek` |
 | Rule registry | `registry_search`, `registry_get`, `registry_upsert`, `registry_test`, `registry_activate`, `registry_import_pack`, `registry_deactivate`, `registry_list_active`, `registry_suggest_from_samples` (proposals only; NEVER auto-activates) |
-| Recipe registry | `recipe_search`, `recipe_get`, `recipe_upsert`, `recipe_test` (dry-run; does not activate or start a job), `recipe_activate`, `recipe_deactivate`, `recipe_list_active`, `recipe_run`. Separate from rules. Compact facade `recipe` actions: `search`, `get`, `upsert`, `test`, `activate`, `deactivate`, `list_active`, `run`. MCP `recipe_activate` / `recipe_deactivate` are denied while `llm_can_activate_recipes` is false (default) with `recipe_activate_requires_admin`. The operator CLI is `terminal-commander recipes activate`, `recipes deactivate`, `recipes tombstone`, and `recipes import [--activate]` (global scope only). `recipe_run` runs an activated recipe on the argv lane (`run_and_watch` when the recipe has a timeout or rule pack; otherwise `command_start_combed`). Never `shell_exec`. |
+| Recipe registry | `recipe_search`, `recipe_get`, `recipe_upsert`, `recipe_test` (dry-run; does not activate or start a job), `recipe_activate`, `recipe_deactivate`, `recipe_list_active`, `recipe_run`. Separate from rules. Compact facade `recipe` actions: `search`, `get`, `upsert`, `test`, `activate`, `deactivate`, `list_active`, `run`. MCP `recipe_activate` / `recipe_deactivate` are denied while `llm_can_activate_recipes` is false (default) with `recipe_activate_requires_admin`. The grant is the `terminal-commander` peer image, not a caller `from_mcp` bit; omitting that field is not admin, and the MCP adapter image cannot claim it. The operator CLI is `terminal-commander recipes activate`, `recipes deactivate`, `recipes tombstone`, and `recipes import [--activate]` (global scope only). `recipe_run` runs an activated recipe on the argv lane. A recipe with `timeout_ms` or `rule_pack_ids` returns a watched response (signals, resume cursor, `degraded` / `recover_hint`, same contract as `run_and_watch`). `rule_pack_ids` only select that path and do not load packs; combing uses registry rules already active on the job. Otherwise the start is `command_start_combed`. Never `shell_exec`. |
 | Sessions and workspace | `shell_session_start`, `shell_session_exec`, `shell_session_status`, `shell_session_stop`, `shell_session_list`, `workspace_snapshot_create`, `workspace_snapshot_apply` (gated by `allow_session`; unix-only; combed, never raw) |
 | Files | `file_read_window`, `file_search`, `file_write` (policy-gated by `paths.write_allow`; audited before write; bounded size; atomic; mutating / non-idempotent), `file_watch_start`, `file_watch_stop`, `file_watch_list` |
 | PTY | `pty_command_start`, `pty_command_write_stdin`, `pty_command_stop`, `pty_command_list` (POSIX + Windows ConPTY) |
@@ -151,10 +151,12 @@ is off in the active policy profile`. Discover's catalogue `steer` and
 `omni_status.matrix.shell_exec.steer` stay the argv default (`recover_hint`
 `retry_with_argv`, `intended_tool` `run_and_watch`, `intended_example`
 `{"argv":["git","status"]}`). A shell-misuse deny follows the daemon
-`ShellTeach`: when `recipe_id` is set, `recover_hint` is
-`retry_with_recipe`, `intended_tool` is `recipe_run`, and
-`intended_example` is `{"recipe_id":"..."}`. Otherwise the envelope keeps
-`retry_with_argv` / `run_and_watch`. Alternatives still list argv tools.
+`ShellTeach`: when `recipe_id` and `recipe_scope` are set (exactly one
+runnable scope), `recover_hint` is `retry_with_recipe`, `intended_tool`
+is `recipe_run`, and `intended_example` is
+`{"recipe_id":"...","scope":{"kind":"global"}}`. Pass that object
+unchanged. Otherwise the envelope keeps `retry_with_argv` /
+`run_and_watch`. Alternatives still list argv tools.
 The remedy is that hint, not "enable shell". See
 `docs/integrations/recipe-registry.md`.
 

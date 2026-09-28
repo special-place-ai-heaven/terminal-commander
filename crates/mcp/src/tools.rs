@@ -2365,7 +2365,7 @@ impl TerminalCommanderMcpServer {
 
     /// `recipe_run` — activated recipe, argv lane only.
     #[tool(
-        description = "Run an activated argv recipe through the command argv lane (command_start_combed / run_and_watch). Refuses recipes that are not activated. Never uses shell_exec."
+        description = "Run an activated argv recipe on the argv lane. Never uses shell_exec. When the recipe has timeout_ms or rule_pack_ids, the response is watched: it returns signals, a resume cursor, and degraded/recover_hint the same way run_and_watch does. rule_pack_ids only select that watched response; they do not load packs. Combing uses registry rules already active on the job. Refuses recipes that are not activated."
     )]
     async fn recipe_run(
         &self,
@@ -2395,11 +2395,35 @@ impl TerminalCommanderMcpServer {
             probe_id,
             cursor,
         } = started;
-        let (state, exit_code, complete, cursor) = if watched {
-            self.watch_recipe_job(job_id, bucket_id, cursor, wait_ms)
-                .await
+        let watched_result = if watched {
+            Some(
+                self.watch_recipe_job(job_id, bucket_id, cursor, wait_ms)
+                    .await?,
+            )
         } else {
-            (None, None, false, cursor)
+            None
+        };
+        let RecipeWatch {
+            state,
+            exit_code,
+            complete,
+            cursor,
+            signals,
+            degraded,
+            recover_hint,
+        } = watched_result.unwrap_or(RecipeWatch {
+            state: None,
+            exit_code: None,
+            complete: false,
+            cursor,
+            signals: Vec::new(),
+            degraded: false,
+            recover_hint: None,
+        });
+        let state_json = match state {
+            Some(state) => serde_json::json!(state),
+            None if degraded => serde_json::json!("unknown"),
+            None => serde_json::Value::Null,
         };
         json_tool_result(&serde_json::json!({
             "recipe_id": recipe_id,
@@ -2412,72 +2436,172 @@ impl TerminalCommanderMcpServer {
             "bucket_id": bucket_id,
             "probe_id": probe_id,
             "cursor": cursor,
-            "state": state,
+            "state": state_json,
             "exit_code": exit_code,
             "complete": complete,
+            "signals": signals,
+            "signal_count": signals.len(),
+            "degraded": degraded,
+            "recover_hint": recover_hint,
         }))
     }
 
-    /// Bounded status poll after an argv-lane recipe start.
+    /// Watched recipe_run: same wait loop as `run_and_watch`.
+    #[allow(clippy::too_many_lines)] // same wait/degrade shape as run_and_watch
     ///
-    /// ponytail: same primitives as `run_and_watch` (bucket_wait + command_status)
-    /// without copying its signal packer. `rule_pack_ids` only choose this path.
+    /// `resume_cursor` advances only when every rule event on the page fit in
+    /// `signals`. A full buffer leaves the cursor before the omitted match.
+    /// Transport errors return `degraded` plus `recover_hint` and do not move
+    /// that cursor. `rule_pack_ids` only choose this path; they do not load
+    /// packs.
     async fn watch_recipe_job(
         &self,
         job_id: terminal_commander_core::JobId,
         bucket_id: terminal_commander_core::BucketId,
-        mut cursor: u64,
+        cursor: u64,
         wait_ms: u64,
-    ) -> (
-        Option<terminal_commander_core::JobState>,
-        Option<i32>,
-        bool,
-        u64,
-    ) {
+    ) -> Result<RecipeWatch, McpError> {
         use terminal_commander_core::JobState;
+        let max_signals = RUN_AND_WATCH_DEFAULT_MAX_SIGNALS;
+        let mut signals = Vec::new();
+        let mut cursor = cursor;
+        let mut resume_cursor = cursor;
+        let mut last_state = None;
+        let mut exit_code = None;
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
         loop {
-            let status = self
+            let status = match self
                 .daemon
                 .call(IpcRequest::CommandStatus(CommandStatusParams { job_id }))
-                .await;
-            if let Ok(IpcResponse::CommandStatus(status)) = status {
-                let terminal = matches!(
-                    status.state,
-                    JobState::Exited | JobState::Cancelled | JobState::Failed
-                );
-                if terminal || std::time::Instant::now() >= deadline {
-                    return (Some(status.state), status.exit_code, terminal, cursor);
+                .await
+            {
+                Ok(IpcResponse::CommandStatus(status)) => status,
+                Ok(other) => return Err(unexpected_variant(&other)),
+                Err(e) => {
+                    return Ok(degraded_recipe_watch(
+                        last_state,
+                        exit_code,
+                        resume_cursor,
+                        signals,
+                        &e,
+                    ));
                 }
-            } else if std::time::Instant::now() >= deadline {
-                return (None, None, false, cursor);
-            }
+            };
+            last_state = Some(status.state);
+            exit_code = status.exit_code;
+            let terminal = matches!(
+                status.state,
+                JobState::Exited | JobState::Cancelled | JobState::Failed
+            );
             let remaining_ms = u64::try_from(
                 deadline
                     .saturating_duration_since(std::time::Instant::now())
                     .as_millis(),
             )
             .unwrap_or(0);
-            if remaining_ms == 0 {
+            let slice_ms = if terminal {
+                0
+            } else {
+                MAX_WAIT_SLICE_MS.min(remaining_ms)
+            };
+            if let Some(err) = self
+                .drain_recipe_signals(
+                    bucket_id,
+                    &mut cursor,
+                    &mut resume_cursor,
+                    &mut signals,
+                    max_signals,
+                    slice_ms,
+                )
+                .await?
+            {
+                return Ok(degraded_recipe_watch(
+                    last_state,
+                    exit_code,
+                    resume_cursor,
+                    signals,
+                    &err,
+                ));
+            }
+            if terminal || signals.len() >= max_signals {
                 break;
             }
-            let slice = remaining_ms.clamp(1, MAX_WAIT_SLICE_MS);
-            if let Ok(IpcResponse::BucketWait(wait)) = self
-                .daemon
-                .call(IpcRequest::BucketWait(BucketWaitParams {
-                    bucket_id,
-                    cursor,
-                    severity_min: None,
-                    kind_filter: None,
-                    limit: None,
-                    timeout_ms: Some(slice),
-                }))
-                .await
-            {
-                cursor = wait.next_cursor;
+            if std::time::Instant::now() >= deadline {
+                if let Some(err) = self
+                    .drain_recipe_signals(
+                        bucket_id,
+                        &mut cursor,
+                        &mut resume_cursor,
+                        &mut signals,
+                        max_signals,
+                        0,
+                    )
+                    .await?
+                {
+                    return Ok(degraded_recipe_watch(
+                        last_state,
+                        exit_code,
+                        resume_cursor,
+                        signals,
+                        &err,
+                    ));
+                }
+                break;
             }
         }
-        (None, None, false, cursor)
+        let complete = last_state.is_some_and(|state| {
+            matches!(
+                state,
+                JobState::Exited | JobState::Cancelled | JobState::Failed
+            )
+        });
+        Ok(RecipeWatch {
+            state: last_state,
+            exit_code,
+            complete,
+            cursor: resume_cursor,
+            signals,
+            degraded: false,
+            recover_hint: None,
+        })
+    }
+
+    /// `Some` is the transport error (caller returns degraded; cursors stay).
+    async fn drain_recipe_signals(
+        &self,
+        bucket_id: terminal_commander_core::BucketId,
+        cursor: &mut u64,
+        resume_cursor: &mut u64,
+        signals: &mut Vec<terminal_commander_core::SignalEvent>,
+        max_signals: usize,
+        timeout_ms: u64,
+    ) -> Result<Option<IpcError>, McpError> {
+        match self
+            .daemon
+            .call(IpcRequest::BucketWait(BucketWaitParams {
+                bucket_id,
+                cursor: *cursor,
+                severity_min: None,
+                kind_filter: None,
+                limit: Some(max_signals.saturating_sub(signals.len()).max(1)),
+                timeout_ms: Some(timeout_ms),
+            }))
+            .await
+        {
+            Ok(IpcResponse::BucketWait(page)) => {
+                let room = max_signals.saturating_sub(signals.len());
+                let rule_count = page.events.iter().filter(|ev| ev.rule.is_some()).count();
+                *cursor = page.next_cursor;
+                collect_rule_signals(page.events, signals, max_signals);
+                // A rule event that did not fit stays behind resume_cursor.
+                if rule_count <= room {
+                    *resume_cursor = *cursor;
+                }
+                Ok(None)
+            }
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(err) => Ok(Some(err)),
+        }
     }
 
     /// `file_read_window` — bounded line/byte window read of one file.
@@ -3433,7 +3557,7 @@ usually {\"kind\":\"global\"}. Rules comb command output into structured signals
     /// `recipe` facade — argv recipes. Not rules.
     #[tool(
         name = "recipe",
-        description = "Argv recipes (not rules): search, get, upsert, test (dry-run; does not activate), activate, deactivate, list_active, run. activate is global-only. activate and deactivate are denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin); an operator runs `terminal-commander recipes activate`, `recipes deactivate`, or `recipes tombstone`. run executes an activated recipe on the argv lane (run_and_watch when the recipe has a timeout or rule pack; otherwise command_start_combed). Never shell_exec. Example: {\"action\":\"run\",\"recipe_id\":\"git.status\",\"scope\":{\"kind\":\"global\"}}."
+        description = "Argv recipes (not rules): search, get, upsert, test (dry-run; does not activate), activate, deactivate, list_active, run. activate is global-only. activate and deactivate are denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin); an operator runs `terminal-commander recipes activate`, `recipes deactivate`, or `recipes tombstone`. run executes an activated recipe on the argv lane. A recipe with timeout_ms or rule_pack_ids returns a watched response (signals, resume cursor, degraded and recover_hint, same contract as run_and_watch); rule_pack_ids only select that path and do not load packs. Otherwise the start is command_start_combed. Never shell_exec. Example: {\"action\":\"run\",\"recipe_id\":\"git.status\",\"scope\":{\"kind\":\"global\"}}."
     )]
     pub(crate) async fn recipe_facade(
         &self,
@@ -4982,6 +5106,34 @@ impl McpShellExecParams {
             bucket_config,
             tag: self.tag,
         })
+    }
+}
+
+struct RecipeWatch {
+    state: Option<terminal_commander_core::JobState>,
+    exit_code: Option<i32>,
+    complete: bool,
+    cursor: u64,
+    signals: Vec<terminal_commander_core::SignalEvent>,
+    degraded: bool,
+    recover_hint: Option<String>,
+}
+
+fn degraded_recipe_watch(
+    state: Option<terminal_commander_core::JobState>,
+    exit_code: Option<i32>,
+    cursor: u64,
+    signals: Vec<terminal_commander_core::SignalEvent>,
+    err: &IpcError,
+) -> RecipeWatch {
+    RecipeWatch {
+        state,
+        exit_code,
+        complete: false,
+        cursor,
+        signals,
+        degraded: true,
+        recover_hint: Some(degraded_wait_hint(err)),
     }
 }
 
@@ -7944,6 +8096,7 @@ mod tests {
             denied_tool: "shell_exec".to_owned(),
             reason: ShellDenyClass::ShellCapabilityOff.reason().to_owned(),
             recipe_id: None,
+            recipe_scope: None,
         };
         let mut e = IpcError::new(IpcErrorCode::PolicyDenied, teach.reason.clone());
         e.teach = Some(Box::new(teach.clone()));

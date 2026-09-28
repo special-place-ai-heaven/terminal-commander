@@ -100,12 +100,15 @@ pub struct RecipeDefinition {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    /// Environment variable names only. Values are rejected.
+    /// Rejected when non-empty. Names-only shape is checked, but the
+    /// field is not applied: the child inherits the daemon environment.
+    /// A non-empty list would claim a filter that does not exist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
-    /// Soft references to existing rule packs. Not shared table ownership.
+    /// Selects the watched `recipe_run` response only. Does not load packs.
+    /// Combing is whatever registry rules are already active on the job.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rule_pack_ids: Vec<String>,
     /// Named slots filled later at run. No free-form argv rewrite.
@@ -143,7 +146,9 @@ impl RecipeDefinition {
         Ok(())
     }
 
-    /// True when run should follow the `run_and_watch` path (timeout or pack hint).
+    /// True when `recipe_run` should return signals and a resume cursor.
+    ///
+    /// `rule_pack_ids` only selects this path. It does not import packs.
     #[must_use]
     pub const fn prefers_watch(&self) -> bool {
         self.timeout_ms.is_some() || !self.rule_pack_ids.is_empty()
@@ -269,11 +274,15 @@ fn validate_tags(tags: &[String]) -> Result<(), RecipeError> {
     if tags.len() > MAX_RECIPE_TAGS {
         return Err(invalid(format!("tags exceed {MAX_RECIPE_TAGS}")));
     }
+    let mut seen = std::collections::BTreeSet::new();
     for tag in tags {
         if tag.trim().is_empty() || tag.len() > MAX_RECIPE_TAG_BYTES || tag.contains('\0') {
             return Err(invalid(format!(
                 "tag must be non-empty and at most {MAX_RECIPE_TAG_BYTES} bytes"
             )));
+        }
+        if !seen.insert(tag.as_str()) {
+            return Err(invalid(format!("duplicate tag '{tag}'")));
         }
     }
     Ok(())
@@ -300,6 +309,9 @@ fn valid_env_name(name: &str) -> bool {
 }
 
 fn validate_env_names(names: &[String]) -> Result<(), RecipeError> {
+    if names.is_empty() {
+        return Ok(());
+    }
     if names.len() > MAX_RECIPE_TAGS {
         return Err(invalid("env_allowlist is too long"));
     }
@@ -310,7 +322,16 @@ fn validate_env_names(names: &[String]) -> Result<(), RecipeError> {
             )));
         }
     }
-    Ok(())
+    // ponytail: the process probe does not env_clear (that drops SystemRoot
+    // and breaks Windows children). Until a safe apply exists, a non-empty
+    // list is a false filter. Reject it. Upgrade path: pass only these
+    // names from the daemon env without clearing the rest, if a measured
+    // host still starts.
+    Err(invalid(
+        "env_allowlist is not enforced; omit it. A non-empty list would claim \
+         to filter the child environment, but recipe_run inherits the daemon \
+         environment",
+    ))
 }
 
 fn validate_names(field: &str, names: &[String], max: usize) -> Result<(), RecipeError> {
@@ -434,7 +455,7 @@ mod tests {
             status: RecipeStatus::Draft,
             tags: vec!["git".to_owned()],
             cwd: None,
-            env_allowlist: vec!["PATH".to_owned()],
+            env_allowlist: vec![],
             timeout_ms: Some(5_000),
             rule_pack_ids: vec!["git".to_owned()],
             placeholders: vec!["branch".to_owned(), "{rev}".to_owned()],
@@ -517,6 +538,22 @@ mod tests {
             "status".to_owned(),
         ];
         def.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_duplicate_tags() {
+        let mut def = ok_def();
+        def.tags = vec!["git".to_owned(), "git".to_owned()];
+        let err = def.validate().unwrap_err().to_string();
+        assert!(err.contains("duplicate tag"), "{err}");
+    }
+
+    #[test]
+    fn rejects_nonempty_env_allowlist() {
+        let mut def = ok_def();
+        def.env_allowlist = vec!["PATH".to_owned()];
+        let err = def.validate().unwrap_err().to_string();
+        assert!(err.contains("not enforced"), "{err}");
     }
 
     #[test]
