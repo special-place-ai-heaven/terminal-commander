@@ -136,10 +136,9 @@ The daemon `ShellTeach` chooses the steer:
 | `recipe_id` and `recipe_scope` are set (exactly one runnable scope) | `recover_hint` = `retry_with_recipe`, `intended_tool` = `recipe_run`, `intended_example` = `{"recipe_id":"git.status","scope":{"kind":"global"}}` |
 | no match, or more than one runnable scope | `recover_hint` = `retry_with_argv`, `intended_tool` = `run_and_watch`, `intended_example` = `{"argv":["git","status"]}` |
 
-`alternatives` still lists argv tools (`run_and_watch`,
-`command_start_combed`, file tools, PTY). `shell_exec` stays last and
-tagged `operator_opt_in`, except under `profile_forbids_shell`, where no
-operator knob enables it and it is omitted. Follow `recover_hint`. Do not
+`alternatives` lists argv tools only (`run_and_watch`,
+`command_start_combed`, file tools, PTY); a denied `shell_exec` is never
+offered back. Follow `recover_hint`. Do not
 ask to enable shell.
 
 The recipe `intended_example` is a `recipe_run` body. Pass it unchanged.

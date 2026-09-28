@@ -32,7 +32,7 @@ gate, so the default surface stays exactly as safe as before.
   wait_ms }`. The daemon spawns `[shell, "-lc", shell_line]`.
 - A new `ShellRuntime` facade over the existing `CommandRuntime`.
 - The `allow_shell` capability gate (`[policy.caps]`; on in the default
-  `developer_local` profile, `allow_shell = false` hardens;
+  `full_access` profile, `allow_shell = false` hardens;
   see `POLICY.md` section 4.1).
 - A dedicated policy action `PolicyAction::CommandShellStart`,
   evaluated to `AllowWithAudit` only on an exec-capable profile with
@@ -169,9 +169,9 @@ audits.
 NOT scan `shell_line`. Once `allow_shell` is on, a host where `sudo` is
 otherwise reachable can have `sudo ...` embedded inside a `shell_line`,
 and the argv[0] deny will not catch it. This is intended: it is WHY the
-shell lane is a trusted-profile, on-by-default (`developer_local`),
-single-operator capability -- `[policy.caps] allow_shell = false`
-hardens it off -- and WHY privilege escalation stays a SEPARATE closed
+shell lane is an on-by-default capability under the default
+`full_access` profile (which applies no escalator deny at all) --
+`[policy.caps] allow_shell = false` or a hardened profile turns it off -- and WHY privilege escalation stays a SEPARATE closed
 helper (Wave 4, `allow_privileged`) rather than a generic shell. See
 `POLICY.md` section 4.1 and `docs/security/PRIVILEGE_MODEL.md`.
 

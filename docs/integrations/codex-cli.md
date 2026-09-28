@@ -142,12 +142,12 @@ Ask the assistant to:
 Every response is bounded JSON. Raw stdout/stderr should not be pasted into the
 conversation.
 
-`allow_shell` is on in the default `developer_local` profile; an operator
-hardens with `[policy.caps] allow_shell = false` in config TOML. If
+`allow_shell` is on in the default `full_access` profile (TC inherits the
+harness's trust); a hardened config sets `[policy.caps] allow_shell = false`. If
 `system_discover` shows `shell_exec` `available: false`, or a shell call
 is PolicyDenied, follow `recover_hint` `retry_with_argv` (argv
 `run_and_watch` / `command_start_combed`) first; the deny names the
-operator knob.
+profile and the config key that changes it.
 
 ## Troubleshooting
 

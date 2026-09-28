@@ -105,9 +105,10 @@ Pass criteria:
 - Optional: `workspace_snapshot_create` then `workspace_snapshot_apply`
   into the same (or a fresh) session, confirming cwd/env restore.
 
-Expected-deny variant: with `allow_session` OFF (the default), step 1
-should be denied by policy and audited. Record "deny verified" -- that is
-the correct default-deny behavior, not a harness failure.
+Expected-deny variant: on a hardened profile with `allow_session` OFF
+(the default `full_access` turns it on), step 1 should be denied by policy
+and audited. Record "deny verified" -- that is the correct hardened
+behavior, not a harness failure.
 
 ## Check C -- suggest loop (unknown output)
 

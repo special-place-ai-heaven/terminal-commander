@@ -1,5 +1,29 @@
 <!--
 SYNC IMPACT REPORT
+Version change: 3.0.0 -> 4.0.0
+Bump rationale: the default profile becomes `full_access` and TC inherits the
+harness's trust: by default nothing is denied (escalators, sensitive paths,
+sessions, remote, recipe admin). Principle II no longer mandates default-deny
+and Principle IV names the harness as the trust boundary, so the bump is MAJOR.
+Rationale (owner's product direction, 2026-09-28): "I am trying to make TC be
+indispensable tool to LLMs, not human operators." "If they trust LLM to allow
+all, MCP should listen to the same level LLM is allowed to work in." "If the
+LLM setting is to allow all, that means sudo/su work too." "This means root
+and full filesystem access." The policy engine still evaluates and audits
+every action; developer_local, repo_only, read_only_observer and admin_debug
+remain as opt-in hardening.
+Modified principles:
+  - II. Policy-Before-Spawn, Audited, Harness-Trust Default
+  - IV. Local-Only Privilege Boundary
+Added sections: none
+Removed sections: none
+Templates reviewed:
+  - .specify/templates/plan-template.md       OK  (no default-deny wording)
+  - .specify/templates/spec-template.md       OK  (no default-deny wording)
+  - .specify/templates/tasks-template.md      OK  (no default-deny wording)
+Follow-up TODOs: none
+
+Previous report:
 Version change: 2.1.0 -> 3.0.0
 Bump rationale: Principle II no longer requires default profiles to deny shell
 passthrough; `allow_shell` now defaults on for `developer_local`. That redefines
@@ -16,7 +40,7 @@ Templates reviewed:
   - .specify/templates/tasks-template.md      OK  (no shell-default wording)
 Follow-up TODOs: none
 
-Previous report:
+Earlier report:
 Version change: 1.0.0 -> 2.1.0
 Bump rationale: The committed 1.0.0 two-process boundary is redefined as one
 engine boundary with two approved delivery modes, which is a major governance
@@ -78,32 +102,31 @@ Rationale: one execution chokepoint is what makes policy, audit, and bounded
 output enforceable. Delivery topology may differ, but duplicating or bypassing
 the engine would make every other guarantee untrustworthy.
 
-### II. Policy-Before-Spawn, Default-Deny, Opt-In Capabilities (NON-NEGOTIABLE)
+### II. Policy-Before-Spawn, Audited, Harness-Trust Default (NON-NEGOTIABLE)
 
 No command, shell line, PTY, privileged op, connector action, environment
 sensor, or remote target runs until the policy engine governing that action has
-evaluated it. The default `developer_local` profile allows shell passthrough
-(`allow_shell`): it runs behind the combed, bounded pipeline and every start is
-audited (`command_shell_start`); an operator hardens with
-`[policy.caps] allow_shell = false`. Default profiles MUST deny privileged
-execution and remote targets. New capability surfaces MUST be gated behind
-explicit `[policy.caps]` flags (`allow_shell`, `allow_session`,
-`allow_privileged`, `allow_remote`, ...) that default to `false` (the one
-exception is `allow_shell` on `developer_local`) and are enabled only by the
-operator. A new cap absent from an existing configuration resolves
-`false` under every profile, including `full_access`; selecting an old broad
-profile MUST NOT silently authorize a future cap after upgrade. A trusted fixed
-helper does not bypass policy; both its sensor class and its underlying command,
-file, probe, or connector action MUST be authorized before use. There is NO
-generic `sudo`/`doas`/`su` path and NO unaudited argv smuggling: a shell line
-travels in a dedicated request field. With `allow_shell` off,
-`SHELL_INTERPRETERS_DENY` on the argv path MUST remain intact and
-`argv[0]=bash` is denied; with `allow_shell` on, an interpreter argv passes the
-same `CommandShellStart` policy check and its audit row is tagged
-`nested_shell`.
+evaluated it, and every gated start is audited. The default profile is
+`full_access`: TC inherits the trust of the harness that runs the LLM, so every
+`[policy.caps]` flag (`allow_shell`, `allow_session`, `allow_privileged`,
+`allow_remote`, and any future cap) is on, MCP recipe admin is open, and the
+structural denies (`sudo`/`doas`/`su`/`pkexec` argv, the shell-line escalator
+scan, the sensitive-path list) do not apply. Hardening is opt-in:
+`developer_local`, `repo_only`, `read_only_observer` and `admin_debug` keep
+those denies, and an explicit `[policy.caps]` false, `allow_roots`, or
+`[policy.paths]` list narrows any profile. A hardened-profile deny MUST name
+the profile and the config key that changes it. A trusted fixed helper does not
+bypass policy; both its sensor class and its underlying command, file, probe,
+or connector action MUST be authorized before use. There is NO unaudited argv
+smuggling: a shell line travels in a dedicated request field. With
+`allow_shell` off, `SHELL_INTERPRETERS_DENY` on the argv path MUST remain
+intact and `argv[0]=bash` is denied; with `allow_shell` on, an interpreter
+argv passes the same `CommandShellStart` policy check and its audit row is
+tagged `nested_shell`.
 
-Rationale: capability is granted, never assumed. The operator -- not the LLM --
-decides what the daemon may do on the host.
+Rationale: the LLM is the primary user. When its harness trusts it with
+everything, a TC deny only pushes it to raw Bash with no combing and no audit;
+the harness owns the trust decision and TC records what was done.
 
 ### III. Combed, Bounded Output (NON-NEGOTIABLE)
 
@@ -141,6 +164,12 @@ authentication rooted in the attested peer identity. Any connector carrying a
 caller-supplied secret or environment overlay value additionally requires
 authenticated end-to-end confidentiality; reachability or a challenge response
 alone is insufficient.
+
+Under the default `full_access` profile the harness running the LLM is the
+authority boundary: TC grants the same host access that harness grants
+(including root through `sudo`/`su` and the full filesystem) and does not
+re-litigate it. A hardened profile is how an operator narrows TC below the
+harness.
 
 Rationale: the trust model is per-user, per-host. The network is never inside
 the boundary.
@@ -255,4 +284,4 @@ be recorded in the plan's Complexity Tracking table with the simpler alternative
 that was rejected and why. The NON-NEGOTIABLE principles (I, II, III, VI) are not
 subject to per-feature waiver.
 
-**Version**: 3.0.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-09-28
+**Version**: 4.0.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-09-28

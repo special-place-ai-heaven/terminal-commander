@@ -14,9 +14,9 @@ Language: ASCII only.
 ## The one-screen decision tree
 
 Default profile: argv first. Decompose pipelines before any shell lane.
-`shell_exec` is on by default for `developer_local` (`[policy.caps]
-allow_shell = false` hardens it off); it is still not the first branch
-or the remedy when a call is denied.
+`shell_exec` is on by default: the default `full_access` profile denies
+nothing (`[policy.caps] allow_shell = false` or a hardened profile turns
+it off); it is still not the first branch or the remedy when a call is denied.
 
 ```text
 Need to run or observe something?
@@ -53,9 +53,9 @@ Need to run or observe something?
 |
 +-- Pipeline, redirect, compound, or PowerShell one-liner?
 |     DECOMPOSE FIRST into argv steps or the file tools above.
-|     shell_exec comes only after that split, and only if the operator
-|     left allow_shell on (the developer_local default; `[policy.caps]
-|     allow_shell = false` hardens). Denied is not a cue to call it again.
+|     shell_exec comes only after that split, and only while allow_shell
+|     is on (the full_access default; `[policy.caps] allow_shell = false`
+|     hardens). Denied is not a cue to call it again.
 |
 +-- PolicyDenied on shell misuse?
 |     If recover_hint = retry_with_recipe, call recipe_run with
@@ -129,7 +129,7 @@ tagged `nested_shell` in the audit instead of being denied outright.
 
 `shell_exec` is for a line that is still irreducible after that split,
 and only while `allow_shell` is on in the daemon config TOML. It is on
-in the default `developer_local` profile; `[policy.caps] allow_shell =
+in the default `full_access` profile; `[policy.caps] allow_shell =
 false` hardens. It is not an MCP parameter, and it is not the first
 remedy when a call is denied.
 
@@ -155,16 +155,15 @@ A matching recipe uses `crates/mcp/tests/fixtures/a2/retry_with_recipe.json`.
 - `intended_tool` = `run_and_watch`
 - `intended_example` = `{"argv":["git","status"]}` (argv only; never
   `shell_line`)
-- `alternatives` lists argv, file, and PTY tools first; `shell_exec`
-  is last and tagged `operator_opt_in` (omitted under
-  `profile_forbids_shell`, where no operator knob enables it)
+- `alternatives` lists argv, file, and PTY tools only; a denied
+  `shell_exec` is never offered back
 - `recover_hint` = `retry_with_argv` when no recipe matches
 
 The remedy is that hint: call `run_and_watch` or `command_start_combed`
 with an argv array. Do not thrash schema field names. Argv is the
-first fix; the deny also names `[policy.caps] allow_shell = true` for
-the operator. Owner decision D0 (2026-09-28) superseded Decision A2's
-rejection of Finding 1: `developer_local` now defaults `allow_shell` on.
+first fix; the deny also names the active profile and the config key
+that changes it (`[policy] profile = "full_access"`). Owner decision
+(2026-09-28): `full_access` is the default and inherits the harness's trust.
 
 When the daemon sets `recipe_id` and `recipe_scope` on that deny, three
 fields change: `recover_hint` = `retry_with_recipe`, `intended_tool` =
@@ -338,5 +337,5 @@ These apply to every lane:
   daemon sets `recipe_id` and `recipe_scope`, `recover_hint` is
   `retry_with_recipe`, `intended_tool` is `recipe_run`, and
   `intended_example` includes both fields. `allow_shell` is on in the
-  default `developer_local` profile; `[policy.caps] allow_shell = false`
+  default `full_access` profile; `[policy.caps] allow_shell = false`
   hardens. Guide: `docs/integrations/recipe-registry.md`.

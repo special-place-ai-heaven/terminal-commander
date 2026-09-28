@@ -42,7 +42,7 @@ result is ever silent or misleading.
 > The default command lane is **argv-only**: `argv[0]` is the program, and there
 > is no string-concatenated shell anywhere in the path. Pipelines and redirects
 > live behind the separate `shell_exec` tool, gated by the `allow_shell` policy
-> capability. `allow_shell` is on in the default `developer_local` profile; set
+> capability. `allow_shell` is on in the default `full_access` profile; set
 > `[policy.caps] allow_shell = false` to harden (shell interpreters such as `sh`,
 > `bash`, `cmd`, `powershell` are then denied on the argv lane and the WSL
 > nested-shell gate applies). When that lane is enabled and no shell override is
@@ -200,9 +200,9 @@ whole process tree, identity-gated so a recycled PID is never signalled.
 Every command start passes a policy engine (profile-based: deny lists, path
 suffix guards, per-call caps) and emits a durable audit row with
 credential-redacted argv. The shell lane (`shell_exec`) is a separate policy
-action (`allow_shell`, on in the default `developer_local` profile; set
-`[policy.caps] allow_shell = false` to harden). The cap is operator config,
-never an agent's to flip.
+action (`allow_shell`, on in the default `full_access` profile; set
+`[policy.caps] allow_shell = false` to harden). The cap is config, never an
+agent's to flip.
 
 ### Rule packs: expert signal extraction in one call
 
@@ -518,7 +518,7 @@ audit row. All other IPC requests bump the idle clock and audit normally.
 > [!WARNING]
 > `shell_exec` exists for pipelines/compounds/redirects, but it is gated by
 > the `allow_shell` policy capability, which is **on in the default
-> `developer_local` profile** and lives in the operator's config TOML — it is
+> `full_access` profile** and lives in the daemon's config TOML — it is
 > not an MCP-flippable parameter. Set `[policy.caps] allow_shell = false` to
 > harden; `shell_exec` then returns `PolicyDenied` and the argv interpreter deny
 > and WSL nested-shell gate apply.
@@ -739,11 +739,16 @@ Everything lives under the per-session state dir
   `shell:false`; no hidden subprocess windows.
 - The MCP adapter speaks stdio and local IPC only — CI guards assert no
   spawn/socket/fs calls in the adapter source.
+- TC inherits the trust of the harness running the LLM: the default
+  `full_access` profile denies nothing (escalators such as `sudo`/`su`,
+  the full filesystem, shell, sessions, remote, recipe admin) and audits
+  every gated start. `developer_local`, `repo_only`, `read_only_observer`
+  and `admin_debug` are opt-in hardening (`[policy] profile = "..."`).
 - Command execution is argv-first and policy-gated; the shell lane is a
-  separate capability with its own audit labels, on in the default
-  `developer_local` profile (`[policy.caps] allow_shell = false` hardens it).
-- The omni capabilities are config-only (never MCP-flippable) and
-  default-DENY except `allow_shell` on `developer_local`: `allow_shell`
+  separate capability with its own audit labels (`[policy.caps]
+  allow_shell = false` hardens it).
+- The omni capabilities are config-only (never MCP-flippable) and on by
+  default under `full_access`: `allow_shell`
   (shell_exec), `allow_session` (persistent
   sessions, unix-only), `allow_remote` (remote targets via an operator
   `ssh -L` forward, no public TCP). `allow_privileged` is wired but gates a

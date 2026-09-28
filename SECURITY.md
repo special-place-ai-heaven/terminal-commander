@@ -129,8 +129,9 @@ their entire lifecycle (start, success, failure, cancellation):
 
 ## 5. Default-deny sensitive paths
 
-Every policy profile (see `POLICY.md`) MUST inherit a base list of
-default-denied path patterns. The MVP base list is anchored on
+Every hardened policy profile (see `POLICY.md`) MUST inherit a base list
+of default-denied path patterns; the default `full_access` profile
+inherits the harness's trust and applies none. The MVP base list is anchored on
 README.md:294-297 and expanded for known credential stores:
 
 ```text

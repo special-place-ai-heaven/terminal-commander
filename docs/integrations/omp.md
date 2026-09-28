@@ -58,11 +58,11 @@ exists. Add `env.TC_SOCKET` only for a non-default daemon endpoint. On
 Windows the default endpoint is a local named pipe and normally does not
 need `TC_SOCKET`.
 
-`allow_shell` is on in the default `developer_local` profile; an operator
-hardens with `[policy.caps] allow_shell = false` in config TOML. If a shell
+`allow_shell` is on in the default `full_access` profile (TC inherits the
+harness's trust); a hardened config sets `[policy.caps] allow_shell = false`. If a shell
 call is PolicyDenied, follow `recover_hint` `retry_with_argv` (argv
 `run_and_watch` / `command_start_combed`) first; the deny names the
-operator knob.
+profile and the config key that changes it.
 
 ## What setup does not do
 

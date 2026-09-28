@@ -17,6 +17,11 @@ Language: ASCII only.
 
 This is the single hardest rule in the project. Every component
 listed below exists to keep this rule true even as features land.
+The adapter never spawns; the daemon does, after policy. Under the
+default `full_access` profile TC inherits the harness's trust and the
+daemon runs `sudo`/`su` argv like any audited command (it gains no
+privilege the user's own `sudo` does not grant); the hardened profiles
+deny them (section 6).
 
 ## 2. Process model and uid map
 
@@ -168,8 +173,10 @@ named-op surface, not a sudo bridge.
 
 ## 6. Sudo / doas / pkexec posture (MVP)
 
-The MVP `commands.deny` list in every profile (see `POLICY.md`
-section 4) names these binaries explicitly:
+The `commands.deny` list in every hardened profile (`developer_local`,
+`repo_only`, `read_only_observer`, `admin_debug`; see `POLICY.md`
+section 2) names these binaries explicitly. The default `full_access`
+profile does not apply it:
 
 - `sudo`, `doas`, `su`, `pkexec`, `kexec`
 
@@ -178,7 +185,8 @@ client requests them, and refuses to spawn ANY argv whose `argv[0]`
 basename matches. The audit record reads
 `decision=deny reason=command_denied`.
 
-There is no path through the MCP boundary that bypasses this.
+Under a hardened profile there is no path through the MCP boundary that
+bypasses this.
 
 ## 7. WSL specifics
 
@@ -239,14 +247,14 @@ TC29 (security hardening + fuzz-like tests) MUST verify, at minimum:
    equivalent process-spawn API call (grep test).
 2. `terminal-commander-mcp` contains no `bind`, `connect`, or TCP/UDP
    listener (grep test on `tokio::net` and `std::net`).
-3. Every profile parses with `sudo`, `doas`, `su`, `pkexec`, `kexec`
-   in `commands.deny`.
+3. Every hardened profile parses with `sudo`, `doas`, `su`, `pkexec`,
+   `kexec` in `commands.deny` (the default `full_access` applies none).
 4. The audit log is `0600` and owned by the daemon uid (filesystem
    test).
-5. Attempting to spawn `sudo` via the MCP tool surface results in a
+5. Under a hardened profile, attempting to spawn `sudo` via the MCP tool surface results in a
    `deny` audit record AND a policy error to the caller, and no
    process is created.
-6. Attempting to read a default-deny path via `file_read_window`
+6. Under a hardened profile, attempting to read a default-deny path via `file_read_window`
    results in a `deny` audit record AND a policy error to the caller,
    and no `open()` syscall succeeds on the path.
 

@@ -34,9 +34,9 @@ In MVP:
   an MVP feature. See `docs/security/PRIVILEGE_MODEL.md`.
 - Policy is **auditable**: every decision (allow, deny, error) emits
   an audit record before the gated action runs.
-- Policy is **default-deny on sensitive paths** (see `SECURITY.md`
-  section 5). Profiles may NOT remove a default-deny entry without
-  an explicit, logged override.
+- Under a hardened profile, policy is **default-deny on sensitive
+  paths** (see `SECURITY.md` section 5). The default `full_access`
+  profile inherits the harness's trust and applies no such deny.
 - Policy is **profile-scoped**: exactly one active profile per TC
   daemon instance. Profile switching requires daemon restart in MVP.
 
@@ -47,8 +47,10 @@ MVP runs without going through it.
 ## 2. Profile catalog
 
 MVP shipped FOUR named profiles. TC49 adds a FIFTH, `full_access`
-(section 2.5), for the trusted/unrestricted case. Profile names are
-stable identifiers; goals MUST refer to them by exact name.
+(section 2.5), which is the DEFAULT since 2026-09-28 (owner decision:
+TC inherits the harness's trust); the other four are opt-in hardening.
+Profile names are stable identifiers; goals MUST refer to them by exact
+name.
 
 ### 2.1 `developer_local`
 
@@ -154,11 +156,10 @@ audit_requirements: every gated action; audit records tagged
 
 Added: TC49 (Hybrid trust model -- reconciliation Decision 1).
 
-Intended for: a TRUSTED, single-operator machine where the agent is
-explicitly allowed the full capability surface (shell, session,
-privileged helper, remote). This is the convenience profile that
-bundles every opt-in capability (section 4.1) ON in one declaration,
-instead of listing each cap by hand on a base profile.
+Intended for: the DEFAULT. TC is a tool for LLMs, and the harness that
+runs the LLM is the trust boundary; when the harness allows everything,
+TC does too (shell, session, remote, recipe admin, escalators, the full
+filesystem).
 
 ```text
 permits:
@@ -173,9 +174,10 @@ permits:
     helper, which is PLAN-ONLY: no privileged code ships this program
     (blocked on a threat review), so the cap currently gates nothing
     runnable. See docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md.
-denies (in addition to default-deny):
-  - the cross-profile closed deny set (sudo/doas/su/pkexec/kexec) as
-    argv[0] is STILL denied -- full_access does NOT remove COMMANDS_DENY.
+denies: nothing structural. COMMANDS_DENY (sudo/doas/su/pkexec/kexec
+  argv), the shell-line escalator scan, and the sensitive-path list
+  apply only under the hardened profiles; an explicit `[policy.caps]`
+  false, `allow_roots`, or `[policy.paths]` list still narrows it.
 limits: same as developer_local.
 audit_requirements: every gated action. Capability use stays
   AllowWithAudit (no audit-off short-circuit).
@@ -184,9 +186,9 @@ audit_requirements: every gated action. Capability use stays
 The five binding guardrails (Decision 1; the implementation honors
 each):
 
-1. **NEVER default.** `developer_local` stays the safe default;
-   `full_access` requires an explicit `profile = "full_access"` in
-   TOML plus a daemon restart.
+1. **THE default.** A daemon with no config runs `full_access`; a
+   hardened profile needs an explicit `profile = "..."` in TOML plus a
+   daemon restart.
 2. **TOML-only, NOT MCP-toggleable.** No MCP tool flips the profile or
    any cap. Profile selection is config + restart, identical to the
    other four profiles.
@@ -197,15 +199,12 @@ each):
 4. **`policy_status` EXPOSES the caps.** The active profile and the
    resolved per-call caps (`allow_shell:true`, ...) are visible via the
    `policy_status` tool -- there is no opaque "full_access magic".
-5. **Trusted-machine / single-operator only.** Documented as a
-   trusted-host capability. Do NOT enable it on a shared, multi-tenant,
-   or untrusted host. See the residual-risk note in section 4.1.
+5. **Harness trust.** TC grants what the harness running the LLM
+   grants. On a shared, multi-tenant, or untrusted host, select a
+   hardened profile.
 
-Cap semantics under `full_access`: the loader applies `base || full`,
-so EVERY cap resolves ON even if `[policy.caps]` lists one as `false`.
-To run a SUBSET of capabilities, do NOT use `full_access` -- use a
-base profile (`developer_local`) plus explicit `[policy.caps]` entries
-(section 4.1).
+Cap semantics under `full_access`: every cap is preset ON; an explicit
+`[policy.caps]` false revokes that one cap (section 4.1).
 
 ## 3. Profile selection
 
@@ -214,8 +213,8 @@ A daemon instance loads exactly one profile at startup, named in
 
 ```toml
 [policy]
-profile = "developer_local"  # or repo_only, read_only_observer,
-                             # admin_debug, full_access
+profile = "full_access"  # the default; or developer_local, repo_only,
+                         # read_only_observer, admin_debug (hardened)
 profile_version = "1"
 ```
 
@@ -261,9 +260,10 @@ allow_remote     = true    # gates remote federation / target_id
 
 Rules:
 
-- **All four caps default `false`, except `allow_shell` on
-  `developer_local`.** `allow_shell` is on in the default
-  `developer_local` profile: an LLM caller abandons a denied tool for raw
+- **All four caps default `true` on the default `full_access`;
+  `developer_local` grants `allow_shell` only; the others grant none.**
+  `allow_shell` is on in `full_access` and `developer_local`: an LLM
+  caller abandons a denied tool for raw
   Bash, and shell output stays combed, bounded, and audited
   (`command_shell_start`). Set `[policy.caps] allow_shell = false` to
   harden (the argv interpreter deny and the WSL nested-shell gate then
@@ -280,7 +280,7 @@ Rules:
   A config that fails to parse stops the daemon (`config load error`,
   exit 1); it is never half-applied. The MCP adapter's auto-start passes
   only `--data-dir`, so it loads `<data-dir>/terminal-commander.toml` or,
-  when that file is absent, runs on defaults with `allow_shell` on. A
+  when that file is absent, runs on the `full_access` defaults. A
   hardening file given with `--config` is not what an auto-started daemon
   reads. After hardening, confirm `policy_status` shows `allow_shell: false`.
 - **Caps are inputs to `evaluate()`.** They do not bypass the policy
@@ -307,9 +307,10 @@ Rules:
 - **Visibility.** The resolved per-call caps are surfaced by the
   `policy_status` tool.
 
-**Accepted residual risk (Decision 1).** The cross-profile command
-deny set (`COMMANDS_DENY`: `sudo`, `doas`, `su`, `pkexec`, `kexec`) is
-checked on `argv[0]` ONLY. It deliberately does NOT scan the
+**Accepted residual risk (Decision 1), under a hardened profile.** The
+command deny set (`COMMANDS_DENY`: `sudo`, `doas`, `su`, `pkexec`,
+`kexec`; not applied under the default `full_access`) is checked on
+`argv[0]` ONLY. It deliberately does NOT scan the
 `shell_line` of a `shell_exec` call. Once `allow_shell` is on, a host
 where `sudo` is otherwise reachable can have `sudo ...` embedded INSIDE
 a `shell_line` (e.g. `echo x | sudo tee ...`) and the argv[0] deny will
@@ -413,8 +414,8 @@ argv checks passed while an arbitrary Linux shell ran. US8 closes that gap.
 WSL is THIS host's boundary, not a remote machine (`allow_remote` is not
 implicated). A shell reachable through `wsl.exe` is gated by the same
 `allow_shell` capability that gates `shell_exec`. `allow_shell` is on in
-the default `developer_local` profile, so this gate applies once an
-operator hardens with `[policy.caps] allow_shell = false`.
+the default `full_access` profile (and `developer_local`), so this gate
+applies only once the config hardens with `[policy.caps] allow_shell = false`.
 
 - **Inspected: argv only.** The classifier reads the argv the caller
   supplied and nothing else. File contents are never read, and there is no
@@ -442,7 +443,7 @@ operator hardens with `[policy.caps] allow_shell = false`.
 Enforcement matrix -- both argv lanes (`command_start` and
 `pty_command_start`) share ONE classifier, so a payload denied on one lane
 is denied on the other. The `allow_shell=false` column is the hardened
-opt-in; the default `developer_local` profile runs the `allow_shell=true`
+opt-in; the default `full_access` profile runs the `allow_shell=true`
 column:
 
 | Classification | `allow_shell=false` | `allow_shell=true` |
@@ -504,7 +505,7 @@ subcommand, and deliberately covers `podman unshare bash -c ...`, which runs
 a shell on this host inside a user namespace. Residual:
 `ssh localhost bash -c ...` reaches this host's shell through sshd.
 
-**A guard rail, not a boundary.** With `allow_shell = false` this deny is
+**A guard rail, not a boundary (hardened profiles only).** With `allow_shell = false` this deny is
 argv string matching over the listed shells, wrappers, and script flags. It
 stops the common routes to a shell, not every route. Known residual classes
 that still run: a listed shell behind an unlisted launcher running a script
@@ -607,10 +608,10 @@ have allowed, but it never widens. See section 6 steps 2c / 2e.
 
 **OPERATOR WARNING -- zero-config write posture (TC22 A3).** `write_allow`
 follows the same OPT-IN posture as the read/watch lists, and that has a
-sharp edge for WRITES. With the DEFAULT config (profile `developer_local`,
+sharp edge for WRITES. With the DEFAULT config (profile `full_access`,
 no `repo_root`, EMPTY `write_allow`), the `file_write` tool can write
-ANYWHERE on disk EXCEPT the default-deny sensitive-suffix list -- there is
-no path containment at all. `..` (parent-dir) targets are rejected up front
+ANYWHERE on disk (under `developer_local`, anywhere EXCEPT the
+default-deny sensitive-suffix list) -- there is no path containment at all. `..` (parent-dir) targets are rejected up front
 for writes, and the default-deny suffix list still runs, but neither
 confines the write to a project tree. This is acceptable for a single local
 developer on their own machine. In ANY shared, multi-user, or agent-facing
@@ -672,7 +673,8 @@ Given request `(actor, action, subject, profile)`:
       -> deny ("probe_kind_denied").
    d. If action is registry_activate and llm_can_activate is false
       and actor is mcp -> deny ("registry_activate_requires_admin").
-      Shipped recipe gate (separate from rules): `[policy] llm_can_activate_recipes`
+      Shipped recipe gate (separate from rules): open under the default
+      `full_access`; on a hardened profile `[policy] llm_can_activate_recipes`
       defaults false. Recipe admin is the peer image basename
       `terminal-commander` (not `terminal-commander-mcp`, not
       `terminal-commanderd`). `from_mcp` defaults true, so omitting it is
