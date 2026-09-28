@@ -513,7 +513,10 @@ indistinguishable from an operand such as `rg bash src`); tools that run a
 command string themselves (`script -c ...`, and `su -c ...` behind a
 wrapper, since the closed privilege deny checks only the launched
 `argv[0]`); and Windows names the basename match does not resolve
-(drive-relative `C:wsl.exe`, 8.3 short names other than `POWERS~n`). The
+(drive-relative `C:wsl.exe`, 8.3 short names other than `POWERS~n`); and
+option runs are modelled for bash/dash/sh, PowerShell and cmd only, so a
+value option of another listed shell (`fish -d all -c ...`, `nu -m light -c
+...`, `ksh -R x -c ...`) can hide its script flag. The
 complete control is `[policy.commands] allow_roots`: a non-empty list
 admits only the programs it names, so leave interpreters and launchers
 (`env`, `nice`, `timeout`, ...) off it, and it also withholds the
