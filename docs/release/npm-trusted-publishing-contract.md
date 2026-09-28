@@ -190,9 +190,33 @@ does not automate them; NPM07 documents them.
 |---|--------|-------|
 | 1 | Claim the `@terminal-commander` organization on npmjs.com | NPM02 §1.2 already flagged this. |
 | 2 | Reserve all three package names on the registry | `terminal-commander`, `@terminal-commander/linux-x64`, `@terminal-commander/linux-arm64`. The reservation can be done by publishing a stub 0.0.0 version with the `--access public` flag, OR by the npmjs.com `Add Package` flow for the scope. If a name is taken when the operator gets there, follow NPM02 §1.3 (stop and amend, do not silently rename). |
-| 3 | For each of the three packages, configure a trusted publisher in the npmjs.com package settings → "Publishing access" → "Add trusted publisher" with: <br>· Publisher: GitHub Actions <br>· Repository owner: `special-place-administrator` <br>· Repository name: `terminal-commander` <br>· Workflow filename: `release-please.yml` <br>· Environment: (leave blank — no environment is used) | Workflow filename MUST match the actual workflow that publishes. NPM07 publishes from `.github/workflows/release-please.yml`. If the operator selects a different filename, npm will reject the OIDC token. |
+| 3 | For each of the three packages, configure a trusted publisher in the npmjs.com package settings → "Publishing access" → "Add trusted publisher" with: <br>· Publisher: GitHub Actions <br>· Repository owner: `special-place-ai-heaven` <br>· Repository name: `terminal-commander` <br>· Workflow filename: `release-please.yml` <br>· Environment: (leave blank — no environment is used) | Workflow filename MUST match the actual workflow that publishes. NPM07 publishes from `.github/workflows/release-please.yml`. If the operator selects a different filename, npm will reject the OIDC token. |
 | 4 | (Optional) Pre-register the npm dist-tags | Not required. The first `npm publish --tag beta` creates the `beta` dist-tag implicitly. |
 | 5 | Document the steps so a future operator can mirror them | Recorded in this file + `docs/release/npm-binary-packaging-contract.md` §11. |
+
+> **CORRECTION (2026-08-07).** Two facts in this table drifted and produced a
+> real misconfiguration, so verify rather than assume:
+>
+> 1. **Owner.** This row said `special-place-administrator` until today. The
+>    repository was transferred and is now
+>    `special-place-ai-heaven/terminal-commander` — the value above is the
+>    corrected one. `special-place-administrator` is the operator's personal
+>    account, not the repo owner.
+> 2. **There are SIX packages, not three.** `terminal-commander` plus
+>    `@terminal-commander/{linux-x64,linux-arm64,windows-x64,mac-x64,
+>    mac-arm64}`. Every one needs its own trusted publisher.
+>
+> The live entry found on `terminal-commander` on 2026-08-07 carried the old
+> owner, workflow `npm-publish.yml` (a file that does not exist in this repo),
+> and environment `npm-publish` (never declared by any job). It therefore
+> never matched, and releases fell back to `NPM_TOKEN_TC` without failing
+> loudly — the OIDC handshake error described below only fires when token auth
+> is unavailable.
+>
+> In the GitHub-Actions form the field is labelled **"Organization or user"**
+> and wants the GITHUB owner (`special-place-ai-heaven`), NOT the npm scope
+> (`@terminal-commander`). Those are different namespaces and the package name
+> makes the wrong one look right.
 
 Until step 3 is complete for all three packages, the FIRST live
 publish attempt will fail at the OIDC handshake with an npm error
@@ -265,13 +289,36 @@ completes.
 
 ## 13. Acceptance against NPM07 mini-spec
 
-- [x] OIDC `id-token: write` set only on publish jobs.
-- [x] `npm publish --provenance` on every package.
+> **STATUS (2026-08-07): the NPM07 design is now SHIPPED, after a period of
+> drift.** History kept deliberately, because the drift is the lesson.
+>
+> Between NPM07 and Task 23 the publish path was walked back to token mode for
+> the 0.2.0 line, while this list still showed every box ticked. It therefore
+> asserted OIDC, `--provenance` and "no NPM_TOKEN references" throughout a
+> period when the workflow did the opposite at six call sites.
+>
+> That was not academic. The stale operator values in §8 were applied verbatim
+> to the live npm trusted-publisher entry, pointing it at a nonexistent
+> workflow (`npm-publish.yml`) under the pre-transfer owner. It could never
+> match — so every release quietly authenticated with the token and reported
+> success. A ticked box and a green release together looked like proof.
+>
+> Task 23 (2026-08-07) restored the design: `id-token: write` on the six npm
+> publish jobs, Node 22.14+, `--provenance`, and no `NODE_AUTH_TOKEN` anywhere
+> in the npm path. Removing the token is what makes it honest: a broken
+> trusted publisher now FAILS the publish instead of silently falling back.
+
+- [x] OIDC `id-token: write` set only on publish jobs. *(Task 23; verified by
+      parsing the workflow — six publish jobs have it, no other job does.)*
+- [x] `npm publish --provenance` on every package. *(Task 23; `NODE_PUBLISH_VERSION: 24`
+      supplies the npm >= 11.5.1 that `--provenance` requires.)*
 - [x] `--tag beta` on the first publish.
 - [x] Platform packages publish first, root wrapper last.
-- [x] No `secrets.NPM_TOKEN` / `_TC` reference anywhere in the
-      workflow.
-- [x] No `cargo publish` / crates.io step.
+- [x] No `secrets.NPM_TOKEN` / `_TC` reference anywhere in the npm publish
+      path. *(Task 23. crates.io still uses `CARGO_REGISTRY_TOKEN_TC` — that
+      cutover is NOT done and is out of scope here.)*
+- [ ] ~~No `cargo publish` / crates.io step.~~ **SUPERSEDED** — the crates.io
+      publish chain was added after NPM07 and is intentionally token-based.
 - [x] Operator setup notes documented in this file §8.
 - [x] Workflow YAML parses.
 - [x] No `crates/**` / `Cargo.toml` / `Cargo.lock` / `rules/**` /
