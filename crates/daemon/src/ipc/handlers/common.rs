@@ -227,9 +227,10 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
             format!(
                 "shell interpreter '{shell}' denied: allow_shell is off. \
                  Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of \
-                 [\"{shell}\",\"-c\",\"cargo build\"]), or have the operator set \
+                 {}), or have the operator set \
                  [policy.caps] allow_shell = true, which allows this argv and enables \
-                 shell_exec (command with action=\"exec\" on the compact MCP surface)."
+                 shell_exec (command with action=\"exec\" on the compact MCP surface).",
+                terminal_commander_core::shell_deny::denied_argv_example(&shell)
             ),
         ),
         // US8 (FR-060): a shell smuggled through a wsl carrier. Reuses the
@@ -944,6 +945,22 @@ mod tests {
     /// F7 (cross-platform): a GENERIC spawn failure (not program-not-found)
     /// must stay `Internal`. The `ProgramNotFound` carve-out must not widen
     /// to swallow other spawn faults.
+    /// The `env -S` deny names a real denied argv, not `["env -S","-c",...]`.
+    #[test]
+    fn env_split_string_deny_example_is_a_real_argv() {
+        let err = map_command_error(CommandError::ShellInterpreterDenied(
+            terminal_commander_core::shell_deny::ENV_SPLIT_STRING_DENY.to_owned(),
+        ));
+        assert!(
+            !err.message.contains("[\"env -S\""),
+            "example must be a real argv: {}",
+            err.message
+        );
+        assert!(err.message.contains("[\"env\",\"-S\","), "{}", err.message);
+        let err = map_command_error(CommandError::ShellInterpreterDenied("bash".to_owned()));
+        assert!(err.message.contains("[\"bash\",\"-c\",\"cargo build\"]"));
+    }
+
     #[test]
     fn generic_spawn_error_still_maps_to_internal() {
         let err = map_command_error(CommandError::Spawn(

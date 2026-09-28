@@ -65,9 +65,9 @@ pub const SHELL_INTERPRETERS_DENY: &[&str] = &[
 
 /// Launchers whose first operand is the program they run, each with the
 /// short letters and long names of its options that take a value (`env -u
-/// NAME`, `timeout --signal=KILL`), read by [`wrapper_option`]. After a
-/// wrapper, operands that start with a digit are skipped too, and
-/// [`VALUE_OPERAND_WRAPPERS`] take their first operand as a value. Not
+/// NAME`, `timeout --signal=KILL`), read by [`wrapper_option`].
+/// [`VALUE_OPERAND_WRAPPERS`] take their first operand as a value and skip
+/// further numeric operands (never a path such as `1/bash`). Not
 /// `xargs` or `sudo`: their operands are not just a program, and `sudo` has
 /// its own privilege deny.
 const SHELL_ARGV_WRAPPERS: &[(&str, &str, &[&str])] = &[
@@ -93,6 +93,18 @@ const VALUE_OPERAND_WRAPPERS: &[&str] = &["timeout", "taskset", "chrt"];
 
 /// Deny label for an `env -S` string this split does not model.
 pub const ENV_SPLIT_STRING_DENY: &str = "env -S";
+
+/// The denied argv a deny message shows next to `["cargo","build"]`:
+/// `["bash","-c","cargo build"]`, or for [`ENV_SPLIT_STRING_DENY`] an
+/// `env -S` string this split does not model.
+#[must_use]
+pub fn denied_argv_example(shell: &str) -> String {
+    if shell == ENV_SPLIT_STRING_DENY {
+        r#"["env","-S","${SHELL} -c 'cargo build'"]"#.to_owned()
+    } else {
+        format!(r#"["{shell}","-c","cargo build"]"#)
+    }
+}
 
 /// Programs that run their operands on another host or in a container.
 /// The interpreter they name is not this host's shell, so the argv is not
@@ -126,9 +138,10 @@ const SHELL_SCRIPT_FLAGS: &[&str] = &[
     "/encodedcommand",
 ];
 
-/// Interpreter options that take a separate value, so the value is not
-/// read as the first operand (`bash -o pipefail -c`). Case-insensitive.
-const POSIX_VALUE_FLAGS: &[&str] = &["-o", "+o", "--rcfile", "--init-file"];
+/// PowerShell options that take a separate value, so the value is not read
+/// as the script flag (`powershell -Version 5.1 -Command`). Case-insensitive;
+/// POSIX shells use [`posix_option_takes_value`] instead (their value flags
+/// cluster). `-File` is NOT here: it is a script flag, not a value flag.
 const PWSH_VALUE_FLAGS: &[&str] = &[
     "-executionpolicy",
     "-ex",
@@ -149,6 +162,8 @@ const PWSH_VALUE_FLAGS: &[&str] = &[
     "-outputformat",
     "-o",
     "-of",
+    "-version",
+    "-psconsolefile",
 ];
 
 const WIN_EXE_EXTS: &[&str] = &["exe", "com", "bat", "cmd"];
@@ -273,7 +288,7 @@ fn launched_program(argv: &[String]) -> Launched {
             index += 1;
             continue;
         }
-        let Some((_, shorts, longs)) = wrapper else {
+        let Some((name, shorts, longs)) = wrapper else {
             return Launched::At(index);
         };
         if token.starts_with('-') {
@@ -291,7 +306,10 @@ fn launched_program(argv: &[String]) -> Launched {
             index = next;
             continue;
         }
-        if value_operand || token.starts_with(|ch: char| ch.is_ascii_digit()) {
+        let numeric = VALUE_OPERAND_WRAPPERS.contains(&name)
+            && token.starts_with(|ch: char| ch.is_ascii_digit())
+            && !token.contains(['/', '\\']);
+        if value_operand || numeric {
             value_operand = false;
             index += 1;
             continue;
@@ -401,21 +419,21 @@ fn wrapper_option<'a>(
 
 /// A script flag in the option run right after a denied interpreter
 /// (`bash -x -c`, `pwsh -NoProfile -Command`), up to its first operand.
+///
+/// The run is read the way getopt reads it, so a value flag consumes its
+/// argument instead of the script flag being tested as an operand: a
+/// PowerShell value flag (`-Version 5.1`), or a POSIX value-letter cluster
+/// (`-xo pipefail`, `-eO extglob`) via [`posix_option_takes_value`].
 fn interpreter_script_flag(shell: &str, args: &[impl AsRef<str>]) -> bool {
-    let pwsh = matches!(strip_win_ext(shell), "powershell" | "pwsh");
-    let cmd = strip_win_ext(shell) == "cmd";
-    let value_flags = if pwsh {
-        PWSH_VALUE_FLAGS
-    } else {
-        POSIX_VALUE_FLAGS
-    };
+    let stem = strip_win_ext(shell);
+    let pwsh = matches!(stem, "powershell" | "pwsh");
     let mut args = args.iter().map(AsRef::as_ref);
     while let Some(arg) = args.next() {
         // `-NonInteractive` is a PowerShell word, not a POSIX `c` cluster.
-        let script_flag = if pwsh {
-            is_listed_script_flag(arg) || is_pwsh_command_flag(arg)
-        } else {
-            is_script_flag(arg) || (cmd && is_cmd_script_switch(arg))
+        let script_flag = match stem {
+            "powershell" | "pwsh" => is_listed_script_flag(arg) || is_pwsh_command_flag(arg),
+            "cmd" => is_script_flag(arg) || is_cmd_script_switch(arg),
+            _ => is_script_flag(arg) || is_extra_shell_command_flag(stem, arg),
         };
         if script_flag {
             return true;
@@ -423,14 +441,55 @@ fn interpreter_script_flag(shell: &str, args: &[impl AsRef<str>]) -> bool {
         if !is_interpreter_option(arg) {
             return false;
         }
-        if value_flags
-            .iter()
-            .any(|flag| arg.eq_ignore_ascii_case(flag))
-        {
+        let takes_value = if pwsh {
+            PWSH_VALUE_FLAGS
+                .iter()
+                .any(|flag| arg.eq_ignore_ascii_case(flag))
+        } else {
+            posix_option_takes_value(arg)
+        };
+        if takes_value {
             args.next();
         }
     }
     false
+}
+
+/// Whether a POSIX interpreter option token consumes the following word as
+/// its value, read like [`wrapper_option`]: a `--rcfile`/`--init-file` with
+/// no inline `=`, or a short cluster whose FIRST value letter (`o`/`O`, the
+/// `set -o` / `shopt -O` argument) is also its last char, so its value is
+/// the next word (`-o pipefail`, `-xo pipefail`) rather than inline (`-ox`).
+fn posix_option_takes_value(token: &str) -> bool {
+    if let Some(long) = token.strip_prefix("--") {
+        return matches!(long, "rcfile" | "init-file");
+    }
+    let Some(body) = token.strip_prefix(['-', '+']) else {
+        return false;
+    };
+    body.bytes()
+        .position(|byte| matches!(byte, b'o' | b'O'))
+        .is_some_and(|at| at + 1 == body.len())
+}
+
+/// Shell-specific flags that run a command, beyond the shared script-flag
+/// set: fish `--init-command`/`-C` and nu `-e`/`--execute`. A bare `-C`
+/// already matches the POSIX `c` cluster; this adds the long/value forms.
+fn is_extra_shell_command_flag(stem: &str, arg: &str) -> bool {
+    let long = arg
+        .strip_prefix("--")
+        .map(|rest| rest.split_once('=').map_or(rest, |(name, _)| name));
+    match stem {
+        "fish" => {
+            arg.eq_ignore_ascii_case("-C")
+                || long.is_some_and(|name| name.eq_ignore_ascii_case("init-command"))
+        }
+        "nu" => {
+            arg.eq_ignore_ascii_case("-e")
+                || long.is_some_and(|name| name.eq_ignore_ascii_case("execute"))
+        }
+        _ => false,
+    }
 }
 
 /// `-x`, `--norc`, `+o`, or a short cmd switch (`/d`, `/e:on`).
@@ -1067,6 +1126,44 @@ mod tests {
             (&["flock", "x", "cmd", "/cecho", "hi"], "cmd"),
             (&["flock", "x", "cmd", "/q/c", "echo", "hi"], "cmd"),
             (&["flock", "x", "cmd", "/Q/D/K", "echo", "hi"], "cmd"),
+            // FCR2-004 V4: the interpreter's OWN option run is read as getopt,
+            // so a value-letter cluster consumes its value and the later
+            // script flag is still seen.
+            (
+                &[
+                    "xargs",
+                    "-a",
+                    "/dev/null",
+                    "bash",
+                    "-xo",
+                    "pipefail",
+                    "-c",
+                    "echo X",
+                ],
+                "bash",
+            ),
+            (&["xargs", "bash", "-eO", "extglob", "-c", "echo X"], "bash"),
+            (
+                &[
+                    "xargs",
+                    "powershell",
+                    "-Version",
+                    "5.1",
+                    "-NoProfile",
+                    "-Command",
+                    "echo X",
+                ],
+                "powershell",
+            ),
+            // Shell-specific command flags behind an unlisted launcher.
+            (&["xargs", "fish", "--init-command=id"], "fish"),
+            (&["xargs", "nu", "-e", "id"], "nu"),
+            (&["xargs", "nu", "--execute", "id"], "nu"),
+            // A digit-leading path is the program, not a numeric operand:
+            // only timeout/taskset/chrt take numbers, and never a path.
+            (&["env", "1/bash", "-c", "id"], "bash"),
+            (&["nohup", "1/bash", "run.sh"], "bash"),
+            (&["timeout", "5", "1/bash", "run.sh"], "bash"),
         ];
         for (argv, expected) in denied {
             assert_eq!(shell_argv_denied(argv), Some(*expected), "argv={argv:?}");
@@ -1082,6 +1179,9 @@ mod tests {
             &["time", "-p", "cargo", "test"],
             // A drive path after a `cmd` operand is not a switch run.
             &["grep", "-rn", "cmd", "/c/Users/x"],
+            // A value flag consumes a script-file operand; no `-c` follows.
+            &["xargs", "bash", "-o", "pipefail", "script.sh"],
+            &["xargs", "pwsh", "-Version", "5.1", "-File", "x.ps1"],
         ] {
             assert_eq!(shell_argv_denied(argv), None, "false deny for {argv:?}");
         }

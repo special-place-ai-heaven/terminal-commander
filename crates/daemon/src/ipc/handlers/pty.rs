@@ -133,9 +133,10 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
                 format!(
                     "shell interpreter '{shell}' denied: allow_shell is off. \
                      Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of \
-                     [\"{shell}\",\"-c\",\"cargo build\"]), or have the operator set \
+                     {}), or have the operator set \
                      [policy.caps] allow_shell = true, which allows this argv in \
-                     pty_command_start and enables shell_exec."
+                     pty_command_start and enables shell_exec.",
+                    terminal_commander_core::shell_deny::denied_argv_example(&shell)
                 ),
             ))
         }
