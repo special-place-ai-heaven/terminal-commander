@@ -218,7 +218,7 @@ fn deny_mcp_recipe_activate(
     peer: &PeerIdentity,
     from_mcp: bool,
 ) -> Result<(), IpcError> {
-    if caller_may_recipe_admin(peer, from_mcp) || state.policy.llm_can_activate_recipes() {
+    if caller_may_recipe_admin(state, peer, from_mcp) || state.policy.llm_can_activate_recipes() {
         return Ok(());
     }
     Err(IpcError::new(
@@ -256,7 +256,7 @@ fn unix_image_name(pid: i32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
         let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-        return path.file_name().map(|s| s.to_string_lossy().into_owned());
+        path.file_name().map(|s| s.to_string_lossy().into_owned())
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -275,19 +275,21 @@ fn peer_program_role(peer: &PeerIdentity) -> ProgramRole {
         PeerIdentity::Unix { pid: None, .. } | PeerIdentity::Unknown { .. } => None,
     };
     name.as_deref()
-        .map(program_role_from_name)
-        .unwrap_or(ProgramRole::Unknown)
+        .map_or(ProgramRole::Unknown, program_role_from_name)
 }
 
 /// Release builds grant recipe admin only to the `terminal-commander` image.
 /// The MCP image is never admin. An unknown peer cannot grant itself by
 /// setting or omitting `from_mcp`.
 ///
-/// ponytail: `cfg(test)` also allows an explicit `from_mcp: false` from an
-/// unknown image so in-process daemon tests can activate. Release builds
-/// do not compile that arm. Point those tests at the CLI binary if the
-/// seam ever lies.
-fn recipe_admin_grant(role: ProgramRole, from_mcp: bool, allow_unknown_explicit: bool) -> bool {
+/// ponytail: `DaemonConfig::recipe_admin_test_seam` lets in-process tests
+/// pass an explicit `from_mcp: false` from an unknown image. It is skipped
+/// by serde, so a config file cannot turn it on. The MCP image stays denied.
+const fn recipe_admin_grant(
+    role: ProgramRole,
+    from_mcp: bool,
+    allow_unknown_explicit: bool,
+) -> bool {
     match role {
         ProgramRole::AdminCli => true,
         ProgramRole::McpAdapter => false,
@@ -295,8 +297,9 @@ fn recipe_admin_grant(role: ProgramRole, from_mcp: bool, allow_unknown_explicit:
     }
 }
 
-fn caller_may_recipe_admin(peer: &PeerIdentity, from_mcp: bool) -> bool {
-    recipe_admin_grant(peer_program_role(peer), from_mcp, cfg!(test))
+fn caller_may_recipe_admin(state: &DaemonState, peer: &PeerIdentity, from_mcp: bool) -> bool {
+    let seam = state.config.recipe_admin_test_seam && !from_mcp;
+    recipe_admin_grant(peer_program_role(peer), from_mcp, seam)
 }
 
 pub(in crate::ipc::server) fn recipe_actor_label(
@@ -721,9 +724,7 @@ pub(in crate::ipc::server) fn recipe_audit_overlay(
             (p.recipe_id.clone(), version, scope, Some(p.from_mcp))
         }
         IpcRequest::RecipeRun(p) => {
-            let version = activated_identity(result)
-                .map(|(version, _)| version)
-                .unwrap_or(p.version);
+            let version = activated_identity(result).map_or(p.version, |(version, _)| version);
             (p.recipe_id.clone(), version, p.scope, None)
         }
         IpcRequest::RecipeTombstone(p) => (p.recipe_id.clone(), None, None, None),
@@ -741,7 +742,7 @@ pub(in crate::ipc::server) fn recipe_audit_overlay(
     ))
 }
 
-fn activated_identity(result: &IpcResult) -> Option<(Option<u32>, Option<ActivationScope>)> {
+const fn activated_identity(result: &IpcResult) -> Option<(Option<u32>, Option<ActivationScope>)> {
     match result {
         IpcResult::Ok {
             response: IpcResponse::RecipeActivate(body),

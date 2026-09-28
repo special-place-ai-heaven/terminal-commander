@@ -660,6 +660,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one store: search, activate, get_active, tombstone
     fn lifecycle_search_activate_tombstone_leaves_rules_alone() {
         let mut store = EventStore::in_memory().unwrap();
         store.ensure_registry().unwrap();

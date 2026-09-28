@@ -65,7 +65,8 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("gate");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = true;
         assert!(!cfg.policy.llm_can_activate_recipes);
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         assert!(!state.policy.llm_can_activate_recipes());

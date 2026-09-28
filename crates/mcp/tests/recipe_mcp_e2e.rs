@@ -281,10 +281,10 @@ fn keyword_rule_json(id: &str, keyword: &str, event_kind: &str) -> String {
 fn rule_event_ids(events: &serde_json::Value) -> std::collections::BTreeSet<String> {
     let mut ids = std::collections::BTreeSet::new();
     for ev in events.as_array().into_iter().flatten() {
-        if ev.get("rule").is_some_and(|rule| !rule.is_null()) {
-            if let Some(id) = ev["event_id"].as_str() {
-                ids.insert(id.to_owned());
-            }
+        if ev.get("rule").is_some_and(|rule| !rule.is_null())
+            && let Some(id) = ev["event_id"].as_str()
+        {
+            ids.insert(id.to_owned());
         }
     }
     ids

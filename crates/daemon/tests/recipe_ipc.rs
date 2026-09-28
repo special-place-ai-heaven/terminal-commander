@@ -60,7 +60,8 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("life");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = true;
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         let socket = state.config.socket_path();
         let handle = IpcServer::new(Arc::clone(&state), socket).spawn().unwrap();
@@ -210,7 +211,8 @@ fn recipe_seed_import_stays_tested_until_operator_activates() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("seeds");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = true;
         assert!(!cfg.policy.llm_can_activate_recipes);
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         assert!(!state.policy.llm_can_activate_recipes());
@@ -356,7 +358,8 @@ fn recipe_tombstone_deactivate_and_dead_scope_are_not_runnable() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("life-close");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = true;
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
             .spawn()
@@ -583,7 +586,8 @@ fn recipe_seed_import_skips_tombstone_and_activates_imported_version() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("seed-life");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = true;
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
             .spawn()
@@ -656,7 +660,8 @@ fn recipe_seed_import_skips_tombstone_and_activates_imported_version() {
 
     runtime.block_on(async {
         let data = tmp_data_dir("seed-version");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = true;
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
             .spawn()

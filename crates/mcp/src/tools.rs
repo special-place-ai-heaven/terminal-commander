@@ -2447,6 +2447,7 @@ impl TerminalCommanderMcpServer {
     }
 
     /// Watched recipe_run: same wait loop as `run_and_watch`.
+    #[allow(clippy::too_many_lines)] // same wait/degrade shape as run_and_watch
     ///
     /// `resume_cursor` advances only when every rule event on the page fit in
     /// `signals`. A full buffer leaves the cursor before the omitted match.

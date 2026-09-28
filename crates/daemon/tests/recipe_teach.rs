@@ -143,7 +143,8 @@ fn shell_deny_steers_to_matching_activated_recipe_only() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("steer");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = true;
         assert!(!cfg.policy.llm_can_activate_recipes);
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         assert!(!state.policy.llm_can_activate_recipes());
@@ -239,7 +240,8 @@ fn recipe_tombstone_and_dead_job_scope_do_not_steer() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("steer-life");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = true;
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
             .spawn()
@@ -299,7 +301,8 @@ fn two_runnable_scopes_fall_back_to_argv() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("steer-scopes");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = true;
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
             .spawn()
