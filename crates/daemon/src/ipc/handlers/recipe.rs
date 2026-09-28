@@ -17,7 +17,7 @@ use crate::ipc::protocol::{
     RecipeUpsertParams, RecipeUpsertResponse, RecipeVersionEntry,
 };
 use crate::state::DaemonState;
-use terminal_commander_core::{ActivationScope, RecipeDefinition, shell_interpreter_denied};
+use terminal_commander_core::{ActivationScope, RecipeDefinition, shell_argv_denied};
 use terminal_commander_store::EventStoreError;
 use terminal_commander_supervisor::identity::PeerIdentity;
 use time::format_description::well_known::Rfc3339;
@@ -457,7 +457,10 @@ pub(in crate::ipc::server) fn handle_recipe_run(
     let argv = definition
         .resolve_argv(&params.fills)
         .map_err(|err| map_recipe_argv_error(&err))?;
-    if let Some(shell) = shell_interpreter_denied(argv.first().map_or("", String::as_str)) {
+    // Same predicate as `resolve_argv` (which already re-validates). This is
+    // the run re-check: a stored argv cannot reach `command_start` if resolve
+    // ever stops applying the deny.
+    if let Some(shell) = shell_argv_denied(&argv) {
         return Err(IpcError::new(
             IpcErrorCode::ShellInterpreterDenied,
             format!("shell interpreter '{shell}' is denied on recipe_run"),

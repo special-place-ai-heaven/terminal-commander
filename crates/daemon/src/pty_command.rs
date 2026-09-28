@@ -22,13 +22,13 @@
 mod runtime {
     use std::collections::HashMap;
     use std::ffi::OsString;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use parking_lot::RwLock;
     use terminal_commander_core::{
         ActivationScope, BucketConfig, BucketError, BucketId, ContextRingManager, EventDraft,
-        JobConfig, JobId, JobManager, ProbeId, RuleDefinition,
+        JobConfig, JobId, JobManager, ProbeId, RuleDefinition, shell_argv_denied,
     };
     use terminal_commander_probes::{
         EventSink, PtyProbe, PtyProbeConfig, PtyProbeError, PtyProbeMetrics, WriteStdinError,
@@ -38,9 +38,7 @@ mod runtime {
 
     use crate::activation::ActivationRegistry;
     use crate::audit::AuditSink;
-    use crate::command::{
-        SHELL_INTERPRETERS_DENY, WslArgvClass, classify_wsl_nested_shell, wsl_carrier_label,
-    };
+    use crate::command::{WslArgvClass, classify_wsl_nested_shell, wsl_carrier_label};
     use crate::policy::{PolicyAction, PolicyDecision, PolicyEngine, PolicyProfile};
     use crate::router::Router;
 
@@ -284,30 +282,15 @@ mod runtime {
                 })
         }
 
-        fn shell_interpreter_basename(argv0: &str) -> Option<&'static str> {
-            let basename = Path::new(argv0)
-                .file_name()
-                .and_then(|os| os.to_str())
-                .unwrap_or(argv0);
-            for &shell in SHELL_INTERPRETERS_DENY {
-                if basename == shell {
-                    return Some(shell);
-                }
-                let is_exe_variant = Path::new(shell)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"));
-                if is_exe_variant && basename.eq_ignore_ascii_case(shell) {
-                    return Some(shell);
-                }
-            }
-            None
-        }
-
         pub fn start(&self, req: PtyStartRequest) -> Result<PtyStartResponse, PtyRuntimeError> {
             if req.argv.is_empty() {
                 return Err(PtyRuntimeError::EmptyArgv);
             }
-            if let Some(shell) = Self::shell_interpreter_basename(&req.argv[0]) {
+            // WSL carriers skip this hard deny; the nested-shell gate below
+            // owns them so the decision stays aligned with `allow_shell`.
+            if matches!(classify_wsl_nested_shell(&req.argv), WslArgvClass::NotWsl)
+                && let Some(shell) = shell_argv_denied(&req.argv)
+            {
                 self.audit(
                             "pty_command_start",
                             &req.argv[0],
