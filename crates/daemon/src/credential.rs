@@ -20,13 +20,13 @@ use std::time::Duration;
 use terminal_commander_core::JobId;
 use terminal_commander_ipc::protocol::{
     CredentialKind, CredentialRequestResponse, CredentialStatus, CredentialUrlOp,
-    CredentialUrlResponse,
+    CredentialUrlResponse, owner_prompt_text,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
-use crate::pty_command::{PtyRuntime, PtyRuntimeError};
+use crate::pty_command::{CredentialPrompt, PtyRuntime, PtyRuntimeError};
 
 /// How long one `credential_request` waits for the owner before answering
 /// `timeout`. The owner prompt stays open; a repeat call waits on it again.
@@ -116,7 +116,7 @@ impl CredentialBroker {
                         },
                     );
                     let rx = outcome.subscribe();
-                    let text = PromptText::new(job_id, awaiting.kind, &prompt.argv);
+                    let text = PromptText::new(job_id, awaiting.kind, &prompt);
                     spawn_owner_prompt(
                         Arc::clone(pty),
                         self.prompter.clone(),
@@ -230,7 +230,7 @@ impl CredentialBroker {
                         generation: prompt.generation,
                         host: addr.to_string(),
                         token,
-                        text: PromptText::new(job_id, awaiting.kind, &prompt.argv),
+                        text: PromptText::new(job_id, awaiting.kind, &prompt),
                         ttl: self.url_ttl,
                     },
                     listener,
@@ -607,9 +607,10 @@ enum Asked {
     Unavailable,
 }
 
-/// Owner-facing prompt text. Built from the job id, prompt kind, and a
-/// sanitized argv so the owner can tell which job is asking (a job the
-/// model started can print a fake prompt; the owner decides).
+/// Owner-facing prompt text: [`owner_prompt_text`] (job id, prompt kind, the
+/// program the daemon actually spawned, sanitized argv, and a warning when
+/// the request overrode program resolution), so the owner can tell which
+/// job is asking and what will receive the answer.
 #[derive(Debug, Clone)]
 struct PromptText {
     title: String,
@@ -617,36 +618,15 @@ struct PromptText {
 }
 
 impl PromptText {
-    fn new(job_id: JobId, kind: CredentialKind, argv: &[String]) -> Self {
-        let kind = match kind {
-            CredentialKind::Sudo => "sudo",
-            CredentialKind::Ssh => "ssh",
-            CredentialKind::Password => "password",
-        };
-        // Plain printable ASCII only: helpers such as zenity and kdialog
-        // render markup, and argv is model-chosen.
-        let mut command: String = argv
-            .join(" ")
-            .chars()
-            .map(|c| {
-                if (c.is_ascii_graphic() || c == ' ') && !matches!(c, '<' | '>' | '&') {
-                    c
-                } else {
-                    '?'
-                }
-            })
-            .collect();
-        if command.len() > 200 {
-            command.truncate(197);
-            command.push_str("...");
-        }
+    fn new(job_id: JobId, kind: CredentialKind, prompt: &CredentialPrompt) -> Self {
         Self {
-            title: format!("Terminal Commander: {kind} password"),
-            message: format!(
-                "Job {} is waiting for a {kind} password.\nCommand: {command}\n\
-                 Terminal Commander types your answer into that job only; the AI model never \
-                 sees it. Cancel if you did not expect this.",
-                job_id.to_wire_string()
+            title: format!("Terminal Commander: {} password", kind.as_str()),
+            message: owner_prompt_text(
+                job_id,
+                kind,
+                &prompt.program,
+                &prompt.argv,
+                &prompt.program_env,
             ),
         }
     }
@@ -892,22 +872,33 @@ mod native {
 mod tests {
     use super::*;
 
+    fn prompt(argv: &[&str]) -> CredentialPrompt {
+        CredentialPrompt {
+            generation: 1,
+            awaiting: None,
+            argv: argv.iter().map(|a| (*a).to_owned()).collect(),
+            program: "/usr/bin/sudo".to_owned(),
+            program_env: Vec::new(),
+        }
+    }
+
     #[test]
     fn prompt_text_names_job_and_strips_markup() {
         let job = JobId::new();
         let text = PromptText::new(
             job,
             CredentialKind::Sudo,
-            &["sudo".to_owned(), "<b>x</b>\u{1b}[31m".to_owned()],
+            &prompt(&["sudo", "<b>x</b>\u{1b}[31m"]),
         );
         assert_eq!(text.title, "Terminal Commander: sudo password");
         assert!(text.message.contains(&job.to_wire_string()));
+        assert!(text.message.contains("Program: /usr/bin/sudo"));
         assert!(text.message.contains("Command: sudo ?b?x?/b??[31m"));
     }
 
     #[test]
     fn test_seam_never_reaches_a_native_prompt() {
-        let text = PromptText::new(JobId::new(), CredentialKind::Password, &[]);
+        let text = PromptText::new(JobId::new(), CredentialKind::Password, &prompt(&[]));
         assert!(matches!(ask_owner(Some("test:pw"), &text), Asked::Secret(s) if s.0 == b"pw"));
         assert!(matches!(
             ask_owner(Some("test-decline"), &text),

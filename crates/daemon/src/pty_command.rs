@@ -95,6 +95,10 @@ mod runtime {
         bucket_id: BucketId,
         probe_id: ProbeId,
         argv: Vec<String>,
+        /// Absolute program the spawn ran; shown to the owner.
+        program: String,
+        /// Request env keys that change program resolution or loading.
+        program_env: Vec<String>,
         sifter: Arc<SifterRuntime>,
         inline_rules: Vec<RuleDefinition>,
         probe: Arc<tokio::sync::Mutex<Option<PtyProbe>>>,
@@ -129,6 +133,9 @@ mod runtime {
         pub generation: u64,
         pub awaiting: Option<AwaitingCredential>,
         pub argv: Vec<String>,
+        /// The absolute program the daemon spawned (not the typed name).
+        pub program: String,
+        pub program_env: Vec<String>,
     }
 
     const fn credential_kind(kind: PromptKind) -> CredentialKind {
@@ -579,6 +586,8 @@ mod runtime {
             let bucket_id = BucketId::new();
             let probe_id = ProbeId::new();
             let job_id = JobId::new();
+            let program = shown_program(&spawn_argv[0], &req.env, req.cwd.as_deref());
+            let program_env = program_env_overrides(&req.env);
             let bucket_cfg = req.bucket_config.unwrap_or_default();
             self.router.bucket_create(bucket_id, bucket_cfg)?;
             // Record the bucket's source identity for subscription routing
@@ -781,6 +790,8 @@ mod runtime {
                     bucket_id,
                     probe_id,
                     argv: req.argv.clone(),
+                    program,
+                    program_env,
                     sifter,
                     inline_rules: req.rules,
                     probe: probe_cell,
@@ -894,10 +905,15 @@ mod runtime {
             &self,
             job_id: JobId,
         ) -> Result<CredentialPrompt, PtyRuntimeError> {
-            let (probe, argv) = {
+            let (probe, argv, program, program_env) = {
                 let g = self.live.read();
                 let b = g.get(&job_id).ok_or(PtyRuntimeError::UnknownJob(job_id))?;
-                (Arc::clone(&b.probe), b.argv.clone())
+                (
+                    Arc::clone(&b.probe),
+                    b.argv.clone(),
+                    b.program.clone(),
+                    b.program_env.clone(),
+                )
             };
             let guard = probe.lock().await;
             let probe = guard.as_ref().ok_or(PtyRuntimeError::UnknownJob(job_id))?;
@@ -905,7 +921,18 @@ mod runtime {
                 generation: probe.secret_prompt_generation(),
                 awaiting: awaiting_of(probe),
                 argv,
+                program,
+                program_env,
             })
+        }
+
+        /// The spawned program and its program-affecting env keys, for the
+        /// `pty_command_list` entry the admin CLI shows the owner.
+        #[must_use]
+        pub fn program_of(&self, job_id: JobId) -> Option<(String, Vec<String>)> {
+            let g = self.live.read();
+            g.get(&job_id)
+                .map(|b| (b.program.clone(), b.program_env.clone()))
         }
 
         /// Type an OWNER-supplied secret (plus Enter) into the job's
@@ -1247,6 +1274,81 @@ mod runtime {
             .map(|p| p.to_string_lossy().into_owned())
     }
 
+    /// Request env keys that decide which program runs or what it loads.
+    const PROGRAM_ENV: [&str; 6] = [
+        "PATH",
+        "PATHEXT",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "SSH_ASKPASS",
+        "SUDO_ASKPASS",
+    ];
+
+    /// Keys only (never values), case-insensitive, first spelling kept.
+    fn program_env_overrides(env: &[(OsString, OsString)]) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        for (key, _) in env {
+            let key = key.to_string_lossy();
+            let upper = key.to_ascii_uppercase();
+            if (PROGRAM_ENV.contains(&upper.as_str()) || upper.starts_with("DYLD_"))
+                && !keys.iter().any(|k| k.eq_ignore_ascii_case(&key))
+            {
+                keys.push(key.into_owned());
+            }
+        }
+        keys
+    }
+
+    /// The program the owner is told about. On Windows the spawn path is
+    /// already resolved and absolute.
+    #[cfg(windows)]
+    fn shown_program(
+        spawn_argv0: &str,
+        _env: &[(OsString, OsString)],
+        _cwd: Option<&std::path::Path>,
+    ) -> String {
+        spawn_argv0.to_owned()
+    }
+
+    /// The program the owner is told about. Unix spawns the typed name and
+    /// the exec searches the request's PATH (else the daemon's), so search
+    /// it the same way here.
+    ///
+    /// ponytail: display-only search; an empty PATH entry resolves against
+    /// the daemon's cwd, not the job's.
+    #[cfg(not(windows))]
+    fn shown_program(
+        argv0: &str,
+        env: &[(OsString, OsString)],
+        cwd: Option<&std::path::Path>,
+    ) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let typed = std::path::Path::new(argv0);
+        let found = if argv0.contains('/') {
+            Some(match cwd {
+                Some(dir) if typed.is_relative() => dir.join(typed),
+                _ => typed.to_path_buf(),
+            })
+        } else {
+            let search = env
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "PATH")
+                .map(|(_, v)| v.clone())
+                .or_else(|| std::env::var_os("PATH"))
+                .unwrap_or_default();
+            std::env::split_paths(&search)
+                .map(|dir| dir.join(argv0))
+                .find(|c| {
+                    c.metadata()
+                        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                })
+        };
+        found
+            .and_then(|p| std::path::absolute(p).ok())
+            .map_or_else(|| argv0.to_owned(), |p| p.to_string_lossy().into_owned())
+    }
+
     /// Unix `execvp` searches PATH without rewriting the name: run it as typed.
     #[cfg(not(windows))]
     #[allow(clippy::unnecessary_wraps)]
@@ -1427,6 +1529,6 @@ mod runtime {
 
 #[cfg(any(unix, windows))]
 pub use runtime::{
-    LivePtyIdentity, PtyRebindReport, PtyRuntime, PtyRuntimeError, PtyStartRequest,
-    PtyStartResponse, PtyWriteResponse,
+    CredentialPrompt, LivePtyIdentity, PtyRebindReport, PtyRuntime, PtyRuntimeError,
+    PtyStartRequest, PtyStartResponse, PtyWriteResponse,
 };

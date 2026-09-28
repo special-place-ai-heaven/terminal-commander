@@ -88,7 +88,7 @@ pub use protocol::{
     SubscriptionPredicate, SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSourceSel,
     SubscriptionSummary, TerminalProbe, WorkspaceSnapshotApplyParams,
     WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
-    WslProbe, decode_payload, encode_frame,
+    WslProbe, decode_payload, encode_frame, owner_prompt_text,
 };
 
 pub use framing::{ReadOutcome, read_frame, read_request, read_request_classified, write_response};

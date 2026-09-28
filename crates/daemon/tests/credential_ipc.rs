@@ -149,6 +149,10 @@ impl Harness {
     }
 
     async fn start_child(&mut self, python: &str) -> JobId {
+        self.start_child_with_env(python, vec![]).await
+    }
+
+    async fn start_child_with_env(&mut self, python: &str, env: Vec<(String, String)>) -> JobId {
         let r = self
             .call(IpcRequest::PtyCommandStart(PtyCommandStartParams {
                 environment: None,
@@ -159,7 +163,7 @@ impl Harness {
                     CHILD.to_owned(),
                 ],
                 cwd: None,
-                env: vec![],
+                env,
                 bucket_config: None,
                 rules: vec![],
                 rows: None,
@@ -531,6 +535,87 @@ fn credential_url_page_takes_exactly_one_post_with_the_right_token() {
         assert_eq!(meta, serde_json::json!({"kind": "sudo", "source": "url"}));
 
         h.assert_secret_never_surfaced(job_id).await;
+    });
+}
+
+/// The owner page for `job_id`'s prompt, plus its `pty_command_list` entry.
+async fn owner_view(
+    h: &mut Harness,
+    job_id: JobId,
+) -> (String, terminal_commander_ipc::PtyCommandListEntry) {
+    let url = h
+        .url(job_id, CredentialUrlOp::Open)
+        .await
+        .url
+        .expect("page url");
+    let (status, page) = h.http(&url, "GET", None, None, "").await.unwrap();
+    assert_eq!(status, 200, "{page}");
+    let Ok(IpcResponse::PtyCommandList(list)) = h.call(IpcRequest::PtyCommandList).await else {
+        panic!("pty_command_list failed");
+    };
+    let entry = list
+        .entries
+        .into_iter()
+        .find(|e| e.job_id == job_id)
+        .expect("job listed");
+    (page, entry)
+}
+
+/// W1: the owner is shown the program the daemon spawned, resolved through
+/// the request's PATH, and warned when the request overrode resolution; a
+/// familiar `argv[0]` alone never vouches for what receives the password.
+#[test]
+fn owner_prompt_shows_the_spawned_program_and_warns_on_a_path_override() {
+    let Some(python) = python() else {
+        eprintln!("skipping: python not on PATH");
+        return;
+    };
+    let exe = std::process::Command::new(&python)
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .unwrap();
+    let exe = PathBuf::from(String::from_utf8(exe.stdout).unwrap().trim());
+    let dir = exe.parent().unwrap().to_string_lossy().into_owned();
+    let name = exe.file_name().unwrap().to_string_lossy().into_owned();
+    let norm = |s: &str| {
+        if cfg!(windows) {
+            s.to_lowercase()
+        } else {
+            s.to_owned()
+        }
+    };
+    rt().block_on(async {
+        let mut h = Harness::new("w1", "none");
+
+        // PATH override: `argv[0]` is a bare name the request's PATH picks.
+        let job_id = h
+            .start_child_with_env(&name, vec![("PATH".to_owned(), dir.clone())])
+            .await;
+        h.wait_awaiting(job_id).await;
+        let (page, entry) = owner_view(&mut h, job_id).await;
+        let program = entry.program.clone().expect("program on an awaiting entry");
+        assert!(std::path::Path::new(&program).is_absolute(), "{program}");
+        assert!(
+            norm(&program).starts_with(&norm(&dir)),
+            "{program} not in {dir}"
+        );
+        assert!(
+            norm(&page).contains(&norm(&format!("Program: {program}"))),
+            "{page}"
+        );
+        assert_eq!(entry.program_env, vec!["PATH".to_owned()]);
+        assert!(page.contains("\u{26a0} request overrides PATH"), "{page}");
+        h.stop(job_id).await;
+
+        // No override: still the absolute program, and no warning.
+        let job_id = h.start_child(&python).await;
+        h.wait_awaiting(job_id).await;
+        let (page, entry) = owner_view(&mut h, job_id).await;
+        let program = entry.program.expect("program on an awaiting entry");
+        assert!(std::path::Path::new(&program).is_absolute(), "{program}");
+        assert!(entry.program_env.is_empty());
+        assert!(!page.contains('\u{26a0}'), "{page}");
+        h.stop(job_id).await;
     });
 }
 

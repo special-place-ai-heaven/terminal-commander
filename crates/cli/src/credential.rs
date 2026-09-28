@@ -12,7 +12,7 @@
 use std::process::ExitCode;
 
 use terminal_commander_ipc::{
-    CredentialKind, CredentialProvideParams, IpcRequest, IpcResponse, OwnerSecret,
+    CredentialProvideParams, IpcRequest, IpcResponse, OwnerSecret, owner_prompt_text,
 };
 
 use crate::ipc::connect_or_unavailable;
@@ -63,16 +63,16 @@ pub(crate) fn run_provide(job_id: &str) -> ExitCode {
         );
         return ExitCode::from(1);
     };
-    let kind = match awaiting.kind {
-        CredentialKind::Sudo => "sudo",
-        CredentialKind::Ssh => "ssh",
-        CredentialKind::Password => "password",
-    };
+    // The same text the native dialog and the loopback page show.
     eprintln!(
-        "Job {} is waiting for a {kind} password.\nCommand: {}\n\
-         It is typed into that job only; the AI model never sees it.",
-        job_id.to_wire_string(),
-        printable(&entry.argv.join(" "))
+        "{}",
+        owner_prompt_text(
+            job_id,
+            awaiting.kind,
+            entry.program.as_deref().unwrap_or("(unknown)"),
+            &entry.argv,
+            &entry.program_env,
+        )
     );
 
     let secret = match read_secret() {
@@ -101,14 +101,6 @@ pub(crate) fn run_provide(job_id: &str) -> ExitCode {
             ExitCode::from(err.exit_code())
         }
     }
-}
-
-/// Model-chosen argv must not drive the owner's terminal: control
-/// characters (escape sequences) print as `?`.
-fn printable(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_control() { '?' } else { c })
-        .collect()
 }
 
 /// One line from stdin, echo off when stdin is a terminal. Piped stdin is
@@ -220,6 +212,14 @@ impl EchoOff {
 mod tests {
     #[test]
     fn argv_control_characters_cannot_reach_the_owner_terminal() {
-        assert_eq!(super::printable("sudo \u{1b}]0;x\u{7}ls"), "sudo ?]0;x?ls");
+        // The CLI prints the shared owner text, which sanitizes argv.
+        let text = terminal_commander_ipc::owner_prompt_text(
+            terminal_commander_core::JobId::new(),
+            terminal_commander_ipc::CredentialKind::Sudo,
+            "/usr/bin/sudo",
+            &["sudo".to_owned(), "\u{1b}]0;x\u{7}ls\u{202e}".to_owned()],
+            &[],
+        );
+        assert!(text.contains("Command: sudo ?]0;x?ls?"), "{text}");
     }
 }

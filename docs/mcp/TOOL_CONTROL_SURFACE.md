@@ -126,7 +126,15 @@ PTY password prompts (owner credential path):
   The deny message names `credential_request` with the job id.
 - `command_status`, `pty_command_list`, and `pty_command_write_stdin` carry
   `awaiting_credential: {kind: "sudo"|"ssh"|"password", since_ms}` for a job
-  at such a prompt; the field is omitted otherwise.
+  at such a prompt; the field is omitted otherwise. `pty_command_list` then
+  also carries `program` (the absolute program the daemon spawned) and
+  `program_env` (request env keys such as `PATH` or `LD_PRELOAD` that change
+  what runs or loads).
+- Every owner channel shows the same text: job id, prompt kind, `Program:`
+  (the spawned absolute path, never just the typed `argv[0]`), `Command:`,
+  and a `⚠ request overrides <keys>` line when the request set a
+  program-affecting env key. A familiar command name alone never vouches
+  for what receives the password.
 - `credential_request {job_id}` asks the OWNER through a channel the model
   cannot read. First, when the MCP client declared URL-mode elicitation
   (`elicitation.url`; form mode never carries a password), the daemon opens

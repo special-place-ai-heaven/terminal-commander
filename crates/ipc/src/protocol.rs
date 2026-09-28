@@ -2726,6 +2726,14 @@ pub struct PtyCommandListEntry {
     /// The job is blocked on a password prompt. Omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_credential: Option<AwaitingCredential>,
+    /// With `awaiting_credential`: the absolute program the daemon spawned
+    /// (what the owner is shown), not the typed `argv[0]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// With `awaiting_credential`: request env keys that change which
+    /// program runs or what it loads (`PATH`, `LD_PRELOAD`, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub program_env: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2740,6 +2748,73 @@ pub enum CredentialKind {
     Sudo,
     Ssh,
     Password,
+}
+
+impl CredentialKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sudo => "sudo",
+            Self::Ssh => "ssh",
+            Self::Password => "password",
+        }
+    }
+}
+
+/// What the owner is told about a password prompt: the SAME text on every
+/// channel (native dialog, loopback page, `credential provide`).
+///
+/// `program` is the absolute path the daemon spawned, not the model's
+/// `argv[0]`: a request `PATH` can put any binary behind a familiar name.
+/// `program_env` lists the request env keys that change which program runs
+/// or what it loads (keys only, never values).
+#[must_use]
+pub fn owner_prompt_text(
+    job_id: JobId,
+    kind: CredentialKind,
+    program: &str,
+    argv: &[String],
+    program_env: &[String],
+) -> String {
+    let warning = if program_env.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\u{26a0} request overrides {}: the program or what it loads may not be what its \
+             name suggests.\n",
+            owner_printable(&program_env.join(", "))
+        )
+    };
+    format!(
+        "Job {} is waiting for a {} password.\nProgram: {}\nCommand: {}\n{warning}\
+         Terminal Commander types your answer into that job only; the AI model never sees it. \
+         Cancel if you did not expect this.",
+        job_id.to_wire_string(),
+        kind.as_str(),
+        owner_printable(program),
+        owner_printable(&argv.join(" ")),
+    )
+}
+
+/// Model-influenced text shown to the owner: printable ASCII only (zenity
+/// and kdialog render markup; terminals honour escapes and bidi controls),
+/// `<`, `>`, `&` as `?`, capped at 200 bytes.
+fn owner_printable(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| {
+            if (c.is_ascii_graphic() || c == ' ') && !matches!(c, '<' | '>' | '&') {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    if out.len() > 200 {
+        out.truncate(197);
+        out.push_str("...");
+    }
+    out
 }
 
 /// A PTY job waiting for a password. TC never takes the password from the
@@ -4791,6 +4866,46 @@ mod tests {
     }
 
     #[test]
+    fn owner_prompt_text_names_the_spawned_program_and_warns_on_overrides() {
+        let job = JobId::new();
+        let argv = ["ssh".to_owned(), "prod-db".to_owned()];
+        let plain = owner_prompt_text(job, CredentialKind::Ssh, "/usr/bin/ssh", &argv, &[]);
+        assert!(plain.contains(&job.to_wire_string()), "{plain}");
+        assert!(
+            plain.contains("Program: /usr/bin/ssh\nCommand: ssh prod-db"),
+            "{plain}"
+        );
+        assert!(!plain.contains('\u{26a0}'), "{plain}");
+        let spoofed = owner_prompt_text(
+            job,
+            CredentialKind::Ssh,
+            "C:\\tmp\\fake\\ssh.exe",
+            &argv,
+            &["PATH".to_owned(), "LD_PRELOAD".to_owned()],
+        );
+        assert!(
+            spoofed.contains("Program: C:\\tmp\\fake\\ssh.exe"),
+            "{spoofed}"
+        );
+        assert!(
+            spoofed.contains("\u{26a0} request overrides PATH, LD_PRELOAD"),
+            "{spoofed}"
+        );
+        // Markup, escapes and bidi controls never reach the owner.
+        let hostile = owner_prompt_text(
+            job,
+            CredentialKind::Sudo,
+            "/x/<b>\u{202e}",
+            &["sudo".to_owned(), "\u{1b}[31m&".to_owned()],
+            &[],
+        );
+        assert!(
+            hostile.contains("Program: /x/?b??\nCommand: sudo ?[31m?"),
+            "{hostile}"
+        );
+    }
+
+    #[test]
     fn awaiting_credential_is_omitted_when_none() {
         let entry = PtyCommandListEntry {
             job_id: JobId::new(),
@@ -4804,9 +4919,12 @@ mod tests {
             secret_prompts_total: 0,
             secret_prompt_active: false,
             awaiting_credential: None,
+            program: None,
+            program_env: Vec::new(),
         };
         let v = serde_json::to_value(&entry).unwrap();
         assert!(v.get("awaiting_credential").is_none());
+        assert!(v.get("program").is_none() && v.get("program_env").is_none());
         let entry = PtyCommandListEntry {
             awaiting_credential: Some(AwaitingCredential {
                 kind: CredentialKind::Sudo,

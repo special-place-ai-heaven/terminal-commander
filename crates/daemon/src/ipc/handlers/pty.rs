@@ -359,18 +359,27 @@ pub(in crate::ipc::server) fn handle_pty_command_list(state: &Arc<DaemonState>) 
             )
         })
         .map(
-            |(job_id, bucket_id, probe_id, argv, m, secret_prompt_active)| PtyCommandListEntry {
-                job_id,
-                bucket_id,
-                probe_id,
-                argv,
-                frames_total: m.frames_total,
-                events_emitted: m.events_emitted,
-                bytes_total: m.bytes_total,
-                stdin_bytes_written: m.stdin_bytes_written,
-                secret_prompts_total: m.secret_prompts_total,
-                secret_prompt_active,
-                awaiting_credential: state.pty.awaiting_credential(job_id),
+            |(job_id, bucket_id, probe_id, argv, m, secret_prompt_active)| {
+                let awaiting_credential = state.pty.awaiting_credential(job_id);
+                // Only an owner-facing prompt needs the spawned program.
+                let (program, program_env) = awaiting_credential
+                    .and_then(|_| state.pty.program_of(job_id))
+                    .map_or((None, Vec::new()), |(p, e)| (Some(p), e));
+                PtyCommandListEntry {
+                    job_id,
+                    bucket_id,
+                    probe_id,
+                    argv,
+                    frames_total: m.frames_total,
+                    events_emitted: m.events_emitted,
+                    bytes_total: m.bytes_total,
+                    stdin_bytes_written: m.stdin_bytes_written,
+                    secret_prompts_total: m.secret_prompts_total,
+                    secret_prompt_active,
+                    awaiting_credential,
+                    program,
+                    program_env,
+                }
             },
         )
         .collect();
