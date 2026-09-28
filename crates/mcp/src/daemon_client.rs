@@ -426,6 +426,8 @@ impl McpDaemonClient {
     /// [`IpcRequest::is_idempotent`]:
     ///   - Idempotent RPCs (pure bounded reads / idempotent repositioning) are
     ///     retried once; a transient pipe-busy / restart may already be over.
+    ///     A per-call deadline timeout is not retried: the daemon may still be
+    ///     working, and a re-send would stack another full deadline.
     ///   - MUTATING RPCs (e.g. `CommandStartCombed`, registry writes, a
     ///     subscription pull that commits offsets server-side) are NEVER
     ///     auto-retried. A client-side timeout cannot prove the daemon did not
@@ -478,13 +480,14 @@ impl McpDaemonClient {
                 // replace). `try_self_heal` is a no-op (returns false) when
                 // there is no status handle.
                 let _recovered = self.try_self_heal().await;
-                if request.is_idempotent() {
+                if request.is_idempotent() && !e.is_transport_timeout() {
                     // Safe to re-send: a pure read / idempotent reposition can
                     // run twice without a server-side double-effect.
                     let retry_id = self.next_id.fetch_add(1, Ordering::Relaxed);
                     self.call_inner(retry_id, request, deadline).await
                 } else {
-                    // Mutating RPC: the daemon may already have performed the
+                    // Mutating RPC or deadline timeout: the daemon may already
+                    // have performed (or still be performing) the request's
                     // side effect before the transport dropped. Returning the
                     // transport error (no re-send) is the only safe choice; the
                     // caller reconciles via command_status / runtime_state.

@@ -1240,6 +1240,27 @@ impl IpcError {
     pub fn is_transport(&self) -> bool {
         self.code == IpcErrorCode::Internal && self.message.starts_with(Self::TRANSPORT_PREFIX)
     }
+
+    /// Lead-in of the per-call deadline message after [`Self::TRANSPORT_PREFIX`].
+    const TIMEOUT_LEAD: &'static str = "request timed out after ";
+
+    /// Construct the client-side per-call deadline failure: a
+    /// [`Self::transport`] error that [`Self::is_transport_timeout`] recognizes.
+    #[must_use]
+    pub fn transport_timeout(timeout: std::time::Duration) -> Self {
+        Self::transport(format!("{}{}ms", Self::TIMEOUT_LEAD, timeout.as_millis()))
+    }
+
+    /// True when this transport failure is the per-call deadline elapsing (the
+    /// daemon may still be working on the request), not a lost connection.
+    #[must_use]
+    pub fn is_transport_timeout(&self) -> bool {
+        self.code == IpcErrorCode::Internal
+            && self
+                .message
+                .strip_prefix(Self::TRANSPORT_PREFIX)
+                .is_some_and(|rest| rest.starts_with(Self::TIMEOUT_LEAD))
+    }
 }
 
 /// Parameters for `bucket_events_since`.
@@ -3419,6 +3440,18 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         let back: IpcError = serde_json::from_str(&json).unwrap();
         assert!(back.is_transport());
+    }
+
+    #[test]
+    fn transport_timeout_is_a_transport_error_only_it_classifies() {
+        let t = IpcError::transport_timeout(std::time::Duration::from_millis(250));
+        assert!(t.is_transport() && t.is_transport_timeout());
+        assert_eq!(t.message, "transport: request timed out after 250ms");
+        assert!(!IpcError::transport("read length: early eof").is_transport_timeout());
+        assert!(
+            !IpcError::new(IpcErrorCode::Internal, "request timed out after 1ms")
+                .is_transport_timeout()
+        );
     }
 
     #[test]

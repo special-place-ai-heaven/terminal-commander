@@ -90,9 +90,7 @@ impl DaemonClient {
         };
         let resp_env = tokio::time::timeout(timeout, self.round_trip(&env))
             .await
-            .map_err(|_| {
-                IpcError::transport(format!("request timed out after {}ms", timeout.as_millis()))
-            })??;
+            .map_err(|_| IpcError::transport_timeout(timeout))??;
         if resp_env.correlation_id != correlation_id {
             return Err(IpcError::transport(format!(
                 "correlation mismatch: expected {correlation_id} got {}",

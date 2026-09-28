@@ -16,7 +16,8 @@
 //! the stream WITHOUT writing a response. The client's response read then hits
 //! EOF and surfaces an `IpcError::transport`. Counting connections counts
 //! re-sends: a non-idempotent request must produce exactly ONE connection, an
-//! idempotent request exactly TWO (the original plus the single retry).
+//! idempotent request exactly TWO (the original plus the single retry), and a
+//! deadline timeout exactly ONE.
 //!
 //! Source-status: test-only/mock (no real daemon; the fake speaks only the
 //! TC37 length-prefixed wire framing far enough to receive a request).
@@ -233,11 +234,53 @@ async fn idempotent_request_is_resent_once_on_transport_failure() {
         "the drop-without-reply daemon must surface a transport error"
     );
 
-    let observed = wait_for_count(&count, 2).await;
+    // Wait for a (forbidden) second retry so the cap is actually checked.
+    let observed = wait_for_count(&count, 3).await;
     assert_eq!(
         observed, 2,
         "an IDEMPOTENT Health request IS re-sent exactly once after a \
          transport failure (expected 2 connections, got {observed})"
+    );
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+/// Like [`spawn_counting_drop_daemon`], but each connection is held open
+/// without a reply, so the client hits its per-call deadline instead of EOF.
+fn spawn_counting_hang_daemon(sock: &std::path::Path) -> Arc<AtomicU64> {
+    let count = Arc::new(AtomicU64::new(0));
+    let listener = tokio::net::UnixListener::bind(sock).expect("bind fake daemon socket");
+    let task_count = Arc::clone(&count);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            task_count.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                drop(stream);
+            });
+        }
+    });
+    count
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idempotent_request_is_not_resent_after_deadline_timeout() {
+    let sock = unique_sock("deadline");
+    let count = spawn_counting_hang_daemon(&sock);
+    let client = McpDaemonClient::new(&sock).with_timeout(Duration::from_millis(300));
+
+    // A timeout means the daemon may still be working: re-sending would only
+    // stack another full deadline on the caller's wait.
+    let err = client
+        .call(IpcRequest::Health)
+        .await
+        .expect_err("the hang daemon must surface a deadline timeout");
+    assert!(err.is_transport_timeout(), "{err:?}");
+
+    let observed = wait_for_count(&count, 2).await;
+    assert_eq!(
+        observed, 1,
+        "a deadline timeout must NOT be retried (got {observed} connections)"
     );
 
     let _ = std::fs::remove_file(&sock);
