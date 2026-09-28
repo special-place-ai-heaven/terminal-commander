@@ -441,35 +441,60 @@ fn interpreter_script_flag(shell: &str, args: &[impl AsRef<str>]) -> bool {
         if !is_interpreter_option(arg) {
             return false;
         }
-        let takes_value = if pwsh {
-            PWSH_VALUE_FLAGS
-                .iter()
-                .any(|flag| arg.eq_ignore_ascii_case(flag))
+        let words = if pwsh {
+            usize::from(pwsh_option_takes_value(arg))
         } else {
-            posix_option_takes_value(arg)
+            posix_option_value_words(arg)
         };
-        if takes_value {
+        for _ in 0..words {
             args.next();
         }
     }
     false
 }
 
-/// Whether a POSIX interpreter option token consumes the following word as
-/// its value, read like [`wrapper_option`]: a `--rcfile`/`--init-file` with
-/// no inline `=`, or a short cluster whose FIRST value letter (`o`/`O`, the
-/// `set -o` / `shopt -O` argument) is also its last char, so its value is
-/// the next word (`-o pipefail`, `-xo pipefail`) rather than inline (`-ox`).
-fn posix_option_takes_value(token: &str) -> bool {
+/// How many following words a POSIX interpreter option token consumes as
+/// values: 1 for a `--rcfile`/`--init-file` with no inline `=`, else one per
+/// `o`/`O` letter in a short cluster. bash and dash take a separate word for
+/// EACH invocation `-o`/`-O` (`set -o NAME`, `shopt -O NAME`) wherever the
+/// letter sits, so `-ox pipefail -c` and `-oO a b -c` each still expose `-c`.
+fn posix_option_value_words(token: &str) -> usize {
     if let Some(long) = token.strip_prefix("--") {
-        return matches!(long, "rcfile" | "init-file");
+        return usize::from(matches!(long, "rcfile" | "init-file"));
     }
     let Some(body) = token.strip_prefix(['-', '+']) else {
-        return false;
+        return 0;
     };
     body.bytes()
-        .position(|byte| matches!(byte, b'o' | b'O'))
-        .is_some_and(|at| at + 1 == body.len())
+        .filter(|byte| matches!(byte, b'o' | b'O'))
+        .count()
+}
+
+/// Whether a PowerShell option consumes the next word as its value. Matches
+/// [`PWSH_VALUE_FLAGS`] by exact name or by unique prefix, the way
+/// [`is_pwsh_command_flag`] matches `-Command` (so `-v`/`-Vers` are
+/// `-Version`). Spelled with `-`, `--`, or `/`.
+fn pwsh_option_takes_value(arg: &str) -> bool {
+    let Some(name) = arg
+        .strip_prefix("--")
+        .or_else(|| arg.strip_prefix(['-', '/']))
+        .filter(|name| !name.is_empty())
+    else {
+        return false;
+    };
+    let names = || {
+        PWSH_VALUE_FLAGS
+            .iter()
+            .map(|flag| flag.trim_start_matches('-'))
+    };
+    if names().any(|full| full.eq_ignore_ascii_case(name)) {
+        return true;
+    }
+    let mut prefixed = names().filter(|full| {
+        full.get(..name.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(name))
+    });
+    matches!((prefixed.next(), prefixed.next()), (Some(_), None))
 }
 
 /// Shell-specific flags that run a command, beyond the shared script-flag
@@ -1094,6 +1119,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one exhaustive deny/allow table
     fn argv_denies_quoted_split_string_assignments_and_getopt_clusters() {
         let denied: &[(&[&str], &str)] = &[
             // A quoted `NAME=value` word keeps its space, so `ssh` is not the program.
@@ -1159,6 +1185,37 @@ mod tests {
             (&["xargs", "fish", "--init-command=id"], "fish"),
             (&["xargs", "nu", "-e", "id"], "nu"),
             (&["xargs", "nu", "--execute", "id"], "nu"),
+            // FCR2-004 V4b: bash/dash take one word per `o`/`O` letter wherever
+            // it sits, so the later `-c` is still exposed.
+            (
+                &["xargs", "bash", "-ox", "pipefail", "-c", "echo X"],
+                "bash",
+            ),
+            (
+                &[
+                    "xargs", "bash", "-oO", "pipefail", "extglob", "-c", "echo X",
+                ],
+                "bash",
+            ),
+            (&["xargs", "bash", "-Oe", "extglob", "-c", "echo X"], "bash"),
+            (&["xargs", "dash", "-ox", "nounset", "-c", "echo X"], "dash"),
+            // PowerShell value flags match by unique prefix (`-v`/`-Vers`).
+            (
+                &[
+                    "xargs",
+                    "powershell",
+                    "-v",
+                    "5.1",
+                    "-NoProfile",
+                    "-Command",
+                    "echo X",
+                ],
+                "powershell",
+            ),
+            (
+                &["xargs", "powershell", "-Vers", "5.1", "-Command", "echo X"],
+                "powershell",
+            ),
             // A digit-leading path is the program, not a numeric operand:
             // only timeout/taskset/chrt take numbers, and never a path.
             (&["env", "1/bash", "-c", "id"], "bash"),
@@ -1181,7 +1238,9 @@ mod tests {
             &["grep", "-rn", "cmd", "/c/Users/x"],
             // A value flag consumes a script-file operand; no `-c` follows.
             &["xargs", "bash", "-o", "pipefail", "script.sh"],
+            &["xargs", "bash", "-ox", "pipefail", "script.sh"],
             &["xargs", "pwsh", "-Version", "5.1", "-File", "x.ps1"],
+            &["xargs", "pwsh", "-v", "5.1", "-File", "x.ps1"],
         ] {
             assert_eq!(shell_argv_denied(argv), None, "false deny for {argv:?}");
         }
