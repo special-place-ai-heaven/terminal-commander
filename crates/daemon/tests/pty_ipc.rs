@@ -337,6 +337,45 @@ fn pty_interpreter_denied_under_explicit_allow_shell_false() {
     });
 }
 
+/// FCR2-004: a quoted `NAME=value` in an `env -S` string is one word, so
+/// the program env launches is `bash`, not the `ssh`/`docker` inside the
+/// quotes. Denied on the PTY lane like the argv lane.
+#[test]
+fn pty_env_split_string_quoted_assignment_is_denied() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server_with_allow_shell(false);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        for split in [
+            "'FOO=x ssh' bash -c id",
+            "FOO='x ssh' bash -c id",
+            "\"FOO=x docker\" bash -c id",
+        ] {
+            let err = client
+                .call(
+                    1,
+                    IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                        environment: None,
+                        argv: vec!["env".to_owned(), "-S".to_owned(), split.to_owned()],
+                        cwd: None,
+                        env: vec![],
+                        bucket_config: None,
+                        rules: vec![],
+                        rows: None,
+                        cols: None,
+                        tag: None,
+                    }),
+                )
+                .await
+                .expect_err("env -S shell must be denied under allow_shell=false");
+            assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied, "{split}");
+            assert!(err.message.contains("'bash'"), "{split}: {}", err.message);
+        }
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
 /// Under `allow_shell=true` the interpreter starts and the allow audit row
 /// carries the `nested_shell` classification tag.
 #[test]
@@ -363,6 +402,7 @@ fn pty_interpreter_starts_and_audit_tagged_under_allow_shell_true() {
             metadata.contains("\"nested_shell\":\"sh\""),
             "allow row must be tagged nested_shell; got: {metadata}"
         );
+        assert_eq!(allow_row.reason.as_deref(), Some("nested_shell: sh"));
         let _ = client
             .call(
                 2,
@@ -425,6 +465,10 @@ fn pty_wsl_nested_shell_starts_and_audit_tagged_under_allow_shell_true() {
         assert!(
             metadata.contains("\"nested_shell\":\"bash\""),
             "allow row must be tagged nested_shell; got: {metadata}"
+        );
+        assert_eq!(
+            allow_row.reason.as_deref(),
+            Some("wsl nested_shell classification: bash")
         );
         let _ = client
             .call(

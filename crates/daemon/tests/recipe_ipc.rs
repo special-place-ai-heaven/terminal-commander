@@ -82,7 +82,7 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
             )
             .await
             .unwrap_err();
-        assert_eq!(denied.code, IpcErrorCode::RecipeInvalid);
+        assert_eq!(denied.code, IpcErrorCode::ShellInterpreterDenied);
         assert!(denied.message.contains("shell interpreter"));
         assert!(denied.message.contains("[policy.caps] allow_shell = true"));
 

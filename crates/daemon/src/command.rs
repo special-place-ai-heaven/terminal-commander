@@ -75,11 +75,10 @@ pub const MAX_ARGV_ITEM_BYTES: usize = 4096;
 /// escalators: sudo, doas, su, pkexec, kexec, polkit-agent,
 /// polkit-auth-agent-1).
 ///
-/// Future shell-execution opt-in is intentionally NOT implemented
-/// in TC38. A later goal would need to add an explicit policy
-/// capability (e.g. `allow_shell: bool` on `CommandStartRequest`,
-/// gated by a new `PolicyAction::CommandShellStart` variant) before
-/// this guard can be bypassed.
+/// The opt-in is `[policy.caps] allow_shell` (on in the default
+/// `developer_local` profile): with it on, a matched argv runs after the
+/// `PolicyAction::CommandShellStart` check with a `nested_shell` audit
+/// tag; with it off, this guard denies.
 pub use terminal_commander_core::SHELL_INTERPRETERS_DENY;
 
 /// US8 (FR-060): classification of a `wsl`/`wsl.exe` argv for the
@@ -3883,6 +3882,12 @@ mod wsl_carrier_tests {
         assert_eq!(classify(&["nohup", "wsl", "-e", "bash"]), nested("bash"));
         assert_eq!(
             classify(&["env", "-S", "wsl.exe -e bash -lc id"]),
+            nested("bash")
+        );
+        // A quoted `NAME=value` in the `-S` string is one word, so the
+        // carrier is `wsl.exe`, not `ssh`.
+        assert_eq!(
+            classify(&["env", "-S", "'FOO=x ssh' wsl.exe bash -c id"]),
             nested("bash")
         );
         assert_eq!(

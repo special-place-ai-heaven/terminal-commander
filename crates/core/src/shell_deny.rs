@@ -16,10 +16,10 @@
 //! powershell 8.3 shape `powers~<digit>` fold into that same match.
 //!
 //! ponytail: wrapper and interpreter options come from small tables, and
-//! `env -S` is split on whitespace with `'`/`"` removed; a string holding a
-//! `\` escape or `${VAR}` is denied rather than modeled. An
-//! unlisted launcher is covered only when a script flag follows the
-//! interpreter. Basename matching also strips trailing
+//! `env -S` is split the way GNU env splits it (quotes, `#` comments, the
+//! literal escapes); `$VAR`, `${VAR}`, and other `\` escapes are denied
+//! rather than modeled. An unlisted launcher is covered only when a script
+//! flag follows the interpreter. Basename matching also strips trailing
 //! ASCII dots/spaces and an unnamed `::$DATA` stream, and recognizes the
 //! powershell 8.3 shape `powers~<digit>`. That is deny-list string matching
 //! on every host, not a Win32 security boundary: no filesystem short-name
@@ -64,30 +64,26 @@ pub const SHELL_INTERPRETERS_DENY: &[&str] = &[
 ];
 
 /// Launchers whose first operand is the program they run, each with the
-/// options that take a separate value (`env -u NAME`, `timeout -s KILL`).
-/// After a wrapper, operands that start with a digit are skipped too, and
-/// [`VALUE_OPERAND_WRAPPERS`] take their first operand as a value. Not `xargs` or `sudo`: their operands are
-/// not just a program, and `sudo` has its own privilege deny.
-const SHELL_ARGV_WRAPPERS: &[(&str, &[&str])] = &[
-    ("command", &[]),
-    ("exec", &["-a"]),
-    (
-        "env",
-        &["-u", "--unset", "-C", "--chdir", "-P", "-a", "--argv0"],
-    ),
-    ("nohup", &[]),
-    ("time", &["-f", "--format", "-o", "--output"]),
-    ("nice", &["-n", "--adjustment"]),
-    ("timeout", &["-s", "--signal", "-k", "--kill-after"]),
-    (
-        "stdbuf",
-        &["-i", "-o", "-e", "--input", "--output", "--error"],
-    ),
-    ("ionice", &["-c", "--class", "-n", "--classdata"]),
-    ("chrt", &[]),
-    ("taskset", &[]),
-    ("setsid", &[]),
-    ("unbuffer", &[]),
+/// short letters and long names of its options that take a value (`env -u
+/// NAME`, `timeout --signal=KILL`), read by [`wrapper_option`]. After a
+/// wrapper, operands that start with a digit are skipped too, and
+/// [`VALUE_OPERAND_WRAPPERS`] take their first operand as a value. Not
+/// `xargs` or `sudo`: their operands are not just a program, and `sudo` has
+/// its own privilege deny.
+const SHELL_ARGV_WRAPPERS: &[(&str, &str, &[&str])] = &[
+    ("command", "", &[]),
+    ("exec", "a", &[]),
+    ("env", "uCSPa", &["unset", "chdir", "split-string", "argv0"]),
+    ("nohup", "", &[]),
+    ("time", "fo", &["format", "output"]),
+    ("nice", "n", &["adjustment"]),
+    ("timeout", "sk", &["signal", "kill-after"]),
+    ("stdbuf", "ioe", &["input", "output", "error"]),
+    ("ionice", "cn", &["class", "classdata"]),
+    ("chrt", "", &[]),
+    ("taskset", "", &[]),
+    ("setsid", "", &[]),
+    ("unbuffer", "", &[]),
 ];
 
 /// Wrappers whose first operand is a value, not the program: `timeout
@@ -111,7 +107,9 @@ const REMOTE_CARRIERS: &[&str] = &["ssh", "docker", "podman", "nerdctl", "kubect
 /// (`/C`, `-Command`). POSIX `-C` (noclobber) shares that spelling; the
 /// check only runs next to a denied interpreter, so `git -C` is allowed.
 /// Single-dash letter clusters holding `c` (`-ec`, `-Cc`, `-eluxc`) are
-/// recognized in addition for non-PowerShell interpreters.
+/// recognized in addition for non-PowerShell interpreters, `--name=value`
+/// matches by its name (`fish --command=id`), and cmd also takes combined
+/// or glued switches ([`is_cmd_script_switch`]).
 const SHELL_SCRIPT_FLAGS: &[&str] = &[
     "-c",
     "-lc",
@@ -119,6 +117,7 @@ const SHELL_SCRIPT_FLAGS: &[&str] = &[
     "-ic",
     "-command",
     "--command",
+    "--commands",
     "/c",
     "/k",
     "/r",
@@ -233,7 +232,7 @@ pub fn launched_argv(argv: &[impl AsRef<str>]) -> Vec<String> {
     launched(argv).unwrap_or_default()
 }
 
-/// [`launched_argv`], or `None` for an `env -S` string with `\` or `${`.
+/// [`launched_argv`], or `None` for an `env -S` string [`split_env_words`] refuses.
 fn launched(argv: &[impl AsRef<str>]) -> Option<Vec<String>> {
     let mut argv: Vec<String> = argv.iter().map(|arg| arg.as_ref().to_owned()).collect();
     loop {
@@ -260,7 +259,7 @@ enum Launched {
 /// The program this argv launches, past leading `NAME=value` words and
 /// wrappers with their options and value operands.
 fn launched_program(argv: &[String]) -> Launched {
-    let mut wrapper: Option<(&str, &[&str])> = None;
+    let mut wrapper: Option<(&str, &str, &[&str])> = None;
     let mut value_operand = false;
     let mut index = 0;
     while let Some(token) = argv.get(index).map(String::as_str) {
@@ -274,13 +273,13 @@ fn launched_program(argv: &[String]) -> Launched {
             index += 1;
             continue;
         }
-        let Some((name, value_flags)) = wrapper else {
+        let Some((_, shorts, longs)) = wrapper else {
             return Launched::At(index);
         };
         if token.starts_with('-') {
-            if name == "env"
-                && let Some((split, next)) = env_split_string(argv, index)
-            {
+            let (option, next) = wrapper_option(argv, index, shorts, longs);
+            // `env -S STR` / `--split-string=STR`; no other wrapper has them.
+            if let Some(("S" | "split-string", Some(split))) = option {
                 let Some(words) = split_env_words(split) else {
                     return Launched::Unparseable;
                 };
@@ -289,7 +288,7 @@ fn launched_program(argv: &[String]) -> Launched {
                 expanded.extend_from_slice(&argv[next..]);
                 return Launched::SplitString(expanded);
             }
-            index += if value_flags.contains(&token) { 2 } else { 1 };
+            index = next;
             continue;
         }
         if value_operand || token.starts_with(|ch: char| ch.is_ascii_digit()) {
@@ -302,50 +301,109 @@ fn launched_program(argv: &[String]) -> Launched {
     Launched::Nothing
 }
 
-/// Words env makes of a `-S` string: whitespace split, then quote removal
-/// (`'bash'` and `b""ash` are `bash`). `None` for a `\` escape or `${VAR}`
-/// expansion, which env would rewrite and this does not model.
+/// Words env makes of a `-S` string (GNU `env --split-string`): whitespace
+/// separates words, a quoted run keeps its whitespace and joins the word
+/// around it (`FOO='x ssh'` is one word), `#` at the start of a word ends
+/// the string, and `\\ \' \" \# \$` stand for the character. `None` where
+/// env would rewrite or reject the string and this does not model it:
+/// `$VAR` / `${VAR}`, any other `\` escape, or an unterminated quote.
 fn split_env_words(split: &str) -> Option<Vec<String>> {
-    if split.contains('\\') || split.contains("${") {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quote = None;
+    let mut chars = split.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let literal = match (quote, ch) {
+            (Some(open), _) if ch == open => {
+                quote = None;
+                continue;
+            }
+            // Inside single quotes only `\\` and `\'` are escapes.
+            (Some('\''), '\\') => chars
+                .next_if(|next| matches!(next, '\\' | '\''))
+                .unwrap_or('\\'),
+            (Some('\''), _) => ch,
+            (_, '$') => return None,
+            (_, '\\') => chars
+                .next()
+                .filter(|next| matches!(next, '\\' | '\'' | '"' | '#' | '$'))?,
+            (None, '\'' | '"') => {
+                quote = Some(ch);
+                word.get_or_insert_default();
+                continue;
+            }
+            (None, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r') => {
+                words.extend(word.take());
+                continue;
+            }
+            (None, '#') if word.is_none() => break,
+            _ => ch,
+        };
+        word.get_or_insert_default().push(literal);
+    }
+    if quote.is_some() {
         return None;
     }
-    Some(
-        split
-            .split_whitespace()
-            .map(|word| word.replace(['\'', '"'], ""))
-            .collect(),
-    )
+    words.extend(word);
+    Some(words)
 }
 
-/// `env -S STR`, `-SSTR`, `-iS STR`, `--split-string[=]STR` (or a long
-/// prefix): the string env splits into arguments, and the index after it.
-fn env_split_string(argv: &[String], index: usize) -> Option<(&str, usize)> {
+/// A wrapper option at `argv[index]`, read the way getopt reads it: in a
+/// short cluster the first letter that takes a value ends the cluster and
+/// takes the rest of it, or else the next word (`-uX`, `-iu X`, `-tc idle`);
+/// `--name[=value]` takes an exact or unique-prefix long name (`--un X`).
+/// Returns that value option (its letter or long name, and its value), if
+/// any, and the index after the option.
+fn wrapper_option<'a>(
+    argv: &'a [String],
+    index: usize,
+    shorts: &'static str,
+    longs: &[&'static str],
+) -> (Option<(&'static str, Option<&'a str>)>, usize) {
     let token = argv[index].as_str();
-    let inline = if let Some(long) = token.strip_prefix("--") {
-        let (name, value) = long
-            .split_once('=')
-            .map_or((long, None), |(n, v)| (n, Some(v)));
-        if name.is_empty() || !"split-string".starts_with(name) {
-            return None;
-        }
-        value
-    } else {
-        let (flags, value) = token.strip_prefix('-')?.split_once('S')?;
-        if !flags.bytes().all(|byte| matches!(byte, b'i' | b'0' | b'v')) {
-            return None;
-        }
-        (!value.is_empty()).then_some(value)
+    let short = || {
+        let body = token.strip_prefix('-').unwrap_or(token);
+        body.char_indices().find_map(|(at, letter)| {
+            let key = shorts.find(letter)?;
+            let rest = &body[at + letter.len_utf8()..];
+            Some((&shorts[key..=key], (!rest.is_empty()).then_some(rest)))
+        })
     };
-    inline.map_or_else(
-        || argv.get(index + 1).map(|value| (value.as_str(), index + 2)),
-        |value| Some((value, index + 1)),
-    )
+    let long = |long: &'a str| {
+        let (name, inline) = long
+            .split_once('=')
+            .map_or((long, None), |(name, value)| (name, Some(value)));
+        let mut prefixed = longs
+            .iter()
+            .copied()
+            .filter(|full| !name.is_empty() && full.starts_with(name));
+        let unique = match (prefixed.next(), prefixed.next()) {
+            (Some(full), None) => Some(full),
+            _ => None,
+        };
+        longs
+            .iter()
+            .copied()
+            .find(|full| *full == name)
+            .or(unique)
+            .map(|full| (full, inline))
+    };
+    let hit = token.strip_prefix("--").map_or_else(short, long);
+    match hit {
+        Some((key, None)) => (
+            Some((key, argv.get(index + 1).map(String::as_str))),
+            index + 2,
+        ),
+        Some((key, inline)) => (Some((key, inline)), index + 1),
+        None => (None, index + 1),
+    }
 }
 
 /// A script flag in the option run right after a denied interpreter
 /// (`bash -x -c`, `pwsh -NoProfile -Command`), up to its first operand.
 fn interpreter_script_flag(shell: &str, args: &[impl AsRef<str>]) -> bool {
     let pwsh = matches!(strip_win_ext(shell), "powershell" | "pwsh");
+    let cmd = strip_win_ext(shell) == "cmd";
     let value_flags = if pwsh {
         PWSH_VALUE_FLAGS
     } else {
@@ -357,7 +415,7 @@ fn interpreter_script_flag(shell: &str, args: &[impl AsRef<str>]) -> bool {
         let script_flag = if pwsh {
             is_listed_script_flag(arg) || is_pwsh_command_flag(arg)
         } else {
-            is_script_flag(arg)
+            is_script_flag(arg) || (cmd && is_cmd_script_switch(arg))
         };
         if script_flag {
             return true;
@@ -386,8 +444,9 @@ fn is_interpreter_option(arg: &str) -> bool {
     }
 }
 
-/// PowerShell takes any prefix of `-Command` / `-EncodedCommand` (`-c`,
-/// `-com`, `-e`, `-enc`), spelled with `-`, `--`, or `/`.
+/// PowerShell takes any prefix of `-Command` / `-EncodedCommand` /
+/// `-CommandWithArgs` (`-c`, `-com`, `-e`, `-enc`) and the `-cwa` alias,
+/// spelled with `-`, `--`, or `/`.
 fn is_pwsh_command_flag(arg: &str) -> bool {
     let Some(name) = arg
         .strip_prefix("--")
@@ -395,11 +454,43 @@ fn is_pwsh_command_flag(arg: &str) -> bool {
     else {
         return false;
     };
-    !name.is_empty()
-        && ["command", "encodedcommand"].iter().any(|full| {
-            full.get(..name.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(name))
-        })
+    name.eq_ignore_ascii_case("cwa")
+        || (!name.is_empty()
+            && ["command", "encodedcommand", "commandwithargs"]
+                .iter()
+                .any(|full| {
+                    full.get(..name.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(name))
+                }))
+}
+
+/// A cmd switch run holding a script switch: combined (`/q/c`, `/D/K`) or
+/// glued to its command (`/cecho`, which cmd runs as `/c echo`). A
+/// one-letter `/c` with more path after it (`/c/Users`) is a Git Bash drive
+/// path, not a switch run.
+///
+/// ponytail: a `cmd` operand followed by a `/c...`, `/k...` or `/r...` path
+/// (`cp cmd /root`) is denied too; argv alone cannot tell the two apart.
+fn is_cmd_script_switch(arg: &str) -> bool {
+    let Some(body) = arg.strip_prefix('/') else {
+        return false;
+    };
+    let mut switches = body.split('/').peekable();
+    while let Some(switch) = switches.next() {
+        let mut chars = switch.chars();
+        let Some(letter) = chars.next().map(|ch| ch.to_ascii_lowercase()) else {
+            return false;
+        };
+        let tail = chars.as_str();
+        if matches!(letter, 'c' | 'k' | 'r') {
+            return !tail.is_empty() || switches.peek().is_none();
+        }
+        // `/q`, `/d`, `/e:on`, `/t:0a`, ...
+        if !"adefqstuv".contains(letter) || !(tail.is_empty() || tail.starts_with(':')) {
+            return false;
+        }
+    }
+    false
 }
 
 fn argv_basename(token: &str) -> &str {
@@ -450,12 +541,12 @@ fn strip_win_ext(basename: &str) -> &str {
     basename
 }
 
-fn shell_wrapper(token: &str) -> Option<(&'static str, &'static [&'static str])> {
+fn shell_wrapper(token: &str) -> Option<(&'static str, &'static str, &'static [&'static str])> {
     let stem = strip_win_ext(normalized_win_basename(token));
     SHELL_ARGV_WRAPPERS
         .iter()
         .copied()
-        .find(|(wrapper, _)| stem.eq_ignore_ascii_case(wrapper))
+        .find(|(wrapper, _, _)| stem.eq_ignore_ascii_case(wrapper))
 }
 
 fn is_remote_carrier(token: &str) -> bool {
@@ -482,9 +573,14 @@ fn is_script_flag(token: &str) -> bool {
 }
 
 fn is_listed_script_flag(token: &str) -> bool {
+    let name = if token.starts_with("--") {
+        token.split_once('=').map_or(token, |(name, _)| name)
+    } else {
+        token
+    };
     SHELL_SCRIPT_FLAGS
         .iter()
-        .any(|flag| token.eq_ignore_ascii_case(flag))
+        .any(|flag| name.eq_ignore_ascii_case(flag))
 }
 
 /// Single-dash letter cluster of any length that holds `c` in either case
@@ -894,5 +990,104 @@ mod tests {
         for name in ["wslconfig.exe", "wsl2", "git.exe.", "wsl.cmd", ""] {
             assert!(!is_wsl_carrier(name), "{name:?} is not a wsl carrier");
         }
+    }
+
+    #[test]
+    fn split_env_words_follows_gnu_split_string() {
+        let words = |s: &str| split_env_words(s);
+        assert_eq!(
+            words("FOO='x ssh' bash -c 'echo 1'").unwrap(),
+            ["FOO=x ssh", "bash", "-c", "echo 1"]
+        );
+        assert_eq!(
+            words("'bash' -c 'echo X'").unwrap(),
+            ["bash", "-c", "echo X"]
+        );
+        assert_eq!(words("b\"\"ash").unwrap(), ["bash"]);
+        assert_eq!(words("\"a b\"c").unwrap(), ["a bc"]);
+        assert_eq!(words("bash\x0b-c\tid").unwrap(), ["bash", "-c", "id"]);
+        assert_eq!(words("''").unwrap(), [""]);
+        // `#` starts a comment only at the start of a word.
+        assert_eq!(
+            words("cargo build # bash -c id").unwrap(),
+            ["cargo", "build"]
+        );
+        assert_eq!(words("FOO=a#b bash").unwrap(), ["FOO=a#b", "bash"]);
+        // Escapes env keeps as the literal character, in and out of quotes.
+        assert_eq!(
+            words(r#"a\"b "c\$d" 'e\'f' 'g\h'"#).unwrap(),
+            ["a\"b", "c$d", "e'f", r"g\h"]
+        );
+        for unparseable in [
+            "'bash -c id",
+            "\"bash",
+            "$X -c id",
+            "b${X}ash",
+            "\"$X\"",
+            r"b\ash",
+            r"bash\_-c\_id",
+            r"bash\c",
+            "bash\\",
+        ] {
+            assert_eq!(words(unparseable), None, "{unparseable:?}");
+        }
+        assert_eq!(words("'$X'").unwrap(), ["$X"]);
+    }
+
+    #[test]
+    fn argv_denies_quoted_split_string_assignments_and_getopt_clusters() {
+        let denied: &[(&[&str], &str)] = &[
+            // A quoted `NAME=value` word keeps its space, so `ssh` is not the program.
+            (&["env", "-S", "'FOO=x ssh' bash -c id"], "bash"),
+            (&["env", "-S", "FOO='x ssh' bash -c id"], "bash"),
+            (&["env", "-S", "\"FOO=x docker\" bash -c id"], "bash"),
+            (&["env", "-S", "FOO='a b' bash run.sh"], "bash"),
+            (&["env", "-S", "FOO='x ssh' bash -c 'echo 1'"], "bash"),
+            (&["env", "-S", "'bash -c id"], ENV_SPLIT_STRING_DENY),
+            (&["env", "-S", "$X -c id"], ENV_SPLIT_STRING_DENY),
+            // getopt: a value letter ends the cluster, long names take a prefix.
+            (&["env", "--un", "X", "bash", "s"], "bash"),
+            (&["env", "-iu", "X", "bash", "s"], "bash"),
+            (&["env", "-iC", "/tmp", "bash", "s"], "bash"),
+            (&["env", "--ch", "/tmp", "bash", "s"], "bash"),
+            (&["ionice", "-tc", "idle", "bash", "s"], "bash"),
+            (&["time", "-po", "out", "bash", "s"], "bash"),
+            (&["env", "-uX", "bash", "s"], "bash"),
+            (&["env", "--unset=X", "bash", "s"], "bash"),
+            (&["env", "-vS", "bash -c id"], "bash"),
+            (&["env", "--sp", "bash -c id"], "bash"),
+            // Script flags behind an unlisted launcher.
+            (&["flock", "x", "fish", "--command=id"], "fish"),
+            (&["flock", "x", "nu", "--commands", "id"], "nu"),
+            (
+                &["flock", "x", "pwsh", "-CommandWithArgs", "$args", "x"],
+                "pwsh",
+            ),
+            (&["flock", "x", "pwsh", "-cwa", "$args", "x"], "pwsh"),
+            (&["flock", "x", "cmd", "/cecho", "hi"], "cmd"),
+            (&["flock", "x", "cmd", "/q/c", "echo", "hi"], "cmd"),
+            (&["flock", "x", "cmd", "/Q/D/K", "echo", "hi"], "cmd"),
+        ];
+        for (argv, expected) in denied {
+            assert_eq!(shell_argv_denied(argv), Some(*expected), "argv={argv:?}");
+        }
+        for argv in [
+            &["env", "-S", "git --version"][..],
+            &["env", "-S", "FOO='x y' git status"],
+            &["env", "-S", "cargo build # bash -c id"],
+            &["env", "-i", "cargo", "build"],
+            &["timeout", "-s", "KILL", "10", "cargo", "test"],
+            &["nice", "-n", "10", "cargo", "build"],
+            &["env", "-u", "X", "cargo", "build"],
+            &["time", "-p", "cargo", "test"],
+            // A drive path after a `cmd` operand is not a switch run.
+            &["grep", "-rn", "cmd", "/c/Users/x"],
+        ] {
+            assert_eq!(shell_argv_denied(argv), None, "false deny for {argv:?}");
+        }
+        assert_eq!(
+            launched_argv(&["env", "-S", "'FOO=x ssh' wsl.exe bash -c id"]),
+            ["wsl.exe", "bash", "-c", "id"]
+        );
     }
 }

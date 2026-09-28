@@ -138,8 +138,9 @@ The daemon `ShellTeach` chooses the steer:
 
 `alternatives` still lists argv tools (`run_and_watch`,
 `command_start_combed`, file tools, PTY). `shell_exec` stays last and
-tagged `operator_opt_in`. Follow `recover_hint`. Do not ask to enable
-shell.
+tagged `operator_opt_in`, except under `profile_forbids_shell`, where no
+operator knob enables it and it is omitted. Follow `recover_hint`. Do not
+ask to enable shell.
 
 The recipe `intended_example` is a `recipe_run` body. Pass it unchanged.
 Discover's `shell_exec` catalogue row, while `allow_shell` is off, keeps

@@ -14,8 +14,7 @@
     {"tool": "file_read_window"},
     {"tool": "file_search"},
     {"tool": "file_write"},
-    {"tool": "pty_command_start"},
-    {"tool": "shell_exec", "tag": "operator_opt_in"}
+    {"tool": "pty_command_start"}
   ],
   "recover_hint": "retry_with_argv"
 }

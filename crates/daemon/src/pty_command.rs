@@ -762,9 +762,17 @@ mod runtime {
                 audit_action,
                 &job_id.to_wire_string(),
                 "allow",
-                shell_tag
-                    .as_ref()
-                    .map(|(key, val)| format!("{key} classification: {val} (allow_shell)")),
+                // Same reason text as the command argv lane.
+                shell_tag.as_ref().map(|(key, val)| {
+                    if terminal_commander_core::shell_deny::launched_argv(&req.argv)
+                        .first()
+                        .is_some_and(|a| terminal_commander_core::shell_deny::is_wsl_carrier(a))
+                    {
+                        format!("wsl {key} classification: {val}")
+                    } else {
+                        format!("{key}: {val}")
+                    }
+                }),
                 Some(metadata.to_string()),
             );
 

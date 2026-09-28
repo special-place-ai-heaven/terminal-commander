@@ -7595,7 +7595,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} missing from discovered tools"))
         }
 
-        // Daemon up, every cap OFF (the DeveloperLocal deny-by-default posture).
+        // Daemon up, every cap OFF (a hardened config; DeveloperLocal grants allow_shell by default).
         let denied = discovered_tools(true, Some(PolicyCapsView::default()));
         let shell = entry(&denied, "shell_exec");
         assert!(

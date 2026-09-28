@@ -156,7 +156,8 @@ A matching recipe uses `crates/mcp/tests/fixtures/a2/retry_with_recipe.json`.
 - `intended_example` = `{"argv":["git","status"]}` (argv only; never
   `shell_line`)
 - `alternatives` lists argv, file, and PTY tools first; `shell_exec`
-  is last and tagged `operator_opt_in`
+  is last and tagged `operator_opt_in` (omitted under
+  `profile_forbids_shell`, where no operator knob enables it)
 - `recover_hint` = `retry_with_argv` when no recipe matches
 
 The remedy is that hint: call `run_and_watch` or `command_start_combed`

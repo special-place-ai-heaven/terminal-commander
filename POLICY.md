@@ -469,13 +469,20 @@ off it denies with `shell_interpreter_denied` when:
   words and wrappers (`env`, `command`, `exec`, `nohup`, `time`, `nice`,
   `timeout`, `stdbuf`, `ionice`, `chrt`, `taskset`, `setsid`, `unbuffer`)
   with their options, numeric operands, and the value operand of
-  `timeout`/`taskset`/`chrt` (`timeout inf`, `taskset ff`);
-  `env -S`/`--split-string` is split on whitespace with `'`/`"` removed and
-  checked again, and a `-S` string holding a `\` escape or `${VAR}` is
-  denied (fail closed); or
+  `timeout`/`taskset`/`chrt` (`timeout inf`, `taskset ff`). Wrapper
+  options are read the way getopt reads them: a short cluster ends at the
+  letter that takes a value (`env -iu NAME`, `ionice -tc idle`,
+  `time -po FILE`), and a long name may be a unique prefix (`env --un NAME`).
+  `env -S`/`--split-string` is split the way GNU env splits it and checked
+  again: a quoted run keeps its whitespace and joins its word
+  (`FOO='x ssh' bash` is the assignment `FOO=x ssh`, then `bash`), `#`
+  at the start of a word ends the string, and `\\ \' \" \# \$` are literal. A
+  `-S` string holding `$VAR`/`${VAR}`, another `\` escape, or an
+  unterminated quote is denied (fail closed); or
 - a listed interpreter appears later with a script flag in its option run
-  (`strace bash -x -c ...`, `bash -Cc ...`, `pwsh -NoProfile -Command ...`,
-  `cmd /d /c ...`).
+  (`strace bash -x -c ...`, `bash -Cc ...`, `fish --command=...`,
+  `pwsh -NoProfile -Command ...`, `pwsh -cwa ...`, `cmd /d /c ...`,
+  `cmd /q/c ...`, `cmd /cecho ...`).
 
 Non-shell interpreters (`python`, `node`, `perl`, ...) are not listed and
 run with any flags. `[policy.caps] allow_shell = true` is the one switch: it
@@ -496,6 +503,21 @@ which runs as an ordinary argv command. The exemption is by program, not
 subcommand, and deliberately covers `podman unshare bash -c ...`, which runs
 a shell on this host inside a user namespace. Residual:
 `ssh localhost bash -c ...` reaches this host's shell through sshd.
+
+**A guard rail, not a boundary.** With `allow_shell = false` this deny is
+argv string matching over the listed shells, wrappers, and script flags. It
+stops the common routes to a shell, not every route. Known residual classes
+that still run: a listed shell behind an unlisted launcher running a script
+file (`flock /tmp/l bash run.sh`; with no script flag the shell name is
+indistinguishable from an operand such as `rg bash src`); tools that run a
+command string themselves (`script -c ...`, and `su -c ...` behind a
+wrapper, since the closed privilege deny checks only the launched
+`argv[0]`); and Windows names the basename match does not resolve
+(drive-relative `C:wsl.exe`, 8.3 short names other than `POWERS~n`). The
+complete control is `[policy.commands] allow_roots`: a non-empty list
+admits only the programs it names, so leave interpreters and launchers
+(`env`, `nice`, `timeout`, ...) off it, and it also withholds the
+`developer_local` `allow_shell` default (section 4.1).
 
 ### 4.2 Full profile schema (informative)
 

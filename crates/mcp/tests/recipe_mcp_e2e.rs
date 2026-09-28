@@ -497,6 +497,7 @@ async fn watched_recipe_run_returns_signals_and_resume_cursor_loses_nothing() {
 /// recover_hint), and the omitted matches must still be reachable through
 /// bucket_wait -- the same contract run_and_watch's cap tests pin.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)] // one capped run: cap fields, then a lossless resume
 async fn watched_recipe_run_reports_capped_signals_and_recoverable_cursor() {
     if !python3_available() {
         eprintln!("skipping: python3 not on PATH");
@@ -573,27 +574,56 @@ async fn watched_recipe_run_reports_capped_signals_and_recoverable_cursor() {
         50,
         "signals must be truncated to the fixed max_signals cap: {body}"
     );
+    // Only this rule's matches count: `command_exited` shares the bucket.
+    let needle_ids = |events: &serde_json::Value| -> std::collections::BTreeSet<String> {
+        events
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|ev| ev["kind"] == "cap_needle_match")
+            .filter_map(|ev| ev["event_id"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let signal_ids = needle_ids(&body["signals"]);
+    assert_eq!(
+        signal_ids.len(),
+        50,
+        "every signal is a needle match: {body}"
+    );
 
     let bucket_id = body["bucket_id"].as_str().expect("bucket").to_owned();
-    let cursor = body["cursor"].as_u64().expect("cursor");
-    let resumed = call_tool(
-        &client,
-        "bucket_wait",
-        serde_json::json!({
-            "bucket_id": bucket_id,
-            "cursor": cursor,
-            "timeout_ms": 3000,
-            "limit": 20
-        }),
-    )
-    .await
-    .expect("bucket_wait");
-    let resumed_body: serde_json::Value =
-        serde_json::from_str(&first_text(&resumed)).expect("bucket_wait json");
-    let resumed_events = resumed_body["events"].as_array().expect("resumed events");
+    let mut cursor = body["cursor"].as_u64().expect("cursor");
+    let mut resumed_ids = std::collections::BTreeSet::new();
+    for _ in 0..5 {
+        let resumed = call_tool(
+            &client,
+            "bucket_wait",
+            serde_json::json!({
+                "bucket_id": bucket_id,
+                "cursor": cursor,
+                "timeout_ms": 3000,
+                "limit": 20
+            }),
+        )
+        .await
+        .expect("bucket_wait");
+        let resumed_body: serde_json::Value =
+            serde_json::from_str(&first_text(&resumed)).expect("bucket_wait json");
+        resumed_ids.extend(needle_ids(&resumed_body["events"]));
+        let next = resumed_body["next_cursor"].as_u64().unwrap_or(cursor);
+        if resumed_ids.len() >= 10 || next == cursor {
+            break;
+        }
+        cursor = next;
+    }
     assert!(
-        !resumed_events.is_empty(),
-        "the matches omitted by the cap must still be recoverable via bucket_wait: {resumed_body}"
+        signal_ids.is_disjoint(&resumed_ids),
+        "the resume cursor must not replay returned signals: {resumed_ids:?}"
+    );
+    assert_eq!(
+        signal_ids.len() + resumed_ids.len(),
+        60,
+        "the 10 matches omitted by the cap must all be recoverable via bucket_wait: {resumed_ids:?}"
     );
 
     let _ = client.cancel().await;

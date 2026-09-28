@@ -437,7 +437,7 @@ fn recipe_lane_follows_allow_shell() {
                 );
             } else {
                 let err = upserted.expect_err("upsert denied while allow_shell is off");
-                assert_eq!(err.code, IpcErrorCode::RecipeInvalid);
+                assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
                 let err = tested.expect_err("recipe_test denied while allow_shell is off");
                 assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
                 let err = ran.expect_err("recipe_run denied while allow_shell is off");

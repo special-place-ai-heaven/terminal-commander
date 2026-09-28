@@ -15,7 +15,7 @@ use rmcp::ErrorData as McpError;
 use rmcp::model::CallToolResult;
 use serde::Serialize;
 use serde_json::{Value, json};
-use terminal_commander_ipc::ShellTeach;
+use terminal_commander_ipc::{ShellDenyClass, ShellTeach};
 
 pub const KIND: &str = "policy_denied";
 pub const RECOVER_HINT: &str = "retry_with_argv";
@@ -76,6 +76,13 @@ fn steer_for(teach: &ShellTeach) -> (&'static str, Value, &'static str) {
 #[must_use]
 pub fn policy_denied_data(teach: &ShellTeach, denied_tool: Option<&str>, ipc_code: &str) -> Value {
     let (intended_tool, intended_example, recover_hint) = steer_for(teach);
+    let mut alternatives = alternatives();
+    // No operator knob enables shell on a profile that forbids it.
+    if teach.deny_class == ShellDenyClass::ProfileForbidsShell
+        && let Some(list) = alternatives.as_array_mut()
+    {
+        list.retain(|alt| alt["tool"] != "shell_exec");
+    }
     json!({
         "ipc_code": ipc_code,
         "kind": KIND,
@@ -86,7 +93,7 @@ pub fn policy_denied_data(teach: &ShellTeach, denied_tool: Option<&str>, ipc_cod
         "reason": teach.reason,
         "intended_tool": intended_tool,
         "intended_example": intended_example,
-        "alternatives": alternatives(),
+        "alternatives": alternatives,
         "recover_hint": recover_hint,
     })
 }
@@ -148,7 +155,6 @@ mod tests {
         assert_eq!(data["intended_tool"], json!(INTENDED_TOOL));
         assert_eq!(data["intended_example"], intended_example());
         assert_eq!(data["recover_hint"], json!(RECOVER_HINT));
-        assert_eq!(data["alternatives"], alternatives());
         let hint = data["recover_hint"].as_str().expect("recover_hint");
         assert!(
             !recover_hint_upsells_shell(hint),
@@ -167,12 +173,20 @@ mod tests {
                 .unwrap_or_default()
                 .contains("set allow_shell")
         );
-        let last = data["alternatives"]
-            .as_array()
-            .and_then(|a| a.last())
-            .expect("alternatives");
-        assert_eq!(last["tool"], json!("shell_exec"));
-        assert_eq!(last["tag"], json!("operator_opt_in"));
+        if class == "profile_forbids_shell" {
+            assert!(
+                !data["alternatives"].to_string().contains("shell_exec"),
+                "a profile that forbids shell offers no shell_exec opt-in"
+            );
+        } else {
+            assert_eq!(data["alternatives"], alternatives());
+            let last = data["alternatives"]
+                .as_array()
+                .and_then(|a| a.last())
+                .expect("alternatives");
+            assert_eq!(last["tool"], json!("shell_exec"));
+            assert_eq!(last["tag"], json!("operator_opt_in"));
+        }
         assert!(
             !data["intended_example"].to_string().contains("shell_line"),
             "intended example must be argv, never shell_line"

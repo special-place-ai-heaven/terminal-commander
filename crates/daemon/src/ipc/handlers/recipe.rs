@@ -111,7 +111,7 @@ pub(in crate::ipc::server) fn handle_recipe_upsert(
     params
         .definition
         .validate(state.policy.caps_allow_shell())
-        .map_err(|e| IpcError::new(IpcErrorCode::RecipeInvalid, e.to_string()))?;
+        .map_err(|err| map_recipe_argv_error(&err))?;
     let version = state
         .store
         .create_recipe_version(&params.definition)
