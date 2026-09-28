@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.2.0...v0.2.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* **ci:** speak MCP 2026-07-28 in release presmoke and smoke drivers ([96c9dd5](https://github.com/special-place-ai-heaven/terminal-commander/commit/96c9dd531d5deb5578a36b00f2987d6589a1f7ec))
+
 ## [0.2.0](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.100...v0.2.0) (2026-09-28)
 
 
