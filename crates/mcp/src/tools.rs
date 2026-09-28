@@ -17,7 +17,7 @@
 //! MCP process never spawns commands, opens raw files, or binds a
 //! network socket.
 //!
-//! [`tool_catalogue`] is the single source of truth for the 59 live
+//! [`tool_catalogue`] is the single source of truth for the 60 live
 //! tools, spanning discovery (`system_discover`), status (`health`,
 //! `policy_status`, `self_check`), command/bucket/event, registry
 //! (including `registry_suggest_from_samples`),
@@ -38,7 +38,7 @@
 //! (constitution IV: no public TCP; constitution I: the adapter never
 //! spawns -- the `ssh -L` tunnel is the OPERATOR's, not ours).
 //!
-//! Source-status: live; all 59 tools forward through daemon IPC.
+//! Source-status: live; all 60 tools forward through daemon IPC.
 
 use std::borrow::Cow;
 
@@ -60,14 +60,14 @@ use terminal_commanderd::ipc::protocol::{
     BucketEventsSinceParams, BucketEventsSinceResponse, BucketSummaryParams, BucketSummaryResponse,
     BucketWaitParams, BucketWaitResponse, CommandOutputTailParams, CommandOutputTailResponse,
     CommandStartParams, CommandStartResponse, CommandStatusParams, CommandStatusResponse,
-    CommandStopParams, CommandStopResponse, ContextUnavailableReason, DiscoverResponse,
-    EventContextParams, EventContextResponse, FileListDirParams, FileListDirResponse,
-    FileReadWindowParams, FileReadWindowResponse, FileSearchParams, FileWatchListResponse,
-    FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams, FileWatchStopResponse,
-    FileWriteParams, FileWriteResponse, IpcContextFrame, IpcError, IpcErrorCode, IpcRequest,
-    IpcResponse, ListLimitParams, PolicyCapsView, PolicyStatusResponse, ProbeListResponse,
-    ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams,
-    PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
+    CommandStopParams, CommandStopResponse, ContextUnavailableReason, CredentialRequestParams,
+    DiscoverResponse, EventContextParams, EventContextResponse, FileListDirParams,
+    FileListDirResponse, FileReadWindowParams, FileReadWindowResponse, FileSearchParams,
+    FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
+    FileWatchStopResponse, FileWriteParams, FileWriteResponse, IpcContextFrame, IpcError,
+    IpcErrorCode, IpcRequest, IpcResponse, ListLimitParams, PolicyCapsView, PolicyStatusResponse,
+    ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse,
+    PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
     PtyCommandWriteStdinParams, RecipeActivateParams, RecipeActivateResponse,
     RecipeDeactivateParams, RecipeDeactivateResponse, RecipeGetParams, RecipeGetResponse,
     RecipeListActiveResponse, RecipeRunParams, RecipeRunResponse, RecipeSearchParams,
@@ -346,7 +346,12 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "pty_command_list",
             status: ToolStatus::Live,
-            description: "Snapshot of every currently-live PTY job (including secret_prompt_active).",
+            description: "Snapshot of every currently-live PTY job (including secret_prompt_active and awaiting_credential).",
+        },
+        ToolCatalogueEntry {
+            name: "credential_request",
+            status: ToolStatus::Live,
+            description: "Ask the owner for the password a PTY job is waiting on. The daemon prompts the owner directly and types the answer; returns only a status (provided, declined, timeout, owner_action_required with the CLI command, not_awaiting). Never returns or accepts the password.",
         },
         ToolCatalogueEntry {
             name: "shell_session_start",
@@ -473,6 +478,7 @@ const fn is_pty_command_tool(name: &str) -> bool {
             | b"pty_command_write_stdin"
             | b"pty_command_stop"
             | b"pty_command_list"
+            | b"credential_request"
     )
 }
 
@@ -1322,6 +1328,7 @@ impl TerminalCommanderMcpServer {
         // the target's operator-forwarded LOCAL socket.
         let daemon = self.daemon_for_target(params.target_id.as_deref()).await?;
         let ipc = params.into_ipc()?;
+        let credential_hint = password_prompt_hint(&ipc.argv);
         match daemon.call(IpcRequest::CommandStartCombed(ipc)).await {
             Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
                 job_id,
@@ -1340,6 +1347,9 @@ impl TerminalCommanderMcpServer {
                 });
                 if let Some(h) = hint {
                     body["hint"] = serde_json::to_value(h).unwrap_or(serde_json::Value::Null);
+                }
+                if let Some(h) = credential_hint {
+                    body["credential_hint"] = serde_json::json!(h);
                 }
                 json_tool_result(&body)
             }
@@ -1377,6 +1387,7 @@ impl TerminalCommanderMcpServer {
         let target_id = start_params.target_id.clone();
         let daemon = self.daemon_for_target(target_id.as_deref()).await?;
         let start_ipc = start_params.into_ipc()?;
+        let credential_hint = password_prompt_hint(&start_ipc.argv);
 
         // 1. Start.
         let (job_id, bucket_id, mut cursor) =
@@ -1575,7 +1586,7 @@ impl TerminalCommanderMcpServer {
         //    (no-silence rule): a quiet command yields a receipt, never an
         //    error. `complete`/`wait_exhausted` disambiguate the bounded wait
         //    (see run_and_watch_result / run_and_watch_completion).
-        run_and_watch_result(
+        let mut body = run_and_watch_result_value(
             job_id,
             bucket_id,
             resume_cursor,
@@ -1594,7 +1605,11 @@ impl TerminalCommanderMcpServer {
             // where collect_rule_signals stops appending at `max_signals`. Either
             // way more matches may exist beyond `cursor`.
             signals.len() >= max_signals,
-        )
+        );
+        if let Some(h) = credential_hint {
+            body["credential_hint"] = serde_json::json!(h);
+        }
+        json_tool_result(&body)
     }
 
     /// `command_status` — lifecycle counters + exit info for a job.
@@ -2892,7 +2907,7 @@ impl TerminalCommanderMcpServer {
 
     /// `pty_command_write_stdin` — bounded stdin write.
     #[tool(
-        description = "Write bounded UTF-8 stdin bytes to a running PTY job. Returns SecretInputDenied while a secret prompt is active; no automatic password entry."
+        description = "Write bounded UTF-8 stdin bytes to a running PTY job. Returns SecretInputDenied while a secret prompt is active: TC never accepts passwords from the model; call credential_request with the job_id so the owner is asked directly."
     )]
     async fn pty_command_write_stdin(
         &self,
@@ -2965,6 +2980,33 @@ impl TerminalCommanderMcpServer {
             }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
+        }
+    }
+
+    /// `credential_request` — ask the owner for a PTY job's password.
+    ///
+    /// The adapter only forwards the job id; the daemon owns the prompt and
+    /// the write. There is deliberately no MCP tool for `credential_provide`.
+    #[tool(
+        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). TC never accepts passwords from the model: the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop) and types the answer into that job itself. Returns only {job_id, status}: provided | declined | timeout (not answered within 60 s; the prompt stays open, call again to keep waiting) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls never re-ask. Never returns or accepts the password."
+    )]
+    async fn credential_request(
+        &self,
+        Parameters(params): Parameters<McpCredentialRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_daemon_available().await?;
+        use terminal_commander_core::ids::JobIdKind;
+        let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
+        match self
+            .daemon
+            .call(IpcRequest::CredentialRequest(CredentialRequestParams {
+                job_id,
+            }))
+            .await
+        {
+            Ok(IpcResponse::CredentialRequest(resp)) => json_tool_result(&resp),
+            Ok(other) => Err(unexpected_variant(&other)),
+            Err(e) => Err(into_mcp_error_for(false, &e)),
         }
     }
 
@@ -3525,6 +3567,8 @@ sub_seek, sub_close, sub_list."
         name = "session",
         description = "PTY commands and persistent shell sessions. To start a PTY command use \
 action=\"pty_start\"; write stdin with pty_stdin; stop with pty_stop; list with pty_list. \
+A job whose status shows awaiting_credential is at a password prompt: TC never accepts passwords \
+from the model, so call credential_request with its job_id and the owner is asked directly. \
 For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires allow_session), sh_exec, sh_status, sh_stop, sh_list."
     )]
     pub(crate) async fn session_facade(
@@ -3537,6 +3581,7 @@ For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires 
             S::PtyStdin(p) => self.pty_command_write_stdin(Parameters(p)).await,
             S::PtyStop(p) => self.pty_command_stop(Parameters(p)).await,
             S::PtyList => self.pty_command_list().await,
+            S::CredentialRequest(p) => self.credential_request(Parameters(p)).await,
             S::ShStart(p) => self.shell_session_start(Parameters(p)).await,
             S::ShExec(p) => self.shell_session_exec(Parameters(p)).await,
             S::ShStatus(p) => self.shell_session_status(Parameters(p)).await,
@@ -3653,7 +3698,7 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
 // the `tools/list` and `tools/call` paths can honor `TC_SURFACE`:
 //   - `list_tools` advertises the compact facade(s) under `TC_SURFACE=compact`,
 //     else the unchanged granular tools (with facade names filtered OUT so the
-//     full surface stays EXACTLY the 59 granular tools).
+//     full surface stays EXACTLY the 60 granular tools).
 //   - `call_tool` runs the admission gate, then facade_strict, THEN the SAME
 //     router the macro used (`ToolCallContext` + `self.tool_router.call`).
 //   - `get_tool` mirrors the macro (router lookup).
@@ -3675,7 +3720,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
             .unwrap_or_else(crate::surface::surface_from_env)
         {
             crate::surface::Surface::Compact => crate::surface_list::compact_surface_tools(),
-            // `full` keeps the granular surface EXACTLY the 59 granular tools:
+            // `full` keeps the granular surface EXACTLY the 60 granular tools:
             // the facade handler is registered on the same router, so filter
             // its name(s) OUT of `list_all()` -- the facade must not leak into
             // the full list.
@@ -5605,7 +5650,7 @@ impl McpEventContextParams {
 }
 
 fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "job_id": s.job_id,
         "bucket_id": s.bucket_id,
         "probe_id": s.probe_id,
@@ -5637,7 +5682,28 @@ fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
         // delivered as a typed `JobLost` error.)
         "outcome_trust": effective_outcome_trust(s),
         "pipeline_exit_masked": s.pipeline_exit_masked,
-    })
+    });
+    // PTY job at a password prompt: steer to credential_request.
+    if let Some(awaiting) = s.awaiting_credential {
+        v["awaiting_credential"] = serde_json::json!(awaiting);
+    }
+    v
+}
+
+/// Argv-lane teach for programs that may stop at a password prompt, which
+/// a pipe cannot answer and the model must not.
+const PASSWORD_PROMPT_HINT: &str = "may prompt for a password -- use pty_command_start so the owner can be asked via credential_request";
+
+fn password_prompt_hint(argv: &[String]) -> Option<&'static str> {
+    let launched = terminal_commander_core::shell_deny::launched_argv(argv);
+    let program = launched.first()?;
+    let base = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let stem = base.strip_suffix(".exe").unwrap_or(&base);
+    matches!(stem, "sudo" | "su" | "doas" | "ssh").then_some(PASSWORD_PROMPT_HINT)
 }
 
 /// Resolve `outcome_trust` against version skew (spec 004 review, kimi-k3).
@@ -6270,6 +6336,13 @@ pub struct McpPtyCommandWriteStdinParams {
 pub struct McpPtyCommandStopParams {
     /// Opaque job id returned by `pty_command_start` (e.g.
     /// `job_<32hex>`); copy it verbatim, not free-form.
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpCredentialRequestParams {
+    /// Opaque id of a PTY job whose status shows `awaiting_credential`
+    /// (e.g. `job_<32hex>`); copy it verbatim, not free-form.
     pub job_id: String,
 }
 
@@ -7068,6 +7141,66 @@ mod tests {
 
     // --- TC-1b: run_and_watch degraded / superset result builder ---
 
+    #[test]
+    fn password_prompting_programs_get_the_credential_hint() {
+        let argv = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        for prompting in [
+            &["sudo", "apt", "update"][..],
+            &["/usr/bin/ssh", "host", "uptime"],
+            &["env", "FOO=1", "doas", "ls"],
+            &[r"C:\Windows\System32\OpenSSH\ssh.exe", "host"],
+            &["su", "-"],
+        ] {
+            assert_eq!(
+                password_prompt_hint(&argv(prompting)),
+                Some(PASSWORD_PROMPT_HINT),
+                "{prompting:?}"
+            );
+        }
+        for quiet in [
+            &["git", "status"][..],
+            &["cargo", "build"],
+            &["sshd"],
+            &["python", "sudo.py"],
+            &["npm", "run", "sudo"],
+        ] {
+            assert_eq!(password_prompt_hint(&argv(quiet)), None, "{quiet:?}");
+        }
+    }
+
+    #[test]
+    fn command_status_payload_surfaces_awaiting_credential_only_when_set() {
+        let mut status: CommandStatusResponse = serde_json::from_value(serde_json::json!({
+            "job_id": terminal_commander_core::JobId::new(),
+            "bucket_id": terminal_commander_core::BucketId::new(),
+            "probe_id": terminal_commander_core::ProbeId::new(),
+            "state": "running",
+            "frames_total": 1,
+            "frames_stdout": 1,
+            "frames_stderr": 0,
+            "bytes_total": 25,
+            "events_emitted": 1,
+            "exit_code": null,
+            "signal": null,
+            "duration_ms": null,
+            "receipt": null,
+        }))
+        .expect("status");
+        assert!(
+            command_status_payload(&status)
+                .get("awaiting_credential")
+                .is_none()
+        );
+        status.awaiting_credential = Some(terminal_commanderd::ipc::protocol::AwaitingCredential {
+            kind: terminal_commanderd::ipc::protocol::CredentialKind::Sudo,
+            since_ms: 42,
+        });
+        assert_eq!(
+            command_status_payload(&status)["awaiting_credential"],
+            serde_json::json!({"kind": "sudo", "since_ms": 42})
+        );
+    }
+
     /// F1: the daemon's pipeline flag reaches the run_and_watch payload.
     #[test]
     fn run_and_watch_payload_carries_pipeline_exit_masked() {
@@ -7295,7 +7428,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_lists_fifty_nine_live_tools() {
+    fn catalogue_lists_sixty_live_tools() {
         let live: Vec<_> = tool_catalogue()
             .iter()
             .filter(|t| matches!(t.status, ToolStatus::Live))
@@ -7346,6 +7479,7 @@ mod tests {
                 "pty_command_write_stdin",
                 "pty_command_stop",
                 "pty_command_list",
+                "credential_request",
                 "shell_session_start",
                 "shell_session_exec",
                 "shell_session_status",
@@ -7428,6 +7562,7 @@ mod tests {
                 "command_start_combed".to_owned(),
                 "command_status".to_owned(),
                 "command_stop".to_owned(),
+                "credential_request".to_owned(),
                 "event_context".to_owned(),
                 "file_read_window".to_owned(),
                 "file_search".to_owned(),
@@ -7720,6 +7855,7 @@ mod tests {
             "pty_command_write_stdin",
             "pty_command_stop",
             "pty_command_list",
+            "credential_request",
         ];
         for name in pty_names {
             let tool = tools
@@ -7793,6 +7929,7 @@ mod tests {
             "pty_command_write_stdin",
             "pty_command_stop",
             "pty_command_list",
+            "credential_request",
         ] {
             let tool = tools
                 .iter()

@@ -320,7 +320,7 @@ pub const MAX_PULL_TIMEOUT_MS: u64 = 8_000;
 /// supervisor-only `quiesce_for_replace` verb, and the `recipe_*` store
 /// methods (search/get/upsert/activate/list/tombstone plus `recipe_test`
 /// and `recipe_run`).
-/// The full rmcp catalogue exposes 59 granular tools (see
+/// The full rmcp catalogue exposes 60 granular tools (see
 /// `docs/mcp/TOOL_CONTROL_SURFACE.md` §2); the compact MCP surface instead
 /// advertises six facade tools, gated by `TC_SURFACE=compact`, that forward
 /// to the same IPC methods.
@@ -2743,6 +2743,10 @@ pub struct AwaitingCredential {
     /// Unix epoch milliseconds when the prompt appeared.
     pub since_ms: u64,
 }
+
+/// How long one `credential_request` waits for the owner before answering
+/// `timeout` (the owner prompt stays open).
+pub const CREDENTIAL_REQUEST_WAIT_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialRequestParams {

@@ -10,18 +10,19 @@ use serde::Deserialize;
 use crate::tools::{
     McpBucketEventsSinceParams, McpBucketSummaryParams, McpBucketWaitParams,
     McpCommandOutputTailParams, McpCommandStartParams, McpCommandStatusParams,
-    McpCommandStopParams, McpEventContextParams, McpFileListDirParams, McpFileReadWindowParams,
-    McpFileSearchParams, McpFileWatchStartParams, McpFileWatchStopParams, McpFileWriteParams,
-    McpListLimitParams, McpProbeStatusParams, McpPtyCommandStartParams, McpPtyCommandStopParams,
-    McpPtyCommandWriteStdinParams, McpRecipeActivateParams, McpRecipeDeactivateParams,
-    McpRecipeGetParams, McpRecipeRunParams, McpRecipeSearchParams, McpRecipeTestParams,
-    McpRecipeUpsertParams, McpRegistryActivateParams, McpRegistryDeactivateParams,
-    McpRegistryGetParams, McpRegistryImportPackParams, McpRegistrySearchParams,
-    McpRegistrySuggestFromSamplesParams, McpRegistryTestParams, McpRegistryUpsertParams,
-    McpRunAndWatchParams, McpShellExecParams, McpShellSessionExecParams, McpShellSessionRefParams,
-    McpShellSessionStartParams, McpSubscriptionCloseParams, McpSubscriptionListParams,
-    McpSubscriptionOpenParams, McpSubscriptionPullParams, McpSubscriptionSeekParams,
-    McpTargetProbeParams, McpWorkspaceSnapshotApplyParams, McpWorkspaceSnapshotCreateParams,
+    McpCommandStopParams, McpCredentialRequestParams, McpEventContextParams, McpFileListDirParams,
+    McpFileReadWindowParams, McpFileSearchParams, McpFileWatchStartParams, McpFileWatchStopParams,
+    McpFileWriteParams, McpListLimitParams, McpProbeStatusParams, McpPtyCommandStartParams,
+    McpPtyCommandStopParams, McpPtyCommandWriteStdinParams, McpRecipeActivateParams,
+    McpRecipeDeactivateParams, McpRecipeGetParams, McpRecipeRunParams, McpRecipeSearchParams,
+    McpRecipeTestParams, McpRecipeUpsertParams, McpRegistryActivateParams,
+    McpRegistryDeactivateParams, McpRegistryGetParams, McpRegistryImportPackParams,
+    McpRegistrySearchParams, McpRegistrySuggestFromSamplesParams, McpRegistryTestParams,
+    McpRegistryUpsertParams, McpRunAndWatchParams, McpShellExecParams, McpShellSessionExecParams,
+    McpShellSessionRefParams, McpShellSessionStartParams, McpSubscriptionCloseParams,
+    McpSubscriptionListParams, McpSubscriptionOpenParams, McpSubscriptionPullParams,
+    McpSubscriptionSeekParams, McpTargetProbeParams, McpWorkspaceSnapshotApplyParams,
+    McpWorkspaceSnapshotCreateParams,
 };
 
 /// `command` facade -- run + observe + stream a one-shot command. Internally
@@ -60,6 +61,8 @@ pub enum SessionFacadeCall {
     PtyStop(McpPtyCommandStopParams),
     /// List all live PTY jobs. No additional fields required.
     PtyList,
+    /// Ask the owner for the password a PTY job is waiting on.
+    CredentialRequest(McpCredentialRequestParams),
     ShStart(McpShellSessionStartParams),
     ShExec(McpShellSessionExecParams),
     ShStatus(McpShellSessionRefParams),
@@ -188,6 +191,12 @@ mod tests {
             serde_json::from_value(serde_json::json!({"action":"pty_start","argv":["bash"]}))
                 .expect("pty_start must parse");
         assert!(matches!(v, SessionFacadeCall::PtyStart(_)));
+
+        let v: SessionFacadeCall = serde_json::from_value(
+            serde_json::json!({"action":"credential_request","job_id":"job_abc"}),
+        )
+        .expect("credential_request must parse");
+        assert!(matches!(v, SessionFacadeCall::CredentialRequest(p) if p.job_id == "job_abc"));
     }
 
     #[test]

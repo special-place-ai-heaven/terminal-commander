@@ -25,7 +25,8 @@ use crate::pty_command::{PtyRuntime, PtyRuntimeError};
 
 /// How long one `credential_request` waits for the owner before answering
 /// `timeout`. The owner prompt stays open; a repeat call waits on it again.
-pub const CREDENTIAL_WAIT: Duration = Duration::from_mins(1);
+pub const CREDENTIAL_WAIT: Duration =
+    Duration::from_millis(terminal_commander_ipc::protocol::CREDENTIAL_REQUEST_WAIT_MS);
 
 /// The command the owner runs when no native prompt is available.
 #[must_use]

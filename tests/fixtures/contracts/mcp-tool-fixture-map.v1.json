@@ -60,6 +60,7 @@
     "pty_command_write_stdin": "ensure_daemon_status_v1",
     "pty_command_stop": "ensure_daemon_status_v1",
     "pty_command_list": "ensure_daemon_status_v1",
+    "credential_request": "ensure_daemon_status_v1",
     "shell_session_start": "ensure_daemon_status_v1",
     "shell_session_exec": "ensure_daemon_status_v1",
     "shell_session_status": "ensure_daemon_status_v1",
@@ -290,6 +291,11 @@
       "status": "covered_live"
     },
     {
+      "name": "credential_request",
+      "fixture": "mcp-tools/credential_request.v1.json",
+      "status": "covered_live"
+    },
+    {
       "name": "shell_session_start",
       "fixture": "mcp-tools/shell_session_start.v1.json",
       "status": "covered_live"
@@ -377,8 +383,8 @@
   ],
   "obsolete_fixtures": [],
   "counts": {
-    "live_tools": 59,
-    "covered_live": 51,
+    "live_tools": 60,
+    "covered_live": 52,
     "placeholder_for_live_tool": 0,
     "missing_fixture": 8,
     "obsolete_fixture_present": 0

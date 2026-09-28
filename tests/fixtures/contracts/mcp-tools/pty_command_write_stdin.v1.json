@@ -85,7 +85,7 @@
     }
   },
   "secret_input_denied_error_example": {
-    "message": "daemon ipc error [SecretInputDenied]: secret prompt active; LLM-supplied input denied",
+    "message": "daemon ipc error [SecretInputDenied]: secret prompt active; LLM-supplied input denied. This job is waiting for a password; TC never accepts passwords from the model -- call credential_request {\"job_id\":\"job_018f0000000000000000000000000003\"} and the owner will be asked directly; then poll command_status for the job",
     "data": {
       "ipc_code": "SecretInputDenied"
     }
@@ -96,6 +96,8 @@
     "without wait_ms the response reports bytes_written and post-write secret_prompt_active only, byte-identical to the pre-US5 shape",
     "with wait_ms the response adds the combed batch cursor_in/next_cursor/has_more/dropped_count/events (same shape family as shell_session_exec)",
     "secret prompts produce a typed SecretInputDenied error BEFORE the write, unchanged by wait_ms; the bytes are not written and no settle read runs",
+    "the SecretInputDenied message names credential_request with the job_id: the owner is asked for the password, never the model",
+    "awaiting_credential {kind, since_ms} appears (read after the settle window when wait_ms is given) only while the job is at a password prompt",
     "success payload never contains echoed stdin, PTY output, or screen content; events are structured signals only"
   ]
 }

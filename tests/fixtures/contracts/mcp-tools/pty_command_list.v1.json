@@ -39,7 +39,11 @@
           "bytes_total": 128,
           "stdin_bytes_written": 6,
           "secret_prompts_total": 1,
-          "secret_prompt_active": true
+          "secret_prompt_active": true,
+          "awaiting_credential": {
+            "kind": "sudo",
+            "since_ms": 1767225600000
+          }
         }
       ]
     }

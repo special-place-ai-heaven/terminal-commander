@@ -19,7 +19,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use terminal_commander_ipc::{IpcError, IpcRequest, IpcResponse, MAX_BUCKET_WAIT_MS};
+use terminal_commander_ipc::{
+    CREDENTIAL_REQUEST_WAIT_MS, IpcError, IpcRequest, IpcResponse, MAX_BUCKET_WAIT_MS,
+};
 use terminal_commander_supervisor::ensure::EnsureDaemonStatus;
 use terminal_commander_supervisor::paths;
 
@@ -298,6 +300,10 @@ fn blocking_deadline(request: &IpcRequest) -> Option<std::time::Duration> {
         | IpcRequest::PtyCommandStart(_)
         | IpcRequest::ShellExec(_)
         | IpcRequest::ShellSessionStart(_) => Some(SPAWN_ACK_BUDGET + BLOCKING_DEADLINE_MARGIN),
+        // Holds while the owner answers a password prompt.
+        IpcRequest::CredentialRequest(_) => Some(
+            std::time::Duration::from_millis(CREDENTIAL_REQUEST_WAIT_MS) + BLOCKING_DEADLINE_MARGIN,
+        ),
         _ => None,
     }
 }
