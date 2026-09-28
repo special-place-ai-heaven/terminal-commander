@@ -425,15 +425,14 @@ mod native {
         let asked = wrote
             .then(|| {
                 stdout.split(|&b| b == b'\n').find_map(|line| {
-                    if let Some(pin) = line.strip_prefix(b"D ") {
-                        Some(Asked::Secret(SecretBuf(unescape(pin))))
-                    } else if line.starts_with(b"ERR")
-                        && line.to_ascii_lowercase().windows(6).any(|w| w == b"cancel")
-                    {
-                        Some(Asked::Declined)
-                    } else {
-                        None
-                    }
+                    line.strip_prefix(b"D ").map_or_else(
+                        || {
+                            let cancelled = line.starts_with(b"ERR")
+                                && line.to_ascii_lowercase().windows(6).any(|w| w == b"cancel");
+                            cancelled.then_some(Asked::Declined)
+                        },
+                        |pin| Some(Asked::Secret(SecretBuf(unescape(pin)))),
+                    )
                 })
             })
             .flatten();
