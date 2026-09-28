@@ -22,6 +22,7 @@ pub mod error;
 pub mod event;
 pub mod ids;
 pub mod job;
+pub mod os_guard;
 #[cfg(windows)]
 pub mod platform;
 pub mod pointer;
@@ -54,6 +55,10 @@ pub use event::{Captures, EventDraft, RuleRef, SignalEvent};
 pub use ids::{
     ActivationId, AuditId, BucketId, EventId, FrameId, JobId, ProbeId, RuleId, SessionId, SourceId,
     TypedId,
+};
+pub use os_guard::{
+    FAILSAFE_REASON_TAG, OsGuardHit, argv_deletion_hit, is_os_critical_path,
+    shell_line_deletion_hit,
 };
 pub use pointer::SourcePointer;
 pub use recipe::{RecipeDefinition, RecipeError, RecipeStatus};

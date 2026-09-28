@@ -125,7 +125,15 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
             cursor: 0,
         })),
         Err(crate::pty_command::PtyRuntimeError::PolicyDenied(reason)) => {
-            Err(IpcError::new(IpcErrorCode::PolicyDenied, reason))
+            // Same failsafe typed-code mapping as the argv lane
+            // (`map_command_error`): a deletion of OS-critical infrastructure
+            // surfaces as `OsCriticalPathProtected`, not a generic deny.
+            let code = if reason.contains(terminal_commander_core::FAILSAFE_REASON_TAG) {
+                IpcErrorCode::OsCriticalPathProtected
+            } else {
+                IpcErrorCode::PolicyDenied
+            };
+            Err(IpcError::new(code, reason))
         }
         Err(crate::pty_command::PtyRuntimeError::ShellInterpreterDenied(shell)) => {
             Err(IpcError::new(

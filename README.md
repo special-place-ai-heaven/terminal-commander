@@ -739,11 +739,17 @@ Everything lives under the per-session state dir
   `shell:false`; no hidden subprocess windows.
 - The MCP adapter speaks stdio and local IPC only — CI guards assert no
   spawn/socket/fs calls in the adapter source.
+- The one failsafe: TC never deletes OS-critical infrastructure
+  (`rm -rf /`, `Remove-Item C:\Windows`, `mkfs`/`dd` to a disk, ...) in
+  ANY profile — refused with a typed `OsCriticalPathProtected` error, no
+  knob. Everything else — install, update, edit, configure, write to any
+  path, run as root — is allowed by default.
 - TC inherits the trust of the harness running the LLM: the default
-  `full_access` profile denies nothing (escalators such as `sudo`/`su`,
-  the full filesystem, shell, sessions, remote, recipe admin) and audits
-  every gated start. `developer_local`, `repo_only`, `read_only_observer`
-  and `admin_debug` are opt-in hardening (`[policy] profile = "..."`).
+  `full_access` profile denies nothing else (escalators such as
+  `sudo`/`su`, the full filesystem, shell, sessions, remote, recipe admin)
+  and audits every gated start. `developer_local`, `repo_only`,
+  `read_only_observer` and `admin_debug` are opt-in hardening
+  (`[policy] profile = "..."`).
 - Command execution is argv-first and policy-gated; the shell lane is a
   separate capability with its own audit labels (`[policy.caps]
   allow_shell = false` hardens it).

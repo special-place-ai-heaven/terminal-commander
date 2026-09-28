@@ -5,6 +5,11 @@ Bump rationale: the default profile becomes `full_access` and TC inherits the
 harness's trust: by default nothing is denied (escalators, sensitive paths,
 sessions, remote, recipe admin). Principle II no longer mandates default-deny
 and Principle IV names the harness as the trust boundary, so the bump is MAJOR.
+Principle II also gains THE ONE FAILSAFE: TC never deletes OS-critical
+infrastructure, in every profile, no knob (owner: "the only command TC should
+NEVER ever do, is delete OS files ... Think of it as a failsafe, the only one
+that matters"; "it can install programs ... update, change config settings edit
+files etc.... never delete OS critical infrastructure").
 Rationale (owner's product direction, 2026-09-28): "I am trying to make TC be
 indispensable tool to LLMs, not human operators." "If they trust LLM to allow
 all, MCP should listen to the same level LLM is allowed to work in." "If the
@@ -115,7 +120,21 @@ scan, the sensitive-path list) do not apply. Hardening is opt-in:
 `developer_local`, `repo_only`, `read_only_observer` and `admin_debug` keep
 those denies, and an explicit `[policy.caps]` false, `allow_roots`, or
 `[policy.paths]` list narrows any profile. A hardened-profile deny MUST name
-the profile and the config key that changes it. A trusted fixed helper does not
+the profile and the config key that changes it.
+
+THE ONE FAILSAFE (non-negotiable, EVERY profile including `full_access`, no
+knob): TC MUST NOT DELETE OS-critical infrastructure. A destructive-deletion
+command -- `rm`/`rmdir`/`unlink`/`shred`/`srm`, `del`/`erase`/`rd`,
+`Remove-Item`/`ri`, `mkfs*`/`wipefs`, `dd` to a disk device, `format`,
+`cipher /w`, on either the argv or the shell lane, after escalator/wrapper
+unwrapping -- targeting a protected system tree (`/`, `/usr`, `/etc`, `/boot`,
+`/System`, `C:\Windows`, a drive root, a raw disk, ...) is refused with the
+typed `OsCriticalPathProtected` error in every profile. Everything else --
+install, update, edit, configure, write to any path including `/etc/hosts`,
+run as root -- is allowed by default; only deletion of OS-critical
+infrastructure is the line. It is a string-level guard rail, not a kernel
+boundary: indirect deletion (`find -delete`, a script, `os.remove`) is out of
+scope. A trusted fixed helper does not
 bypass policy; both its sensor class and its underlying command, file, probe,
 or connector action MUST be authorized before use. There is NO unaudited argv
 smuggling: a shell line travels in a dedicated request field. With
@@ -168,8 +187,9 @@ alone is insufficient.
 Under the default `full_access` profile the harness running the LLM is the
 authority boundary: TC grants the same host access that harness grants
 (including root through `sudo`/`su` and the full filesystem) and does not
-re-litigate it. A hardened profile is how an operator narrows TC below the
-harness.
+re-litigate it -- with the single exception of Principle II's failsafe, TC
+never deletes OS-critical infrastructure even here. A hardened profile is how
+an operator narrows TC below the harness.
 
 Rationale: the trust model is per-user, per-host. The network is never inside
 the boundary.

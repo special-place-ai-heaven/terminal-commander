@@ -845,6 +845,28 @@ impl PolicyEngine {
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn evaluate(&self, action: &PolicyAction<'_>) -> PolicyVerdict {
+        // THE ONE FAILSAFE (owner decision, every profile including
+        // full_access): TC never DELETES OS-critical infrastructure. Install,
+        // update, edit, configure, run as root -- all allowed; only a
+        // destructive-deletion command whose target is a protected OS tree or
+        // a raw disk is refused. Runs before any profile logic so the default
+        // full_access is bound by it too.
+        let os_guard_hit = match action {
+            PolicyAction::CommandStart { argv, .. } => {
+                terminal_commander_core::argv_deletion_hit(argv)
+            }
+            PolicyAction::CommandShellStart { shell_line, .. } => {
+                terminal_commander_core::shell_line_deletion_hit(shell_line)
+            }
+            _ => None,
+        };
+        if let Some(hit) = os_guard_hit {
+            return PolicyVerdict {
+                decision: PolicyDecision::Deny,
+                reason: hit.reason(),
+            };
+        }
+
         // Structural denies (escalators, sensitive paths, the shell-line
         // scan) are hardening: every profile except the default full_access.
         let structural = self.profile != PolicyProfile::FullAccess;

@@ -3972,6 +3972,10 @@ pub fn into_mcp_error_for_tool(
         | IpcErrorCode::SchemaMismatch
         | IpcErrorCode::UnknownMethod
         | IpcErrorCode::PolicyDenied
+        // The one failsafe: TC never deletes OS-critical infrastructure. There
+        // is no knob to flip, so this is caller-ROUTABLE (`invalid_params`,
+        // -32602): the model must target something else, not abandon TC.
+        | IpcErrorCode::OsCriticalPathProtected
         | IpcErrorCode::BucketNotFound
         | IpcErrorCode::EventNotFound
         | IpcErrorCode::InvalidCursor

@@ -105,6 +105,73 @@ fn audit_rows_have_both_start_rows(rows: &[terminal_commander_store::AuditRow]) 
             .any(|r| r.action == "command_start" && r.decision == "allow")
 }
 
+/// THE ONE FAILSAFE: even the default `full_access` profile refuses to DELETE
+/// OS-critical infrastructure, on both the argv and shell lanes, with the
+/// typed `OsCriticalPathProtected` code. An ordinary deletion still runs.
+#[test]
+fn os_critical_deletion_denied_in_full_access_on_both_lanes() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("os-guard");
+        let (_state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+
+        // Argv lane: rm -rf /usr is refused before any spawn.
+        let err = client
+            .call(
+                1,
+                IpcRequest::CommandStartCombed(small_start_params(&["rm", "-rf", "/usr"])),
+            )
+            .await
+            .expect_err("rm -rf /usr must be refused");
+        assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected);
+        assert!(
+            err.message.contains("OS-critical infrastructure"),
+            "{}",
+            err.message
+        );
+
+        // Shell lane: same failsafe, same typed code (full_access has
+        // allow_shell on, so this reaches the shell-line scan, not a cap deny).
+        let err = client
+            .call(
+                2,
+                IpcRequest::ShellExec(ShellExecParams {
+                    shell_line: "cd /tmp && rm -rf /etc".to_owned(),
+                    shell: None,
+                    cwd: None,
+                    env: Vec::new(),
+                    rules: Vec::new(),
+                    bucket_config: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect_err("shell rm -rf /etc must be refused");
+        assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected);
+
+        // An ordinary deletion inside the data dir is NOT a failsafe hit.
+        let victim = data.join("deleteme");
+        std::fs::create_dir_all(&victim).unwrap();
+        let ok = client
+            .call(
+                3,
+                IpcRequest::CommandStartCombed(small_start_params(&[
+                    "rm",
+                    "-rf",
+                    victim.to_str().unwrap(),
+                ])),
+            )
+            .await;
+        if let Err(err) = &ok {
+            assert_ne!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
+        }
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
 /// Owner decision: the default `full_access` profile runs an escalator like
 /// any argv (audited `command_start`); `developer_local` denies it pre-spawn.
 /// `sudo -n` never prompts: it runs or fails, and either is not a policy deny.

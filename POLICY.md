@@ -52,6 +52,16 @@ TC inherits the harness's trust); the other four are opt-in hardening.
 Profile names are stable identifiers; goals MUST refer to them by exact
 name.
 
+THE ONE FAILSAFE (every profile, no knob): TC never DELETES OS-critical
+infrastructure. A destructive-deletion command (rm/rmdir/unlink/shred/srm,
+del/erase/rd, Remove-Item/ri, mkfs*/wipefs, dd-to-disk, format, cipher /w),
+on the argv or shell lane and after escalator/wrapper unwrapping, targeting a
+protected system tree (/, /usr, /etc, /boot, /System, C:\Windows, a drive
+root, a raw disk) is refused with the typed `OsCriticalPathProtected` error.
+Writing/editing/creating those paths, and every non-deletion command
+(installers, `systemctl`, `reg add`, ...), stay allowed. It is a string-level
+guard rail: indirect deletion (`find -delete`, a script) is not caught.
+
 ### 2.1 `developer_local`
 
 Intended for: a developer running TC on their own workstation

@@ -222,7 +222,18 @@ const fn classify_shell_policy(policy: &PolicyEngine) -> ShellDenyClass {
 
 pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
     match e {
-        CommandError::PolicyDenied(msg) => IpcError::new(IpcErrorCode::PolicyDenied, msg),
+        CommandError::PolicyDenied(msg) => {
+            // The one failsafe (os_guard) reuses the PolicyDenied channel but
+            // gets its own typed code so a client sees it is not a knob-gated
+            // deny. Detected by the stable reason tag, so no new error variant
+            // has to be threaded through the whole command runtime.
+            let code = if msg.contains(terminal_commander_core::FAILSAFE_REASON_TAG) {
+                IpcErrorCode::OsCriticalPathProtected
+            } else {
+                IpcErrorCode::PolicyDenied
+            };
+            IpcError::new(code, msg)
+        }
         CommandError::ShellInterpreterDenied(shell) => IpcError::new(
             IpcErrorCode::ShellInterpreterDenied,
             format!(

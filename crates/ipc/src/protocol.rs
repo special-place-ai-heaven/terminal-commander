@@ -1068,6 +1068,13 @@ pub enum IpcErrorCode {
     /// Returned to a new request that arrives while the daemon is draining for
     /// shutdown. Retryable: the client should cold-spawn a fresh daemon.
     ShuttingDown,
+    /// THE ONE FAILSAFE: a destructive-deletion command (or shell line)
+    /// targeted OS-critical infrastructure (a protected system tree or a raw
+    /// disk). Refused in EVERY profile, including the default `full_access`;
+    /// there is no capability that enables it, so no knob is offered. Writing,
+    /// editing, installing, and configuring those paths stay allowed -- only
+    /// deletion is refused. Owner decision 2026-09-28.
+    OsCriticalPathProtected,
 }
 
 /// Closed set of shell-misuse classes (Decision A2). Not every
