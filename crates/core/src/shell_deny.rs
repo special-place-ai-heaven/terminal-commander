@@ -232,7 +232,7 @@ pub fn shell_argv_denied(argv: &[impl AsRef<str>]) -> Option<&'static str> {
     }
     rest.iter().enumerate().find_map(|(index, arg)| {
         let shell = shell_interpreter_denied(arg)?;
-        interpreter_script_flag(shell, &rest[index + 1..]).then_some(shell)
+        interpreter_script_flag(shell, &rest[index + 1..]).map(|_| shell)
     })
 }
 
@@ -372,7 +372,7 @@ fn split_env_words(split: &str) -> Option<Vec<String>> {
 /// `--name[=value]` takes an exact or unique-prefix long name (`--un X`).
 /// Returns that value option (its letter or long name, and its value), if
 /// any, and the index after the option.
-fn wrapper_option<'a>(
+pub(crate) fn wrapper_option<'a>(
     argv: &'a [String],
     index: usize,
     shorts: &'static str,
@@ -417,18 +417,19 @@ fn wrapper_option<'a>(
     }
 }
 
-/// A script flag in the option run right after a denied interpreter
-/// (`bash -x -c`, `pwsh -NoProfile -Command`), up to its first operand.
+/// The index in `args` of a script flag in the option run right after a
+/// denied interpreter (`bash -x -c`, `pwsh -NoProfile -Command`), up to its
+/// first operand. `os_guard` reads the payload that follows it.
 ///
 /// The run is read the way getopt reads it, so a value flag consumes its
 /// argument instead of the script flag being tested as an operand: a
 /// PowerShell value flag (`-Version 5.1`), or a POSIX value-letter cluster
 /// (`-xo pipefail`, `-eO extglob`) via [`posix_option_takes_value`].
-fn interpreter_script_flag(shell: &str, args: &[impl AsRef<str>]) -> bool {
+pub(crate) fn interpreter_script_flag(shell: &str, args: &[impl AsRef<str>]) -> Option<usize> {
     let stem = strip_win_ext(shell);
     let pwsh = matches!(stem, "powershell" | "pwsh");
-    let mut args = args.iter().map(AsRef::as_ref);
-    while let Some(arg) = args.next() {
+    let mut index = 0;
+    while let Some(arg) = args.get(index).map(AsRef::as_ref) {
         // `-NonInteractive` is a PowerShell word, not a POSIX `c` cluster.
         let script_flag = match stem {
             "powershell" | "pwsh" => is_listed_script_flag(arg) || is_pwsh_command_flag(arg),
@@ -436,21 +437,19 @@ fn interpreter_script_flag(shell: &str, args: &[impl AsRef<str>]) -> bool {
             _ => is_script_flag(arg) || is_extra_shell_command_flag(stem, arg),
         };
         if script_flag {
-            return true;
+            return Some(index);
         }
         if !is_interpreter_option(arg) {
-            return false;
+            return None;
         }
         let words = if pwsh {
             usize::from(pwsh_option_takes_value(arg))
         } else {
             posix_option_value_words(arg)
         };
-        for _ in 0..words {
-            args.next();
-        }
+        index += 1 + words;
     }
-    false
+    None
 }
 
 /// How many following words a POSIX interpreter option token consumes as

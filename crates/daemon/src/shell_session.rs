@@ -88,6 +88,10 @@ pub enum SessionError {
     /// is denied (reuses the PTY secret-prompt guard).
     #[error("secret prompt active; LLM-supplied input denied")]
     SecretInputDenied,
+    /// The line would delete OS-critical infrastructure: the os_guard
+    /// failsafe, which binds every profile. Carries the deny reason.
+    #[error("{0}")]
+    OsCriticalPathProtected(String),
 }
 
 /// A session's restorable workspace: `(cwd, bounded env overlay)`.
@@ -100,6 +104,9 @@ pub type WorkspaceState = (Option<String>, Vec<(String, String)>);
 struct SessionEntry {
     job_id: JobId,
     bucket_id: BucketId,
+    /// The session interpreter; picks the grammar the os_guard scan reads
+    /// each `exec` line with.
+    shell: String,
     /// Best-known current working directory. Seeded from the requested
     /// start cwd, then advanced when an `exec` line is a recognisable
     /// `cd <abs-path>` (best-effort; see [`parse_cd_target`]).
@@ -282,7 +289,7 @@ impl ShellSessionRuntime {
         // sends; the argv is daemon-assembled (never caller-supplied), so
         // the PTY shell-interpreter guard is intentionally skipped by
         // `start_session` and the `SessionStart` cap gates instead.
-        let argv = vec![shell, "-i".to_owned()];
+        let argv = vec![shell.clone(), "-i".to_owned()];
 
         let env_os: Vec<(OsString, OsString)> = req
             .env
@@ -344,6 +351,7 @@ impl ShellSessionRuntime {
                 SessionEntry {
                     job_id: started.job_id,
                     bucket_id: started.bucket_id,
+                    shell,
                     cwd,
                     env_snapshot,
                     last_active: Instant::now(),
@@ -430,6 +438,25 @@ impl ShellSessionRuntime {
             return Err(SessionError::OversizedLine);
         }
         let (job_id, bucket_id) = self.resolve_live(session_id)?;
+
+        // THE ONE FAILSAFE (os_guard), as on the shell_exec lane: a line that
+        // would delete OS-critical infrastructure never reaches the shell.
+        // Relative operands resolve against the best-known tracked cwd.
+        let guard = self
+            .sessions
+            .read()
+            .entries
+            .get(&session_id)
+            .map(|e| (e.shell.clone(), e.cwd.clone()));
+        if let Some((shell, cwd)) = guard
+            && let Some(hit) = terminal_commander_core::shell_line_deletion_hit(
+                line,
+                &shell,
+                cwd.as_deref().map(std::path::Path::new),
+            )
+        {
+            return Err(SessionError::OsCriticalPathProtected(hit.reason()));
+        }
 
         // Append the newline so the shell executes the line. The PTY probe
         // enforces the secret-prompt guard + the stdin byte cap.

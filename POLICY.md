@@ -55,12 +55,16 @@ name.
 THE ONE FAILSAFE (every profile, no knob): TC never DELETES OS-critical
 infrastructure. A destructive-deletion command (rm/rmdir/unlink/shred/srm,
 del/erase/rd, Remove-Item/ri, mkfs*/wipefs, dd-to-disk, format, cipher /w),
-on the argv or shell lane and after escalator/wrapper unwrapping, targeting a
+on the argv, PTY, shell, or session lane -- after escalator/wrapper
+unwrapping, through interpreter payloads (`sh -c`, `pwsh -Command`, `cmd /c`,
+`wsl`, `su -c`, `eval`, `$(...)`), and with relative operands resolved against
+the cwd and any `cd` in the line -- targeting a
 protected system tree (/, /usr, /etc, /boot, /System, C:\Windows, a drive
 root, a raw disk) is refused with the typed `OsCriticalPathProtected` error.
 Writing/editing/creating those paths, and every non-deletion command
 (installers, `systemctl`, `reg add`, ...), stay allowed. It is a string-level
-guard rail: indirect deletion (`find -delete`, a script) is not caught.
+guard rail: indirect deletion (`find -delete`, a script, a path held in a
+variable) is not caught.
 
 ### 2.1 `developer_local`
 

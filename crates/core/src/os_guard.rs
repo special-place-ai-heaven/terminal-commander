@@ -11,17 +11,31 @@
 //!
 //! Pure functions, used by the policy engine for both the argv lane
 //! (`CommandStart`, via [`argv_deletion_hit`]) and the shell lane
-//! (`CommandShellStart`, via [`shell_line_deletion_hit`]).
+//! (`CommandShellStart`, via [`shell_line_deletion_hit`]), and by the
+//! session lane (`shell_session_exec`) directly.
+//!
+//! The parser unwraps escalators (`sudo -iu`, `su -c`, `chroot`, ...) and
+//! wrappers in any order, reads interpreter payloads (`sh -c`, `pwsh
+//! -Command` / `-EncodedCommand`, `cmd /c`, `wsl`), `eval`, `$(...)` and
+//! backticks, splits lines with the grammar of the shell that runs them, and
+//! resolves relative operands against the request cwd and any `cd` in the
+//! line.
 //!
 //! ponytail: this is a guard rail, not a kernel boundary. It matches command
 //! basenames and path operands as strings. INDIRECT deletion is NOT caught:
 //! `find / -delete`, `python -c "shutil.rmtree('/usr')"`, an interactive
-//! `diskpart` script, a Makefile target. The complete control is a hardened
-//! profile plus OS permissions; this stops the obvious `rm -rf /` mistakes.
+//! `diskpart` script, a Makefile target, a path held in a variable. The
+//! complete control is a hardened profile plus OS permissions; this stops the
+//! obvious `rm -rf /` mistakes.
 
+use std::iter::Peekable;
 use std::path::{Component, Path, PathBuf};
+use std::str::Chars;
 
-use crate::shell_deny::launched_argv;
+use crate::shell_deny::{
+    interpreter_script_flag, is_wsl_carrier, launched_argv, posix_option_value_words,
+    shell_interpreter_denied, wrapper_option,
+};
 
 /// Substring every failsafe deny reason carries, so the IPC layer can map it
 /// to the typed `OsCriticalPathProtected` error code without re-deriving it.
@@ -47,14 +61,60 @@ impl OsGuardHit {
     }
 }
 
-/// Privilege escalators stripped before classifying the real command, so
-/// `sudo rm -rf /` is caught. Distinct from the shell-interpreter deny.
-const ESCALATORS: &[&str] = &["sudo", "doas", "su", "pkexec", "run0"];
-
-/// Escalator options that consume a following value (so it is not mistaken
-/// for the wrapped command).
-const ESCALATOR_VALUE_OPTS: &[&str] = &[
-    "-u", "--user", "-g", "--group", "-C", "-p", "--prompt", "-h", "--host", "-R", "--chroot",
+/// Privilege escalators (and `chroot`) stripped before classifying the real
+/// command, so `sudo rm -rf /` is caught. Each carries the getopt letters and
+/// long names of its options that take a value (`sudo -iu root` consumes
+/// `root`). Distinct from the shell-interpreter deny.
+const ESCALATORS: &[(&str, &str, &[&str])] = &[
+    (
+        "sudo",
+        "aCcDgpRrTtUu",
+        &[
+            "chdir",
+            "chroot",
+            "close-from",
+            "command-timeout",
+            "group",
+            "host",
+            "other-user",
+            "prompt",
+            "role",
+            "type",
+            "user",
+        ],
+    ),
+    ("doas", "Cu", &[]),
+    (
+        "su",
+        "cgGsw",
+        &[
+            "command",
+            "group",
+            "session-command",
+            "shell",
+            "supp-group",
+            "whitelist-environment",
+        ],
+    ),
+    ("pkexec", "", &["user"]),
+    (
+        "run0",
+        "Dgu",
+        &[
+            "background",
+            "chdir",
+            "description",
+            "group",
+            "machine",
+            "nice",
+            "property",
+            "setenv",
+            "slice",
+            "unit",
+            "user",
+        ],
+    ),
+    ("chroot", "", &["groups", "userspec"]),
 ];
 
 /// Commands whose path OPERANDS are deletion targets.
@@ -75,6 +135,30 @@ const DELETE_COMMANDS: &[&str] = &[
 /// Filesystem-format / disk-wipe commands: any protected/device operand is
 /// refused. `mkfs`, `mkfs.ext4`, ... all start with `mkfs`.
 const WIPE_COMMANDS: &[&str] = &["wipefs"];
+
+/// POSIX reserved words that can lead a simple command (`then rm ...`).
+const POSIX_RESERVED: &[&str] = &[
+    "!", "{", "}", "if", "then", "elif", "else", "do", "while", "until",
+];
+
+/// `wsl` launch options that take a value.
+const WSL_VALUE_OPTS: &[&str] = &[
+    "-d",
+    "--distribution",
+    "--distribution-id",
+    "-u",
+    "--user",
+    "--cd",
+    "--shell-type",
+];
+
+/// Nested payload depth cap (`sh -c`, `su -c`, `eval`, `$(...)`, `wsl`).
+/// Every level is strictly shorter than its parent, so this only bounds the
+/// stack against a pathological `eval eval eval ...` line.
+///
+/// ponytail: deeper nesting is not scanned (fail-open); raise it if a real
+/// line ever nests further.
+const MAX_NESTING: usize = 16;
 
 /// Classify a normalized command basename into how its operands are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +186,33 @@ fn classify(name: &str) -> Option<DestructiveKind> {
     }
 }
 
+/// The word grammar of the shell that runs a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grammar {
+    /// sh, bash, zsh, ...: `\` escapes, `'...'` is literal, `$(...)` and
+    /// backticks substitute.
+    Posix,
+    /// PowerShell: backtick escapes, `\` is a path separator, `{...}` blocks.
+    Pwsh,
+    /// cmd.exe: `^` escapes, only `"` quotes.
+    Cmd,
+}
+
+impl Grammar {
+    /// The grammar of `shell` (`pwsh.exe`, `C:\...\cmd.exe`, `/bin/bash`);
+    /// anything not PowerShell or cmd is read as POSIX.
+    fn of_shell(shell: &str) -> Self {
+        let base = command_basename(shell);
+        if base.starts_with("pwsh") || base.starts_with("powershell") {
+            Self::Pwsh
+        } else if base == "cmd" {
+            Self::Cmd
+        } else {
+            Self::Posix
+        }
+    }
+}
+
 /// Normalize a command token to a comparable basename: split on `/` and `\`,
 /// strip one Windows executable extension, lowercase, drop trailing dots/spaces.
 fn command_basename(token: &str) -> String {
@@ -116,36 +227,92 @@ fn command_basename(token: &str) -> String {
     lower
 }
 
-/// Strip leading privilege escalators (and their value options) so the real
-/// command is classified. `sudo -u root rm -rf /` -> `rm -rf /`.
-fn strip_escalators(argv: &[String]) -> Vec<String> {
-    let mut i = 0;
-    while let Some(first) = argv.get(i) {
-        if !ESCALATORS.contains(&command_basename(first).as_str()) {
+/// What an argv runs once launchers are peeled off: an argv, or a line for
+/// a POSIX shell (`su -c LINE`).
+enum Unwrapped {
+    Argv(Vec<String>),
+    Line(String),
+}
+
+/// Strip escalators, wrappers (`env`, `nice`, `timeout`, ...), and a
+/// `busybox` applet prefix in any interleaving until the head is stable.
+/// Every step drops at least one word, so the loop ends.
+fn unwrap_launchers(argv: &[String]) -> Unwrapped {
+    let mut real = argv.to_vec();
+    loop {
+        if let Some(step) = strip_escalator(&real) {
+            match step {
+                Unwrapped::Argv(rest) => real = rest,
+                line @ Unwrapped::Line(_) => return line,
+            }
+            continue;
+        }
+        if real.len() > 1 && command_basename(&real[0]) == "busybox" && !real[1].starts_with('-') {
+            real.remove(0);
+            continue;
+        }
+        let launched = launched_argv(&real);
+        if launched.is_empty() || launched == real {
+            return Unwrapped::Argv(real);
+        }
+        real = launched;
+    }
+}
+
+/// One escalator peeled off `argv`, or `None` when the head is not one.
+/// `sudo -iu root rm -rf /` -> `rm -rf /`; `su -c LINE` -> the line;
+/// `chroot NEWROOT cmd` -> `cmd`.
+fn strip_escalator(argv: &[String]) -> Option<Unwrapped> {
+    let head = command_basename(argv.first()?);
+    let &(name, shorts, longs) = ESCALATORS.iter().find(|(name, ..)| *name == head)?;
+    if name == "su"
+        && let Some(line) = su_command(argv, shorts, longs)
+    {
+        return Some(Unwrapped::Line(line));
+    }
+    let mut i = 1;
+    while let Some(tok) = argv.get(i) {
+        if tok == "--" {
+            i += 1;
             break;
         }
-        i += 1;
-        while let Some(tok) = argv.get(i) {
-            if !tok.starts_with('-') {
-                break;
-            }
-            let consumes_value = ESCALATOR_VALUE_OPTS.contains(&tok.as_str());
-            i += 1;
-            if consumes_value && argv.get(i).is_some_and(|v| !v.starts_with('-')) {
-                i += 1;
-            }
+        if !tok.starts_with('-') {
+            break;
         }
-        // `su LOGIN -c ...` / `su LOGIN cmd`: drop a bare login name that is
-        // not itself the destructive command.
-        if command_basename(first) == "su"
-            && let Some(tok) = argv.get(i)
-            && !tok.starts_with('-')
-            && classify(&command_basename(tok)).is_none()
-        {
-            i += 1;
-        }
+        i = wrapper_option(argv, i, shorts, longs).1;
     }
-    argv[i.min(argv.len())..].to_vec()
+    // `chroot NEWROOT cmd`, `su LOGIN ...`: drop the operand that is not the
+    // command (a `su` login name that is itself destructive stays).
+    let skip_operand = name == "chroot"
+        || (name == "su"
+            && argv
+                .get(i)
+                .is_some_and(|tok| classify(&command_basename(tok)).is_none()));
+    if skip_operand {
+        i += 1;
+    }
+    Some(Unwrapped::Argv(argv[i.min(argv.len())..].to_vec()))
+}
+
+/// `su`'s `-c LINE` / `--command=LINE` wherever it sits: util-linux `su`
+/// permutes options past the login name (`su - root -c LINE`).
+fn su_command(argv: &[String], shorts: &'static str, longs: &[&'static str]) -> Option<String> {
+    let mut i = 1;
+    while let Some(tok) = argv.get(i) {
+        if tok == "--" {
+            return None;
+        }
+        if !tok.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        let (option, next) = wrapper_option(argv, i, shorts, longs);
+        if let Some(("c" | "command" | "session-command", Some(line))) = option {
+            return Some(line.to_owned());
+        }
+        i = next;
+    }
+    None
 }
 
 /// Is this token a flag (skipped when scanning path operands)?
@@ -166,18 +333,45 @@ fn is_flag(token: &str) -> bool {
 /// The destructive-deletion hit for a fully-formed argv, or `None`.
 ///
 /// Escalators and command wrappers (`env`, `nohup`, `timeout`, ...) are
-/// stripped first, so `sudo env rm -rf /usr` is classified as `rm`.
+/// stripped first, so `sudo env rm -rf /usr` is classified as `rm`; an
+/// interpreter payload (`sh -c`, `pwsh -Command`, `cmd /c`, `wsl`) is
+/// scanned as a line. Relative operands resolve against `cwd`.
 #[must_use]
-pub fn argv_deletion_hit(argv: &[impl AsRef<str>]) -> Option<OsGuardHit> {
+pub fn argv_deletion_hit(argv: &[impl AsRef<str>], cwd: Option<&Path>) -> Option<OsGuardHit> {
     let owned: Vec<String> = argv.iter().map(|a| a.as_ref().to_owned()).collect();
-    let unescalated = strip_escalators(&owned);
-    let launched = launched_argv(&unescalated);
-    let real = if launched.is_empty() {
-        &unescalated
-    } else {
-        &launched
+    let cwd = cwd.map(|p| p.to_string_lossy().into_owned());
+    argv_hit(&owned, cwd.as_deref(), 0)
+}
+
+/// The destructive-deletion hit for a line `shell` will run.
+///
+/// The line is split into simple commands with that shell's grammar (see
+/// [`Grammar`]), then each is run through the argv scan. `cd` /
+/// `Set-Location` in the line move the cwd later commands resolve against.
+#[must_use]
+pub fn shell_line_deletion_hit(line: &str, shell: &str, cwd: Option<&Path>) -> Option<OsGuardHit> {
+    let cwd = cwd.map(|p| p.to_string_lossy().into_owned());
+    line_hit(line, Grammar::of_shell(shell), cwd, 0)
+}
+
+fn argv_hit(argv: &[String], cwd: Option<&str>, depth: usize) -> Option<OsGuardHit> {
+    if depth > MAX_NESTING {
+        return None;
+    }
+    let real = match unwrap_launchers(argv) {
+        Unwrapped::Argv(real) => real,
+        Unwrapped::Line(line) => {
+            return line_hit(&line, Grammar::Posix, cwd.map(str::to_owned), depth + 1);
+        }
     };
     let (name_tok, operands) = real.split_first()?;
+    if let Some(shell) = shell_interpreter_denied(name_tok) {
+        let (grammar, payload) = interpreter_payload(shell, operands)?;
+        return line_hit(&payload, grammar, cwd.map(str::to_owned), depth + 1);
+    }
+    if is_wsl_carrier(name_tok) {
+        return wsl_hit(operands, cwd, depth + 1);
+    }
     let name = command_basename(name_tok);
     let kind = classify(&name)?;
 
@@ -187,7 +381,7 @@ pub fn argv_deletion_hit(argv: &[impl AsRef<str>]) -> Option<OsGuardHit> {
                 if is_flag(operand) {
                     continue;
                 }
-                if operand_is_protected(operand) {
+                if operand_is_protected(operand, cwd) {
                     return Some(OsGuardHit {
                         op: name,
                         path: operand.clone(),
@@ -235,104 +429,477 @@ pub fn argv_deletion_hit(argv: &[impl AsRef<str>]) -> Option<OsGuardHit> {
     None
 }
 
-/// The destructive-deletion hit for a shell line: split into simple commands
-/// on `;`, `&&`, `||`, `|`, `&`, and newlines (honoring quotes and `\`), then
-/// run [`argv_deletion_hit`] on each.
-#[must_use]
-pub fn shell_line_deletion_hit(line: &str) -> Option<OsGuardHit> {
-    for command in split_simple_commands(line) {
-        if command.is_empty() {
+/// The line a listed interpreter runs from its script flag, and the grammar
+/// it is written in. `None` when there is no script flag (`bash build.sh`).
+fn interpreter_payload(shell: &str, args: &[String]) -> Option<(Grammar, String)> {
+    let at = interpreter_script_flag(shell, args)?;
+    let flag = args[at].as_str();
+    let rest = &args[at + 1..];
+    let grammar = Grammar::of_shell(shell);
+    let payload = match grammar {
+        Grammar::Pwsh => pwsh_payload(flag, rest)?,
+        Grammar::Cmd => cmd_payload(flag, rest),
+        Grammar::Posix => posix_payload(flag, rest)?,
+    };
+    Some((grammar, payload))
+}
+
+/// `-Command WORDS...` joins the rest; `-CommandWithArgs LINE ARGS` takes
+/// one word; `-EncodedCommand B64` (any `-e...` prefix, `-ec`) decodes it.
+fn pwsh_payload(flag: &str, rest: &[String]) -> Option<String> {
+    let name = flag.trim_start_matches(['-', '/']).to_ascii_lowercase();
+    if name.starts_with('e') {
+        return decode_utf16le_base64(rest.first()?);
+    }
+    if name == "cwa" || (name.len() > "command".len() && "commandwithargs".starts_with(&name)) {
+        return rest.first().cloned();
+    }
+    Some(rest.join(" "))
+}
+
+/// cmd runs the rest of its command line after `/c`, `/k`, or `/r`,
+/// including a command glued to the switch (`/crd` is `/c rd`).
+fn cmd_payload(flag: &str, rest: &[String]) -> String {
+    let glued = flag
+        .char_indices()
+        .find(|&(at, ch)| {
+            matches!(ch.to_ascii_lowercase(), 'c' | 'k' | 'r') && flag[..at].ends_with('/')
+        })
+        .map_or("", |(at, _)| &flag[at + 1..]);
+    std::iter::once(glued)
+        .chain(rest.iter().map(String::as_str))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The command string of `sh -c`: the first operand after the options,
+/// past `--`; a `--name=VALUE` flag (`fish --command=...`) carries it.
+fn posix_payload(flag: &str, rest: &[String]) -> Option<String> {
+    if let Some((_, inline)) = flag
+        .strip_prefix("--")
+        .and_then(|long| long.split_once('='))
+    {
+        return Some(inline.to_owned());
+    }
+    let mut words = rest.iter().skip(posix_option_value_words(flag));
+    while let Some(word) = words.next() {
+        if word == "--" {
+            return words.next().cloned();
+        }
+        if word.len() > 1 && word.starts_with(['-', '+']) {
+            for _ in 0..posix_option_value_words(word) {
+                words.next();
+            }
             continue;
         }
-        if let Some(hit) = argv_deletion_hit(&command) {
+        return Some(word.clone());
+    }
+    None
+}
+
+/// PowerShell `-EncodedCommand` text: base64 of UTF-16LE. `None` when it is
+/// not base64.
+fn decode_utf16le_base64(text: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(text.len() * 3 / 4);
+    let mut bits = 0u32;
+    let mut pending = 0u32;
+    for byte in text.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        bits = ((bits << 6) | u32::from(value)) & 0xFFFF;
+        pending += 6;
+        if pending >= 8 {
+            pending -= 8;
+            bytes.push(((bits >> pending) & 0xFF).to_le_bytes()[0]);
+        }
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// `wsl -e PROG ARGS` runs an argv; `wsl [OPTIONS] [--] WORDS` runs WORDS as
+/// a line in the distro's default shell. `--cd DIR` moves the cwd.
+fn wsl_hit(args: &[String], cwd: Option<&str>, depth: usize) -> Option<OsGuardHit> {
+    let mut cwd = cwd.map(str::to_owned);
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        let lower = arg.to_ascii_lowercase();
+        if lower == "-e" || lower == "--exec" {
+            return argv_hit(&args[i + 1..], cwd.as_deref(), depth);
+        }
+        if lower == "--" {
+            i += 1;
+            break;
+        }
+        if !arg.starts_with('-') {
+            break;
+        }
+        if WSL_VALUE_OPTS.contains(&lower.as_str()) {
+            if lower == "--cd" {
+                cwd = args
+                    .get(i + 1)
+                    .and_then(|dir| resolve_dir(dir, cwd.as_deref()));
+            }
+            i += 1;
+        }
+        i += 1;
+    }
+    // wsl hands the rest of its command line, quotes included, to the shell.
+    let line = args[i.min(args.len())..]
+        .iter()
+        .map(|word| {
+            if word.is_empty() || word.contains([' ', '\t', '"']) {
+                format!("\"{}\"", word.replace('"', "\\\""))
+            } else {
+                word.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    line_hit(&line, Grammar::Posix, cwd, depth)
+}
+
+fn line_hit(
+    line: &str,
+    grammar: Grammar,
+    mut cwd: Option<String>,
+    depth: usize,
+) -> Option<OsGuardHit> {
+    if depth > MAX_NESTING {
+        return None;
+    }
+    let split = split_line(line, grammar);
+    for nested in &split.nested {
+        if let Some(hit) = line_hit(nested, grammar, cwd.clone(), depth + 1) {
+            return Some(hit);
+        }
+    }
+    // cwd on entry to each open POSIX `( ... )` subshell, restored on exit.
+    let mut saved: Vec<Option<String>> = Vec::new();
+    for (level, command) in &split.commands {
+        if grammar == Grammar::Posix {
+            while saved.len() < *level {
+                saved.push(cwd.clone());
+            }
+            while saved.len() > *level {
+                cwd = saved.pop().flatten();
+            }
+        }
+        let command = if grammar == Grammar::Posix {
+            let start = command
+                .iter()
+                .position(|word| !POSIX_RESERVED.contains(&word.as_str()))
+                .unwrap_or(command.len());
+            &command[start..]
+        } else {
+            command.as_slice()
+        };
+        let Some((head, args)) = command.split_first() else {
+            continue;
+        };
+        let head = command_basename(head);
+        if grammar == Grammar::Posix && head == "eval" {
+            if let Some(hit) = line_hit(&args.join(" "), grammar, cwd.clone(), depth + 1) {
+                return Some(hit);
+            }
+            continue;
+        }
+        if changes_dir(&head, grammar) {
+            cwd = cd_target(args, grammar).and_then(|dir| resolve_dir(dir, cwd.as_deref()));
+            continue;
+        }
+        if let Some(hit) = argv_hit(command, cwd.as_deref(), depth + 1) {
             return Some(hit);
         }
     }
     None
 }
 
-/// Split a shell line into simple commands, each a `Vec<String>` of words.
-/// Quotes and backslash escapes are respected; `NAME=value` prefixes are
-/// kept (escalator/wrapper stripping handles them downstream).
-fn split_simple_commands(line: &str) -> Vec<Vec<String>> {
-    let mut commands = Vec::new();
-    let mut current: Vec<String> = Vec::new();
-    let mut word = String::new();
-    let mut has_word = false;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut chars = line.chars().peekable();
-
-    let flush_word = |word: &mut String, has_word: &mut bool, current: &mut Vec<String>| {
-        if *has_word {
-            current.push(std::mem::take(word));
-            *has_word = false;
-        }
+/// Does `head` change the directory later commands in the line run in?
+fn changes_dir(head: &str, grammar: Grammar) -> bool {
+    let names: &[&str] = match grammar {
+        Grammar::Posix => &["cd", "pushd"],
+        Grammar::Cmd => &["cd", "chdir", "pushd"],
+        Grammar::Pwsh => &[
+            "cd",
+            "chdir",
+            "sl",
+            "set-location",
+            "pushd",
+            "push-location",
+        ],
     };
+    names.contains(&head)
+}
 
-    while let Some(ch) = chars.next() {
-        if in_single {
-            if ch == '\'' {
-                in_single = false;
-            } else {
-                word.push(ch);
-                has_word = true;
+/// The directory a [`changes_dir`] command moves to, `None` when it is not
+/// known (`cd`, `cd -`, `cd ~`).
+fn cd_target(args: &[String], grammar: Grammar) -> Option<&str> {
+    let mut args = args.iter().map(String::as_str);
+    let mut target = None;
+    while let Some(arg) = args.next() {
+        if grammar == Grammar::Pwsh && arg.starts_with('-') {
+            let name = arg.to_ascii_lowercase();
+            if matches!(name.as_str(), "-path" | "-literalpath" | "-lp" | "-pspath") {
+                target = args.next();
+                break;
+            }
+            if name == "-stackname" {
+                args.next();
             }
             continue;
         }
-        if in_double {
+        if is_flag(arg) {
+            continue; // `cd -P`, `cd /d`
+        }
+        target = Some(arg);
+        break;
+    }
+    target.filter(|dir| !is_unresolvable(dir) && !dir.starts_with('-'))
+}
+
+/// `dir` against `cwd`: rooted or drive paths stand alone, a relative one
+/// joins `cwd` (`None` when `cwd` is unknown).
+fn resolve_dir(dir: &str, cwd: Option<&str>) -> Option<String> {
+    if is_unresolvable(dir) {
+        return None;
+    }
+    let plain = dir.replace('\\', "/");
+    if plain.starts_with('/') || has_drive(&plain) {
+        return Some(dir.to_owned());
+    }
+    cwd.map(|cwd| format!("{cwd}/{dir}"))
+}
+
+/// A word whose value the shell supplies (`$VAR`, `~`, `%VAR%`, a `$(...)`
+/// placeholder): never resolved against cwd.
+fn is_unresolvable(word: &str) -> bool {
+    word.starts_with(['$', '~', '%'])
+}
+
+fn has_drive(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+/// A line split into simple commands, each with its `( ... )` nesting
+/// level, plus the bodies of `$(...)` and backtick substitutions, which run
+/// as lines of their own.
+#[derive(Default)]
+struct SplitLine {
+    commands: Vec<(usize, Vec<String>)>,
+    nested: Vec<String>,
+}
+
+/// The simple command being assembled by [`split_line`].
+#[derive(Default)]
+struct Words {
+    current: Vec<String>,
+    word: String,
+    has_word: bool,
+    /// The next word is a redirection target, not an operand.
+    skip_target: bool,
+    /// Open `(` count.
+    level: usize,
+}
+
+impl Words {
+    fn push(&mut self, ch: char) {
+        self.word.push(ch);
+        self.has_word = true;
+    }
+
+    fn flush(&mut self) {
+        if !self.has_word {
+            return;
+        }
+        let word = std::mem::take(&mut self.word);
+        self.has_word = false;
+        if !std::mem::take(&mut self.skip_target) {
+            self.current.push(word);
+        }
+    }
+
+    fn end_command(&mut self, commands: &mut Vec<(usize, Vec<String>)>) {
+        self.flush();
+        self.skip_target = false;
+        if !self.current.is_empty() {
+            commands.push((self.level, std::mem::take(&mut self.current)));
+        }
+    }
+
+    /// A redirection (`>`, `>>`, `2>&1`, `&>`, `*>`, `<`, `<<`): drop an fd
+    /// number in front of it and the target word after it.
+    fn redirect(&mut self, chars: &mut Peekable<Chars<'_>>) {
+        if self
+            .word
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch == '*' || ch == '&')
+        {
+            self.word.clear();
+            self.has_word = false;
+        } else {
+            self.flush();
+        }
+        while chars
+            .next_if(|ch| matches!(ch, '>' | '<' | '&' | '|'))
+            .is_some()
+        {}
+        self.skip_target = true;
+    }
+}
+
+/// Split a line into simple commands, each a `Vec<String>` of words, using
+/// the grammar of the shell that runs it. Commands end at `;`, `&&`, `||`,
+/// `|`, `&`, newlines, and `(` `)` (and `{` `}` in PowerShell).
+/// Redirections and comments are dropped; substitution bodies go to
+/// [`SplitLine::nested`] and leave a `$` placeholder in their word.
+fn split_line(line: &str, grammar: Grammar) -> SplitLine {
+    let escape = match grammar {
+        Grammar::Posix => '\\',
+        Grammar::Pwsh => '`',
+        Grammar::Cmd => '^',
+    };
+    let substitutes = grammar != Grammar::Cmd;
+    let mut out = SplitLine::default();
+    let mut words = Words::default();
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if quote == Some('\'') {
+            if ch != '\'' {
+                words.push(ch);
+            } else if grammar == Grammar::Pwsh && chars.next_if_eq(&'\'').is_some() {
+                words.push('\''); // `''` is a quote inside PowerShell '...'
+            } else {
+                quote = None;
+            }
+            continue;
+        }
+        if quote == Some('"') {
             match ch {
-                '"' => in_double = false,
-                '\\' => {
-                    if let Some(next) = chars.next() {
-                        word.push(next);
-                        has_word = true;
+                '"' => quote = None,
+                '$' if substitutes && chars.next_if_eq(&'(').is_some() => {
+                    out.nested.push(capture_parens(&mut chars));
+                    words.push('$');
+                }
+                '`' if grammar == Grammar::Posix => {
+                    out.nested.push(capture_backticks(&mut chars));
+                    words.push('$');
+                }
+                // POSIX `\` escapes only `$ ` " \ newline` inside "...";
+                // PowerShell's backtick escapes anything; cmd has none.
+                _ if ch == escape && grammar != Grammar::Cmd => match chars.peek() {
+                    Some(&next)
+                        if grammar == Grammar::Pwsh
+                            || matches!(next, '$' | '`' | '"' | '\\' | '\n') =>
+                    {
+                        chars.next();
+                        words.push(next);
                     }
-                }
-                _ => {
-                    word.push(ch);
-                    has_word = true;
-                }
+                    _ => words.push(ch),
+                },
+                _ => words.push(ch),
             }
             continue;
         }
         match ch {
-            '\'' => {
-                in_single = true;
-                has_word = true;
+            _ if ch == escape => {
+                if let Some(next) = chars.next()
+                    && next != '\n'
+                {
+                    words.push(next);
+                }
+            }
+            '\'' if grammar != Grammar::Cmd => {
+                quote = Some('\'');
+                words.has_word = true;
             }
             '"' => {
-                in_double = true;
-                has_word = true;
+                quote = Some('"');
+                words.has_word = true;
             }
-            '\\' => {
-                if let Some(next) = chars.next() {
-                    word.push(next);
-                    has_word = true;
-                }
+            '$' if substitutes && chars.next_if_eq(&'(').is_some() => {
+                out.nested.push(capture_parens(&mut chars));
+                words.push('$');
             }
-            ' ' | '\t' | '\r' => flush_word(&mut word, &mut has_word, &mut current),
+            '`' if grammar == Grammar::Posix => {
+                out.nested.push(capture_backticks(&mut chars));
+                words.push('$');
+            }
+            '#' if substitutes && !words.has_word => {
+                while chars.next_if(|next| *next != '\n').is_some() {}
+            }
+            ' ' | '\t' | '\r' => words.flush(),
+            '>' | '<' => words.redirect(&mut chars),
+            '&' if grammar != Grammar::Cmd && chars.peek() == Some(&'>') => {
+                words.redirect(&mut chars);
+            }
             ';' | '\n' | '|' | '&' => {
                 // `&&` / `||` collapse to one boundary.
-                if (ch == '&' || ch == '|') && chars.peek() == Some(&ch) {
-                    chars.next();
+                if matches!(ch, '&' | '|') {
+                    chars.next_if_eq(&ch);
                 }
-                flush_word(&mut word, &mut has_word, &mut current);
-                if !current.is_empty() {
-                    commands.push(std::mem::take(&mut current));
-                }
+                words.end_command(&mut out.commands);
             }
-            _ => {
-                word.push(ch);
-                has_word = true;
+            '(' => {
+                words.end_command(&mut out.commands);
+                words.level += 1;
             }
+            ')' => {
+                words.end_command(&mut out.commands);
+                words.level = words.level.saturating_sub(1);
+            }
+            '{' | '}' if grammar == Grammar::Pwsh => words.end_command(&mut out.commands),
+            _ => words.push(ch),
         }
     }
-    flush_word(&mut word, &mut has_word, &mut current);
-    if !current.is_empty() {
-        commands.push(current);
+    words.end_command(&mut out.commands);
+    out
+}
+
+/// The body of a `$(...)` whose `$(` was just read, up to its matching `)`.
+fn capture_parens(chars: &mut Peekable<Chars<'_>>) -> String {
+    let mut body = String::new();
+    let mut depth = 0usize;
+    let mut quote = None;
+    for ch in chars.by_ref() {
+        match (quote, ch) {
+            (Some(open), _) if ch == open => quote = None,
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '(') => depth += 1,
+            (None, ')') if depth == 0 => return body,
+            (None, ')') => depth -= 1,
+            _ => {}
+        }
+        body.push(ch);
     }
-    commands
+    body
+}
+
+/// The body of a backtick substitution whose opening backtick was just read.
+fn capture_backticks(chars: &mut Peekable<Chars<'_>>) -> String {
+    let mut body = String::new();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '`' => break,
+            '\\' => body.extend(chars.next()),
+            _ => body.push(ch),
+        }
+    }
+    body
 }
 
 /// A raw-disk device target for `dd of=` / `mkfs` (`/dev/sda`, `/dev/nvme0n1`,
@@ -352,18 +919,39 @@ pub fn is_disk_device(raw: &str) -> bool {
         .any(|p| dev.starts_with(p))
 }
 
-/// A path operand as a deletion command sees it.
+/// A path operand as a deletion command sees it, resolved against `cwd`.
 ///
-/// Takes the fixed prefix before any glob metacharacter, then checks
-/// [`is_os_critical_path`]. `/usr/*` -> `/usr` -> protected; `/tmp/*` ->
-/// `/tmp` -> allowed.
+/// Verbatim prefixes are resolved first (their `?` is not a glob), then the
+/// fixed prefix before any glob metacharacter is checked with
+/// [`is_os_critical_path`]: `/usr/*` -> `/usr` -> protected; `/tmp/*` ->
+/// `/tmp` -> allowed; a bare `*` names `cwd` itself. A rooted `\Windows` is
+/// checked both as-is and on the cwd's drive.
 #[must_use]
-pub fn operand_is_protected(operand: &str) -> bool {
-    let fixed = glob_fixed_prefix(operand);
+pub fn operand_is_protected(operand: &str, cwd: Option<&str>) -> bool {
+    let Some(path) = plain_path(operand) else {
+        return true; // device or volume object
+    };
+    let fixed = glob_fixed_prefix(&path);
     if fixed.is_empty() {
+        // `*`, `.*`, `[ab]*`: the glob expands inside cwd.
+        return !path.is_empty() && !is_unresolvable(&path) && cwd.is_some_and(is_os_critical_path);
+    }
+    if is_unresolvable(&fixed) {
         return false;
     }
-    is_os_critical_path(&fixed)
+    if has_drive(&fixed) {
+        return is_os_critical_path(&fixed);
+    }
+    if fixed.starts_with('/') {
+        let drive = cwd.map(str::trim_start).filter(|cwd| has_drive(cwd));
+        return is_os_critical_path(&fixed)
+            || (!fixed.starts_with("//")
+                && drive.is_some_and(|cwd| is_os_critical_path(&format!("{}{fixed}", &cwd[..2]))));
+    }
+    cwd.map_or_else(
+        || is_os_critical_path(&fixed),
+        |cwd| is_os_critical_path(&format!("{cwd}/{fixed}")),
+    )
 }
 
 /// The path prefix before the first glob metacharacter (`* ? [`), trimmed to
@@ -378,6 +966,51 @@ fn glob_fixed_prefix(operand: &str) -> String {
                 .map_or_else(String::new, |sep| head[..=sep].to_owned())
         },
     )
+}
+
+/// Forward-slash `raw`, resolve a Windows verbatim or device prefix (`\\?\`,
+/// `\\.\`, `//?/`), and collapse repeated separators. `None` for a device or
+/// volume object (`\\?\Volume{..}`, `\\.\PhysicalDrive0`, `\\?\GLOBALROOT`),
+/// which is always protected.
+fn plain_path(raw: &str) -> Option<String> {
+    let slashed = raw.trim().replace('\\', "/");
+    let path = match ["//?/", "//./"]
+        .iter()
+        .find_map(|prefix| slashed.strip_prefix(prefix))
+    {
+        None => slashed.clone(),
+        Some(rest) if has_drive(rest) => rest.to_owned(),
+        Some(rest)
+            if rest
+                .get(..4)
+                .is_some_and(|head| head.eq_ignore_ascii_case("unc/")) =>
+        {
+            format!("//{}", &rest[4..])
+        }
+        Some(_) => return None,
+    };
+    Some(collapse_separators(&path))
+}
+
+/// Collapse runs of `/`. A leading `//` survives only as a UNC
+/// `//server/share` (single separators) on a Windows host; anywhere else it
+/// is the root, so `//usr//lib` is `/usr/lib`.
+fn collapse_separators(path: &str) -> String {
+    let mut parts = path.strip_prefix("//").unwrap_or_default().split('/');
+    let unc = cfg!(windows)
+        && path.starts_with("//")
+        && parts.next().is_some_and(|server| !server.is_empty())
+        && parts.next().is_some_and(|share| !share.is_empty());
+    let mut out = String::with_capacity(path.len());
+    if unc {
+        out.push('/');
+    }
+    for ch in path.chars() {
+        if !(ch == '/' && out.ends_with('/') && out.len() > usize::from(unc)) {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Unix protected trees (exact root and everything beneath). `/` itself is
@@ -418,9 +1051,9 @@ const WINDOWS_PROTECTED_SUBTREES: &[&str] = &[
 /// Is `raw` an OS-critical location (protected tree root, a path beneath one,
 /// an ancestor of one, a drive/volume root, or a raw disk device)?
 ///
-/// Normalizes verbatim `\\?\` prefixes, slash direction, case (Windows only),
-/// trailing separators, `.`/`..`, WSL `/mnt/<drive>` bridging, and
-/// drive-relative `C:foo`.
+/// Normalizes verbatim/device prefixes, slash direction, repeated
+/// separators, case (Windows only), trailing separators, `.`/`..`, WSL
+/// `/mnt/<drive>` bridging, and drive-relative `C:foo`.
 #[must_use]
 pub fn is_os_critical_path(raw: &str) -> bool {
     let trimmed = raw.trim();
@@ -430,24 +1063,20 @@ pub fn is_os_critical_path(raw: &str) -> bool {
     if is_disk_device(trimmed) {
         return true;
     }
-    let slashed = trimmed.replace('\\', "/");
-    // `\\?\Volume{...}` / `\\.\...` device or volume roots.
-    let lower_dev = slashed.to_ascii_lowercase();
-    if lower_dev.starts_with("//?/volume{") || lower_dev.starts_with("//./") {
+    // `\\?\Volume{...}` / `\\.\...` device or volume objects.
+    let Some(path) = plain_path(trimmed) else {
         return true;
-    }
-    // Strip a `\\?\` verbatim prefix.
-    let no_verbatim = slashed.strip_prefix("//?/").unwrap_or(&slashed);
+    };
 
     // WSL bridge: /mnt/<drive>/... maps to <drive>:/...
-    if let Some(mapped) = wsl_mount_to_windows(no_verbatim) {
+    if let Some(mapped) = wsl_mount_to_windows(&path) {
         return windows_protected(&mapped);
     }
 
-    if looks_windows(no_verbatim) {
-        windows_protected(no_verbatim)
+    if looks_windows(&path) {
+        windows_protected(&path)
     } else {
-        unix_protected(no_verbatim)
+        unix_protected(&path)
     }
 }
 
@@ -643,36 +1272,46 @@ mod tests {
 
     #[test]
     fn rm_rf_root_and_system_denied() {
-        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "/"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "--no-preserve-root", "/"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "/usr"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["sudo", "rm", "-rf", "/etc"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["sudo", "-u", "root", "rm", "-rf", "/boot"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "/usr/*"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["shred", "/dev/sda"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["wipefs", "-a", "/dev/nvme0n1"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["dd", "if=/dev/zero", "of=/dev/sda"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["mkfs.ext4", "/dev/sdb1"])).is_some());
+        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "/"]), None).is_some());
+        assert!(
+            argv_deletion_hit(&argv(&["rm", "-rf", "--no-preserve-root", "/"]), None).is_some()
+        );
+        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "/usr"]), None).is_some());
+        assert!(argv_deletion_hit(&argv(&["sudo", "rm", "-rf", "/etc"]), None).is_some());
+        assert!(
+            argv_deletion_hit(&argv(&["sudo", "-u", "root", "rm", "-rf", "/boot"]), None).is_some()
+        );
+        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "/usr/*"]), None).is_some());
+        assert!(argv_deletion_hit(&argv(&["shred", "/dev/sda"]), None).is_some());
+        assert!(argv_deletion_hit(&argv(&["wipefs", "-a", "/dev/nvme0n1"]), None).is_some());
+        assert!(argv_deletion_hit(&argv(&["dd", "if=/dev/zero", "of=/dev/sda"]), None).is_some());
+        assert!(argv_deletion_hit(&argv(&["mkfs.ext4", "/dev/sdb1"]), None).is_some());
     }
 
     #[test]
     fn windows_deletion_denied() {
-        assert!(argv_deletion_hit(&argv(&["Remove-Item", "-Recurse", r"C:\Windows"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["del", "/S", "/Q", r"C:\Windows\System32"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["rd", "/s", r"C:\Boot"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["format", "c:"])).is_some());
-        assert!(argv_deletion_hit(&argv(&["cipher", "/w:C:\\"])).is_some());
+        assert!(
+            argv_deletion_hit(&argv(&["Remove-Item", "-Recurse", r"C:\Windows"]), None).is_some()
+        );
+        assert!(
+            argv_deletion_hit(&argv(&["del", "/S", "/Q", r"C:\Windows\System32"]), None).is_some()
+        );
+        assert!(argv_deletion_hit(&argv(&["rd", "/s", r"C:\Boot"]), None).is_some());
+        assert!(argv_deletion_hit(&argv(&["format", "c:"]), None).is_some());
+        assert!(argv_deletion_hit(&argv(&["cipher", "/w:C:\\"]), None).is_some());
     }
 
     #[test]
     fn ordinary_deletions_allowed() {
-        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "target"])).is_none());
-        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "/tmp/x"])).is_none());
-        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "node_modules"])).is_none());
-        assert!(argv_deletion_hit(&argv(&["del", "build\\out.txt"])).is_none());
-        assert!(argv_deletion_hit(&argv(&["Remove-Item", "-Recurse", "node_modules"])).is_none());
-        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "/home/dev/project/dist"])).is_none());
-        assert!(argv_deletion_hit(&argv(&["dd", "if=/dev/zero", "of=./disk.img"])).is_none());
+        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "target"]), None).is_none());
+        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "/tmp/x"]), None).is_none());
+        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "node_modules"]), None).is_none());
+        assert!(argv_deletion_hit(&argv(&["del", "build\\out.txt"]), None).is_none());
+        assert!(
+            argv_deletion_hit(&argv(&["Remove-Item", "-Recurse", "node_modules"]), None).is_none()
+        );
+        assert!(argv_deletion_hit(&argv(&["rm", "-rf", "/home/dev/project/dist"]), None).is_none());
+        assert!(argv_deletion_hit(&argv(&["dd", "if=/dev/zero", "of=./disk.img"]), None).is_none());
     }
 
     #[test]
@@ -688,7 +1327,7 @@ mod tests {
             &["cat", "/etc/hosts"][..],
         ] {
             assert!(
-                argv_deletion_hit(&argv(cmd)).is_none(),
+                argv_deletion_hit(&argv(cmd), None).is_none(),
                 "must allow {cmd:?}"
             );
         }
@@ -696,10 +1335,619 @@ mod tests {
 
     #[test]
     fn shell_line_scan() {
-        assert!(shell_line_deletion_hit("cd /tmp && rm -rf /usr").is_some());
-        assert!(shell_line_deletion_hit("echo hi | sudo rm -rf /etc").is_some());
-        assert!(shell_line_deletion_hit("rm -rf target; cargo build").is_none());
-        assert!(shell_line_deletion_hit("rm -rf \"/usr/lib\"").is_some());
-        assert!(shell_line_deletion_hit("make clean && rm -rf ./dist").is_none());
+        assert!(shell_line_deletion_hit("cd /tmp && rm -rf /usr", "sh", None).is_some());
+        assert!(shell_line_deletion_hit("echo hi | sudo rm -rf /etc", "sh", None).is_some());
+        assert!(shell_line_deletion_hit("rm -rf target; cargo build", "sh", None).is_none());
+        assert!(shell_line_deletion_hit("rm -rf \"/usr/lib\"", "sh", None).is_some());
+        assert!(shell_line_deletion_hit("make clean && rm -rf ./dist", "sh", None).is_none());
+    }
+
+    // ---- Parser-gap table (G1-G7). TEST SAFETY: pure functions only; every
+    // protected operand is `<root>/tc-guard-nonexistent`, never a real path.
+
+    /// Unix and Windows protected roots the refused rows target.
+    const UNIX_ROOT: &str = "/usr";
+    const WIN_ROOT: &str = r"C:\Windows\System32";
+    const UNIX_PROJECT: &str = "/home/dev/proj";
+    const WIN_PROJECT: &str = r"C:\Users\dev\proj";
+
+    fn target(root: &str) -> String {
+        format!("{root}/tc-guard-nonexistent")
+    }
+
+    enum Case {
+        Argv(Vec<String>),
+        /// `(shell, line)` as `shell_exec` would run it.
+        Line(&'static str, String),
+    }
+
+    fn a(parts: &[&str]) -> Case {
+        Case::Argv(argv(parts))
+    }
+
+    fn l(shell: &'static str, line: impl Into<String>) -> Case {
+        Case::Line(shell, line.into())
+    }
+
+    fn guarded(case: &Case, cwd: Option<&str>) -> bool {
+        let cwd = cwd.map(Path::new);
+        match case {
+            Case::Argv(argv) => argv_deletion_hit(argv, cwd).is_some(),
+            Case::Line(shell, line) => shell_line_deletion_hit(line, shell, cwd).is_some(),
+        }
+    }
+
+    fn describe(case: &Case) -> String {
+        match case {
+            Case::Argv(argv) => format!("argv {argv:?}"),
+            Case::Line(shell, line) => format!("{shell} line {line:?}"),
+        }
+    }
+
+    /// PowerShell `-EncodedCommand` text: base64 of the UTF-16LE bytes.
+    fn b64_utf16le(text: &str) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = chunk
+                .iter()
+                .zip([16, 8, 0])
+                .fold(0u32, |acc, (byte, shift)| acc | (u32::from(*byte) << shift));
+            for i in 0..=chunk.len() {
+                out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize]));
+            }
+            for _ in chunk.len()..3 {
+                out.push('=');
+            }
+        }
+        out
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn refused_rows() -> Vec<(&'static str, Case, Option<&'static str>)> {
+        let u = target(UNIX_ROOT);
+        let w = target(WIN_ROOT);
+        let wsl_w = "/mnt/c/Windows/System32/tc-guard-nonexistent";
+        vec![
+            // G1: interpreter payloads, recursively.
+            (
+                "G1 sh -c line",
+                l("sh", format!("bash -c 'rm -rf {u}'")),
+                None,
+            ),
+            (
+                "G1 argv sh -c",
+                a(&["sh", "-c", &format!("rm -rf {u}")]),
+                None,
+            ),
+            (
+                "G1 option run before -ec",
+                a(&[
+                    "bash",
+                    "-x",
+                    "-o",
+                    "pipefail",
+                    "-ec",
+                    &format!("rm -rf {u}"),
+                ]),
+                None,
+            ),
+            (
+                "G1 nested sh in bash",
+                l("sh", format!(r#"bash -c "sh -c 'rm -rf {u}'""#)),
+                None,
+            ),
+            (
+                "G1 pwsh -Command words",
+                a(&[
+                    "pwsh",
+                    "-NoProfile",
+                    "-Command",
+                    "Remove-Item",
+                    "-Recurse",
+                    &w,
+                ]),
+                None,
+            ),
+            (
+                "G1 powershell -c line",
+                a(&["powershell.exe", "-c", &format!("Remove-Item -Recurse {w}")]),
+                None,
+            ),
+            (
+                "G1 pwsh -EncodedCommand",
+                a(&[
+                    "pwsh",
+                    "-enc",
+                    &b64_utf16le(&format!("Remove-Item -Recurse {w}")),
+                ]),
+                None,
+            ),
+            (
+                "G1 cmd /c",
+                a(&["cmd", "/c", &format!("rd /s /q {w}")]),
+                None,
+            ),
+            (
+                "G1 cmd glued /q/crd",
+                a(&["cmd.exe", "/q/crd", "/s", &w]),
+                None,
+            ),
+            ("G1 wsl -e argv", a(&["wsl", "-e", "rm", "-rf", &u]), None),
+            (
+                "G1 wsl bare line",
+                a(&["wsl.exe", "-d", "Ubuntu", "rm", "-rf", &u]),
+                None,
+            ),
+            (
+                "G1 wsl -- bash -c",
+                a(&["wsl", "--", "bash", "-c", &format!("rm -rf {u}")]),
+                None,
+            ),
+            (
+                "G1 wsl windows mount",
+                a(&["wsl", "-e", "rm", "-rf", wsl_w]),
+                None,
+            ),
+            (
+                "G1 cmd line into pwsh",
+                l(
+                    "cmd.exe",
+                    format!(r#"pwsh -NoProfile -Command "Remove-Item -Recurse {w}""#),
+                ),
+                None,
+            ),
+            ("G1 busybox applet", a(&["busybox", "rm", "-rf", &u]), None),
+            // G2: escalators and wrappers in any interleaving.
+            (
+                "G2 sudo -iu",
+                a(&["sudo", "-iu", "root", "rm", "-rf", &u]),
+                None,
+            ),
+            (
+                "G2 wrapper then sudo",
+                a(&["nice", "-n", "5", "sudo", "rm", "-rf", &u]),
+                None,
+            ),
+            (
+                "G2 interleaved chain",
+                a(&[
+                    "timeout", "5", "doas", "-u", "root", "env", "A=1", "pkexec", "rm", "-rf", &u,
+                ]),
+                None,
+            ),
+            (
+                "G2 su -c before login",
+                a(&["su", "-c", &format!("rm -rf {u}"), "root"]),
+                None,
+            ),
+            (
+                "G2 su login then -c",
+                a(&["su", "-", "root", "-c", &format!("rm -rf {u}")]),
+                None,
+            ),
+            (
+                "G2 sudo sh -c",
+                a(&["sudo", "-u", "root", "sh", "-c", &format!("rm -rf {u}")]),
+                None,
+            ),
+            ("G2 run0", a(&["run0", "-u", "root", "rm", "-rf", &u]), None),
+            (
+                "G2 chroot",
+                a(&["chroot", "/mnt/sysroot", "rm", "-rf", &u]),
+                None,
+            ),
+            (
+                "G2 sudo -iu windows mount",
+                a(&["sudo", "-iu", "root", "rm", "-rf", wsl_w]),
+                None,
+            ),
+            (
+                "G2 line",
+                l("bash", format!("sudo -iu root rm -rf {u}")),
+                None,
+            ),
+            // G3: grammar from the shell that runs the line.
+            (
+                "G3 pwsh keeps backslashes",
+                l("pwsh", format!("Remove-Item -Recurse -Force {w}")),
+                None,
+            ),
+            (
+                "G3 pwsh by path",
+                l(
+                    r"C:\Program Files\PowerShell\7\pwsh.exe",
+                    format!("Remove-Item -Recurse {w}"),
+                ),
+                None,
+            ),
+            (
+                "G3 cmd keeps backslashes",
+                l("cmd.exe", format!("rd /s /q {w}")),
+                None,
+            ),
+            (
+                "G3 posix double quotes keep backslashes",
+                l("bash", format!(r#"rm -rf "{w}""#)),
+                None,
+            ),
+            (
+                "G3 posix escape",
+                l("bash", r"rm -rf /us\r/tc-guard-nonexistent"),
+                None,
+            ),
+            // G4: repeated separators.
+            (
+                "G4 doubled unix separators",
+                a(&["rm", "-rf", "//usr//lib//tc-guard-nonexistent"]),
+                None,
+            ),
+            (
+                "G4 doubled windows mount",
+                a(&["rm", "-rf", "/mnt//c//Windows//tc-guard-nonexistent"]),
+                None,
+            ),
+            // G5: verbatim and device prefixes.
+            (
+                "G5 verbatim windows",
+                l("pwsh", format!(r"Remove-Item -Recurse \\?\{w}")),
+                None,
+            ),
+            (
+                "G5 forward verbatim",
+                a(&["rm", "-rf", "//?/C:/Windows/System32/tc-guard-nonexistent"]),
+                None,
+            ),
+            (
+                "G5 device namespace",
+                a(&["rd", "/s", "/q", &format!(r"\\.\{w}")]),
+                None,
+            ),
+            // G6: operands resolved against cwd, cd tracked within a line.
+            (
+                "G6 relative in protected cwd",
+                a(&["rm", "-rf", "tc-guard-nonexistent"]),
+                Some(UNIX_ROOT),
+            ),
+            (
+                "G6 dotdot out of tmp",
+                a(&["rm", "-rf", "../../usr/tc-guard-nonexistent"]),
+                Some("/tmp/x"),
+            ),
+            (
+                "G6 glob in protected cwd",
+                a(&["rm", "-rf", "*"]),
+                Some("/usr/lib"),
+            ),
+            (
+                "G6 windows relative",
+                a(&["Remove-Item", "-Recurse", "tc-guard-nonexistent"]),
+                Some(WIN_ROOT),
+            ),
+            (
+                "G6 rooted on the cwd drive",
+                l(
+                    "pwsh",
+                    r"Remove-Item -Recurse \Windows\System32\tc-guard-nonexistent",
+                ),
+                Some(WIN_PROJECT),
+            ),
+            (
+                "G6 cd then relative",
+                l("bash", "cd /usr && rm -rf tc-guard-nonexistent"),
+                Some("/tmp"),
+            ),
+            (
+                "G6 pushd",
+                l("bash", "pushd /usr/lib; rm -rf ./tc-guard-nonexistent"),
+                None,
+            ),
+            (
+                "G6 Set-Location",
+                l(
+                    "pwsh",
+                    r"Set-Location C:\Windows\System32; Remove-Item -Recurse tc-guard-nonexistent",
+                ),
+                Some(WIN_PROJECT),
+            ),
+            (
+                "G6 sl -Path",
+                l(
+                    "pwsh",
+                    r"sl -Path C:\Windows; Remove-Item -Recurse System32\tc-guard-nonexistent",
+                ),
+                None,
+            ),
+            (
+                "G6 cmd cd /d",
+                l(
+                    "cmd.exe",
+                    r"cd /d C:\Windows && rd /s /q System32\tc-guard-nonexistent",
+                ),
+                None,
+            ),
+            (
+                "G6 cd carried into a subshell",
+                l("bash", "cd /usr && (rm -rf tc-guard-nonexistent)"),
+                Some(UNIX_PROJECT),
+            ),
+            (
+                "G6 cd inside payload",
+                a(&["bash", "-c", "cd /usr; rm -rf tc-guard-nonexistent"]),
+                None,
+            ),
+            // G7: compound grammar, substitutions, eval, redirections.
+            ("G7 subshell", l("bash", format!("(rm -rf {u})")), None),
+            (
+                "G7 brace group",
+                l("bash", format!("{{ rm -rf {u}; }}")),
+                None,
+            ),
+            (
+                "G7 then",
+                l("bash", format!("if true; then rm -rf {u}; fi")),
+                None,
+            ),
+            (
+                "G7 do",
+                l("bash", format!("for d in a; do rm -rf {u}; done")),
+                None,
+            ),
+            (
+                "G7 else",
+                l("bash", format!("if false; then :; else rm -rf {u}; fi")),
+                None,
+            ),
+            ("G7 bang", l("bash", format!("! rm -rf {u}")), None),
+            ("G7 $()", l("bash", format!("echo $(rm -rf {u})")), None),
+            (
+                "G7 quoted $()",
+                l("bash", format!(r#"echo "$(rm -rf {u})""#)),
+                None,
+            ),
+            (
+                "G7 backticks",
+                l("bash", format!("echo `rm -rf {u}`")),
+                None,
+            ),
+            ("G7 eval words", l("bash", format!("eval rm -rf {u}")), None),
+            (
+                "G7 eval quoted",
+                l("bash", format!("eval 'rm -rf {u}'")),
+                None,
+            ),
+            (
+                "G7 2>&1 before operand",
+                l("bash", format!("rm -rf 2>&1 {u}")),
+                None,
+            ),
+            (
+                "G7 &> before operand",
+                l("bash", format!("rm -rf &>/dev/null {u}")),
+                None,
+            ),
+            (
+                "G7 pwsh script block",
+                l("pwsh", format!("& {{ Remove-Item -Recurse {w} }}")),
+                None,
+            ),
+            (
+                "G7 pwsh subexpression",
+                l(
+                    "pwsh",
+                    format!(r#"Write-Output "$(Remove-Item -Recurse {w})""#),
+                ),
+                None,
+            ),
+            (
+                "G7 pwsh 2>&1 before operand",
+                l("pwsh", format!("Remove-Item -Recurse 2>&1 {w}")),
+                None,
+            ),
+            (
+                "G7 cmd parens",
+                l("cmd.exe", format!("if exist x (rd /s /q {w})")),
+                None,
+            ),
+        ]
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn allowed_rows() -> Vec<(&'static str, Case, Option<&'static str>)> {
+        let verbatim_profile = r"\\?\C:\Users\dev\tc-guard-nonexistent";
+        vec![
+            ("rm target", a(&["rm", "-rf", "target"]), Some(UNIX_PROJECT)),
+            ("rm build", a(&["rm", "-rf", "build"]), Some(UNIX_PROJECT)),
+            (
+                "rm node_modules",
+                a(&["rm", "-rf", "node_modules"]),
+                Some(WIN_PROJECT),
+            ),
+            (
+                "Remove-Item target",
+                a(&["Remove-Item", "-Recurse", "target"]),
+                Some(WIN_PROJECT),
+            ),
+            (
+                "bash line",
+                l("bash", "rm -rf target build node_modules"),
+                Some(UNIX_PROJECT),
+            ),
+            (
+                "pwsh line",
+                l(
+                    "pwsh",
+                    "Remove-Item -Recurse -Force target, build, node_modules",
+                ),
+                Some(WIN_PROJECT),
+            ),
+            (
+                "cmd line",
+                l("cmd.exe", r"rd /s /q build"),
+                Some(WIN_PROJECT),
+            ),
+            (
+                "glob in project",
+                a(&["rm", "-rf", "*"]),
+                Some(UNIX_PROJECT),
+            ),
+            (
+                "tmp child",
+                a(&["rm", "-rf", "/tmp/tc-guard-nonexistent"]),
+                None,
+            ),
+            (
+                "doubled tmp child",
+                a(&["rm", "-rf", "//tmp//tc-guard-nonexistent"]),
+                None,
+            ),
+            (
+                "verbatim profile argv",
+                a(&["Remove-Item", "-Recurse", verbatim_profile]),
+                None,
+            ),
+            (
+                "verbatim profile line",
+                l("pwsh", format!("Remove-Item -Recurse {verbatim_profile}")),
+                None,
+            ),
+            (
+                "apt-get remove",
+                a(&["apt-get", "remove", "-y", "cowsay"]),
+                None,
+            ),
+            (
+                "npm uninstall -g",
+                a(&["npm", "uninstall", "-g", "typescript"]),
+                None,
+            ),
+            (
+                "cargo uninstall",
+                a(&["cargo", "uninstall", "ripgrep"]),
+                None,
+            ),
+            (
+                "git clean",
+                a(&["git", "clean", "-fdx"]),
+                Some(UNIX_PROJECT),
+            ),
+            (
+                "package removals line",
+                l(
+                    "bash",
+                    "sudo apt-get remove -y cowsay && npm uninstall -g typescript",
+                ),
+                None,
+            ),
+            (
+                "redirect to /dev/null",
+                l("bash", "rm -f build.log > /dev/null"),
+                Some(UNIX_PROJECT),
+            ),
+            (
+                "stderr to /dev/null",
+                l("bash", "rm -rf target 2> /dev/null"),
+                Some(UNIX_PROJECT),
+            ),
+            (
+                "pwsh redirect",
+                l("pwsh", r"Remove-Item build.log 2>&1 > $null"),
+                Some(WIN_PROJECT),
+            ),
+            (
+                "comment names a root",
+                l("bash", "rm -rf target # never /usr"),
+                Some(UNIX_PROJECT),
+            ),
+            (
+                "bash -c target",
+                a(&["bash", "-c", "rm -rf target"]),
+                Some(UNIX_PROJECT),
+            ),
+            (
+                "pwsh -Command node_modules",
+                a(&["pwsh", "-Command", "Remove-Item -Recurse node_modules"]),
+                Some(WIN_PROJECT),
+            ),
+            (
+                "cmd /c build",
+                a(&["cmd", "/c", "rd /s /q build"]),
+                Some(WIN_PROJECT),
+            ),
+            (
+                "sudo -iu tmp child",
+                a(&[
+                    "sudo",
+                    "-iu",
+                    "root",
+                    "rm",
+                    "-rf",
+                    "/tmp/tc-guard-nonexistent",
+                ]),
+                None,
+            ),
+            (
+                "cd away from a root",
+                l(
+                    "bash",
+                    "cd /usr && ls && cd /home/dev/proj && rm -rf target",
+                ),
+                None,
+            ),
+            (
+                "cd scoped to a subshell",
+                l("bash", "(cd /usr && ls); rm -rf build"),
+                Some(UNIX_PROJECT),
+            ),
+            (
+                "unknown substitution",
+                l("bash", "rm -rf $(mktemp -d)"),
+                Some("/"),
+            ),
+            ("glob in tmp", l("bash", "cd /tmp && rm -rf *"), None),
+            (
+                "wsl tmp child",
+                a(&["wsl", "-e", "rm", "-rf", "/tmp/tc-guard-nonexistent"]),
+                None,
+            ),
+            (
+                "wsl relative",
+                a(&["wsl", "rm", "-rf", "target"]),
+                Some(WIN_PROJECT),
+            ),
+            ("quoted text", l("bash", "echo 'rm -rf /usr'"), None),
+            (
+                "commit message",
+                l("bash", r#"git commit -m "rm -rf /usr is bad""#),
+                None,
+            ),
+            ("eval agent", l("bash", r#"eval "$(ssh-agent -s)""#), None),
+        ]
+    }
+
+    #[test]
+    fn parser_gaps_are_refused() {
+        let missed: Vec<String> = refused_rows()
+            .iter()
+            .filter(|(_, case, cwd)| !guarded(case, *cwd))
+            .map(|(gap, case, cwd)| format!("{gap}: {} cwd={cwd:?}", describe(case)))
+            .collect();
+        assert!(missed.is_empty(), "not refused:\n{}", missed.join("\n"));
+    }
+
+    #[test]
+    fn parser_gap_controls_stay_allowed() {
+        let refused: Vec<String> = allowed_rows()
+            .iter()
+            .filter(|(_, case, cwd)| guarded(case, *cwd))
+            .map(|(name, case, cwd)| format!("{name}: {} cwd={cwd:?}", describe(case)))
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "wrongly refused:\n{}",
+            refused.join("\n")
+        );
     }
 }

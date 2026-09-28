@@ -852,12 +852,14 @@ impl PolicyEngine {
         // a raw disk is refused. Runs before any profile logic so the default
         // full_access is bound by it too.
         let os_guard_hit = match action {
-            PolicyAction::CommandStart { argv, .. } => {
-                terminal_commander_core::argv_deletion_hit(argv)
+            PolicyAction::CommandStart { argv, cwd } => {
+                terminal_commander_core::argv_deletion_hit(argv, Some(cwd))
             }
-            PolicyAction::CommandShellStart { shell_line, .. } => {
-                terminal_commander_core::shell_line_deletion_hit(shell_line)
-            }
+            PolicyAction::CommandShellStart {
+                shell_line,
+                cwd,
+                shell,
+            } => terminal_commander_core::shell_line_deletion_hit(shell_line, shell, Some(cwd)),
             _ => None,
         };
         if let Some(hit) = os_guard_hit {

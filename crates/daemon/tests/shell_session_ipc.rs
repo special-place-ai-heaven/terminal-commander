@@ -104,6 +104,77 @@ fn tmp_rule() -> RuleDefinition {
     }
 }
 
+/// The os_guard failsafe binds `shell_session_exec` too: a line deleting
+/// under a protected root is refused with the typed code and never reaches
+/// the shell, including a relative operand after a tracked `cd`. TEST
+/// SAFETY: refused targets do not exist; the allowed control deletes a
+/// non-existent child of the data dir.
+#[test]
+fn session_exec_os_guard_refuses_protected_deletion_and_allows_control() {
+    if !bash_available() {
+        eprintln!("skipping: /bin/bash not present");
+        return;
+    }
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server_full_access();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+        let started = match client
+            .call(
+                1,
+                IpcRequest::ShellSessionStart(ShellSessionStartParams {
+                    shell: None,
+                    cwd: None,
+                    env: vec![],
+                    rules: vec![],
+                    bucket_config: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect("session start")
+        {
+            IpcResponse::ShellSessionStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let exec = |line: String| {
+            IpcRequest::ShellSessionExec(ShellSessionExecParams {
+                session_id: started.session_id,
+                line,
+                cursor: 0,
+                wait_ms: Some(50),
+            })
+        };
+
+        let err = client
+            .call(2, exec("rm -rf /usr/tc-guard-nonexistent".to_owned()))
+            .await
+            .expect_err("protected deletion must be refused");
+        assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
+
+        // A tracked `cd` moves the cwd relative operands resolve against.
+        client
+            .call(3, exec("cd /usr".to_owned()))
+            .await
+            .expect("exec cd");
+        let err = client
+            .call(4, exec("rm -rf tc-guard-nonexistent".to_owned()))
+            .await
+            .expect_err("relative deletion under /usr must be refused");
+        assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
+
+        let victim = data.join("tc-guard-nonexistent");
+        client
+            .call(5, exec(format!("rm -rf '{}'", victim.display())))
+            .await
+            .expect("ordinary deletion runs");
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
 /// O-02: start a session, `cd /tmp`, then `pwd`; the combed signal must
 /// report `/tmp` WITHOUT the agent re-passing cwd. Status reports cwd.
 /// Stop is graceful (terminal state Exited).

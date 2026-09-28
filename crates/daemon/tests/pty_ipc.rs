@@ -202,6 +202,63 @@ print("pty bye", flush=True)
     });
 }
 
+/// The os_guard failsafe binds the PTY argv lane: an `sh -c` payload that
+/// deletes under a protected root is refused with the typed code before any
+/// spawn. TEST SAFETY: the refused target does not exist; the allowed control
+/// deletes a non-existent child of the data dir.
+#[test]
+fn pty_os_guard_refuses_protected_payload_and_allows_control() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        let start = |argv: Vec<String>| {
+            IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                environment: None,
+                argv,
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                rows: None,
+                cols: None,
+                tag: None,
+            })
+        };
+
+        let err = client
+            .call(
+                1,
+                start(vec![
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    "sudo -iu root rm -rf /usr/tc-guard-nonexistent".to_owned(),
+                ]),
+            )
+            .await
+            .expect_err("protected payload must be refused");
+        assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
+
+        let victim = data.join("tc-guard-nonexistent");
+        let ok = client
+            .call(
+                2,
+                start(vec![
+                    "rm".to_owned(),
+                    "-rf".to_owned(),
+                    victim.to_string_lossy().into_owned(),
+                ]),
+            )
+            .await;
+        if let Err(err) = &ok {
+            assert_ne!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
+        }
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
 #[test]
 fn pty_command_rejects_shell_interpreter() {
     let runtime = rt();

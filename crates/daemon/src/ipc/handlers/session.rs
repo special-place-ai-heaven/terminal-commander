@@ -135,6 +135,9 @@ fn map_session_error(e: &SessionError) -> IpcError {
         SessionError::SecretInputDenied => {
             IpcError::new(IpcErrorCode::SecretInputDenied, e.to_string())
         }
+        SessionError::OsCriticalPathProtected(reason) => {
+            IpcError::new(IpcErrorCode::OsCriticalPathProtected, reason.clone())
+        }
         SessionError::Pty(other) => {
             IpcError::new(IpcErrorCode::Internal, format!("shell_session: {other}"))
         }

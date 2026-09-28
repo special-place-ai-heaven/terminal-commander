@@ -179,6 +179,103 @@ fn os_critical_deletion_denied_in_full_access_on_both_lanes() {
     });
 }
 
+/// Parser gaps: the failsafe reads interpreter payloads and `cd` on the argv
+/// lane, and picks the line grammar from the shell on the shell_exec lane.
+/// TEST SAFETY: every refused target is a NON-EXISTENT child of a protected
+/// root; the allowed controls delete a non-existent child of the data dir.
+#[test]
+fn os_guard_reads_payloads_and_shell_grammar() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("os-guard-gaps");
+        let (_state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        let victim = data.join("tc-guard-nonexistent");
+        let shell_exec = |shell: &str, line: String| {
+            IpcRequest::ShellExec(ShellExecParams {
+                shell_line: line,
+                shell: Some(shell.to_owned()),
+                cwd: None,
+                env: Vec::new(),
+                rules: Vec::new(),
+                bucket_config: None,
+                tag: None,
+            })
+        };
+
+        // Argv lane: a `cd` inside an `sh -c` payload.
+        let err = client
+            .call(
+                1,
+                IpcRequest::CommandStartCombed(small_start_params(&[
+                    "sh",
+                    "-c",
+                    "cd /usr && rm -rf tc-guard-nonexistent",
+                ])),
+            )
+            .await
+            .expect_err("sh -c payload under /usr must be refused");
+        assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
+
+        // Shell lane: PowerShell keeps `\` as a path separator.
+        let err = client
+            .call(
+                2,
+                shell_exec(
+                    "pwsh",
+                    r"Remove-Item -Recurse -Force C:\Windows\System32\tc-guard-nonexistent"
+                        .to_owned(),
+                ),
+            )
+            .await
+            .expect_err("pwsh Remove-Item under System32 must be refused");
+        assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
+
+        // Shell lane: an escalator inside an `eval` payload.
+        let err = client
+            .call(
+                3,
+                shell_exec(
+                    "bash",
+                    "eval 'sudo -iu root rm -rf /usr/tc-guard-nonexistent'".to_owned(),
+                ),
+            )
+            .await
+            .expect_err("eval payload under /usr must be refused");
+        assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
+
+        // Controls: the same shapes on an ordinary path are not failsafe hits.
+        let ok = client
+            .call(
+                4,
+                IpcRequest::CommandStartCombed(small_start_params(&[
+                    "sh",
+                    "-c",
+                    &format!("rm -rf '{}'", victim.display()),
+                ])),
+            )
+            .await;
+        if let Err(err) = &ok {
+            assert_ne!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
+        }
+        let ok = client
+            .call(
+                5,
+                shell_exec(
+                    "pwsh",
+                    format!("Remove-Item -Recurse -Force '{}'", victim.display()),
+                ),
+            )
+            .await;
+        if let Err(err) = &ok {
+            assert_ne!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
+        }
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
 /// Owner decision: the default `full_access` profile runs an escalator like
 /// any argv (audited `command_start`); `developer_local` denies it pre-spawn.
 /// `sudo -n` never prompts: it runs or fails, and either is not a policy deny.
