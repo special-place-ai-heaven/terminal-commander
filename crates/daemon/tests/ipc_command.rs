@@ -116,14 +116,21 @@ fn os_critical_deletion_denied_in_full_access_on_both_lanes() {
         let (_state, handle) = build_server(&data);
         let client = DaemonClient::new(handle.socket_path().to_path_buf());
 
-        // Argv lane: rm -rf /usr is refused before any spawn.
+        // TEST SAFETY: every target is a NON-EXISTENT path under a protected
+        // tree, so a broken guard could not destroy anything.
+        // Argv lane (incl. sudo unwrapping) is refused before any spawn.
         let err = client
             .call(
                 1,
-                IpcRequest::CommandStartCombed(small_start_params(&["rm", "-rf", "/usr"])),
+                IpcRequest::CommandStartCombed(small_start_params(&[
+                    "sudo",
+                    "rm",
+                    "-rf",
+                    "/usr/lib/tc-guard-nonexistent",
+                ])),
             )
             .await
-            .expect_err("rm -rf /usr must be refused");
+            .expect_err("sudo rm -rf under /usr must be refused");
         assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected);
         assert!(
             err.message.contains("OS-critical infrastructure"),
@@ -137,7 +144,7 @@ fn os_critical_deletion_denied_in_full_access_on_both_lanes() {
             .call(
                 2,
                 IpcRequest::ShellExec(ShellExecParams {
-                    shell_line: "cd /tmp && rm -rf /etc".to_owned(),
+                    shell_line: "cd /tmp && sudo rm -rf /etc/tc-guard-nonexistent".to_owned(),
                     shell: None,
                     cwd: None,
                     env: Vec::new(),
@@ -147,7 +154,7 @@ fn os_critical_deletion_denied_in_full_access_on_both_lanes() {
                 }),
             )
             .await
-            .expect_err("shell rm -rf /etc must be refused");
+            .expect_err("shell rm -rf under /etc must be refused");
         assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected);
 
         // An ordinary deletion inside the data dir is NOT a failsafe hit.

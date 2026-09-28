@@ -453,14 +453,26 @@ fn recognized_tool_with_active_pack_gets_no_hint() {
     });
 }
 
+/// `sudo rm -rf <protected tree>` is refused pre-spawn in BOTH profiles:
+/// developer_local by the escalator deny, the full_access default by the
+/// os_guard failsafe. TEST SAFETY: the target is a NON-EXISTENT path under a
+/// protected tree, so even a broken guard could not destroy anything.
 #[test]
 fn command_start_denied_for_sudo_argv() {
+    for profile in [
+        terminal_commanderd::PolicyProfile::DeveloperLocal,
+        terminal_commanderd::PolicyProfile::FullAccess,
+    ] {
+        command_start_denied_for_sudo_argv_under(profile);
+    }
+}
+
+fn command_start_denied_for_sudo_argv_under(profile: terminal_commanderd::PolicyProfile) {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("deny-sudo");
         let mut cfg = DaemonConfig::defaults_in(&data);
-        // The escalator deny is developer_local hardening; full_access runs it.
-        cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
+        cfg.policy.profile = profile;
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let req = CommandStartRequest {
@@ -468,7 +480,7 @@ fn command_start_denied_for_sudo_argv() {
                 "sudo".to_owned(),
                 "rm".to_owned(),
                 "-rf".to_owned(),
-                "/".to_owned(),
+                "/usr/lib/tc-guard-nonexistent".to_owned(),
             ],
             cwd: None,
             env: vec![],
@@ -481,13 +493,21 @@ fn command_start_denied_for_sudo_argv() {
             peer_discriminator: None,
         };
         let err = state.command.start_combed(req).unwrap_err();
-        assert!(matches!(err, CommandError::PolicyDenied(_)));
+        let CommandError::PolicyDenied(reason) = err else {
+            panic!("{profile:?}: expected PolicyDenied, got {err:?}");
+        };
+        if profile == terminal_commanderd::PolicyProfile::FullAccess {
+            assert!(
+                reason.contains(terminal_commander_core::FAILSAFE_REASON_TAG),
+                "full_access must be refused by the os_guard failsafe: {reason}"
+            );
+        }
 
         let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
             rows.iter()
                 .any(|r| r.action == "command_rejected" && r.decision == "deny"),
-            "rows: {rows:?}"
+            "{profile:?} rows: {rows:?}"
         );
 
         cleanup(&data);
