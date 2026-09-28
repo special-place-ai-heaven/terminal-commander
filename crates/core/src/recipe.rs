@@ -259,7 +259,8 @@ fn validate_argv(argv: &[String]) -> Result<(), RecipeError> {
             )));
         }
     }
-    // Shared predicate: case, Windows extensions, wrappers, script flags.
+    // Shared predicate: case, Windows extensions, trailing dot/space, 8.3
+    // powershell short names, `::$DATA`, wrappers, script flags.
     // `git -c` is not this shape: git is not on the deny list.
     if let Some(shell) = shell_argv_denied(argv) {
         return Err(invalid(format!(
@@ -640,6 +641,14 @@ mod tests {
             ),
             (&["env", "{bin}", "-ec", "id"], "bash", "bash"),
             (&["env", "{bin}", "/k", "dir"], "cmd.exe", "cmd.exe"),
+            (&["{bin}", "/c", "dir"], "cmd.exe.", "cmd.exe"),
+            (&["{bin}", "/c", "dir"], "cmd.exe ", "cmd.exe"),
+            (
+                &["{bin}", "-Command", "Get-Date"],
+                "POWERS~1.EXE",
+                "powershell",
+            ),
+            (&["{bin}", "/c", "dir"], "cmd.exe::$DATA", "cmd.exe"),
         ];
         for (argv, fill, expect) in cases {
             let mut stored = ok_def();

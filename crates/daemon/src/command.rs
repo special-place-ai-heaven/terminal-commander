@@ -835,8 +835,8 @@ impl CommandRuntime {
         // a shell bridge: a future opt-in policy capability is the
         // only sanctioned path to invoke an interpreter, and TC38
         // does NOT add that capability. The predicate is
-        // `shell_argv_denied` (case, Windows extensions, wrappers,
-        // script flags), not a second copy.
+        // `shell_argv_denied` (case, Windows extensions, trailing dot/space,
+        // powershell 8.3, `::$DATA`, wrappers, script flags), not a second copy.
         //
         // ARGV LANE ONLY. The TC49 shell lane (`StartLane::Shell`)
         // assembles `argv[0]` = the chosen interpreter ON PURPOSE, so
@@ -2192,10 +2192,10 @@ fn merge_active_and_inline(
 /// still yields `ErrorKind::NotFound` -> `ProgramNotFound` unchanged.
 ///
 /// SECURITY: this runs AFTER `shell_argv_denied` on the raw argv, so a denied
-/// interpreter stem (`cmd`, `CMD`, `bash.exe`, `powershell`, `env bash -ec`)
-/// is already rejected and never reaches resolution. PATH+PATHEXT lookup only
-/// maps a name to a file of the SAME stem. Win32 trailing-dot, 8.3, and ADS
-/// forms (RISK-002) are not normalized here.
+/// interpreter (`cmd.exe.`, `POWERS~1.EXE`, `cmd.exe::$DATA`, wrappers, script
+/// flags) is already rejected and never reaches resolution. PATH+PATHEXT
+/// lookup only maps a name to a file of the SAME stem. This helper does not
+/// normalize; the shared deny list does.
 #[cfg(windows)]
 fn resolve_windows_argv0(argv0: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;
@@ -3681,9 +3681,9 @@ mod redact_tests {
 #[cfg(test)]
 mod resolve_tests {
     /// The shell-interpreter denylist runs on the RAW argv BEFORE any
-    /// PATH+PATHEXT resolution, so `cmd` / `CMD` / `bash.exe` / `powershell`
-    /// and `env bash -ec` are rejected and never reach the resolver.
-    /// Cross-platform: the guard is platform-independent.
+    /// PATH+PATHEXT resolution, so `cmd` / `cmd.exe.` / `POWERS~1.EXE` /
+    /// `cmd.exe::$DATA` and `env bash -ec` are rejected and never reach
+    /// the resolver. Cross-platform: the guard is platform-independent.
     #[test]
     fn shell_interpreters_still_denied_by_bare_name() {
         use terminal_commander_core::{shell_argv_denied, shell_interpreter_denied};
@@ -3698,6 +3698,10 @@ mod resolve_tests {
             "bash.exe",
             "sh.exe",
             "powershell.exe",
+            "cmd.exe.",
+            "cmd.exe ",
+            "POWERS~1.EXE",
+            "cmd.exe::$DATA",
         ] {
             assert!(
                 shell_interpreter_denied(name).is_some(),

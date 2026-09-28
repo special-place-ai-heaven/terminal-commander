@@ -224,12 +224,13 @@ fn deny_mcp_recipe_activate(
     Err(IpcError::new(
         IpcErrorCode::PolicyDenied,
         "recipe_activate_requires_admin: llm_can_activate_recipes is false, so only the \
-         admin CLI peer (`terminal-commander`) may recipe_activate or recipe_deactivate. \
-         Omitting from_mcp does not grant admin, and the MCP adapter image cannot claim \
-         it. An operator runs `terminal-commander recipes activate` or \
-         `terminal-commander recipes deactivate`. `terminal-commander recipes tombstone` \
-         retires an id. recipe_run is allowed once a recipe is activated. Same-user code \
-         can still exec that CLI; the socket is not a privilege boundary.",
+         admin CLI peer (`terminal-commander`) may recipe_activate, recipe_deactivate, \
+         or recipe_tombstone. Omitting from_mcp does not grant admin, and the MCP \
+         adapter image cannot claim it. An operator runs `terminal-commander recipes \
+         activate`, `terminal-commander recipes deactivate`, or \
+         `terminal-commander recipes tombstone`. recipe_run is allowed once a recipe \
+         is activated. Same-user code can still exec that CLI; the socket is not a \
+         privilege boundary.",
     ))
 }
 
@@ -316,6 +317,17 @@ pub(in crate::ipc::server) fn recipe_actor_label(
                 "admin"
             }
         }
+    }
+}
+
+/// `recipe_run` has no `from_mcp` field. Known images keep the FCR-014
+/// actor (`admin` / `mcp`). An unknown peer is `unknown`, not the
+/// `from_mcp: None → false → "admin"` fallback.
+fn recipe_run_actor(peer: &PeerIdentity) -> &'static str {
+    match peer_program_role(peer) {
+        ProgramRole::AdminCli => "admin",
+        ProgramRole::McpAdapter => "mcp",
+        ProgramRole::Unknown => "unknown",
     }
 }
 
@@ -539,7 +551,12 @@ pub(in crate::ipc::server) fn handle_recipe_list_versions(
 pub(in crate::ipc::server) fn handle_recipe_tombstone(
     state: &Arc<DaemonState>,
     params: &RecipeTombstoneParams,
+    peer: &PeerIdentity,
 ) -> Result<IpcResponse, IpcError> {
+    // Tombstone has no `from_mcp` field. `false` is not a caller claim: it
+    // selects the admin-CLI grant (image basename `terminal-commander`) and
+    // the in-process test seam. The MCP image stays denied.
+    deny_mcp_recipe_activate(state, peer, false)?;
     let found = state
         .store
         .tombstone_recipe(&params.recipe_id)
@@ -731,8 +748,13 @@ pub(in crate::ipc::server) fn recipe_audit_overlay(
         _ => return None,
     };
     let from_mcp_bit = from_mcp.unwrap_or(false);
+    let actor = if matches!(req, IpcRequest::RecipeRun(_)) {
+        recipe_run_actor(peer)
+    } else {
+        recipe_actor_label(peer, from_mcp_bit)
+    };
     Some((
-        recipe_actor_label(peer, from_mcp_bit),
+        actor,
         serde_json::json!({
             "recipe_id": recipe_id,
             "version": version,
@@ -806,5 +828,51 @@ mod tests {
             pid: Some(i32::try_from(std::process::id()).unwrap_or(1)),
         };
         assert_eq!(peer_program_role(&peer), ProgramRole::Unknown);
+    }
+
+    fn recipe_run_overlay(peer: &PeerIdentity) -> (&'static str, serde_json::Value) {
+        let req = IpcRequest::RecipeRun(RecipeRunParams {
+            recipe_id: "git.status".to_owned(),
+            version: Some(3),
+            scope: Some(ActivationScope::Global),
+            fills: std::collections::BTreeMap::new(),
+        });
+        let result = IpcResult::Err {
+            error: IpcError::new(IpcErrorCode::RecipeNotActive, "not active"),
+        };
+        recipe_audit_overlay(peer, &req, &result).expect("recipe_run overlay")
+    }
+
+    #[test]
+    fn unknown_peer_recipe_run_is_not_labeled_admin() {
+        let (actor, meta) = recipe_run_overlay(&PeerIdentity::unknown());
+        assert_eq!(actor, "unknown");
+        assert_eq!(meta["recipe_id"], "git.status");
+        assert_eq!(meta["version"], 3);
+        assert_eq!(meta["scope"]["kind"], "global");
+        assert!(meta["from_mcp"].is_null());
+    }
+
+    #[test]
+    fn known_peer_recipe_run_keeps_image_actor() {
+        let admin = PeerIdentity::Windows {
+            sid: "S-1-5-21".to_owned(),
+            pid: None,
+            image: Some(std::path::PathBuf::from("terminal-commander.exe")),
+        };
+        let mcp = PeerIdentity::Windows {
+            sid: "S-1-5-21".to_owned(),
+            pid: None,
+            image: Some(std::path::PathBuf::from("terminal-commander-mcp.exe")),
+        };
+        let (admin_actor, admin_meta) = recipe_run_overlay(&admin);
+        let (mcp_actor, mcp_meta) = recipe_run_overlay(&mcp);
+        assert_eq!(admin_actor, "admin");
+        assert_eq!(mcp_actor, "mcp");
+        assert_eq!(admin_meta["recipe_id"], "git.status");
+        assert_eq!(admin_meta["version"], 3);
+        assert_eq!(admin_meta["scope"]["kind"], "global");
+        assert!(admin_meta["from_mcp"].is_null());
+        assert!(mcp_meta["from_mcp"].is_null());
     }
 }
