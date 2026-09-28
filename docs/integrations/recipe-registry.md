@@ -51,9 +51,25 @@ recipe action=get recipe_id="git.status"
 
 3. Operator activates. MCP `recipe_activate` and `recipe_deactivate` are
    denied while `[policy] llm_can_activate_recipes` is false (the
-   default). The deny text is `recipe_activate_requires_admin`. Admin
-   IPC that omits `from_mcp` may activate. `recipe_upsert` and
-   `recipe_test` do not activate. `recipe_test` does not start a job.
+   default). The deny text is `recipe_activate_requires_admin`. The
+   operator commands are:
+
+```text
+terminal-commander recipes import [--activate]
+terminal-commander recipes activate <recipe_id> [--version N]
+terminal-commander recipes deactivate <recipe_id> [--version N]
+terminal-commander recipes tombstone <recipe_id>
+```
+
+   `recipes activate` and `recipes import --activate` open a global
+   activation only. Job, bucket, and probe scopes are refused, so a
+   recipe cannot stay runnable after that job exits. `recipes deactivate`
+   with no `--version` closes the active version in global scope, not
+   the latest stored version. `recipes tombstone` retires the id and
+   closes every open activation. `recipe_upsert` and `recipe_test` do
+   not activate. `recipe_test` does not start a job. A tombstoned seed
+   id is reported and skipped on import; the rest of the bank still
+   imports, and a retry is not stuck on that id.
 
 4. Run only an activated recipe. `recipe_run` (compact
    `recipe action=run`) refuses a recipe that is not active for the

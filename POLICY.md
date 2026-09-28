@@ -587,8 +587,11 @@ Given request `(actor, action, subject, profile)`:
       Shipped recipe gate (separate from rules): `[policy] llm_can_activate_recipes`
       defaults false. MCP `recipe_activate` and `recipe_deactivate` set
       `from_mcp` and are denied with `recipe_activate_requires_admin`.
-      Admin IPC omits `from_mcp` and may activate. `recipe_run` of an
-      already-activated recipe follows the normal argv command policy.
+      The operator CLI (`terminal-commander recipes activate`,
+      `recipes deactivate`, `recipes tombstone`, `recipes import --activate`)
+      omits `from_mcp` and may activate. Activations are global-only.
+      `recipe_run` of an already-activated recipe follows the normal argv
+      command policy.
    e. Evaluate the per-action path allow list (`paths.read_allow` for
       file_read, `paths.watch_allow` for file_watch). The list is
       OPT-IN, with the SAME posture as the command allow-list

@@ -41,11 +41,23 @@ pub struct RecipeVersionMeta {
     pub created_at: OffsetDateTime,
 }
 
+/// One seed the import stored or recognized, with the version to activate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipeSeedRow {
+    pub recipe_id: String,
+    pub version: u32,
+}
+
 /// Outcome of importing the built-in argv seed bank. Not a rule pack.
+///
+/// `tombstoned` ids are left unchanged. Import does not error on them,
+/// so a later seed still lands and a retry is not stuck on the same id.
+/// Tombstone has no undo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipeSeedImport {
-    pub imported: Vec<String>,
-    pub skipped: Vec<String>,
+    pub imported: Vec<RecipeSeedRow>,
+    pub skipped: Vec<RecipeSeedRow>,
+    pub tombstoned: Vec<String>,
 }
 
 /// Borrowed writer/reader over the recipe tables.
@@ -91,8 +103,11 @@ impl EventStore {
     /// `promote_active` stores each seed as `active` so a later activation
     /// gate can open a row. Otherwise seeds stay `tested` and are not
     /// activatable. Re-import of the same id and status skips that id
-    /// (no extra version). A status change (tested, then active) stores
-    /// a new version. Does not write `rules*` rows and does not activate.
+    /// (no extra version) and reports the stored version. A status or
+    /// body change stores a new version and reports that version, so the
+    /// caller can activate the row just written instead of "latest".
+    /// A tombstoned id is reported and skipped with no write. Does not
+    /// write `rules*` rows and does not activate.
     pub fn import_recipe_seeds(&mut self, promote_active: bool) -> Result<RecipeSeedImport> {
         let status = if promote_active {
             RecipeStatus::Active
@@ -101,25 +116,52 @@ impl EventStore {
         };
         let mut imported = Vec::new();
         let mut skipped = Vec::new();
+        let mut tombstoned = Vec::new();
         for seed in terminal_commander_core::RECIPE_SEEDS {
             let incoming = seed
                 .definition(status)
                 .map_err(|err| EventStoreError::InvalidPayload(err.to_string()))?;
-            let same = {
+            let decision = {
                 let store = self.recipe_store()?;
-                store
-                    .get_latest(seed.recipe_id)?
-                    .is_some_and(|latest| recipe_body_eq(&latest, &incoming))
+                if store.is_tombstoned(seed.recipe_id)? {
+                    SeedDecision::Tombstoned
+                } else if let Some(latest) = store.get_latest(seed.recipe_id)? {
+                    if recipe_body_eq(&latest, &incoming) {
+                        SeedDecision::Skip(latest.version)
+                    } else {
+                        SeedDecision::Import
+                    }
+                } else {
+                    SeedDecision::Import
+                }
             };
-            if same {
-                skipped.push(seed.recipe_id.to_owned());
-                continue;
+            match decision {
+                SeedDecision::Tombstoned => tombstoned.push(seed.recipe_id.to_owned()),
+                SeedDecision::Skip(version) => skipped.push(RecipeSeedRow {
+                    recipe_id: seed.recipe_id.to_owned(),
+                    version,
+                }),
+                SeedDecision::Import => {
+                    let version = self.recipe_store()?.create_recipe_version(&incoming)?;
+                    imported.push(RecipeSeedRow {
+                        recipe_id: seed.recipe_id.to_owned(),
+                        version,
+                    });
+                }
             }
-            self.recipe_store()?.create_recipe_version(&incoming)?;
-            imported.push(seed.recipe_id.to_owned());
         }
-        Ok(RecipeSeedImport { imported, skipped })
+        Ok(RecipeSeedImport {
+            imported,
+            skipped,
+            tombstoned,
+        })
     }
+}
+
+enum SeedDecision {
+    Import,
+    Skip(u32),
+    Tombstoned,
 }
 
 /// Content identity for skip-on-reimport. Version is assigned by the
@@ -322,6 +364,9 @@ impl RecipeStore<'_> {
 
     /// Open one scoped activation. Returns `true` when a new row was inserted.
     /// Only `status = active` versions of a non-tombstoned parent.
+    ///
+    /// At most one version stays open for `(recipe_id, scope)`. Opening
+    /// this version closes every other open version in that scope.
     pub fn record_activation_scoped(
         &mut self,
         recipe_id: &str,
@@ -330,8 +375,10 @@ impl RecipeStore<'_> {
         profile: Option<&str>,
         actor: Option<&str>,
     ) -> Result<bool> {
-        let tombstoned: i64 = self
-            .conn
+        let now_s = OffsetDateTime::now_utc().format(&Rfc3339)?;
+        let tx = self.conn.transaction()?;
+
+        let tombstoned: i64 = tx
             .query_row(
                 "SELECT tombstoned FROM recipes WHERE recipe_id = ?1",
                 params![recipe_id],
@@ -344,8 +391,7 @@ impl RecipeStore<'_> {
                 "recipe '{recipe_id}' is tombstoned"
             )));
         }
-        let status_s: Option<String> = self
-            .conn
+        let status_s: Option<String> = tx
             .query_row(
                 "SELECT status FROM recipe_versions WHERE recipe_id = ?1 AND version = ?2",
                 params![recipe_id, i64::from(version)],
@@ -370,7 +416,25 @@ impl RecipeStore<'_> {
 
         let scope_kind = scope.kind_label();
         let scope_value = scope.value_wire();
-        let already_open: i64 = self.conn.query_row(
+        // One open version per (recipe_id, scope). Close the others in
+        // this transaction so a re-import cannot leave two runnable bodies.
+        tx.execute(
+            "UPDATE recipe_activations
+                SET deactivated_at = ?1
+              WHERE recipe_id = ?2
+                AND version != ?3
+                AND scope_kind = ?4
+                AND ((?5 IS NULL AND scope_value IS NULL) OR scope_value = ?5)
+                AND deactivated_at IS NULL",
+            params![
+                &now_s,
+                recipe_id,
+                i64::from(version),
+                scope_kind,
+                scope_value
+            ],
+        )?;
+        let already_open: i64 = tx.query_row(
             "SELECT COUNT(*) FROM recipe_activations
               WHERE recipe_id = ?1
                 AND version = ?2
@@ -380,25 +444,37 @@ impl RecipeStore<'_> {
             params![recipe_id, i64::from(version), scope_kind, scope_value],
             |row| row.get(0),
         )?;
-        if already_open > 0 {
-            return Ok(false);
+        if already_open == 0 {
+            tx.execute(
+                "INSERT INTO recipe_activations
+                    (recipe_id, version, activated_at, profile, actor, scope_kind, scope_value)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    recipe_id,
+                    i64::from(version),
+                    &now_s,
+                    profile,
+                    actor,
+                    scope_kind,
+                    scope_value
+                ],
+            )?;
         }
-        let now_s = OffsetDateTime::now_utc().format(&Rfc3339)?;
-        self.conn.execute(
-            "INSERT INTO recipe_activations
-                (recipe_id, version, activated_at, profile, actor, scope_kind, scope_value)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                recipe_id,
-                i64::from(version),
-                now_s,
-                profile,
-                actor,
-                scope_kind,
-                scope_value
-            ],
-        )?;
-        Ok(true)
+        tx.commit()?;
+        Ok(already_open == 0)
+    }
+
+    /// `true` when the parent row exists and is tombstoned.
+    pub fn is_tombstoned(&self, recipe_id: &str) -> Result<bool> {
+        let flag: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT tombstoned FROM recipes WHERE recipe_id = ?1",
+                params![recipe_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(flag == Some(1))
     }
 
     /// Close every open row for `(recipe_id, version, scope)`. `true` if any closed.
@@ -430,14 +506,16 @@ impl RecipeStore<'_> {
         Ok(changed > 0)
     }
 
-    /// Open activations, oldest first.
+    /// Open activations of non-tombstoned parents, oldest first.
     pub fn list_active(&self) -> Result<Vec<ActiveRecipe>> {
         let mut stmt = self.conn.prepare(
             "SELECT rv.definition, ra.scope_kind, ra.scope_value
                FROM recipe_activations ra
                JOIN recipe_versions rv
                  ON rv.recipe_id = ra.recipe_id AND rv.version = ra.version
+               JOIN recipes ru ON ru.recipe_id = ra.recipe_id
               WHERE ra.deactivated_at IS NULL
+                AND ru.tombstoned = 0
               ORDER BY ra.activated_at ASC",
         )?;
         let mut rows = stmt.query([])?;
@@ -454,14 +532,27 @@ impl RecipeStore<'_> {
         Ok(out)
     }
 
-    /// Mark the parent tombstoned. Versions stay readable. `false` if no such id.
+    /// Mark the parent tombstoned and close every open activation for it.
+    /// Versions stay readable. `false` if no such id.
     pub fn tombstone(&mut self, recipe_id: &str) -> Result<bool> {
         let now_s = OffsetDateTime::now_utc().format(&Rfc3339)?;
-        let changed = self.conn.execute(
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
             "UPDATE recipes SET tombstoned = 1, updated_at = ?1 WHERE recipe_id = ?2",
-            params![now_s, recipe_id],
+            params![&now_s, recipe_id],
         )?;
-        Ok(changed > 0)
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE recipe_activations
+                SET deactivated_at = ?1
+              WHERE recipe_id = ?2
+                AND deactivated_at IS NULL",
+            params![&now_s, recipe_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 }
 
@@ -626,7 +717,8 @@ mod tests {
         );
         assert_eq!(first.imported.len(), 8, "{:?}", first.imported);
         assert!(first.skipped.is_empty());
-        assert!(!first.imported.iter().any(|id| id == "rg.files"));
+        assert!(first.tombstoned.is_empty());
+        assert!(!first.imported.iter().any(|row| row.recipe_id == "rg.files"));
         assert!(
             store
                 .recipe_store()
@@ -635,18 +727,20 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        for id in &first.imported {
+        for row in &first.imported {
             let def = store
                 .recipe_store()
                 .unwrap()
-                .get_latest(id)
+                .get_latest(&row.recipe_id)
                 .unwrap()
                 .unwrap();
+            assert_eq!(def.version, row.version);
             assert_eq!(def.status, RecipeStatus::Tested);
             assert!(!def.argv.is_empty());
             assert!(
                 shell_interpreter_denied(&def.argv[0]).is_none(),
-                "{id} argv[0]={} is denied",
+                "{} argv[0]={} is denied",
+                row.recipe_id,
                 def.argv[0]
             );
         }
@@ -657,14 +751,16 @@ mod tests {
 
         let promoted = store.import_recipe_seeds(true).unwrap();
         assert_eq!(promoted.imported.len(), 8);
-        for id in &promoted.imported {
+        assert!(promoted.tombstoned.is_empty());
+        for row in &promoted.imported {
             let def = store
                 .recipe_store()
                 .unwrap()
-                .get_latest(id)
+                .get_latest(&row.recipe_id)
                 .unwrap()
                 .unwrap();
             assert_eq!(def.status, RecipeStatus::Active);
+            assert_eq!(def.version, row.version);
             assert_eq!(def.version, 2);
             assert!(shell_interpreter_denied(&def.argv[0]).is_none());
         }
@@ -697,5 +793,192 @@ mod tests {
             );
         }
         assert!(recipes.get_latest("git.status").unwrap().is_none());
+    }
+
+    #[test]
+    fn tombstone_closes_open_activations() {
+        let mut store = EventStore::in_memory().unwrap();
+        let v1 = {
+            let mut recipes = store.recipe_store().unwrap();
+            let v1 = recipes
+                .create_recipe_version(&def(RecipeStatus::Active))
+                .unwrap();
+            assert!(
+                recipes
+                    .record_activation_scoped("git.status", v1, ActivationScope::Global, None, None)
+                    .unwrap()
+            );
+            assert_eq!(recipes.list_active().unwrap().len(), 1);
+            assert!(recipes.tombstone("git.status").unwrap());
+            assert!(
+                recipes.list_active().unwrap().is_empty(),
+                "tombstone must close open activations"
+            );
+            assert!(recipes.search("status", None).unwrap().is_empty());
+            assert!(recipes.is_tombstoned("git.status").unwrap());
+            v1
+        };
+        let _ = v1;
+        assert!(
+            store
+                .recipe_store()
+                .unwrap()
+                .list_active()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn activation_keeps_one_open_version_per_scope() {
+        let mut store = EventStore::in_memory().unwrap();
+        let v1 = store
+            .recipe_store()
+            .unwrap()
+            .create_recipe_version(&def(RecipeStatus::Active))
+            .unwrap();
+        assert!(
+            store
+                .recipe_store()
+                .unwrap()
+                .record_activation_scoped("git.status", v1, ActivationScope::Global, None, None)
+                .unwrap()
+        );
+        let mut next = def(RecipeStatus::Active);
+        next.summary = "Custom status argv".to_owned();
+        next.argv = vec![
+            "git".to_owned(),
+            "status".to_owned(),
+            "--porcelain=v2".to_owned(),
+        ];
+        let v2 = store
+            .recipe_store()
+            .unwrap()
+            .create_recipe_version(&next)
+            .unwrap();
+        assert!(
+            store
+                .recipe_store()
+                .unwrap()
+                .record_activation_scoped("git.status", v2, ActivationScope::Global, None, None)
+                .unwrap()
+        );
+        let listed = store.recipe_store().unwrap().list_active().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].definition.version, v2);
+        assert!(
+            !store
+                .recipe_store()
+                .unwrap()
+                .record_activation_scoped("git.status", v2, ActivationScope::Global, None, None)
+                .unwrap()
+        );
+        assert_eq!(
+            store.recipe_store().unwrap().list_active().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn import_skips_tombstoned_seed_and_retry_is_not_bricked() {
+        let mut store = EventStore::in_memory().unwrap();
+        let first = store.import_recipe_seeds(false).unwrap();
+        assert_eq!(first.imported.len(), 8);
+        assert!(store.recipe_store().unwrap().tombstone("git.log").unwrap());
+        let version_before = store
+            .recipe_store()
+            .unwrap()
+            .get_latest("git.log")
+            .unwrap()
+            .unwrap()
+            .version;
+
+        let second = store.import_recipe_seeds(true).unwrap();
+        assert_eq!(second.tombstoned, vec!["git.log".to_owned()]);
+        assert!(!second.imported.iter().any(|row| row.recipe_id == "git.log"));
+        assert_eq!(second.imported.len(), 7);
+        assert_eq!(
+            store
+                .recipe_store()
+                .unwrap()
+                .get_latest("git.log")
+                .unwrap()
+                .unwrap()
+                .version,
+            version_before
+        );
+
+        let retry = store.import_recipe_seeds(true).unwrap();
+        assert!(retry.imported.is_empty(), "{:?}", retry.imported);
+        assert_eq!(retry.tombstoned, vec!["git.log".to_owned()]);
+        assert_eq!(retry.skipped.len(), 7);
+        assert_eq!(
+            store
+                .recipe_store()
+                .unwrap()
+                .get_latest("git.log")
+                .unwrap()
+                .unwrap()
+                .version,
+            version_before
+        );
+    }
+
+    #[test]
+    fn import_reports_the_version_just_stored() {
+        let mut store = EventStore::in_memory().unwrap();
+        let mut custom = def(RecipeStatus::Active);
+        custom.argv = vec![
+            "git".to_owned(),
+            "status".to_owned(),
+            "--porcelain=v2".to_owned(),
+        ];
+        let v1 = store
+            .recipe_store()
+            .unwrap()
+            .create_recipe_version(&custom)
+            .unwrap();
+        assert!(
+            store
+                .recipe_store()
+                .unwrap()
+                .record_activation_scoped("git.status", v1, ActivationScope::Global, None, None)
+                .unwrap()
+        );
+
+        let imported = store.import_recipe_seeds(true).unwrap();
+        let git_status = imported
+            .imported
+            .iter()
+            .find(|row| row.recipe_id == "git.status")
+            .expect("custom body must mint a seed version");
+        assert_eq!(git_status.version, 2);
+        assert!(
+            store
+                .recipe_store()
+                .unwrap()
+                .record_activation_scoped(
+                    "git.status",
+                    git_status.version,
+                    ActivationScope::Global,
+                    None,
+                    None
+                )
+                .unwrap()
+        );
+        let open: Vec<_> = store
+            .recipe_store()
+            .unwrap()
+            .list_active()
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.definition.recipe_id == "git.status")
+            .collect();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].definition.version, git_status.version);
+        assert_eq!(
+            open[0].definition.argv,
+            ["git".to_owned(), "status".to_owned(), "--short".to_owned()]
+        );
     }
 }

@@ -10,10 +10,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use terminal_commander_core::{ActivationScope, RecipeDefinition, RecipeStatus};
+use terminal_commander_core::{ActivationScope, JobId, RecipeDefinition, RecipeStatus};
 use terminal_commanderd::{
     CommandStartParams, DaemonClient, DaemonConfig, DaemonState, IpcError, IpcErrorCode,
-    IpcRequest, IpcServer, RecipeActivateParams, RecipeUpsertParams, ServerHandle, ShellExecParams,
+    IpcRequest, IpcServer, RecipeActivateParams, RecipeTombstoneParams, RecipeUpsertParams,
+    ServerHandle, ShellExecParams,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -222,6 +223,66 @@ fn shell_deny_steers_to_matching_activated_recipe_only() {
         let other = session.shell("echo a | wc -c").await;
         assert_argv_teach(&other);
         assert!(!state.policy.caps_allow_shell());
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&data);
+    });
+}
+
+#[test]
+fn recipe_tombstone_and_dead_job_scope_do_not_steer() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("steer-life");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+        let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
+            .spawn()
+            .unwrap();
+        let mut session = Session {
+            client: DaemonClient::new(handle.socket_path().to_path_buf())
+                .with_timeout(Duration::from_secs(5)),
+            next: 0,
+        };
+        session
+            .upsert(recipe(
+                "git.status",
+                &["git", "status", "--short"],
+                &["git", "vcs"],
+            ))
+            .await;
+        let job_scope = ActivationScope::Job {
+            job_id: JobId::new(),
+        };
+        assert!(
+            state
+                .store
+                .record_recipe_activation_scoped("git.status", 1, job_scope, None, Some("test"))
+                .unwrap()
+        );
+        let dead = session.shell("git status --short").await;
+        assert_argv_teach(&dead);
+
+        session.activate("git.status").await;
+        let matched = session.shell("git status --short").await;
+        assert_recipe(&matched, "git.status");
+
+        session.next += 1;
+        session
+            .client
+            .call(
+                session.next,
+                IpcRequest::RecipeTombstone(RecipeTombstoneParams {
+                    recipe_id: "git.status".to_owned(),
+                }),
+            )
+            .await
+            .expect("tombstone");
+        let retired = session.shell("git status --short").await;
+        assert_argv_teach(&retired);
 
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&data);

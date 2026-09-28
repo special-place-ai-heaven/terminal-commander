@@ -641,7 +641,7 @@ cannot cross the trust boundary.
 
 | Command | Role |
 | --- | --- |
-| `terminal-commander` | Admin CLI: status, doctor, setup, session, rules, jobs, probes, policy, audit, update |
+| `terminal-commander` | Admin CLI: status, doctor, setup, session, rules, recipes, jobs, probes, policy, audit, update |
 | `terminal-commander-mcp` | MCP stdio adapter launched by Cursor/Codex/Claude |
 | `terminal-commanderd` | Local daemon for IPC, probes, policy, buckets, audit, and graceful shutdown |
 
@@ -658,6 +658,7 @@ Admin CLI subcommands (`terminal-commander <cmd>`):
 | `session list` | Enumerate sessions (default + seeded), columns: SESSION/PID/STATE/IDLE/ENDPOINT. |
 | `session reap [<token>] [--all] [--idle --idle-secs N]` | Graceful Shutdown-IPC; identity-gated force fallback. |
 | `rules { list \| show <id> }`, `jobs`, `probes`, `policy`, `audit [--limit N]` | Daemon-backed inspection (exit 69 when daemon unavailable; no fake data). |
+| `recipes import [--activate]`, `recipes activate <id> [--version N]`, `recipes deactivate <id> [--version N]`, `recipes tombstone <id>` | Operator recipe lifecycle. Global scope only. MCP activate/deactivate stay denied while `llm_can_activate_recipes` is false. |
 | `update` | Run `npm install -g terminal-commander@latest` after a scoped Windows lock preflight. |
 
 The Rust admin CLI does not synthesize fake daemon data. Daemon-backed

@@ -281,12 +281,12 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "recipe_activate",
             status: ToolStatus::Live,
-            description: "Activate an argv recipe for a scope. Denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin).",
+            description: "Activate an argv recipe in global scope. Job, bucket, and probe scopes are refused. Denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin). An operator runs `terminal-commander recipes activate`.",
         },
         ToolCatalogueEntry {
             name: "recipe_deactivate",
             status: ToolStatus::Live,
-            description: "Deactivate an argv recipe for a scope. Same MCP admin gate as recipe_activate.",
+            description: "Deactivate an argv recipe for a scope. Omitted version closes the active version, not the latest stored. Same MCP admin gate as recipe_activate. An operator runs `terminal-commander recipes deactivate`.",
         },
         ToolCatalogueEntry {
             name: "recipe_list_active",
@@ -2273,7 +2273,7 @@ impl TerminalCommanderMcpServer {
 
     /// `recipe_activate` — MCP-gated. Default deny.
     #[tool(
-        description = "Activate an argv recipe for a scope. Denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin)."
+        description = "Activate an argv recipe in global scope. Job, bucket, and probe scopes are refused. Denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin). An operator runs `terminal-commander recipes activate`."
     )]
     async fn recipe_activate(
         &self,
@@ -2305,7 +2305,7 @@ impl TerminalCommanderMcpServer {
 
     /// `recipe_deactivate` — same MCP admin gate as activate.
     #[tool(
-        description = "Deactivate an argv recipe for a scope. Same MCP admin gate as recipe_activate."
+        description = "Deactivate an argv recipe for a scope. Omitted version closes the active version, not the latest stored. Same MCP admin gate as recipe_activate. An operator runs `terminal-commander recipes deactivate`."
     )]
     async fn recipe_deactivate(
         &self,
@@ -2313,24 +2313,11 @@ impl TerminalCommanderMcpServer {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_daemon_available().await?;
         let scope = params.scope.into_ipc_scope()?;
-        let version = match params.version {
-            Some(version) => version,
-            None => match self
-                .daemon
-                .call(IpcRequest::RecipeGet(RecipeGetParams {
-                    recipe_id: params.recipe_id.clone(),
-                    version: None,
-                }))
-                .await
-            {
-                Ok(IpcResponse::RecipeGet(RecipeGetResponse { definition })) => definition.version,
-                Ok(other) => return Err(unexpected_variant(&other)),
-                Err(e) => return Err(into_mcp_error_for(false, &e)),
-            },
-        };
+        // Omitted version is resolved by the daemon after the admin gate,
+        // to the open activation for this scope, not the latest stored row.
         let ipc = RecipeDeactivateParams {
             recipe_id: params.recipe_id,
-            version,
+            version: params.version,
             scope: Some(scope),
             from_mcp: true,
         };
@@ -3446,7 +3433,7 @@ usually {\"kind\":\"global\"}. Rules comb command output into structured signals
     /// `recipe` facade — argv recipes. Not rules.
     #[tool(
         name = "recipe",
-        description = "Argv recipes (not rules): search, get, upsert, test (dry-run; does not activate), activate, deactivate, list_active, run. activate and deactivate are denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin). run executes an activated recipe on the argv lane (run_and_watch when the recipe has a timeout or rule pack; otherwise command_start_combed). Never shell_exec. Example: {\"action\":\"run\",\"recipe_id\":\"git.status\",\"scope\":{\"kind\":\"global\"}}."
+        description = "Argv recipes (not rules): search, get, upsert, test (dry-run; does not activate), activate, deactivate, list_active, run. activate is global-only. activate and deactivate are denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin); an operator runs `terminal-commander recipes activate`, `recipes deactivate`, or `recipes tombstone`. run executes an activated recipe on the argv lane (run_and_watch when the recipe has a timeout or rule pack; otherwise command_start_combed). Never shell_exec. Example: {\"action\":\"run\",\"recipe_id\":\"git.status\",\"scope\":{\"kind\":\"global\"}}."
     )]
     pub(crate) async fn recipe_facade(
         &self,
@@ -6206,7 +6193,8 @@ pub struct McpRecipeActivateParams {
     pub scope: McpActivationScope,
 }
 
-/// MCP parameters for `recipe_deactivate`. `version` omitted means latest stored.
+/// MCP parameters for `recipe_deactivate`. `version` omitted means the
+/// open activation for this scope, not the latest stored version.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRecipeDeactivateParams {
     pub recipe_id: String,

@@ -2028,10 +2028,14 @@ pub struct RecipeActivateResponse {
 }
 
 /// `recipe_deactivate` parameters. `scope` is required at the handler.
+///
+/// `version: null` closes the open activation for that scope. It does
+/// not mean the latest stored version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecipeDeactivateParams {
     pub recipe_id: String,
-    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ActivationScope>,
     /// See [`RecipeActivateParams::from_mcp`]. Same admin gate.
@@ -2111,6 +2115,9 @@ pub struct RecipeImportSeedsResponse {
     pub imported: Vec<String>,
     pub skipped: Vec<String>,
     pub activated: Vec<String>,
+    /// Ids left unchanged because the parent is tombstoned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tombstoned: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed: Vec<RecipeImportFailure>,
 }
@@ -3728,7 +3735,7 @@ mod tests {
             (
                 IpcRequest::RecipeDeactivate(RecipeDeactivateParams {
                     recipe_id: "git.status".to_owned(),
-                    version: 1,
+                    version: Some(1),
                     scope: None,
                     from_mcp: false,
                 }),
