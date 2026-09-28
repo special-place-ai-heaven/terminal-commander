@@ -1310,7 +1310,7 @@ impl TerminalCommanderMcpServer {
     /// `command_start_combed` — start a non-PTY argv command on the
     /// daemon and return bounded metadata. Never returns raw output.
     #[tool(
-        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. Argv only; shell interpreters are denied when allow_shell is off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default developer_local profile). On Windows, do not pass bare /home/... paths in argv — prefix with wsl or use Windows paths."
+        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. Argv only; shell interpreters are denied when allow_shell is off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default developer_local profile). A pipeline in a shell -c/-lc script may report only its last stage's exit code (unless the script sets pipefail); command_status then sets pipeline_exit_masked:true (not detected for cmd /C or pwsh -Command). On Windows, do not pass bare /home/... paths in argv — prefix with wsl or use Windows paths."
     )]
     async fn command_start_combed(
         &self,
@@ -1353,7 +1353,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters denied when allow_shell is off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default developer_local profile)."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters denied when allow_shell is off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default developer_local profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail)."
     )]
     async fn run_and_watch(
         &self,
@@ -1421,6 +1421,7 @@ impl TerminalCommanderMcpServer {
         // status we actually got. Stays None if no poll ever succeeded.
         let mut last_outcome_trust: Option<terminal_commander_ipc::OutcomeTrust> = None;
         let mut exit_code: Option<i32> = None;
+        let mut pipeline_exit_masked = false;
         // Deferred init: every normal loop exit assigns `receipt` first, and the
         // degraded arms pass `None` (a degraded result carries no receipt), so a
         // `= None` here would be a dead store under -D unused-assignments.
@@ -1450,6 +1451,7 @@ impl TerminalCommanderMcpServer {
                         last_observed_state,
                         last_outcome_trust,
                         exit_code,
+                        pipeline_exit_masked,
                         &signals,
                         None,
                         true,
@@ -1464,6 +1466,7 @@ impl TerminalCommanderMcpServer {
             last_observed_state = Some(status.state);
             last_outcome_trust = Some(status.outcome_trust);
             exit_code = status.exit_code;
+            pipeline_exit_masked = status.pipeline_exit_masked;
             receipt = status.receipt.as_ref().map(|r| serde_json::json!(r));
 
             let terminal = matches!(
@@ -1517,6 +1520,7 @@ impl TerminalCommanderMcpServer {
                         last_observed_state,
                         last_outcome_trust,
                         exit_code,
+                        pipeline_exit_masked,
                         &signals,
                         None,
                         true,
@@ -1578,6 +1582,7 @@ impl TerminalCommanderMcpServer {
             last_observed_state,
             last_outcome_trust,
             exit_code,
+            pipeline_exit_masked,
             &signals,
             receipt,
             false,
@@ -1594,7 +1599,7 @@ impl TerminalCommanderMcpServer {
 
     /// `command_status` — lifecycle counters + exit info for a job.
     #[tool(
-        description = "Lookup bounded counters and exit info for a previously started job. `outcome_trust` tells you HOW the daemon knows: `observed` (witnessed live -- every counter is a real observation), `reconstructed` (read back from the durable receipt after a restart -- state/exit_code are truthful and the counters are the values captured when the job finished), `abandoned` (ended by daemon shutdown or replacement rather than by the job itself; reported as cancelled with no exit code, and is NOT a failure). A job the daemon recorded STARTING but never recorded finishing is not a status at all -- it is returned as a typed `JobLost` error, never as an `outcome_trust` value, and must NEVER be read as success. `restarted` is the older boolean alias for 'not observed live'; prefer `outcome_trust`. Never returns raw stream text, with one exception: when the command finished and ZERO rules matched, a bounded exit receipt (exit code, suppressed-line count, short tail) is included so a no-rule command is never silent. That receipt is memory-only and does NOT survive a daemon restart -- its absence after a restart does not mean the command produced no output."
+        description = "Lookup bounded counters and exit info for a previously started job. `outcome_trust` tells you HOW the daemon knows: `observed` (witnessed live -- every counter is a real observation), `reconstructed` (read back from the durable receipt after a restart -- state/exit_code are truthful and the counters are the values captured when the job finished), `abandoned` (ended by daemon shutdown or replacement rather than by the job itself; reported as cancelled with no exit code, and is NOT a failure). A job the daemon recorded STARTING but never recorded finishing is not a status at all -- it is returned as a typed `JobLost` error, never as an `outcome_trust` value, and must NEVER be read as success. `restarted` is the older boolean alias for 'not observed live'; prefer `outcome_trust`. Never returns raw stream text, with one exception: when the command finished and ZERO rules matched, a bounded exit receipt (exit code, suppressed-line count, short tail) is included so a no-rule command is never silent. That receipt is memory-only and does NOT survive a daemon restart -- its absence after a restart does not mean the command produced no output. `pipeline_exit_masked: true` means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only the last stage (unless the script sets pipefail), so an earlier stage's failure can hide behind a 0. Not detected on reconstructed status, PTY jobs, cmd /C or pwsh -Command."
     )]
     async fn command_status(
         &self,
@@ -1660,7 +1665,7 @@ impl TerminalCommanderMcpServer {
     /// MCP carries `shell_line` ONLY — capabilities are config/TOML, never an
     /// MCP-flippable flag.
     #[tool(
-        description = "Run ONE shell line (pipelines/compounds/redirects via [shell,-lc,line]) and get back ONLY the lines your rules match plus exit state, never the raw stream. Requires the allow_shell capability (config/TOML; on in the default developer_local profile, [policy.caps] allow_shell = false hardens); a denied daemon returns a policy error. Returns job_id, bucket_id, probe_id, initial cursor. Use run_and_watch or command_start_combed when you do not need shell syntax; shell_exec only when pipelines, compounds, or redirects are required and allow_shell is on."
+        description = "Run ONE shell line (pipelines/compounds/redirects via [shell,-lc,line]) and get back ONLY the lines your rules match plus exit state, never the raw stream. Requires the allow_shell capability (config/TOML; on in the default developer_local profile, [policy.caps] allow_shell = false hardens); a denied daemon returns a policy error. Returns job_id, bucket_id, probe_id, initial cursor. Use run_and_watch or command_start_combed when you do not need shell syntax; shell_exec only when pipelines, compounds, or redirects are required and allow_shell is on. A pipeline's exit code may reflect only its last stage (unless the line sets pipefail; TC runs it as-is, adding none); command_status/run_and_watch report pipeline_exit_masked:true for it. Not detected for cmd /C or pwsh -Command shells."
     )]
     async fn shell_exec(
         &self,
@@ -2426,6 +2431,7 @@ impl TerminalCommanderMcpServer {
             state,
             outcome_trust,
             exit_code,
+            pipeline_exit_masked,
             cursor,
             signals,
             receipt,
@@ -2447,6 +2453,7 @@ impl TerminalCommanderMcpServer {
             state,
             outcome_trust,
             exit_code,
+            pipeline_exit_masked,
             &signals,
             receipt,
             degraded,
@@ -2490,6 +2497,7 @@ impl TerminalCommanderMcpServer {
         let mut last_state = None;
         let mut last_outcome_trust = None;
         let mut exit_code = None;
+        let mut pipeline_exit_masked = false;
         // Deferred init: every loop iteration assigns `receipt` before the
         // final Ok(..) below reads it; the early-return degraded arms never
         // read it (mirrors run_and_watch's same pattern).
@@ -2508,6 +2516,7 @@ impl TerminalCommanderMcpServer {
                         last_state,
                         last_outcome_trust,
                         exit_code,
+                        pipeline_exit_masked,
                         resume_cursor,
                         signals,
                         &e,
@@ -2517,6 +2526,7 @@ impl TerminalCommanderMcpServer {
             last_state = Some(status.state);
             last_outcome_trust = Some(status.outcome_trust);
             exit_code = status.exit_code;
+            pipeline_exit_masked = status.pipeline_exit_masked;
             receipt = status.receipt.as_ref().map(|r| serde_json::json!(r));
             let terminal = matches!(
                 status.state,
@@ -2548,6 +2558,7 @@ impl TerminalCommanderMcpServer {
                     last_state,
                     last_outcome_trust,
                     exit_code,
+                    pipeline_exit_masked,
                     resume_cursor,
                     signals,
                     &err,
@@ -2572,6 +2583,7 @@ impl TerminalCommanderMcpServer {
                         last_state,
                         last_outcome_trust,
                         exit_code,
+                        pipeline_exit_masked,
                         resume_cursor,
                         signals,
                         &err,
@@ -2587,6 +2599,7 @@ impl TerminalCommanderMcpServer {
             state: last_state,
             outcome_trust: last_outcome_trust,
             exit_code,
+            pipeline_exit_masked,
             cursor: resume_cursor,
             signals,
             receipt,
@@ -4107,7 +4120,7 @@ fn project_signal_compact(ev: &terminal_commander_core::SignalEvent) -> serde_js
 /// `recover_hint` rather than a bare error. `last_observed_state` is `None`
 /// when the daemon failed before the first status poll -- the state is then
 /// reported as "unknown", never a silent "running".
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn run_and_watch_result(
     job_id: terminal_commander_core::JobId,
     bucket_id: terminal_commander_core::BucketId,
@@ -4115,6 +4128,7 @@ fn run_and_watch_result(
     last_observed_state: Option<terminal_commander_core::JobState>,
     outcome_trust: Option<terminal_commander_ipc::OutcomeTrust>,
     exit_code: Option<i32>,
+    pipeline_exit_masked: bool,
     signals: &[terminal_commander_core::SignalEvent],
     receipt: Option<serde_json::Value>,
     degraded: bool,
@@ -4129,6 +4143,7 @@ fn run_and_watch_result(
         last_observed_state,
         outcome_trust,
         exit_code,
+        pipeline_exit_masked,
         signals,
         receipt,
         degraded,
@@ -4142,7 +4157,7 @@ fn run_and_watch_result(
 /// a caller that needs to overlay extra top-level fields -- `recipe_run`'s
 /// watched response -- can merge onto this `Value` instead of duplicating
 /// the run_and_watch contract fields.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn run_and_watch_result_value(
     job_id: terminal_commander_core::JobId,
     bucket_id: terminal_commander_core::BucketId,
@@ -4154,6 +4169,8 @@ fn run_and_watch_result_value(
     // becomes "unknown" rather than a silent "running".
     outcome_trust: Option<terminal_commander_ipc::OutcomeTrust>,
     exit_code: Option<i32>,
+    // F1: last status saw a shell pipeline; `exit_code` may be its last stage's.
+    pipeline_exit_masked: bool,
     signals: &[terminal_commander_core::SignalEvent],
     receipt: Option<serde_json::Value>,
     degraded: bool,
@@ -4211,6 +4228,7 @@ fn run_and_watch_result_value(
         "bucket_id": bucket_id,
         "state": state_json,
         "exit_code": exit_code,
+        "pipeline_exit_masked": pipeline_exit_masked,
         "signals": signals_json,
         "signal_count": signals.len(),
         // F6: explicit truncation flag -- true when `signals` hit `max_signals`
@@ -5178,6 +5196,7 @@ struct RecipeWatch {
     state: Option<terminal_commander_core::JobState>,
     outcome_trust: Option<terminal_commander_ipc::OutcomeTrust>,
     exit_code: Option<i32>,
+    pipeline_exit_masked: bool,
     cursor: u64,
     signals: Vec<terminal_commander_core::SignalEvent>,
     receipt: Option<serde_json::Value>,
@@ -5190,6 +5209,7 @@ fn degraded_recipe_watch(
     state: Option<terminal_commander_core::JobState>,
     outcome_trust: Option<terminal_commander_ipc::OutcomeTrust>,
     exit_code: Option<i32>,
+    pipeline_exit_masked: bool,
     cursor: u64,
     signals: Vec<terminal_commander_core::SignalEvent>,
     err: &IpcError,
@@ -5198,6 +5218,7 @@ fn degraded_recipe_watch(
         state,
         outcome_trust,
         exit_code,
+        pipeline_exit_masked,
         cursor,
         signals,
         // F6: an interrupted wait did not necessarily cap; degraded:true
@@ -5605,6 +5626,7 @@ fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
         // shapes cannot drift apart. (`lost` is NOT a value here -- it is
         // delivered as a typed `JobLost` error.)
         "outcome_trust": effective_outcome_trust(s),
+        "pipeline_exit_masked": s.pipeline_exit_masked,
     })
 }
 
@@ -7036,6 +7058,29 @@ mod tests {
 
     // --- TC-1b: run_and_watch degraded / superset result builder ---
 
+    /// F1: the daemon's pipeline flag reaches the run_and_watch payload.
+    #[test]
+    fn run_and_watch_payload_carries_pipeline_exit_masked() {
+        for masked in [true, false] {
+            let v = run_and_watch_result_value(
+                terminal_commander_core::JobId::new(),
+                terminal_commander_core::BucketId::new(),
+                0,
+                Some(terminal_commander_core::JobState::Exited),
+                None,
+                Some(0),
+                masked,
+                &[],
+                None,
+                false,
+                None,
+                false,
+                false,
+            );
+            assert_eq!(v["pipeline_exit_masked"], serde_json::json!(masked));
+        }
+    }
+
     /// Build a `run_and_watch_result` payload and return its parsed JSON. A
     /// success-shaped result (Ok) is itself the TC-1b property: once a job_id
     /// exists, run_and_watch never returns a bare error.
@@ -7065,6 +7110,7 @@ mod tests {
             last_observed_state,
             None,
             exit_code,
+            false,
             signals,
             None,
             degraded,

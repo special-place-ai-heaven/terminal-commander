@@ -445,6 +445,8 @@ struct JobBinding {
     /// read zero for a still-running job). Mirrors the PTY runtime, which
     /// reads probe-side metrics before cancellation.
     metrics_live: Arc<parking_lot::Mutex<terminal_commander_probes::ProcessProbeMetrics>>,
+    /// F1: argv runs a shell `-c` script holding a pipeline.
+    pipeline_exit_masked: bool,
 }
 
 /// Identity triple for a single live job.
@@ -839,6 +841,10 @@ impl CommandRuntime {
         mode: StartLane<'_>,
     ) -> Result<CommandStartResponse, CommandError> {
         Self::validate_argv(&req.argv)?;
+
+        // F1: flag (never rewrite) a shell pipeline: its exit code may reflect
+        // only the last stage. Covers the shell lane too (`[shell, "-lc", line]`).
+        let pipeline_exit_masked = argv_runs_shell_pipeline(&req.argv);
 
         // TC-2 in-flight dedup guard. BEFORE the id mint: if an identical
         // logical start is already in flight (same client nonce, or the
@@ -1362,6 +1368,7 @@ impl CommandRuntime {
                 cancel: cancel_handle,
                 // TC-3: shared handle to the probe's live metrics for `stop()`.
                 metrics_live,
+                pipeline_exit_masked,
             },
         );
         self.audit(
@@ -1913,7 +1920,7 @@ impl CommandRuntime {
             } else {
                 b.metrics_live.lock().clone()
             };
-            (m, b.receipt.clone())
+            (m, b.receipt.clone(), b.pipeline_exit_masked)
         });
         // spec 004 review (composer MEDIUM, grok/kimi LOW): with no live
         // binding there is NO observation to report, so certifying
@@ -1930,10 +1937,10 @@ impl CommandRuntime {
         // Unreachable today because terminal bindings are never evicted
         // (BACKLOG TCD-8); this is the guard that keeps TCD-8's eventual fix
         // from silently reintroducing the defect.
-        let (metrics, receipt) = match live_metrics {
+        let (metrics, receipt, pipeline_exit_masked) = match live_metrics {
             Some(found) => found,
             None if rec.state == terminal_commander_core::JobState::Starting => {
-                (ProcessProbeMetrics::default(), None)
+                (ProcessProbeMetrics::default(), None, false)
             }
             None => return Err(CommandError::UnknownJob(job_id)),
         };
@@ -1960,6 +1967,7 @@ impl CommandRuntime {
             // spec 004: this counter set came from a live probe, so the agent
             // may treat every number here as a real observation.
             outcome_trust: OutcomeTrust::Observed,
+            pipeline_exit_masked,
         })
     }
 
@@ -2063,6 +2071,7 @@ impl CommandRuntime {
             // Derived, never set independently.
             restarted: outcome_trust != OutcomeTrust::Observed,
             outcome_trust,
+            pipeline_exit_masked: false,
         })
     }
 
@@ -2092,6 +2101,65 @@ enum ProbeOutcome {
         signal: Option<String>,
     },
     Cancelled,
+}
+
+/// F1: the script a shell interpreter in `argv` runs with `-c`: the argument
+/// after the first single-dash flag cluster holding `c` (`-c`, `-lc`, `-ec`,
+/// `-xc`), so options between the shell and `-c` (`bash -e -c`,
+/// `bash --norc -c`, `bash -ox pipefail -c`) are skipped. The search stops at
+/// the first positional argument: in `bash script.sh -c x` the `-c` belongs
+/// to the script. `None` for non-shells (`python -c`).
+fn shell_script_arg(argv: &[String]) -> Option<&str> {
+    let shell = argv
+        .iter()
+        .position(|arg| shell_interpreter_denied(arg).is_some())?;
+    let mut rest = argv[shell + 1..].iter();
+    while let Some(arg) = rest.next() {
+        let script_flag = arg.strip_prefix('-').is_some_and(|body| {
+            body.bytes().all(|b| b.is_ascii_alphabetic()) && body.contains('c')
+        });
+        if script_flag {
+            return rest.next().map(String::as_str);
+        }
+        if !arg.starts_with(['-', '+']) {
+            return None;
+        }
+        for _ in 0..terminal_commander_core::shell_deny::posix_option_value_words(arg) {
+            rest.next();
+        }
+    }
+    None
+}
+
+/// F1: detect an unquoted pipe (`|` or `|&`, not `||`) in a shell script.
+// ponytail: quote/escape-aware scan, not a shell parser; a `|` in a `case`
+// pattern also counts. Good enough for an advisory flag.
+fn shell_script_has_pipeline(script: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut chars = script.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            // `||` is consumed whole by the guard and falls through to `_`.
+            '|' if !in_single && !in_double && chars.next_if_eq(&'|').is_none() => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// F1: whether `argv` runs a shell `-c` script holding a pipeline, whose exit
+/// code may then reflect only the last stage (unless the script sets pipefail).
+fn argv_runs_shell_pipeline(argv: &[String]) -> bool {
+    shell_script_arg(argv).is_some_and(shell_script_has_pipeline)
 }
 
 async fn drive_to_exit(mut probe: ProcessProbe) -> (ProcessProbeMetrics, ProbeOutcome) {
@@ -3054,6 +3122,63 @@ mod posix_argv_tests {
                 "{ok:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::{argv_runs_shell_pipeline, shell_script_has_pipeline};
+
+    fn runs(a: &[&str]) -> bool {
+        let argv: Vec<String> = a.iter().map(|s| (*s).to_owned()).collect();
+        argv_runs_shell_pipeline(&argv)
+    }
+
+    #[test]
+    fn detects_pipeline_outside_quotes() {
+        assert!(shell_script_has_pipeline("false | head -1"));
+        assert!(shell_script_has_pipeline("make 2>&1 |& tee log"));
+        assert!(!shell_script_has_pipeline("echo 'a|b'"));
+        assert!(!shell_script_has_pipeline("echo a\\|b"));
+        assert!(!shell_script_has_pipeline("false || true"));
+    }
+
+    #[test]
+    fn flags_pipelines_in_any_shell_script_only() {
+        for a in [
+            &["bash", "-lc", "a | b"][..],
+            &["sh", "-c", "a | b"][..],
+            &["fish", "-c", "a | b"][..],
+            &["bash", "-e", "-c", "a | b"][..],
+            &["bash", "--norc", "-c", "a | b"][..],
+            &["sh", "-ec", "a | b"][..],
+            &["bash", "-xc", "a | b"][..],
+            &["bash", "-o", "pipefail", "-c", "a | b"][..],
+            &["bash", "-ox", "pipefail", "-c", "a | b"][..],
+            &["wsl", "bash", "-lc", "a | b"][..],
+        ] {
+            assert!(runs(a), "{a:?}");
+        }
+        for a in [
+            &["python", "-c", "print(1|2)"][..],
+            &["node", "-e", "a | b"][..],
+            &["bash", "-c", "a || b"][..],
+            &["bash", "script.sh"][..],
+            &["bash", "script.sh", "-c", "x|y"][..],
+            &["bash", "--rcfile", "rc", "script.sh", "-c", "x|y"][..],
+            &["bash", "-ox", "pipefail", "script.sh", "-c", "x|y"][..],
+            &["bash", "-c"][..],
+        ] {
+            assert!(!runs(a), "{a:?}");
+        }
+    }
+
+    /// F3 regression: `[ ... ] &&` in a `-lc` script is not a pipeline and the
+    /// script is passed through untouched (nothing rewrites argv).
+    #[test]
+    fn bracket_test_is_not_a_pipeline() {
+        let script = "for i in $(seq 1 3); do [ $i -eq 2 ] && echo HIT; done";
+        assert!(!runs(&["bash", "-lc", script]));
     }
 }
 

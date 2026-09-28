@@ -189,6 +189,12 @@ pub struct CommandStatusResponse {
     /// `Observed` so a payload from an older daemon decodes unchanged.
     #[serde(default)]
     pub outcome_trust: OutcomeTrust,
+    /// F1: `true` when a pipeline was detected in the shell `-c`/`-lc`
+    /// script; the exit code may reflect only the last stage (unless the
+    /// script sets pipefail), so an earlier stage's failure can hide behind it. Omitted when `false`. Not detected
+    /// on reconstructed status, PTY jobs, `cmd /C` or `pwsh -Command` lanes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pipeline_exit_masked: bool,
 }
 
 /// Params for `command_stop` (TC-3): force-kill a running combed

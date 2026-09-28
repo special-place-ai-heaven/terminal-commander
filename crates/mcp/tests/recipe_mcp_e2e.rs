@@ -700,3 +700,58 @@ async fn watched_recipe_run_reports_wait_exhausted_on_deadline() {
     handle.shutdown().await;
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// F1: a watched recipe whose argv is a shell pipeline (recipes follow
+/// allow_shell) carries the daemon's `pipeline_exit_masked` flag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watched_recipe_run_reports_pipeline_exit_masked() {
+    let data = tmp_data_dir("watch-pipeline");
+    let (handle, state) = spawn_daemon(&data);
+    let (_server, client) = paired(&handle).await;
+
+    let recipe = RecipeDefinition {
+        recipe_id: "sh.pipeline".to_owned(),
+        title: "Pipeline".to_owned(),
+        summary: "A shell pipeline".to_owned(),
+        argv: vec!["sh".to_owned(), "-c".to_owned(), "true | true".to_owned()],
+        ..watched_true()
+    };
+    let definition = serde_json::to_string(&recipe).unwrap();
+    let upserted = call_tool(
+        &client,
+        "recipe_upsert",
+        serde_json::json!({ "definition_json": definition }),
+    )
+    .await
+    .expect("recipe upsert");
+    let upsert_body: serde_json::Value =
+        serde_json::from_str(&first_text(&upserted)).expect("upsert json");
+    let version = u32::try_from(upsert_body["version"].as_u64().expect("version")).unwrap();
+    assert!(
+        state
+            .store
+            .record_recipe_activation_scoped(
+                "sh.pipeline",
+                version,
+                ActivationScope::Global,
+                Some("test"),
+                Some("admin"),
+            )
+            .expect("store activate")
+    );
+
+    let ran = call_tool(
+        &client,
+        "recipe_run",
+        serde_json::json!({ "recipe_id": "sh.pipeline", "scope": {"kind": "global"} }),
+    )
+    .await
+    .expect("recipe_run");
+    let body: serde_json::Value = serde_json::from_str(&first_text(&ran)).expect("run json");
+    assert_eq!(body["watched"], true, "{body}");
+    assert_eq!(body["pipeline_exit_masked"], true, "{body}");
+
+    let _ = client.cancel().await;
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
+}

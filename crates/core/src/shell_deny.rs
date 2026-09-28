@@ -454,11 +454,14 @@ fn interpreter_script_flag(shell: &str, args: &[impl AsRef<str>]) -> bool {
 }
 
 /// How many following words a POSIX interpreter option token consumes as
-/// values: 1 for a `--rcfile`/`--init-file` with no inline `=`, else one per
+/// values.
+///
+/// 1 for a `--rcfile`/`--init-file` with no inline `=`, else one per
 /// `o`/`O` letter in a short cluster. bash and dash take a separate word for
 /// EACH invocation `-o`/`-O` (`set -o NAME`, `shopt -O NAME`) wherever the
 /// letter sits, so `-ox pipefail -c` and `-oO a b -c` each still expose `-c`.
-fn posix_option_value_words(token: &str) -> usize {
+#[must_use]
+pub fn posix_option_value_words(token: &str) -> usize {
     if let Some(long) = token.strip_prefix("--") {
         return usize::from(matches!(long, "rcfile" | "init-file"));
     }

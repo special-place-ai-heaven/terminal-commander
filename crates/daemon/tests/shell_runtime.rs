@@ -226,3 +226,59 @@ fn shell_exec_distinct_lines_yield_distinct_jobs() {
         cleanup(&data);
     });
 }
+
+/// F1: a shell pipeline is never rewritten (a healthy `cmd | head` keeps its
+/// exit code), so `false | head -1` still exits 0 -- and status flags it.
+#[test]
+fn pipeline_is_not_rewritten_and_status_flags_masked_exit() {
+    use std::time::Duration;
+    use terminal_commander_core::JobState;
+
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("pipeline-masked");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        let cmd = caps_command_runtime(
+            &state,
+            PolicyProfile::DeveloperLocal,
+            PolicyCaps {
+                allow_shell: true,
+                ..Default::default()
+            },
+        );
+        let shell = ShellRuntime::new(Arc::clone(&cmd));
+
+        for (sh, line, masked) in [
+            ("bash", "false | head -1", true),
+            ("sh", "false | head -1", true),
+            ("bash", "false || true", false),
+        ] {
+            let resp = shell
+                .exec(ShellExecRequest {
+                    shell: Some(sh.to_owned()),
+                    ..ShellExecRequest::line(line)
+                })
+                .expect("pipeline spawns");
+
+            let mut terminal = false;
+            for _ in 0..50 {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                let status = cmd.status(resp.job_id).expect("status");
+                if matches!(
+                    status.state,
+                    JobState::Exited | JobState::Failed | JobState::Cancelled
+                ) {
+                    assert_eq!(status.exit_code, Some(0), "{sh} {line}: {status:?}");
+                    assert_eq!(status.pipeline_exit_masked, masked, "{sh} {line}");
+                    terminal = true;
+                    break;
+                }
+            }
+            assert!(terminal, "{sh} {line}: job did not reach terminal state");
+        }
+
+        cleanup(&data);
+    });
+}

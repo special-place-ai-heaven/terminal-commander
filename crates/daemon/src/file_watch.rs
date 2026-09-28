@@ -669,6 +669,7 @@ impl WatchRuntime {
             receipt: None,
             restarted: false,
             outcome_trust: OutcomeTrust::Observed,
+            pipeline_exit_masked: false,
         })
     }
 

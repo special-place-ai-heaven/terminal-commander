@@ -1013,6 +1013,7 @@ fn response_types_have_no_raw_stream_lane() {
         receipt: None,
         restarted: false,
         outcome_trust: terminal_commanderd::OutcomeTrust::Observed,
+        pipeline_exit_masked: false,
     };
     assert_small_response(&s);
 }
