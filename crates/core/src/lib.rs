@@ -68,5 +68,5 @@ pub use rule::{
     compile_bounded_regex_set, is_reserved_match_key,
 };
 pub use severity::Severity;
-pub use shell_deny::{SHELL_INTERPRETERS_DENY, shell_interpreter_denied};
+pub use shell_deny::{SHELL_INTERPRETERS_DENY, shell_argv_denied, shell_interpreter_denied};
 pub use source::{EventSource, SourceStream, SourceType};

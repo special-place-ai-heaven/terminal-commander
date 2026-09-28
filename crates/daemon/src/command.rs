@@ -41,7 +41,8 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use terminal_commander_core::{
     ActivationScope, BucketConfig, BucketId, ContextRingManager, EventDraft, JobConfig, JobId,
-    JobManager, JobRecord, JobState, ProbeId, RuleDefinition,
+    JobManager, JobRecord, JobState, ProbeId, RuleDefinition, shell_argv_denied,
+    shell_interpreter_denied,
 };
 use terminal_commander_probes::{EventSink, ProcessProbe, ProcessProbeConfig, ProcessProbeMetrics};
 use terminal_commander_sifters::SifterRuntime;
@@ -144,19 +145,6 @@ pub(crate) fn wsl_carrier_label(argv0: &str) -> String {
     argv_basename(argv0).to_owned()
 }
 
-/// Basename-match a program token against `SHELL_INTERPRETERS_DENY`. Uses
-/// [`argv_basename`] so a path form classifies host-independently.
-fn denied_interpreter(token: &str) -> Option<&'static str> {
-    let basename = argv_basename(token);
-    SHELL_INTERPRETERS_DENY.iter().copied().find(|&shell| {
-        basename == shell
-            || (std::path::Path::new(shell)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-                && basename.eq_ignore_ascii_case(shell))
-    })
-}
-
 /// US8 (FR-060): classify a full argv for the WSL nested-shell gate,
 /// implementing policy-wsl.md steps 1-4 exactly. Argv-only; file contents
 /// are never inspected. Shared by both argv lanes (`command_start` and
@@ -219,7 +207,7 @@ pub(crate) fn classify_wsl_nested_shell(argv: &[String]) -> WslArgvClass {
         };
     };
 
-    let interpreter = denied_interpreter(first_tok);
+    let interpreter = shell_interpreter_denied(first_tok);
     if exec_introduced {
         // Direct exec: a shell only if the program itself is an interpreter.
         interpreter.map_or(WslArgvClass::NonShellPayload, |name| {
@@ -644,40 +632,6 @@ impl CommandRuntime {
         Ok(())
     }
 
-    /// Reject argv[0] whose basename is a known shell interpreter.
-    /// This is the shell-bridge guard; it runs BEFORE the policy
-    /// engine so the audit log records the rejection with the
-    /// specific reason "shell interpreter denied" instead of a
-    /// generic policy reason.
-    ///
-    /// Matches both the bare basename and the path tail
-    /// (`/bin/sh` -> "sh"). Case-insensitive on the Windows-style
-    /// `.exe` variants because Windows file matching is case-
-    /// insensitive at the OS layer; Linux comparisons are exact.
-    fn shell_interpreter_basename(argv0: &str) -> Option<&'static str> {
-        // Extract the last path component.
-        let basename = std::path::Path::new(argv0)
-            .file_name()
-            .and_then(|os| os.to_str())
-            .unwrap_or(argv0);
-        for &shell in SHELL_INTERPRETERS_DENY {
-            if basename == shell {
-                return Some(shell);
-            }
-            // Case-insensitive match for the .exe family (Windows).
-            let is_exe_variant = std::path::Path::new(shell)
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"));
-            if is_exe_variant && basename.eq_ignore_ascii_case(shell) {
-                return Some(shell);
-            }
-        }
-        // Bare "powershell" / "pwsh" / "cmd" without extension on
-        // Windows would already be caught above; the loop handles
-        // both cases.
-        None
-    }
-
     /// US2 (FR-011): map `argv[0]`'s basename to a known curated pack
     /// id, or `None` if the tool is unrecognized. Static table; the
     /// values MUST be names in the store's seed-pack set.
@@ -880,14 +834,21 @@ impl CommandRuntime {
         // rejection reason is precise. command_start_combed is not
         // a shell bridge: a future opt-in policy capability is the
         // only sanctioned path to invoke an interpreter, and TC38
-        // does NOT add that capability.
+        // does NOT add that capability. The predicate is
+        // `shell_argv_denied` (case, Windows extensions, wrappers,
+        // script flags), not a second copy.
         //
         // ARGV LANE ONLY. The TC49 shell lane (`StartLane::Shell`)
         // assembles `argv[0]` = the chosen interpreter ON PURPOSE, so
         // this guard would self-deny it. The shell lane is instead gated
         // by `PolicyAction::CommandShellStart` (allow_shell cap) below.
+        //
+        // WSL carriers are not hard-denied here. `wsl.exe -e bash -lc`
+        // names a shell after argv[0]; the nested-shell gate below owns
+        // that decision so `allow_shell=true` can still allow it.
         if matches!(mode, StartLane::Argv)
-            && let Some(shell) = Self::shell_interpreter_basename(&req.argv[0])
+            && matches!(classify_wsl_nested_shell(&req.argv), WslArgvClass::NotWsl)
+            && let Some(shell) = shell_argv_denied(&req.argv)
         {
             self.audit(
                 "command_rejected",
@@ -2230,11 +2191,11 @@ fn merge_active_and_inline(
 /// behavior). A genuinely-missing program also returns `None`, so the spawn
 /// still yields `ErrorKind::NotFound` -> `ProgramNotFound` unchanged.
 ///
-/// SECURITY: this runs AFTER the `SHELL_INTERPRETERS_DENY` guard on the raw
-/// `argv[0]`, so a bare `cmd`/`powershell`/`pwsh` is already rejected and never
-/// reaches resolution. PATH+PATHEXT lookup only maps a name to a file of the
-/// SAME name, so the only bare name that could resolve to `cmd.exe` is `cmd` --
-/// which is denied. No shell interpreter can slip through here.
+/// SECURITY: this runs AFTER `shell_argv_denied` on the raw argv, so a denied
+/// interpreter stem (`cmd`, `CMD`, `bash.exe`, `powershell`, `env bash -ec`)
+/// is already rejected and never reaches resolution. PATH+PATHEXT lookup only
+/// maps a name to a file of the SAME stem. Win32 trailing-dot, 8.3, and ADS
+/// forms (RISK-002) are not normalized here.
 #[cfg(windows)]
 fn resolve_windows_argv0(argv0: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;
@@ -3719,24 +3680,38 @@ mod redact_tests {
 /// Windows argv[0] PATH+PATHEXT resolution (npm/.cmd-shim fix).
 #[cfg(test)]
 mod resolve_tests {
-    use super::CommandRuntime;
-
-    /// The shell-interpreter denylist runs on the RAW argv[0] BEFORE any
-    /// PATH+PATHEXT resolution, so bare `cmd`/`powershell`/`pwsh` are rejected
-    /// and never reach the resolver -- no interpreter can slip through as a
-    /// resolved `.exe`. Cross-platform: the guard is platform-independent.
+    /// The shell-interpreter denylist runs on the RAW argv BEFORE any
+    /// PATH+PATHEXT resolution, so `cmd` / `CMD` / `bash.exe` / `powershell`
+    /// and `env bash -ec` are rejected and never reach the resolver.
+    /// Cross-platform: the guard is platform-independent.
     #[test]
     fn shell_interpreters_still_denied_by_bare_name() {
-        for name in ["cmd", "powershell", "pwsh", "cmd.exe", "powershell.exe"] {
+        use terminal_commander_core::{shell_argv_denied, shell_interpreter_denied};
+
+        for name in [
+            "cmd",
+            "CMD",
+            "powershell",
+            "PowerShell",
+            "pwsh",
+            "cmd.exe",
+            "bash.exe",
+            "sh.exe",
+            "powershell.exe",
+        ] {
             assert!(
-                CommandRuntime::shell_interpreter_basename(name).is_some(),
+                shell_interpreter_denied(name).is_some(),
                 "shell interpreter '{name}' must remain denied by bare name"
             );
         }
+        assert!(
+            shell_argv_denied(&["env", "bash", "-ec", "id"]).is_some(),
+            "env bash -ec must be denied before PATH resolution"
+        );
         // A JS toolchain shim is NOT a shell interpreter, so it passes the
         // guard and reaches PATHEXT resolution.
         assert!(
-            CommandRuntime::shell_interpreter_basename("npm").is_none(),
+            shell_interpreter_denied("npm").is_none(),
             "npm must not be caught by the shell-interpreter denylist"
         );
     }

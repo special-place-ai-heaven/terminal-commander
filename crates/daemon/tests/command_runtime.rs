@@ -690,6 +690,57 @@ fn command_start_denies_all_known_shell_interpreters() {
     });
 }
 
+/// FCR-001: case, Windows extensions, and wrapped script flags are denied on
+/// the argv lane before any spawn.
+#[test]
+fn command_start_denies_fcr001_shell_bypasses() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("deny-fcr001");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+        assert!(!state.policy.caps_allow_shell());
+
+        let cases: &[(&[&str], &str)] = &[
+            (&["bash.exe", "-c", "whoami"], "bash"),
+            (&["sh.exe", "-c", "id"], "sh"),
+            (&["CMD", "/c", "dir"], "cmd"),
+            (&["PowerShell", "-Command", "Get-Date"], "powershell"),
+            (&["PoWeRsHeLl", "-EncodedCommand", "QQ=="], "powershell"),
+            (&["env", "bash", "-ec", "id"], "bash"),
+            (&["env", "cmd.exe", "/k", "dir"], "cmd.exe"),
+        ];
+        for (argv, expected) in cases {
+            let job_count_before = state.jobs.list().len();
+            let req = CommandStartRequest {
+                argv: argv.iter().map(|s| (*s).to_owned()).collect(),
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                grace: None,
+                tag: None,
+                dedup_nonce: None,
+                strip_ansi: true,
+                peer_discriminator: None,
+            };
+            let err = state.command.start_combed(req).unwrap_err();
+            match err {
+                CommandError::ShellInterpreterDenied(ref shell) => {
+                    assert_eq!(shell, expected, "argv={argv:?}");
+                }
+                other => panic!("argv={argv:?} expected ShellInterpreterDenied, got {other:?}"),
+            }
+            assert_eq!(
+                state.jobs.list().len(),
+                job_count_before,
+                "argv={argv:?} must not spawn"
+            );
+        }
+        cleanup(&data);
+    });
+}
+
 /// TC49 Task-4 regression lock: threading `StartLane` through
 /// `start_combed_inner` MUST NOT weaken the argv lane. The default
 /// `start_combed` path (`StartLane::Argv`) still hard-denies a shell
@@ -1372,6 +1423,8 @@ fn wsl_nested_shell_all_spellings_classified_identically() {
             (&["wsl.exe", "-d", "Ubuntu", "-e", "zsh"], "zsh"),
             (&[r"C:\Windows\System32\wsl.exe", "-e", "bash"], "bash"),
             (&["wsl.exe", "--exec", "busybox", "sh"], "busybox"),
+            (&["wsl.exe", "-e", "bash.exe", "-ec", "id"], "bash"),
+            (&["wsl.exe", "-e", "BASH.EXE"], "bash"),
             (
                 &["wsl.exe", "echo", "$(id)"],
                 "default shell interpretation",

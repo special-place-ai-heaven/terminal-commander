@@ -40,6 +40,8 @@ Invoke-Gate 'terminal-commander-probes' 'windows_no_console_spawn' @('--include-
 Invoke-Gate 'terminal-commander-supervisor' 'probe_handshake_windows' @()
 # crates/daemon/tests/windows_spawn_site_coverage.rs tests are NOT ignored.
 Invoke-Gate 'terminal-commanderd' 'windows_spawn_site_coverage' @()
+# FCR-001: argv-lane shell deny must refuse before CreateProcess (no ConPTY).
+Invoke-Gate 'terminal-commanderd' 'shell_deny_windows' @()
 # T1: collect_probes PTY cfg must admit Windows (headless-safe; live ConPTY is not).
 Invoke-Gate 'terminal-commanderd' 'runtime_state_windows' @('collect_probes_pty_enumeration_cfg_admits_windows')
 # spec 004 T5: Windows Job Object ownership tripwire. KILL_ON_JOB_CLOSE killing a

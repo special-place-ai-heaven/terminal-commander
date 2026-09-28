@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::shell_deny::shell_interpreter_denied;
+use crate::shell_deny::shell_argv_denied;
 
 /// Maximum `recipe_id` length in bytes.
 pub const MAX_RECIPE_ID_BYTES: usize = 128;
@@ -237,8 +237,6 @@ fn validate_text(field: &str, value: &str, max: usize) -> Result<(), RecipeError
     Ok(())
 }
 
-const SCRIPT_FLAGS: &[&str] = &["-c", "-lc", "-command", "/c"];
-
 fn validate_argv(argv: &[String]) -> Result<(), RecipeError> {
     if argv.is_empty() {
         return Err(invalid("argv must not be empty"));
@@ -256,25 +254,13 @@ fn validate_argv(argv: &[String]) -> Result<(), RecipeError> {
             )));
         }
     }
-    if let Some(shell) = shell_interpreter_denied(&argv[0]) {
-        return Err(invalid(format!(
-            "shell interpreter '{shell}' is denied; recipe argv[0] must not be a shell \
-             (including -c/-Command smuggling)"
-        )));
-    }
-    // Interpreter + script flag later in the argv (`env bash -c`, `cmd /c`).
+    // Shared predicate: case, Windows extensions, wrappers, script flags.
     // `git -c` is not this shape: git is not on the deny list.
-    for pair in argv.windows(2) {
-        if let Some(shell) = shell_interpreter_denied(&pair[0])
-            && SCRIPT_FLAGS
-                .iter()
-                .any(|flag| pair[1].eq_ignore_ascii_case(flag))
-        {
-            return Err(invalid(format!(
-                "shell interpreter '{shell}' with '{}' is denied",
-                pair[1]
-            )));
-        }
+    if let Some(shell) = shell_argv_denied(argv) {
+        return Err(invalid(format!(
+            "shell interpreter '{shell}' is denied; recipe argv must not launch a shell \
+             (including wrapped argv and -c, -ec, -Command, -EncodedCommand, /k)"
+        )));
     }
     Ok(())
 }
@@ -485,6 +471,31 @@ mod tests {
                 "/C".to_owned(),
                 "dir".to_owned(),
             ],
+            vec!["bash.exe".to_owned(), "-c".to_owned(), "whoami".to_owned()],
+            vec!["sh.exe".to_owned(), "-c".to_owned(), "id".to_owned()],
+            vec!["CMD".to_owned(), "/c".to_owned(), "dir".to_owned()],
+            vec![
+                "PowerShell".to_owned(),
+                "-EncodedCommand".to_owned(),
+                "QQ==".to_owned(),
+            ],
+            vec![
+                "PoWeRsHeLl".to_owned(),
+                "-Command".to_owned(),
+                "Get-Date".to_owned(),
+            ],
+            vec![
+                "env".to_owned(),
+                "bash".to_owned(),
+                "-ec".to_owned(),
+                "id".to_owned(),
+            ],
+            vec![
+                "env".to_owned(),
+                "cmd.exe".to_owned(),
+                "/k".to_owned(),
+                "dir".to_owned(),
+            ],
         ] {
             let mut def = ok_def();
             def.argv = argv;
@@ -571,6 +582,44 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("not a declared placeholder"), "{err}");
+    }
+
+    /// Run re-check: a placeholder argv validates, then the fill is denied.
+    #[test]
+    fn resolve_argv_rechecks_fcr001_shell_bypasses() {
+        let cases: &[(&[&str], &str, &str)] = &[
+            (&["{bin}", "-c", "id"], "bash.exe", "bash"),
+            (&["{bin}", "-c", "id"], "sh.exe", "sh"),
+            (&["{bin}", "/c", "dir"], "CMD", "cmd"),
+            (
+                &["{bin}", "-Command", "Get-Date"],
+                "PowerShell",
+                "powershell",
+            ),
+            (
+                &["{bin}", "-Command", "Get-Date"],
+                "PoWeRsHeLl",
+                "powershell",
+            ),
+            (&["env", "{bin}", "-ec", "id"], "bash", "bash"),
+            (&["env", "{bin}", "/k", "dir"], "cmd.exe", "cmd.exe"),
+        ];
+        for (argv, fill, expect) in cases {
+            let mut stored = ok_def();
+            stored.argv = argv.iter().map(|s| (*s).to_owned()).collect();
+            stored.placeholders = vec!["bin".to_owned()];
+            stored
+                .validate()
+                .unwrap_or_else(|err| panic!("template {argv:?} must validate: {err}"));
+            let err = stored
+                .resolve_argv(&BTreeMap::from([("bin".to_owned(), (*fill).to_owned())]))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("shell interpreter") && err.contains(expect),
+                "run re-check fill {fill} argv {argv:?}: {err}"
+            );
+        }
     }
 
     #[test]
