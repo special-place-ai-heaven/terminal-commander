@@ -237,13 +237,17 @@ enum Unwrapped {
 /// Strip escalators, wrappers (`env`, `nice`, `timeout`, ...), and a
 /// `busybox` applet prefix in any interleaving until the head is stable.
 /// Every step drops at least one word, so the loop ends.
-fn unwrap_launchers(argv: &[String]) -> Unwrapped {
+fn unwrap_launchers(argv: &[String], cwd: Option<&str>) -> (Unwrapped, Option<String>) {
     let mut real = argv.to_vec();
+    let mut cwd = cwd.map(str::to_owned);
     loop {
         if let Some(step) = strip_escalator(&real) {
             match step {
-                Unwrapped::Argv(rest) => real = rest,
-                line @ Unwrapped::Line(_) => return line,
+                Unwrapped::Argv(rest) => {
+                    cwd = launcher_chdir(&real[..real.len() - rest.len()], cwd.as_deref());
+                    real = rest;
+                }
+                line @ Unwrapped::Line(_) => return (line, cwd),
             }
             continue;
         }
@@ -253,10 +257,54 @@ fn unwrap_launchers(argv: &[String]) -> Unwrapped {
         }
         let launched = launched_argv(&real);
         if launched.is_empty() || launched == real {
-            return Unwrapped::Argv(real);
+            return (Unwrapped::Argv(real), cwd);
         }
+        cwd = launcher_chdir(&real[..real.len() - launched.len()], cwd.as_deref());
         real = launched;
     }
+}
+
+/// The working directory a peeled launcher prefix moves the command into:
+/// `sudo -D DIR` / `--chdir=DIR`, `run0 -D DIR`, `env -C DIR` / `--chdir DIR`,
+/// and `chroot NEWROOT` (operands then resolve inside NEWROOT). Anything
+/// else leaves `cwd` untouched.
+fn launcher_chdir(prefix: &[String], cwd: Option<&str>) -> Option<String> {
+    let head = prefix
+        .first()
+        .map(|t| command_basename(t))
+        .unwrap_or_default();
+    let short = match head.as_str() {
+        "sudo" | "run0" => Some("-D"),
+        "env" => Some("-C"),
+        "chroot" => {
+            return prefix
+                .iter()
+                .skip(1)
+                .find(|t| !t.starts_with('-'))
+                .and_then(|dir| resolve_dir(dir, cwd));
+        }
+        _ => None,
+    };
+    let mut dir: Option<&str> = None;
+    let mut i = 1;
+    while i < prefix.len() {
+        let tok = prefix[i].as_str();
+        if let Some(v) = tok.strip_prefix("--chdir=") {
+            dir = Some(v);
+        } else if tok == "--chdir" {
+            dir = prefix.get(i + 1).map(String::as_str);
+            i += 1;
+        } else if let Some(s) = short {
+            if tok == s {
+                dir = prefix.get(i + 1).map(String::as_str);
+                i += 1;
+            } else if let Some(v) = tok.strip_prefix(s).filter(|v| !v.is_empty()) {
+                dir = Some(v);
+            }
+        }
+        i += 1;
+    }
+    dir.map_or_else(|| cwd.map(str::to_owned), |dir| resolve_dir(dir, cwd))
 }
 
 /// One escalator peeled off `argv`, or `None` when the head is not one.
@@ -358,7 +406,9 @@ fn argv_hit(argv: &[String], cwd: Option<&str>, depth: usize) -> Option<OsGuardH
     if depth > MAX_NESTING {
         return None;
     }
-    let real = match unwrap_launchers(argv) {
+    let (unwrapped, cwd) = unwrap_launchers(argv, cwd);
+    let cwd = cwd.as_deref();
+    let real = match unwrapped {
         Unwrapped::Argv(real) => real,
         Unwrapped::Line(line) => {
             return line_hit(&line, Grammar::Posix, cwd.map(str::to_owned), depth + 1);
@@ -914,9 +964,15 @@ pub fn is_disk_device(raw: &str) -> bool {
     let Some(dev) = lower.strip_prefix("/dev/") else {
         return false;
     };
-    ["sd", "nvme", "hd", "disk", "mmcblk", "vd", "xvd"]
-        .iter()
-        .any(|p| dev.starts_with(p))
+    // Whole disks and partitions, plus the device-mapper / md / nbd names a
+    // root filesystem commonly lives on (`/dev/mapper/ubuntu--vg-root`,
+    // `/dev/dm-0`, `/dev/md0`). `loop` devices are left alone (dev use).
+    [
+        "sd", "nvme", "hd", "disk", "mmcblk", "vd", "xvd", "dm-", "mapper/", "md", "nbd",
+        "disk/by-",
+    ]
+    .iter()
+    .any(|p| dev.starts_with(p))
 }
 
 /// A path operand as a deletion command sees it, resolved against `cwd`.
@@ -950,7 +1006,7 @@ pub fn operand_is_protected(operand: &str, cwd: Option<&str>) -> bool {
     }
     cwd.map_or_else(
         || is_os_critical_path(&fixed),
-        |cwd| is_os_critical_path(&format!("{cwd}/{fixed}")),
+        |cwd| is_os_critical_path(&format!("{}/{fixed}", cwd.trim_end_matches('/'))),
     )
 }
 
@@ -1369,6 +1425,44 @@ mod tests {
         ] {
             assert!(!is_os_critical_path(p), "must allow {p}");
         }
+    }
+
+    #[test]
+    fn device_mapper_and_launcher_chdir_are_covered() {
+        // C1: root filesystems on LVM / md / device-mapper names.
+        for dev in [
+            "/dev/mapper/ubuntu--vg-root",
+            "/dev/dm-0",
+            "/dev/md0",
+            "/dev/nbd0",
+        ] {
+            assert!(is_disk_device(dev), "{dev} is a disk device");
+            assert!(argv_deletion_hit(&argv(&["mkfs.ext4", dev]), None).is_some());
+            assert!(argv_deletion_hit(&argv(&["wipefs", "-a", dev]), None).is_some());
+        }
+        assert!(!is_disk_device("/dev/loop0"), "loop devices stay usable");
+        // W1: launchers that move the working directory before the command.
+        let victim = "usr/lib/tc-guard-nonexistent";
+        for case in [
+            argv(&["env", "-C", "/", "rm", "-rf", victim]),
+            argv(&["env", "--chdir=/", "rm", "-rf", victim]),
+            argv(&["sudo", "--chdir=/", "rm", "-rf", victim]),
+            argv(&["sudo", "-D", "/", "rm", "-rf", victim]),
+            argv(&["run0", "-D/", "rm", "-rf", victim]),
+        ] {
+            assert!(
+                argv_deletion_hit(&case, Some(Path::new("/tmp"))).is_some(),
+                "launcher chdir must be tracked: {case:?}"
+            );
+        }
+        assert!(
+            argv_deletion_hit(
+                &argv(&["env", "-C", "/tmp", "rm", "-rf", "build"]),
+                Some(Path::new("/"))
+            )
+            .is_none(),
+            "chdir into an ordinary directory stays allowed"
+        );
     }
 
     #[test]
