@@ -503,10 +503,14 @@ mod pty_core {
         /// The owner answered the pending prompt, so that line's completion is
         /// not a fresh prompt. Cleared by the next completed line.
         answered: Arc<AtomicBool>,
-        /// The owner's secret, held until the next completed line so a child
-        /// that left terminal echo on cannot put it in the ring or a bucket.
-        scrub: Arc<Mutex<Option<Vec<u8>>>>,
+        /// The owner's secret and the completed lines left to check, so a
+        /// child that left terminal echo on cannot put it in the ring or a
+        /// bucket.
+        scrub: Arc<Mutex<Scrub>>,
     }
+
+    /// Owner secret + completed lines left to check (see `SecretGate::scrub`).
+    type Scrub = Option<(Vec<u8>, u8)>;
 
     impl SecretGate {
         pub(super) fn new() -> Self {
@@ -553,31 +557,37 @@ mod pty_core {
             self.answered.store(false, Ordering::Release);
             self.active.store(true, Ordering::Release);
             let secret = self.scrub.lock().take();
-            if let Some(mut secret) = secret {
+            if let Some((mut secret, _)) = secret {
                 wipe(&mut secret);
             }
         }
 
-        /// Mask the owner's secret in the first line completed after it was
-        /// typed (the echo line, if the child left echo on).
+        /// Mask the owner's secret in the echo line, if the child left echo
+        /// on: the first of the next few completed lines that contains it.
         ///
-        /// ponytail: one line only; a child that re-prints the secret later
-        /// is not covered.
+        /// ponytail: a 4-line window covers a terminal repaint before the
+        /// echo; a child that re-prints the secret later is not covered.
         pub(super) fn arm_scrub(&self, line: &[u8]) {
             let secret = line.strip_suffix(b"\n").unwrap_or(line);
             let secret = secret.strip_suffix(b"\r").unwrap_or(secret);
             if !secret.is_empty() {
-                *self.scrub.lock() = Some(secret.to_vec());
+                *self.scrub.lock() = Some((secret.to_vec(), 4));
             }
         }
 
         fn scrub_line(&self, line: &str) -> Option<String> {
-            let mut secret = self.scrub.lock().take()?;
-            let masked = std::str::from_utf8(&secret)
+            let mut guard = self.scrub.lock();
+            let (secret, lines_left) = guard.as_mut()?;
+            let masked = std::str::from_utf8(secret)
                 .ok()
                 .filter(|s| line.contains(s))
                 .map(|s| line.replace(s, "********"));
-            wipe(&mut secret);
+            *lines_left = lines_left.saturating_sub(1);
+            if (masked.is_some() || *lines_left == 0)
+                && let Some((mut secret, _)) = guard.take()
+            {
+                wipe(&mut secret);
+            }
             masked
         }
     }
@@ -895,18 +905,22 @@ mod pty_core {
         }
 
         #[test]
-        fn owner_secret_echo_is_masked_on_the_next_completed_line_only() {
+        fn owner_secret_echo_is_masked_within_the_next_few_lines_only() {
             let gate = SecretGate::new();
-            gate.arm_scrub(
-                b"s3cret-marker
-",
-            );
+            gate.arm_scrub(b"s3cret-marker\r");
+            // A repaint line before the echo does not use up the mask.
+            assert_eq!(gate.scrub_line(""), None);
             assert_eq!(
                 gate.scrub_line("[sudo] password for dev: s3cret-marker")
                     .as_deref(),
                 Some("[sudo] password for dev: ********")
             );
-            assert_eq!(gate.scrub_line("s3cret-marker"), None, "one line only");
+            assert_eq!(gate.scrub_line("s3cret-marker"), None, "masked once");
+            gate.arm_scrub(b"s3cret-marker\r");
+            for _ in 0..4 {
+                assert_eq!(gate.scrub_line("unrelated"), None);
+            }
+            assert_eq!(gate.scrub_line("s3cret-marker"), None, "window closed");
         }
 
         #[test]
