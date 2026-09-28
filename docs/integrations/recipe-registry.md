@@ -71,6 +71,32 @@ terminal-commander recipes tombstone <recipe_id>
    id is reported and skipped on import; the rest of the bank still
    imports, and a retry is not stuck on that id.
 
+   `recipes import --activate` on a customized id (you upserted a
+   different body for a seed's `recipe_id` and it is still active)
+   mints a new seed version and activates it, closing your customized
+   activation -- the same one-open-version-per-scope rule any other
+   activation follows. Nothing skips this for you: check
+   `recipe action=list_active` before `--activate` if you have
+   customized any seed id, and re-activate your version afterward if
+   you want it back.
+
+   This is not silent: the `recipe_import_seeds` response carries a
+   `superseded: [{recipe_id, closed_version}]` field naming every id
+   `--activate` closed, and the CLI prints one line per entry --
+   `superseded <id> closed v<N>; re-activate it with recipes activate
+   <id> --version <N>`.
+
+   The daemon recognizes the admin CLI by the calling program's
+   executable: the pipe client image on Windows, `/proc/<pid>/exe` on
+   Linux, and `proc_pidpath` on macOS. A CLI started by the daemon
+   itself (for example through MCP `command_start`) is refused; run it
+   from your own terminal. This follows the live parent chain, so a
+   descendant whose intermediate parent has already exited (a double
+   fork, `cmd /c start ...`) is not detected -- the gate is a guard
+   rail, not a boundary. Where the executable cannot be resolved,
+   the deny says so, and `[policy] llm_can_activate_recipes = true` is
+   the only way to grant activation.
+
 4. Run only an activated recipe. `recipe_run` (compact
    `recipe action=run`) refuses a recipe that is not active for the
    scope.
@@ -81,12 +107,16 @@ recipe_run { "recipe_id": "git.status", "scope": { "kind": "global" } }
 ```
 
 `recipe_run` uses the argv command lane. When the recipe has
-`timeout_ms` or `rule_pack_ids`, the response is watched: it returns
-signals, a resume cursor, and `degraded` / `recover_hint` the same way
-`run_and_watch` does. `rule_pack_ids` only select that watched
-response; they do not load packs. Combing uses registry rules already
-active on the job. Otherwise the start follows `command_start_combed`.
-It does not call `shell_exec`. `allow_shell` stays off.
+`timeout_ms` or `rule_pack_ids`, the response is watched: it carries the
+full `run_and_watch` contract -- `signals`, `signal_count`, a resume
+`cursor`, `signals_capped`, `complete` / `wait_exhausted`, `receipt`,
+`outcome_trust`, `poll_hint_ms`, `wait_cap_ms`, and `degraded` /
+`recover_hint` -- plus the recipe-specific `recipe_id`, `version`,
+`argv`, `lane`, `watched`, `wait_ms`, and `probe_id`. `rule_pack_ids`
+only select that watched response; they do not load packs. Combing
+uses registry rules already active on the job. Otherwise the start
+follows `command_start_combed`. It does not call `shell_exec` and does
+not need `allow_shell`.
 
 If the recipe is not active, list what is:
 

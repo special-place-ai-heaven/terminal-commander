@@ -58,9 +58,11 @@ exists. Add `env.TC_SOCKET` only for a non-default daemon endpoint. On
 Windows the default endpoint is a local named pipe and normally does not
 need `TC_SOCKET`.
 
-`allow_shell` is off unless an operator sets it in config TOML. If a shell
+`allow_shell` is on in the default `developer_local` profile; an operator
+hardens with `[policy.caps] allow_shell = false` in config TOML. If a shell
 call is PolicyDenied, follow `recover_hint` `retry_with_argv` (argv
-`run_and_watch` / `command_start_combed`). Do not ask to enable shell.
+`run_and_watch` / `command_start_combed`) first; the deny names the
+operator knob.
 
 ## What setup does not do
 

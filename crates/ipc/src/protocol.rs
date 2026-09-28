@@ -348,8 +348,8 @@ pub enum IpcRequest {
     /// Rule-free bounded read of a job's captured output tail (F1).
     CommandOutputTail(CommandOutputTailParams),
     /// Start a shell-lane command (TC49): run ONE shell line through the
-    /// comb pipeline behind the `allow_shell` capability. Denied by
-    /// default; the wire carries `shell_line` ONLY, never a cap flag.
+    /// comb pipeline behind the `allow_shell` capability (on in the default
+    /// `developer_local` profile); the wire carries `shell_line` ONLY, never a cap flag.
     /// Bounded metadata response (reuses [`CommandStartResponse`]);
     /// never returns raw stdout/stderr.
     ShellExec(ShellExecParams),
@@ -1076,15 +1076,18 @@ pub enum ShellDenyClass {
 }
 
 impl ShellDenyClass {
-    /// Short human sentence. Must not tell the caller to turn shell on.
+    /// Short human sentence. Steers to argv first; names the operator knob
+    /// (`allow_shell`) when the cap is what gates the call.
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
             Self::ShellCapabilityOff => {
-                "Shell execution is denied on this profile; retry with an argv array."
+                "Shell execution denied: allow_shell is off. Retry with an argv array, \
+                 or ask the operator to set [policy.caps] allow_shell = true."
             }
             Self::ShellInterpreterDenied => {
-                "Shell interpreter denied on the argv lane; retry with an argv array."
+                "Shell interpreter denied: allow_shell is off. Retry with a direct argv, \
+                 or ask the operator to set [policy.caps] allow_shell = true."
             }
             Self::ProfileForbidsShell => {
                 "This profile forbids shell execution; retry with an argv array."
@@ -1511,7 +1514,7 @@ impl CommandStartParams {
 /// behind the `allow_shell` capability. Mirrors the daemon's
 /// `ShellExecRequest`; carries the dedicated `shell_line` ONLY — there
 /// is NO capability flag on the wire (caps are config/TOML, never
-/// MCP-flippable). Denied by default.
+/// MCP-flippable). Allowed by default on `developer_local`.
 ///
 /// `wait_ms` is deliberately ABSENT here: like `command_start_combed`,
 /// the bounded-wait control is an MCP-layer concern (`McpShellExecParams`
@@ -1994,6 +1997,11 @@ pub struct RecipeGetParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipeGetResponse {
     pub definition: RecipeDefinition,
+    /// The id is retired (`recipe_tombstone`): no new versions or
+    /// activations, and `recipe_run` refuses it. `definition.status` still
+    /// shows the stored version's status.
+    #[serde(default)]
+    pub tombstoned: bool,
 }
 
 /// `recipe_upsert` parameters. Validated, version assigned, not activated.
@@ -2127,6 +2135,18 @@ pub struct RecipeImportSeedsResponse {
     pub tombstoned: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed: Vec<RecipeImportFailure>,
+    /// Active versions `activate=true` closed because a different active
+    /// version was open (customized or an older seed revision) (FCR2-007).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded: Vec<RecipeImportSuperseded>,
+}
+
+/// A previously-open global version the seed activation closed. Re-activate
+/// `closed_version` to restore it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeImportSuperseded {
+    pub recipe_id: String,
+    pub closed_version: u32,
 }
 
 /// One seed whose activation failed after it was stored.

@@ -8,8 +8,8 @@
 //! - Linux / Android: `SO_PEERCRED` (returns uid, gid, pid)
 //! - macOS / BSD: `getpeereid` (returns uid, gid; pid is None on BSDs)
 //!
-//! No `unsafe` code; workspace lints forbid it. The platform
-//! distinction lives inside tokio.
+//! Credential lookup has no `unsafe`; the platform distinction lives
+//! inside tokio. macOS image/parent lookups call libproc (`unsafe` FFI).
 //!
 //! Fail-closed: if `peer_cred()` returns an error, we return `None`
 //! and the IPC server treats that as a peer-credential failure on
@@ -50,6 +50,87 @@ pub fn resolve(stream: &tokio::net::UnixStream) -> Option<PeerCred> {
         gid: ucred.gid(),
         pid: ucred.pid(),
     })
+}
+
+/// Longest parent chain [`descends_from`] walks before giving up.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+pub(crate) const MAX_ANCESTRY_DEPTH: usize = 64;
+
+/// `true` when `ancestor` is a strict ancestor of `pid`. An unreadable
+/// parent ends the walk as `false`.
+///
+/// ponytail: parent-chain walk only. A descendant whose intermediate
+/// parent already exited was reparented and escapes; Win32 job-object
+/// membership would catch it on Windows.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn descends_from(pid: u32, ancestor: u32) -> bool {
+    let mut cur = pid;
+    for _ in 0..MAX_ANCESTRY_DEPTH {
+        match parent_pid(cur) {
+            Some(parent) if parent == ancestor => return true,
+            Some(parent) if parent > 1 && parent != cur => cur = parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
+#[cfg(windows)]
+pub fn descends_from(pid: u32, ancestor: u32) -> bool {
+    super::peer_windows::descends_from(pid, ancestor)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+pub const fn descends_from(_pid: u32, _ancestor: u32) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))?
+        .trim()
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    // SAFETY: `info` is an aligned `proc_bsdinfo` of exactly `size` bytes;
+    // proc_pidinfo writes at most `size` bytes and returns the count written.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    // SAFETY: the kernel filled all `size` bytes, and the zeroed start is
+    // already a valid `proc_bsdinfo` (plain integers and char arrays).
+    Some(unsafe { info.assume_init() }.pbi_ppid)
+}
+
+/// Executable path of `pid` via `proc_pidpath` (macOS has no `/proc`).
+#[cfg(target_os = "macos")]
+pub fn image_path(pid: i32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buf = vec![0u8; usize::try_from(libc::PROC_PIDPATHINFO_MAXSIZE).ok()?];
+    let cap = u32::try_from(buf.len()).ok()?;
+    // SAFETY: `buf` is a live, writable buffer of `cap` bytes; proc_pidpath
+    // writes at most `cap` bytes and returns the length written (<= 0 on error).
+    let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), cap) };
+    buf.truncate(usize::try_from(len).ok().filter(|&n| n > 0)?);
+    Some(std::ffi::OsString::from_vec(buf).into())
 }
 
 #[cfg(test)]

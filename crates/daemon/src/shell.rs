@@ -143,7 +143,7 @@ impl ShellRuntime {
     /// the interpreter-family argv, and forwards to
     /// [`CommandRuntime::start_combed_shell`] — which gates on
     /// [`PolicyAction::CommandShellStart`](crate::policy::PolicyAction)
-    /// (denied by default) and, on allow, emits a `command_shell_start`
+    /// (allowed on the default `developer_local` profile) and, on allow, emits a `command_shell_start`
     /// audit row before spawning.
     ///
     /// SYNC: `start_combed_shell` never awaits, so the borrows it holds on

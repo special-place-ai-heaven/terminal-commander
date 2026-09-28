@@ -199,12 +199,15 @@ mod tests {
 
     #[test]
     fn golden_shell_interpreter_denied() {
-        let teach = sample(
+        let mut teach = sample(
             ShellDenyClass::ShellInterpreterDenied,
             "DeveloperLocal",
-            None,
+            Some("allow_shell"),
             "command_start_combed",
         );
+        // An interpreter deny carries the argv lane's own text (pinned in the
+        // daemon's `shell_teach_keeps_lane_text_and_names_profile_forbid`).
+        teach.reason = "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]), or have the operator set [policy.caps] allow_shell = true, which allows this argv and enables shell_exec (command with action=\"exec\" on the compact MCP surface).".to_owned();
         let data = policy_denied_data(&teach, Some("run_and_watch"), "ShellInterpreterDenied");
         let expected: Value = serde_json::from_str(include_str!(
             "../tests/fixtures/a2/shell_interpreter_denied.json"
@@ -212,7 +215,7 @@ mod tests {
         .expect("golden json");
         assert_eq!(data, expected);
         assert_envelope(&data, "shell_interpreter_denied");
-        assert!(data["denied_capability"].is_null());
+        assert_eq!(data["denied_capability"], json!("allow_shell"));
         assert_eq!(data["denied_tool"], json!("run_and_watch"));
     }
 
@@ -235,15 +238,15 @@ mod tests {
     }
 
     #[test]
-    fn allow_shell_default_remains_false() {
+    fn allow_shell_default_is_on_for_developer_local() {
         let engine = terminal_commanderd::PolicyEngine::new(
             terminal_commanderd::PolicyProfile::DeveloperLocal,
         );
         assert!(
-            !engine.caps_allow_shell(),
-            "DeveloperLocal allow_shell default must stay false"
+            engine.caps_allow_shell(),
+            "DeveloperLocal allow_shell default is on (owner decision D0)"
         );
-        assert!(!engine.resolved_caps().allow_shell);
+        assert!(engine.resolved_caps().allow_shell);
     }
 
     #[test]
@@ -335,7 +338,7 @@ mod tests {
     #[test]
     fn omitted_recipe_id_deserializes_as_argv_teach() {
         let teach: ShellTeach = serde_json::from_str(
-            r#"{"deny_class":"shell_capability_off","profile":"DeveloperLocal","denied_capability":"allow_shell","denied_tool":"shell_exec","reason":"Shell execution is denied on this profile; retry with an argv array."}"#,
+            r#"{"deny_class":"shell_capability_off","profile":"DeveloperLocal","denied_capability":"allow_shell","denied_tool":"shell_exec","reason":"Shell execution denied: allow_shell is off. Retry with an argv array, or ask the operator to set [policy.caps] allow_shell = true."}"#,
         )
         .expect("old teach payload");
         assert!(teach.recipe_id.is_none());

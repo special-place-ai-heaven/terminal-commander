@@ -14,8 +14,9 @@ Language: ASCII only.
 ## The one-screen decision tree
 
 Default profile: argv first. Decompose pipelines before any shell lane.
-`shell_exec` is operator opt-in, not the first branch and not the remedy
-when a call is denied.
+`shell_exec` is on by default for `developer_local` (`[policy.caps]
+allow_shell = false` hardens it off); it is still not the first branch
+or the remedy when a call is denied.
 
 ```text
 Need to run or observe something?
@@ -53,15 +54,16 @@ Need to run or observe something?
 +-- Pipeline, redirect, compound, or PowerShell one-liner?
 |     DECOMPOSE FIRST into argv steps or the file tools above.
 |     shell_exec comes only after that split, and only if the operator
-|     set allow_shell in config TOML (default OFF). Denied is not a
-|     cue to call it again or to ask for the cap.
+|     left allow_shell on (the developer_local default; `[policy.caps]
+|     allow_shell = false` hardens). Denied is not a cue to call it again.
 |
 +-- PolicyDenied on shell misuse?
 |     If recover_hint = retry_with_recipe, call recipe_run with
 |     intended_example {"recipe_id":"...","scope":{"kind":"global"}}.
 |     Otherwise recover_hint = retry_with_argv. Retry run_and_watch with
-|     {"argv":["git","status"]}. Do not thrash the schema. Do not ask
-|     to enable shell. Decision A2 rejects flipping allow_shell on.
+|     {"argv":["git","status"]}. Do not thrash the schema. The deny
+|     names the operator knob ([policy.caps] allow_shell = true); argv
+|     is still the first retry.
 |     Guide: docs/integrations/recipe-registry.md.
 |
 +-- Multi-step work that shares cwd/env (cd build; cmake ..; make)?
@@ -121,13 +123,15 @@ to call `shell_exec`. Split it into argv calls (`run_and_watch` or
 `command_start_combed`, plus a pack when one exists) or into file tools
 (`file_read_window`, `file_search`, `file_write`). Do not read files
 with `type`, `Get-Content`, `cat`, or a shell pipeline. Shell
-interpreters are denied as `argv[0]` on the argv lane; that deny means
-retry with a real argv array, not a shell line.
+interpreters as `argv[0]` on the argv lane are denied while `allow_shell`
+is off (retry with a real argv array); once `allow_shell` is on they run
+tagged `nested_shell` in the audit instead of being denied outright.
 
 `shell_exec` is for a line that is still irreducible after that split,
-and only after the operator has set `allow_shell` in the daemon config
-TOML. Default is OFF. It is not an MCP parameter, and it is not the
-first remedy when a call is denied.
+and only while `allow_shell` is on in the daemon config TOML. It is on
+in the default `developer_local` profile; `[policy.caps] allow_shell =
+false` hardens. It is not an MCP parameter, and it is not the first
+remedy when a call is denied.
 
 ```text
 shell_exec { shell_line: "grep -r TODO src | wc -l" }
@@ -156,9 +160,10 @@ A matching recipe uses `crates/mcp/tests/fixtures/a2/retry_with_recipe.json`.
 - `recover_hint` = `retry_with_argv` when no recipe matches
 
 The remedy is that hint: call `run_and_watch` or `command_start_combed`
-with an argv array. Do not thrash schema field names. Turning
-`allow_shell` on is not the fix. Decision A2 rejects Finding 1 (flip
-the default shell cap on).
+with an argv array. Do not thrash schema field names. Argv is the
+first fix; the deny also names `[policy.caps] allow_shell = true` for
+the operator. Owner decision D0 (2026-09-28) superseded Decision A2's
+rejection of Finding 1: `developer_local` now defaults `allow_shell` on.
 
 When the daemon sets `recipe_id` and `recipe_scope` on that deny, three
 fields change: `recover_hint` = `retry_with_recipe`, `intended_tool` =
@@ -331,5 +336,6 @@ These apply to every lane:
   `retry_with_argv` and `intended_tool` is `run_and_watch`. When the
   daemon sets `recipe_id` and `recipe_scope`, `recover_hint` is
   `retry_with_recipe`, `intended_tool` is `recipe_run`, and
-  `intended_example` includes both fields. Default `allow_shell` stays
-  off. Guide: `docs/integrations/recipe-registry.md`.
+  `intended_example` includes both fields. `allow_shell` is on in the
+  default `developer_local` profile; `[policy.caps] allow_shell = false`
+  hardens. Guide: `docs/integrations/recipe-registry.md`.

@@ -3,9 +3,9 @@
   "kind": "policy_denied",
   "deny_class": "shell_interpreter_denied",
   "profile": "DeveloperLocal",
-  "denied_capability": null,
+  "denied_capability": "allow_shell",
   "denied_tool": "run_and_watch",
-  "reason": "Shell interpreter denied on the argv lane; retry with an argv array.",
+  "reason": "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]), or have the operator set [policy.caps] allow_shell = true, which allows this argv and enables shell_exec (command with action=\"exec\" on the compact MCP surface).",
   "intended_tool": "run_and_watch",
   "intended_example": {"argv": ["git", "status"]},
   "alternatives": [

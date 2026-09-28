@@ -5,8 +5,8 @@
 //!
 //! Recipe validate, the recipe-run re-check, and the non-WSL argv lanes
 //! (`command_start_combed`, `pty_command_start`) call [`shell_argv_denied`].
-//! A `wsl`/`wsl.exe` carrier stays with the daemon WSL gate so `allow_shell`
-//! still applies. Distinct from
+//! A `wsl`/`wsl.exe` carrier ([`is_wsl_carrier`]) stays with the daemon WSL
+//! gate so `allow_shell` still applies. Distinct from
 //! privilege-escalator denials (`sudo`, `doas`, ...).
 //!
 //! Matching case-folds every interpreter name and strips one Windows
@@ -15,13 +15,16 @@
 //! Trailing ASCII dots and spaces, an unnamed `::$DATA` stream, and the
 //! powershell 8.3 shape `powers~<digit>` fold into that same match.
 //!
-//! ponytail: a dash-flag after a wrapper is skipped, not that flag's argument
-//! (`env -u NAME bash` with no script flag). An adjacent script flag still
-//! denies `env -u NAME bash -ec`. Basename matching also strips trailing
+//! ponytail: wrapper and interpreter options come from small tables, and
+//! `env -S` is split on whitespace with `'`/`"` removed; a string holding a
+//! `\` escape or `${VAR}` is denied rather than modeled. An
+//! unlisted launcher is covered only when a script flag follows the
+//! interpreter. Basename matching also strips trailing
 //! ASCII dots/spaces and an unnamed `::$DATA` stream, and recognizes the
 //! powershell 8.3 shape `powers~<digit>`. That is deny-list string matching
 //! on every host, not a Win32 security boundary: no filesystem short-name
 //! lookup, no other 8.3 names, no arbitrary ADS (`file:stream:$DATA`).
+//! A complete control is an explicit command allowlist.
 
 /// Closed-set deny list for shell-interpreter basenames.
 ///
@@ -31,14 +34,27 @@
 pub const SHELL_INTERPRETERS_DENY: &[&str] = &[
     "sh",
     "bash",
+    "rbash",
     "dash",
     "zsh",
     "fish",
     "ksh",
+    "mksh",
+    "lksh",
+    "pdksh",
+    "oksh",
+    "loksh",
+    "yash",
+    "posh",
     "csh",
     "tcsh",
     "ash",
     "busybox",
+    "nu",
+    "elvish",
+    "xonsh",
+    "osh",
+    "ysh",
     "powershell",
     "powershell.exe",
     "pwsh",
@@ -47,16 +63,55 @@ pub const SHELL_INTERPRETERS_DENY: &[&str] = &[
     "cmd.exe",
 ];
 
-/// Leading argv words that launch the next program. Same set the shell-line
-/// privilege scan skips (`SHELL_COMMAND_PREFIX_WORDS` in the daemon policy).
-const SHELL_ARGV_WRAPPERS: &[&str] = &["command", "exec", "env", "nohup", "time"];
+/// Launchers whose first operand is the program they run, each with the
+/// options that take a separate value (`env -u NAME`, `timeout -s KILL`).
+/// After a wrapper, operands that start with a digit are skipped too, and
+/// [`VALUE_OPERAND_WRAPPERS`] take their first operand as a value. Not `xargs` or `sudo`: their operands are
+/// not just a program, and `sudo` has its own privilege deny.
+const SHELL_ARGV_WRAPPERS: &[(&str, &[&str])] = &[
+    ("command", &[]),
+    ("exec", &["-a"]),
+    (
+        "env",
+        &["-u", "--unset", "-C", "--chdir", "-P", "-a", "--argv0"],
+    ),
+    ("nohup", &[]),
+    ("time", &["-f", "--format", "-o", "--output"]),
+    ("nice", &["-n", "--adjustment"]),
+    ("timeout", &["-s", "--signal", "-k", "--kill-after"]),
+    (
+        "stdbuf",
+        &["-i", "-o", "-e", "--input", "--output", "--error"],
+    ),
+    ("ionice", &["-c", "--class", "-n", "--classdata"]),
+    ("chrt", &[]),
+    ("taskset", &[]),
+    ("setsid", &[]),
+    ("unbuffer", &[]),
+];
+
+/// Wrappers whose first operand is a value, not the program: `timeout
+/// DURATION`, `taskset MASK`, `chrt PRIORITY` (`inf`, `ff`). `nice` and
+/// `ionice` take their values through options only.
+const VALUE_OPERAND_WRAPPERS: &[&str] = &["timeout", "taskset", "chrt"];
+
+/// Deny label for an `env -S` string this split does not model.
+pub const ENV_SPLIT_STRING_DENY: &str = "env -S";
+
+/// Programs that run their operands on another host or in a container.
+/// The interpreter they name is not this host's shell, so the argv is not
+/// scanned past them. TC does not gate the remote side (`allow_remote` is
+/// `target_id` federation only). `podman unshare` is exempt too, on purpose.
+/// `wsl` is not here: it runs on this host and has its own gate.
+const REMOTE_CARRIERS: &[&str] = &["ssh", "docker", "podman", "nerdctl", "kubectl"];
 
 /// Flags that hand the following argument to an interpreter.
 ///
 /// Compared case-insensitively, matching the previous recipe pair check
 /// (`/C`, `-Command`). POSIX `-C` (noclobber) shares that spelling; the
 /// check only runs next to a denied interpreter, so `git -C` is allowed.
-/// Short lowercase clusters (`-ec`, `-exc`) are recognized in addition.
+/// Single-dash letter clusters holding `c` (`-ec`, `-Cc`, `-eluxc`) are
+/// recognized in addition for non-PowerShell interpreters.
 const SHELL_SCRIPT_FLAGS: &[&str] = &[
     "-c",
     "-lc",
@@ -66,9 +121,35 @@ const SHELL_SCRIPT_FLAGS: &[&str] = &[
     "--command",
     "/c",
     "/k",
+    "/r",
     "/command",
     "-encodedcommand",
     "/encodedcommand",
+];
+
+/// Interpreter options that take a separate value, so the value is not
+/// read as the first operand (`bash -o pipefail -c`). Case-insensitive.
+const POSIX_VALUE_FLAGS: &[&str] = &["-o", "+o", "--rcfile", "--init-file"];
+const PWSH_VALUE_FLAGS: &[&str] = &[
+    "-executionpolicy",
+    "-ex",
+    "-ep",
+    "-windowstyle",
+    "-w",
+    "-workingdirectory",
+    "-wd",
+    "-configurationname",
+    "-config",
+    "-configurationfile",
+    "-custompipename",
+    "-settingsfile",
+    "-settings",
+    "-inputformat",
+    "-inp",
+    "-if",
+    "-outputformat",
+    "-o",
+    "-of",
 ];
 
 const WIN_EXE_EXTS: &[&str] = &["exe", "com", "bat", "cmd"];
@@ -87,6 +168,14 @@ pub fn shell_interpreter_denied(argv0: &str) -> Option<&'static str> {
     // `powershell.exe` is the deny-list name that does not fit 8.3, so
     // Windows can surface it as `POWERS~1.EXE` (or `~2`..`~9` on collision).
     is_powershell_short_name(base).then_some("powershell")
+}
+
+/// `wsl` / `wsl.exe` under the same basename normalize as the interpreter
+/// deny, so `wsl.exe.`, `WSL.EXE ` and `wsl.exe::$DATA` are carriers too.
+#[must_use]
+pub fn is_wsl_carrier(argv0: &str) -> bool {
+    let base = normalized_win_basename(argv0);
+    base.eq_ignore_ascii_case("wsl") || base.eq_ignore_ascii_case("wsl.exe")
 }
 
 fn listed_shell(base: &str) -> Option<&'static str> {
@@ -109,38 +198,208 @@ fn listed_shell(base: &str) -> Option<&'static str> {
 
 /// Deny a shell interpreter anywhere this argv would launch one.
 ///
-/// Hits a leading interpreter, an interpreter after a wrapper (`env`,
-/// `command`, `exec`, `nohup`, `time`, plus dash-flags and `NAME=value`
-/// assignments), or a denied interpreter
-/// immediately followed by a script flag (`-c`, `-ec`, `/k`, `-EncodedCommand`, ...).
+/// Hits the launched program when it is an interpreter, after skipping
+/// `NAME=value` words and wrappers (`env`, `nice`, `timeout`, ...) with
+/// their options; `env -S STR` is split and re-checked. Otherwise hits a
+/// denied interpreter whose option run holds a script flag (`-c`, `-x -c`,
+/// `/k`, `-NoProfile -Command`, ...), unless the program is a remote or
+/// container carrier (`ssh`, `docker`, ...).
 #[must_use]
 pub fn shell_argv_denied(argv: &[impl AsRef<str>]) -> Option<&'static str> {
-    if let Some(shell) = leading_interpreter(argv) {
+    let Some(rest) = launched(argv) else {
+        return Some(ENV_SPLIT_STRING_DENY);
+    };
+    let head = rest.first()?;
+    if let Some(shell) = shell_interpreter_denied(head) {
         return Some(shell);
     }
-    argv.windows(2).find_map(|pair| {
-        let shell = shell_interpreter_denied(pair[0].as_ref())?;
-        is_script_flag(pair[1].as_ref()).then_some(shell)
+    if is_remote_carrier(head) {
+        return None;
+    }
+    rest.iter().enumerate().find_map(|(index, arg)| {
+        let shell = shell_interpreter_denied(arg)?;
+        interpreter_script_flag(shell, &rest[index + 1..]).then_some(shell)
     })
 }
 
-fn leading_interpreter(argv: &[impl AsRef<str>]) -> Option<&'static str> {
-    let mut wrapper = false;
-    for arg in argv {
-        let token = arg.as_ref();
-        if is_env_assignment(token) {
-            continue;
+/// The argv from the program it launches onward.
+///
+/// Leading `NAME=value` words and wrappers (with their options and value
+/// operands) are dropped, and `env -S STR` is split. Empty when only wrappers
+/// remain or the `-S` string is one [`shell_argv_denied`] refuses.
+/// The daemon WSL gate uses this so `env wsl.exe ...` is still a carrier.
+#[must_use]
+pub fn launched_argv(argv: &[impl AsRef<str>]) -> Vec<String> {
+    launched(argv).unwrap_or_default()
+}
+
+/// [`launched_argv`], or `None` for an `env -S` string with `\` or `${`.
+fn launched(argv: &[impl AsRef<str>]) -> Option<Vec<String>> {
+    let mut argv: Vec<String> = argv.iter().map(|arg| arg.as_ref().to_owned()).collect();
+    loop {
+        match launched_program(&argv) {
+            Launched::At(index) => {
+                argv.drain(..index);
+                return Some(argv);
+            }
+            // Each expansion drops the `-S` flag, so the loop ends.
+            Launched::SplitString(expanded) => argv = expanded,
+            Launched::Nothing => return Some(Vec::new()),
+            Launched::Unparseable => return None,
         }
-        if is_shell_wrapper(token) {
-            wrapper = true;
-            continue;
-        }
-        if wrapper && token.starts_with('-') {
-            continue;
-        }
-        return shell_interpreter_denied(token);
     }
-    None
+}
+
+enum Launched {
+    At(usize),
+    SplitString(Vec<String>),
+    Nothing,
+    Unparseable,
+}
+
+/// The program this argv launches, past leading `NAME=value` words and
+/// wrappers with their options and value operands.
+fn launched_program(argv: &[String]) -> Launched {
+    let mut wrapper: Option<(&str, &[&str])> = None;
+    let mut value_operand = false;
+    let mut index = 0;
+    while let Some(token) = argv.get(index).map(String::as_str) {
+        if is_env_assignment(token) {
+            index += 1;
+            continue;
+        }
+        if let Some(found) = shell_wrapper(token) {
+            wrapper = Some(found);
+            value_operand = VALUE_OPERAND_WRAPPERS.contains(&found.0);
+            index += 1;
+            continue;
+        }
+        let Some((name, value_flags)) = wrapper else {
+            return Launched::At(index);
+        };
+        if token.starts_with('-') {
+            if name == "env"
+                && let Some((split, next)) = env_split_string(argv, index)
+            {
+                let Some(words) = split_env_words(split) else {
+                    return Launched::Unparseable;
+                };
+                let mut expanded = argv[..index].to_vec();
+                expanded.extend(words);
+                expanded.extend_from_slice(&argv[next..]);
+                return Launched::SplitString(expanded);
+            }
+            index += if value_flags.contains(&token) { 2 } else { 1 };
+            continue;
+        }
+        if value_operand || token.starts_with(|ch: char| ch.is_ascii_digit()) {
+            value_operand = false;
+            index += 1;
+            continue;
+        }
+        return Launched::At(index);
+    }
+    Launched::Nothing
+}
+
+/// Words env makes of a `-S` string: whitespace split, then quote removal
+/// (`'bash'` and `b""ash` are `bash`). `None` for a `\` escape or `${VAR}`
+/// expansion, which env would rewrite and this does not model.
+fn split_env_words(split: &str) -> Option<Vec<String>> {
+    if split.contains('\\') || split.contains("${") {
+        return None;
+    }
+    Some(
+        split
+            .split_whitespace()
+            .map(|word| word.replace(['\'', '"'], ""))
+            .collect(),
+    )
+}
+
+/// `env -S STR`, `-SSTR`, `-iS STR`, `--split-string[=]STR` (or a long
+/// prefix): the string env splits into arguments, and the index after it.
+fn env_split_string(argv: &[String], index: usize) -> Option<(&str, usize)> {
+    let token = argv[index].as_str();
+    let inline = if let Some(long) = token.strip_prefix("--") {
+        let (name, value) = long
+            .split_once('=')
+            .map_or((long, None), |(n, v)| (n, Some(v)));
+        if name.is_empty() || !"split-string".starts_with(name) {
+            return None;
+        }
+        value
+    } else {
+        let (flags, value) = token.strip_prefix('-')?.split_once('S')?;
+        if !flags.bytes().all(|byte| matches!(byte, b'i' | b'0' | b'v')) {
+            return None;
+        }
+        (!value.is_empty()).then_some(value)
+    };
+    inline.map_or_else(
+        || argv.get(index + 1).map(|value| (value.as_str(), index + 2)),
+        |value| Some((value, index + 1)),
+    )
+}
+
+/// A script flag in the option run right after a denied interpreter
+/// (`bash -x -c`, `pwsh -NoProfile -Command`), up to its first operand.
+fn interpreter_script_flag(shell: &str, args: &[impl AsRef<str>]) -> bool {
+    let pwsh = matches!(strip_win_ext(shell), "powershell" | "pwsh");
+    let value_flags = if pwsh {
+        PWSH_VALUE_FLAGS
+    } else {
+        POSIX_VALUE_FLAGS
+    };
+    let mut args = args.iter().map(AsRef::as_ref);
+    while let Some(arg) = args.next() {
+        // `-NonInteractive` is a PowerShell word, not a POSIX `c` cluster.
+        let script_flag = if pwsh {
+            is_listed_script_flag(arg) || is_pwsh_command_flag(arg)
+        } else {
+            is_script_flag(arg)
+        };
+        if script_flag {
+            return true;
+        }
+        if !is_interpreter_option(arg) {
+            return false;
+        }
+        if value_flags
+            .iter()
+            .any(|flag| arg.eq_ignore_ascii_case(flag))
+        {
+            args.next();
+        }
+    }
+    false
+}
+
+/// `-x`, `--norc`, `+o`, or a short cmd switch (`/d`, `/e:on`).
+fn is_interpreter_option(arg: &str) -> bool {
+    match arg.as_bytes() {
+        [b'-' | b'+', _, ..] => true,
+        [b'/', rest @ ..] => {
+            (1..=5).contains(&rest.len()) && !rest.contains(&b'/') && !rest.contains(&b'\\')
+        }
+        _ => false,
+    }
+}
+
+/// PowerShell takes any prefix of `-Command` / `-EncodedCommand` (`-c`,
+/// `-com`, `-e`, `-enc`), spelled with `-`, `--`, or `/`.
+fn is_pwsh_command_flag(arg: &str) -> bool {
+    let Some(name) = arg
+        .strip_prefix("--")
+        .or_else(|| arg.strip_prefix(['-', '/']))
+    else {
+        return false;
+    };
+    !name.is_empty()
+        && ["command", "encodedcommand"].iter().any(|full| {
+            full.get(..name.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(name))
+        })
 }
 
 fn argv_basename(token: &str) -> &str {
@@ -191,11 +450,19 @@ fn strip_win_ext(basename: &str) -> &str {
     basename
 }
 
-fn is_shell_wrapper(token: &str) -> bool {
+fn shell_wrapper(token: &str) -> Option<(&'static str, &'static [&'static str])> {
     let stem = strip_win_ext(normalized_win_basename(token));
     SHELL_ARGV_WRAPPERS
         .iter()
-        .any(|wrapper| stem.eq_ignore_ascii_case(wrapper))
+        .copied()
+        .find(|(wrapper, _)| stem.eq_ignore_ascii_case(wrapper))
+}
+
+fn is_remote_carrier(token: &str) -> bool {
+    let stem = strip_win_ext(normalized_win_basename(token));
+    REMOTE_CARRIERS
+        .iter()
+        .any(|carrier| stem.eq_ignore_ascii_case(carrier))
 }
 
 fn is_env_assignment(word: &str) -> bool {
@@ -211,22 +478,25 @@ fn is_env_assignment(word: &str) -> bool {
 }
 
 fn is_script_flag(token: &str) -> bool {
+    is_listed_script_flag(token) || is_posix_command_cluster(token)
+}
+
+fn is_listed_script_flag(token: &str) -> bool {
     SHELL_SCRIPT_FLAGS
         .iter()
         .any(|flag| token.eq_ignore_ascii_case(flag))
-        || is_posix_command_cluster(token)
 }
 
-/// Single-dash letter cluster that includes lowercase `c` (`-ec`, `-exc`).
-/// `-C` (noclobber) does not match. Longer names (`-Command`) use the table.
+/// Single-dash letter cluster of any length that holds `c` in either case
+/// (`-ec`, `-exc`, `-Cc`, `-eluxc`). A lone `-C` (noclobber) matches too,
+/// as it already does through the table.
 fn is_posix_command_cluster(token: &str) -> bool {
     let Some(body) = token.strip_prefix('-') else {
         return false;
     };
-    if body.is_empty() || body.starts_with('-') || body.len() > 4 {
-        return false;
-    }
-    body.bytes().all(|byte| byte.is_ascii_lowercase()) && body.as_bytes().contains(&b'c')
+    !body.is_empty()
+        && body.bytes().all(|byte| byte.is_ascii_alphabetic())
+        && body.bytes().any(|byte| byte.eq_ignore_ascii_case(&b'c'))
 }
 
 #[cfg(test)]
@@ -410,5 +680,219 @@ mod tests {
         assert_eq!(shell_argv_denied(&["git.exe::$DATA", "status"]), None);
         // Non-ASCII tail must not panic on the ASCII `::$DATA` cut.
         assert_eq!(shell_interpreter_denied("ü::$DATA"), None);
+    }
+
+    #[test]
+    fn argv_denies_fcr2_wrapper_split_string_and_flag_run() {
+        let denied: &[(&[&str], &str)] = &[
+            // Launchers outside the old five-item set, with their value flags.
+            (&["setsid", "-f", "zsh", "run.zsh"], "zsh"),
+            (&["timeout", "-s", "KILL", "5", "sh", "build.sh"], "sh"),
+            (&["stdbuf", "-o", "L", "bash", "build.sh"], "bash"),
+            (&["ionice", "-c", "3", "bash", "build.sh"], "bash"),
+            (&["chrt", "-f", "50", "dash", "build.sh"], "dash"),
+            (&["taskset", "-c", "0-3", "bash", "build.sh"], "bash"),
+            (&["taskset", "0x3", "bash", "build.sh"], "bash"),
+            (&["unbuffer", "sh", "build.sh"], "sh"),
+            (&["env", "-u", "HOME", "bash", "build.sh"], "bash"),
+            (&["env", "-C", "/tmp", "bash", "build.sh"], "bash"),
+            (&["time", "-o", "t.txt", "bash", "build.sh"], "bash"),
+            (
+                &["nohup", "nice", "-n", "10", "env", "bash", "build.sh"],
+                "bash",
+            ),
+            // env split-string.
+            (&["env", "-S", "bash -c id"], "bash"),
+            (&["env", "-Sbash -c id"], "bash"),
+            (&["env", "--split-string", "sh -c id"], "sh"),
+            (&["env", "--split-string=sh -c id"], "sh"),
+            (&["env", "-iS", "bash -c id"], "bash"),
+            (&["/usr/bin/env", "-S", "FOO=1 nice bash build.sh"], "bash"),
+            (&["env", "-S", "-i bash", "-c", "id"], "bash"),
+            // Script flag after other interpreter flags, behind an unknown launcher.
+            (&["strace", "-f", "bash", "-x", "-c", "id"], "bash"),
+            (
+                &[
+                    "flock",
+                    "/tmp/l",
+                    "bash",
+                    "--noprofile",
+                    "--norc",
+                    "-c",
+                    "id",
+                ],
+                "bash",
+            ),
+            (&["xargs", "bash", "-o", "pipefail", "-c", "id"], "bash"),
+            (
+                &[
+                    "strace",
+                    "pwsh",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "x",
+                ],
+                "pwsh",
+            ),
+            (&["strace", "PWSH", "-noprofile", "-COMMAND", "x"], "pwsh"),
+            (&["strace", "pwsh", "-e", "QQ=="], "pwsh"),
+            (
+                &[
+                    "strace",
+                    "powershell",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    "x",
+                ],
+                "powershell",
+            ),
+            (&["strace", "cmd", "/d", "/q", "/c", "dir"], "cmd"),
+            (&["strace", "cmd", "/r", "dir"], "cmd"),
+            // Shells that were not listed.
+            (&["mksh", "-c", "id"], "mksh"),
+            (&["yash"], "yash"),
+            (&["env", "rbash", "x.sh"], "rbash"),
+            (&["strace", "nu", "-c", "ls"], "nu"),
+        ];
+        for (argv, expected) in denied {
+            assert_eq!(shell_argv_denied(argv), Some(*expected), "argv={argv:?}");
+        }
+    }
+
+    #[test]
+    fn argv_denies_quoted_split_string_value_operands_and_mixed_clusters() {
+        let denied: &[(&[&str], &str)] = &[
+            // env -S quote removal: `'bash'` and `b""ash` are `bash` to env.
+            (&["env", "-S", "'bash' -c 'echo X'"], "bash"),
+            (&["env", "-S", "b\"\"ash -c 'echo X'"], "bash"),
+            (&["env", "-S", "\"sh\" build.sh"], "sh"),
+            // `\` escapes and `${VAR}` are not modeled: fail closed.
+            (&["env", "-S", "b\\ash -c id"], ENV_SPLIT_STRING_DENY),
+            (&["env", "-S", "${SHELL} -c id"], ENV_SPLIT_STRING_DENY),
+            // The first operand of timeout / taskset / chrt is a value.
+            (&["timeout", "inf", "bash", "run.sh"], "bash"),
+            (&["timeout", ".5", "bash", "run.sh"], "bash"),
+            (&["taskset", "ff", "bash", "run.sh"], "bash"),
+            (&["chrt", "-f", "50", "bash", "run.sh"], "bash"),
+            (&["env", "-a", "x", "bash", "run.sh"], "bash"),
+            // Script-flag clusters are case-insensitive and any length.
+            (&["flock", "/tmp/x", "bash", "-Cc", "id"], "bash"),
+            (&["flock", "/tmp/x", "bash", "-Bc", "id"], "bash"),
+            (&["flock", "/tmp/x", "bash", "-eluxc", "id"], "bash"),
+        ];
+        for (argv, expected) in denied {
+            assert_eq!(shell_argv_denied(argv), Some(*expected), "argv={argv:?}");
+        }
+        for argv in [
+            &["env", "-S", "cargo build"][..],
+            &["env", "-S", "'cargo' build --release"],
+            &["timeout", "10", "cargo", "test"],
+            &["timeout", "5m", "npm", "test"],
+            &["taskset", "ff", "cargo", "bench"],
+            &["ionice", "-c3", "cargo", "build"],
+            &["flock", "/tmp/x", "bash", "-x", "script.sh"],
+            &["flock", "/tmp/x", "bash", "run.sh"],
+            // PowerShell words are not POSIX clusters.
+            &[
+                "strace",
+                "pwsh",
+                "-NoProfile",
+                "-NonInteractive",
+                "-File",
+                "x.ps1",
+            ],
+        ] {
+            assert_eq!(shell_argv_denied(argv), None, "false deny for {argv:?}");
+        }
+    }
+
+    #[test]
+    fn argv_allows_ordinary_dev_commands() {
+        for argv in [
+            &["git", "status"][..],
+            &["cargo", "build"],
+            &["cargo", "test", "--workspace"],
+            &["npm", "test"],
+            &["npm.cmd", "run", "build"],
+            &["node", "script.js"],
+            &["node", "-e", "console.log(1)"],
+            &["python", "script.py"],
+            &["python", "-c", "print(1)"],
+            &["perl", "-e", "print 1"],
+            &["rg", "-n", "foo", "src"],
+            &["docker", "ps"],
+            &["ssh", "host", "uptime"],
+            &["wsl", "-e", "cargo", "build"],
+            &["timeout", "10", "cargo", "test"],
+            &["nice", "-n", "5", "cargo", "build"],
+            &["nohup", "node", "server.js"],
+            &["time", "-f", "%e", "npm", "test"],
+            &["stdbuf", "-oL", "python", "script.py"],
+            &["taskset", "-c", "0", "cargo", "bench"],
+            &["env", "RUST_LOG=debug", "cargo", "run"],
+            &["env", "-S", "cargo build --release"],
+            // A shell name as an operand, with no script flag after it.
+            &["rg", "bash", "src"],
+            &["git", "log", "--grep", "sh"],
+            &["which", "bash"],
+        ] {
+            assert_eq!(shell_argv_denied(argv), None, "false deny for {argv:?}");
+        }
+    }
+
+    #[test]
+    fn remote_and_container_carriers_are_not_scanned() {
+        for argv in [
+            &["docker", "exec", "c", "sh", "-c", "ls"][..],
+            &["docker", "run", "--rm", "alpine", "sh", "-c", "echo hi"],
+            &["docker.exe.", "exec", "c", "bash", "-c", "ls"],
+            &["ssh", "host", "bash", "-c", "uptime"],
+            &["ssh.exe", "host", "bash", "-lc", "uptime"],
+            &[
+                r"C:\Windows\System32\OpenSSH\ssh.exe",
+                "host",
+                "sh",
+                "-c",
+                "x",
+            ],
+            &["kubectl", "exec", "pod", "--", "sh", "-c", "ls"],
+            &["podman", "exec", "c", "bash", "-c", "ls"],
+            &["nerdctl", "exec", "c", "sh", "-c", "ls"],
+            &["env", "ssh", "host", "bash", "-c", "uptime"],
+        ] {
+            assert_eq!(shell_argv_denied(argv), None, "false deny for {argv:?}");
+        }
+        // Only the launched program is a carrier; an operand named `docker`
+        // does not stop the scan, and a leading interpreter still denies.
+        assert_eq!(
+            shell_argv_denied(&["flock", "/tmp/docker", "bash", "-c", "id"]),
+            Some("bash")
+        );
+        assert_eq!(
+            shell_argv_denied(&["bash", "-c", "ssh host uptime"]),
+            Some("bash")
+        );
+    }
+
+    #[test]
+    fn wsl_carrier_uses_win32_basename_normalize() {
+        for name in [
+            "wsl",
+            "WSL.EXE",
+            "wsl.exe.",
+            "wsl.exe ",
+            "WSL.EXE. ",
+            "wsl.",
+            "wsl.exe::$DATA",
+            r"C:\Windows\System32\wsl.exe.",
+            "/mnt/c/Windows/System32/wsl.exe",
+        ] {
+            assert!(is_wsl_carrier(name), "{name:?} must be a wsl carrier");
+        }
+        for name in ["wslconfig.exe", "wsl2", "git.exe.", "wsl.cmd", ""] {
+            assert!(!is_wsl_carrier(name), "{name:?} is not a wsl carrier");
+        }
     }
 }

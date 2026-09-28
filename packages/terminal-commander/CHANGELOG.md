@@ -10,6 +10,10 @@
 ## [0.1.99](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.98...v0.1.99) (2026-09-28)
 
 
+### ⚠ BREAKING CHANGES
+
+* **recipes:** `from_mcp` on `recipe_activate`/`recipe_deactivate`/`recipe_import_seeds` now defaults to `true` (was `false`). A raw-IPC admin client other than the shipped CLI that omits `from_mcp` is no longer treated as admin; the shipped CLI already sends it explicitly, so `terminal-commander recipes ...` is unaffected.
+
 ### Bug Fixes
 
 * **recipes:** close FCR-003, 004, 005, 010, 012–015 ([7990ccf](https://github.com/special-place-ai-heaven/terminal-commander/commit/7990ccf381ce82681685092e35acc195ed33b8e8))

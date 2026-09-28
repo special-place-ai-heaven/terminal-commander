@@ -11,13 +11,16 @@
 use std::path::PathBuf;
 use terminal_commander_supervisor::identity::PeerIdentity;
 use tokio::net::windows::named_pipe::NamedPipeServer;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::Pipes::GetNamedPipeClientProcessId;
 use windows::Win32::System::Threading::{
-    OpenProcess, OpenProcessToken, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
+    GetProcessTimes, OpenProcess, OpenProcessToken, PROCESS_NAME_FORMAT,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
 pub fn peer_identity_for(server: &NamedPipeServer) -> PeerIdentity {
@@ -120,4 +123,84 @@ fn resolve_sid_and_image(pid: u32) -> Option<(String, Option<PathBuf>)> {
         let _ = CloseHandle(proc);
         Some((sid, image))
     }
+}
+
+/// `true` when `ancestor` is a strict ancestor of `pid`. One Toolhelp
+/// snapshot supplies the parent map. Each hop's parent must be created no
+/// later than its child, so a recycled parent pid ends the walk.
+///
+/// ponytail: parent-chain walk, not job-object membership. A descendant
+/// whose intermediate parent already exited escapes; `IsProcessInJob`
+/// against the probe job handles would catch it.
+pub fn descends_from(pid: u32, ancestor: u32) -> bool {
+    let Some(parents) = parent_map() else {
+        return false;
+    };
+    let Some(mut child_created) = creation_time(pid) else {
+        return false;
+    };
+    let mut cur = pid;
+    for _ in 0..super::peer::MAX_ANCESTRY_DEPTH {
+        let Some(&parent) = parents.get(&cur) else {
+            return false;
+        };
+        if parent == 0 || parent == cur {
+            return false;
+        }
+        let Some(parent_created) = creation_time(parent) else {
+            return false;
+        };
+        if parent_created > child_created {
+            return false;
+        }
+        if parent == ancestor {
+            return true;
+        }
+        cur = parent;
+        child_created = parent_created;
+    }
+    false
+}
+
+fn parent_map() -> Option<std::collections::HashMap<u32, u32>> {
+    let mut parents = std::collections::HashMap::new();
+    // SAFETY: the snapshot handle is closed once below. `entry` is an owned
+    // PROCESSENTRY32W with `dwSize` set, as Process32FirstW/NextW require.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: u32::try_from(std::mem::size_of::<PROCESSENTRY32W>()).ok()?,
+            ..Default::default()
+        };
+        let mut more = Process32FirstW(snapshot, &raw mut entry).is_ok();
+        while more {
+            parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+            more = Process32NextW(snapshot, &raw mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    Some(parents)
+}
+
+fn creation_time(pid: u32) -> Option<u64> {
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: the process handle is closed once below; the four FILETIMEs
+    // are owned out-parameters.
+    let ok = unsafe {
+        let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let ok = GetProcessTimes(
+            proc,
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+        .is_ok();
+        let _ = CloseHandle(proc);
+        ok
+    };
+    ok.then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
 }

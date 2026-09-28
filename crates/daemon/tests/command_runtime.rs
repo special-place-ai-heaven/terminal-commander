@@ -48,6 +48,17 @@ fn tmp_data_dir(tag: &str) -> PathBuf {
     p
 }
 
+/// `developer_local` hardened with `[policy.caps] allow_shell = false`: the
+/// default profile grants `allow_shell`, so deny tests opt out explicitly.
+fn shell_off_cfg(data: &std::path::Path) -> DaemonConfig {
+    let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+        allow_shell: Some(false),
+        ..Default::default()
+    });
+    cfg
+}
+
 fn cleanup(p: &std::path::Path) {
     let _ = std::fs::remove_dir_all(p);
 }
@@ -541,7 +552,7 @@ fn command_start_denied_for_bare_sh_argv() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("deny-sh-bare");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let cfg = shell_off_cfg(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let job_count_before = state.jobs.list().len();
@@ -592,7 +603,7 @@ fn command_start_denied_for_absolute_sh_argv() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("deny-sh-abs");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let cfg = shell_off_cfg(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let job_count_before = state.jobs.list().len();
@@ -636,7 +647,7 @@ fn command_start_denies_all_known_shell_interpreters() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("deny-shells");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let cfg = shell_off_cfg(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         // Subset that covers POSIX shells + Windows shells +
@@ -697,7 +708,7 @@ fn command_start_denies_fcr001_shell_bypasses() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("deny-fcr001");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let cfg = shell_off_cfg(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
         assert!(!state.policy.caps_allow_shell());
 
@@ -741,20 +752,108 @@ fn command_start_denies_fcr001_shell_bypasses() {
     });
 }
 
+/// `allow_shell` is the one switch for the argv interpreter deny. Explicitly
+/// off: `sh -c` is denied before spawn with a `command_rejected` row.
+#[test]
+fn argv_shell_interpreter_denied_with_explicit_allow_shell_false() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("deny-argv-cap-off");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+            allow_shell: Some(false),
+            ..Default::default()
+        });
+        let state = DaemonState::bootstrap(cfg).unwrap();
+        assert!(!state.policy.caps_allow_shell());
+
+        let job_count_before = state.jobs.list().len();
+        let err = state
+            .command
+            .start_combed(wsl_req(&["env", "sh", "-x", "-c", "echo hi"]))
+            .unwrap_err();
+        assert!(
+            matches!(err, CommandError::ShellInterpreterDenied(ref s) if s == "sh"),
+            "allow_shell=false must deny the interpreter: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("[policy.caps] allow_shell = true"),
+            "deny text must name the knob: {err}"
+        );
+        assert_eq!(state.jobs.list().len(), job_count_before);
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.action == "command_rejected" && r.decision == "deny"),
+            "expected a command_rejected deny row: {rows:?}"
+        );
+        cleanup(&data);
+    });
+}
+
+/// `allow_shell=true`: the same argv runs, and the `command_start` row carries
+/// the `nested_shell` tag the WSL gate uses.
+#[test]
+fn argv_shell_interpreter_runs_and_is_audit_tagged_under_allow_shell_true() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("allow-argv-cap-on");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+            allow_shell: Some(true),
+            ..Default::default()
+        });
+        let state = DaemonState::bootstrap(cfg).unwrap();
+
+        state
+            .command
+            .start_combed(wsl_req(&["env", "sh", "-x", "-c", "echo hi"]))
+            .expect("allow_shell=true must run the interpreter");
+
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        let tagged = rows
+            .iter()
+            .find(|r| {
+                r.action == "command_start"
+                    && r.decision == "allow"
+                    && r.metadata_json
+                        .as_deref()
+                        .is_some_and(|m| m.contains("nested_shell"))
+            })
+            .expect("a command_start row tagged with nested_shell");
+        assert!(
+            tagged
+                .metadata_json
+                .as_deref()
+                .unwrap_or_default()
+                .contains(r#""nested_shell":"sh""#),
+            "nested_shell tag must name the interpreter: {:?}",
+            tagged.metadata_json
+        );
+        // No WSL carrier here, so the reason must not claim one.
+        assert_eq!(tagged.reason.as_deref(), Some("nested_shell: sh"));
+        assert!(
+            !rows.iter().any(|r| r.action == "command_rejected"),
+            "no deny row under allow_shell=true: {rows:?}"
+        );
+        cleanup(&data);
+    });
+}
+
 /// TC49 Task-4 regression lock: threading `StartLane` through
 /// `start_combed_inner` MUST NOT weaken the argv lane. The default
 /// `start_combed` path (`StartLane::Argv`) still hard-denies a shell
 /// interpreter as `argv[0]` with `ShellInterpreterDenied` and still
 /// writes a `command_rejected` deny audit row — byte-for-byte the
 /// pre-TC49 behavior, BEFORE the policy engine. The shell lane's
-/// `allow_shell` gate is a separate door (`start_combed_shell`); it
-/// never relaxes this guard.
+/// `allow_shell` gate is a separate door (`start_combed_shell`); with
+/// `allow_shell=false` it never relaxes this guard.
 #[test]
 fn argv_shell_interpreter_still_denied_unchanged() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("deny-argv-unchanged");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let cfg = shell_off_cfg(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let job_count_before = state.jobs.list().len();
@@ -1349,7 +1448,7 @@ fn start_combed_reusing_same_bucket_yields_distinct_jobs_one_bucket() {
 // run these); the spellings matrix is normative in policy-wsl.md.
 // ------------------------------------------------------------------
 
-/// Default (allow_shell=false) argv request builder for the WSL cases.
+/// Argv request builder for the WSL cases.
 fn wsl_req(argv: &[&str]) -> CommandStartRequest {
     CommandStartRequest {
         argv: argv.iter().map(|s| (*s).to_owned()).collect(),
@@ -1373,7 +1472,7 @@ fn wsl_nested_shell_denied_under_allow_shell_false() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("wsl-deny");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let cfg = shell_off_cfg(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let job_count_before = state.jobs.list().len();
@@ -1412,7 +1511,7 @@ fn wsl_nested_shell_all_spellings_classified_identically() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("wsl-spellings");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let cfg = shell_off_cfg(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         // (argv, expected interpreter). Matrix from policy-wsl.md deny table.
@@ -1430,6 +1529,13 @@ fn wsl_nested_shell_all_spellings_classified_identically() {
                 "default shell interpretation",
             ),
             (&["wsl.exe", "~"], "default shell"),
+            // FCR2-001: Win32 drops a trailing dot/space and the unnamed
+            // `::$DATA` stream, so these still launch wsl.exe.
+            (&["wsl.exe.", "-e", "bash", "-lc", "echo hi"], "bash"),
+            (&["wsl.exe ", "--", "sh", "-c", "echo hi"], "sh"),
+            (&["WSL.EXE. ", "~"], "default shell"),
+            (&["wsl.exe::$DATA", "-e", "bash"], "bash"),
+            (&[r"C:\Windows\System32\wsl.exe.", "-e", "zsh"], "zsh"),
         ];
 
         for (argv, expected) in cases {
@@ -1491,7 +1597,7 @@ fn wsl_bare_payload_without_exec_is_shell_interpreted_and_denied() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("wsl-bare-payload");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let cfg = shell_off_cfg(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let err = state
@@ -1521,7 +1627,7 @@ fn wsl_tilde_shorthand_is_selector_not_payload() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("wsl-tilde");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let cfg = shell_off_cfg(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let err = state
@@ -1550,7 +1656,7 @@ fn wsl_unknown_construction_fails_closed() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("wsl-unknown");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let cfg = shell_off_cfg(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let err = state
@@ -1579,7 +1685,7 @@ fn wsl_bare_invocation_is_default_shell_and_denied() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("wsl-bare");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let cfg = shell_off_cfg(&data);
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let err = state

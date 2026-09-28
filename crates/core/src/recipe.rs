@@ -117,18 +117,19 @@ pub struct RecipeDefinition {
 }
 
 impl RecipeDefinition {
-    /// Check required fields, argv shape, and the shell-interpreter deny.
+    /// Check required fields, argv shape, and, unless `allow_shell` (the
+    /// daemon's resolved `[policy.caps] allow_shell`), the shell-interpreter deny.
     ///
     /// # Errors
     /// Returns [`RecipeError::Invalid`] when the definition cannot be stored.
-    pub fn validate(&self) -> Result<(), RecipeError> {
+    pub fn validate(&self, allow_shell: bool) -> Result<(), RecipeError> {
         validate_id(&self.recipe_id)?;
         if self.version == 0 {
             return Err(invalid("version must be >= 1"));
         }
         validate_text("title", &self.title, MAX_RECIPE_TITLE_BYTES)?;
         validate_text("summary", &self.summary, MAX_RECIPE_SUMMARY_BYTES)?;
-        validate_argv(&self.argv)?;
+        validate_argv(&self.argv, allow_shell)?;
         validate_tags(&self.tags)?;
         if let Some(cwd) = &self.cwd {
             validate_cwd(cwd)?;
@@ -173,10 +174,12 @@ impl RecipeDefinition {
     ///
     /// # Errors
     /// Unknown fills, missing fills for tokens that appear in argv, or an argv
-    /// that fails [`validate`](Self::validate)'s argv rules (including shells).
+    /// that fails [`validate`](Self::validate)'s argv rules (including shells
+    /// when `allow_shell` is false).
     pub fn resolve_argv(
         &self,
         fills: &BTreeMap<String, String>,
+        allow_shell: bool,
     ) -> Result<Vec<String>, RecipeError> {
         let allowed: BTreeSet<String> = self
             .placeholders
@@ -194,7 +197,7 @@ impl RecipeDefinition {
         for (index, arg) in self.argv.iter().enumerate() {
             argv.push(apply_fills(arg, &allowed, fills, index)?);
         }
-        validate_argv(&argv)?;
+        validate_argv(&argv, allow_shell)?;
         Ok(argv)
     }
 }
@@ -242,7 +245,7 @@ fn validate_text(field: &str, value: &str, max: usize) -> Result<(), RecipeError
     Ok(())
 }
 
-fn validate_argv(argv: &[String]) -> Result<(), RecipeError> {
+fn validate_argv(argv: &[String], allow_shell: bool) -> Result<(), RecipeError> {
     if argv.is_empty() {
         return Err(invalid("argv must not be empty"));
     }
@@ -262,10 +265,13 @@ fn validate_argv(argv: &[String]) -> Result<(), RecipeError> {
     // Shared predicate: case, Windows extensions, trailing dot/space, 8.3
     // powershell short names, `::$DATA`, wrappers, script flags.
     // `git -c` is not this shape: git is not on the deny list.
-    if let Some(shell) = shell_argv_denied(argv) {
+    if !allow_shell && let Some(shell) = shell_argv_denied(argv) {
         return Err(invalid(format!(
-            "shell interpreter '{shell}' is denied; recipe argv must not launch a shell \
-             (including wrapped argv and -c, -ec, -Command, -EncodedCommand, /k)"
+            "shell interpreter '{shell}' is denied: allow_shell is off, so recipe argv must \
+             not launch a shell (including wrapped argv and -c, -ec, -Command, \
+             -EncodedCommand, /k). Run the program directly as argv (e.g. \
+             [\"cargo\",\"build\"]), or have the operator set [policy.caps] allow_shell = \
+             true, which allows shell recipes and shell_exec"
         )));
     }
     Ok(())
@@ -465,7 +471,7 @@ mod tests {
 
     #[test]
     fn accepts_a_plain_argv_recipe() {
-        ok_def().validate().unwrap();
+        ok_def().validate(false).unwrap();
     }
 
     #[test]
@@ -521,11 +527,16 @@ mod tests {
         ] {
             let mut def = ok_def();
             def.argv = argv;
-            let err = def.validate().unwrap_err();
+            let err = def.validate(false).unwrap_err();
             assert!(
-                err.to_string().contains("shell interpreter"),
-                "expected deny, got {err}"
+                err.to_string().contains("shell interpreter")
+                    && err.to_string().contains("[policy.caps] allow_shell = true"),
+                "expected actionable deny, got {err}"
             );
+            // allow_shell is the one switch: the same recipe validates when on.
+            def.validate(true).unwrap_or_else(|err| {
+                panic!("{:?} must validate with allow_shell: {err}", def.argv)
+            });
         }
     }
 
@@ -538,14 +549,14 @@ mod tests {
             "color.ui=auto".to_owned(),
             "status".to_owned(),
         ];
-        def.validate().unwrap();
+        def.validate(false).unwrap();
     }
 
     #[test]
     fn rejects_duplicate_tags() {
         let mut def = ok_def();
         def.tags = vec!["git".to_owned(), "git".to_owned()];
-        let err = def.validate().unwrap_err().to_string();
+        let err = def.validate(false).unwrap_err().to_string();
         assert!(err.contains("duplicate tag"), "{err}");
     }
 
@@ -553,7 +564,7 @@ mod tests {
     fn rejects_nonempty_env_allowlist() {
         let mut def = ok_def();
         def.env_allowlist = vec!["PATH".to_owned()];
-        let err = def.validate().unwrap_err().to_string();
+        let err = def.validate(false).unwrap_err().to_string();
         assert!(err.contains("not enforced"), "{err}");
     }
 
@@ -561,7 +572,7 @@ mod tests {
     fn rejects_secret_values_and_unknown_fields() {
         let mut def = ok_def();
         def.env_allowlist = vec!["AWS_SECRET=hunter2".to_owned()];
-        assert!(def.validate().is_err());
+        assert!(def.validate(false).is_err());
 
         let raw = r#"{
             "recipe_id": "git.status",
@@ -599,24 +610,32 @@ mod tests {
         ];
         def.placeholders = vec!["bin".to_owned(), "{flag}".to_owned()];
         let argv = def
-            .resolve_argv(&BTreeMap::from([
-                ("bin".to_owned(), "git".to_owned()),
-                ("flag".to_owned(), "short".to_owned()),
-            ]))
+            .resolve_argv(
+                &BTreeMap::from([
+                    ("bin".to_owned(), "git".to_owned()),
+                    ("flag".to_owned(), "short".to_owned()),
+                ]),
+                false,
+            )
             .unwrap();
         assert_eq!(argv, vec!["git", "status", "--short"]);
 
-        let err = def
-            .resolve_argv(&BTreeMap::from([
-                ("bin".to_owned(), "bash".to_owned()),
-                ("flag".to_owned(), "short".to_owned()),
-            ]))
-            .unwrap_err()
-            .to_string();
+        let bash_fill = BTreeMap::from([
+            ("bin".to_owned(), "bash".to_owned()),
+            ("flag".to_owned(), "short".to_owned()),
+        ]);
+        let err = def.resolve_argv(&bash_fill, false).unwrap_err().to_string();
         assert!(err.contains("shell interpreter"), "{err}");
+        assert_eq!(
+            def.resolve_argv(&bash_fill, true).unwrap(),
+            vec!["bash", "status", "--short"]
+        );
 
         let err = def
-            .resolve_argv(&BTreeMap::from([("nope".to_owned(), "git".to_owned())]))
+            .resolve_argv(
+                &BTreeMap::from([("nope".to_owned(), "git".to_owned())]),
+                false,
+            )
             .unwrap_err()
             .to_string();
         assert!(err.contains("not a declared placeholder"), "{err}");
@@ -655,10 +674,13 @@ mod tests {
             stored.argv = argv.iter().map(|s| (*s).to_owned()).collect();
             stored.placeholders = vec!["bin".to_owned()];
             stored
-                .validate()
+                .validate(false)
                 .unwrap_or_else(|err| panic!("template {argv:?} must validate: {err}"));
             let err = stored
-                .resolve_argv(&BTreeMap::from([("bin".to_owned(), (*fill).to_owned())]))
+                .resolve_argv(
+                    &BTreeMap::from([("bin".to_owned(), (*fill).to_owned())]),
+                    false,
+                )
                 .unwrap_err()
                 .to_string();
             assert!(

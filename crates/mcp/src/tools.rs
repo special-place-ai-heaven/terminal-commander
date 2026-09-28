@@ -266,7 +266,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "recipe_get",
             status: ToolStatus::Live,
-            description: "Fetch an argv recipe by id and optional version.",
+            description: "Fetch an argv recipe by id and optional version. `tombstoned` is true when the id was retired by recipe_tombstone.",
         },
         ToolCatalogueEntry {
             name: "recipe_upsert",
@@ -296,7 +296,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "recipe_run",
             status: ToolStatus::Live,
-            description: "Run an activated argv recipe through the command argv lane (command_start_combed / run_and_watch). Refuses recipes that are not activated. Never uses shell_exec.",
+            description: "Run an activated argv recipe on the argv lane. Never uses shell_exec. When the recipe has timeout_ms or rule_pack_ids, the response is watched: it returns signals, a resume cursor, and degraded/recover_hint the same way run_and_watch does. rule_pack_ids only select that watched response; they do not load packs. Combing uses registry rules already active on the job. Refuses recipes that are not activated.",
         },
         ToolCatalogueEntry {
             name: "file_read_window",
@@ -331,7 +331,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "pty_command_start",
             status: ToolStatus::Live,
-            description: "Start an interactive non-shell argv command attached to a PTY. Bounded metadata only.",
+            description: "Start an interactive argv command attached to a PTY; shell interpreters follow allow_shell. Bounded metadata only.",
         },
         ToolCatalogueEntry {
             name: "pty_command_write_stdin",
@@ -702,7 +702,7 @@ pub struct OmniMatrix {
 ///
 /// `available` is the CAP-TRUTHFUL verdict: the lane is WIRED (the `shell_exec`
 /// tool is live and the daemon is reachable) AND the active profile grants
-/// `allow_shell`. A deny-by-default profile (allow_shell off) reports
+/// `allow_shell`. A profile with allow_shell off (hardened or non-exec) reports
 /// `available: false` with `reason` set, because a call would be PolicyDenied
 /// (BUG 1). `reason` is `None` when available, or when caps could not be read
 /// (the presence-only fallback). The precise cap value is still reported by
@@ -1310,7 +1310,7 @@ impl TerminalCommanderMcpServer {
     /// `command_start_combed` — start a non-PTY argv command on the
     /// daemon and return bounded metadata. Never returns raw output.
     #[tool(
-        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. Argv only; shell interpreters are denied. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. shell_exec is opt-in only when shell syntax is required and the operator has enabled allow_shell."
+        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. Argv only; shell interpreters are denied when allow_shell is off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default developer_local profile)."
     )]
     async fn command_start_combed(
         &self,
@@ -1353,7 +1353,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters denied. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. shell_exec is opt-in only when shell syntax is required and the operator has enabled allow_shell."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters denied when allow_shell is off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default developer_local profile)."
     )]
     async fn run_and_watch(
         &self,
@@ -1651,7 +1651,7 @@ impl TerminalCommanderMcpServer {
     /// Forwards `IpcRequest::ShellExec`; the daemon spawns
     /// `[shell, "-lc", shell_line]` ONLY on an `AllowWithAudit` verdict for
     /// `PolicyAction::CommandShellStart` (gated by the `allow_shell`
-    /// capability, denied by default). The shell lane skips the
+    /// capability, on in the default `developer_local` profile). The shell lane skips the
     /// argv `SHELL_INTERPRETERS_DENY` guard, so its denials are
     /// `PolicyDenied`, never `ShellInterpreterDenied`. The reply reuses the
     /// `command_start_combed` bounded shape (`job_id`/`bucket_id`/`probe_id`/
@@ -1660,7 +1660,7 @@ impl TerminalCommanderMcpServer {
     /// MCP carries `shell_line` ONLY — capabilities are config/TOML, never an
     /// MCP-flippable flag.
     #[tool(
-        description = "Run ONE shell line (pipelines/compounds/redirects via [shell,-lc,line]) and get back ONLY the lines your rules match plus exit state, never the raw stream. Requires the allow_shell capability (config/TOML, denied by default); a denied daemon returns a policy error. Returns job_id, bucket_id, probe_id, initial cursor. Use run_and_watch or command_start_combed when you do not need shell syntax; shell_exec only when pipelines, compounds, or redirects are required and allow_shell is on."
+        description = "Run ONE shell line (pipelines/compounds/redirects via [shell,-lc,line]) and get back ONLY the lines your rules match plus exit state, never the raw stream. Requires the allow_shell capability (config/TOML; on in the default developer_local profile, [policy.caps] allow_shell = false hardens); a denied daemon returns a policy error. Returns job_id, bucket_id, probe_id, initial cursor. Use run_and_watch or command_start_combed when you do not need shell syntax; shell_exec only when pipelines, compounds, or redirects are required and allow_shell is on."
     )]
     async fn shell_exec(
         &self,
@@ -2192,7 +2192,9 @@ impl TerminalCommanderMcpServer {
     }
 
     /// `recipe_get` — fetch an argv recipe.
-    #[tool(description = "Fetch an argv recipe by id and optional version.")]
+    #[tool(
+        description = "Fetch an argv recipe by id and optional version. `tombstoned` is true when the id was retired by recipe_tombstone."
+    )]
     async fn recipe_get(
         &self,
         Parameters(params): Parameters<McpRecipeGetParams>,
@@ -2203,9 +2205,13 @@ impl TerminalCommanderMcpServer {
             version: params.version,
         };
         match self.daemon.call(IpcRequest::RecipeGet(ipc)).await {
-            Ok(IpcResponse::RecipeGet(RecipeGetResponse { definition })) => {
-                json_tool_result(&serde_json::json!({ "definition": definition }))
-            }
+            Ok(IpcResponse::RecipeGet(RecipeGetResponse {
+                definition,
+                tombstoned,
+            })) => json_tool_result(&serde_json::json!({
+                "definition": definition,
+                "tombstoned": tombstoned,
+            })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
         }
@@ -2395,55 +2401,70 @@ impl TerminalCommanderMcpServer {
             probe_id,
             cursor,
         } = started;
-        let watched_result = if watched {
-            Some(
-                self.watch_recipe_job(job_id, bucket_id, cursor, wait_ms)
-                    .await?,
-            )
-        } else {
-            None
-        };
+        if !watched {
+            return json_tool_result(&serde_json::json!({
+                "recipe_id": recipe_id,
+                "version": version,
+                "argv": argv,
+                "lane": lane,
+                "watched": watched,
+                "wait_ms": wait_ms,
+                "job_id": job_id,
+                "bucket_id": bucket_id,
+                "probe_id": probe_id,
+                "cursor": cursor,
+                "state": serde_json::Value::Null,
+                "exit_code": serde_json::Value::Null,
+                "complete": false,
+                "signals": Vec::<terminal_commander_core::SignalEvent>::new(),
+                "signal_count": 0,
+                "degraded": false,
+                "recover_hint": serde_json::Value::Null,
+            }));
+        }
         let RecipeWatch {
             state,
+            outcome_trust,
             exit_code,
-            complete,
             cursor,
             signals,
+            receipt,
             degraded,
             recover_hint,
-        } = watched_result.unwrap_or(RecipeWatch {
-            state: None,
-            exit_code: None,
-            complete: false,
+            signals_capped,
+            ..
+        } = self
+            .watch_recipe_job(job_id, bucket_id, cursor, wait_ms)
+            .await?;
+        // FCR2-011: build through the same field builder as run_and_watch so
+        // the watched contract (signals_capped, wait_exhausted, receipt,
+        // outcome_trust, poll_hint_ms, wait_cap_ms) cannot drift from it;
+        // overlay only the recipe fields run_and_watch doesn't have.
+        let mut value = run_and_watch_result_value(
+            job_id,
+            bucket_id,
             cursor,
-            signals: Vec::new(),
-            degraded: false,
-            recover_hint: None,
-        });
-        let state_json = match state {
-            Some(state) => serde_json::json!(state),
-            None if degraded => serde_json::json!("unknown"),
-            None => serde_json::Value::Null,
-        };
-        json_tool_result(&serde_json::json!({
-            "recipe_id": recipe_id,
-            "version": version,
-            "argv": argv,
-            "lane": lane,
-            "watched": watched,
-            "wait_ms": wait_ms,
-            "job_id": job_id,
-            "bucket_id": bucket_id,
-            "probe_id": probe_id,
-            "cursor": cursor,
-            "state": state_json,
-            "exit_code": exit_code,
-            "complete": complete,
-            "signals": signals,
-            "signal_count": signals.len(),
-            "degraded": degraded,
-            "recover_hint": recover_hint,
-        }))
+            state,
+            outcome_trust,
+            exit_code,
+            &signals,
+            receipt,
+            degraded,
+            recover_hint.as_deref(),
+            false,
+            signals_capped,
+        );
+        let obj = value
+            .as_object_mut()
+            .expect("run_and_watch_result_value returns a JSON object");
+        obj.insert("recipe_id".to_owned(), serde_json::json!(recipe_id));
+        obj.insert("version".to_owned(), serde_json::json!(version));
+        obj.insert("argv".to_owned(), serde_json::json!(argv));
+        obj.insert("lane".to_owned(), serde_json::json!(lane));
+        obj.insert("watched".to_owned(), serde_json::json!(watched));
+        obj.insert("wait_ms".to_owned(), serde_json::json!(wait_ms));
+        obj.insert("probe_id".to_owned(), serde_json::json!(probe_id));
+        json_tool_result(&value)
     }
 
     /// Watched recipe_run: same wait loop as `run_and_watch`.
@@ -2467,7 +2488,12 @@ impl TerminalCommanderMcpServer {
         let mut cursor = cursor;
         let mut resume_cursor = cursor;
         let mut last_state = None;
+        let mut last_outcome_trust = None;
         let mut exit_code = None;
+        // Deferred init: every loop iteration assigns `receipt` before the
+        // final Ok(..) below reads it; the early-return degraded arms never
+        // read it (mirrors run_and_watch's same pattern).
+        let mut receipt: Option<serde_json::Value>;
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
         loop {
             let status = match self
@@ -2480,6 +2506,7 @@ impl TerminalCommanderMcpServer {
                 Err(e) => {
                     return Ok(degraded_recipe_watch(
                         last_state,
+                        last_outcome_trust,
                         exit_code,
                         resume_cursor,
                         signals,
@@ -2488,7 +2515,9 @@ impl TerminalCommanderMcpServer {
                 }
             };
             last_state = Some(status.state);
+            last_outcome_trust = Some(status.outcome_trust);
             exit_code = status.exit_code;
+            receipt = status.receipt.as_ref().map(|r| serde_json::json!(r));
             let terminal = matches!(
                 status.state,
                 JobState::Exited | JobState::Cancelled | JobState::Failed
@@ -2517,6 +2546,7 @@ impl TerminalCommanderMcpServer {
             {
                 return Ok(degraded_recipe_watch(
                     last_state,
+                    last_outcome_trust,
                     exit_code,
                     resume_cursor,
                     signals,
@@ -2540,6 +2570,7 @@ impl TerminalCommanderMcpServer {
                 {
                     return Ok(degraded_recipe_watch(
                         last_state,
+                        last_outcome_trust,
                         exit_code,
                         resume_cursor,
                         signals,
@@ -2549,20 +2580,19 @@ impl TerminalCommanderMcpServer {
                 break;
             }
         }
-        let complete = last_state.is_some_and(|state| {
-            matches!(
-                state,
-                JobState::Exited | JobState::Cancelled | JobState::Failed
-            )
-        });
+        // F6: matches run_and_watch's signals_capped -- true iff the cap
+        // ended the wait, so more matches may exist beyond resume_cursor.
+        let signals_capped = signals.len() >= max_signals;
         Ok(RecipeWatch {
             state: last_state,
+            outcome_trust: last_outcome_trust,
             exit_code,
-            complete,
             cursor: resume_cursor,
             signals,
+            receipt,
             degraded: false,
             recover_hint: None,
+            signals_capped,
         })
     }
 
@@ -2809,7 +2839,7 @@ impl TerminalCommanderMcpServer {
 
     /// `pty_command_start` — interactive PTY argv command.
     #[tool(
-        description = "Start an interactive argv command attached to a PTY. Bounded metadata response only; never returns raw screen buffer. Shell interpreters denied."
+        description = "Start an interactive argv command attached to a PTY. Bounded metadata response only; never returns raw screen buffer. Shell interpreters are denied when allow_shell is off (on by default in developer_local)."
     )]
     async fn pty_command_start(
         &self,
@@ -3721,7 +3751,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
             ))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(
-                "Terminal Commander runs commands and returns STRUCTURED SIGNALS, not raw output: you define keyword/regex rules and get back only the matching events plus exit state, so you can run noisy or long-running commands without flooding your context. This saves you tokens and scrolling and lets you run commands too large to read. If no rule matches, command_status gives you a bounded receipt (exit code, suppressed-line count, short tail), never silence. Argv tools (run_and_watch, command_start_combed) are the primary path for ordinary commands, including tiny one-offs. shell_exec is operator opt-in (allow_shell, denied by default) only when pipelines, compounds, or redirects are required. The adapter is a thin facade: each tool forwards 1:1 to a daemon IPC method (discovery, status, command/bucket/event, registry, file, PTY, runtime)."
+                "Terminal Commander runs commands and returns STRUCTURED SIGNALS, not raw output: you define keyword/regex rules and get back only the matching events plus exit state, so you can run noisy or long-running commands without flooding your context. This saves you tokens and scrolling and lets you run commands too large to read. If no rule matches, command_status gives you a bounded receipt (exit code, suppressed-line count, short tail), never silence. Argv tools (run_and_watch, command_start_combed) are the primary path for ordinary commands, including tiny one-offs. shell_exec is only for when pipelines, compounds, or redirects are required (allow_shell, on in the default developer_local profile). The adapter is a thin facade: each tool forwards 1:1 to a daemon IPC method (discovery, status, command/bucket/event, registry, file, PTY, runtime)."
                     .to_owned(),
             )
     }
@@ -4083,6 +4113,41 @@ fn run_and_watch_result(
     bucket_id: terminal_commander_core::BucketId,
     cursor: u64,
     last_observed_state: Option<terminal_commander_core::JobState>,
+    outcome_trust: Option<terminal_commander_ipc::OutcomeTrust>,
+    exit_code: Option<i32>,
+    signals: &[terminal_commander_core::SignalEvent],
+    receipt: Option<serde_json::Value>,
+    degraded: bool,
+    recover_hint: Option<&str>,
+    compact: bool,
+    signals_capped: bool,
+) -> Result<CallToolResult, McpError> {
+    json_tool_result(&run_and_watch_result_value(
+        job_id,
+        bucket_id,
+        cursor,
+        last_observed_state,
+        outcome_trust,
+        exit_code,
+        signals,
+        receipt,
+        degraded,
+        recover_hint,
+        compact,
+        signals_capped,
+    ))
+}
+
+/// Field-building half of [`run_and_watch_result`], split out (FCR2-011) so
+/// a caller that needs to overlay extra top-level fields -- `recipe_run`'s
+/// watched response -- can merge onto this `Value` instead of duplicating
+/// the run_and_watch contract fields.
+#[allow(clippy::too_many_arguments)]
+fn run_and_watch_result_value(
+    job_id: terminal_commander_core::JobId,
+    bucket_id: terminal_commander_core::BucketId,
+    cursor: u64,
+    last_observed_state: Option<terminal_commander_core::JobState>,
     // spec 004: provenance of `last_observed_state` / `exit_code`. `None` when
     // no status was obtained at all (a degraded wait that never got an answer),
     // which serializes as null -- the honest shape, mirroring how `state`
@@ -4101,7 +4166,7 @@ fn run_and_watch_result(
     // an interrupted wait did not necessarily cap, and `degraded:true` already
     // marks the result incomplete.
     signals_capped: bool,
-) -> Result<CallToolResult, McpError> {
+) -> serde_json::Value {
     // A degraded result is never "complete" (the wait was interrupted);
     // otherwise derive completion from the last observed state.
     let (complete, wait_exhausted) = if degraded {
@@ -4141,7 +4206,7 @@ fn run_and_watch_result(
     } else {
         serde_json::json!(RUN_AND_WATCH_POLL_HINT_MS)
     };
-    json_tool_result(&serde_json::json!({
+    serde_json::json!({
         "job_id": job_id,
         "bucket_id": bucket_id,
         "state": state_json,
@@ -4163,7 +4228,7 @@ fn run_and_watch_result(
         // spec 004 FR-006: present on every payload, null only when no status
         // was ever obtained. Never guessed.
         "outcome_trust": outcome_trust,
-    }))
+    })
 }
 
 /// Build a structured `daemon_unavailable` MCP error envelope.
@@ -5111,16 +5176,19 @@ impl McpShellExecParams {
 
 struct RecipeWatch {
     state: Option<terminal_commander_core::JobState>,
+    outcome_trust: Option<terminal_commander_ipc::OutcomeTrust>,
     exit_code: Option<i32>,
-    complete: bool,
     cursor: u64,
     signals: Vec<terminal_commander_core::SignalEvent>,
+    receipt: Option<serde_json::Value>,
     degraded: bool,
     recover_hint: Option<String>,
+    signals_capped: bool,
 }
 
 fn degraded_recipe_watch(
     state: Option<terminal_commander_core::JobState>,
+    outcome_trust: Option<terminal_commander_ipc::OutcomeTrust>,
     exit_code: Option<i32>,
     cursor: u64,
     signals: Vec<terminal_commander_core::SignalEvent>,
@@ -5128,12 +5196,16 @@ fn degraded_recipe_watch(
 ) -> RecipeWatch {
     RecipeWatch {
         state,
+        outcome_trust,
         exit_code,
-        complete: false,
         cursor,
         signals,
+        // F6: an interrupted wait did not necessarily cap; degraded:true
+        // already marks the result incomplete -- mirrors run_and_watch.
+        receipt: None,
         degraded: true,
         recover_hint: Some(degraded_wait_hint(err)),
+        signals_capped: false,
     }
 }
 
@@ -6100,7 +6172,7 @@ pub struct McpFileWatchStopParams {
 pub struct McpPtyCommandStartParams {
     /// Non-empty argv as an array of strings, e.g.
     /// `["node","-e","..."]`. argv[0] is the program; the rest are args.
-    /// Shell interpreters denied.
+    /// Shell interpreters are denied when allow_shell is off.
     #[serde(deserialize_with = "deserialize_argv")]
     #[schemars(with = "Vec<String>")]
     pub argv: Vec<String>,
@@ -7246,6 +7318,37 @@ mod tests {
             not_impl.is_empty(),
             "TC45 carries forward TC44's no-not_implemented invariant; got: {not_impl:?}"
         );
+    }
+
+    #[test]
+    fn catalogue_descriptions_match_the_live_tool_attribute() {
+        // FCR2-012: `tool_catalogue()` is a hand-maintained, SEPARATE source
+        // of truth from the rmcp `#[tool(description = "...")]` attribute
+        // that actually ships in `tools/list`; nothing keeps the two in sync
+        // automatically, so a rewritten attribute description silently
+        // drifts from the catalogue row, as happened to `recipe_run`.
+        //
+        // Scoped to the `recipe_*` family (this pin's ownership): a repo-wide
+        // sweep turned up unrelated pre-existing drift on other tools (e.g.
+        // `health`) that is a separate cleanup, not this finding.
+        let router = TerminalCommanderMcpServer::tool_router();
+        for entry in tool_catalogue()
+            .iter()
+            .filter(|t| matches!(t.status, ToolStatus::Live) && t.name.starts_with("recipe_"))
+        {
+            let live = router.get(entry.name).unwrap_or_else(|| {
+                panic!(
+                    "{} is Live in tool_catalogue but not in the router",
+                    entry.name
+                )
+            });
+            assert_eq!(
+                live.description.as_deref(),
+                Some(entry.description),
+                "{} catalogue row description drifted from its #[tool] attribute",
+                entry.name
+            );
+        }
     }
 
     #[test]

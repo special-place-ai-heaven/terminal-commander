@@ -238,6 +238,59 @@ async fn mcp_activate_denied_and_run_uses_argv_lane() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+fn python3_available() -> bool {
+    ["/usr/bin/python3", "/usr/local/bin/python3", "/bin/python3"]
+        .iter()
+        .any(|c| std::path::Path::new(c).exists())
+}
+
+/// Prints more matches than `recipe_run`'s fixed 50-signal cap, then keeps
+/// running past it (FCR2-011 cap path).
+fn cap_needle_recipe() -> RecipeDefinition {
+    RecipeDefinition {
+        recipe_id: "echo.cap-needle".to_owned(),
+        version: 1,
+        title: "Cap needle".to_owned(),
+        summary: "Print more matches than max_signals, then keep running".to_owned(),
+        argv: vec![
+            "python3".to_owned(),
+            "-u".to_owned(),
+            "-c".to_owned(),
+            "import time\nfor i in range(60):\n    print('NEEDLE', i)\ntime.sleep(2)".to_owned(),
+        ],
+        status: RecipeStatus::Active,
+        tags: vec![],
+        cwd: None,
+        env_allowlist: vec![],
+        timeout_ms: Some(5_000),
+        rule_pack_ids: vec![],
+        placeholders: vec![],
+    }
+}
+
+/// Sleeps well past its own short `timeout_ms` (FCR2-011 deadline path).
+fn deadline_sleep_recipe() -> RecipeDefinition {
+    RecipeDefinition {
+        recipe_id: "echo.deadline-sleep".to_owned(),
+        version: 1,
+        title: "Deadline sleep".to_owned(),
+        summary: "Outlive a short wait_ms so recipe_run reports wait_exhausted".to_owned(),
+        argv: vec![
+            "python3".to_owned(),
+            "-u".to_owned(),
+            "-c".to_owned(),
+            "import time\ntime.sleep(2)\nprint('done')".to_owned(),
+        ],
+        status: RecipeStatus::Active,
+        tags: vec![],
+        cwd: None,
+        env_allowlist: vec![],
+        timeout_ms: Some(300),
+        rule_pack_ids: vec![],
+        placeholders: vec![],
+    }
+}
+
 fn needle_recipe() -> RecipeDefinition {
     RecipeDefinition {
         recipe_id: "echo.needle".to_owned(),
@@ -319,6 +372,7 @@ async fn events_since(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)] // one watched run: contract keys, signals, resume cursor
 async fn watched_recipe_run_returns_signals_and_resume_cursor_loses_nothing() {
     let data = tmp_data_dir("watch");
     let (handle, state) = spawn_daemon(&data);
@@ -379,6 +433,38 @@ async fn watched_recipe_run_returns_signals_and_resume_cursor_loses_nothing() {
     assert_eq!(body["watched"], true);
     assert_eq!(body["degraded"], false);
     assert_eq!(body["lane"], "argv");
+    // FCR2-011: watched recipe_run is documented as the same contract as
+    // run_and_watch (signals_capped, wait_exhausted, receipt, outcome_trust,
+    // poll_hint_ms, wait_cap_ms). Before the fix these keys were absent, so
+    // indexing them yielded Value::Null and every assertion below failed.
+    assert_eq!(
+        body["signals_capped"], false,
+        "signals_capped must be present and false (well under the cap): {body}"
+    );
+    assert_eq!(
+        body["wait_exhausted"], false,
+        "wait_exhausted must be present and false (the job finished): {body}"
+    );
+    assert_eq!(
+        body["outcome_trust"], "observed",
+        "outcome_trust must be present (a status poll succeeded): {body}"
+    );
+    assert!(
+        body.get("wait_cap_ms")
+            .and_then(serde_json::Value::as_u64)
+            .is_some(),
+        "wait_cap_ms must be present: {body}"
+    );
+    assert!(
+        body.as_object()
+            .is_some_and(|obj| obj.contains_key("poll_hint_ms")),
+        "poll_hint_ms key must be present (null once complete): {body}"
+    );
+    assert!(
+        body.as_object()
+            .is_some_and(|obj| obj.contains_key("receipt")),
+        "receipt key must be present (null here: signals are non-empty): {body}"
+    );
     let signal_ids = rule_event_ids(&body["signals"]);
     assert!(
         body["signals"].as_array().is_some_and(|rows| {
@@ -400,6 +486,185 @@ async fn watched_recipe_run_returns_signals_and_resume_cursor_loses_nothing() {
             "rule event {id} is neither in signals nor after cursor {cursor}"
         );
     }
+
+    let _ = client.cancel().await;
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// FCR2-011: a recipe whose job outproduces the 50-signal cap while still
+/// running must report the cap honestly (signals_capped, incomplete,
+/// recover_hint), and the omitted matches must still be reachable through
+/// bucket_wait -- the same contract run_and_watch's cap tests pin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watched_recipe_run_reports_capped_signals_and_recoverable_cursor() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    let data = tmp_data_dir("watch-cap");
+    let (handle, state) = spawn_daemon(&data);
+    let (_server, client) = paired(&handle).await;
+
+    call_tool(
+        &client,
+        "registry_upsert",
+        serde_json::json!({
+            "definition_json": keyword_rule_json("fcr-cap-needle", "NEEDLE", "cap_needle_match"),
+        }),
+    )
+    .await
+    .expect("rule upsert");
+    call_tool(
+        &client,
+        "registry_activate",
+        serde_json::json!({"rule_id": "fcr-cap-needle", "scope": {"kind": "global"}}),
+    )
+    .await
+    .expect("rule activate");
+
+    let definition = serde_json::to_string(&cap_needle_recipe()).unwrap();
+    let upserted = call_tool(
+        &client,
+        "recipe_upsert",
+        serde_json::json!({ "definition_json": definition }),
+    )
+    .await
+    .expect("recipe upsert");
+    let upsert_body: serde_json::Value =
+        serde_json::from_str(&first_text(&upserted)).expect("upsert json");
+    let version = u32::try_from(upsert_body["version"].as_u64().expect("version")).unwrap();
+    assert!(
+        state
+            .store
+            .record_recipe_activation_scoped(
+                "echo.cap-needle",
+                version,
+                ActivationScope::Global,
+                Some("test"),
+                Some("admin"),
+            )
+            .expect("store activate")
+    );
+
+    let ran = call_tool(
+        &client,
+        "recipe_run",
+        serde_json::json!({
+            "recipe_id": "echo.cap-needle",
+            "scope": {"kind": "global"}
+        }),
+    )
+    .await
+    .expect("recipe_run");
+    let body: serde_json::Value = serde_json::from_str(&first_text(&ran)).expect("run json");
+    assert_eq!(body["signals_capped"], true, "cap must be hit: {body}");
+    assert_eq!(
+        body["complete"], false,
+        "the job is still sleeping past the cap: {body}"
+    );
+    assert!(
+        body["recover_hint"].as_str().is_some(),
+        "a capped, incomplete result must carry a recover_hint: {body}"
+    );
+    let signals = body["signals"].as_array().expect("signals array");
+    assert_eq!(
+        signals.len(),
+        50,
+        "signals must be truncated to the fixed max_signals cap: {body}"
+    );
+
+    let bucket_id = body["bucket_id"].as_str().expect("bucket").to_owned();
+    let cursor = body["cursor"].as_u64().expect("cursor");
+    let resumed = call_tool(
+        &client,
+        "bucket_wait",
+        serde_json::json!({
+            "bucket_id": bucket_id,
+            "cursor": cursor,
+            "timeout_ms": 3000,
+            "limit": 20
+        }),
+    )
+    .await
+    .expect("bucket_wait");
+    let resumed_body: serde_json::Value =
+        serde_json::from_str(&first_text(&resumed)).expect("bucket_wait json");
+    let resumed_events = resumed_body["events"].as_array().expect("resumed events");
+    assert!(
+        !resumed_events.is_empty(),
+        "the matches omitted by the cap must still be recoverable via bucket_wait: {resumed_body}"
+    );
+
+    let _ = client.cancel().await;
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// FCR2-011: a recipe that outlives its own short `timeout_ms` must report
+/// `wait_exhausted` with a `recover_hint`, distinguishable from the cap path
+/// above (no signals here, only the deadline).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watched_recipe_run_reports_wait_exhausted_on_deadline() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    let data = tmp_data_dir("watch-deadline");
+    let (handle, state) = spawn_daemon(&data);
+    let (_server, client) = paired(&handle).await;
+
+    let definition = serde_json::to_string(&deadline_sleep_recipe()).unwrap();
+    let upserted = call_tool(
+        &client,
+        "recipe_upsert",
+        serde_json::json!({ "definition_json": definition }),
+    )
+    .await
+    .expect("recipe upsert");
+    let upsert_body: serde_json::Value =
+        serde_json::from_str(&first_text(&upserted)).expect("upsert json");
+    let version = u32::try_from(upsert_body["version"].as_u64().expect("version")).unwrap();
+    assert!(
+        state
+            .store
+            .record_recipe_activation_scoped(
+                "echo.deadline-sleep",
+                version,
+                ActivationScope::Global,
+                Some("test"),
+                Some("admin"),
+            )
+            .expect("store activate")
+    );
+
+    let ran = call_tool(
+        &client,
+        "recipe_run",
+        serde_json::json!({
+            "recipe_id": "echo.deadline-sleep",
+            "scope": {"kind": "global"}
+        }),
+    )
+    .await
+    .expect("recipe_run");
+    let body: serde_json::Value = serde_json::from_str(&first_text(&ran)).expect("run json");
+    assert_eq!(
+        body["wait_exhausted"], true,
+        "the job must still outlive wait_ms: {body}"
+    );
+    assert_eq!(
+        body["complete"], false,
+        "wait_exhausted implies incomplete: {body}"
+    );
+    assert_eq!(
+        body["signals_capped"], false,
+        "no matches were produced, only the deadline hit: {body}"
+    );
+    assert!(
+        body["recover_hint"].as_str().is_some(),
+        "a deadline-exhausted result must carry a recover_hint: {body}"
+    );
 
     let _ = client.cancel().await;
     handle.shutdown().await;

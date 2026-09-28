@@ -1,5 +1,22 @@
 <!--
 SYNC IMPACT REPORT
+Version change: 2.1.0 -> 3.0.0
+Bump rationale: Principle II no longer requires default profiles to deny shell
+passthrough; `allow_shell` now defaults on for `developer_local`. That redefines
+a NON-NEGOTIABLE default, so the bump is MAJOR. Rationale for the change: LLM
+callers abandon a denied tool for raw Bash; shell output remains combed,
+bounded, and audited. Owner decision D0 (2026-09-28).
+Modified principles:
+  - II. Policy-Before-Spawn, Default-Deny, Opt-In Capabilities
+Added sections: none
+Removed sections: none
+Templates reviewed:
+  - .specify/templates/plan-template.md       OK  (no shell-default wording)
+  - .specify/templates/spec-template.md       OK  (no shell-default wording)
+  - .specify/templates/tasks-template.md      OK  (no shell-default wording)
+Follow-up TODOs: none
+
+Previous report:
 Version change: 1.0.0 -> 2.1.0
 Bump rationale: The committed 1.0.0 two-process boundary is redefined as one
 engine boundary with two approved delivery modes, which is a major governance
@@ -65,18 +82,25 @@ the engine would make every other guarantee untrustworthy.
 
 No command, shell line, PTY, privileged op, connector action, environment
 sensor, or remote target runs until the policy engine governing that action has
-evaluated it. Default profiles MUST deny shell passthrough, privileged
-execution, and remote targets. New capability surfaces MUST be gated behind
+evaluated it. The default `developer_local` profile allows shell passthrough
+(`allow_shell`): it runs behind the combed, bounded pipeline and every start is
+audited (`command_shell_start`); an operator hardens with
+`[policy.caps] allow_shell = false`. Default profiles MUST deny privileged
+execution and remote targets. New capability surfaces MUST be gated behind
 explicit `[policy.caps]` flags (`allow_shell`, `allow_session`,
-`allow_privileged`, `allow_remote`, ...) that default to `false` and are enabled
-only by the operator. A new cap absent from an existing configuration resolves
+`allow_privileged`, `allow_remote`, ...) that default to `false` (the one
+exception is `allow_shell` on `developer_local`) and are enabled only by the
+operator. A new cap absent from an existing configuration resolves
 `false` under every profile, including `full_access`; selecting an old broad
 profile MUST NOT silently authorize a future cap after upgrade. A trusted fixed
 helper does not bypass policy; both its sensor class and its underlying command,
 file, probe, or connector action MUST be authorized before use. There is NO
-generic `sudo`/`doas`/`su` path and NO argv smuggling: a shell line travels in a
-dedicated request field, never as `argv[0]=bash` on the argv command path.
-`SHELL_INTERPRETERS_DENY` on the argv path MUST remain intact.
+generic `sudo`/`doas`/`su` path and NO unaudited argv smuggling: a shell line
+travels in a dedicated request field. With `allow_shell` off,
+`SHELL_INTERPRETERS_DENY` on the argv path MUST remain intact and
+`argv[0]=bash` is denied; with `allow_shell` on, an interpreter argv passes the
+same `CommandShellStart` policy check and its audit row is tagged
+`nested_shell`.
 
 Rationale: capability is granted, never assumed. The operator -- not the LLM --
 decides what the daemon may do on the host.
@@ -231,4 +255,4 @@ be recorded in the plan's Complexity Tracking table with the simpler alternative
 that was rejected and why. The NON-NEGOTIABLE principles (I, II, III, VI) are not
 subject to per-feature waiver.
 
-**Version**: 2.1.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-07-17
+**Version**: 3.0.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-09-28

@@ -48,16 +48,30 @@ pub struct RecipeSeedRow {
     pub version: u32,
 }
 
+/// An id whose previously-open global activation would close.
+///
+/// Reported, not skipped: `--activate` on a customized id is a visible
+/// decision instead of a silent overwrite (FCR2-007). Workaround:
+/// re-activate `closed_version` after the import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipeSupersededRow {
+    pub recipe_id: String,
+    pub closed_version: u32,
+}
+
 /// Outcome of importing the built-in argv seed bank. Not a rule pack.
 ///
 /// `tombstoned` ids are left unchanged. Import does not error on them,
 /// so a later seed still lands and a retry is not stuck on the same id.
-/// Tombstone has no undo.
+/// Tombstone has no undo. `superseded` is populated only when the caller
+/// requested activation; it does not close anything itself, it reports
+/// what activating the imported/skipped versions will close.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipeSeedImport {
     pub imported: Vec<RecipeSeedRow>,
     pub skipped: Vec<RecipeSeedRow>,
     pub tombstoned: Vec<String>,
+    pub superseded: Vec<RecipeSupersededRow>,
 }
 
 /// Borrowed writer/reader over the recipe tables.
@@ -117,6 +131,7 @@ impl EventStore {
         let mut imported = Vec::new();
         let mut skipped = Vec::new();
         let mut tombstoned = Vec::new();
+        let mut superseded = Vec::new();
         for seed in terminal_commander_core::RECIPE_SEEDS {
             let incoming = seed
                 .definition(status)
@@ -135,6 +150,23 @@ impl EventStore {
                     SeedDecision::Import
                 }
             };
+            // The imported/skipped version is what `--activate` will open
+            // next (see handlers::activate_imported_recipes). If a
+            // different body is already open globally, activating will
+            // close it (record_activation_scoped keeps one open version
+            // per scope) — report that instead of silently doing it.
+            if promote_active && !matches!(decision, SeedDecision::Tombstoned) {
+                let store = self.recipe_store()?;
+                if let Some(active) =
+                    store.get_active(seed.recipe_id, None, ActivationScope::Global)?
+                    && !recipe_body_eq(&active, &incoming)
+                {
+                    superseded.push(RecipeSupersededRow {
+                        recipe_id: seed.recipe_id.to_owned(),
+                        closed_version: active.version,
+                    });
+                }
+            }
             match decision {
                 SeedDecision::Tombstoned => tombstoned.push(seed.recipe_id.to_owned()),
                 SeedDecision::Skip(version) => skipped.push(RecipeSeedRow {
@@ -154,6 +186,7 @@ impl EventStore {
             imported,
             skipped,
             tombstoned,
+            superseded,
         })
     }
 }
@@ -178,7 +211,9 @@ fn recipe_body_eq(stored: &RecipeDefinition, incoming: &RecipeDefinition) -> boo
 impl RecipeStore<'_> {
     /// Insert the next immutable version. Does not activate.
     pub fn create_recipe_version(&mut self, def: &RecipeDefinition) -> Result<u32> {
-        def.validate()
+        // Shape only. The interpreter deny follows `[policy.caps] allow_shell`,
+        // which the daemon applies at upsert and again at recipe_run.
+        def.validate(true)
             .map_err(|e| EventStoreError::InvalidPayload(e.to_string()))?;
         let now_s = OffsetDateTime::now_utc().format(&Rfc3339)?;
         let tx = self.conn.transaction()?;
@@ -857,27 +892,21 @@ mod tests {
         assert_eq!(rules_before, rules_after);
     }
 
+    /// The store checks shape; the interpreter deny is the daemon's, gated on
+    /// `allow_shell` at upsert and at recipe_run.
     #[test]
-    fn interpreter_deny_rejects_before_insert() {
+    fn store_checks_shape_and_leaves_the_interpreter_deny_to_the_daemon() {
         let mut store = EventStore::in_memory().unwrap();
         let mut recipes = store.recipe_store().unwrap();
-        for argv0 in ["bash", "sh", "zsh", "fish", "powershell", "pwsh", "cmd"] {
-            let mut bad = def(RecipeStatus::Draft);
-            bad.argv = vec![argv0.to_owned(), "-c".to_owned(), "echo".to_owned()];
-            if argv0 == "pwsh" || argv0 == "powershell" {
-                bad.argv = vec![
-                    argv0.to_owned(),
-                    "-Command".to_owned(),
-                    "Get-Date".to_owned(),
-                ];
-            }
-            let err = recipes.create_recipe_version(&bad).unwrap_err();
-            assert!(
-                err.to_string().contains("shell interpreter"),
-                "{argv0}: {err}"
-            );
-        }
+        let mut empty = def(RecipeStatus::Draft);
+        empty.argv.clear();
+        let err = recipes.create_recipe_version(&empty).unwrap_err();
+        assert!(err.to_string().contains("argv must not be empty"), "{err}");
         assert!(recipes.get_latest("git.status").unwrap().is_none());
+
+        let mut shell = def(RecipeStatus::Draft);
+        shell.argv = vec!["bash".to_owned(), "-c".to_owned(), "echo".to_owned()];
+        assert_eq!(recipes.create_recipe_version(&shell).unwrap(), 1);
     }
 
     #[test]
@@ -1065,6 +1094,52 @@ mod tests {
             open[0].definition.argv,
             ["git".to_owned(), "status".to_owned(), "--short".to_owned()]
         );
+    }
+
+    #[test]
+    fn import_reports_superseded_when_activate_would_close_a_customized_version() {
+        // FCR2-007: a customized active recipe must not be silently closed
+        // by `import --activate`; the caller needs to see it coming.
+        let mut store = EventStore::in_memory().unwrap();
+        let mut custom = def(RecipeStatus::Active);
+        custom.argv = vec![
+            "git".to_owned(),
+            "status".to_owned(),
+            "--porcelain=v2".to_owned(),
+        ];
+        let v1 = store
+            .recipe_store()
+            .unwrap()
+            .create_recipe_version(&custom)
+            .unwrap();
+        assert!(
+            store
+                .recipe_store()
+                .unwrap()
+                .record_activation_scoped("git.status", v1, ActivationScope::Global, None, None)
+                .unwrap()
+        );
+
+        let imported = store.import_recipe_seeds(true).unwrap();
+        assert_eq!(
+            imported.superseded,
+            vec![RecipeSupersededRow {
+                recipe_id: "git.status".to_owned(),
+                closed_version: v1,
+            }],
+            "customized active version must be reported as superseded"
+        );
+
+        // Re-running with the same activation state (still v1 open, since
+        // this import did not itself activate anything) reports it again.
+        let again = store.import_recipe_seeds(true).unwrap();
+        assert_eq!(again.superseded.len(), 1);
+        assert_eq!(again.superseded[0].closed_version, v1);
+
+        // A plain import (no --activate) never reports supersession: it
+        // cannot close anything that isn't about to be (re)activated.
+        let unpromoted = store.import_recipe_seeds(false).unwrap();
+        assert!(unpromoted.superseded.is_empty());
     }
 
     #[test]

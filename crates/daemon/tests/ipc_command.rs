@@ -56,7 +56,22 @@ fn rt() -> tokio::runtime::Runtime {
 }
 
 fn build_server(data: &std::path::Path) -> (Arc<DaemonState>, terminal_commanderd::ServerHandle) {
-    let cfg = DaemonConfig::defaults_in(data);
+    build_server_with(DaemonConfig::defaults_in(data))
+}
+
+/// `developer_local` hardened with `[policy.caps] allow_shell = false`.
+fn build_server_shell_off(
+    data: &std::path::Path,
+) -> (Arc<DaemonState>, terminal_commanderd::ServerHandle) {
+    let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+        allow_shell: Some(false),
+        ..Default::default()
+    });
+    build_server_with(cfg)
+}
+
+fn build_server_with(cfg: DaemonConfig) -> (Arc<DaemonState>, terminal_commanderd::ServerHandle) {
     let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
     let socket = state.config.socket_path();
     let server = IpcServer::new(Arc::clone(&state), socket);
@@ -225,7 +240,7 @@ fn command_start_combed_denies_shell_interpreter_and_audits() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("sh");
-        let (state, handle) = build_server(&data);
+        let (state, handle) = build_server_shell_off(&data);
         let client = DaemonClient::new(handle.socket_path().to_path_buf());
 
         let err = client
@@ -243,7 +258,7 @@ fn command_start_combed_denies_shell_interpreter_and_audits() {
             teach.deny_class,
             terminal_commander_ipc::ShellDenyClass::ShellInterpreterDenied
         );
-        assert!(teach.denied_capability.is_none());
+        assert_eq!(teach.denied_capability.as_deref(), Some("allow_shell"));
         assert_eq!(teach.denied_tool, "command_start_combed");
         assert_eq!(err.message, teach.reason);
         assert!(
@@ -251,8 +266,7 @@ fn command_start_combed_denies_shell_interpreter_and_audits() {
             "remedy is retry with argv, got: {}",
             err.message
         );
-        assert!(!err.message.contains("set allow_shell"));
-        assert!(!err.message.to_ascii_lowercase().contains("enable shell"));
+        assert!(err.message.contains("[policy.caps] allow_shell = true"));
 
         let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(
@@ -355,11 +369,11 @@ fn command_start_combed_denied_when_probe_kind_denied() {
 /// The runtime records a `command_shell_rejected` deny row (the shell
 /// lane's label), never the argv lane's `command_rejected`.
 #[test]
-fn shell_exec_denied_on_default_profile_maps_to_policy_denied() {
+fn shell_exec_denied_under_allow_shell_false_maps_to_policy_denied() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("shellexec-deny");
-        let (state, handle) = build_server(&data);
+        let (state, handle) = build_server_shell_off(&data);
         let client = DaemonClient::new(handle.socket_path().to_path_buf());
 
         let err = client

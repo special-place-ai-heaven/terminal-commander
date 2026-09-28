@@ -5,7 +5,7 @@
   "profile": "DeveloperLocal",
   "denied_capability": "allow_shell",
   "denied_tool": "shell_exec",
-  "reason": "Shell execution is denied on this profile; retry with an argv array.",
+  "reason": "Shell execution denied: allow_shell is off. Retry with an argv array, or ask the operator to set [policy.caps] allow_shell = true.",
   "intended_tool": "recipe_run",
   "intended_example": {"recipe_id": "git.status", "scope": {"kind": "global"}},
   "alternatives": [

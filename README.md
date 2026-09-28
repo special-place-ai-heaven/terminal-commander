@@ -39,12 +39,14 @@ bounded **receipt** — exit code, suppressed-line count, short tail — so no
 result is ever silent or misleading.
 
 > [!IMPORTANT]
-> The default command lane is **argv-only**: `argv[0]` is the program, shell
-> interpreters (`sh`, `bash`, `cmd`, `powershell`, …) are denied, and there is
-> no string-concatenated shell anywhere in the path. Pipelines and redirects
-> live behind the separate `shell_exec` tool, which is disabled unless the
-> operator enables the `allow_shell` policy capability. When that lane is
-> enabled and no shell override is supplied, Terminal Commander follows the
+> The default command lane is **argv-only**: `argv[0]` is the program, and there
+> is no string-concatenated shell anywhere in the path. Pipelines and redirects
+> live behind the separate `shell_exec` tool, gated by the `allow_shell` policy
+> capability. `allow_shell` is on in the default `developer_local` profile; set
+> `[policy.caps] allow_shell = false` to harden (shell interpreters such as `sh`,
+> `bash`, `cmd`, `powershell` are then denied on the argv lane and the WSL
+> nested-shell gate applies). When that lane is enabled and no shell override is
+> supplied, Terminal Commander follows the
 > highest-ranked interpreter route proven by `system_discover`.
 
 ## Contents
@@ -198,8 +200,9 @@ whole process tree, identity-gated so a recycled PID is never signalled.
 Every command start passes a policy engine (profile-based: deny lists, path
 suffix guards, per-call caps) and emits a durable audit row with
 credential-redacted argv. The shell lane (`shell_exec`) is a separate policy
-action (`allow_shell`, default off) — enabling it is an explicit operator
-decision, never an agent's.
+action (`allow_shell`, on in the default `developer_local` profile; set
+`[policy.caps] allow_shell = false` to harden). The cap is operator config,
+never an agent's to flip.
 
 ### Rule packs: expert signal extraction in one call
 
@@ -514,9 +517,11 @@ audit row. All other IPC requests bump the idle clock and audit normally.
 
 > [!WARNING]
 > `shell_exec` exists for pipelines/compounds/redirects, but it is gated by
-> the `allow_shell` policy capability, which is **off by default** and lives
-> in the operator's config TOML — it is not an MCP-flippable parameter. On the
-> default profile, `shell_exec` returns `PolicyDenied`.
+> the `allow_shell` policy capability, which is **on in the default
+> `developer_local` profile** and lives in the operator's config TOML — it is
+> not an MCP-flippable parameter. Set `[policy.caps] allow_shell = false` to
+> harden; `shell_exec` then returns `PolicyDenied` and the argv interpreter deny
+> and WSL nested-shell gate apply.
 
 > [!CAUTION]
 > PTY tools are a dual backend: unix `pty-process` and Windows ConPTY
@@ -735,9 +740,11 @@ Everything lives under the per-session state dir
 - The MCP adapter speaks stdio and local IPC only — CI guards assert no
   spawn/socket/fs calls in the adapter source.
 - Command execution is argv-first and policy-gated; the shell lane is a
-  separate, default-off capability with its own audit labels.
-- The omni opt-in capabilities are all default-DENY and config-only (never
-  MCP-flippable): `allow_shell` (shell_exec), `allow_session` (persistent
+  separate capability with its own audit labels, on in the default
+  `developer_local` profile (`[policy.caps] allow_shell = false` hardens it).
+- The omni capabilities are config-only (never MCP-flippable) and
+  default-DENY except `allow_shell` on `developer_local`: `allow_shell`
+  (shell_exec), `allow_session` (persistent
   sessions, unix-only), `allow_remote` (remote targets via an operator
   `ssh -L` forward, no public TCP). `allow_privileged` is wired but gates a
   PLAN-ONLY helper -- no privileged code ships (blocked on a threat review;

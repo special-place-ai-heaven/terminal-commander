@@ -67,6 +67,11 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
         let data = tmp_data_dir("gate");
         let mut cfg = DaemonConfig::defaults_in(&data);
         cfg.recipe_admin_test_seam = true;
+        // The recipe_run shell deny below follows allow_shell (on by default).
+        cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+            allow_shell: Some(false),
+            ..Default::default()
+        });
         assert!(!cfg.policy.llm_can_activate_recipes);
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         assert!(!state.policy.llm_can_activate_recipes());
@@ -249,8 +254,8 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
         let activations = audit_hits(&client, "ipc_recipe_activate").await;
         assert!(
             activations.iter().any(|row| {
-                row.actor.as_deref() == Some("admin")
-                    && row.actor.as_deref() != Some("ipc")
+                // FCR2-009: the seam-granted peer is not the CLI image.
+                row.actor.as_deref() == Some("unknown")
                     && row
                         .metadata_json
                         .as_deref()
@@ -316,6 +321,137 @@ fn llm_can_activate_recipes_true_allows_mcp_actor() {
         );
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&data);
+    });
+}
+
+/// `allow_shell` is the one switch for the recipe lane too: off, an
+/// interpreter recipe is denied at upsert, recipe_test, and recipe_run with
+/// the operator knob named; on, it validates, runs, and the command_start
+/// audit row is tagged `nested_shell` like a direct argv start.
+#[test]
+#[allow(clippy::too_many_lines)] // one daemon per setting, full recipe lifecycle
+fn recipe_lane_follows_allow_shell() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for allow_shell in [false, true] {
+            let data = tmp_data_dir(if allow_shell { "shell-on" } else { "shell-off" });
+            let mut cfg = DaemonConfig::defaults_in(&data);
+            cfg.recipe_admin_test_seam = true;
+            cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+                allow_shell: Some(allow_shell),
+                ..Default::default()
+            });
+            let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+            assert_eq!(state.policy.caps_allow_shell(), allow_shell);
+            let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
+                .spawn()
+                .unwrap();
+            let client = DaemonClient::new(handle.socket_path().to_path_buf())
+                .with_timeout(Duration::from_secs(5));
+            let scope = ActivationScope::Global;
+            let bash_argv = vec!["bash".to_owned(), "-c".to_owned(), "echo hi".to_owned()];
+
+            let upserted = client
+                .call(
+                    1,
+                    IpcRequest::RecipeUpsert(RecipeUpsertParams {
+                        definition: recipe("bash.echo", bash_argv.clone(), vec![]),
+                    }),
+                )
+                .await;
+            let tested = client
+                .call(
+                    2,
+                    IpcRequest::RecipeTest(RecipeTestParams {
+                        definition: Some(recipe("bash.echo", bash_argv.clone(), vec![])),
+                        recipe_id: None,
+                        version: None,
+                        fills: BTreeMap::new(),
+                        expect_argv0: None,
+                    }),
+                )
+                .await;
+            // Stored with a slot so the shell-off daemon can hold it too.
+            client
+                .call(
+                    3,
+                    IpcRequest::RecipeUpsert(RecipeUpsertParams {
+                        definition: recipe(
+                            "slot.echo",
+                            vec!["{bin}".to_owned(), "-c".to_owned(), "echo hi".to_owned()],
+                            vec!["bin".to_owned()],
+                        ),
+                    }),
+                )
+                .await
+                .unwrap();
+            client
+                .call(
+                    4,
+                    IpcRequest::RecipeActivate(RecipeActivateParams {
+                        recipe_id: "slot.echo".to_owned(),
+                        version: None,
+                        scope: Some(scope),
+                        from_mcp: false,
+                    }),
+                )
+                .await
+                .unwrap();
+            let ran = client
+                .call(
+                    5,
+                    IpcRequest::RecipeRun(RecipeRunParams {
+                        recipe_id: "slot.echo".to_owned(),
+                        version: None,
+                        scope: Some(scope),
+                        fills: BTreeMap::from([("bin".to_owned(), "bash".to_owned())]),
+                    }),
+                )
+                .await;
+
+            if allow_shell {
+                assert!(
+                    matches!(upserted, Ok(IpcResponse::RecipeUpsert(_))),
+                    "{upserted:?}"
+                );
+                let Ok(IpcResponse::RecipeTest(dry)) = tested else {
+                    panic!("recipe_test under allow_shell: {tested:?}");
+                };
+                assert!(dry.ok);
+                assert_eq!(dry.argv, bash_argv);
+                let Ok(IpcResponse::RecipeRun(body)) = ran else {
+                    panic!("recipe_run under allow_shell: {ran:?}");
+                };
+                assert_eq!(body.argv, bash_argv);
+                let starts = audit_hits(&client, "command_start").await;
+                assert!(
+                    starts.iter().any(|row| {
+                        row.metadata_json.as_deref().is_some_and(|meta| {
+                            meta.contains("nested_shell") && meta.contains("bash")
+                        })
+                    }),
+                    "recipe_run shell start is tagged nested_shell: {starts:?}"
+                );
+            } else {
+                let err = upserted.expect_err("upsert denied while allow_shell is off");
+                assert_eq!(err.code, IpcErrorCode::RecipeInvalid);
+                let err = tested.expect_err("recipe_test denied while allow_shell is off");
+                assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
+                let err = ran.expect_err("recipe_run denied while allow_shell is off");
+                assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
+                assert!(
+                    err.message.contains("[policy.caps] allow_shell = true"),
+                    "{}",
+                    err.message
+                );
+            }
+
+            handle.shutdown().await;
+            let _ = std::fs::remove_dir_all(&data);
+        }
     });
 }
 

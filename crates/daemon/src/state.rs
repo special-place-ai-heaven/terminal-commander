@@ -340,7 +340,8 @@ impl DaemonState {
             &paths.deny_extra,
         )
         .with_probe_kinds(&probes.allow_kinds, &probes.deny_kinds)
-        .with_llm_can_activate_recipes(config.policy.llm_can_activate_recipes);
+        .with_llm_can_activate_recipes(config.policy.llm_can_activate_recipes)
+        .with_shell_withheld_by_allow_roots(config.shell_withheld_by_allow_roots());
 
         // Restore active rule definitions from the persistent
         // registry. The in-memory ActivationRegistry is the runtime
@@ -676,7 +677,11 @@ mod tests {
     #[test]
     fn embedded_discovery_applies_the_state_policy_capability() {
         let data = temp_data_dir("embedded-discovery");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.caps = Some(crate::config::PolicyCapsSection {
+            allow_shell: Some(false),
+            ..Default::default()
+        });
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let environment = state.discover_environment();

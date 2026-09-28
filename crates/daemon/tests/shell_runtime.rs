@@ -22,8 +22,10 @@
 //! reuses a bootstrapped state's wired Arcs (router / rings / jobs / audit /
 //! activation / sources) but builds a SEPARATE `CommandRuntime` whose policy
 //! engine has `allow_shell` flipped on via `PolicyEngine::with_config_caps`.
-//! The default-deny test goes through the real bootstrapped `state.command`
-//! (default config, caps off), proving the default surface stays safe.
+//! `shell_exec_denied_when_allow_shell_off` goes through the real
+//! bootstrapped `state.command` with `[policy.caps] allow_shell = false`
+//! explicitly set (the default `developer_local` profile ships
+//! `allow_shell` on), proving the hardened surface still denies.
 
 #![cfg(unix)]
 
@@ -84,15 +86,19 @@ fn caps_command_runtime(
     ))
 }
 
-/// Default profile (`developer_local`), caps OFF: the shell lane must be
-/// denied by `CommandShellStart` -> `PolicyDenied`. This goes through the
-/// REAL bootstrapped command runtime, proving the default surface is safe.
+/// `developer_local` hardened with `[policy.caps] allow_shell = false`: the
+/// shell lane must be denied by `CommandShellStart` -> `PolicyDenied`. This
+/// goes through the REAL bootstrapped command runtime.
 #[test]
-fn shell_exec_denied_default_profile() {
+fn shell_exec_denied_when_allow_shell_off() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("deny-default");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+            allow_shell: Some(false),
+            ..Default::default()
+        });
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let shell = ShellRuntime::new(Arc::clone(&state.command));

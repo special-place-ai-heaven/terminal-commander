@@ -240,7 +240,8 @@ pub struct PolicyCommandsSection {
 
 /// `[policy.caps]` (Hybrid trust model -- reconciliation Decision 1/5).
 ///
-/// Granular capability overrides. Omitted values inherit the selected profile;
+/// Granular capability overrides. Omitted values inherit the selected profile
+/// (`developer_local` grants `allow_shell`; every other cap is off);
 /// explicit true/false values override that profile's preset.
 // 4 independent opt-in capability flags; a bitfield/enum would hurt the config/serde surface
 #[allow(clippy::struct_excessive_bools)]
@@ -450,6 +451,24 @@ impl DaemonConfig {
         Ok(cfg)
     }
 
+    /// `developer_local` grants `allow_shell` by default, but `shell_exec`
+    /// does not consult `[policy.commands] allow_roots`. An operator who
+    /// confined commands keeps that confinement: with a non-empty
+    /// `allow_roots` and no explicit `[policy.caps] allow_shell`, the
+    /// default is withheld. An explicit `allow_shell = true` still wins.
+    #[must_use]
+    pub const fn shell_withheld_by_allow_roots(&self) -> bool {
+        let explicit = match &self.policy.caps {
+            Some(caps) => caps.allow_shell.is_some(),
+            None => false,
+        };
+        let confined = match &self.policy.commands {
+            Some(commands) => !commands.allow_roots.is_empty(),
+            None => false,
+        };
+        matches!(self.policy.profile, PolicyProfile::DeveloperLocal) && confined && !explicit
+    }
+
     /// Resolve the effective capability set fed to the policy engine.
     ///
     /// Starts from the selected profile's preset and applies every explicitly
@@ -458,6 +477,9 @@ impl DaemonConfig {
     #[must_use]
     pub const fn resolved_caps(&self) -> PolicyCaps {
         let mut caps = PolicyCaps::default_for_profile(self.policy.profile);
+        if self.shell_withheld_by_allow_roots() {
+            caps.allow_shell = false;
+        }
         if let Some(overrides) = &self.policy.caps {
             if let Some(value) = overrides.allow_shell {
                 caps.allow_shell = value;
@@ -987,15 +1009,22 @@ mod tests {
     }
 
     #[test]
-    fn developer_local_profile_presets_allow_shell_false() {
+    fn developer_local_profile_presets_allow_shell_true() {
         let toml =
             "[daemon]\ndata_dir = \"/tmp/tc-dev-shell\"\n[policy]\nprofile = \"developer_local\"\n";
         let cfg = DaemonConfig::from_toml(toml).expect("parse developer_local defaults");
         let caps = cfg.resolved_caps();
-        assert!(!caps.allow_shell);
+        assert!(caps.allow_shell);
         assert!(!caps.allow_session);
         assert!(!caps.allow_privileged);
         assert!(!caps.allow_remote);
+    }
+
+    #[test]
+    fn developer_local_explicit_false_hardens_shell() {
+        let toml = "[daemon]\ndata_dir = \"/tmp/tc-dev-harden\"\n[policy]\nprofile = \"developer_local\"\n[policy.caps]\nallow_shell = false\n";
+        let cfg = DaemonConfig::from_toml(toml).expect("parse developer_local override");
+        assert!(!cfg.resolved_caps().allow_shell);
     }
 
     #[test]

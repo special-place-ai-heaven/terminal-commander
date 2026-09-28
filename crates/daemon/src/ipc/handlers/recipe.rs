@@ -94,7 +94,14 @@ pub(in crate::ipc::server) fn handle_recipe_get(
     params: &RecipeGetParams,
 ) -> Result<IpcResponse, IpcError> {
     let definition = lookup_recipe(state, &params.recipe_id, params.version)?;
-    Ok(IpcResponse::RecipeGet(RecipeGetResponse { definition }))
+    let tombstoned = state
+        .store
+        .is_recipe_tombstoned(&params.recipe_id)
+        .map_err(map_recipe_store_error)?;
+    Ok(IpcResponse::RecipeGet(RecipeGetResponse {
+        definition,
+        tombstoned,
+    }))
 }
 
 pub(in crate::ipc::server) fn handle_recipe_upsert(
@@ -103,7 +110,7 @@ pub(in crate::ipc::server) fn handle_recipe_upsert(
 ) -> Result<IpcResponse, IpcError> {
     params
         .definition
-        .validate()
+        .validate(state.policy.caps_allow_shell())
         .map_err(|e| IpcError::new(IpcErrorCode::RecipeInvalid, e.to_string()))?;
     let version = state
         .store
@@ -157,6 +164,14 @@ pub(in crate::ipc::server) fn handle_recipe_import_seeds(
         activated,
         tombstoned: import.tombstoned,
         failed,
+        superseded: import
+            .superseded
+            .into_iter()
+            .map(|row| crate::ipc::protocol::RecipeImportSuperseded {
+                recipe_id: row.recipe_id,
+                closed_version: row.closed_version,
+            })
+            .collect(),
     }))
 }
 
@@ -180,7 +195,8 @@ fn activate_imported_recipes(
             scope: Some(scope),
             from_mcp,
         };
-        match handle_recipe_activate(state, &params, peer) {
+        // The import handler already ran the admin gate once for this request.
+        match activate_recipe(state, &params, peer) {
             Ok(_) => activated.push(row.recipe_id.clone()),
             Err(err) => failed.push(RecipeImportFailure {
                 recipe_id: row.recipe_id.clone(),
@@ -218,20 +234,45 @@ fn deny_mcp_recipe_activate(
     peer: &PeerIdentity,
     from_mcp: bool,
 ) -> Result<(), IpcError> {
-    if caller_may_recipe_admin(state, peer, from_mcp) || state.policy.llm_can_activate_recipes() {
+    if state.policy.llm_can_activate_recipes() {
         return Ok(());
     }
-    Err(IpcError::new(
-        IpcErrorCode::PolicyDenied,
-        "recipe_activate_requires_admin: llm_can_activate_recipes is false, so only the \
-         admin CLI peer (`terminal-commander`) may recipe_activate, recipe_deactivate, \
-         or recipe_tombstone. Omitting from_mcp does not grant admin, and the MCP \
-         adapter image cannot claim it. An operator runs `terminal-commander recipes \
-         activate`, `terminal-commander recipes deactivate`, or \
-         `terminal-commander recipes tombstone`. recipe_run is allowed once a recipe \
-         is activated. Same-user code can still exec that CLI; the socket is not a \
-         privilege boundary.",
-    ))
+    if !caller_may_recipe_admin(state, peer, from_mcp) {
+        if peer_image_name(peer).is_none() {
+            return Err(IpcError::new(
+                IpcErrorCode::PolicyDenied,
+                "recipe_activate_requires_admin: llm_can_activate_recipes is false and the \
+                 daemon could not resolve the calling program's executable on this \
+                 platform, so it cannot recognize the admin CLI (`terminal-commander`) and \
+                 denies recipe_activate, recipe_deactivate, and recipe_tombstone. An \
+                 operator enables recipe admin by setting `[policy] \
+                 llm_can_activate_recipes = true` in the daemon config. recipe_run is \
+                 allowed once a recipe is activated.",
+            ));
+        }
+        return Err(IpcError::new(
+            IpcErrorCode::PolicyDenied,
+            "recipe_activate_requires_admin: llm_can_activate_recipes is false, so only the \
+             admin CLI peer (`terminal-commander`) may recipe_activate, recipe_deactivate, \
+             or recipe_tombstone. Omitting from_mcp does not grant admin, and the MCP \
+             adapter image cannot claim it. An operator runs `terminal-commander recipes \
+             activate`, `terminal-commander recipes deactivate`, or \
+             `terminal-commander recipes tombstone`. recipe_run is allowed once a recipe \
+             is activated. Same-user code can still exec that CLI; the socket is not a \
+             privilege boundary.",
+        ));
+    }
+    if peer_started_by_daemon(peer) {
+        return Err(IpcError::new(
+            IpcErrorCode::PolicyDenied,
+            "recipe_activate_requires_admin: recipe admin is refused to processes started \
+             by the daemon; run the CLI from your own terminal (`terminal-commander \
+             recipes activate|deactivate|tombstone`), or set `[policy] \
+             llm_can_activate_recipes = true` in the daemon config to let the model \
+             activate recipes. recipe_run is allowed once a recipe is activated.",
+        ));
+    }
+    Ok(())
 }
 
 /// Who the peer executable is, for the recipe admin gate.
@@ -253,30 +294,49 @@ fn program_role_from_name(name: &str) -> ProgramRole {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn unix_image_name(pid: i32) -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-        path.file_name().map(|s| s.to_string_lossy().into_owned())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        None
-    }
+    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    path.file_name().map(|s| s.to_string_lossy().into_owned())
 }
 
-fn peer_program_role(peer: &PeerIdentity) -> ProgramRole {
-    let name = match peer {
+#[cfg(target_os = "macos")]
+fn unix_image_name(pid: i32) -> Option<String> {
+    let path = crate::ipc::peer::image_path(pid)?;
+    path.file_name().map(|s| s.to_string_lossy().into_owned())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const fn unix_image_name(_pid: i32) -> Option<String> {
+    None
+}
+
+fn peer_image_name(peer: &PeerIdentity) -> Option<String> {
+    match peer {
         PeerIdentity::Windows { image, .. } => image
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().into_owned()),
         PeerIdentity::Unix { pid: Some(pid), .. } => unix_image_name(*pid),
         PeerIdentity::Unix { pid: None, .. } | PeerIdentity::Unknown { .. } => None,
-    };
-    name.as_deref()
+    }
+}
+
+fn peer_program_role(peer: &PeerIdentity) -> ProgramRole {
+    peer_image_name(peer)
+        .as_deref()
         .map_or(ProgramRole::Unknown, program_role_from_name)
+}
+
+/// Whether the peer runs under this daemon's process tree (an MCP
+/// `command_start` of the admin CLI). Evaluated only for admin verbs.
+fn peer_started_by_daemon(peer: &PeerIdentity) -> bool {
+    let pid = match peer {
+        PeerIdentity::Unix { pid, .. } => pid.and_then(|pid| u32::try_from(pid).ok()),
+        PeerIdentity::Windows { pid, .. } => *pid,
+        PeerIdentity::Unknown { .. } => None,
+    };
+    pid.is_some_and(|pid| crate::ipc::peer::descends_from(pid, std::process::id()))
 }
 
 /// Release builds grant recipe admin only to the `terminal-commander` image.
@@ -303,30 +363,15 @@ fn caller_may_recipe_admin(state: &DaemonState, peer: &PeerIdentity, from_mcp: b
     recipe_admin_grant(peer_program_role(peer), from_mcp, seam)
 }
 
-pub(in crate::ipc::server) fn recipe_actor_label(
-    peer: &PeerIdentity,
-    from_mcp: bool,
-) -> &'static str {
+/// Audit actor for recipe admin verbs and `recipe_run`. Known images keep
+/// the FCR-014 actor (`admin` / `mcp`). An unknown peer is never `admin`:
+/// it is `mcp` only when it claims `from_mcp: true` (an under-claim), else
+/// `unknown`. `recipe_run` and tombstone carry no `from_mcp` (`None`).
+fn recipe_actor_label(peer: &PeerIdentity, from_mcp: Option<bool>) -> &'static str {
     match peer_program_role(peer) {
         ProgramRole::AdminCli => "admin",
         ProgramRole::McpAdapter => "mcp",
-        ProgramRole::Unknown => {
-            if from_mcp {
-                "mcp"
-            } else {
-                "admin"
-            }
-        }
-    }
-}
-
-/// `recipe_run` has no `from_mcp` field. Known images keep the FCR-014
-/// actor (`admin` / `mcp`). An unknown peer is `unknown`, not the
-/// `from_mcp: None → false → "admin"` fallback.
-fn recipe_run_actor(peer: &PeerIdentity) -> &'static str {
-    match peer_program_role(peer) {
-        ProgramRole::AdminCli => "admin",
-        ProgramRole::McpAdapter => "mcp",
+        ProgramRole::Unknown if from_mcp == Some(true) => "mcp",
         ProgramRole::Unknown => "unknown",
     }
 }
@@ -347,6 +392,16 @@ pub(in crate::ipc::server) fn handle_recipe_activate(
     peer: &PeerIdentity,
 ) -> Result<IpcResponse, IpcError> {
     deny_mcp_recipe_activate(state, peer, params.from_mcp)?;
+    activate_recipe(state, params, peer)
+}
+
+/// `recipe_activate` after the admin gate. Import calls this per seed so the
+/// gate (image lookup + ancestry walk) runs once per request, not per row.
+fn activate_recipe(
+    state: &Arc<DaemonState>,
+    params: &RecipeActivateParams,
+    peer: &PeerIdentity,
+) -> Result<IpcResponse, IpcError> {
     let scope = require_scope(params.scope)?;
     require_global_recipe_scope(scope)?;
     let def = lookup_recipe(state, &params.recipe_id, params.version)?;
@@ -370,7 +425,7 @@ pub(in crate::ipc::server) fn handle_recipe_activate(
             version,
             scope,
             Some(&profile),
-            Some(recipe_actor_label(peer, params.from_mcp)),
+            Some(recipe_actor_label(peer, Some(params.from_mcp))),
         )
         .map_err(map_recipe_store_error)?;
     Ok(IpcResponse::RecipeActivate(RecipeActivateResponse {
@@ -586,11 +641,12 @@ pub(in crate::ipc::server) fn handle_recipe_test(
         (Some(definition), None) => definition.clone(),
         (None, Some(recipe_id)) => lookup_recipe(state, recipe_id, params.version)?,
     };
+    let allow_shell = state.policy.caps_allow_shell();
     definition
-        .validate()
+        .validate(allow_shell)
         .map_err(|err| map_recipe_argv_error(&err))?;
     let argv = definition
-        .resolve_argv(&params.fills)
+        .resolve_argv(&params.fills, allow_shell)
         .map_err(|err| map_recipe_argv_error(&err))?;
     let (expects_met, notes) = params.expect_argv0.as_deref().map_or_else(
         || (true, Vec::new()),
@@ -666,16 +722,25 @@ pub(in crate::ipc::server) fn handle_recipe_run(
 ) -> Result<IpcResponse, IpcError> {
     let scope = require_scope(params.scope)?;
     let definition = resolve_activated(state, &params.recipe_id, params.version, scope)?;
+    // `allow_shell` is the one switch. Off: an interpreter argv is denied
+    // here. On: it goes to `command_start_combed`, which evaluates
+    // `CommandShellStart` and tags the audit row `nested_shell`.
+    let allow_shell = state.policy.caps_allow_shell();
     let argv = definition
-        .resolve_argv(&params.fills)
+        .resolve_argv(&params.fills, allow_shell)
         .map_err(|err| map_recipe_argv_error(&err))?;
     // Same predicate as `resolve_argv` (which already re-validates). This is
     // the run re-check: a stored argv cannot reach `command_start` if resolve
     // ever stops applying the deny.
-    if let Some(shell) = shell_argv_denied(&argv) {
+    if !allow_shell && let Some(shell) = shell_argv_denied(&argv) {
         return Err(IpcError::new(
             IpcErrorCode::ShellInterpreterDenied,
-            format!("shell interpreter '{shell}' is denied on recipe_run"),
+            format!(
+                "shell interpreter '{shell}' is denied on recipe_run: allow_shell is off. \
+                 Use a recipe whose argv runs the program directly (e.g. \
+                 [\"cargo\",\"build\"]), or have the operator set [policy.caps] \
+                 allow_shell = true, which allows shell recipes and shell_exec."
+            ),
         ));
     }
     if !definition.env_allowlist.is_empty() {
@@ -747,14 +812,8 @@ pub(in crate::ipc::server) fn recipe_audit_overlay(
         IpcRequest::RecipeTombstone(p) => (p.recipe_id.clone(), None, None, None),
         _ => return None,
     };
-    let from_mcp_bit = from_mcp.unwrap_or(false);
-    let actor = if matches!(req, IpcRequest::RecipeRun(_)) {
-        recipe_run_actor(peer)
-    } else {
-        recipe_actor_label(peer, from_mcp_bit)
-    };
     Some((
-        actor,
+        recipe_actor_label(peer, from_mcp),
         serde_json::json!({
             "recipe_id": recipe_id,
             "version": version,
@@ -874,5 +933,131 @@ mod tests {
         assert_eq!(admin_meta["scope"]["kind"], "global");
         assert!(admin_meta["from_mcp"].is_null());
         assert!(mcp_meta["from_mcp"].is_null());
+    }
+
+    #[test]
+    fn unknown_peer_activate_and_tombstone_are_not_labeled_admin() {
+        let peer = PeerIdentity::unknown();
+        let result = IpcResult::Err {
+            error: IpcError::new(IpcErrorCode::PolicyDenied, "denied"),
+        };
+        let activate = IpcRequest::RecipeActivate(RecipeActivateParams {
+            recipe_id: "git.status".to_owned(),
+            version: None,
+            scope: Some(ActivationScope::Global),
+            from_mcp: false,
+        });
+        let tombstone = IpcRequest::RecipeTombstone(RecipeTombstoneParams {
+            recipe_id: "git.status".to_owned(),
+        });
+        for req in [activate, tombstone] {
+            let (actor, _) = recipe_audit_overlay(&peer, &req, &result).expect("overlay");
+            assert_eq!(actor, "unknown", "{req:?}");
+        }
+    }
+
+    fn test_state(tag: &str, seam: bool) -> Arc<DaemonState> {
+        let mut data = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        data.push(format!(
+            "tc-recipe-gate-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        let mut cfg = crate::config::DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = seam;
+        Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"))
+    }
+
+    #[test]
+    fn unresolved_peer_image_deny_names_the_config_knob() {
+        let state = test_state("unresolved", false);
+        let err = deny_mcp_recipe_activate(&state, &PeerIdentity::unknown(), false)
+            .expect_err("unresolved peer is denied");
+        assert_eq!(err.code, IpcErrorCode::PolicyDenied);
+        assert!(err.message.contains("recipe_activate_requires_admin"));
+        assert!(err.message.contains("could not resolve"), "{}", err.message);
+        assert!(
+            err.message.contains("llm_can_activate_recipes = true"),
+            "{}",
+            err.message
+        );
+
+        // A resolved non-CLI image keeps pointing at the operator CLI.
+        let python = PeerIdentity::Windows {
+            sid: "S-1-5-21".to_owned(),
+            pid: None,
+            image: Some(std::path::PathBuf::from("python.exe")),
+        };
+        let err = deny_mcp_recipe_activate(&state, &python, false).expect_err("python is denied");
+        assert!(
+            !err.message.contains("could not resolve"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("terminal-commander recipes"));
+    }
+
+    /// A long-lived child of this test process. The in-process "daemon" is
+    /// this process, so the child stands in for a daemon-spawned job.
+    fn spawn_child() -> std::process::Child {
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut cmd = std::process::Command::new("ping");
+            cmd.args(["-n", "30", "127.0.0.1"]);
+            cmd
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut cmd = std::process::Command::new("sleep");
+            cmd.arg("30");
+            cmd
+        };
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn child")
+    }
+
+    #[cfg(windows)]
+    fn admin_peer(pid: u32) -> PeerIdentity {
+        PeerIdentity::Windows {
+            sid: "S-1-5-21".to_owned(),
+            pid: Some(pid),
+            image: Some(std::path::PathBuf::from("terminal-commander.exe")),
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn admin_peer(pid: u32) -> PeerIdentity {
+        PeerIdentity::Unix {
+            uid: 0,
+            gid: 0,
+            pid: Some(i32::try_from(pid).expect("pid fits i32")),
+        }
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn daemon_spawned_peer_is_refused_recipe_admin() {
+        let state = test_state("spawned", true);
+        // Not a descendant: the caller that is this process itself is granted.
+        deny_mcp_recipe_activate(&state, &admin_peer(std::process::id()), false)
+            .expect("a peer outside the daemon tree keeps admin");
+
+        let mut child = spawn_child();
+        let denied = deny_mcp_recipe_activate(&state, &admin_peer(child.id()), false);
+        let _ = child.kill();
+        let _ = child.wait();
+        let err = denied.expect_err("a daemon-spawned peer is refused recipe admin");
+        assert_eq!(err.code, IpcErrorCode::PolicyDenied);
+        assert!(
+            err.message
+                .contains("recipe admin is refused to processes started by the daemon"),
+            "{}",
+            err.message
+        );
     }
 }

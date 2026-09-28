@@ -47,7 +47,7 @@ mod runtime {
         #[error("policy denied pty_command_start: {0}")]
         PolicyDenied(String),
         #[error(
-            "shell interpreter '{0}' is denied by default; pty_command_start is not a shell bridge"
+            "shell interpreter '{0}' denied: allow_shell is off; pty_command_start is not a shell bridge"
         )]
         ShellInterpreterDenied(String),
         /// US8 (FR-060): a shell smuggled through a `wsl`/`wsl.exe` carrier on
@@ -63,6 +63,12 @@ mod runtime {
         },
         #[error("argv must not be empty")]
         EmptyArgv,
+        /// Caller-fixable argv the spawn refuses (NUL, CR/LF in batch args).
+        #[error("{0}")]
+        ArgvInvalid(String),
+        /// `argv[0]` did not resolve to a program; carries `argv[0]`.
+        #[error("program not found: {0}")]
+        ProgramNotFound(String),
         #[error("bucket create error: {0}")]
         Bucket(#[from] BucketError),
         #[error("sifter build error: {0}")]
@@ -286,29 +292,79 @@ mod runtime {
             if req.argv.is_empty() {
                 return Err(PtyRuntimeError::EmptyArgv);
             }
-            // WSL carriers skip this hard deny; the nested-shell gate below
-            // owns them so the decision stays aligned with `allow_shell`.
-            if matches!(classify_wsl_nested_shell(&req.argv), WslArgvClass::NotWsl)
-                && let Some(shell) = shell_argv_denied(&req.argv)
-            {
-                self.audit(
-                            "pty_command_start",
-                            &req.argv[0],
-                            "deny",
-                            Some(format!(
-                                "shell interpreter '{shell}' denied by default; pty_command_start is not a shell bridge"
-                            )),
-                            None,
-                        );
-                return Err(PtyRuntimeError::ShellInterpreterDenied(shell.to_owned()));
+            if req.argv.iter().any(|a| a.contains('\0')) {
+                return Err(PtyRuntimeError::ArgvInvalid(
+                    "argv must not contain NUL bytes".to_owned(),
+                ));
             }
+            // FCR2-002: gate the program the backend will run, not the typed
+            // name. Unresolved, the gate sees the stem the backend's own
+            // extension-replacing search would substitute (`bash.txt` ->
+            // `bash`), and the spawn below is refused.
+            let spawn_argv0 = resolve_pty_argv0(&req.argv[0], &req.env);
+            let mut gate_argv = req.argv.clone();
+            gate_argv[0] = spawn_argv0.clone().unwrap_or_else(|| {
+                std::path::Path::new(&req.argv[0])
+                    .file_stem()
+                    .map_or_else(String::new, |s| s.to_string_lossy().into_owned())
+            });
+            // Interpreter gate, same as the command argv lane: denied under
+            // allow_shell=false; under allow_shell=true it runs through
+            // `CommandShellStart` and the allow row is tagged `nested_shell`.
+            // WSL carriers skip it; the nested-shell gate below owns them.
+            let cwd_for_policy = req.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
+            let shell_start_gate = |shell: &str| -> Result<(), PtyRuntimeError> {
+                let verdict = self.policy.evaluate(&PolicyAction::CommandShellStart {
+                    shell_line: "",
+                    cwd: cwd_for_policy.as_path(),
+                    shell,
+                });
+                if verdict.decision == PolicyDecision::Deny {
+                    self.audit(
+                        "pty_command_start",
+                        &req.argv[0],
+                        "deny",
+                        Some(verdict.reason.clone()),
+                        None,
+                    );
+                    return Err(PtyRuntimeError::PolicyDenied(verdict.reason));
+                }
+                Ok(())
+            };
+            let shell_tag = if matches!(classify_wsl_nested_shell(&gate_argv), WslArgvClass::NotWsl)
+                && let Some(shell) = shell_argv_denied(&gate_argv)
+            {
+                if !self.policy.caps_allow_shell() {
+                    self.audit(
+                        "pty_command_start",
+                        &req.argv[0],
+                        "deny",
+                        Some(format!(
+                            "shell interpreter '{shell}' denied: allow_shell is off \
+                             ([policy.caps] allow_shell = true enables it and shell_exec)"
+                        )),
+                        None,
+                    );
+                    return Err(PtyRuntimeError::ShellInterpreterDenied(shell.to_owned()));
+                }
+                shell_start_gate(shell)?;
+                Some(("nested_shell", shell.to_owned()))
+            } else {
+                None
+            };
             // WSL nested-shell gate (US8 / FR-060). Same classifier as the
             // command argv lane -- a shell smuggled through a `wsl`/`wsl.exe`
             // carrier is denied under allow_shell=false, identically on both
             // lanes (lane divergence would be a defect).
-            match classify_wsl_nested_shell(&req.argv) {
+            // Under allow_shell=true the payload runs through `CommandShellStart`
+            // and the allow row is tagged, as on the command argv lane.
+            let wsl_tag = match classify_wsl_nested_shell(&gate_argv) {
                 WslArgvClass::NestedShell { interpreter } if !self.policy.caps_allow_shell() => {
-                    let carrier = wsl_carrier_label(&req.argv[0]);
+                    let carrier = wsl_carrier_label(
+                        terminal_commander_core::shell_deny::launched_argv(&req.argv)
+                            .first()
+                            .map_or("", String::as_str),
+                    );
                     self.audit(
                         "pty_command_start",
                         &req.argv[0],
@@ -326,7 +382,11 @@ mod runtime {
                     });
                 }
                 WslArgvClass::UnknownConstruction if !self.policy.caps_allow_shell() => {
-                    let carrier = wsl_carrier_label(&req.argv[0]);
+                    let carrier = wsl_carrier_label(
+                        terminal_commander_core::shell_deny::launched_argv(&req.argv)
+                            .first()
+                            .map_or("", String::as_str),
+                    );
                     self.audit(
                         "pty_command_start",
                         &req.argv[0],
@@ -343,9 +403,16 @@ mod runtime {
                         carrier,
                     });
                 }
-                _ => {}
-            }
-            let cwd_for_policy = req.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
+                WslArgvClass::NestedShell { interpreter } => {
+                    shell_start_gate(&interpreter)?;
+                    Some(("nested_shell", interpreter))
+                }
+                WslArgvClass::UnknownConstruction => {
+                    shell_start_gate("unrecognized construction")?;
+                    Some(("wsl_construction", "unknown".to_owned()))
+                }
+                _ => None,
+            };
             let verdict = self.policy.evaluate(&PolicyAction::CommandStart {
                 argv: &req.argv,
                 cwd: cwd_for_policy.as_path(),
@@ -378,7 +445,14 @@ mod runtime {
                 return Err(PtyRuntimeError::PolicyDenied(probe_verdict.reason));
             }
 
-            self.spawn_pty_job(req, "pty_command_start")
+            // Hand the backend the resolved path so its search cannot rewrite
+            // it; nothing resolved means nothing the gate has vetted.
+            let Some(spawn_argv0) = spawn_argv0 else {
+                return Err(PtyRuntimeError::ProgramNotFound(req.argv[0].clone()));
+            };
+            let mut spawn_argv = req.argv.clone();
+            spawn_argv[0] = spawn_argv0;
+            self.spawn_pty_job(req, &spawn_argv, shell_tag.or(wsl_tag), "pty_command_start")
         }
 
         /// Spawn a long-lived session shell PTY (P1 / TC50).
@@ -445,7 +519,8 @@ mod runtime {
                 return Err(PtyRuntimeError::PolicyDenied(probe_verdict.reason));
             }
 
-            self.spawn_pty_job(req, "shell_session_start")
+            let spawn_argv = req.argv.clone();
+            self.spawn_pty_job(req, &spawn_argv, None, "shell_session_start")
         }
 
         /// Shared PTY spawn core for the argv lane ([`PtyRuntime::start`])
@@ -460,6 +535,8 @@ mod runtime {
         fn spawn_pty_job(
             &self,
             req: PtyStartRequest,
+            spawn_argv: &[String],
+            shell_tag: Option<(&'static str, String)>,
             audit_action: &'static str,
         ) -> Result<PtyStartResponse, PtyRuntimeError> {
             let bucket_id = BucketId::new();
@@ -504,12 +581,21 @@ mod runtime {
             cfg.cols = req.cols;
 
             let mut probe = PtyProbe::spawn(
-                &req.argv,
+                spawn_argv,
                 &cfg,
                 Arc::clone(&self.rings),
                 Arc::clone(&sifter),
                 sink,
-            )?;
+            )
+            .map_err(|e| match e {
+                PtyProbeError::InvalidArgument(m) => PtyRuntimeError::ArgvInvalid(m),
+                // Unix spawns the name as typed, so a missing program is the
+                // spawn's `NotFound`, carved out like the argv lane's F7.
+                PtyProbeError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+                    PtyRuntimeError::ProgramNotFound(req.argv[0].clone())
+                }
+                e => PtyRuntimeError::Spawn(e),
+            })?;
             // Take the completion receiver BEFORE the probe is moved into the
             // live binding. The lifecycle waiter below owns it so it can flip
             // the job ledger on exit without ever locking the probe mutex
@@ -665,16 +751,21 @@ mod runtime {
                 },
             );
 
+            let mut metadata = serde_json::json!({
+                "argv0": req.argv[0],
+                "bucket_id": bucket_id.to_wire_string(),
+            });
+            if let Some((key, val)) = &shell_tag {
+                metadata[*key] = serde_json::Value::String(val.clone());
+            }
             self.audit(
                 audit_action,
                 &job_id.to_wire_string(),
                 "allow",
-                None,
-                Some(format!(
-                    "{{\"argv0\":{},\"bucket_id\":{}}}",
-                    serde_json::Value::String(req.argv[0].clone()),
-                    serde_json::Value::String(bucket_id.to_wire_string())
-                )),
+                shell_tag
+                    .as_ref()
+                    .map(|(key, val)| format!("{key} classification: {val} (allow_shell)")),
+                Some(metadata.to_string()),
             );
 
             Ok(PtyStartResponse {
@@ -984,6 +1075,43 @@ mod runtime {
         Arc<SifterRuntime>,
         Vec<RuleDefinition>,
     );
+
+    /// FCR2-002: absolute path of the program the ConPTY spawn will run, or
+    /// `None` when nothing on disk matches.
+    ///
+    /// `portable-pty` searches PATH by REPLACING a typed extension with each
+    /// PATHEXT entry (`bash.txt` -> `bash.exe`), even for an absolute path that
+    /// does not exist. Resolve with the argv lane's stem-preserving search
+    /// instead, honoring a request `PATH` like the backend does, and return an
+    /// absolute path its search keeps verbatim.
+    #[cfg(windows)]
+    fn resolve_pty_argv0(argv0: &str, env: &[(OsString, OsString)]) -> Option<String> {
+        let found = if argv0.contains(['\\', '/']) {
+            std::path::Path::new(argv0)
+                .is_file()
+                .then(|| argv0.to_owned())?
+        } else {
+            let path = env
+                .iter()
+                .rev()
+                .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+                .map(|(_, v)| v.clone())
+                .or_else(|| std::env::var_os("PATH"))?;
+            let pathext =
+                std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+            crate::command::resolve_on_path(argv0, &path, &pathext)?
+        };
+        std::path::absolute(found)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    /// Unix `execvp` searches PATH without rewriting the name: run it as typed.
+    #[cfg(not(windows))]
+    #[allow(clippy::unnecessary_wraps)]
+    fn resolve_pty_argv0(argv0: &str, _env: &[(OsString, OsString)]) -> Option<String> {
+        Some(argv0.to_owned())
+    }
 
     fn merge_active_and_inline(
         active: &[RuleDefinition],

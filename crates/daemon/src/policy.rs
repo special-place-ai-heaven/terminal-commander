@@ -146,9 +146,17 @@ pub struct PolicyVerdict {
     pub reason: String,
 }
 
+/// Why `allow_shell` is off when `developer_local` withheld its default
+/// because `[policy.commands] allow_roots` is set (see
+/// `DaemonConfig::shell_withheld_by_allow_roots`).
+pub const SHELL_WITHHELD_BY_ALLOW_ROOTS: &str = "allow_shell is off because [policy.commands] \
+     allow_roots confines commands; set [policy.caps] allow_shell = true explicitly to enable \
+     shell_exec";
+
 /// Resolved capability set fed to the engine (mirror of `[policy.caps]`).
 ///
-/// All-false by default; deny-first preserved. These are INPUTS to
+/// All-false by default except `allow_shell` on `developer_local` (see
+/// [`Self::default_for_profile`]); deny-first preserved. These are INPUTS to
 /// `evaluate()`, never a bypass: a cap being on only flips a gated action
 /// from `Deny` to `AllowWithAudit` on an exec-capable profile.
 // 4 independent opt-in capability flags; a bitfield/enum would hurt the config/serde surface
@@ -173,8 +181,17 @@ impl PolicyCaps {
                 allow_privileged: true,
                 allow_remote: true,
             },
-            PolicyProfile::DeveloperLocal
-            | PolicyProfile::RepoOnly
+            // Shell passthrough is on for the default developer profile: an
+            // LLM caller abandons a denied tool for raw Bash, and shell output
+            // stays combed, bounded, and audited (`command_shell_start`).
+            // `[policy.caps] allow_shell = false` is the opt-in hardening.
+            PolicyProfile::DeveloperLocal => Self {
+                allow_shell: true,
+                allow_session: false,
+                allow_privileged: false,
+                allow_remote: false,
+            },
+            PolicyProfile::RepoOnly
             | PolicyProfile::ReadOnlyObserver
             | PolicyProfile::AdminDebug => Self {
                 allow_shell: false,
@@ -482,7 +499,7 @@ pub struct PolicyEngine {
     /// is denied even if it would satisfy the allow-list.
     deny_extra: GlobList,
     /// Resolved capability set (Hybrid trust model, Decision 1). Defaults to
-    /// all-false; only `with_config_caps` (fed by `DaemonConfig::resolved_caps`)
+    /// the profile preset; only `with_config_caps` (fed by `DaemonConfig::resolved_caps`)
     /// sets it. Caps are inputs to `evaluate()`, never an `evaluate()` bypass.
     caps: PolicyCaps,
     /// `[policy.probes] allow_kinds` (TC22 A2). The probe-kind allow-list for
@@ -501,6 +518,10 @@ pub struct PolicyEngine {
     /// When false (default), MCP `recipe_activate` / `recipe_deactivate`
     /// are denied. Set by [`Self::with_llm_can_activate_recipes`].
     llm_can_activate_recipes: bool,
+    /// `allow_shell` is off only because `allow_roots` withheld the
+    /// `developer_local` default. Selects the shell deny text. Set by
+    /// [`Self::with_shell_withheld_by_allow_roots`].
+    shell_withheld_by_allow_roots: bool,
 }
 
 impl PolicyEngine {
@@ -545,6 +566,7 @@ impl PolicyEngine {
             probe_allow_kinds: Vec::new(),
             probe_deny_kinds: Vec::new(),
             llm_can_activate_recipes: false,
+            shell_withheld_by_allow_roots: false,
         }
     }
 
@@ -568,6 +590,7 @@ impl PolicyEngine {
             probe_allow_kinds: Vec::new(),
             probe_deny_kinds: Vec::new(),
             llm_can_activate_recipes: false,
+            shell_withheld_by_allow_roots: false,
         }
     }
 
@@ -603,6 +626,7 @@ impl PolicyEngine {
             probe_allow_kinds: Vec::new(),
             probe_deny_kinds: Vec::new(),
             llm_can_activate_recipes: false,
+            shell_withheld_by_allow_roots: false,
         }
     }
 
@@ -678,6 +702,19 @@ impl PolicyEngine {
     pub const fn with_llm_can_activate_recipes(mut self, enabled: bool) -> Self {
         self.llm_can_activate_recipes = enabled;
         self
+    }
+
+    /// Record that `allow_roots` withheld the `developer_local` shell default.
+    #[must_use]
+    pub const fn with_shell_withheld_by_allow_roots(mut self, withheld: bool) -> Self {
+        self.shell_withheld_by_allow_roots = withheld;
+        self
+    }
+
+    /// Whether `allow_roots` withheld the `developer_local` shell default.
+    #[must_use]
+    pub const fn shell_withheld_by_allow_roots(&self) -> bool {
+        self.shell_withheld_by_allow_roots
     }
 
     /// Whether MCP may activate or deactivate recipes.
@@ -884,6 +921,12 @@ impl PolicyEngine {
                     decision: PolicyDecision::AllowWithAudit,
                     reason: "shell execution allowed by allow_shell capability (audited)"
                         .to_owned(),
+                };
+            }
+            if exec_profile && self.shell_withheld_by_allow_roots {
+                return PolicyVerdict {
+                    decision: PolicyDecision::Deny,
+                    reason: format!("shell execution denied: {SHELL_WITHHELD_BY_ALLOW_ROOTS}"),
                 };
             }
             return PolicyVerdict {
@@ -1513,8 +1556,24 @@ mod tests {
     }
 
     #[test]
-    fn shell_start_denied_by_default() {
+    fn shell_start_allowed_with_audit_on_default_developer_local() {
         let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
+        let v = e.evaluate(&PolicyAction::CommandShellStart {
+            shell_line: "echo a | wc -c",
+            cwd: Path::new("."),
+            shell: "/bin/bash",
+        });
+        assert_eq!(v.decision, PolicyDecision::AllowWithAudit);
+    }
+
+    #[test]
+    fn shell_start_denied_when_allow_shell_off() {
+        let e = PolicyEngine::with_config_caps(
+            PolicyProfile::DeveloperLocal,
+            None,
+            None,
+            PolicyCaps::default(),
+        );
         let v = e.evaluate(&PolicyAction::CommandShellStart {
             shell_line: "echo a | wc -c",
             cwd: Path::new("."),

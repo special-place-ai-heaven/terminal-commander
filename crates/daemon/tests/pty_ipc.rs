@@ -206,7 +206,7 @@ print("pty bye", flush=True)
 fn pty_command_rejects_shell_interpreter() {
     let runtime = rt();
     runtime.block_on(async {
-        let (data, _state, handle) = build_server();
+        let (data, _state, handle) = build_server_with_allow_shell(false);
         let client = DaemonClient::new(handle.socket_path().to_path_buf());
 
         let err = client
@@ -241,7 +241,7 @@ fn pty_command_rejects_shell_interpreter() {
 fn pty_wsl_nested_shell_denied_like_argv_lane() {
     let runtime = rt();
     runtime.block_on(async {
-        let (data, _state, handle) = build_server();
+        let (data, _state, handle) = build_server_with_allow_shell(false);
         let client = DaemonClient::new(handle.socket_path().to_path_buf());
 
         let err = client
@@ -275,7 +275,7 @@ fn pty_wsl_nested_shell_denied_like_argv_lane() {
             teach.deny_class,
             terminal_commander_ipc::ShellDenyClass::ShellInterpreterDenied
         );
-        assert!(teach.denied_capability.is_none());
+        assert_eq!(teach.denied_capability.as_deref(), Some("allow_shell"));
         assert_eq!(teach.denied_tool, "pty_command_start");
         assert_eq!(err.message, teach.reason);
         assert!(
@@ -283,8 +283,157 @@ fn pty_wsl_nested_shell_denied_like_argv_lane() {
             "remedy is retry with argv, got: {}",
             err.message
         );
-        assert!(!err.message.contains("set allow_shell"));
+        assert!(err.message.contains("[policy.caps] allow_shell = true"));
 
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// Server whose policy sets `[policy.caps] allow_shell` explicitly.
+fn build_server_with_allow_shell(
+    allow_shell: bool,
+) -> (PathBuf, Arc<DaemonState>, terminal_commanderd::ServerHandle) {
+    let data = tmp_data_dir("allow-shell");
+    let mut cfg = DaemonConfig::defaults_in(&data);
+    cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+        allow_shell: Some(allow_shell),
+        ..Default::default()
+    });
+    let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+    let socket = state.config.socket_path();
+    let handle = IpcServer::new(Arc::clone(&state), socket).spawn().unwrap();
+    (data, state, handle)
+}
+
+fn sh_start_params() -> IpcRequest {
+    IpcRequest::PtyCommandStart(PtyCommandStartParams {
+        environment: None,
+        argv: vec!["sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
+        cwd: None,
+        env: vec![],
+        bucket_config: None,
+        rules: vec![],
+        rows: None,
+        cols: None,
+        tag: None,
+    })
+}
+
+/// The interpreter deny is the `allow_shell` gate: explicit `false` denies.
+#[test]
+fn pty_interpreter_denied_under_explicit_allow_shell_false() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server_with_allow_shell(false);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        let err = client
+            .call(1, sh_start_params())
+            .await
+            .expect_err("interpreter must be denied under allow_shell=false");
+        assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// Under `allow_shell=true` the interpreter starts and the allow audit row
+/// carries the `nested_shell` classification tag.
+#[test]
+fn pty_interpreter_starts_and_audit_tagged_under_allow_shell_true() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server_with_allow_shell(true);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        let started = match client
+            .call(1, sh_start_params())
+            .await
+            .expect("interpreter must start under allow_shell=true")
+        {
+            IpcResponse::PtyCommandStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        let allow_row = rows
+            .iter()
+            .find(|r| r.action == "pty_command_start" && r.decision == "allow")
+            .expect("allow audit row");
+        let metadata = allow_row.metadata_json.as_deref().unwrap_or("");
+        assert!(
+            metadata.contains("\"nested_shell\":\"sh\""),
+            "allow row must be tagged nested_shell; got: {metadata}"
+        );
+        let _ = client
+            .call(
+                2,
+                IpcRequest::PtyCommandStop(PtyCommandStopParams {
+                    job_id: started.job_id,
+                }),
+            )
+            .await;
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// Lane parity with the argv lane: under `allow_shell=true` a WSL nested
+/// shell passes `CommandShellStart` and the allow row is tagged. A stub
+/// `wsl.exe` stands in for the carrier (classification is by basename).
+#[test]
+fn pty_wsl_nested_shell_starts_and_audit_tagged_under_allow_shell_true() {
+    use std::os::unix::fs::PermissionsExt;
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, state, handle) = build_server_with_allow_shell(true);
+        let stub = data.join("wsl.exe");
+        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        let started = match client
+            .call(
+                1,
+                IpcRequest::PtyCommandStart(PtyCommandStartParams {
+                    environment: None,
+                    argv: vec![
+                        stub.to_string_lossy().into_owned(),
+                        "-e".to_owned(),
+                        "bash".to_owned(),
+                        "-lc".to_owned(),
+                        "echo hi".to_owned(),
+                    ],
+                    cwd: None,
+                    env: vec![],
+                    bucket_config: None,
+                    rules: vec![],
+                    rows: None,
+                    cols: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect("wsl nested shell must start under allow_shell=true")
+        {
+            IpcResponse::PtyCommandStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
+        let allow_row = rows
+            .iter()
+            .find(|r| r.action == "pty_command_start" && r.decision == "allow")
+            .expect("allow audit row");
+        let metadata = allow_row.metadata_json.as_deref().unwrap_or("");
+        assert!(
+            metadata.contains("\"nested_shell\":\"bash\""),
+            "allow row must be tagged nested_shell; got: {metadata}"
+        );
+        let _ = client
+            .call(
+                2,
+                IpcRequest::PtyCommandStop(PtyCommandStopParams {
+                    job_id: started.job_id,
+                }),
+            )
+            .await;
         handle.shutdown().await;
         cleanup(&data);
     });

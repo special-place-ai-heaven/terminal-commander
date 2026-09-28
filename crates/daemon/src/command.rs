@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use terminal_commander_core::{
     ActivationScope, BucketConfig, BucketId, ContextRingManager, EventDraft, JobConfig, JobId,
     JobManager, JobRecord, JobState, ProbeId, RuleDefinition, shell_argv_denied,
+    shell_deny::{is_wsl_carrier, launched_argv},
     shell_interpreter_denied,
 };
 use terminal_commander_probes::{EventSink, ProcessProbe, ProcessProbeConfig, ProcessProbeMetrics};
@@ -151,13 +152,13 @@ pub(crate) fn wsl_carrier_label(argv0: &str) -> String {
 /// `pty_command_start`) so a payload denied on one lane is denied on the
 /// other.
 pub(crate) fn classify_wsl_nested_shell(argv: &[String]) -> WslArgvClass {
-    // Step 1 -- carrier detection: argv[0] basename == wsl / wsl.exe
-    // (case-insensitive, any path form).
-    let is_carrier = argv.first().is_some_and(|a| {
-        let b = argv_basename(a);
-        b.eq_ignore_ascii_case("wsl") || b.eq_ignore_ascii_case("wsl.exe")
-    });
-    if !is_carrier {
+    // Step 1 -- carrier detection: the launched program (past wrappers such
+    // as `env`/`nohup`, core `launched_argv`) has basename wsl / wsl.exe
+    // (case-insensitive, any path form, plus the interpreter deny's Win32
+    // trailing dot/space and `::$DATA` normalize).
+    let launched = launched_argv(argv);
+    let argv: Vec<&str> = launched.iter().map(String::as_str).collect();
+    if !argv.first().is_some_and(|a| is_wsl_carrier(a)) {
         return WslArgvClass::NotWsl;
     }
 
@@ -165,7 +166,7 @@ pub(crate) fn classify_wsl_nested_shell(argv: &[String]) -> WslArgvClass {
 
     // Step 2 -- management (first argument only).
     if let Some(first) = rest.first()
-        && WSL_MANAGEMENT_FLAGS.contains(&first.as_str())
+        && WSL_MANAGEMENT_FLAGS.contains(first)
     {
         return WslArgvClass::Management;
     }
@@ -173,7 +174,7 @@ pub(crate) fn classify_wsl_nested_shell(argv: &[String]) -> WslArgvClass {
     // Step 3 -- skip selectors, note the introducer, find the payload start.
     let mut i = 0;
     let mut exec_introduced = false;
-    while let Some(tok) = rest.get(i).map(String::as_str) {
+    while let Some(tok) = rest.get(i).copied() {
         match tok {
             // Value-less selectors.
             "~" | "--system" => i += 1,
@@ -244,7 +245,8 @@ pub enum CommandError {
     #[error("policy denied command_start: {0}")]
     PolicyDenied(String),
     #[error(
-        "shell interpreter '{0}' is denied by default; command_start_combed is not a shell bridge"
+        "shell interpreter '{0}' denied: allow_shell is off. Run the program directly as argv, \
+         or set [policy.caps] allow_shell = true to allow it here and in shell_exec"
     )]
     ShellInterpreterDenied(String),
     /// US8 (FR-060): a shell smuggled through a `wsl`/`wsl.exe` carrier.
@@ -252,7 +254,9 @@ pub enum CommandError {
     /// teaching error can name the carrier; maps to the SAME
     /// `IpcErrorCode::ShellInterpreterDenied` wire code.
     #[error(
-        "nested shell interpreter '{interpreter}' denied inside a '{carrier}' invocation; the argv lane is not a shell bridge on either side of the WSL boundary"
+        "nested shell interpreter '{interpreter}' denied inside a '{carrier}' invocation: \
+         allow_shell is off. Run '{carrier} -e <program>' directly, or set \
+         [policy.caps] allow_shell = true to allow it here and in shell_exec"
     )]
     WslNestedShellDenied {
         interpreter: String,
@@ -287,8 +291,8 @@ pub enum CommandError {
 
 /// Which lane started this combed job, threaded through
 /// [`CommandRuntime::start_combed_inner`]. `Argv` is the default
-/// command path: `argv[0]` is the program and shell interpreters are a
-/// hard deny (`SHELL_INTERPRETERS_DENY`). `Shell` is the TC49
+/// command path: `argv[0]` is the program and shell interpreters are
+/// denied unless `allow_shell` (`SHELL_INTERPRETERS_DENY`). `Shell` is the TC49
 /// `shell_exec` lane: `argv` is assembled for the selected interpreter family,
 /// the interpreter guard is skipped, and the verdict comes
 /// from [`PolicyAction::CommandShellStart`] (gated by `allow_shell`).
@@ -831,46 +835,65 @@ impl CommandRuntime {
         }
 
         // Shell-bridge guard. Runs BEFORE the policy engine so the
-        // rejection reason is precise. command_start_combed is not
-        // a shell bridge: a future opt-in policy capability is the
-        // only sanctioned path to invoke an interpreter, and TC38
-        // does NOT add that capability. The predicate is
+        // rejection reason is precise. The predicate is
         // `shell_argv_denied` (case, Windows extensions, trailing dot/space,
         // powershell 8.3, `::$DATA`, wrappers, script flags), not a second copy.
+        // Under `allow_shell=false` a matched interpreter is denied; under
+        // `allow_shell=true` it runs through the same `CommandShellStart`
+        // policy check and `nested_shell` audit tag as the WSL gate below.
         //
         // ARGV LANE ONLY. The TC49 shell lane (`StartLane::Shell`)
         // assembles `argv[0]` = the chosen interpreter ON PURPOSE, so
         // this guard would self-deny it. The shell lane is instead gated
         // by `PolicyAction::CommandShellStart` (allow_shell cap) below.
         //
-        // WSL carriers are not hard-denied here. `wsl.exe -e bash -lc`
+        // WSL carriers are not handled here. `wsl.exe -e bash -lc`
         // names a shell after argv[0]; the nested-shell gate below owns
-        // that decision so `allow_shell=true` can still allow it.
-        if matches!(mode, StartLane::Argv)
+        // that decision.
+        let cwd_for_policy = req.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
+        let mut wsl_audit_tag: Option<(&'static str, String)> = if matches!(mode, StartLane::Argv)
             && matches!(classify_wsl_nested_shell(&req.argv), WslArgvClass::NotWsl)
             && let Some(shell) = shell_argv_denied(&req.argv)
         {
-            self.audit(
-                "command_rejected",
-                &subject_for_argv(&req.argv),
-                "deny",
-                Some(format!(
-                    "shell interpreter '{shell}' denied by default; \
-                             command_start_combed is not a shell bridge"
-                )),
-                Some(format_argv_metadata(&req.argv)),
-            );
-            return Err(CommandError::ShellInterpreterDenied(shell.to_owned()));
-        }
+            if !self.policy.caps_allow_shell() {
+                self.audit(
+                    "command_rejected",
+                    &subject_for_argv(&req.argv),
+                    "deny",
+                    Some(format!(
+                        "shell interpreter '{shell}' denied: allow_shell is off \
+                         ([policy.caps] allow_shell = true enables it and shell_exec)"
+                    )),
+                    Some(format_argv_metadata(&req.argv)),
+                );
+                return Err(CommandError::ShellInterpreterDenied(shell.to_owned()));
+            }
+            let shell_verdict = self.policy.evaluate(&PolicyAction::CommandShellStart {
+                shell_line: "",
+                cwd: cwd_for_policy.as_path(),
+                shell,
+            });
+            if shell_verdict.decision == PolicyDecision::Deny {
+                self.audit(
+                    "command_rejected",
+                    &subject_for_argv(&req.argv),
+                    "deny",
+                    Some(shell_verdict.reason.clone()),
+                    Some(format_argv_metadata(&req.argv)),
+                );
+                return Err(CommandError::PolicyDenied(shell_verdict.reason));
+            }
+            Some(("nested_shell", shell.to_owned()))
+        } else {
+            None
+        };
 
-        // WSL nested-shell gate (US8 / FR-060). The argv[0] guard above
-        // catches a bare interpreter; this catches a shell smuggled through a
+        // WSL nested-shell gate (US8 / FR-060). The guard above catches an
+        // interpreter launched directly; this catches a shell smuggled through a
         // `wsl`/`wsl.exe` carrier. Argv-only, reusing SHELL_INTERPRETERS_DENY.
         // Under `allow_shell=true` the classification is remembered and tagged
         // on the command-start audit row instead of denying. NotWsl /
         // Management / NonShellPayload are byte-identical to pre-US8 behavior.
-        let cwd_for_policy = req.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
-        let mut wsl_audit_tag: Option<(&'static str, String)> = None;
         if matches!(mode, StartLane::Argv) {
             match classify_wsl_nested_shell(&req.argv) {
                 WslArgvClass::NestedShell { interpreter } => {
@@ -893,7 +916,9 @@ impl CommandRuntime {
                         }
                         wsl_audit_tag = Some(("nested_shell", interpreter));
                     } else {
-                        let carrier = wsl_carrier_label(&req.argv[0]);
+                        let carrier = wsl_carrier_label(
+                            launched_argv(&req.argv).first().map_or("", String::as_str),
+                        );
                         self.audit(
                             "command_rejected",
                             &subject_for_argv(&req.argv),
@@ -901,7 +926,8 @@ impl CommandRuntime {
                             Some(format!(
                                 "nested shell interpreter '{interpreter}' denied inside a \
                                  '{carrier}' invocation; the argv lane is not a shell bridge \
-                                 on either side of the WSL boundary (allow_shell gate)"
+                                 on either side of the WSL boundary (allow_shell is off; \
+                                 [policy.caps] allow_shell = true enables it)"
                             )),
                             Some(format_argv_metadata(&req.argv)),
                         );
@@ -931,7 +957,9 @@ impl CommandRuntime {
                         }
                         wsl_audit_tag = Some(("wsl_construction", "unknown".to_owned()));
                     } else {
-                        let carrier = wsl_carrier_label(&req.argv[0]);
+                        let carrier = wsl_carrier_label(
+                            launched_argv(&req.argv).first().map_or("", String::as_str),
+                        );
                         self.audit(
                             "command_rejected",
                             &subject_for_argv(&req.argv),
@@ -939,7 +967,8 @@ impl CommandRuntime {
                             Some(format!(
                                 "unrecognized '{carrier}' construction denied (fail closed); \
                                  the argv lane is not a shell bridge on either side of the \
-                                 WSL boundary (allow_shell gate)"
+                                 WSL boundary (allow_shell is off; [policy.caps] allow_shell = true \
+                                 enables it)"
                             )),
                             Some(format_argv_metadata(&req.argv)),
                         );
@@ -953,6 +982,17 @@ impl CommandRuntime {
                 }
             }
         }
+        // Audit reason for a tagged start; only a WSL carrier gets the `wsl` prefix.
+        let tag_reason = wsl_audit_tag.as_ref().map(|(key, val)| {
+            if launched_argv(&req.argv)
+                .first()
+                .is_some_and(|a| is_wsl_carrier(a))
+            {
+                format!("wsl {key} classification: {val}")
+            } else {
+                format!("{key}: {val}")
+            }
+        });
 
         // Pre-spawn policy gate. The lane selects BOTH the policy action
         // and the audit-row labels (a denied argv start is
@@ -1201,12 +1241,10 @@ impl CommandRuntime {
                     "command_start",
                     &subject_for_argv(&req.argv),
                     "error",
-                    Some(match &wsl_audit_tag {
-                        Some((key, val)) => {
-                            format!("spawn failed: {e}; wsl {key} classification: {val}")
-                        }
-                        None => format!("spawn failed: {e}"),
-                    }),
+                    Some(tag_reason.as_ref().map_or_else(
+                        || format!("spawn failed: {e}"),
+                        |reason| format!("spawn failed: {e}; {reason}"),
+                    )),
                     Some(format_argv_metadata_tagged(
                         &req.argv,
                         wsl_audit_tag.as_ref(),
@@ -1292,9 +1330,7 @@ impl CommandRuntime {
             "command_start",
             &job_id.to_wire_string(),
             "allow",
-            wsl_audit_tag
-                .as_ref()
-                .map(|(key, val)| format!("wsl {key} classification: {val}")),
+            tag_reason,
             Some(format_argv_metadata_tagged(
                 &argv_for_meta,
                 wsl_audit_tag.as_ref(),
@@ -2209,7 +2245,11 @@ fn resolve_windows_argv0(argv0: &str) -> Option<String> {
 /// deterministic: PATH entries are tried in order, and within each directory
 /// the PATHEXT extensions are tried in their listed order. First hit wins.
 #[cfg(windows)]
-fn resolve_on_path(argv0: &str, path: &std::ffi::OsStr, pathext: &str) -> Option<String> {
+pub(crate) fn resolve_on_path(
+    argv0: &str,
+    path: &std::ffi::OsStr,
+    pathext: &str,
+) -> Option<String> {
     // Explicit path (already carries a separator): let the OS resolve it.
     if argv0.contains('\\') || argv0.contains('/') {
         return None;
@@ -3780,5 +3820,85 @@ mod resolve_tests {
             .is_none(),
             "an explicit path must not be re-resolved against PATH"
         );
+    }
+}
+
+/// FCR2-001: the WSL carrier check uses the same Win32 basename normalize as
+/// the interpreter deny. Cross-platform (`tests/command_runtime.rs` is unix-only).
+#[cfg(test)]
+mod wsl_carrier_tests {
+    use super::{WslArgvClass, classify_wsl_nested_shell};
+
+    fn classify(argv: &[&str]) -> WslArgvClass {
+        let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_owned()).collect();
+        classify_wsl_nested_shell(&argv)
+    }
+
+    fn nested(interpreter: &str) -> WslArgvClass {
+        WslArgvClass::NestedShell {
+            interpreter: interpreter.to_owned(),
+        }
+    }
+
+    #[test]
+    fn wsl_carrier_trailing_dot_space_and_data_stream_classified() {
+        assert_eq!(
+            classify(&["wsl.exe.", "-e", "bash", "-lc", "id"]),
+            nested("bash")
+        );
+        assert_eq!(
+            classify(&["wsl.exe ", "--", "sh", "-c", "id"]),
+            nested("sh")
+        );
+        assert_eq!(classify(&["WSL.EXE. ", "~"]), nested("default shell"));
+        assert_eq!(classify(&["wsl.exe::$DATA", "-e", "bash"]), nested("bash"));
+        assert_eq!(
+            classify(&["wsl.", "echo", "$(id)"]),
+            nested("default shell interpretation")
+        );
+        assert_eq!(
+            classify(&[r"C:\Windows\System32\wsl.exe.", "-e", "zsh"]),
+            nested("zsh")
+        );
+        assert_eq!(
+            classify(&["wsl.exe.", "-e", "cargo", "build"]),
+            WslArgvClass::NonShellPayload
+        );
+        assert_eq!(
+            classify(&["wsl.exe ", "--status"]),
+            WslArgvClass::Management
+        );
+        assert_eq!(classify(&["wslconfig.exe", "/l"]), WslArgvClass::NotWsl);
+        assert_eq!(classify(&["git.exe.", "status"]), WslArgvClass::NotWsl);
+    }
+
+    /// A wrapper in front of the carrier (`env wsl.exe ...`) still reaches
+    /// the WSL gate.
+    #[test]
+    fn wsl_carrier_behind_wrapper_classified() {
+        assert_eq!(
+            classify(&["env", "wsl.exe", "echo", "$(id)"]),
+            nested("default shell interpretation")
+        );
+        assert_eq!(classify(&["nohup", "wsl", "-e", "bash"]), nested("bash"));
+        assert_eq!(
+            classify(&["env", "-S", "wsl.exe -e bash -lc id"]),
+            nested("bash")
+        );
+        assert_eq!(
+            classify(&["FOO=1", "nice", "-n", "5", "wsl.exe."]),
+            nested("default shell")
+        );
+        assert_eq!(
+            classify(&["env", "wsl.exe", "-e", "cargo", "build"]),
+            WslArgvClass::NonShellPayload
+        );
+        assert_eq!(
+            classify(&["time", "wsl", "--status"]),
+            WslArgvClass::Management
+        );
+        assert_eq!(classify(&["env", "git", "status"]), WslArgvClass::NotWsl);
+        // A `wsl` operand of another program is not the carrier.
+        assert_eq!(classify(&["rg", "wsl", "src"]), WslArgvClass::NotWsl);
     }
 }

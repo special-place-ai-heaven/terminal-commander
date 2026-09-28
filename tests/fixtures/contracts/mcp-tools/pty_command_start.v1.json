@@ -77,6 +77,6 @@
     "a non-array argv is rejected with a field-prefixed teaching error naming the array-of-strings shape with an example (TB-11)",
     "MCP request does not expose the daemon-only environment field, but does accept optional bucket_config_json and rules_json that map to daemon IPC without a prior registry_activate",
     "success payload contains only job_id, bucket_id, probe_id, and cursor",
-    "pty_command_start is not a shell bridge and rejects shell interpreters"
+    "shell interpreters are denied while allow_shell is off (ShellInterpreterDenied); with allow_shell on they start and the audit row is tagged nested_shell"
   ]
 }

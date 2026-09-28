@@ -14,8 +14,8 @@
 //! start metadata (job_id/bucket_id/probe_id/cursor) — a combed signal /
 //! receipt — and NEVER a raw stdout dump of the pipeline output.
 //!
-//! Default-deny (cap OFF): on the default `developer_local` profile the
-//! `allow_shell` capability defaults false, so `shell_exec` is denied at
+//! Hardened (cap OFF): with `[policy.caps] allow_shell = false` on
+//! `developer_local` (whose default grants the cap), `shell_exec` is denied at
 //! the `CommandShellStart` policy gate and surfaces a denied/policy error
 //! through MCP — never `ShellInterpreterDenied` (the shell lane skips the
 //! argv shell-interpreter guard by design).
@@ -58,10 +58,14 @@ fn cleanup(p: &std::path::Path) {
     let _ = std::fs::remove_dir_all(p);
 }
 
-/// Live daemon on the DEFAULT profile (`developer_local`): caps default
-/// false, so `allow_shell` is OFF and the shell lane is denied.
-fn spawn_live_daemon(data: &std::path::Path) -> ServerHandle {
-    let cfg = DaemonConfig::defaults_in(data);
+/// Live daemon on `developer_local` hardened with `[policy.caps]
+/// allow_shell = false`, so the shell lane is denied.
+fn spawn_live_daemon_shell_off(data: &std::path::Path) -> ServerHandle {
+    let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+        allow_shell: Some(false),
+        ..Default::default()
+    });
     spawn_with_config(cfg)
 }
 
@@ -191,13 +195,13 @@ async fn o01_pipeline_returns_signal_when_cap_on() {
     cleanup(&data);
 }
 
-/// Default-deny: on the default `developer_local` profile the
-/// `allow_shell` capability is OFF, so the shell lane is denied at the
-/// `CommandShellStart` policy gate and MCP surfaces a denied/policy error.
+/// Hardened: with `[policy.caps] allow_shell = false` the shell lane is
+/// denied at the `CommandShellStart` policy gate and MCP surfaces a
+/// denied/policy error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shell_exec_denied_on_default_profile_e2e() {
-    let data = tmp_data_dir("default-deny");
-    let handle = spawn_live_daemon(&data);
+async fn shell_exec_denied_when_allow_shell_off_e2e() {
+    let data = tmp_data_dir("shell-off-deny");
+    let handle = spawn_live_daemon_shell_off(&data);
     {
         let (_server, client) = paired_against_live_daemon(&handle).await;
 
@@ -222,8 +226,8 @@ async fn shell_exec_denied_on_default_profile_e2e() {
             "shell-lane denial must be a policy denial, not the argv ShellInterpreterDenied guard; got: {rendered}"
         );
         assert!(
-            !rendered.contains("set allow_shell") && !rendered.contains("enable shell"),
-            "the deny must not upsell enabling shell; got: {rendered}"
+            rendered.contains("[policy.caps] allow_shell = true"),
+            "the deny must name the operator knob; got: {rendered}"
         );
 
         let _ = client.cancel().await;

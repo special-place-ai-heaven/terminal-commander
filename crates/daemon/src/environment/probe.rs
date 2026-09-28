@@ -684,12 +684,18 @@ fn bounded_text(bytes: &[u8]) -> String {
 mod tests {
     use super::super::apply_execution_policy;
     use super::*;
-    use crate::policy::{PolicyEngine, PolicyProfile};
+    use crate::policy::{PolicyCaps, PolicyEngine, PolicyProfile};
 
     #[test]
     fn shell_disabled_environment_keeps_only_direct_argv_routes() {
         let mut host = discover_host_environment();
-        apply_execution_policy(&mut host, &PolicyEngine::new(PolicyProfile::DeveloperLocal));
+        let shell_off = PolicyEngine::with_config_caps(
+            PolicyProfile::DeveloperLocal,
+            None,
+            None,
+            PolicyCaps::default(),
+        );
+        apply_execution_policy(&mut host, &shell_off);
 
         assert!(
             host.access_routes

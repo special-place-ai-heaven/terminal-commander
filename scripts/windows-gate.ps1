@@ -42,6 +42,9 @@ Invoke-Gate 'terminal-commander-supervisor' 'probe_handshake_windows' @()
 Invoke-Gate 'terminal-commanderd' 'windows_spawn_site_coverage' @()
 # FCR-001: argv-lane shell deny must refuse before CreateProcess (no ConPTY).
 Invoke-Gate 'terminal-commanderd' 'shell_deny_windows' @()
+# FCR2-002/003: PTY-lane extension-swap deny and NUL / batch CR-LF argv_invalid
+# refuse before any child spawns (headless-safe; the live ConPTY cases are not).
+Invoke-Gate 'terminal-commanderd' 'pty_windows' @('pty_extension_swapped_interpreter_is_denied', 'pty_rejects_nul_and_batch_line_breaks_as_argv_invalid')
 # T1: collect_probes PTY cfg must admit Windows (headless-safe; live ConPTY is not).
 Invoke-Gate 'terminal-commanderd' 'runtime_state_windows' @('collect_probes_pty_enumeration_cfg_admits_windows')
 # spec 004 T5: Windows Job Object ownership tripwire. KILL_ON_JOB_CLOSE killing a

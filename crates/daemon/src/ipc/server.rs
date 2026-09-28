@@ -1661,7 +1661,11 @@ mod tests {
     #[test]
     fn system_discover_routes_obey_the_active_shell_capability() {
         let data = tempfile::tempdir().expect("temp data dir");
-        let config = crate::config::DaemonConfig::defaults_in(data.path());
+        let mut config = crate::config::DaemonConfig::defaults_in(data.path());
+        config.policy.caps = Some(crate::config::PolicyCapsSection {
+            allow_shell: Some(false),
+            ..Default::default()
+        });
         let state = Arc::new(DaemonState::bootstrap(config).expect("daemon bootstrap"));
         assert!(!state.policy.caps_allow_shell());
 
@@ -1674,7 +1678,7 @@ mod tests {
                 .access_routes
                 .iter()
                 .all(|route| matches!(route.kind.as_str(), "direct_argv" | "wsl_argv")),
-            "default policy must not advertise a shell route"
+            "allow_shell=false must not advertise a shell route"
         );
         assert_eq!(
             response.environment.beachhead,

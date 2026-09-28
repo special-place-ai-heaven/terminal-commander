@@ -419,9 +419,11 @@ async fn file_list_dir_through_mcp_on_default_deny_profile() {
     {
         let (_server, client) = paired_against_live_daemon(&handle).await;
 
-        // The default-deny profile grants no shell/session caps; directory
-        // listing is gated only by the read-path policy, so a readable project
-        // directory enumerates in ONE call.
+        // The default `developer_local` profile is not deny-by-default for
+        // shell (allow_shell is on); it grants no session/privileged/remote
+        // caps. Directory listing here is gated only by the read-path
+        // policy regardless, so a readable project directory enumerates in
+        // ONE call.
         let payload = first_text(
             &call_tool(
                 &client,

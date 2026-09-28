@@ -124,6 +124,8 @@ pub enum StoreOp {
     ListRecipeVersions { recipe_id: String },
     /// `RecipeStore::tombstone` -> parent row existed
     TombstoneRecipe { recipe_id: String },
+    /// `RecipeStore::is_tombstoned` -> parent row exists and is tombstoned
+    IsRecipeTombstoned { recipe_id: String },
     /// `EventStore::import_recipe_seeds(promote_active)`
     ImportRecipeSeeds { promote_active: bool },
     /// `EventStore::ensure_workspace()` (P1 / TC50)
@@ -581,6 +583,16 @@ impl StoreClient {
         }
     }
 
+    /// `true` when the recipe id exists and is tombstoned.
+    pub fn is_recipe_tombstoned(&self, recipe_id: &str) -> Result<bool, EventStoreError> {
+        match self.call(StoreOp::IsRecipeTombstoned {
+            recipe_id: recipe_id.to_owned(),
+        })? {
+            StoreReply::Bool(tombstoned) => Ok(tombstoned),
+            other => Err(unexpected_store_reply("IsRecipeTombstoned", &other)),
+        }
+    }
+
     /// Deactivate a scoped rule; returns whether a row changed.
     pub fn deactivate_rule_scoped(
         &self,
@@ -877,6 +889,10 @@ fn execute(store: &mut EventStore, op: StoreOp) -> Result<StoreReply, EventStore
         StoreOp::TombstoneRecipe { recipe_id } => store
             .recipe_store()?
             .tombstone(&recipe_id)
+            .map(StoreReply::Bool),
+        StoreOp::IsRecipeTombstoned { recipe_id } => store
+            .recipe_store()?
+            .is_tombstoned(&recipe_id)
             .map(StoreReply::Bool),
         StoreOp::ImportRecipeSeeds { promote_active } => store
             .import_recipe_seeds(promote_active)

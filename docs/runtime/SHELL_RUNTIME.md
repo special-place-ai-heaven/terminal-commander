@@ -31,7 +31,8 @@ gate, so the default surface stays exactly as safe as before.
 - One-shot `shell_exec { shell_line, shell?, cwd, env, rules, tag,
   wait_ms }`. The daemon spawns `[shell, "-lc", shell_line]`.
 - A new `ShellRuntime` facade over the existing `CommandRuntime`.
-- The `allow_shell` capability gate (`[policy.caps]`, default false;
+- The `allow_shell` capability gate (`[policy.caps]`; on in the default
+  `developer_local` profile, `allow_shell = false` hardens;
   see `POLICY.md` section 4.1).
 - A dedicated policy action `PolicyAction::CommandShellStart`,
   evaluated to `AllowWithAudit` only on an exec-capable profile with
@@ -168,10 +169,11 @@ audits.
 NOT scan `shell_line`. Once `allow_shell` is on, a host where `sudo` is
 otherwise reachable can have `sudo ...` embedded inside a `shell_line`,
 and the argv[0] deny will not catch it. This is intended: it is WHY the
-shell lane is a trusted-profile, opt-in, single-operator capability,
-and WHY privilege escalation stays a SEPARATE closed helper (Wave 4,
-`allow_privileged`) rather than a generic shell. See `POLICY.md`
-section 4.1 and `docs/security/PRIVILEGE_MODEL.md`.
+shell lane is a trusted-profile, on-by-default (`developer_local`),
+single-operator capability -- `[policy.caps] allow_shell = false`
+hardens it off -- and WHY privilege escalation stays a SEPARATE closed
+helper (Wave 4, `allow_privileged`) rather than a generic shell. See
+`POLICY.md` section 4.1 and `docs/security/PRIVILEGE_MODEL.md`.
 
 ## 8. Audit redaction
 
@@ -217,8 +219,9 @@ metadata preview is also bounded (128 bytes/item), so a secret pushed
 far past the preview window in a very long line may be truncated away
 rather than masked. The subject/metadata are a redacted PREVIEW, not a
 guarantee that an adversarially-crafted line cannot smuggle a secret;
-the shell lane stays a trusted-profile, opt-in capability for that
-reason (section 7).
+the shell lane stays a trusted-profile, on-by-default capability
+(`[policy.caps] allow_shell = false` hardens it off) for that reason
+(section 7).
 
 ## 9. MCP surface
 
@@ -246,7 +249,8 @@ Layering (same fields, three layers):
 
 ## 10. Test coverage
 
-- `crates/daemon/tests/shell_runtime.rs` -- default-deny, runs a
+- `crates/daemon/tests/shell_runtime.rs` -- deny under
+  `allow_shell = false`, runs a
   pipeline when the cap is on, oversize-line rejection, distinct lines
   -> distinct `job_id`s (dedup).
 - `crates/daemon/tests/command_runtime.rs` -- the argv-lane regression
@@ -254,8 +258,8 @@ Layering (same fields, three layers):
 - `crates/mcp/tests/mcp_live_daemon.rs` -- the 39-tool count + the
   sorted catalogue including `shell_exec`.
 - `crates/mcp/tests/shell_live_e2e.rs` -- O-01 pipeline e2e (combed,
-  not raw) under `full_access`; default-deny e2e under
-  `developer_local`.
+  not raw) under `full_access`; deny e2e under `developer_local`
+  hardened with `allow_shell = false`.
 - `tests/fixtures/contracts/mcp-tools/shell_exec.v1.json` -- the tool
   contract fixture.
 

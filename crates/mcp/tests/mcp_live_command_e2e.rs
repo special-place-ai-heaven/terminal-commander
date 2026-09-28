@@ -61,7 +61,20 @@ fn cleanup(p: &std::path::Path) {
 }
 
 fn spawn_live_daemon(data: &std::path::Path) -> ServerHandle {
-    let cfg = DaemonConfig::defaults_in(data);
+    spawn_with_config(DaemonConfig::defaults_in(data))
+}
+
+/// `developer_local` hardened with `[policy.caps] allow_shell = false`.
+fn spawn_live_daemon_shell_off(data: &std::path::Path) -> ServerHandle {
+    let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+        allow_shell: Some(false),
+        ..Default::default()
+    });
+    spawn_with_config(cfg)
+}
+
+fn spawn_with_config(cfg: DaemonConfig) -> ServerHandle {
     let state = Arc::new(DaemonState::bootstrap(cfg).expect("daemon bootstrap"));
     let socket = state.config.socket_path();
     let server = IpcServer::new(Arc::clone(&state), socket);
@@ -301,7 +314,7 @@ async fn full_command_lifecycle_through_mcp_yields_only_structured_signal() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_shell_attempt_is_denied_and_audited() {
     let data = tmp_data_dir("sh-deny");
-    let handle = spawn_live_daemon(&data);
+    let handle = spawn_live_daemon_shell_off(&data);
     {
         let (_server, client) = paired_against_live_daemon(&handle).await;
 

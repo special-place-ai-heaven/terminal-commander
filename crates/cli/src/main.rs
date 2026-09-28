@@ -317,6 +317,12 @@ fn run_recipes_import(activate: bool) -> std::process::ExitCode {
             println!("skipped: {}", report.skipped.join(" "));
             println!("tombstoned: {}", report.tombstoned.join(" "));
             println!("activated: {}", report.activated.join(" "));
+            for row in &report.superseded {
+                println!(
+                    "superseded {} closed v{}; re-activate it with recipes activate {} --version {}",
+                    row.recipe_id, row.closed_version, row.recipe_id, row.closed_version
+                );
+            }
             if report.failed.is_empty() {
                 Ok(())
             } else {

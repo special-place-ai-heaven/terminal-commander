@@ -391,6 +391,10 @@ mod pty_core {
         Pty(String),
         #[error("argv must not be empty")]
         EmptyArgv,
+        /// A caller-fixable argv the backend refuses to spawn (for example
+        /// CR/LF in a batch file argument, which `cmd.exe` would cut at).
+        #[error("{0}")]
+        InvalidArgument(String),
         #[error("probe was cancelled before the child exited")]
         Cancelled,
     }
@@ -991,7 +995,12 @@ mod runtime {
             for (k, v) in &config.env {
                 cmd = cmd.env(k, v);
             }
-            let mut child = cmd.spawn(pts)?;
+            // Keep the spawn's io error typed so a missing program stays
+            // `ErrorKind::NotFound` for the daemon's `program_not_found`.
+            let mut child = cmd.spawn(pts).map_err(|e| match e {
+                pty_process::Error::Io(io) => PtyProbeError::Io(io),
+                other => PtyProbeError::from(other),
+            })?;
             // US3b (T042): `pty_process` runs `setsid()` in the child, making
             // it a new session AND process-group leader, so `pgid == child.id()`.
             // The grace ladder signals that whole group (SIGTERM then SIGKILL),
@@ -1545,6 +1554,76 @@ mod runtime_win {
         (writer_drained, reader_drained)
     }
 
+    /// FCR2-003: env var that carries the escaped batch command line to cmd.exe.
+    const BATCH_LINE_ENV: &str = "TC_PTY_BATCH_LINE";
+
+    /// Whether CreateProcessW would run `program` through cmd.exe: a `.bat` /
+    /// `.cmd` name, ignoring the trailing dots/spaces and `::$DATA` that Win32
+    /// strips from the same file.
+    fn is_batch_script(program: &str) -> bool {
+        let lower = program.to_ascii_lowercase();
+        let name = lower.trim_end_matches([' ', '.']);
+        let name = name
+            .strip_suffix("::$data")
+            .unwrap_or(name)
+            .trim_end_matches([' ', '.']);
+        std::path::Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext == "bat" || ext == "cmd")
+    }
+
+    /// std's `make_bat_command_line` escaping (`library/std/src/sys/args/windows.rs`)
+    /// without the `cmd.exe /c` prefix: the script path in quotes, then each
+    /// argument quoted unless it is plain `[A-Za-z0-9#$*+-./:?@\_]`, `"` doubled.
+    /// std's `%` hack is not needed because the line reaches cmd.exe through
+    /// one `%VAR%` expansion, which does not re-expand the value.
+    fn bat_command_line(argv: &[String]) -> Result<String, PtyProbeError> {
+        let script = &argv[0];
+        if script.contains('"') || script.ends_with('\\') {
+            return Err(PtyProbeError::InvalidArgument(format!(
+                "batch file path {script:?} is not a valid Windows file name"
+            )));
+        }
+        let mut line = format!("\"{script}\"");
+        for arg in &argv[1..] {
+            if arg.contains(['\r', '\n']) {
+                return Err(PtyProbeError::InvalidArgument(format!(
+                    "an argument to batch file {script:?} contains CR/LF, where cmd.exe \
+                     would end the command; pass it without line breaks, or send it with \
+                     pty_command_write_stdin after the program starts"
+                )));
+            }
+            line.push(' ');
+            let quote = arg.is_empty()
+                || arg.ends_with('\\')
+                || arg.chars().any(|c| {
+                    (c.is_ascii() && !(c.is_ascii_alphanumeric() || r"#$*+-./:?@\_".contains(c)))
+                        || c.is_control()
+                });
+            if quote {
+                line.push('"');
+            }
+            let mut backslashes = 0;
+            for c in arg.chars() {
+                if c == '\\' {
+                    backslashes += 1;
+                } else {
+                    if c == '"' {
+                        line.extend(std::iter::repeat_n('\\', backslashes));
+                        line.push('"');
+                    }
+                    backslashes = 0;
+                }
+                line.push(c);
+            }
+            if quote {
+                line.extend(std::iter::repeat_n('\\', backslashes));
+                line.push('"');
+            }
+        }
+        Ok(line)
+    }
+
     /// Handle to a live Windows ConPTY probe. Drop or call `cancel` to
     /// terminate. SAME public API as the unix `PtyProbe`.
     pub struct PtyProbe {
@@ -1704,6 +1783,13 @@ mod runtime_win {
             if argv.is_empty() {
                 return Err(PtyProbeError::EmptyArgv);
             }
+            // FCR2-003: build (and so validate) a batch line before any pty
+            // or ring is allocated; applied to the command below.
+            let batch_line = if is_batch_script(&argv[0]) {
+                Some(bat_command_line(argv)?)
+            } else {
+                None
+            };
             let probe_id = config.probe_id.unwrap_or_default();
             rings
                 .create_ring_default(probe_id)
@@ -1731,6 +1817,26 @@ mod runtime_win {
             }
             for (k, v) in &config.env {
                 cmd.env(k, v);
+            }
+            // FCR2-003 (BatBadBut): for a `.bat`/`.cmd` CreateProcessW runs
+            // cmd.exe, which re-parses `&|<>^%` that `portable-pty`'s CRT
+            // quoting leaves bare, and it has no raw command-line API. Hand
+            // cmd.exe std's batch line through one env var instead: `%VAR%`
+            // expands once, so the value is parsed but its own `%` is never
+            // re-expanded.
+            if let Some(line) = batch_line {
+                cmd.env(BATCH_LINE_ENV, line);
+                let cmd_exe = std::env::var_os("SystemRoot")
+                    .map_or_else(|| r"C:\Windows".into(), std::path::PathBuf::from)
+                    .join(r"System32\cmd.exe");
+                *cmd.get_argv_mut() = vec![
+                    cmd_exe.into_os_string(),
+                    "/e:ON".into(),
+                    "/v:OFF".into(),
+                    "/d".into(),
+                    "/c".into(),
+                    format!("%{BATCH_LINE_ENV}%").into(),
+                ];
             }
 
             // F-010: DO NOT spawn the child here. Spawning in `spawn`'s scope
@@ -2197,6 +2303,26 @@ mod runtime_win {
 
         fn empty_runtime() -> Arc<SifterRuntime> {
             Arc::new(SifterRuntime::build(&[]).unwrap())
+        }
+
+        /// FCR2-003: the batch line follows std's `append_bat_arg` rules, and
+        /// Win32 name forms of a `.cmd` still count as batch.
+        #[test]
+        fn batch_line_matches_std_escaping() {
+            let argv: Vec<String> = [r"C:\t d\x.cmd", "a&b", "50%P%", "x\"y", "", r"tr\", "plain"]
+                .map(str::to_owned)
+                .into();
+            assert_eq!(
+                bat_command_line(&argv).unwrap(),
+                r#""C:\t d\x.cmd" "a&b" "50%P%" "x""y" "" "tr\\" plain"#
+            );
+            assert!(bat_command_line(&[argv[0].clone(), "a\nb".to_owned()]).is_err());
+            for name in ["x.CMD", "x.bat", "x.cmd.", "x.cmd ::$DATA", "x.cmd::$data."] {
+                assert!(is_batch_script(name), "{name}");
+            }
+            for name in ["x.exe", "x.cmdx", "cmd", "x.bat.exe"] {
+                assert!(!is_batch_script(name), "{name}");
+            }
         }
 
         async fn poll_until<F: Fn(&PtyProbeMetrics) -> bool>(

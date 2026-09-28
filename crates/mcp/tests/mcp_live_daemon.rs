@@ -58,7 +58,20 @@ fn cleanup(p: &std::path::Path) {
 }
 
 fn spawn_live_daemon(data: &std::path::Path) -> ServerHandle {
-    let cfg = DaemonConfig::defaults_in(data);
+    spawn_with_config(DaemonConfig::defaults_in(data))
+}
+
+/// `developer_local` hardened with `[policy.caps] allow_shell = false`.
+fn spawn_live_daemon_shell_off(data: &std::path::Path) -> ServerHandle {
+    let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+        allow_shell: Some(false),
+        ..Default::default()
+    });
+    spawn_with_config(cfg)
+}
+
+fn spawn_with_config(cfg: DaemonConfig) -> ServerHandle {
     let state = Arc::new(DaemonState::bootstrap(cfg).expect("daemon bootstrap"));
     let socket = state.config.socket_path();
     let server = IpcServer::new(Arc::clone(&state), socket);
@@ -273,12 +286,12 @@ async fn live_system_discover_roundtrip_reports_daemon() {
             "tool catalogue must list exactly 59 live tools (including recipe_*)"
         );
 
-        assert_environment_routes(&body);
+        assert_environment_routes(&body, true);
 
         // US6/T056 (FR-023): the payload carries the read-only omni capability
         // matrix. Assert its shape AND its honesty invariants against this
         // live, local-only daemon.
-        assert_omni_status_honest(&body);
+        assert_omni_status_honest(&body, true);
 
         let _ = client.cancel().await;
     }
@@ -286,7 +299,29 @@ async fn live_system_discover_roundtrip_reports_daemon() {
     cleanup(&data);
 }
 
-fn assert_environment_routes(body: &serde_json::Value) {
+/// Hardened `[policy.caps] allow_shell = false`: discovery advertises only
+/// argv routes and reports `shell_exec` unavailable with the argv steer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_system_discover_under_allow_shell_false_steers_argv() {
+    let data = tmp_data_dir("discover-shell-off");
+    let handle = spawn_live_daemon_shell_off(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+        let result = client
+            .call_tool(CallToolRequestParams::new("system_discover"))
+            .await
+            .expect("system_discover should succeed");
+        let body: serde_json::Value = serde_json::from_str(&first_text_content(&result))
+            .expect("system_discover payload is JSON");
+        assert_environment_routes(&body, false);
+        assert_omni_status_honest(&body, false);
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
+fn assert_environment_routes(body: &serde_json::Value, shell_on: bool) {
     let environment = &body["daemon"]["environment"];
     assert_eq!(
         environment["os"].as_str(),
@@ -308,16 +343,17 @@ fn assert_environment_routes(body: &serde_json::Value) {
     for (index, route) in routes.iter().enumerate() {
         assert_eq!(route["rank"].as_u64(), Some((index + 1) as u64));
         let kind = route["kind"].as_str().expect("route kind");
+        let argv_route = matches!(kind, "direct_argv" | "wsl_argv");
         assert!(
-            matches!(kind, "direct_argv" | "wsl_argv"),
-            "default policy disables shell execution, so every advertised route must be usable through the argv lane; got {route}"
+            shell_on || argv_route,
+            "allow_shell=false disables shell execution, so every advertised route must be usable through the argv lane; got {route}"
         );
         let argv = route["argv_template"]
             .as_array()
             .expect("route argv_template");
         assert_eq!(
             argv.last().and_then(serde_json::Value::as_str),
-            Some("{args...}")
+            Some(if argv_route { "{args...}" } else { "{command}" })
         );
         if kind == "wsl_argv" {
             assert!(
@@ -331,7 +367,7 @@ fn assert_environment_routes(body: &serde_json::Value) {
 /// US6/T056 (FR-023): assert the omni capability matrix is present and HONEST
 /// for a live, local-only daemon. Extracted from the discover test so the test
 /// stays under the clippy `too_many_lines` cap.
-fn assert_omni_status_honest(body: &serde_json::Value) {
+fn assert_omni_status_honest(body: &serde_json::Value, shell_on: bool) {
     let omni = body
         .get("omni_status")
         .expect("system_discover payload must carry omni_status (US6/T056)");
@@ -342,15 +378,38 @@ fn assert_omni_status_honest(body: &serde_json::Value) {
     );
     let matrix = &omni["matrix"];
     // Daemon is UP here, so daemon-gated lanes report available iff this host's
-    // platform backend exists AND the policy cap is granted. BUG 1: the
-    // shell_exec lane is wired but this daemon runs the default DeveloperLocal
-    // profile with `allow_shell` OFF, so a call would be PolicyDenied -- the
+    // platform backend exists AND the policy cap is granted. The default
+    // DeveloperLocal profile grants `allow_shell`, so shell_exec is available.
+    // BUG 1: with `allow_shell` OFF a call would be PolicyDenied -- the
     // matrix must be cap-truthful and report available:false with the reason,
     // never advertise a call that policy can only reject.
+    if shell_on {
+        assert_eq!(
+            matrix["shell_exec"]["available"].as_bool(),
+            Some(true),
+            "developer_local default grants allow_shell; got {matrix}"
+        );
+        let shell_row = body["tools"]
+            .as_array()
+            .and_then(|tools| tools.iter().find(|tool| tool["name"] == "shell_exec"))
+            .expect("catalogue lists shell_exec");
+        assert_eq!(shell_row["available"], serde_json::json!(true));
+        assert!(
+            shell_row["steer"].is_null(),
+            "no argv steer when shell is on"
+        );
+    } else {
+        assert_shell_exec_steers_argv(body, matrix);
+    }
+    assert_non_shell_lanes_honest(matrix);
+}
+
+fn assert_shell_exec_steers_argv(body: &serde_json::Value, matrix: &serde_json::Value) {
     assert_eq!(
         matrix["shell_exec"]["available"].as_bool(),
         Some(false),
-        "shell_exec must be unavailable when allow_shell is off (deny-by-default); got {matrix}"
+        "shell_exec must be unavailable when allow_shell is off (hardened here via \
+         spawn_live_daemon_shell_off, not the profile default); got {matrix}"
     );
     assert_eq!(
         matrix["shell_exec"]["reason"].as_str(),
@@ -386,6 +445,9 @@ fn assert_omni_status_honest(body: &serde_json::Value) {
         shell_row["steer"]["recover_hint"],
         serde_json::json!("retry_with_argv")
     );
+}
+
+fn assert_non_shell_lanes_honest(matrix: &serde_json::Value) {
     // Sessions require both the unix runtime and allow_session. This daemon's
     // default DeveloperLocal profile keeps allow_session off on every host.
     let sessions_available = matrix["sessions"]["available"]

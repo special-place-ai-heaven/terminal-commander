@@ -70,6 +70,7 @@ pub(in crate::ipc::server) fn dispatch_pty_command_list(
 }
 
 #[cfg(any(unix, windows))]
+#[allow(clippy::too_many_lines)] // one arm per PtyRuntimeError; the deny texts are long
 pub(in crate::ipc::server) fn handle_pty_command_start(
     state: &Arc<DaemonState>,
     params: &PtyCommandStartParams,
@@ -127,30 +128,61 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
             Err(IpcError::new(IpcErrorCode::PolicyDenied, reason))
         }
         Err(crate::pty_command::PtyRuntimeError::ShellInterpreterDenied(shell)) => {
-            Err(IpcError::new(IpcErrorCode::ShellInterpreterDenied, shell))
+            Err(IpcError::new(
+                IpcErrorCode::ShellInterpreterDenied,
+                format!(
+                    "shell interpreter '{shell}' denied: allow_shell is off. \
+                     Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of \
+                     [\"{shell}\",\"-c\",\"cargo build\"]), or have the operator set \
+                     [policy.caps] allow_shell = true, which allows this argv in \
+                     pty_command_start and enables shell_exec."
+                ),
+            ))
         }
         // US8 (FR-060): wsl-carrier nested shell on the PTY argv lane. Same
         // wire code as the command lane, carrier-aware teaching message.
         Err(crate::pty_command::PtyRuntimeError::WslNestedShellDenied {
             interpreter,
             carrier,
+        }) if interpreter == "unrecognized construction" => Err(IpcError::new(
+            IpcErrorCode::ShellInterpreterDenied,
+            format!(
+                "unrecognized '{carrier}' construction denied (fail closed): allow_shell is off. \
+                 Use a recognized form ({carrier} -e <program> ..., or {carrier} --list / --status), \
+                 or have the operator set [policy.caps] allow_shell = true, which allows this \
+                 argv in pty_command_start and enables shell_exec."
+            ),
+        )),
+        Err(crate::pty_command::PtyRuntimeError::WslNestedShellDenied {
+            interpreter,
+            carrier,
         }) => Err(IpcError::new(
             IpcErrorCode::ShellInterpreterDenied,
             format!(
-                "shell interpreter '{interpreter}' denied inside a '{carrier}' invocation; \
-                     the pty argv lane is not a shell bridge on either side of the WSL boundary. \
-                     Remedy: invoke the Linux program directly ({carrier} -e <program> ...); for \
-                     pipelines/redirects use command with action=\"exec\" on the compact MCP \
-                     surface, or the shell_exec tool on the full surface; both are gated by the \
-                     allow_shell policy cap."
+                "shell interpreter '{interpreter}' denied inside a '{carrier}' invocation: \
+                 allow_shell is off. Run the Linux program directly ({carrier} -e <program> ...), \
+                 or have the operator set [policy.caps] allow_shell = true, which allows this \
+                 argv in pty_command_start and enables shell_exec (command with \
+                 action=\"exec\" on the compact MCP surface)."
             ),
         )),
         Err(crate::pty_command::PtyRuntimeError::EmptyArgv) => Err(IpcError::new(
             IpcErrorCode::ArgvInvalid,
             "argv must not be empty",
         )),
+        Err(crate::pty_command::PtyRuntimeError::ArgvInvalid(reason)) => {
+            Err(IpcError::new(IpcErrorCode::ArgvInvalid, reason))
+        }
         Err(crate::pty_command::PtyRuntimeError::Sifter(reason)) => {
             Err(IpcError::new(IpcErrorCode::RuleInvalid, reason))
+        }
+        // Same wire error as the argv lane (`map_command_error`).
+        Err(crate::pty_command::PtyRuntimeError::ProgramNotFound(argv0)) => {
+            let message = format!(
+                "program not found: '{argv0}'. Remedy: check the spelling of argv[0] and \
+                 ensure the program is on the daemon's PATH (or pass an absolute path)."
+            );
+            Err(IpcError::program_not_found(argv0, message))
         }
         Err(other) => Err(IpcError::new(
             IpcErrorCode::Internal,
@@ -308,4 +340,44 @@ pub(in crate::ipc::server) fn dispatch_pty_command_list(
 ) -> (&'static str, IpcResult) {
     let r = handle_pty_command_list(state);
     ("pty_command_list", IpcResult::Ok { response: r })
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    use super::*;
+
+    /// A missing program is the argv lane's caller-fixable `ProgramNotFound`,
+    /// with the typed `argv0`, not `Internal`.
+    #[test]
+    fn missing_program_maps_to_program_not_found() {
+        // The unix PTY spawn needs a reactor.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = runtime.enter();
+        let mut data = std::env::temp_dir();
+        data.push(format!("tc-pty-not-found-{}", std::process::id()));
+        let cfg = crate::config::DaemonConfig::defaults_in(&data);
+        let state = Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"));
+        let argv0 = "tc-no-such-program-4a";
+        let err = handle_pty_command_start(
+            &state,
+            &PtyCommandStartParams {
+                environment: None,
+                argv: vec![argv0.to_owned()],
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                rows: None,
+                cols: None,
+                tag: None,
+            },
+        )
+        .expect_err("missing program");
+        assert_eq!(err.code, IpcErrorCode::ProgramNotFound, "{}", err.message);
+        assert_eq!(err.argv0.as_deref(), Some(argv0));
+        let _ = std::fs::remove_dir_all(&data);
+    }
 }

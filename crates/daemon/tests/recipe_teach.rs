@@ -25,6 +25,17 @@ fn tmp_data_dir(tag: &str) -> PathBuf {
     p
 }
 
+/// `developer_local` hardened with `[policy.caps] allow_shell = false`: the
+/// default profile grants `allow_shell`, so deny tests opt out explicitly.
+fn shell_off_cfg(data: &std::path::Path) -> DaemonConfig {
+    let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+        allow_shell: Some(false),
+        ..Default::default()
+    });
+    cfg
+}
+
 fn recipe(id: &str, argv: &[&str], tags: &[&str]) -> RecipeDefinition {
     RecipeDefinition {
         recipe_id: id.to_owned(),
@@ -143,7 +154,7 @@ fn shell_deny_steers_to_matching_activated_recipe_only() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("steer");
-        let mut cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = shell_off_cfg(&data);
         cfg.recipe_admin_test_seam = true;
         assert!(!cfg.policy.llm_can_activate_recipes);
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
@@ -214,13 +225,14 @@ fn shell_deny_steers_to_matching_activated_recipe_only() {
             interpreter.teach.as_ref().expect("teach").denied_tool,
             "command_start_combed"
         );
-        assert!(
+        assert_eq!(
             interpreter
                 .teach
                 .as_ref()
                 .expect("teach")
                 .denied_capability
-                .is_none()
+                .as_deref(),
+            Some("allow_shell")
         );
 
         let other = session.shell("echo a | wc -c").await;
@@ -240,7 +252,7 @@ fn recipe_tombstone_and_dead_job_scope_do_not_steer() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("steer-life");
-        let mut cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = shell_off_cfg(&data);
         cfg.recipe_admin_test_seam = true;
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
@@ -301,7 +313,7 @@ fn two_runnable_scopes_fall_back_to_argv() {
         .unwrap();
     runtime.block_on(async {
         let data = tmp_data_dir("steer-scopes");
-        let mut cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = shell_off_cfg(&data);
         cfg.recipe_admin_test_seam = true;
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())

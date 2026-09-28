@@ -247,7 +247,8 @@ trust surface stays `[policy]`.
 profile = "developer_local"
 
 [policy.caps]
-allow_shell      = true    # gates shell_exec (TC49). Default false.
+allow_shell      = true    # gates shell_exec (TC49). Default true on
+                           #   developer_local, false on the others.
 allow_session    = true    # gates shell_session_* + workspace_snapshot_*
                            #   (omni P1 / TC50; LIVE, unix-only). Default false.
 allow_privileged = false   # gates the Wave-4 privileged helper, NOT
@@ -260,13 +261,28 @@ allow_remote     = true    # gates remote federation / target_id
 
 Rules:
 
-- **ALL four caps default `false`.** An absent `[policy.caps]` block is
-  identical to all-false. Deny-first is preserved: a capability does
+- **All four caps default `false`, except `allow_shell` on
+  `developer_local`.** `allow_shell` is on in the default
+  `developer_local` profile: an LLM caller abandons a denied tool for raw
+  Bash, and shell output stays combed, bounded, and audited
+  (`command_shell_start`). Set `[policy.caps] allow_shell = false` to
+  harden (the argv interpreter deny and the WSL nested-shell gate then
+  apply). A non-empty `[policy.commands] allow_roots` withholds that
+  default: `allow_shell` resolves `false` unless `[policy.caps]` sets it
+  explicitly, because `shell_exec` does not consult `allow_roots` (an
+  explicit `allow_shell = true` still enables it, unconfined by
+  `allow_roots`). `allow_session`, `allow_privileged`, and `allow_remote` do
   nothing until explicitly turned on.
 - **Config / TOML ONLY.** Caps are NEVER MCP-flippable -- no tool can
   turn a cap on or off. Changing a cap means editing TOML and
   restarting the daemon, the same boundary as switching profiles
   (section 3). This keeps cap changes auditable at restart boundaries.
+  A config that fails to parse stops the daemon (`config load error`,
+  exit 1); it is never half-applied. The MCP adapter's auto-start passes
+  only `--data-dir`, so it loads `<data-dir>/terminal-commander.toml` or,
+  when that file is absent, runs on defaults with `allow_shell` on. A
+  hardening file given with `--config` is not what an auto-started daemon
+  reads. After hardening, confirm `policy_status` shows `allow_shell: false`.
 - **Caps are inputs to `evaluate()`.** They do not bypass the policy
   engine. `allow_shell = true` makes `shell_exec` resolve to
   `AllowWithAudit` (audited) on an exec-capable profile; it does NOT
@@ -298,8 +314,9 @@ checked on `argv[0]` ONLY. It deliberately does NOT scan the
 where `sudo` is otherwise reachable can have `sudo ...` embedded INSIDE
 a `shell_line` (e.g. `echo x | sudo tee ...`) and the argv[0] deny will
 not catch it. This is intended and is WHY the shell lane is a
-trusted-profile capability (default-deny, opt-in, single-operator
-machine) rather than an always-on surface. It is also WHY privilege
+trusted-profile capability (audited, single-operator machine;
+`[policy.caps] allow_shell = false` hardens it) rather than an
+unaudited surface. It is also WHY privilege
 escalation stays a SEPARATE, closed, single-purpose helper (Wave 4,
 gated by `allow_privileged`) and is never delivered through a generic
 shell: the DEFAULT privilege path is never "run an arbitrary shell
@@ -395,13 +412,19 @@ argv checks passed while an arbitrary Linux shell ran. US8 closes that gap.
 **Stance: the shell capability follows the shell across the WSL boundary.**
 WSL is THIS host's boundary, not a remote machine (`allow_remote` is not
 implicated). A shell reachable through `wsl.exe` is gated by the same
-`allow_shell` capability that gates `shell_exec` -- default deny.
+`allow_shell` capability that gates `shell_exec`. `allow_shell` is on in
+the default `developer_local` profile, so this gate applies once an
+operator hardens with `[policy.caps] allow_shell = false`.
 
 - **Inspected: argv only.** The classifier reads the argv the caller
   supplied and nothing else. File contents are never read, and there is no
   second interpreter list -- `SHELL_INTERPRETERS_DENY` is the sole
   authority, matched by basename (split on both `/` and `\` so a
-  `C:\...\wsl.exe` path classifies the same on every platform).
+  `C:\...\wsl.exe` path classifies the same on every platform). The
+  carrier name gets the same Win32 normalize as the interpreter deny
+  (`is_wsl_carrier`): `wsl.exe.`, `wsl.exe ` and `wsl.exe::$DATA` launch
+  `wsl.exe`, so they are carriers too, as is a carrier behind a wrapper
+  (`env wsl.exe ...`, `nohup wsl ...`).
 - **`-e`/`--exec` vs a bare command line.** `wsl.exe` bypasses the distro
   shell ONLY for a payload introduced by `-e`/`--exec`; there the first
   payload token is the program that runs directly (no shell). A payload
@@ -418,7 +441,9 @@ implicated). A shell reachable through `wsl.exe` is gated by the same
 
 Enforcement matrix -- both argv lanes (`command_start` and
 `pty_command_start`) share ONE classifier, so a payload denied on one lane
-is denied on the other:
+is denied on the other. The `allow_shell=false` column is the hardened
+opt-in; the default `developer_local` profile runs the `allow_shell=true`
+column:
 
 | Classification | `allow_shell=false` | `allow_shell=true` |
 |---|---|---|
@@ -433,6 +458,44 @@ would break every legitimate non-shell use (`wsl.exe -e cargo build`,
 `wsl --list`). Inspecting the Linux-side binary was rejected: argv-only is
 the constitutional boundary, and file inspection is unreliable across the
 WSL boundary anyway.
+
+#### Argv interpreter deny: wrappers, flags, remote carriers
+
+Outside a `wsl` carrier, both argv lanes and recipes use one core check
+(`shell_argv_denied`, `crates/core/src/shell_deny.rs`). With `allow_shell`
+off it denies with `shell_interpreter_denied` when:
+
+- the launched program is a listed interpreter, after skipping `NAME=value`
+  words and wrappers (`env`, `command`, `exec`, `nohup`, `time`, `nice`,
+  `timeout`, `stdbuf`, `ionice`, `chrt`, `taskset`, `setsid`, `unbuffer`)
+  with their options, numeric operands, and the value operand of
+  `timeout`/`taskset`/`chrt` (`timeout inf`, `taskset ff`);
+  `env -S`/`--split-string` is split on whitespace with `'`/`"` removed and
+  checked again, and a `-S` string holding a `\` escape or `${VAR}` is
+  denied (fail closed); or
+- a listed interpreter appears later with a script flag in its option run
+  (`strace bash -x -c ...`, `bash -Cc ...`, `pwsh -NoProfile -Command ...`,
+  `cmd /d /c ...`).
+
+Non-shell interpreters (`python`, `node`, `perl`, ...) are not listed and
+run with any flags. `[policy.caps] allow_shell = true` is the one switch: it
+lets a matched argv run (after the `CommandShellStart` policy check, with
+the `command_start` audit row tagged `"nested_shell": "<interpreter>"`, like
+the WSL gate) and enables `shell_exec`. Recipes follow the same switch: with
+`allow_shell` off, `recipe_upsert`, `recipe_test`, and `recipe_run` deny an
+interpreter argv; with it on, the recipe validates and `recipe_run` starts it
+through the same argv lane, policy check, and `nested_shell` audit tag.
+
+**Remote and container carriers are not scanned.** When the launched
+program is `ssh`, `docker`, `podman`, `nerdctl` or `kubectl`, the check
+stops: `docker exec c sh -c ...` and `ssh host bash -c ...` run the
+interpreter in a container or on another machine, not as this host's
+shell. TC does not gate that remote side: `allow_remote` gates only
+`target_id` federation and `target_probe`, not an `ssh`/`docker` argv,
+which runs as an ordinary argv command. The exemption is by program, not
+subcommand, and deliberately covers `podman unshare bash -c ...`, which runs
+a shell on this host inside a user namespace. Residual:
+`ssh localhost bash -c ...` reaches this host's shell through sshd.
 
 ### 4.2 Full profile schema (informative)
 
@@ -455,7 +518,7 @@ shell_passthrough = false   # the argv command lane NEVER invokes a
                             #   joined shell string. As of TC49, shell
                             #   passthrough is its own gated lane
                             #   (shell_exec) behind [policy.caps].allow_shell
-                            #   (section 4.1), default false -- NOT a flag
+                            #   (section 4.1), on in developer_local -- NOT a flag
                             #   on the argv lane.
 require_argv_quoting = true # MCP argv lists, not joined strings
 

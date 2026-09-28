@@ -41,7 +41,7 @@ impl RecipeSeed {
             rule_pack_ids: Vec::new(),
             placeholders: Vec::new(),
         };
-        def.validate()?;
+        def.validate(false)?;
         Ok(def)
     }
 }

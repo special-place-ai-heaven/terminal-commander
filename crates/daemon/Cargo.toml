@@ -56,9 +56,16 @@ windows = { version = "0.62", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }
+
+# macOS has no /proc: the recipe admin gate reads the peer image
+# (proc_pidpath) and parent pid (proc_pidinfo) from libproc. Already in
+# Cargo.lock via sibling crates.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [features]
 test-util = []

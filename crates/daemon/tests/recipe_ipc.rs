@@ -62,6 +62,11 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
         let data = tmp_data_dir("life");
         let mut cfg = DaemonConfig::defaults_in(&data);
         cfg.recipe_admin_test_seam = true;
+        // The interpreter deny follows allow_shell, which developer_local grants.
+        cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+            allow_shell: Some(false),
+            ..Default::default()
+        });
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         let socket = state.config.socket_path();
         let handle = IpcServer::new(Arc::clone(&state), socket).spawn().unwrap();
@@ -79,6 +84,7 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
             .unwrap_err();
         assert_eq!(denied.code, IpcErrorCode::RecipeInvalid);
         assert!(denied.message.contains("shell interpreter"));
+        assert!(denied.message.contains("[policy.caps] allow_shell = true"));
 
         let upsert = client
             .call(
@@ -108,6 +114,7 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
             panic!("get: {got:?}");
         };
         assert_eq!(body.definition.argv[0], "git");
+        assert_eq!(serde_json::to_value(&body).unwrap()["tombstoned"], false);
 
         let found = client
             .call(
@@ -197,6 +204,23 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
             .unwrap();
         assert!(matches!(tombstoned, IpcResponse::RecipeTombstone(_)));
 
+        // FCR2-012: recipe_get marks a retired id instead of looking active.
+        let got = client
+            .call(
+                10,
+                IpcRequest::RecipeGet(RecipeGetParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: None,
+                }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeGet(body) = got else {
+            panic!("get after tombstone: {got:?}");
+        };
+        let wire = serde_json::to_value(&body).unwrap();
+        assert_eq!(wire["tombstoned"], true, "{wire}");
+
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&data);
     });
@@ -213,6 +237,10 @@ fn recipe_seed_import_stays_tested_until_operator_activates() {
         let data = tmp_data_dir("seeds");
         let mut cfg = DaemonConfig::defaults_in(&data);
         cfg.recipe_admin_test_seam = true;
+        cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
+            allow_shell: Some(false),
+            ..Default::default()
+        });
         assert!(!cfg.policy.llm_can_activate_recipes);
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
         assert!(!state.policy.llm_can_activate_recipes());
@@ -693,7 +721,7 @@ fn recipe_seed_import_skips_tombstone_and_activates_imported_version() {
             )
             .await
             .unwrap();
-        client
+        let imported = client
             .call(
                 3,
                 IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
@@ -704,6 +732,17 @@ fn recipe_seed_import_skips_tombstone_and_activates_imported_version() {
             )
             .await
             .unwrap();
+        // FCR2-007: the customized v1 the activation closed is reported.
+        let IpcResponse::RecipeImportSeeds(report) = imported else {
+            panic!("import: {imported:?}");
+        };
+        assert_eq!(
+            report.superseded,
+            vec![terminal_commander_ipc::protocol::RecipeImportSuperseded {
+                recipe_id: "git.status".to_owned(),
+                closed_version: 1,
+            }]
+        );
         let listed = client
             .call(
                 4,
