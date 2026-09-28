@@ -135,7 +135,9 @@ PTY password prompts (owner credential path):
   `elicitation/create` with the message "TC needs the owner's password for
   <kind> in job <id>"; the URL never enters a tool result. Plain HTTP is
   acceptable there because loopback traffic never leaves the host, and the
-  listener exists only while that prompt is pending. Otherwise the daemon
+  listener exists only while that prompt is pending. This is constitution
+  Principle IV's one stated exception to the local-socket-only rule.
+  Otherwise the daemon
   opens a native prompt: Windows CredUI; on a unix desktop the first
   of `$SSH_ASKPASS`, `ssh-askpass`, `zenity`, `kdialog`, `pinentry`. The
   daemon types the answer plus Enter into that job, masks an echoed copy on

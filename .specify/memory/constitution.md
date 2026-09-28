@@ -1,5 +1,23 @@
 <!--
 SYNC IMPACT REPORT
+Version change: 4.0.0 -> 4.1.0
+Bump rationale: Principle IV gains one narrow, explicit exception (a transient
+loopback endpoint that receives an owner-entered credential for MCP URL-mode
+elicitation). No existing guarantee is removed or redefined, so the bump is
+MINOR. Rationale for the change: the owner wants the model to ask for sudo and
+other PTY passwords safely, through the harness's own out-of-band input, with
+the value never passing through the model. Owner decision (2026-09-29).
+Modified principles:
+  - IV. Local-Only Privilege Boundary
+Added sections: none
+Removed sections: none
+Templates reviewed:
+  - .specify/templates/plan-template.md       OK  (no transport wording)
+  - .specify/templates/spec-template.md       OK  (no transport wording)
+  - .specify/templates/tasks-template.md      OK  (no transport wording)
+Follow-up TODOs: none
+
+Previous report:
 Version change: 3.0.0 -> 4.0.0
 Bump rationale: the default profile becomes `full_access` and TC inherits the
 harness's trust: by default nothing is denied (escalators, sensitive paths,
@@ -184,6 +202,13 @@ caller-supplied secret or environment overlay value additionally requires
 authenticated end-to-end confidentiality; reachability or a challenge response
 alone is insufficient.
 
+One exception, and only this one: the daemon may open a transient loopback
+HTTP endpoint (127.0.0.1 only, random >=128-bit token in the path,
+single-use, <=120 s, Host-checked) solely to receive an owner-entered
+credential requested through MCP URL elicitation. Plaintext is confined to the
+host's loopback interface; the value is delivered to the waiting child and
+zeroized, never returned over IPC.
+
 Under the default `full_access` profile the harness running the LLM is the
 authority boundary: TC grants the same host access that harness grants
 (including root through `sudo`/`su` and the full filesystem) and does not
@@ -304,4 +329,4 @@ be recorded in the plan's Complexity Tracking table with the simpler alternative
 that was rejected and why. The NON-NEGOTIABLE principles (I, II, III, VI) are not
 subject to per-feature waiver.
 
-**Version**: 4.0.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-09-28
+**Version**: 4.1.0 | **Ratified**: 2026-06-16 | **Last Amended**: 2026-09-29
