@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.2.0](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.100...v0.2.0) (2026-09-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **policy:** allow_shell on by default; close FCR2 ledger findings 001-013
+* **policy:** the developer_local profile now resolves allow_shell = true (shell_exec and interpreter argv run by default, combed and audited). It is withheld automatically when [policy.commands] allow_roots confines commands unless allow_shell = true is set explicitly. Operators who relied on the deny must set [policy.caps] allow_shell = false.
+
+### Features
+
+* **daemon,mcp:** flag shell pipelines whose exit is only the last stage's ([3253644](https://github.com/special-place-ai-heaven/terminal-commander/commit/32536442057f30f71a6c11aea8c0da5ccad5fbd4))
+* **policy:** allow_shell on by default; close FCR2 ledger findings 001-013 ([3253644](https://github.com/special-place-ai-heaven/terminal-commander/commit/32536442057f30f71a6c11aea8c0da5ccad5fbd4))
+* **policy:** allow_shell on by default; close FCR2 ledger findings 001-013 ([9806ea1](https://github.com/special-place-ai-heaven/terminal-commander/commit/9806ea185b4b8b995bbd3698aa0bb11c77aebbe3))
+
+
+### Bug Fixes
+
+* **core:** consume one word per o/O letter and match pwsh value flags by prefix ([3253644](https://github.com/special-place-ai-heaven/terminal-commander/commit/32536442057f30f71a6c11aea8c0da5ccad5fbd4))
+* **core:** GNU env -S tokenizer and getopt wrapper options for the interpreter deny ([3253644](https://github.com/special-place-ai-heaven/terminal-commander/commit/32536442057f30f71a6c11aea8c0da5ccad5fbd4))
+* **core:** read the interpreter option run getopt-style behind wrappers ([3253644](https://github.com/special-place-ai-heaven/terminal-commander/commit/32536442057f30f71a6c11aea8c0da5ccad5fbd4))
+* **daemon:** name Linux paths on a Windows daemon instead of misresolving them ([3253644](https://github.com/special-place-ai-heaven/terminal-commander/commit/32536442057f30f71a6c11aea8c0da5ccad5fbd4))
+* **mcp,ipc:** never re-send an idempotent read after a deadline timeout ([3253644](https://github.com/special-place-ai-heaven/terminal-commander/commit/32536442057f30f71a6c11aea8c0da5ccad5fbd4))
+* **policy:** close FCR2-004 wrapper bypasses; recipes follow allow_shell; teach text reaches MCP ([3253644](https://github.com/special-place-ai-heaven/terminal-commander/commit/32536442057f30f71a6c11aea8c0da5ccad5fbd4))
+
 ## [0.1.100](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.99...v0.1.100) (2026-09-28)
 
 
