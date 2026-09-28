@@ -1279,6 +1279,14 @@ fn windows_protected(path: &str) -> bool {
     } else {
         lower
     };
+    // Windows ignores trailing dots and spaces on EVERY path segment
+    // (`C:\Windows.\System32` is the real System32), so strip them per
+    // segment before matching.
+    let lower = lower
+        .split('/')
+        .map(|seg| seg.trim_end_matches(['.', ' ']))
+        .collect::<Vec<_>>()
+        .join("/");
     let norm = collapse(&lower);
 
     // Drive root: `c:` or `c:/`.
@@ -1403,6 +1411,9 @@ mod tests {
             r"\\.\PhysicalDrive0",
             r"\\?\Volume{2c1cd3a1-0000-0000-0000-100000000000}\",
             r"C:\Windows.",
+            r"C:\Windows.\System32",
+            r"C:\Windows \System32\drivers",
+            r"C:\Windows.\guard-nx",
             r"C:\pagefile.sys",
             r"C:\Program Files",
             r"C:\Users",
