@@ -52,7 +52,17 @@ fn watched_true() -> RecipeDefinition {
 }
 
 fn spawn_daemon(data: &std::path::Path) -> (ServerHandle, Arc<DaemonState>) {
-    let cfg = DaemonConfig::defaults_in(data);
+    spawn_daemon_with(DaemonConfig::defaults_in(data))
+}
+
+/// `developer_local`: MCP recipe admin is denied (`recipe_activate_requires_admin`).
+fn spawn_hardened_daemon(data: &std::path::Path) -> (ServerHandle, Arc<DaemonState>) {
+    let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
+    spawn_daemon_with(cfg)
+}
+
+fn spawn_daemon_with(cfg: DaemonConfig) -> (ServerHandle, Arc<DaemonState>) {
     let state = Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"));
     let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
         .spawn()
@@ -106,11 +116,40 @@ fn first_text(result: &rmcp::model::CallToolResult) -> String {
     panic!("expected text content");
 }
 
+/// Owner decision: under the default `full_access` profile the model
+/// administers recipes itself through MCP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_activate_allowed_under_default_profile() {
+    let data = tmp_data_dir("default-admin");
+    let (handle, _state) = spawn_daemon(&data);
+    let (_server, client) = paired(&handle).await;
+    let definition = serde_json::to_string(&watched_true()).unwrap();
+    call_tool(
+        &client,
+        "recipe_upsert",
+        serde_json::json!({ "definition_json": definition }),
+    )
+    .await
+    .expect("upsert");
+    let activated = call_tool(
+        &client,
+        "recipe_activate",
+        serde_json::json!({ "recipe_id": "echo.true", "scope": {"kind": "global"} }),
+    )
+    .await
+    .expect("full_access lets MCP activate");
+    let body: serde_json::Value = serde_json::from_str(&first_text(&activated)).unwrap();
+    assert_eq!(body["recipe_id"], "echo.true");
+    let _ = client.cancel().await;
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)] // deny gate plus one argv-lane run
 async fn mcp_activate_denied_and_run_uses_argv_lane() {
     let data = tmp_data_dir("e2e");
-    let (handle, state) = spawn_daemon(&data);
+    let (handle, state) = spawn_hardened_daemon(&data);
     let (_server, client) = paired(&handle).await;
 
     let listed = client.list_all_tools().await.expect("list_tools");

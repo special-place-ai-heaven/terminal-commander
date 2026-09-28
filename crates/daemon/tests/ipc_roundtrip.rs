@@ -152,13 +152,16 @@ fn policy_status_reports_active_caps() {
             IpcResponse::PolicyStatus(p) => {
                 assert_eq!(p.file_window_bytes, state.config.limits.file_window_bytes);
                 assert_eq!(p.bucket_read_limit, state.config.limits.bucket_read_limit);
-                assert!(p.commands_deny_count > 0);
-                assert!(p.default_deny_path_suffix_count > 0);
-                // Default developer_local grants allow_shell only (owner decision D0).
-                assert!(p.caps.allow_shell, "developer_local default enables shell");
-                assert!(!p.caps.allow_session);
-                assert!(!p.caps.allow_privileged);
-                assert!(!p.caps.allow_remote);
+                // Default full_access inherits the harness's trust: every cap on,
+                // no structural command or path deny active.
+                assert_eq!(p.profile, "FullAccess");
+                assert_eq!(p.commands_deny_count, 0);
+                assert_eq!(p.default_deny_path_suffix_count, 0);
+                assert!(p.caps.allow_shell);
+                assert!(p.caps.allow_session);
+                assert!(p.caps.allow_privileged);
+                assert!(p.caps.allow_remote);
+                assert!(p.llm_can_activate_recipes);
             }
             other => panic!("unexpected response: {other:?}"),
         }
@@ -177,6 +180,7 @@ fn policy_status_surfaces_explicit_allow_shell_cap() {
     runtime.block_on(async {
         let data = tmp_data_dir("policy-cap-on");
         let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
         cfg.policy.caps = Some(PolicyCapsSection {
             allow_shell: Some(true),
             ..Default::default()

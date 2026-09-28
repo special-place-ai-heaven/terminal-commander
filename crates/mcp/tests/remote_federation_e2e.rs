@@ -79,9 +79,10 @@ fn spawn_daemon_full_access(data: &Path) -> ServerHandle {
     spawn_with_config(cfg)
 }
 
-fn spawn_daemon_default(data: &Path) -> ServerHandle {
-    // developer_local: allow_remote defaults false (default-deny federation).
-    let cfg = DaemonConfig::defaults_in(data);
+fn spawn_daemon_hardened(data: &Path) -> ServerHandle {
+    // developer_local: allow_remote is off (the default full_access presets it on).
+    let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.profile = PolicyProfile::DeveloperLocal;
     spawn_with_config(cfg)
 }
 
@@ -372,7 +373,7 @@ async fn remote_use_is_denied_without_allow_remote_cap() {
     let local_data = tmp_data_dir("denylocal");
     let remote_data = tmp_data_dir("denyremote");
     // LOCAL daemon on the default profile: allow_remote = false.
-    let local = spawn_daemon_default(&local_data);
+    let local = spawn_daemon_hardened(&local_data);
     let remote = spawn_daemon_full_access(&remote_data);
     {
         let targets = TargetsConfig {

@@ -202,7 +202,7 @@ mod tests {
         );
         // An interpreter deny carries the argv lane's own text (pinned in the
         // daemon's `shell_teach_keeps_lane_text_and_names_profile_forbid`).
-        teach.reason = "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]). This daemon runs the `developer_local` profile (default is full_access, which allows everything); to change it set `[policy] profile = \"full_access\"` in the daemon config (the `--config` file, else terminal-commander.toml in the data dir).".to_owned();
+        teach.reason = "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]). This daemon runs the `developer_local` profile (default is full_access, which allows everything); to change it set `[policy] profile = \"full_access\"` (and drop any `[policy.caps]` false override) in the daemon config (the `--config` file, else terminal-commander.toml in the data dir).".to_owned();
         let data = policy_denied_data(&teach, Some("run_and_watch"), "ShellInterpreterDenied");
         let expected: Value = serde_json::from_str(include_str!(
             "../tests/fixtures/a2/shell_interpreter_denied.json"

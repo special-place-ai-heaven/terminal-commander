@@ -61,7 +61,7 @@ fn spawn_live_daemon(data: &std::path::Path) -> ServerHandle {
     spawn_with_config(DaemonConfig::defaults_in(data))
 }
 
-/// `developer_local` hardened with `[policy.caps] allow_shell = false`.
+/// The default `full_access` profile with `[policy.caps] allow_shell = false`.
 fn spawn_live_daemon_shell_off(data: &std::path::Path) -> ServerHandle {
     let mut cfg = DaemonConfig::defaults_in(data);
     cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
@@ -448,14 +448,15 @@ fn assert_shell_exec_steers_argv(body: &serde_json::Value, matrix: &serde_json::
 }
 
 fn assert_non_shell_lanes_honest(matrix: &serde_json::Value) {
-    // Sessions require both the unix runtime and allow_session. This daemon's
-    // default DeveloperLocal profile keeps allow_session off on every host.
+    // Sessions require both the unix runtime and allow_session, which the
+    // default full_access profile presets on.
     let sessions_available = matrix["sessions"]["available"]
         .as_bool()
         .expect("sessions.available bool");
-    assert!(
-        !sessions_available,
-        "sessions must be unavailable when allow_session is off; got {matrix}"
+    assert_eq!(
+        sessions_available,
+        cfg!(unix),
+        "sessions follow the unix runtime under full_access; got {matrix}"
     );
     // PTY is unix(posix)/windows(conpty) and is not session-cap-gated.
     let pty_available = matrix["pty"]["available"]

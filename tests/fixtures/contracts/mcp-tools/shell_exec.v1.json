@@ -27,7 +27,7 @@
       "TC45",
       "TC49"
     ],
-    "note": "Gated shell lane (TC49). Runs ONE shell line (pipelines/compounds/redirects) as [shell,\"-lc\",shell_line] through the same comb/bucket pipeline as command_start_combed. Policy: CommandShellStart, gated by the [policy.caps].allow_shell capability and evaluated as AllowWithAudit on an exec-capable profile (developer_local/admin_debug/full_access); allowed by default on developer_local (allow_shell defaults true there, false on repo_only/read_only_observer/admin_debug; [policy.caps] allow_shell = false hardens; the MCP/IPC surface carries shell_line ONLY -- never a capability flag, caps are TOML-only). Output is combed signals + a bounded receipt; raw stdout/stderr are never returned here (observe them through bucket/event tools). The argv lane (command_start_combed) applies SHELL_INTERPRETERS_DENY while allow_shell is off."
+    "note": "Gated shell lane (TC49). Runs ONE shell line (pipelines/compounds/redirects) as [shell,\"-lc\",shell_line] through the same comb/bucket pipeline as command_start_combed. Policy: CommandShellStart, gated by the [policy.caps].allow_shell capability and evaluated as AllowWithAudit on an exec-capable profile (developer_local/admin_debug/full_access); allowed by default (allow_shell defaults true on the default full_access profile and on developer_local, false on repo_only/read_only_observer/admin_debug; [policy.caps] allow_shell = false hardens; the MCP/IPC surface carries shell_line ONLY -- never a capability flag, caps are TOML-only). Output is combed signals + a bounded receipt; raw stdout/stderr are never returned here (observe them through bucket/event tools). The argv lane (command_start_combed) applies SHELL_INTERPRETERS_DENY while allow_shell is off."
   },
   "params": {
     "shell_line": {"type": "string", "required": true},
@@ -70,7 +70,7 @@
   },
   "invariants": [
     "shell_line is required; shell/cwd/env/rules/tag/wait_ms are optional",
-    "allowed by default on developer_local: the allow_shell capability defaults true there (and on full_access), false on the other profiles; [policy.caps] allow_shell = false denies shell_exec",
+    "allowed by default: the allow_shell capability defaults true on the default full_access profile (and on developer_local), false on the other profiles; [policy.caps] allow_shell = false denies shell_exec",
     "policy gate is CommandShellStart -> AllowWithAudit on an exec-capable profile with allow_shell; otherwise PolicyDenied, never ShellInterpreterDenied (the shell lane skips the argv shell-interpreter guard)",
     "capability is config/TOML only; the MCP/IPC surface carries shell_line and never a capability flag",
     "success payload contains job_id, bucket_id, probe_id, and cursor only",

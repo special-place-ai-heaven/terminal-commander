@@ -31,9 +31,10 @@ data_dir = "${HOME}/.local/share/terminal-commanderd"
 runtime_mode = "self_check"
 
 [policy]
-# One of: developer_local, repo_only, read_only_observer, admin_debug
-# (see POLICY.md section 2).
-profile = "developer_local"
+# One of: full_access (the default: TC inherits the harness's trust and
+# denies nothing), or a hardened opt-in profile: developer_local,
+# repo_only, read_only_observer, admin_debug (see POLICY.md section 2).
+profile = "full_access"
 profile_version = "1"
 
 # $REPO_ROOT for repo_only containment (POLICY.md section 2.2). REQUIRED
@@ -44,9 +45,8 @@ profile_version = "1"
 
 # [policy.commands] — command allow-list (POLICY.md section 4).
 # Matched by argv[0] basename. When OMITTED (or empty), Terminal Commander
-# allows any command that is not in the cross-profile structural deny set
-# (sudo/doas/su/pkexec/kexec/polkit) — this keeps zero-config usage
-# working for arbitrary dev commands. Setting a non-empty list OPTS IN to
+# allows any command (a hardened profile still denies the structural set
+# sudo/doas/su/pkexec/kexec/polkit). Setting a non-empty list OPTS IN to
 # default-deny: only the listed commands run; everything else is denied
 # with reason `no_allow_rule`. Applies to developer_local and repo_only.
 # [policy.commands]

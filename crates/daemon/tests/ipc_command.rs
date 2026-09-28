@@ -307,7 +307,7 @@ fn command_start_combed_denies_shell_interpreter_and_audits() {
             "remedy is retry with argv, got: {}",
             err.message
         );
-        assert!(err.message.contains("[policy.caps] allow_shell = true"));
+        assert!(err.message.contains(r#"[policy] profile = "full_access""#));
 
         let rows = state.store.audit_since(&AuditReadRequest::new(0)).unwrap();
         assert!(

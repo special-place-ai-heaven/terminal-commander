@@ -281,12 +281,12 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "recipe_activate",
             status: ToolStatus::Live,
-            description: "Activate an argv recipe in global scope. Job, bucket, and probe scopes are refused. Denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin). An operator runs `terminal-commander recipes activate`.",
+            description: "Activate an argv recipe in global scope. Job, bucket, and probe scopes are refused. Open to MCP under the default full_access profile; a hardened profile with llm_can_activate_recipes false denies it (recipe_activate_requires_admin) and leaves it to `terminal-commander recipes activate`.",
         },
         ToolCatalogueEntry {
             name: "recipe_deactivate",
             status: ToolStatus::Live,
-            description: "Deactivate an argv recipe for a scope. Omitted version closes the active version, not the latest stored. Same MCP admin gate as recipe_activate. An operator runs `terminal-commander recipes deactivate`.",
+            description: "Deactivate an argv recipe for a scope. Omitted version closes the active version, not the latest stored. Same MCP admin gate as recipe_activate (open under the default full_access profile); otherwise `terminal-commander recipes deactivate`.",
         },
         ToolCatalogueEntry {
             name: "recipe_list_active",
@@ -351,7 +351,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "shell_session_start",
             status: ToolStatus::Live,
-            description: "Start a persistent shell session (sticky cwd/env across sends). Requires allow_session; denied by default; combed output only. (unix-only; unavailable on Windows)",
+            description: "Start a persistent shell session (sticky cwd/env across sends). Requires allow_session (on by default; off under a hardened profile); combed output only. (unix-only; unavailable on Windows)",
         },
         ToolCatalogueEntry {
             name: "shell_session_exec",
@@ -431,7 +431,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "target_probe",
             status: ToolStatus::Live,
-            description: "Probe ONE target's health over its operator-forwarded LOCAL socket; returns reachable + daemon_version. Requires allow_remote; never opens a public network port.",
+            description: "Probe ONE target's health over its operator-forwarded LOCAL socket; returns reachable + daemon_version. Requires allow_remote (on by default); never opens a public network port.",
         },
     ]
 }
@@ -1259,7 +1259,7 @@ impl TerminalCommanderMcpServer {
     /// `allow_remote` (it reveals no remote data, only configuration);
     /// ACTUALLY routing a tool to a target is gated separately.
     #[tool(
-        description = "List registered remote-federation targets and whether each is reachable. Targets come from targets.toml (default: none = local-only). Reachability is probed over the operator-established LOCAL forward socket; no public network port is opened. Use target_probe for a single target's daemon_version. Routing a tool to a target requires the operator's allow_remote cap."
+        description = "List registered remote-federation targets and whether each is reachable. Targets come from targets.toml (default: none = local-only). Reachability is probed over the operator-established LOCAL forward socket; no public network port is opened. Use target_probe for a single target's daemon_version. Routing a tool to a target requires the allow_remote cap (on by default)."
     )]
     async fn target_list(&self) -> Result<CallToolResult, McpError> {
         let mut targets = Vec::new();
@@ -1284,7 +1284,7 @@ impl TerminalCommanderMcpServer {
     /// unforwarded target reports `reachable: false` rather than erroring, so
     /// an agent can poll readiness. An unknown `target_id` is a typed error.
     #[tool(
-        description = "Probe ONE registered target's health: dials its operator-forwarded LOCAL socket and returns { reachable, daemon_version }. A target whose tunnel is down reports reachable=false (not an error). Requires the operator's allow_remote cap; never opens a public network port."
+        description = "Probe ONE registered target's health: dials its operator-forwarded LOCAL socket and returns { reachable, daemon_version }. A target whose tunnel is down reports reachable=false (not an error). Requires the allow_remote cap (on by default); never opens a public network port."
     )]
     async fn target_probe(
         &self,
@@ -1310,7 +1310,7 @@ impl TerminalCommanderMcpServer {
     /// `command_start_combed` — start a non-PTY argv command on the
     /// daemon and return bounded metadata. Never returns raw output.
     #[tool(
-        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. Argv only; shell interpreters are denied when allow_shell is off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default developer_local profile). A pipeline in a shell -c/-lc script may report only its last stage's exit code (unless the script sets pipefail); command_status then sets pipeline_exit_masked:true (not detected for cmd /C or pwsh -Command). On Windows, do not pass bare /home/... paths in argv — prefix with wsl or use Windows paths. Windows piped children may buffer stdout without a newline; use pty_command_start for live chatty capture."
+        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). A pipeline in a shell -c/-lc script may report only its last stage's exit code (unless the script sets pipefail); command_status then sets pipeline_exit_masked:true (not detected for cmd /C or pwsh -Command). On Windows, do not pass bare /home/... paths in argv — prefix with wsl or use Windows paths. Windows piped children may buffer stdout without a newline; use pty_command_start for live chatty capture."
     )]
     async fn command_start_combed(
         &self,
@@ -1353,7 +1353,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters denied when allow_shell is off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default developer_local profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this."
     )]
     async fn run_and_watch(
         &self,
@@ -1656,7 +1656,7 @@ impl TerminalCommanderMcpServer {
     /// Forwards `IpcRequest::ShellExec`; the daemon spawns
     /// `[shell, "-lc", shell_line]` ONLY on an `AllowWithAudit` verdict for
     /// `PolicyAction::CommandShellStart` (gated by the `allow_shell`
-    /// capability, on in the default `developer_local` profile). The shell lane skips the
+    /// capability, on in the default `full_access` profile). The shell lane skips the
     /// argv `SHELL_INTERPRETERS_DENY` guard, so its denials are
     /// `PolicyDenied`, never `ShellInterpreterDenied`. The reply reuses the
     /// `command_start_combed` bounded shape (`job_id`/`bucket_id`/`probe_id`/
@@ -1665,7 +1665,7 @@ impl TerminalCommanderMcpServer {
     /// MCP carries `shell_line` ONLY — capabilities are config/TOML, never an
     /// MCP-flippable flag.
     #[tool(
-        description = "Run ONE shell line (pipelines/compounds/redirects via [shell,-lc,line]) and get back ONLY the lines your rules match plus exit state, never the raw stream. Requires the allow_shell capability (config/TOML; on in the default developer_local profile, [policy.caps] allow_shell = false hardens); a denied daemon returns a policy error. Returns job_id, bucket_id, probe_id, initial cursor. Use run_and_watch or command_start_combed when you do not need shell syntax; shell_exec only when pipelines, compounds, or redirects are required and allow_shell is on. A pipeline's exit code may reflect only its last stage (unless the line sets pipefail; TC runs it as-is, adding none); command_status/run_and_watch report pipeline_exit_masked:true for it. Not detected for cmd /C or pwsh -Command shells."
+        description = "Run ONE shell line (pipelines/compounds/redirects via [shell,-lc,line]) and get back ONLY the lines your rules match plus exit state, never the raw stream. Requires the allow_shell capability (config/TOML; on in the default full_access profile, [policy.caps] allow_shell = false hardens); a denied daemon returns a policy error. Returns job_id, bucket_id, probe_id, initial cursor. Use run_and_watch or command_start_combed when you do not need shell syntax; shell_exec only when pipelines, compounds, or redirects are required and allow_shell is on. A pipeline's exit code may reflect only its last stage (unless the line sets pipefail; TC runs it as-is, adding none); command_status/run_and_watch report pipeline_exit_masked:true for it. Not detected for cmd /C or pwsh -Command shells."
     )]
     async fn shell_exec(
         &self,
@@ -2284,7 +2284,7 @@ impl TerminalCommanderMcpServer {
 
     /// `recipe_activate` — MCP-gated. Default deny.
     #[tool(
-        description = "Activate an argv recipe in global scope. Job, bucket, and probe scopes are refused. Denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin). An operator runs `terminal-commander recipes activate`."
+        description = "Activate an argv recipe in global scope. Job, bucket, and probe scopes are refused. Open to MCP under the default full_access profile; a hardened profile with llm_can_activate_recipes false denies it (recipe_activate_requires_admin) and leaves it to `terminal-commander recipes activate`."
     )]
     async fn recipe_activate(
         &self,
@@ -2316,7 +2316,7 @@ impl TerminalCommanderMcpServer {
 
     /// `recipe_deactivate` — same MCP admin gate as activate.
     #[tool(
-        description = "Deactivate an argv recipe for a scope. Omitted version closes the active version, not the latest stored. Same MCP admin gate as recipe_activate. An operator runs `terminal-commander recipes deactivate`."
+        description = "Deactivate an argv recipe for a scope. Omitted version closes the active version, not the latest stored. Same MCP admin gate as recipe_activate (open under the default full_access profile); otherwise `terminal-commander recipes deactivate`."
     )]
     async fn recipe_deactivate(
         &self,
@@ -2852,7 +2852,7 @@ impl TerminalCommanderMcpServer {
 
     /// `pty_command_start` — interactive PTY argv command.
     #[tool(
-        description = "Start an interactive argv command attached to a PTY. Bounded metadata response only; never returns raw screen buffer. Shell interpreters are denied when allow_shell is off (on by default in developer_local). On Windows, PTY mode avoids the non-TTY stdout buffering that piped command_start_combed can exhibit for chatty children."
+        description = "Start an interactive argv command attached to a PTY. Bounded metadata response only; never returns raw screen buffer. Shell interpreters are denied only when a hardened profile turns allow_shell off (it is on by default). On Windows, PTY mode avoids the non-TTY stdout buffering that piped command_start_combed can exhibit for chatty children."
     )]
     async fn pty_command_start(
         &self,
@@ -2972,10 +2972,10 @@ impl TerminalCommanderMcpServer {
     ///
     /// Thin forwarder: the adapter NEVER spawns (constitution I). The
     /// daemon's session runtime performs the `SessionStart` policy gate +
-    /// audit BEFORE the shell PTY is spawned. Denied by default
-    /// (`allow_session` off). Returns bounded start metadata only.
+    /// audit BEFORE the shell PTY is spawned. Denied only when a hardened
+    /// profile leaves `allow_session` off. Returns bounded start metadata only.
     #[tool(
-        description = "Start a persistent shell session: a long-lived login shell whose cwd/env stay sticky across shell_session_exec lines. Requires the allow_session capability; denied by default. Combed output only, never a raw stream."
+        description = "Start a persistent shell session: a long-lived login shell whose cwd/env stay sticky across shell_session_exec lines. Requires the allow_session capability (on by default; off under a hardened profile). Combed output only, never a raw stream."
     )]
     async fn shell_session_start(
         &self,
@@ -3600,7 +3600,7 @@ usually {\"kind\":\"global\"}. Rules comb command output into structured signals
     /// `recipe` facade — argv recipes. Not rules.
     #[tool(
         name = "recipe",
-        description = "Argv recipes (not rules): search, get, upsert, test (dry-run; does not activate), activate, deactivate, list_active, run. activate is global-only. activate and deactivate are denied for MCP while llm_can_activate_recipes is false (recipe_activate_requires_admin); an operator runs `terminal-commander recipes activate`, `recipes deactivate`, or `recipes tombstone`. run executes an activated recipe on the argv lane. A recipe with timeout_ms or rule_pack_ids returns a watched response (signals, resume cursor, degraded and recover_hint, same contract as run_and_watch); rule_pack_ids only select that path and do not load packs. Otherwise the start is command_start_combed. Never shell_exec. Example: {\"action\":\"run\",\"recipe_id\":\"git.status\",\"scope\":{\"kind\":\"global\"}}."
+        description = "Argv recipes (not rules): search, get, upsert, test (dry-run; does not activate), activate, deactivate, list_active, run. activate is global-only. activate and deactivate are open to MCP under the default full_access profile; a hardened profile with llm_can_activate_recipes false denies them (recipe_activate_requires_admin) and leaves them to `terminal-commander recipes activate`, `recipes deactivate`, or `recipes tombstone`. run executes an activated recipe on the argv lane. A recipe with timeout_ms or rule_pack_ids returns a watched response (signals, resume cursor, degraded and recover_hint, same contract as run_and_watch); rule_pack_ids only select that path and do not load packs. Otherwise the start is command_start_combed. Never shell_exec. Example: {\"action\":\"run\",\"recipe_id\":\"git.status\",\"scope\":{\"kind\":\"global\"}}."
     )]
     pub(crate) async fn recipe_facade(
         &self,
@@ -3764,7 +3764,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
             ))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(
-                "Terminal Commander runs commands and returns STRUCTURED SIGNALS, not raw output: you define keyword/regex rules and get back only the matching events plus exit state, so you can run noisy or long-running commands without flooding your context. This saves you tokens and scrolling and lets you run commands too large to read. If no rule matches, command_status gives you a bounded receipt (exit code, suppressed-line count, short tail), never silence. Argv tools (run_and_watch, command_start_combed) are the primary path for ordinary commands, including tiny one-offs. shell_exec is only for when pipelines, compounds, or redirects are required (allow_shell, on in the default developer_local profile). The adapter is a thin facade: each tool forwards 1:1 to a daemon IPC method (discovery, status, command/bucket/event, registry, file, PTY, runtime)."
+                "Terminal Commander runs commands and returns STRUCTURED SIGNALS, not raw output: you define keyword/regex rules and get back only the matching events plus exit state, so you can run noisy or long-running commands without flooding your context. This saves you tokens and scrolling and lets you run commands too large to read. If no rule matches, command_status gives you a bounded receipt (exit code, suppressed-line count, short tail), never silence. Argv tools (run_and_watch, command_start_combed) are the primary path for ordinary commands, including tiny one-offs. shell_exec is only for when pipelines, compounds, or redirects are required (allow_shell, on by default). The default full_access profile inherits your harness's trust: nothing is denied unless the daemon config selects a hardened profile. The adapter is a thin facade: each tool forwards 1:1 to a daemon IPC method (discovery, status, command/bucket/event, registry, file, PTY, runtime)."
                     .to_owned(),
             )
     }
@@ -4319,7 +4319,7 @@ fn remote_denied_error(target_id: &str) -> McpError {
         "details": {
             "target_id": target_id,
             "cap": "allow_remote",
-            "remedy": "the operator must enable [policy.caps] allow_remote = true on the local daemon to route tools to a remote target",
+            "remedy": "allow_remote is on under the default full_access profile; set `[policy] profile = \"full_access\"` (and drop any `[policy.caps]` allow_remote = false) in the local daemon config to route tools to a remote target",
         },
     });
     McpError::invalid_params(
@@ -6194,7 +6194,7 @@ pub struct McpFileWatchStopParams {
 pub struct McpPtyCommandStartParams {
     /// Non-empty argv as an array of strings, e.g.
     /// `["node","-e","..."]`. argv[0] is the program; the rest are args.
-    /// Shell interpreters are denied when allow_shell is off.
+    /// Shell interpreters are denied only when a hardened profile turns allow_shell off.
     #[serde(deserialize_with = "deserialize_argv")]
     #[schemars(with = "Vec<String>")]
     pub argv: Vec<String>,

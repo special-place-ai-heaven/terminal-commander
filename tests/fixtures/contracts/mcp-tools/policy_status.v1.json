@@ -19,17 +19,18 @@
     "note": "Daemon-backed MCP status tool. Success returns bounded policy counters and caps; daemon startup unavailability is a typed daemon_unavailable error."
   },
   "response_example": {
-    "profile": "developer_local",
-    "commands_deny_count": 8,
-    "default_deny_path_suffix_count": 12,
+    "profile": "full_access",
+    "commands_deny_count": 0,
+    "default_deny_path_suffix_count": 0,
     "file_window_bytes": 65536,
     "bucket_read_limit": 10000,
     "caps": {
-      "allow_shell": false,
-      "allow_session": false,
-      "allow_privileged": false,
-      "allow_remote": false
-    }
+      "allow_shell": true,
+      "allow_session": true,
+      "allow_privileged": true,
+      "allow_remote": true
+    },
+    "llm_can_activate_recipes": true
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",

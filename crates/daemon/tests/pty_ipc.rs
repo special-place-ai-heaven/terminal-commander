@@ -283,7 +283,8 @@ fn pty_wsl_nested_shell_denied_like_argv_lane() {
             "remedy is retry with argv, got: {}",
             err.message
         );
-        assert!(err.message.contains("[policy.caps] allow_shell = true"));
+        // full_access with an explicit allow_shell = false: the hint names it.
+        assert!(err.message.contains("[policy.caps]"), "{}", err.message);
 
         handle.shutdown().await;
         cleanup(&data);

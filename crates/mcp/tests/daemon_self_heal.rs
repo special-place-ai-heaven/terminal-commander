@@ -205,7 +205,7 @@ async fn stale_version_skew_refreshes_against_replaced_live_daemon() {
             serde_json::from_str(&first_text(&result)).expect("policy_status payload is JSON");
         assert_eq!(
             body["profile"],
-            serde_json::Value::String("DeveloperLocal".to_owned())
+            serde_json::Value::String("FullAccess".to_owned())
         );
         assert_eq!(
             status.version_skew(),

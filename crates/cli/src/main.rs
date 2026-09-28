@@ -153,7 +153,8 @@ enum RecipesOp {
     /// Import the eight built-in argv seeds as tested. Does not activate.
     Import {
         /// Promote seeds to active and activate them in global scope.
-        /// Operator path only. MCP stays denied while llm_can_activate_recipes is false.
+        /// Admin CLI path. MCP may do this too under the default full_access profile;
+        /// a hardened profile denies MCP while llm_can_activate_recipes is false.
         #[arg(long)]
         activate: bool,
     },

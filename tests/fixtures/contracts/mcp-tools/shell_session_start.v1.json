@@ -64,7 +64,7 @@
     }
   },
   "invariants": [
-    "session start is denied by default (allow_session capability off) and surfaces a PolicyDenied error, never a synthetic success",
+    "session start is allowed by default (full_access presets allow_session on); a hardened profile with allow_session off surfaces a PolicyDenied error, never a synthetic success",
     "every accepted start is audited with a redacted subject before the shell PTY is spawned",
     "env is an ARRAY of {key,value} objects, not a map; bounded by MAX_SESSION_ENV_ITEMS",
     "success payload contains only session_id, bucket_id, and state",

@@ -5,7 +5,7 @@
   "profile": "DeveloperLocal",
   "denied_capability": "allow_shell",
   "denied_tool": "run_and_watch",
-  "reason": "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]). This daemon runs the `developer_local` profile (default is full_access, which allows everything); to change it set `[policy] profile = \"full_access\"` in the daemon config (the `--config` file, else terminal-commander.toml in the data dir).",
+  "reason": "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]). This daemon runs the `developer_local` profile (default is full_access, which allows everything); to change it set `[policy] profile = \"full_access\"` (and drop any `[policy.caps]` false override) in the daemon config (the `--config` file, else terminal-commander.toml in the data dir).",
   "intended_tool": "run_and_watch",
   "intended_example": {"argv": ["git", "status"]},
   "alternatives": [

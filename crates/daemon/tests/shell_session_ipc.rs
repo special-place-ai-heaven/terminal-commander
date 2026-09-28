@@ -66,9 +66,12 @@ fn build_server_full_access() -> (PathBuf, Arc<DaemonState>, terminal_commanderd
 
 /// Live daemon on the DEFAULT profile (`developer_local`): caps default
 /// false, so `allow_session` is OFF and the session lane is denied.
-fn build_server_default() -> (PathBuf, Arc<DaemonState>, terminal_commanderd::ServerHandle) {
-    let data = tmp_data_dir("default");
-    let cfg = DaemonConfig::defaults_in(&data);
+/// `developer_local`: sessions stay off unless `allow_session` is set. The
+/// default `full_access` profile presets it on.
+fn build_server_hardened() -> (PathBuf, Arc<DaemonState>, terminal_commanderd::ServerHandle) {
+    let data = tmp_data_dir("hardened");
+    let mut cfg = DaemonConfig::defaults_in(&data);
+    cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
     let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
     let socket = state.config.socket_path();
     let handle = IpcServer::new(Arc::clone(&state), socket).spawn().unwrap();
@@ -247,10 +250,10 @@ fn session_cd_then_pwd_reports_tmp_then_status_and_stop() {
 /// `allow_session` cap is OFF, so `shell_session_start` is denied at the
 /// `SessionStart` policy gate (PolicyDenied), never a synthetic session.
 #[test]
-fn session_start_denied_on_default_profile() {
+fn session_start_denied_on_developer_local() {
     let runtime = rt();
     runtime.block_on(async {
-        let (data, _state, handle) = build_server_default();
+        let (data, _state, handle) = build_server_hardened();
         let client = DaemonClient::new(handle.socket_path().to_path_buf());
         let err = client
             .call(

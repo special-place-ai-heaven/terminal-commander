@@ -173,25 +173,27 @@ async fn live_policy_status_reports_profile_and_caps() {
             "policy_status must report a numeric bucket_read_limit cap; got {body}"
         );
         // W2 / POLICY.md 4.1 guardrail #4: the resolved per-call caps are
-        // surfaced so an operator can see the ACTIVE set. The live daemon runs
-        // the default developer_local profile: allow_shell ON, the rest OFF.
+        // surfaced so the ACTIVE set is visible. The live daemon runs the
+        // default full_access profile: every cap ON, no structural deny.
         let caps = &body["caps"];
         assert!(
             caps.is_object(),
             "policy_status must surface a caps object; got {body}"
         );
-        assert_eq!(
-            caps["allow_shell"].as_bool(),
-            Some(true),
-            "developer_local default grants allow_shell; got {body}"
-        );
-        for key in ["allow_session", "allow_privileged", "allow_remote"] {
+        for key in [
+            "allow_shell",
+            "allow_session",
+            "allow_privileged",
+            "allow_remote",
+        ] {
             assert_eq!(
                 caps[key].as_bool(),
-                Some(false),
-                "default profile cap {key} must be present and false; got {body}"
+                Some(true),
+                "default full_access cap {key} must be present and true; got {body}"
             );
         }
+        assert_eq!(body["commands_deny_count"], serde_json::json!(0));
+        assert_eq!(body["llm_can_activate_recipes"], serde_json::json!(true));
         let _ = client.cancel().await;
     }
     handle.shutdown().await;

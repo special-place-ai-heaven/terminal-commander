@@ -458,7 +458,9 @@ fn command_start_denied_for_sudo_argv() {
     let runtime = rt();
     runtime.block_on(async {
         let data = tmp_data_dir("deny-sudo");
-        let cfg = DaemonConfig::defaults_in(&data);
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        // The escalator deny is developer_local hardening; full_access runs it.
+        cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
         let state = DaemonState::bootstrap(cfg).unwrap();
 
         let req = CommandStartRequest {

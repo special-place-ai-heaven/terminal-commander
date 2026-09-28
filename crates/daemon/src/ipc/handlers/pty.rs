@@ -157,7 +157,7 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
             IpcErrorCode::ShellInterpreterDenied,
             format!(
                 "shell interpreter '{interpreter}' denied inside a '{carrier}' invocation: \
-                 allow_shell is off. Run the Linux program directly ({carrier} -e <program> ...)."
+                 allow_shell is off. Run the Linux program directly as argv ({carrier} -e <program> ...)."
             ),
         )),
         Err(crate::pty_command::PtyRuntimeError::EmptyArgv) => Err(IpcError::new(

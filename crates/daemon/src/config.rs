@@ -274,14 +274,12 @@ pub struct PolicyPathsSection {
     /// usable); a non-empty list is authoritative and a write path matching no
     /// glob is denied (`no_allow_rule`). Independent from `read_allow`.
     ///
-    /// OPERATOR WARNING (zero-config write posture): with the DEFAULT config
-    /// (profile `DeveloperLocal`, no `repo_root`, EMPTY `write_allow`),
-    /// `file_write` can write ANYWHERE except the default-deny sensitive-suffix
-    /// list -- there is no path containment. This is intentional for a single
-    /// local developer, but in ANY shared or agent-facing context an operator
-    /// enabling the write lane MUST set a non-empty `write_allow` (or use the
-    /// `repo_only` profile with a `repo_root`) to confine writes. Leaving this
-    /// empty in a shared/agent deployment is an open write surface.
+    /// Zero-config write posture: with the DEFAULT config (profile
+    /// `full_access`, no `repo_root`, EMPTY `write_allow`), `file_write` can
+    /// write ANYWHERE -- TC inherits the harness's trust (owner decision).
+    /// `developer_local` keeps the default-deny sensitive-suffix list; a
+    /// non-empty `write_allow` (or `repo_only` with a `repo_root`) confines
+    /// writes on any profile.
     #[serde(default)]
     pub write_allow: Vec<String>,
     #[serde(default)]
@@ -1066,7 +1064,7 @@ mod tests {
         let raw = std::fs::read_to_string("../../config/terminal-commanderd.example.toml")
             .expect("read example toml");
         let cfg = DaemonConfig::from_toml(&raw).expect("example toml must parse + validate");
-        assert_eq!(cfg.policy.profile, PolicyProfile::DeveloperLocal);
+        assert_eq!(cfg.policy.profile, PolicyProfile::FullAccess);
     }
 
     #[test]

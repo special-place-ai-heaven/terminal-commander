@@ -27,8 +27,11 @@ fn tmp_data_dir(tag: &str) -> PathBuf {
 
 /// `developer_local` hardened with `[policy.caps] allow_shell = false`: the
 /// default profile grants `allow_shell`, so deny tests opt out explicitly.
+/// `developer_local` with `allow_shell = false`: the MCP recipe admin gate
+/// and the shell deny are both hardening.
 fn shell_off_cfg(data: &std::path::Path) -> DaemonConfig {
     let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
     cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
         allow_shell: Some(false),
         ..Default::default()

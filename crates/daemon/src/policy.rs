@@ -105,7 +105,8 @@ pub fn profile_change_hint(profile: PolicyProfile) -> String {
     }
     format!(
         "This daemon runs the `{}` profile (default is full_access, which allows \
-         everything); to change it set `[policy] profile = \"full_access\"` in {CONFIG}.",
+         everything); to change it set `[policy] profile = \"full_access\"` (and drop any \
+         `[policy.caps]` false override) in {CONFIG}.",
         profile.as_str()
     )
 }

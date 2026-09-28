@@ -62,6 +62,7 @@ fn cleanup(p: &std::path::Path) {
 /// allow_shell = false`, so the shell lane is denied.
 fn spawn_live_daemon_shell_off(data: &std::path::Path) -> ServerHandle {
     let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.profile = PolicyProfile::DeveloperLocal;
     cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
         allow_shell: Some(false),
         ..Default::default()
@@ -226,8 +227,8 @@ async fn shell_exec_denied_when_allow_shell_off_e2e() {
             "shell-lane denial must be a policy denial, not the argv ShellInterpreterDenied guard; got: {rendered}"
         );
         assert!(
-            rendered.contains("[policy.caps] allow_shell = true"),
-            "the deny must name the operator knob; got: {rendered}"
+            rendered.contains(r#"[policy] profile = "full_access""#),
+            "the deny must name the profile switch; got: {rendered}"
         );
 
         let _ = client.cancel().await;

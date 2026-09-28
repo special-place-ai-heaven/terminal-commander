@@ -253,7 +253,7 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
             IpcErrorCode::ShellInterpreterDenied,
             format!(
                 "shell interpreter '{interpreter}' denied inside a '{carrier}' invocation: \
-                 allow_shell is off. Run the Linux program directly ({carrier} -e <program> ...)."
+                 allow_shell is off. Run the Linux program directly as argv ({carrier} -e <program> ...)."
             ),
         ),
         CommandError::EmptyArgv => {
@@ -829,6 +829,13 @@ mod tests {
         Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"))
     }
 
+    /// `developer_local`: the hardened profile that keeps the sensitive-path deny.
+    fn hardened_state_for(data: &std::path::Path) -> Arc<DaemonState> {
+        let mut cfg = crate::config::DaemonConfig::defaults_in(data);
+        cfg.policy.profile = PolicyProfile::DeveloperLocal;
+        Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"))
+    }
+
     /// BUG 2 (cross-platform): a relative path is rejected with a teaching
     /// `PathDenied` instead of being silently resolved against the
     /// daemon's process CWD. The daemon has no workspace root.
@@ -884,10 +891,7 @@ mod tests {
         std::fs::write(&secret, b"FAKE TEST KEY\n").expect("create fake sensitive file");
         resolve_and_authorize_file(&state_for(&data), &secret, false)
             .expect("full_access default reads a sensitive path");
-
-        let mut cfg = crate::config::DaemonConfig::defaults_in(&data);
-        cfg.policy.profile = PolicyProfile::DeveloperLocal;
-        let state = Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"));
+        let state = hardened_state_for(&data);
 
         let read_err = resolve_and_authorize_file(&state, &secret, false)
             .expect_err("native sensitive read path must be denied");
@@ -906,7 +910,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let data = unique_data_dir("write-symlink");
-        let state = state_for(&data);
+        let state = hardened_state_for(&data);
         let ssh_dir = data.join(".ssh");
         std::fs::create_dir_all(&ssh_dir).expect("create fake sensitive parent");
         let secret = ssh_dir.join("id_rsa");
@@ -1219,7 +1223,7 @@ mod tests {
         // Same text as `reason` in crates/mcp/tests/fixtures/a2/shell_interpreter_denied.json.
         assert_eq!(
             direct.message,
-            "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]). This daemon runs the `developer_local` profile (default is full_access, which allows everything); to change it set `[policy] profile = \"full_access\"` in the daemon config (the `--config` file, else terminal-commander.toml in the data dir)."
+            "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]). This daemon runs the `developer_local` profile (default is full_access, which allows everything); to change it set `[policy] profile = \"full_access\"` (and drop any `[policy.caps]` false override) in the daemon config (the `--config` file, else terminal-commander.toml in the data dir)."
         );
         assert_eq!(direct.teach.expect("teach").reason, direct.message);
 

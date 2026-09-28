@@ -48,8 +48,11 @@ fn cleanup(p: &std::path::Path) {
     let _ = std::fs::remove_dir_all(p);
 }
 
+/// `developer_local`: the hardened profile whose sensitive-path deny these
+/// tests pin. The default `full_access` profile applies no path deny.
 fn spawn_live_daemon(data: &std::path::Path) -> ServerHandle {
-    let cfg = DaemonConfig::defaults_in(data);
+    let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
     let state = Arc::new(DaemonState::bootstrap(cfg).expect("daemon bootstrap"));
     let socket = state.config.socket_path();
     let server = IpcServer::new(Arc::clone(&state), socket);

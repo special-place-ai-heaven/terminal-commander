@@ -66,6 +66,8 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
     runtime.block_on(async {
         let data = tmp_data_dir("gate");
         let mut cfg = DaemonConfig::defaults_in(&data);
+        // The MCP activate deny is developer_local hardening.
+        cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
         cfg.recipe_admin_test_seam = true;
         // The recipe_run shell deny below follows allow_shell (on by default).
         cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
@@ -442,11 +444,7 @@ fn recipe_lane_follows_allow_shell() {
                 assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
                 let err = ran.expect_err("recipe_run denied while allow_shell is off");
                 assert_eq!(err.code, IpcErrorCode::ShellInterpreterDenied);
-                assert!(
-                    err.message.contains("[policy.caps] allow_shell = true"),
-                    "{}",
-                    err.message
-                );
+                assert!(err.message.contains("[policy.caps]"), "{}", err.message);
             }
 
             handle.shutdown().await;

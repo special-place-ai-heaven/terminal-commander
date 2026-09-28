@@ -61,6 +61,7 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
     runtime.block_on(async {
         let data = tmp_data_dir("life");
         let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
         cfg.recipe_admin_test_seam = true;
         // The interpreter deny follows allow_shell, which developer_local grants.
         cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
@@ -84,7 +85,11 @@ fn recipe_ipc_lifecycle_and_interpreter_deny() {
             .unwrap_err();
         assert_eq!(denied.code, IpcErrorCode::ShellInterpreterDenied);
         assert!(denied.message.contains("shell interpreter"));
-        assert!(denied.message.contains("[policy.caps] allow_shell = true"));
+        assert!(
+            denied
+                .message
+                .contains(r#"[policy] profile = "full_access""#)
+        );
 
         let upsert = client
             .call(
@@ -236,6 +241,7 @@ fn recipe_seed_import_stays_tested_until_operator_activates() {
     runtime.block_on(async {
         let data = tmp_data_dir("seeds");
         let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
         cfg.recipe_admin_test_seam = true;
         cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
             allow_shell: Some(false),
@@ -792,7 +798,8 @@ fn recipe_tombstone_requires_admin_peer() {
         .unwrap();
     runtime.block_on(async {
         let denied_dir = tmp_data_dir("tomb-deny");
-        let denied_cfg = DaemonConfig::defaults_in(&denied_dir);
+        let mut denied_cfg = DaemonConfig::defaults_in(&denied_dir);
+        denied_cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
         assert!(!denied_cfg.recipe_admin_test_seam);
         assert!(!denied_cfg.policy.llm_can_activate_recipes);
         let denied_state = Arc::new(DaemonState::bootstrap(denied_cfg).unwrap());

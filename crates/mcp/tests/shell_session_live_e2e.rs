@@ -59,11 +59,6 @@ fn bash_available() -> bool {
     std::path::Path::new("/bin/bash").exists()
 }
 
-fn spawn_live_daemon(data: &std::path::Path) -> ServerHandle {
-    let cfg = DaemonConfig::defaults_in(data);
-    spawn_with_config(cfg)
-}
-
 fn spawn_live_daemon_full_access(data: &std::path::Path) -> ServerHandle {
     let mut cfg = DaemonConfig::defaults_in(data);
     cfg.policy.profile = PolicyProfile::FullAccess;
@@ -262,13 +257,15 @@ async fn o02_session_cd_then_pwd_reports_tmp_through_mcp() {
     cleanup(&data);
 }
 
-/// Default-deny: on the default profile `allow_session` is OFF, so
+/// Hardened: on `developer_local` `allow_session` is OFF, so
 /// `shell_session_start` is denied at the `SessionStart` policy gate and
-/// MCP surfaces a denied/policy error.
+/// MCP surfaces a denied/policy error. The default `full_access` presets it on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_start_denied_on_default_profile_e2e() {
-    let data = tmp_data_dir("default-deny");
-    let handle = spawn_live_daemon(&data);
+async fn session_start_denied_on_developer_local_e2e() {
+    let data = tmp_data_dir("hardened-deny");
+    let mut cfg = DaemonConfig::defaults_in(&data);
+    cfg.policy.profile = PolicyProfile::DeveloperLocal;
+    let handle = spawn_with_config(cfg);
     {
         let (_server, client) = paired_against_live_daemon(&handle).await;
 
