@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.97](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.96...v0.1.97) (2026-09-28)
+
+
+### Bug Fixes
+
+* **core:** close FCR-001 shell-interpreter deny bypass ([094b165](https://github.com/special-place-ai-heaven/terminal-commander/commit/094b1650740c3e26f4e8eebb30e3c7e5c76a7613))
+
 ## [0.1.96](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.1.95...v0.1.96) (2026-09-27)
 
 
