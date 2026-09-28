@@ -22,7 +22,8 @@ Need to run or observe something?
 |
 +-- DEFAULT: run a program by argv (do this first)
 |     +-- An activated recipe matches the task
-|     |     -> recipe_run { recipe_id }  (compact: recipe action=run)
+|     |     -> recipe_run { recipe_id, scope: {kind: global} }
+|     |        (compact: recipe action=run; pass intended_example unchanged)
 |     |        Guide: docs/integrations/recipe-registry.md
 |     +-- It has a rule pack (cargo, pytest, npm, docker, kubectl, git, ...)
 |     |     -> registry_import_pack <pack>   (once)   then
@@ -57,7 +58,7 @@ Need to run or observe something?
 |
 +-- PolicyDenied on shell misuse?
 |     If recover_hint = retry_with_recipe, call recipe_run with
-|     intended_example {"recipe_id":"..."}.
+|     intended_example {"recipe_id":"...","scope":{"kind":"global"}}.
 |     Otherwise recover_hint = retry_with_argv. Retry run_and_watch with
 |     {"argv":["git","status"]}. Do not thrash the schema. Do not ask
 |     to enable shell. Decision A2 rejects flipping allow_shell on.
@@ -159,10 +160,13 @@ with an argv array. Do not thrash schema field names. Turning
 `allow_shell` on is not the fix. Decision A2 rejects Finding 1 (flip
 the default shell cap on).
 
-When the daemon sets `recipe_id` on that deny, three fields change:
-`recover_hint` = `retry_with_recipe`, `intended_tool` = `recipe_run`,
-`intended_example` = `{"recipe_id":"..."}`. Alternatives stay the argv
-list above. Operator guide: `docs/integrations/recipe-registry.md`.
+When the daemon sets `recipe_id` and `recipe_scope` on that deny, three
+fields change: `recover_hint` = `retry_with_recipe`, `intended_tool` =
+`recipe_run`, `intended_example` =
+`{"recipe_id":"...","scope":{"kind":"global"}}`. Pass that object
+unchanged. More than one runnable scope keeps the argv steer.
+Alternatives stay the argv list above. Operator guide:
+`docs/integrations/recipe-registry.md`.
 
 Discover's catalogue steer stays the argv default when the daemon is up
 and `allow_shell` is off. The `shell_exec` catalogue row is
@@ -325,6 +329,7 @@ These apply to every lane:
 - `README.md` -- the omni tool surface and safety posture.
 - A2 teach envelopes. With no matching recipe, `recover_hint` is
   `retry_with_argv` and `intended_tool` is `run_and_watch`. When the
-  daemon sets `recipe_id`, `recover_hint` is `retry_with_recipe` and
-  `intended_tool` is `recipe_run`. Default `allow_shell` stays off.
-  Guide: `docs/integrations/recipe-registry.md`.
+  daemon sets `recipe_id` and `recipe_scope`, `recover_hint` is
+  `retry_with_recipe`, `intended_tool` is `recipe_run`, and
+  `intended_example` includes both fields. Default `allow_shell` stays
+  off. Guide: `docs/integrations/recipe-registry.md`.

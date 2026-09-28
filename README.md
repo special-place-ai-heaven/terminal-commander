@@ -447,7 +447,8 @@ Agent rules:
   do not treat it as finished. `degraded: true` means follow the `recover_hint`.
 - The `cursor` returned by `run_and_watch` is a resume cursor. If `max_signals`
   caps the response, it remains before omitted matches so a later `wait` from
-  that cursor recovers them instead of silently skipping evidence.
+  that cursor recovers them instead of silently skipping evidence. A watched
+  `recipe_run` uses that same resume cursor.
 - Prefer an activated argv recipe (`recipe action=run`, full-surface
   `recipe_run`) or a direct argv call over `shell_exec`. See
   [`docs/integrations/recipe-registry.md`](docs/integrations/recipe-registry.md).

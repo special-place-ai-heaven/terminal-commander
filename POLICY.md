@@ -585,11 +585,17 @@ Given request `(actor, action, subject, profile)`:
    d. If action is registry_activate and llm_can_activate is false
       and actor is mcp -> deny ("registry_activate_requires_admin").
       Shipped recipe gate (separate from rules): `[policy] llm_can_activate_recipes`
-      defaults false. MCP `recipe_activate` and `recipe_deactivate` set
-      `from_mcp` and are denied with `recipe_activate_requires_admin`.
-      The operator CLI (`terminal-commander recipes activate`,
+      defaults false. Recipe admin is the peer image basename
+      `terminal-commander` (not `terminal-commander-mcp`, not
+      `terminal-commanderd`). `from_mcp` defaults true, so omitting it is
+      not a grant, and the MCP adapter image cannot claim admin by clearing
+      the field. Other peers are denied with `recipe_activate_requires_admin`
+      unless the operator sets `llm_can_activate_recipes` (that opt-in is
+      unchanged). The operator CLI (`terminal-commander recipes activate`,
       `recipes deactivate`, `recipes tombstone`, `recipes import --activate`)
-      omits `from_mcp` and may activate. Activations are global-only.
+      may activate because of its image. Activations are global-only.
+      Residual: same-user code can exec that CLI, or a binary whose file
+      name is `terminal-commander`. The socket is not a privilege boundary.
       `recipe_run` of an already-activated recipe follows the normal argv
       command policy.
    e. Evaluate the per-action path allow list (`paths.read_allow` for

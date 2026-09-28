@@ -58,22 +58,18 @@ pub fn argv_steer() -> ArgvSteer {
     }
 }
 
-/// `recipe_run` when the daemon named one activated recipe; argv otherwise.
+/// `recipe_run` when the daemon named one activated recipe and its scope.
+/// A recipe id without `scope` is not callable (`recipe_run` requires it),
+/// so that case stays on argv teach.
 fn steer_for(teach: &ShellTeach) -> (&'static str, Value, &'static str) {
-    teach
-        .recipe_id
-        .as_deref()
-        .filter(|id| !id.is_empty())
-        .map_or_else(
-            || (INTENDED_TOOL, intended_example(), RECOVER_HINT),
-            |id| {
-                (
-                    RECIPE_INTENDED_TOOL,
-                    json!({"recipe_id": id}),
-                    RECIPE_RECOVER_HINT,
-                )
-            },
-        )
+    match (teach.recipe_id.as_deref(), teach.recipe_scope) {
+        (Some(id), Some(scope)) if !id.is_empty() => (
+            RECIPE_INTENDED_TOOL,
+            json!({"recipe_id": id, "scope": scope}),
+            RECIPE_RECOVER_HINT,
+        ),
+        _ => (INTENDED_TOOL, intended_example(), RECOVER_HINT),
+    }
 }
 
 /// MCP `-32602` `data` object for a shell-misuse deny.
@@ -142,6 +138,7 @@ mod tests {
             denied_tool: tool.to_owned(),
             reason: class.reason().to_owned(),
             recipe_id: None,
+            recipe_scope: None,
         }
     }
 
@@ -262,7 +259,10 @@ mod tests {
 
     fn assert_recipe_envelope(data: &Value, recipe_id: &str) {
         assert_eq!(data["intended_tool"], json!(RECIPE_INTENDED_TOOL));
-        assert_eq!(data["intended_example"], json!({"recipe_id": recipe_id}));
+        assert_eq!(
+            data["intended_example"],
+            json!({"recipe_id": recipe_id, "scope": {"kind": "global"}})
+        );
         assert_eq!(data["recover_hint"], json!(RECIPE_RECOVER_HINT));
         assert_eq!(data["alternatives"], alternatives());
         let tools: Vec<&str> = data["alternatives"]
@@ -304,6 +304,7 @@ mod tests {
             "shell_exec",
         );
         teach.recipe_id = Some("git.status".to_owned());
+        teach.recipe_scope = Some(terminal_commander_core::ActivationScope::Global);
         let data = policy_denied_data(&teach, None, "PolicyDenied");
         let expected: Value =
             serde_json::from_str(include_str!("../tests/fixtures/a2/retry_with_recipe.json"))
@@ -355,6 +356,7 @@ mod tests {
             "command_start_combed",
         );
         teach.recipe_id = Some("git.status".to_owned());
+        teach.recipe_scope = Some(terminal_commander_core::ActivationScope::Global);
         let data = policy_denied_data(&teach, None, "ShellInterpreterDenied");
         let err = McpError::invalid_params("policy_denied", Some(data));
         let err = retarget_denied_tool(Err(err), "run_and_watch").expect_err("deny");
@@ -362,5 +364,44 @@ mod tests {
         assert_eq!(data["denied_tool"], json!("run_and_watch"));
         assert_recipe_envelope(&data, "git.status");
         assert_eq!(data["deny_class"], json!("shell_interpreter_denied"));
+    }
+
+    #[test]
+    fn recipe_id_without_scope_stays_on_argv_teach() {
+        let mut teach = sample(
+            ShellDenyClass::ShellCapabilityOff,
+            "DeveloperLocal",
+            Some("allow_shell"),
+            "shell_exec",
+        );
+        teach.recipe_id = Some("git.status".to_owned());
+        let data = policy_denied_data(&teach, None, "PolicyDenied");
+        assert_eq!(data["recover_hint"], json!(RECOVER_HINT));
+        assert_eq!(data["intended_tool"], json!(INTENDED_TOOL));
+    }
+
+    #[test]
+    fn intended_example_is_callable_as_recipe_run() {
+        let mut teach = sample(
+            ShellDenyClass::ShellCapabilityOff,
+            "DeveloperLocal",
+            Some("allow_shell"),
+            "shell_exec",
+        );
+        teach.recipe_id = Some("git.status".to_owned());
+        teach.recipe_scope = Some(terminal_commander_core::ActivationScope::Global);
+        let data = policy_denied_data(&teach, None, "PolicyDenied");
+        let example = data["intended_example"].clone();
+        let params: crate::tools::McpRecipeRunParams =
+            serde_json::from_value(example.clone()).expect("recipe_run params");
+        assert_eq!(params.recipe_id, "git.status");
+        let scope = params.scope.into_ipc_scope().expect("scope");
+        assert_eq!(scope, terminal_commander_core::ActivationScope::Global);
+        let mut facade = example;
+        facade["action"] = json!("run");
+        crate::facade_strict::validate_facade_call("recipe", &facade).expect("facade");
+        let parsed: crate::facades::RecipeFacadeCall =
+            serde_json::from_value(facade).expect("facade run");
+        assert!(matches!(parsed, crate::facades::RecipeFacadeCall::Run(_)));
     }
 }

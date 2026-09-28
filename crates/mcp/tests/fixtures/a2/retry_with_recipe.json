@@ -7,7 +7,7 @@
   "denied_tool": "shell_exec",
   "reason": "Shell execution is denied on this profile; retry with an argv array.",
   "intended_tool": "recipe_run",
-  "intended_example": {"recipe_id": "git.status"},
+  "intended_example": {"recipe_id": "git.status", "scope": {"kind": "global"}},
   "alternatives": [
     {"tool": "run_and_watch"},
     {"tool": "command_start_combed"},

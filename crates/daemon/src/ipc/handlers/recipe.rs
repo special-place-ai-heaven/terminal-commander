@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::common::recipe_scope_runnable;
 use crate::ipc::protocol::{
-    CommandStartParams, IpcError, IpcErrorCode, IpcResponse, MAX_LIST_LIMIT,
+    CommandStartParams, IpcError, IpcErrorCode, IpcRequest, IpcResponse, IpcResult, MAX_LIST_LIMIT,
     MAX_RECIPE_SEARCH_LIMIT, RecipeActivateParams, RecipeActivateResponse, RecipeActiveEntry,
     RecipeDeactivateParams, RecipeDeactivateResponse, RecipeGetParams, RecipeGetResponse,
     RecipeImportFailure, RecipeImportSeedsParams, RecipeImportSeedsResponse,
@@ -118,9 +118,10 @@ pub(in crate::ipc::server) fn handle_recipe_upsert(
 pub(in crate::ipc::server) fn handle_recipe_import_seeds(
     state: &Arc<DaemonState>,
     params: &RecipeImportSeedsParams,
+    peer: &PeerIdentity,
 ) -> Result<IpcResponse, IpcError> {
-    if params.from_mcp && params.activate {
-        deny_mcp_recipe_activate(state, true)?;
+    if params.activate {
+        deny_mcp_recipe_activate(state, peer, params.from_mcp)?;
     }
     let activate_scope = if params.activate {
         let scope = params.scope.ok_or_else(|| {
@@ -146,7 +147,7 @@ pub(in crate::ipc::server) fn handle_recipe_import_seeds(
         // later "latest" lookup.
         let mut rows = import.imported.clone();
         rows.extend(import.skipped.iter().cloned());
-        activate_imported_recipes(state, &rows, scope, params.from_mcp)
+        activate_imported_recipes(state, peer, &rows, scope, params.from_mcp)
     } else {
         (Vec::new(), Vec::new())
     };
@@ -165,6 +166,7 @@ fn seed_ids(rows: &[RecipeSeedRow]) -> Vec<String> {
 
 fn activate_imported_recipes(
     state: &Arc<DaemonState>,
+    peer: &PeerIdentity,
     rows: &[RecipeSeedRow],
     scope: terminal_commander_core::ActivationScope,
     from_mcp: bool,
@@ -178,7 +180,7 @@ fn activate_imported_recipes(
             scope: Some(scope),
             from_mcp,
         };
-        match handle_recipe_activate(state, &params) {
+        match handle_recipe_activate(state, &params, peer) {
             Ok(_) => activated.push(row.recipe_id.clone()),
             Err(err) => failed.push(RecipeImportFailure {
                 recipe_id: row.recipe_id.clone(),
@@ -211,18 +213,107 @@ fn require_global_recipe_scope(scope: ActivationScope) -> Result<(), IpcError> {
     ))
 }
 
-fn deny_mcp_recipe_activate(state: &DaemonState, from_mcp: bool) -> Result<(), IpcError> {
-    if from_mcp && !state.policy.llm_can_activate_recipes() {
-        return Err(IpcError::new(
-            IpcErrorCode::PolicyDenied,
-            "recipe_activate_requires_admin: llm_can_activate_recipes is false, so MCP \
-             recipe_activate and recipe_deactivate are denied. An operator runs \
-             `terminal-commander recipes activate` or `terminal-commander recipes deactivate`. \
-             `terminal-commander recipes tombstone` retires an id. recipe_run is allowed \
-             once a recipe is activated.",
-        ));
+fn deny_mcp_recipe_activate(
+    state: &DaemonState,
+    peer: &PeerIdentity,
+    from_mcp: bool,
+) -> Result<(), IpcError> {
+    if caller_may_recipe_admin(peer, from_mcp) || state.policy.llm_can_activate_recipes() {
+        return Ok(());
     }
-    Ok(())
+    Err(IpcError::new(
+        IpcErrorCode::PolicyDenied,
+        "recipe_activate_requires_admin: llm_can_activate_recipes is false, so only the \
+         admin CLI peer (`terminal-commander`) may recipe_activate or recipe_deactivate. \
+         Omitting from_mcp does not grant admin, and the MCP adapter image cannot claim \
+         it. An operator runs `terminal-commander recipes activate` or \
+         `terminal-commander recipes deactivate`. `terminal-commander recipes tombstone` \
+         retires an id. recipe_run is allowed once a recipe is activated. Same-user code \
+         can still exec that CLI; the socket is not a privilege boundary.",
+    ))
+}
+
+/// Who the peer executable is, for the recipe admin gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProgramRole {
+    AdminCli,
+    McpAdapter,
+    Unknown,
+}
+
+fn program_role_from_name(name: &str) -> ProgramRole {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let lower = base.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    match stem {
+        "terminal-commander-mcp" => ProgramRole::McpAdapter,
+        "terminal-commander" => ProgramRole::AdminCli,
+        _ => ProgramRole::Unknown,
+    }
+}
+
+fn unix_image_name(pid: i32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+        return path.file_name().map(|s| s.to_string_lossy().into_owned());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn peer_program_role(peer: &PeerIdentity) -> ProgramRole {
+    let name = match peer {
+        PeerIdentity::Windows { image, .. } => image
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned()),
+        PeerIdentity::Unix { pid: Some(pid), .. } => unix_image_name(*pid),
+        PeerIdentity::Unix { pid: None, .. } | PeerIdentity::Unknown { .. } => None,
+    };
+    name.as_deref()
+        .map(program_role_from_name)
+        .unwrap_or(ProgramRole::Unknown)
+}
+
+/// Release builds grant recipe admin only to the `terminal-commander` image.
+/// The MCP image is never admin. An unknown peer cannot grant itself by
+/// setting or omitting `from_mcp`.
+///
+/// ponytail: `cfg(test)` also allows an explicit `from_mcp: false` from an
+/// unknown image so in-process daemon tests can activate. Release builds
+/// do not compile that arm. Point those tests at the CLI binary if the
+/// seam ever lies.
+fn recipe_admin_grant(role: ProgramRole, from_mcp: bool, allow_unknown_explicit: bool) -> bool {
+    match role {
+        ProgramRole::AdminCli => true,
+        ProgramRole::McpAdapter => false,
+        ProgramRole::Unknown => allow_unknown_explicit && !from_mcp,
+    }
+}
+
+fn caller_may_recipe_admin(peer: &PeerIdentity, from_mcp: bool) -> bool {
+    recipe_admin_grant(peer_program_role(peer), from_mcp, cfg!(test))
+}
+
+pub(in crate::ipc::server) fn recipe_actor_label(
+    peer: &PeerIdentity,
+    from_mcp: bool,
+) -> &'static str {
+    match peer_program_role(peer) {
+        ProgramRole::AdminCli => "admin",
+        ProgramRole::McpAdapter => "mcp",
+        ProgramRole::Unknown => {
+            if from_mcp {
+                "mcp"
+            } else {
+                "admin"
+            }
+        }
+    }
 }
 
 fn map_recipe_argv_error(err: &terminal_commander_core::RecipeError) -> IpcError {
@@ -238,8 +329,9 @@ fn map_recipe_argv_error(err: &terminal_commander_core::RecipeError) -> IpcError
 pub(in crate::ipc::server) fn handle_recipe_activate(
     state: &Arc<DaemonState>,
     params: &RecipeActivateParams,
+    peer: &PeerIdentity,
 ) -> Result<IpcResponse, IpcError> {
-    deny_mcp_recipe_activate(state, params.from_mcp)?;
+    deny_mcp_recipe_activate(state, peer, params.from_mcp)?;
     let scope = require_scope(params.scope)?;
     require_global_recipe_scope(scope)?;
     let def = lookup_recipe(state, &params.recipe_id, params.version)?;
@@ -263,7 +355,7 @@ pub(in crate::ipc::server) fn handle_recipe_activate(
             version,
             scope,
             Some(&profile),
-            Some("ipc"),
+            Some(recipe_actor_label(peer, params.from_mcp)),
         )
         .map_err(map_recipe_store_error)?;
     Ok(IpcResponse::RecipeActivate(RecipeActivateResponse {
@@ -277,8 +369,9 @@ pub(in crate::ipc::server) fn handle_recipe_activate(
 pub(in crate::ipc::server) fn handle_recipe_deactivate(
     state: &Arc<DaemonState>,
     params: &RecipeDeactivateParams,
+    peer: &PeerIdentity,
 ) -> Result<IpcResponse, IpcError> {
-    deny_mcp_recipe_activate(state, params.from_mcp)?;
+    deny_mcp_recipe_activate(state, peer, params.from_mcp)?;
     let scope = require_scope(params.scope)?;
     // A dead job/bucket/probe scope must still be closable. New
     // activations are global-only; this path is the cleanup for leftovers.
@@ -512,27 +605,25 @@ fn resolve_activated(
     if let Some(version) = version {
         let _ = lookup_recipe(state, recipe_id, Some(version))?;
     }
-    let active = runnable_active_recipes(state)?;
-    let mut matches: Vec<RecipeDefinition> = active
-        .into_iter()
-        .filter(|row| {
-            row.definition.recipe_id == recipe_id
-                && row.scope == scope
-                && version.is_none_or(|v| row.definition.version == v)
-        })
-        .map(|row| row.definition)
-        .collect();
-    matches.sort_by_key(|definition| definition.version);
-    matches.pop().ok_or_else(|| {
-        IpcError::new(
-            IpcErrorCode::RecipeNotActive,
-            format!(
-                "recipe '{recipe_id}' is not activated for scope {}; call recipe_list_active \
-                 or run `terminal-commander recipes activate {recipe_id}`",
-                scope.kind_label()
-            ),
-        )
-    })
+    if !super::common::recipe_scope_runnable(state, scope) {
+        return Err(not_activated(recipe_id, scope));
+    }
+    state
+        .store
+        .get_active_recipe(recipe_id, version, scope)
+        .map_err(map_recipe_store_error)?
+        .ok_or_else(|| not_activated(recipe_id, scope))
+}
+
+fn not_activated(recipe_id: &str, scope: ActivationScope) -> IpcError {
+    IpcError::new(
+        IpcErrorCode::RecipeNotActive,
+        format!(
+            "recipe '{recipe_id}' is not activated for scope {}; call recipe_list_active \
+             or run `terminal-commander recipes activate {recipe_id}`",
+            scope.kind_label()
+        ),
+    )
 }
 
 fn runnable_active_recipes(
@@ -567,11 +658,17 @@ pub(in crate::ipc::server) fn handle_recipe_run(
             format!("shell interpreter '{shell}' is denied on recipe_run"),
         ));
     }
+    if !definition.env_allowlist.is_empty() {
+        return Err(IpcError::new(
+            IpcErrorCode::RecipeInvalid,
+            "env_allowlist is not enforced; omit it. recipe_run inherits the daemon \
+             environment and does not filter it",
+        ));
+    }
     let watched = definition.prefers_watch();
     let wait_ms = definition.watch_budget_ms().unwrap_or(0);
-    // ponytail: env_allowlist stores names only. The child inherits the daemon
-    // environment; a value-injecting allowlist can replace the empty env later.
-    // ponytail: rule_pack_ids select the watch path only. They do not import packs.
+    // ponytail: rule_pack_ids select the watched MCP response only. They do
+    // not import packs. Active registry rules still comb the job.
     let start = CommandStartParams {
         environment: None,
         argv: argv.clone(),
@@ -605,4 +702,108 @@ pub(in crate::ipc::server) fn handle_recipe_run(
         probe_id: started.probe_id,
         cursor: started.cursor,
     }))
+}
+
+/// Audit actor plus recipe identity for activate, deactivate, run, and tombstone.
+/// Other methods stay on the generic `ipc` row.
+pub(in crate::ipc::server) fn recipe_audit_overlay(
+    peer: &PeerIdentity,
+    req: &IpcRequest,
+    result: &IpcResult,
+) -> Option<(&'static str, serde_json::Value)> {
+    let (recipe_id, version, scope, from_mcp) = match req {
+        IpcRequest::RecipeActivate(p) => {
+            let (version, scope) = activated_identity(result).unwrap_or((p.version, p.scope));
+            (p.recipe_id.clone(), version, scope, Some(p.from_mcp))
+        }
+        IpcRequest::RecipeDeactivate(p) => {
+            let (version, scope) = activated_identity(result).unwrap_or((p.version, p.scope));
+            (p.recipe_id.clone(), version, scope, Some(p.from_mcp))
+        }
+        IpcRequest::RecipeRun(p) => {
+            let version = activated_identity(result)
+                .map(|(version, _)| version)
+                .unwrap_or(p.version);
+            (p.recipe_id.clone(), version, p.scope, None)
+        }
+        IpcRequest::RecipeTombstone(p) => (p.recipe_id.clone(), None, None, None),
+        _ => return None,
+    };
+    let from_mcp_bit = from_mcp.unwrap_or(false);
+    Some((
+        recipe_actor_label(peer, from_mcp_bit),
+        serde_json::json!({
+            "recipe_id": recipe_id,
+            "version": version,
+            "scope": scope,
+            "from_mcp": from_mcp,
+        }),
+    ))
+}
+
+fn activated_identity(result: &IpcResult) -> Option<(Option<u32>, Option<ActivationScope>)> {
+    match result {
+        IpcResult::Ok {
+            response: IpcResponse::RecipeActivate(body),
+        } => Some((Some(body.version), Some(body.scope))),
+        IpcResult::Ok {
+            response: IpcResponse::RecipeDeactivate(body),
+        } => Some((Some(body.version), Some(body.scope))),
+        IpcResult::Ok {
+            response: IpcResponse::RecipeRun(body),
+        } => Some((Some(body.version), None)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admin_grant_is_the_cli_image_not_the_from_mcp_bit() {
+        assert!(recipe_admin_grant(ProgramRole::AdminCli, true, false));
+        assert!(recipe_admin_grant(ProgramRole::AdminCli, false, false));
+        assert!(!recipe_admin_grant(ProgramRole::McpAdapter, false, false));
+        assert!(!recipe_admin_grant(ProgramRole::McpAdapter, true, true));
+        assert!(!recipe_admin_grant(ProgramRole::Unknown, false, false));
+        assert!(!recipe_admin_grant(ProgramRole::Unknown, true, true));
+        assert!(recipe_admin_grant(ProgramRole::Unknown, false, true));
+    }
+
+    #[test]
+    fn program_role_names() {
+        assert_eq!(
+            program_role_from_name("/usr/local/bin/terminal-commander"),
+            ProgramRole::AdminCli
+        );
+        assert_eq!(
+            program_role_from_name(r"C:\tc\terminal-commander.exe"),
+            ProgramRole::AdminCli
+        );
+        assert_eq!(
+            program_role_from_name("terminal-commander-mcp"),
+            ProgramRole::McpAdapter
+        );
+        assert_eq!(
+            program_role_from_name("terminal-commander-mcp.exe"),
+            ProgramRole::McpAdapter
+        );
+        assert_eq!(
+            program_role_from_name("terminal-commanderd"),
+            ProgramRole::Unknown
+        );
+        assert_eq!(program_role_from_name("python"), ProgramRole::Unknown);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn this_process_is_not_the_admin_cli() {
+        let peer = PeerIdentity::Unix {
+            uid: 0,
+            gid: 0,
+            pid: Some(i32::try_from(std::process::id()).unwrap_or(1)),
+        };
+        assert_eq!(peer_program_role(&peer), ProgramRole::Unknown);
+    }
 }

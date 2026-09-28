@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use terminal_commander_core::{ActivationScope, JobId, RecipeDefinition, RecipeStatus};
 use terminal_commanderd::{
-    CommandStartParams, DaemonClient, DaemonConfig, DaemonState, IpcError, IpcErrorCode,
-    IpcRequest, IpcServer, RecipeActivateParams, RecipeTombstoneParams, RecipeUpsertParams,
-    ServerHandle, ShellExecParams,
+    CommandStartParams, CommandStopParams, DaemonClient, DaemonConfig, DaemonState, IpcError,
+    IpcErrorCode, IpcRequest, IpcResponse, IpcServer, RecipeActivateParams, RecipeTombstoneParams,
+    RecipeUpsertParams, ServerHandle, ShellExecParams,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -121,6 +121,7 @@ fn assert_argv_teach(err: &IpcError) {
     assert_eq!(err.code, IpcErrorCode::PolicyDenied);
     let teach = err.teach.as_ref().expect("A2 teach");
     assert!(teach.recipe_id.is_none(), "no-match must stay argv teach");
+    assert!(teach.recipe_scope.is_none(), "argv teach has no scope");
     assert!(!err.message.contains("set allow_shell"));
     assert!(!err.message.to_ascii_lowercase().contains("enable shell"));
 }
@@ -128,6 +129,7 @@ fn assert_argv_teach(err: &IpcError) {
 fn assert_recipe(err: &IpcError, recipe_id: &str) {
     let teach = err.teach.as_ref().expect("A2 teach");
     assert_eq!(teach.recipe_id.as_deref(), Some(recipe_id));
+    assert_eq!(teach.recipe_scope, Some(ActivationScope::Global));
     assert!(!err.message.contains("set allow_shell"));
     assert!(!err.message.to_ascii_lowercase().contains("enable shell"));
 }
@@ -284,6 +286,81 @@ fn recipe_tombstone_and_dead_job_scope_do_not_steer() {
         let retired = session.shell("git status --short").await;
         assert_argv_teach(&retired);
 
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&data);
+    });
+}
+
+#[test]
+fn two_runnable_scopes_fall_back_to_argv() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("steer-scopes");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+        let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
+            .spawn()
+            .unwrap();
+        let mut session = Session {
+            client: DaemonClient::new(handle.socket_path().to_path_buf())
+                .with_timeout(Duration::from_secs(5)),
+            next: 0,
+        };
+        session
+            .upsert(recipe(
+                "git.status",
+                &["git", "status", "--short"],
+                &["git", "vcs"],
+            ))
+            .await;
+        session.activate("git.status").await;
+        session.next += 1;
+        let started = session
+            .client
+            .call(
+                session.next,
+                IpcRequest::CommandStartCombed(CommandStartParams {
+                    environment: None,
+                    argv: vec!["sleep".to_owned(), "30".to_owned()],
+                    cwd: None,
+                    env: Vec::new(),
+                    bucket_config: None,
+                    rules: Vec::new(),
+                    grace_ms: Some(2_000),
+                    tag: None,
+                    dedup_nonce: None,
+                    strip_ansi: true,
+                }),
+            )
+            .await
+            .expect("sleep");
+        let IpcResponse::CommandStartCombed(body) = started else {
+            panic!("start: {started:?}");
+        };
+        let job_scope = ActivationScope::Job {
+            job_id: body.job_id,
+        };
+        assert!(
+            state
+                .store
+                .record_recipe_activation_scoped("git.status", 1, job_scope, None, Some("test"))
+                .unwrap()
+        );
+        let matched = session.shell("git status --short").await;
+        assert_argv_teach(&matched);
+        session.next += 1;
+        let _ = session
+            .client
+            .call(
+                session.next,
+                IpcRequest::CommandStop(CommandStopParams {
+                    job_id: body.job_id,
+                }),
+            )
+            .await;
         handle.shutdown().await;
         let _ = std::fs::remove_dir_all(&data);
     });

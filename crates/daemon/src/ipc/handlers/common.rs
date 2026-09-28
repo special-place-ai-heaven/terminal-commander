@@ -22,40 +22,57 @@ pub(in crate::ipc::server) fn emit_audit(
     reason: Option<String>,
     peer: &PeerIdentity,
 ) {
-    let mut entry = AuditEntry::new(format!("ipc_{action}"), subject, decision).with_actor("ipc");
+    emit_audit_rich(state, action, subject, decision, reason, peer, "ipc", None);
+}
+
+/// Same row as [`emit_audit`], with an actor label and extra metadata keys.
+/// Recipe activate/run rows pass `admin` or `mcp` plus `recipe_id`.
+#[allow(clippy::too_many_arguments)] // peer metadata plus one recipe overlay
+pub(in crate::ipc::server) fn emit_audit_rich(
+    state: &Arc<DaemonState>,
+    action: &str,
+    subject: &str,
+    decision: &str,
+    reason: Option<String>,
+    peer: &PeerIdentity,
+    actor: &str,
+    extra: Option<&serde_json::Value>,
+) {
+    let mut entry = AuditEntry::new(format!("ipc_{action}"), subject, decision).with_actor(actor);
     if let Some(r) = reason {
         entry = entry.with_reason(r);
     }
-    // Attach peer metadata as pre-serialized JSON. Stays well inside
-    // MAX_AUDIT_METADATA_BYTES.
-    let meta = match peer {
-        PeerIdentity::Unix { uid, gid, pid } => format!(
-            r#"{{"kind":"unix","uid":{},"gid":{},"pid":{}}}"#,
-            uid,
-            gid,
-            pid.map_or_else(|| "null".to_owned(), |x| x.to_string())
-        ),
-        PeerIdentity::Windows { sid, pid, image } => format!(
-            r#"{{"kind":"windows","sid":{},"pid":{},"image":{}}}"#,
-            serde_json::to_string(sid).unwrap_or_else(|_| "null".to_owned()),
-            pid.map_or_else(|| "null".to_owned(), |x| x.to_string()),
-            image
-                .as_deref()
-                .and_then(|p| p.to_str())
-                .and_then(|s| serde_json::to_string(s).ok())
-                .unwrap_or_else(|| "null".to_owned()),
-        ),
-        PeerIdentity::Unknown { reason: r } => format!(
-            r#"{{"kind":"unknown","reason":{}}}"#,
-            r.as_deref()
-                .and_then(|s| serde_json::to_string(s).ok())
-                .unwrap_or_else(|| "null".to_owned()),
-        ),
-    };
-    entry = entry.with_metadata_json(meta);
+    let mut meta = peer_metadata(peer);
+    if let (Some(obj), Some(serde_json::Value::Object(more))) = (meta.as_object_mut(), extra) {
+        for (key, value) in more {
+            obj.insert(key.clone(), value.clone());
+        }
+    }
+    entry = entry.with_metadata_json(meta.to_string());
     // Best-effort; audit unhealth must not DOS the IPC path.
     let sink: Arc<dyn AuditSink> = Arc::clone(&state.audit) as Arc<dyn AuditSink>;
     let _ = sink.emit(&entry);
+}
+
+fn peer_metadata(peer: &PeerIdentity) -> serde_json::Value {
+    match peer {
+        PeerIdentity::Unix { uid, gid, pid } => serde_json::json!({
+            "kind": "unix",
+            "uid": uid,
+            "gid": gid,
+            "pid": pid,
+        }),
+        PeerIdentity::Windows { sid, pid, image } => serde_json::json!({
+            "kind": "windows",
+            "sid": sid,
+            "pid": pid,
+            "image": image.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        }),
+        PeerIdentity::Unknown { reason } => serde_json::json!({
+            "kind": "unknown",
+            "reason": reason,
+        }),
+    }
 }
 
 pub(in crate::ipc::server) fn identity_audit_subject(identity: &PeerIdentity) -> String {
@@ -125,6 +142,7 @@ pub(in crate::ipc::server) fn enrich_shell_teach(
         denied_tool: denied_tool.to_owned(),
         reason,
         recipe_id: None,
+        recipe_scope: None,
     }));
     err
 }
@@ -145,16 +163,28 @@ pub(in crate::ipc::server) fn attach_recipe_steer(
     };
     // Tombstoned parents are already absent. A job/bucket/probe row whose
     // job has exited is not a steer target.
-    let defs: Vec<_> = active
+    let rows: Vec<_> = active
         .into_iter()
         .filter(|row| recipe_scope_runnable(state, row.scope))
-        .map(|row| row.definition)
         .collect();
+    let defs: Vec<_> = rows.iter().map(|row| row.definition.clone()).collect();
     let Some(id) = terminal_commander_core::match_activated_recipe(intent, &defs) else {
+        return err;
+    };
+    // One runnable scope or argv teach. recipe_run has no implicit global,
+    // and two scopes would make a single example the wrong call.
+    let mut scopes = Vec::new();
+    for row in &rows {
+        if row.definition.recipe_id == id && !scopes.contains(&row.scope) {
+            scopes.push(row.scope);
+        }
+    }
+    let [scope] = scopes.as_slice() else {
         return err;
     };
     if let Some(teach) = err.teach.as_mut() {
         teach.recipe_id = Some(id.to_owned());
+        teach.recipe_scope = Some(*scope);
     }
     err
 }

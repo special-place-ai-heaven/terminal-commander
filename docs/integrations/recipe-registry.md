@@ -81,9 +81,12 @@ recipe_run { "recipe_id": "git.status", "scope": { "kind": "global" } }
 ```
 
 `recipe_run` uses the argv command lane. When the recipe has
-`timeout_ms` or `rule_pack_ids`, the run follows `run_and_watch`.
-Otherwise it follows `command_start_combed`. It does not call
-`shell_exec`. `allow_shell` stays off.
+`timeout_ms` or `rule_pack_ids`, the response is watched: it returns
+signals, a resume cursor, and `degraded` / `recover_hint` the same way
+`run_and_watch` does. `rule_pack_ids` only select that watched
+response; they do not load packs. Combing uses registry rules already
+active on the job. Otherwise the start follows `command_start_combed`.
+It does not call `shell_exec`. `allow_shell` stays off.
 
 If the recipe is not active, list what is:
 
@@ -100,17 +103,19 @@ The daemon `ShellTeach` chooses the steer:
 
 | Daemon | Envelope |
 |---|---|
-| `recipe_id` is set (matching activated recipe) | `recover_hint` = `retry_with_recipe`, `intended_tool` = `recipe_run`, `intended_example` = `{"recipe_id":"git.status"}` |
-| no matching recipe | `recover_hint` = `retry_with_argv`, `intended_tool` = `run_and_watch`, `intended_example` = `{"argv":["git","status"]}` |
+| `recipe_id` and `recipe_scope` are set (exactly one runnable scope) | `recover_hint` = `retry_with_recipe`, `intended_tool` = `recipe_run`, `intended_example` = `{"recipe_id":"git.status","scope":{"kind":"global"}}` |
+| no match, or more than one runnable scope | `recover_hint` = `retry_with_argv`, `intended_tool` = `run_and_watch`, `intended_example` = `{"argv":["git","status"]}` |
 
 `alternatives` still lists argv tools (`run_and_watch`,
 `command_start_combed`, file tools, PTY). `shell_exec` stays last and
 tagged `operator_opt_in`. Follow `recover_hint`. Do not ask to enable
 shell.
 
+The recipe `intended_example` is a `recipe_run` body. Pass it unchanged.
 Discover's `shell_exec` catalogue row, while `allow_shell` is off, keeps
 the argv steer (`retry_with_argv` / `run_and_watch`). The recipe steer
-is on the deny envelope when the daemon sets `recipe_id`.
+is on the deny envelope when the daemon sets both `recipe_id` and
+`recipe_scope`.
 
 ## Prefer argv and recipe_run over shell
 

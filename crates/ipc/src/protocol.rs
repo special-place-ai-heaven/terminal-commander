@@ -409,7 +409,7 @@ pub enum IpcRequest {
     /// Tombstone a recipe. Versions stay readable; new versions are refused.
     RecipeTombstone(RecipeTombstoneParams),
     /// Import the built-in argv seed bank. `activate` opens scope rows
-    /// only for an operator (`from_mcp` false, or the recipe activate flag).
+    /// only for the admin CLI peer (or the recipe activate flag).
     RecipeImportSeeds(RecipeImportSeedsParams),
     /// Bounded line/byte window read of a regular file. Never
     /// returns the whole file; the daemon clamps the window.
@@ -1111,6 +1111,11 @@ pub struct ShellTeach {
     /// deny code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe_id: Option<String>,
+    /// Scope of that one open activation. Set together with [`Self::recipe_id`].
+    /// Absent (or more than one runnable scope) keeps argv teach, because
+    /// `recipe_run` requires `scope`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe_scope: Option<ActivationScope>,
 }
 
 /// Structured error payload.
@@ -2012,10 +2017,12 @@ pub struct RecipeActivateParams {
     pub version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ActivationScope>,
-    /// Set by the MCP adapter. Admin CLI and in-process IPC omit it.
-    /// When true and `llm_can_activate_recipes` is false, the daemon denies
-    /// the call with `recipe_activate_requires_admin`.
-    #[serde(default)]
+    /// Caller claim. Defaults to true so omitting the field is not admin.
+    /// The daemon does not grant from this bit: admin is the
+    /// `terminal-commander` peer image. The MCP adapter image is never
+    /// admin. `llm_can_activate_recipes` is the operator opt-in for
+    /// every other peer.
+    #[serde(default = "default_true")]
     pub from_mcp: bool,
 }
 
@@ -2039,7 +2046,7 @@ pub struct RecipeDeactivateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ActivationScope>,
     /// See [`RecipeActivateParams::from_mcp`]. Same admin gate.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub from_mcp: bool,
 }
 
@@ -2105,8 +2112,8 @@ pub struct RecipeImportSeedsParams {
     pub activate: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ActivationScope>,
-    /// Set by the MCP adapter. The admin CLI omits it.
-    #[serde(default)]
+    /// See [`RecipeActivateParams::from_mcp`].
+    #[serde(default = "default_true")]
     pub from_mcp: bool,
 }
 
@@ -4457,6 +4464,18 @@ mod tests {
             } => assert_eq!(r, resp),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn omitted_from_mcp_is_not_admin() {
+        let parsed: RecipeActivateParams =
+            serde_json::from_str(r#"{"recipe_id":"git.status","scope":{"kind":"global"}}"#)
+                .unwrap();
+        assert!(parsed.from_mcp);
+        let deactivate: RecipeDeactivateParams =
+            serde_json::from_str(r#"{"recipe_id":"git.status","scope":{"kind":"global"}}"#)
+                .unwrap();
+        assert!(deactivate.from_mcp);
     }
 
     #[test]
