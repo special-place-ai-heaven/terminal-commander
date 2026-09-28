@@ -284,6 +284,9 @@ pub enum CommandError {
     ProgramNotFound { argv0: String },
     #[error("unknown job id: {0}")]
     UnknownJob(JobId),
+    /// F2: a POSIX absolute path in argv on a Windows host daemon.
+    #[error("argv[{index}] looks like a Linux/WSL path on a Windows daemon: '{path}'")]
+    PosixPathOnWindows { index: usize, path: String },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -629,6 +632,42 @@ impl CommandRuntime {
                 return Err(CommandError::ArgvItemTooLong {
                     index: i,
                     len: a.len(),
+                });
+            }
+        }
+        #[cfg(windows)]
+        Self::validate_windows_posix_argv_paths(argv)?;
+        Ok(())
+    }
+
+    /// F2: reject bare POSIX absolute paths in argv on a Windows host daemon
+    /// before the OS mis-resolves them to `C:\home\...`.
+    ///
+    /// A WSL carrier's payload is POSIX by definition (and is the remedy the
+    /// error suggests), so it is exempt. Only a first segment naming a POSIX
+    /// root directory counts (`/home/u`, `/tmp`), so Windows switches and
+    /// switch values (`/C`, `/p:OutDir=bin/x/`, `/Fo./obj/`) and regex
+    /// literals (`/x/.test(s)`) still run.
+    // ponytail: closed root list, lowercase only; a switch spelled exactly
+    // like a root (`/run`, `/bin`) is refused -- widen the exemption if one
+    // shows up in practice. No `dev`: Git for Windows maps `/dev/null`.
+    #[cfg(windows)]
+    fn validate_windows_posix_argv_paths(argv: &[String]) -> Result<(), CommandError> {
+        const POSIX_ROOTS: &[&str] = &[
+            "home", "usr", "etc", "tmp", "opt", "var", "mnt", "root", "bin", "sbin", "lib", "proc",
+            "srv", "run",
+        ];
+        if classify_wsl_nested_shell(argv) != WslArgvClass::NotWsl {
+            return Ok(());
+        }
+        for (index, arg) in argv.iter().enumerate() {
+            let first = arg
+                .strip_prefix('/')
+                .map(|rest| rest.split('/').next().unwrap_or(rest));
+            if first.is_some_and(|segment| POSIX_ROOTS.contains(&segment)) {
+                return Err(CommandError::PosixPathOnWindows {
+                    index,
+                    path: arg.clone(),
                 });
             }
         }
@@ -2978,6 +3017,44 @@ fn mask_header_credential(token: &str) -> String {
         return format!("{prefix}{sep}{ARGV_HEAD_REDACTED}");
     }
     token.to_owned()
+}
+
+#[cfg(all(test, windows))]
+mod posix_argv_tests {
+    use super::CommandRuntime;
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn posix_path_rejected_but_switches_and_wsl_payloads_pass() {
+        for bad in [
+            &["python", "/home/u/x.py"][..],
+            &["ls", "/tmp"][..],
+            &["cat", "/etc/os-release"][..],
+        ] {
+            assert!(
+                CommandRuntime::validate_windows_posix_argv_paths(&argv(bad)).is_err(),
+                "{bad:?}"
+            );
+        }
+        for ok in [
+            &["cmd", "/D", "/S", "/C", "echo hi"][..],
+            &["msbuild", "/p:OutDir=bin/x/"][..],
+            &["findstr", "/C:\"a/b\"", "f.txt"][..],
+            &["cl", "/Fo./obj/", "a.c"][..],
+            &["node", "-e", "/x/.test(s)"][..],
+            &["git", "diff", "--no-index", "/dev/null", "f"][..],
+            &["wsl.exe", "-e", "python3", "/home/u/x.py"][..],
+            &["wsl", "cat", "/etc/os-release"][..],
+        ] {
+            assert!(
+                CommandRuntime::validate_windows_posix_argv_paths(&argv(ok)).is_ok(),
+                "{ok:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

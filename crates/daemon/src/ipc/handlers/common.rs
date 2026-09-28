@@ -272,6 +272,14 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
             IpcErrorCode::ArgvInvalid,
             format!("argv[{index}] is {len} bytes; exceeds per-item cap"),
         ),
+        CommandError::PosixPathOnWindows { index, path } => IpcError::new(
+            IpcErrorCode::PathDenied,
+            format!(
+                "argv[{index}] '{path}' looks like a Linux/WSL absolute path, but this \
+                 daemon runs on Windows — prefix the command with wsl (e.g. \
+                 [\"wsl\",\"python3\",\"/home/user/script.py\"]) or use a Windows path"
+            ),
+        ),
         CommandError::UnknownJob(id) => {
             IpcError::new(IpcErrorCode::UnknownJob, format!("unknown job: {id}"))
         }
@@ -344,6 +352,31 @@ pub(in crate::ipc::server) fn map_path_policy(
     Ok(())
 }
 
+/// F2: true when `path` looks like a POSIX absolute path (`/home/...`), not a
+/// Windows drive or UNC path. On non-Windows hosts this is always false.
+#[cfg(windows)]
+pub(in crate::ipc::server) fn looks_like_posix_absolute(path: &std::path::Path) -> bool {
+    let s = path.to_string_lossy();
+    s.starts_with('/') && !s.starts_with("//")
+}
+
+#[cfg(not(windows))]
+pub(in crate::ipc::server) const fn looks_like_posix_absolute(_path: &std::path::Path) -> bool {
+    false
+}
+
+fn posix_path_on_windows_error(path: &std::path::Path) -> IpcError {
+    IpcError::new(
+        IpcErrorCode::PathDenied,
+        format!(
+            "path '{}' looks like a Linux/WSL absolute path, but this daemon runs on \
+             Windows — use a Windows path (e.g. C:\\Users\\...) or read the file via \
+             `run_and_watch` with argv [\"wsl\",\"cat\",\"/home/...\"] instead of files.read",
+            path.display()
+        ),
+    )
+}
+
 /// Resolve a client-supplied file path to a canonical, policy-authorized
 /// path that callers then open directly.
 ///
@@ -372,6 +405,12 @@ pub(in crate::ipc::server) fn resolve_and_authorize_file(
     path: &std::path::Path,
     is_watch: bool,
 ) -> Result<std::path::PathBuf, IpcError> {
+    // F2: POSIX-looking paths on a Windows host — before the relative gate
+    // (on Windows `/home/...` is not `is_absolute()` and would mislead).
+    if looks_like_posix_absolute(path) {
+        return Err(posix_path_on_windows_error(path));
+    }
+
     // (1) Absolute-only: the daemon has no workspace root.
     if !path.is_absolute() {
         return Err(IpcError::new(
@@ -439,6 +478,10 @@ pub(in crate::ipc::server) fn resolve_and_authorize_file_write(
     path: &std::path::Path,
     create_dirs: bool,
 ) -> Result<std::path::PathBuf, IpcError> {
+    if looks_like_posix_absolute(path) {
+        return Err(posix_path_on_windows_error(path));
+    }
+
     // (1) Absolute-only: the daemon has no workspace root.
     if !path.is_absolute() {
         return Err(IpcError::new(
@@ -874,6 +917,35 @@ mod tests {
         let err = resolve_and_authorize_file_write(&state, &alias, false)
             .expect_err("write authorization must gate the existing symlink target");
         assert_eq!(err.code, IpcErrorCode::PathDenied);
+
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// F2: POSIX absolute paths on a Windows host daemon get a platform-mismatch
+    /// error, not silent resolution to `C:\home\...`.
+    #[cfg(windows)]
+    #[test]
+    fn posix_absolute_path_is_rejected_on_windows_daemon() {
+        let data = unique_data_dir("posix-win");
+        let state = state_for(&data);
+
+        let err = resolve_and_authorize_file(
+            &state,
+            std::path::Path::new("/home/robert/somefile"),
+            false,
+        )
+        .expect_err("posix path must be rejected on windows daemon");
+        assert_eq!(err.code, IpcErrorCode::PathDenied);
+        assert!(
+            err.message.contains("Linux/WSL"),
+            "expected platform-mismatch guidance, got: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("must be absolute"),
+            "must not use the misleading relative-path message: {}",
+            err.message
+        );
 
         let _ = std::fs::remove_dir_all(&data);
     }
