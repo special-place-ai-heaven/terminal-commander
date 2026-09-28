@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.1](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.0...v0.3.1) (2026-09-28)
+
+
+### Features
+
+* **daemon,mcp:** URL-mode elicitation as the first owner credential channel ([2bca667](https://github.com/special-place-ai-heaven/terminal-commander/commit/2bca667cc3030f584815ff128283f6466b12d9f2))
+* **daemon,probes,cli:** ask the owner for PTY password prompts ([2bca667](https://github.com/special-place-ai-heaven/terminal-commander/commit/2bca667cc3030f584815ff128283f6466b12d9f2))
+* **mcp:** credential_request tool and password-prompt teach ([2bca667](https://github.com/special-place-ai-heaven/terminal-commander/commit/2bca667cc3030f584815ff128283f6466b12d9f2))
+
+
+### Bug Fixes
+
+* **daemon,cli,ipc:** owner prompt names the program the daemon spawned ([2bca667](https://github.com/special-place-ai-heaven/terminal-commander/commit/2bca667cc3030f584815ff128283f6466b12d9f2))
+* **daemon,ipc:** owner prompt names every request env key; honest wipe wording ([2bca667](https://github.com/special-place-ai-heaven/terminal-commander/commit/2bca667cc3030f584815ff128283f6466b12d9f2))
+* **daemon,mcp:** unix clippy on the pinentry parse; live tool lists ([2bca667](https://github.com/special-place-ai-heaven/terminal-commander/commit/2bca667cc3030f584815ff128283f6466b12d9f2))
+* **daemon:** an open owner prompt never holds up daemon shutdown; docs ([2bca667](https://github.com/special-place-ai-heaven/terminal-commander/commit/2bca667cc3030f584815ff128283f6466b12d9f2))
+* **mcp,daemon:** answer `pending` while the owner holds the elicitation link ([2bca667](https://github.com/special-place-ai-heaven/terminal-commander/commit/2bca667cc3030f584815ff128283f6466b12d9f2))
+* **probes:** keep the owner-secret echo mask armed across a repaint line ([2bca667](https://github.com/special-place-ai-heaven/terminal-commander/commit/2bca667cc3030f584815ff128283f6466b12d9f2))
+
 ## [0.3.0](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.2.1...v0.3.0) (2026-09-28)
 
 
