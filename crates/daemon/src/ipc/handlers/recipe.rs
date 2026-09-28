@@ -158,20 +158,24 @@ pub(in crate::ipc::server) fn handle_recipe_import_seeds(
     } else {
         (Vec::new(), Vec::new())
     };
+    // The store predicts supersession before activating; a failed activation
+    // closed nothing, so report only ids whose activation landed.
+    let superseded = import
+        .superseded
+        .into_iter()
+        .filter(|row| activated.contains(&row.recipe_id))
+        .map(|row| crate::ipc::protocol::RecipeImportSuperseded {
+            recipe_id: row.recipe_id,
+            closed_version: row.closed_version,
+        })
+        .collect();
     Ok(IpcResponse::RecipeImportSeeds(RecipeImportSeedsResponse {
         imported: seed_ids(&import.imported),
         skipped: seed_ids(&import.skipped),
         activated,
         tombstoned: import.tombstoned,
         failed,
-        superseded: import
-            .superseded
-            .into_iter()
-            .map(|row| crate::ipc::protocol::RecipeImportSuperseded {
-                recipe_id: row.recipe_id,
-                closed_version: row.closed_version,
-            })
-            .collect(),
+        superseded,
     }))
 }
 

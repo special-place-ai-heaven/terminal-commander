@@ -890,3 +890,108 @@ fn recipe_tombstone_requires_admin_peer() {
         let _ = std::fs::remove_dir_all(&allowed_dir);
     });
 }
+
+/// FCR2-007: the store predicts supersession before activating. When the
+/// activation of that seed then fails, its open customized version was not
+/// closed, so `superseded` must not report it.
+#[test]
+fn import_superseded_omits_a_seed_whose_activation_failed() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("superseded-failed");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.recipe_admin_test_seam = true;
+        let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
+        let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
+            .spawn()
+            .unwrap();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+        let mut custom = recipe(RecipeStatus::Active);
+        custom.argv = vec![
+            "git".to_owned(),
+            "status".to_owned(),
+            "--porcelain=v2".to_owned(),
+        ];
+        client
+            .call(
+                1,
+                IpcRequest::RecipeUpsert(RecipeUpsertParams { definition: custom }),
+            )
+            .await
+            .unwrap();
+        client
+            .call(
+                2,
+                IpcRequest::RecipeActivate(RecipeActivateParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: Some(1),
+                    scope: Some(ActivationScope::Global),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        // Fault injection: refuse every new git.status activation row.
+        rusqlite::Connection::open(state.config.db_path())
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER test_refuse_git_status BEFORE INSERT ON recipe_activations \
+                 WHEN NEW.recipe_id = 'git.status' \
+                 BEGIN SELECT RAISE(ABORT, 'test: activation refused'); END;",
+            )
+            .unwrap();
+
+        let imported = client
+            .call(
+                3,
+                IpcRequest::RecipeImportSeeds(RecipeImportSeedsParams {
+                    activate: true,
+                    scope: Some(ActivationScope::Global),
+                    from_mcp: false,
+                }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeImportSeeds(report) = imported else {
+            panic!("import: {imported:?}");
+        };
+        assert!(
+            report.failed.iter().any(|f| f.recipe_id == "git.status"),
+            "{:?}",
+            report.failed
+        );
+        assert!(!report.activated.iter().any(|id| id == "git.status"));
+        assert!(
+            !report
+                .superseded
+                .iter()
+                .any(|row| row.recipe_id == "git.status"),
+            "a failed activation closed nothing: {:?}",
+            report.superseded
+        );
+        let listed = client
+            .call(
+                4,
+                IpcRequest::RecipeListActive(ListLimitParams { limit: None }),
+            )
+            .await
+            .unwrap();
+        let IpcResponse::RecipeListActive(active) = listed else {
+            panic!("list: {listed:?}");
+        };
+        assert!(
+            active
+                .entries
+                .iter()
+                .any(|entry| entry.recipe_id == "git.status" && entry.version == 1),
+            "the customized v1 stays open: {active:?}"
+        );
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&data);
+    });
+}
