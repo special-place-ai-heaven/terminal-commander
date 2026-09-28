@@ -148,20 +148,20 @@ fn session_exec_os_guard_refuses_protected_deletion_and_allows_control() {
         };
 
         let err = client
-            .call(2, exec("rm -rf /usr/tc-guard-nonexistent".to_owned()))
+            .call(2, exec("rm -rf /usr/lib/tc-guard-nonexistent".to_owned()))
             .await
             .expect_err("protected deletion must be refused");
         assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
 
         // A tracked `cd` moves the cwd relative operands resolve against.
         client
-            .call(3, exec("cd /usr".to_owned()))
+            .call(3, exec("cd /usr/lib".to_owned()))
             .await
             .expect("exec cd");
         let err = client
             .call(4, exec("rm -rf tc-guard-nonexistent".to_owned()))
             .await
-            .expect_err("relative deletion under /usr must be refused");
+            .expect_err("relative deletion under /usr/lib must be refused");
         assert_eq!(err.code, IpcErrorCode::OsCriticalPathProtected, "{err:?}");
 
         let victim = data.join("tc-guard-nonexistent");

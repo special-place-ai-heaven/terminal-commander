@@ -232,7 +232,7 @@ fn pty_os_guard_refuses_protected_payload_and_allows_control() {
                 start(vec![
                     "sh".to_owned(),
                     "-c".to_owned(),
-                    "sudo -iu root rm -rf /usr/tc-guard-nonexistent".to_owned(),
+                    "sudo -iu root rm -rf /usr/lib/tc-guard-nonexistent".to_owned(),
                 ]),
             )
             .await

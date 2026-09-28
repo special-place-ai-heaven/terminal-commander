@@ -1013,24 +1013,68 @@ fn collapse_separators(path: &str) -> String {
     out
 }
 
-/// Unix protected trees (exact root and everything beneath). `/` itself is
-/// handled separately (only the bare-root operand, never its descendants, so
-/// `/home`, `/tmp`, `/opt` stay deletable).
-const UNIX_PROTECTED: &[&str] = &[
+/// Unix protected TREES: the directory and everything beneath it is OS
+/// infrastructure, so removal of any of it is refused. `/usr/local` is
+/// deliberately absent (user-installed software), as is most of `/etc` and
+/// `/var/lib` (package configuration and application state are the owner's
+/// to manage -- only the package databases and the init/auth trees are here).
+const UNIX_PROTECTED_TREES: &[&str] = &[
     "/boot",
     "/bin",
     "/sbin",
     "/lib",
     "/lib32",
     "/lib64",
-    "/usr",
-    "/etc",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/usr/lib32",
+    "/usr/lib64",
+    "/usr/libexec",
+    "/usr/share",
     "/sys",
     "/proc",
-    "/dev",
-    "/var/lib",
+    "/etc/systemd",
+    "/etc/pam.d",
+    "/etc/ssh",
+    "/etc/sudoers.d",
+    "/etc/ld.so.conf.d",
+    "/var/lib/dpkg",
+    "/var/lib/rpm",
+    "/var/lib/pacman",
+    "/var/lib/systemd",
     "/System",
     "/private/etc",
+];
+
+/// Unix protected ROOTS: removing the directory itself (or an ancestor of
+/// it) is refused, but its descendants are ordinary files -- so
+/// `/etc/nginx/sites-enabled/default`, `/var/lib/apt/lists/lock`,
+/// `/usr/local/bin/x`, `/dev/shm/x` and `/opt/tool` stay deletable.
+const UNIX_PROTECTED_ROOTS: &[&str] = &[
+    "/usr",
+    "/usr/local",
+    "/etc",
+    "/var",
+    "/var/lib",
+    "/dev",
+    "/opt",
+    "/home",
+];
+
+/// Unix CRITICAL FILES: single files whose removal breaks login, boot, name
+/// resolution or the dynamic loader. Always refused.
+const UNIX_CRITICAL_FILES: &[&str] = &[
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/group",
+    "/etc/gshadow",
+    "/etc/sudoers",
+    "/etc/fstab",
+    "/etc/hosts",
+    "/etc/hostname",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.cache",
 ];
 
 /// Windows system subtrees on the system drive (compared case-insensitively,
@@ -1046,7 +1090,27 @@ const WINDOWS_PROTECTED_SUBTREES: &[&str] = &[
     "/msdos.sys",
     "/io.sys",
     "/ntldr",
+    "/pagefile.sys",
+    "/hiberfil.sys",
+    "/swapfile.sys",
 ];
+
+/// Windows roots whose descendants are ordinary (removing the root itself is
+/// refused): `Program Files` and user profiles hold installed software and
+/// data the owner manages; the drive root is handled separately.
+const WINDOWS_PROTECTED_ROOTS: &[&str] = &["/program files", "/program files (x86)", "/users"];
+
+/// The system drive letter (lowercase, e.g. `c:`), read from the daemon's
+/// environment so a Windows installed on another letter is still protected.
+/// ponytail: read once per call; cache if this ever shows up in a profile.
+fn system_drive() -> String {
+    std::env::var("SystemDrive")
+        .ok()
+        .filter(|d| {
+            d.len() == 2 && d.as_bytes()[1] == b':' && d.as_bytes()[0].is_ascii_alphabetic()
+        })
+        .map_or_else(|| "c:".to_owned(), |d| d.to_ascii_lowercase())
+}
 
 /// Is `raw` an OS-critical location (protected tree root, a path beneath one,
 /// an ancestor of one, a drive/volume root, or a raw disk device)?
@@ -1132,7 +1196,19 @@ fn unix_protected(path: &str) -> bool {
     if norm == "/" {
         return true;
     }
-    UNIX_PROTECTED.iter().any(|root| tree_hit(&norm, root))
+    UNIX_PROTECTED_TREES
+        .iter()
+        .any(|root| tree_hit(&norm, root))
+        || UNIX_PROTECTED_ROOTS
+            .iter()
+            .any(|root| root_hit(&norm, root))
+        || UNIX_CRITICAL_FILES.contains(&norm.as_str())
+}
+
+/// True when `path` IS `root` or an ancestor of it (removing the ancestor
+/// takes the root with it); descendants of `root` are NOT hits.
+fn root_hit(path: &str, root: &str) -> bool {
+    path == root || root.starts_with(&format!("{path}/"))
 }
 
 fn windows_protected(path: &str) -> bool {
@@ -1162,13 +1238,20 @@ fn windows_protected(path: &str) -> bool {
             .count()
             <= 2;
     }
-    // System-drive subtrees. `%SystemDrive%` is assumed `c:` (documented).
-    let Some(after_drive) = norm.strip_prefix("c:") else {
+    // System-drive subtrees and roots; the drive letter comes from the
+    // daemon's `%SystemDrive%` (falls back to `c:`). A trailing dot on a
+    // Windows name (`C:\Windows.`) is ignored by the OS, so strip it.
+    let drive = system_drive();
+    let Some(after_drive) = norm.strip_prefix(drive.as_str()) else {
         return false;
     };
+    let after_drive = after_drive.trim_end_matches('.');
     WINDOWS_PROTECTED_SUBTREES
         .iter()
         .any(|sub| tree_hit(after_drive, sub))
+        || WINDOWS_PROTECTED_ROOTS
+            .iter()
+            .any(|root| root_hit(after_drive, root))
 }
 
 /// True when `path` equals `root`, sits beneath it, or is an ancestor of it
@@ -1201,12 +1284,17 @@ mod tests {
             "/dev",
             "/dev/sda",
             "/var/lib",
-            "/var/lib/docker",
+            "/var/lib/dpkg/status",
             "/var", // ancestor of /var/lib
+            "/usr/local",
+            "/etc/passwd",
+            "/etc/sudoers.d/dev",
             "/System",
             "/private/etc",
             "/usr/../usr/bin",
             "/etc/./ssh",
+            "/home",
+            "/opt",
         ] {
             assert!(is_os_critical_path(p), "must protect {p}");
         }
@@ -1215,18 +1303,25 @@ mod tests {
     #[test]
     fn allowed_paths_unix() {
         for p in [
-            "/home",
             "/home/dev/project",
             "/tmp",
             "/tmp/x",
             "/var/tmp",
-            "/opt",
             "/opt/tool",
             "/usr2",
             "/etcx",
             "target",
             "./build",
             "/home/dev/.cache",
+            // Owner rule: configure, install and uninstall freely --
+            // only OS infrastructure itself is untouchable.
+            "/usr/local/bin/tool",
+            "/usr/local/src/proj/build",
+            "/etc/nginx/sites-enabled/default",
+            "/etc/resolv.conf",
+            "/var/lib/apt/lists/lock",
+            "/var/lib/docker",
+            "/dev/shm/x",
         ] {
             assert!(!is_os_critical_path(p), "must allow {p}");
         }
@@ -1251,6 +1346,10 @@ mod tests {
             r"/mnt/c/WINDOWS/System32",
             r"\\.\PhysicalDrive0",
             r"\\?\Volume{2c1cd3a1-0000-0000-0000-100000000000}\",
+            r"C:\Windows.",
+            r"C:\pagefile.sys",
+            r"C:\Program Files",
+            r"C:\Users",
         ] {
             assert!(is_os_critical_path(p), "must protect {p}");
         }
@@ -1265,6 +1364,8 @@ mod tests {
             r"C:\temp\build",
             r"/mnt/c/Users/dev/app",
             r"C:\Windows2",
+            r"C:\Program Files\SomeApp",
+            r"C:\Program Files (x86)\Old\bin",
         ] {
             assert!(!is_os_critical_path(p), "must allow {p}");
         }
@@ -1346,7 +1447,7 @@ mod tests {
     // protected operand is `<root>/tc-guard-nonexistent`, never a real path.
 
     /// Unix and Windows protected roots the refused rows target.
-    const UNIX_ROOT: &str = "/usr";
+    const UNIX_ROOT: &str = "/usr/lib";
     const WIN_ROOT: &str = r"C:\Windows\System32";
     const UNIX_PROJECT: &str = "/home/dev/proj";
     const WIN_PROJECT: &str = r"C:\Users\dev\proj";
@@ -1575,7 +1676,7 @@ mod tests {
             ),
             (
                 "G3 posix escape",
-                l("bash", r"rm -rf /us\r/tc-guard-nonexistent"),
+                l("bash", r"rm -rf /usr/li\b/tc-guard-nonexistent"),
                 None,
             ),
             // G4: repeated separators.
@@ -1613,7 +1714,7 @@ mod tests {
             ),
             (
                 "G6 dotdot out of tmp",
-                a(&["rm", "-rf", "../../usr/tc-guard-nonexistent"]),
+                a(&["rm", "-rf", "../../usr/lib/tc-guard-nonexistent"]),
                 Some("/tmp/x"),
             ),
             (
@@ -1636,7 +1737,7 @@ mod tests {
             ),
             (
                 "G6 cd then relative",
-                l("bash", "cd /usr && rm -rf tc-guard-nonexistent"),
+                l("bash", "cd /usr/lib && rm -rf tc-guard-nonexistent"),
                 Some("/tmp"),
             ),
             (
@@ -1670,12 +1771,12 @@ mod tests {
             ),
             (
                 "G6 cd carried into a subshell",
-                l("bash", "cd /usr && (rm -rf tc-guard-nonexistent)"),
+                l("bash", "cd /usr/lib && (rm -rf tc-guard-nonexistent)"),
                 Some(UNIX_PROJECT),
             ),
             (
                 "G6 cd inside payload",
-                a(&["bash", "-c", "cd /usr; rm -rf tc-guard-nonexistent"]),
+                a(&["bash", "-c", "cd /usr/lib; rm -rf tc-guard-nonexistent"]),
                 None,
             ),
             // G7: compound grammar, substitutions, eval, redirections.
@@ -1892,13 +1993,13 @@ mod tests {
                 "cd away from a root",
                 l(
                     "bash",
-                    "cd /usr && ls && cd /home/dev/proj && rm -rf target",
+                    "cd /usr/lib && ls && cd /home/dev/proj && rm -rf target",
                 ),
                 None,
             ),
             (
                 "cd scoped to a subshell",
-                l("bash", "(cd /usr && ls); rm -rf build"),
+                l("bash", "(cd /usr/lib && ls); rm -rf build"),
                 Some(UNIX_PROJECT),
             ),
             (

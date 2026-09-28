@@ -144,7 +144,7 @@ fn os_critical_deletion_denied_in_full_access_on_both_lanes() {
             .call(
                 2,
                 IpcRequest::ShellExec(ShellExecParams {
-                    shell_line: "cd /tmp && sudo rm -rf /etc/tc-guard-nonexistent".to_owned(),
+                    shell_line: "cd /tmp && sudo rm -rf /etc/pam.d/tc-guard-nonexistent".to_owned(),
                     shell: None,
                     cwd: None,
                     env: Vec::new(),
@@ -210,7 +210,7 @@ fn os_guard_reads_payloads_and_shell_grammar() {
                 IpcRequest::CommandStartCombed(small_start_params(&[
                     "sh",
                     "-c",
-                    "cd /usr && rm -rf tc-guard-nonexistent",
+                    "cd /usr/lib && rm -rf tc-guard-nonexistent",
                 ])),
             )
             .await
@@ -237,7 +237,7 @@ fn os_guard_reads_payloads_and_shell_grammar() {
                 3,
                 shell_exec(
                     "bash",
-                    "eval 'sudo -iu root rm -rf /usr/tc-guard-nonexistent'".to_owned(),
+                    "eval 'sudo -iu root rm -rf /usr/lib/tc-guard-nonexistent'".to_owned(),
                 ),
             )
             .await
