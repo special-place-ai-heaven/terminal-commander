@@ -401,7 +401,16 @@ pub(in crate::ipc::server) async fn handle_credential_request(
     state: &Arc<DaemonState>,
     params: &CredentialRequestParams,
 ) -> Result<IpcResponse, IpcError> {
-    match state.credentials.request(&state.pty, params.job_id).await {
+    let wait = params
+        .wait_ms
+        .map_or(crate::credential::CREDENTIAL_WAIT, |ms| {
+            std::time::Duration::from_millis(ms)
+        });
+    match state
+        .credentials
+        .request(&state.pty, params.job_id, wait)
+        .await
+    {
         Ok(r) => Ok(IpcResponse::CredentialRequest(r)),
         Err(crate::pty_command::PtyRuntimeError::UnknownJob(id)) => Err(pty_job_not_live(id)),
         Err(other) => Err(IpcError::new(

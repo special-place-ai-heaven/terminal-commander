@@ -740,7 +740,7 @@ makes the daemon ask the OWNER directly (a one-shot `127.0.0.1` page the MCP
 client links the owner to via URL-mode elicitation, else a native dialog the
 daemon opens, else the admin CLI `terminal-commander credential provide
 <job_id>`). The loopback page is constitution Principle IV's one exception
-(127.0.0.1 only, single-use token path, at most 120 s, Host-checked; the
+(127.0.0.1 only, single-use token path, at most 300 s, Host-checked; the
 value goes only to the waiting child and is never returned over IPC). The
 daemon types the owner's answer itself; the model sees only a status, and
 the audit row `credential_provided` records the job, prompt kind, and source,

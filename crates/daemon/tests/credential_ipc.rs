@@ -216,6 +216,7 @@ impl Harness {
         match self
             .call(IpcRequest::CredentialRequest(CredentialRequestParams {
                 job_id,
+                wait_ms: None,
             }))
             .await
             .expect("credential_request")
@@ -488,6 +489,19 @@ fn credential_url_page_takes_exactly_one_post_with_the_right_token() {
         let again = h.url(job_id, CredentialUrlOp::Open).await;
         assert!(!again.fresh);
         assert_eq!(again.url.as_deref(), Some(url.as_str()));
+
+        // A short poll while the owner has the page answers `pending`.
+        match h
+            .call(IpcRequest::CredentialRequest(CredentialRequestParams {
+                job_id,
+                wait_ms: Some(200),
+            }))
+            .await
+            .expect("credential_request")
+        {
+            IpcResponse::CredentialRequest(r) => assert_eq!(r.status, CredentialStatus::Pending),
+            other => panic!("unexpected: {other:?}"),
+        }
 
         let form = format!("password={SECRET}");
         let wrong_token = format!("/{}", "0".repeat(64));
@@ -826,6 +840,7 @@ fn credential_request_for_a_job_without_a_prompt_is_not_awaiting() {
         let unknown = h
             .call(IpcRequest::CredentialRequest(CredentialRequestParams {
                 job_id: JobId::new(),
+                wait_ms: None,
             }))
             .await
             .expect_err("unknown job");

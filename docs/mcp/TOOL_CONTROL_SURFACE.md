@@ -139,9 +139,12 @@ PTY password prompts (owner credential path):
   cannot read. First, when the MCP client declared URL-mode elicitation
   (`elicitation.url`; form mode never carries a password), the daemon opens
   a one-shot page on `127.0.0.1` (random port, 244-bit token in the path,
-  120 s, one POST, Host header checked) and the adapter sends its URL in an
+  300 s, one POST, Host header checked) and the adapter sends its URL in an
   `elicitation/create` with the message "TC needs the owner's password for
-  <kind> in job <id>"; the URL never enters a tool result. Plain HTTP is
+  <kind> in job <id>"; the URL never enters a tool result. The call answers
+  `pending` after about 10 s while the owner has the link (the dialog stays
+  up as long as the page); the model polls `credential_request`, which never
+  re-elicits for the same prompt. Plain HTTP is
   acceptable there because loopback traffic never leaves the host, and the
   listener exists only while that prompt is pending. This is constitution
   Principle IV's one stated exception to the local-socket-only rule.

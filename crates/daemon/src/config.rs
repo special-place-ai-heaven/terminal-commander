@@ -387,7 +387,7 @@ pub struct DaemonConfig {
     #[serde(skip, default)]
     pub credential_prompter_test_seam: Option<String>,
     /// In-process tests shorten the owner page's lifetime (default
-    /// `CREDENTIAL_URL_TTL`, 120 s). Not a TOML key.
+    /// `CREDENTIAL_URL_TTL`, 300 s). Not a TOML key.
     #[serde(skip, default)]
     pub credential_url_ttl_test_seam: Option<std::time::Duration>,
 }

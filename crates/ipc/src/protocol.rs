@@ -2833,6 +2833,11 @@ pub const CREDENTIAL_REQUEST_WAIT_MS: u64 = 60_000;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialRequestParams {
     pub job_id: JobId,
+    /// How long to wait for the owner, capped at (and defaulting to)
+    /// [`CREDENTIAL_REQUEST_WAIT_MS`]. The MCP adapter waits briefly while
+    /// an elicitation page is open and answers `pending`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
 }
 
 /// Outcome of a `credential_request`. The only thing the model learns.
@@ -2848,6 +2853,9 @@ pub enum CredentialStatus {
     /// The owner has not answered yet; the prompt stays open and a repeat
     /// call waits on the same prompt.
     Timeout,
+    /// The owner has the elicitation link and has not answered yet; the
+    /// page stays open for its TTL and a repeat call polls it.
+    Pending,
     /// The job is not blocked on a password prompt.
     NotAwaiting,
 }
@@ -2913,7 +2921,7 @@ pub struct CredentialProvideResponse {
 }
 
 /// How long the owner's loopback page (URL-mode elicitation) stays open.
-pub const CREDENTIAL_URL_TTL_MS: u64 = 120_000;
+pub const CREDENTIAL_URL_TTL_MS: u64 = 300_000;
 
 /// What the MCP adapter does with the owner's loopback page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

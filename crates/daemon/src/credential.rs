@@ -95,13 +95,18 @@ impl CredentialBroker {
         &self,
         pty: &Arc<PtyRuntime>,
         job_id: JobId,
+        wait: Duration,
     ) -> Result<CredentialRequestResponse, PtyRuntimeError> {
         let prompt = pty.credential_prompt(job_id).await?;
+        let mut on_page = false;
         let mut rx = {
             let mut asked = self.asked.lock();
             prune(&mut asked, pty);
             match asked.get(&job_id) {
-                Some(ask) if ask.generation == prompt.generation => ask.outcome.subscribe(),
+                Some(ask) if ask.generation == prompt.generation => {
+                    on_page = ask.page.is_some();
+                    ask.outcome.subscribe()
+                }
                 _ => {
                     let Some(awaiting) = prompt.awaiting else {
                         return Ok(response(job_id, CredentialStatus::NotAwaiting));
@@ -129,11 +134,18 @@ impl CredentialBroker {
                 }
             }
         };
-        let status = match tokio::time::timeout(CREDENTIAL_WAIT, rx.wait_for(Option::is_some)).await
-        {
-            Ok(Ok(done)) => done.unwrap_or(CredentialStatus::Timeout),
-            _ => CredentialStatus::Timeout,
+        let unanswered = if on_page {
+            CredentialStatus::Pending
+        } else {
+            CredentialStatus::Timeout
         };
+        let status =
+            match tokio::time::timeout(wait.min(CREDENTIAL_WAIT), rx.wait_for(Option::is_some))
+                .await
+            {
+                Ok(Ok(done)) => done.unwrap_or(unanswered),
+                _ => unanswered,
+            };
         Ok(response(job_id, status))
     }
 

@@ -1574,6 +1574,7 @@ mod tests {
             IpcRequest::PtyCommandList,
             IpcRequest::CredentialRequest(terminal_commander_ipc::CredentialRequestParams {
                 job_id: JobId::new(),
+                wait_ms: None,
             }),
             IpcRequest::CredentialProvide(terminal_commander_ipc::CredentialProvideParams {
                 job_id: JobId::new(),

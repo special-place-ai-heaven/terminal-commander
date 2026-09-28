@@ -204,7 +204,7 @@ alone is insufficient.
 
 One exception, and only this one: the daemon may open a transient loopback
 HTTP endpoint (127.0.0.1 only, random >=128-bit token in the path,
-single-use, <=120 s, Host-checked) solely to receive an owner-entered
+single-use, <=300 s, Host-checked) solely to receive an owner-entered
 credential requested through MCP URL elicitation. Plaintext is confined to the
 host's loopback interface; the value is delivered to the waiting child and
 zeroized, never returned over IPC.

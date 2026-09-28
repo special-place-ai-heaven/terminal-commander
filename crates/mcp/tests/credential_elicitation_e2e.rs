@@ -45,6 +45,8 @@ struct OwnerClient {
     /// Every elicitation message, for the assertion on the owner text.
     messages: Arc<std::sync::Mutex<Vec<String>>>,
     completed: Arc<AtomicBool>,
+    /// How long the owner takes after accepting (at least 200 ms).
+    answer_after: Duration,
 }
 
 impl ClientHandler for OwnerClient {
@@ -69,8 +71,9 @@ impl ClientHandler for OwnerClient {
         };
         self.messages.lock().unwrap().push(message);
         // The owner opens the link after accepting, like a browser would.
+        let answer_after = self.answer_after.max(Duration::from_millis(200));
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(answer_after).await;
             let (status, page) = http(&url, "GET", "").await;
             assert_eq!(status, 200, "{page}");
             let (status, done) = http(&url, "POST", &format!("password={SECRET}")).await;
@@ -301,6 +304,73 @@ async fn url_elicitation_client_gets_the_owner_page_and_the_model_only_a_status(
         )
         .await;
         assert!(!tail.contains(SECRET), "{tail}");
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// S1: an owner who has not answered yet does not hold the tool call for
+/// minutes. The call answers `pending` after ~10 s, the dialog and page stay
+/// up, and a later poll reports `provided` without a second elicitation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_owner_gets_pending_then_provided_on_a_later_poll() {
+    let Some(python) = python3() else {
+        eprintln!("skipping: python3 not found");
+        return;
+    };
+    let data = tmp_data_dir("pending");
+    let handle = spawn_daemon(&data);
+    {
+        let owner = OwnerClient {
+            url_mode: true,
+            answer_after: Duration::from_secs(13),
+            ..OwnerClient::default()
+        };
+        let (_server, client) = connect(&handle, owner.clone()).await;
+        let job_id = start_prompting_child(&client, python).await;
+
+        let started = std::time::Instant::now();
+        let first = call(
+            &client,
+            "credential_request",
+            serde_json::json!({"job_id": job_id}),
+        )
+        .await;
+        let waited = started.elapsed();
+        let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(v["status"], "pending", "{first}");
+        assert!(waited < Duration::from_secs(13), "one call took {waited:?}");
+        assert!(!first.contains("http://"), "{first}");
+
+        let mut status = String::new();
+        for _ in 0..5 {
+            let again = call(
+                &client,
+                "credential_request",
+                serde_json::json!({"job_id": job_id}),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_str(&again).unwrap();
+            status = v["status"].as_str().unwrap_or_default().to_owned();
+            if status != "pending" {
+                break;
+            }
+        }
+        assert_eq!(status, "provided");
+        assert_eq!(
+            owner.elicitations.load(Ordering::SeqCst),
+            1,
+            "polls never re-elicit"
+        );
+        assert_eq!(exit_code(&client, &job_id).await, Some(0));
+        for _ in 0..40 {
+            if owner.completed.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(owner.completed.load(Ordering::SeqCst));
         let _ = client.cancel().await;
     }
     handle.shutdown().await;
