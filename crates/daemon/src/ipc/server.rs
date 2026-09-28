@@ -751,11 +751,12 @@ async fn dispatch(
                 Err(e) => IpcResult::Err { error: e },
             }
         }
-        IpcRequest::RecipeTombstone(p) => match handlers::recipe::handle_recipe_tombstone(state, p)
-        {
-            Ok(r) => IpcResult::Ok { response: r },
-            Err(e) => IpcResult::Err { error: e },
-        },
+        IpcRequest::RecipeTombstone(p) => {
+            match handlers::recipe::handle_recipe_tombstone(state, p, peer) {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err { error: e },
+            }
+        }
         IpcRequest::RecipeImportSeeds(p) => {
             match handlers::recipe::handle_recipe_import_seeds(state, p, peer) {
                 Ok(r) => IpcResult::Ok { response: r },

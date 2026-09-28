@@ -743,3 +743,111 @@ fn recipe_seed_import_skips_tombstone_and_activates_imported_version() {
         let _ = std::fs::remove_dir_all(&data);
     });
 }
+
+#[test]
+#[allow(clippy::too_many_lines)] // one daemon denied, one daemon allowed via the test seam
+fn recipe_tombstone_requires_admin_peer() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let denied_dir = tmp_data_dir("tomb-deny");
+        let denied_cfg = DaemonConfig::defaults_in(&denied_dir);
+        assert!(!denied_cfg.recipe_admin_test_seam);
+        assert!(!denied_cfg.policy.llm_can_activate_recipes);
+        let denied_state = Arc::new(DaemonState::bootstrap(denied_cfg).unwrap());
+        let denied_handle =
+            IpcServer::new(Arc::clone(&denied_state), denied_state.config.socket_path())
+                .spawn()
+                .unwrap();
+        let denied_client = DaemonClient::new(denied_handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+        denied_client
+            .call(
+                1,
+                IpcRequest::RecipeUpsert(RecipeUpsertParams {
+                    definition: recipe(RecipeStatus::Active),
+                }),
+            )
+            .await
+            .unwrap();
+        let denied = denied_client
+            .call(
+                2,
+                IpcRequest::RecipeTombstone(RecipeTombstoneParams {
+                    recipe_id: "git.status".to_owned(),
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, IpcErrorCode::PolicyDenied);
+        assert!(
+            denied.message.contains("recipe_activate_requires_admin"),
+            "{}",
+            denied.message
+        );
+        let still_there = denied_client
+            .call(
+                3,
+                IpcRequest::RecipeGet(RecipeGetParams {
+                    recipe_id: "git.status".to_owned(),
+                    version: None,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(still_there, IpcResponse::RecipeGet(_)));
+        denied_handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&denied_dir);
+
+        let allowed_dir = tmp_data_dir("tomb-allow");
+        let mut allowed_cfg = DaemonConfig::defaults_in(&allowed_dir);
+        allowed_cfg.recipe_admin_test_seam = true;
+        let allowed_state = Arc::new(DaemonState::bootstrap(allowed_cfg).unwrap());
+        let allowed_handle = IpcServer::new(
+            Arc::clone(&allowed_state),
+            allowed_state.config.socket_path(),
+        )
+        .spawn()
+        .unwrap();
+        let allowed_client = DaemonClient::new(allowed_handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+        allowed_client
+            .call(
+                1,
+                IpcRequest::RecipeUpsert(RecipeUpsertParams {
+                    definition: recipe(RecipeStatus::Active),
+                }),
+            )
+            .await
+            .unwrap();
+        let tombstoned = allowed_client
+            .call(
+                2,
+                IpcRequest::RecipeTombstone(RecipeTombstoneParams {
+                    recipe_id: "git.status".to_owned(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(tombstoned, IpcResponse::RecipeTombstone(_)));
+        let blocked = allowed_client
+            .call(
+                3,
+                IpcRequest::RecipeUpsert(RecipeUpsertParams {
+                    definition: recipe(RecipeStatus::Active),
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(blocked.code, IpcErrorCode::RecipeInvalid);
+        assert!(
+            blocked.message.contains("tombstoned"),
+            "{}",
+            blocked.message
+        );
+        allowed_handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&allowed_dir);
+    });
+}

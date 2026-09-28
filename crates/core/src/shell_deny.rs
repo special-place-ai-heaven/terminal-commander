@@ -12,11 +12,16 @@
 //! Matching case-folds every interpreter name and strips one Windows
 //! executable extension (`.exe` / `.com` / `.bat` / `.cmd`) so `bash.exe`,
 //! `CMD`, and `PowerShell` hit the same list as `bash` and `cmd`.
+//! Trailing ASCII dots and spaces, an unnamed `::$DATA` stream, and the
+//! powershell 8.3 shape `powers~<digit>` fold into that same match.
 //!
 //! ponytail: a dash-flag after a wrapper is skipped, not that flag's argument
 //! (`env -u NAME bash` with no script flag). An adjacent script flag still
-//! denies `env -u NAME bash -ec`. Win32 trailing-dot, 8.3, and `::$DATA`
-//! (RISK-002) are not normalized.
+//! denies `env -u NAME bash -ec`. Basename matching also strips trailing
+//! ASCII dots/spaces and an unnamed `::$DATA` stream, and recognizes the
+//! powershell 8.3 shape `powers~<digit>`. That is deny-list string matching
+//! on every host, not a Win32 security boundary: no filesystem short-name
+//! lookup, no other 8.3 names, no arbitrary ADS (`file:stream:$DATA`).
 
 /// Closed-set deny list for shell-interpreter basenames.
 ///
@@ -72,10 +77,19 @@ const WIN_EXE_EXTS: &[&str] = &["exe", "com", "bat", "cmd"];
 /// is classified the same on a Linux daemon.
 #[must_use]
 pub fn shell_interpreter_denied(argv0: &str) -> Option<&'static str> {
-    let base = argv_basename(argv0);
+    let base = normalized_win_basename(argv0);
     if base.is_empty() {
         return None;
     }
+    if let Some(shell) = listed_shell(base) {
+        return Some(shell);
+    }
+    // `powershell.exe` is the deny-list name that does not fit 8.3, so
+    // Windows can surface it as `POWERS~1.EXE` (or `~2`..`~9` on collision).
+    is_powershell_short_name(base).then_some("powershell")
+}
+
+fn listed_shell(base: &str) -> Option<&'static str> {
     if let Some(shell) = SHELL_INTERPRETERS_DENY
         .iter()
         .copied()
@@ -133,6 +147,36 @@ fn argv_basename(token: &str) -> &str {
     token.rsplit(['/', '\\']).next().unwrap_or(token)
 }
 
+/// Trailing-dot/space and unnamed `::$DATA` forms of the basename.
+///
+/// Applied on every host so a Windows-shaped argv is classified the same
+/// on a Linux daemon. Two stream strips cover `cmd.exe.::$DATA` and
+/// `cmd.exe::$DATA::$DATA`.
+fn normalized_win_basename(token: &str) -> &str {
+    let base = argv_basename(token);
+    let once = strip_unnamed_data_stream(base.trim_end_matches([' ', '.']));
+    strip_unnamed_data_stream(once.trim_end_matches([' ', '.'])).trim_end_matches([' ', '.'])
+}
+
+fn strip_unnamed_data_stream(name: &str) -> &str {
+    const MARK: &[u8] = b"::$DATA";
+    let bytes = name.as_bytes();
+    if bytes.len() >= MARK.len() && bytes[bytes.len() - MARK.len()..].eq_ignore_ascii_case(MARK) {
+        // MARK is ASCII, so this cut is on a char boundary.
+        return &name[..bytes.len() - MARK.len()];
+    }
+    name
+}
+
+/// `POWERS~1` .. `POWERS~9`, the 8.3 shape of `powershell.exe`.
+fn is_powershell_short_name(base: &str) -> bool {
+    let stem = strip_win_ext(base);
+    let bytes = stem.as_bytes();
+    bytes.len() == 8
+        && bytes[..7].eq_ignore_ascii_case(b"powers~")
+        && (b'1'..=b'9').contains(&bytes[7])
+}
+
 fn strip_win_ext(basename: &str) -> &str {
     let bytes = basename.as_bytes();
     for ext in WIN_EXE_EXTS {
@@ -148,7 +192,7 @@ fn strip_win_ext(basename: &str) -> &str {
 }
 
 fn is_shell_wrapper(token: &str) -> bool {
-    let stem = strip_win_ext(argv_basename(token));
+    let stem = strip_win_ext(normalized_win_basename(token));
     SHELL_ARGV_WRAPPERS
         .iter()
         .any(|wrapper| stem.eq_ignore_ascii_case(wrapper))
@@ -295,5 +339,76 @@ mod tests {
         assert!(is_script_flag("-EncodedCommand"));
         assert!(is_script_flag("-C"));
         assert!(!is_script_flag("--noprofile"));
+    }
+
+    #[test]
+    fn denies_win32_trailing_dot_short_name_and_ads() {
+        assert_eq!(shell_interpreter_denied("cmd.exe."), Some("cmd.exe"));
+        assert_eq!(shell_interpreter_denied("cmd.exe "), Some("cmd.exe"));
+        assert_eq!(shell_interpreter_denied("cmd.exe. "), Some("cmd.exe"));
+        assert_eq!(shell_interpreter_denied("bash."), Some("bash"));
+        assert_eq!(
+            shell_interpreter_denied(r"C:\Windows\System32\cmd.exe."),
+            Some("cmd.exe")
+        );
+        assert_eq!(shell_interpreter_denied("POWERS~1.EXE"), Some("powershell"));
+        assert_eq!(shell_interpreter_denied("powers~2.exe"), Some("powershell"));
+        assert_eq!(shell_interpreter_denied("Powers~1"), Some("powershell"));
+        assert_eq!(
+            shell_interpreter_denied(r"C:\Windows\System32\WindowsPowerShell\v1.0\POWERS~1.EXE"),
+            Some("powershell")
+        );
+        assert_eq!(shell_interpreter_denied("cmd.exe::$DATA"), Some("cmd.exe"));
+        assert_eq!(shell_interpreter_denied("cmd.exe::$data"), Some("cmd.exe"));
+        assert_eq!(shell_interpreter_denied("bash.exe.::$DATA"), Some("bash"));
+        assert_eq!(
+            shell_interpreter_denied(r"C:\Windows\System32\cmd.exe::$DATA"),
+            Some("cmd.exe")
+        );
+        assert_eq!(
+            shell_interpreter_denied("POWERS~1.EXE::$DATA"),
+            Some("powershell")
+        );
+
+        assert_eq!(
+            shell_argv_denied(&["cmd.exe.", "/c", "dir"]),
+            Some("cmd.exe")
+        );
+        assert_eq!(
+            shell_argv_denied(&["cmd.exe ", "/c", "dir"]),
+            Some("cmd.exe")
+        );
+        assert_eq!(
+            shell_argv_denied(&["POWERS~1.EXE", "-Command", "Get-Date"]),
+            Some("powershell")
+        );
+        assert_eq!(
+            shell_argv_denied(&["cmd.exe::$DATA", "/c", "dir"]),
+            Some("cmd.exe")
+        );
+        assert_eq!(
+            shell_argv_denied(&["env", "cmd.exe.", "/k", "dir"]),
+            Some("cmd.exe")
+        );
+        // Same basename normalize on wrappers, so a dotted wrapper still
+        // hands the next token to the interpreter check.
+        assert_eq!(shell_argv_denied(&["env.exe.", "bash"]), Some("bash"));
+        assert_eq!(
+            shell_argv_denied(&["env.exe::$DATA", "bash", "-c", "id"]),
+            Some("bash")
+        );
+
+        assert_eq!(shell_interpreter_denied("git.exe."), None);
+        assert_eq!(shell_interpreter_denied("git.exe "), None);
+        assert_eq!(shell_interpreter_denied("git.exe::$DATA"), None);
+        assert_eq!(shell_interpreter_denied("GIT~1.EXE"), None);
+        assert_eq!(shell_interpreter_denied("POWERS~1.DLL"), None);
+        assert_eq!(shell_interpreter_denied("POWERS~0.EXE"), None);
+        assert_eq!(shell_interpreter_denied("POWERS~10.EXE"), None);
+        assert_eq!(shell_interpreter_denied("npm.cmd."), None);
+        assert_eq!(shell_argv_denied(&["git.exe.", "status"]), None);
+        assert_eq!(shell_argv_denied(&["git.exe::$DATA", "status"]), None);
+        // Non-ASCII tail must not panic on the ASCII `::$DATA` cut.
+        assert_eq!(shell_interpreter_denied("ü::$DATA"), None);
     }
 }

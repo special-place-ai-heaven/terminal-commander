@@ -238,13 +238,13 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
         );
         assert!(
             recipe_audit.iter().any(|row| {
-                row.actor.as_deref() == Some("admin")
+                row.actor.as_deref() == Some("unknown")
                     && row
                         .metadata_json
                         .as_deref()
-                        .is_some_and(|meta| meta.contains("echo.true"))
+                        .is_some_and(|meta| meta.contains("echo.true") && meta.contains("from_mcp"))
             }),
-            "recipe_run audit carries recipe_id and actor: {recipe_audit:?}"
+            "unknown peer recipe_run is not labeled admin: {recipe_audit:?}"
         );
         let activations = audit_hits(&client, "ipc_recipe_activate").await;
         assert!(
