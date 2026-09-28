@@ -1007,10 +1007,21 @@ fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
 
 fn handle_policy_status(state: &Arc<DaemonState>) -> IpcResponse {
     let caps = state.policy.resolved_caps();
+    // The structural command and path deny sets are not applied under
+    // full_access, so they report 0 there rather than an inert list length.
+    let structural = state.policy.profile != crate::policy::PolicyProfile::FullAccess;
     IpcResponse::PolicyStatus(PolicyStatusResponse {
         profile: format!("{:?}", state.policy.profile),
-        commands_deny_count: crate::policy::COMMANDS_DENY.len(),
-        default_deny_path_suffix_count: crate::policy::DEFAULT_DENY_PATH_SUFFIXES.len(),
+        commands_deny_count: if structural {
+            crate::policy::COMMANDS_DENY.len()
+        } else {
+            0
+        },
+        default_deny_path_suffix_count: if structural {
+            crate::policy::DEFAULT_DENY_PATH_SUFFIXES.len()
+        } else {
+            0
+        },
         file_window_bytes: state.config.limits.file_window_bytes,
         bucket_read_limit: state.config.limits.bucket_read_limit,
         // Surface the RESOLVED per-call caps (POLICY.md section 4.1): the same
@@ -1684,5 +1695,45 @@ mod tests {
             response.environment.beachhead,
             response.environment.access_routes.first().cloned()
         );
+    }
+
+    /// The default install inherits the harness's trust: `full_access`, every
+    /// cap on, recipe admin open to the model, and no active structural
+    /// command or path deny. `developer_local` still reports its deny sets.
+    #[test]
+    fn policy_status_default_reports_full_trust() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let config = crate::config::DaemonConfig::defaults_in(data.path());
+        let state = Arc::new(DaemonState::bootstrap(config).expect("daemon bootstrap"));
+        let IpcResponse::PolicyStatus(status) = handle_policy_status(&state) else {
+            panic!("policy_status response");
+        };
+        assert_eq!(status.profile, "FullAccess");
+        assert_eq!(
+            status.caps,
+            PolicyCapsView {
+                allow_shell: true,
+                allow_session: true,
+                allow_privileged: true,
+                allow_remote: true,
+            }
+        );
+        assert!(status.llm_can_activate_recipes);
+        assert_eq!(status.commands_deny_count, 0);
+        assert_eq!(status.default_deny_path_suffix_count, 0);
+
+        let hardened_dir = tempfile::tempdir().expect("temp data dir");
+        let mut hardened = crate::config::DaemonConfig::defaults_in(hardened_dir.path());
+        hardened.policy.profile = crate::policy::PolicyProfile::DeveloperLocal;
+        let state = Arc::new(DaemonState::bootstrap(hardened).expect("daemon bootstrap"));
+        let IpcResponse::PolicyStatus(status) = handle_policy_status(&state) else {
+            panic!("policy_status response");
+        };
+        assert_eq!(
+            status.commands_deny_count,
+            crate::policy::COMMANDS_DENY.len()
+        );
+        assert!(status.default_deny_path_suffix_count > 0);
+        assert!(!status.llm_can_activate_recipes);
     }
 }

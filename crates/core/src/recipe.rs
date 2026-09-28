@@ -270,8 +270,7 @@ fn validate_argv(argv: &[String], allow_shell: bool) -> Result<(), RecipeError> 
             "shell interpreter '{shell}' is denied: allow_shell is off, so recipe argv must \
              not launch a shell (including wrapped argv and -c, -ec, -Command, \
              -EncodedCommand, /k). Run the program directly as argv (e.g. \
-             [\"cargo\",\"build\"]), or have the operator set [policy.caps] allow_shell = \
-             true, which allows shell recipes and shell_exec"
+             [\"cargo\",\"build\"])."
         )));
     }
     Ok(())
@@ -530,7 +529,7 @@ mod tests {
             let err = def.validate(false).unwrap_err();
             assert!(
                 err.to_string().contains("shell interpreter")
-                    && err.to_string().contains("[policy.caps] allow_shell = true"),
+                    && err.to_string().contains("Run the program directly as argv"),
                 "expected actionable deny, got {err}"
             );
             // allow_shell is the one switch: the same recipe validates when on.

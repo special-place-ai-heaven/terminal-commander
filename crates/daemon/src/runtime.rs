@@ -160,8 +160,12 @@ pub fn run_self_check(
         }
     }
 
-    // 4. Policy engine: sudo deny is universal across profiles.
-    {
+    // 4. Policy engine: the default full_access profile inherits the
+    //    harness's trust and denies no escalator; every hardened profile
+    //    must still deny sudo structurally.
+    if state.policy.profile == crate::policy::PolicyProfile::FullAccess {
+        rep.ok("policy: full_access (harness trust; structural denies off)");
+    } else {
         let argv = vec!["sudo".to_owned(), "rm".to_owned(), "-rf".to_owned()];
         let cwd = std::path::Path::new("/");
         let v = state
@@ -768,7 +772,14 @@ mod tests {
         let r = rep.render();
         assert!(r.contains("V0003 audit migration"));
         assert!(r.contains("router -> persistent audit pipeline"));
-        assert!(r.contains("sudo denied"));
+        assert!(r.contains("policy: full_access"));
+        cleanup(&data);
+
+        let data = temp_data_dir("ok-hardened");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.profile = crate::policy::PolicyProfile::DeveloperLocal;
+        let (_state, rep) = run_self_check(cfg).unwrap();
+        assert!(rep.render().contains("sudo denied"), "{}", rep.render());
         cleanup(&data);
     }
 

@@ -133,9 +133,7 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
                 format!(
                     "shell interpreter '{shell}' denied: allow_shell is off. \
                      Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of \
-                     {}), or have the operator set \
-                     [policy.caps] allow_shell = true, which allows this argv in \
-                     pty_command_start and enables shell_exec.",
+                     {}).",
                     terminal_commander_core::shell_deny::denied_argv_example(&shell)
                 ),
             ))
@@ -149,9 +147,7 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
             IpcErrorCode::ShellInterpreterDenied,
             format!(
                 "unrecognized '{carrier}' construction denied (fail closed): allow_shell is off. \
-                 Use a recognized form ({carrier} -e <program> ..., or {carrier} --list / --status), \
-                 or have the operator set [policy.caps] allow_shell = true, which allows this \
-                 argv in pty_command_start and enables shell_exec."
+                 Use a recognized form ({carrier} -e <program> ..., or {carrier} --list / --status)."
             ),
         )),
         Err(crate::pty_command::PtyRuntimeError::WslNestedShellDenied {
@@ -161,10 +157,7 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
             IpcErrorCode::ShellInterpreterDenied,
             format!(
                 "shell interpreter '{interpreter}' denied inside a '{carrier}' invocation: \
-                 allow_shell is off. Run the Linux program directly ({carrier} -e <program> ...), \
-                 or have the operator set [policy.caps] allow_shell = true, which allows this \
-                 argv in pty_command_start and enables shell_exec (command with \
-                 action=\"exec\" on the compact MCP surface)."
+                 allow_shell is off. Run the Linux program directly ({carrier} -e <program> ...)."
             ),
         )),
         Err(crate::pty_command::PtyRuntimeError::EmptyArgv) => Err(IpcError::new(

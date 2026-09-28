@@ -15,7 +15,7 @@ use rmcp::ErrorData as McpError;
 use rmcp::model::CallToolResult;
 use serde::Serialize;
 use serde_json::{Value, json};
-use terminal_commander_ipc::{ShellDenyClass, ShellTeach};
+use terminal_commander_ipc::ShellTeach;
 
 pub const KIND: &str = "policy_denied";
 pub const RECOVER_HINT: &str = "retry_with_argv";
@@ -44,8 +44,7 @@ pub fn alternatives() -> Value {
         {"tool": "file_read_window"},
         {"tool": "file_search"},
         {"tool": "file_write"},
-        {"tool": "pty_command_start"},
-        {"tool": "shell_exec", "tag": "operator_opt_in"}
+        {"tool": "pty_command_start"}
     ])
 }
 
@@ -76,13 +75,6 @@ fn steer_for(teach: &ShellTeach) -> (&'static str, Value, &'static str) {
 #[must_use]
 pub fn policy_denied_data(teach: &ShellTeach, denied_tool: Option<&str>, ipc_code: &str) -> Value {
     let (intended_tool, intended_example, recover_hint) = steer_for(teach);
-    let mut alternatives = alternatives();
-    // No operator knob enables shell on a profile that forbids it.
-    if teach.deny_class == ShellDenyClass::ProfileForbidsShell
-        && let Some(list) = alternatives.as_array_mut()
-    {
-        list.retain(|alt| alt["tool"] != "shell_exec");
-    }
     json!({
         "ipc_code": ipc_code,
         "kind": KIND,
@@ -93,7 +85,7 @@ pub fn policy_denied_data(teach: &ShellTeach, denied_tool: Option<&str>, ipc_cod
         "reason": teach.reason,
         "intended_tool": intended_tool,
         "intended_example": intended_example,
-        "alternatives": alternatives,
+        "alternatives": alternatives(),
         "recover_hint": recover_hint,
     })
 }
@@ -173,20 +165,9 @@ mod tests {
                 .unwrap_or_default()
                 .contains("set allow_shell")
         );
-        if class == "profile_forbids_shell" {
-            assert!(
-                !data["alternatives"].to_string().contains("shell_exec"),
-                "a profile that forbids shell offers no shell_exec opt-in"
-            );
-        } else {
-            assert_eq!(data["alternatives"], alternatives());
-            let last = data["alternatives"]
-                .as_array()
-                .and_then(|a| a.last())
-                .expect("alternatives");
-            assert_eq!(last["tool"], json!("shell_exec"));
-            assert_eq!(last["tag"], json!("operator_opt_in"));
-        }
+        // A denied shell is never offered back as an alternative.
+        assert_eq!(data["alternatives"], alternatives());
+        assert!(!data["alternatives"].to_string().contains("shell_exec"));
         assert!(
             !data["intended_example"].to_string().contains("shell_line"),
             "intended example must be argv, never shell_line"
@@ -221,7 +202,7 @@ mod tests {
         );
         // An interpreter deny carries the argv lane's own text (pinned in the
         // daemon's `shell_teach_keeps_lane_text_and_names_profile_forbid`).
-        teach.reason = "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]), or have the operator set [policy.caps] allow_shell = true, which allows this argv and enables shell_exec (command with action=\"exec\" on the compact MCP surface).".to_owned();
+        teach.reason = "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]). This daemon runs the `developer_local` profile (default is full_access, which allows everything); to change it set `[policy] profile = \"full_access\"` in the daemon config (the `--config` file, else terminal-commander.toml in the data dir).".to_owned();
         let data = policy_denied_data(&teach, Some("run_and_watch"), "ShellInterpreterDenied");
         let expected: Value = serde_json::from_str(include_str!(
             "../tests/fixtures/a2/shell_interpreter_denied.json"
@@ -352,7 +333,7 @@ mod tests {
     #[test]
     fn omitted_recipe_id_deserializes_as_argv_teach() {
         let teach: ShellTeach = serde_json::from_str(
-            r#"{"deny_class":"shell_capability_off","profile":"DeveloperLocal","denied_capability":"allow_shell","denied_tool":"shell_exec","reason":"Shell execution denied: allow_shell is off. Retry with an argv array, or ask the operator to set [policy.caps] allow_shell = true."}"#,
+            r#"{"deny_class":"shell_capability_off","profile":"DeveloperLocal","denied_capability":"allow_shell","denied_tool":"shell_exec","reason":"Shell execution denied: allow_shell is off. Retry with an argv array."}"#,
         )
         .expect("old teach payload");
         assert!(teach.recipe_id.is_none());

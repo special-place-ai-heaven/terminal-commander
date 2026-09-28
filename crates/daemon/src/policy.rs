@@ -62,16 +62,52 @@ pub enum PolicyDecision {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyProfile {
-    #[default]
+    /// Opt-in hardening: the structural escalator and sensitive-path denies.
     DeveloperLocal,
     RepoOnly,
     ReadOnlyObserver,
     AdminDebug,
-    /// Convenience profile (Hybrid trust model -- reconciliation Decision 1).
-    /// Exec-capable like `developer_local`; its preset grants every capability
-    /// unless an explicit `[policy.caps]` false override revokes one. It never
-    /// short-circuits `evaluate()`; gated actions stay `AllowWithAudit`.
+    /// The default. TC inherits the harness's trust (owner decision): every
+    /// capability is preset on, recipe admin is open to the model, and the
+    /// structural command/path/shell-line denies do not apply. An explicit
+    /// `[policy.caps]` false or a configured allow/deny list still narrows it.
+    /// It never short-circuits `evaluate()`; gated actions stay audited.
+    #[default]
     FullAccess,
+}
+
+impl PolicyProfile {
+    /// Config spelling (`[policy] profile = "..."`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DeveloperLocal => "developer_local",
+            Self::RepoOnly => "repo_only",
+            Self::ReadOnlyObserver => "read_only_observer",
+            Self::AdminDebug => "admin_debug",
+            Self::FullAccess => "full_access",
+        }
+    }
+}
+
+/// The one sentence every profile- or cap-caused deny ends with, so the
+/// model (and whoever set the config) sees the same accurate remedy.
+#[must_use]
+pub fn profile_change_hint(profile: PolicyProfile) -> String {
+    const CONFIG: &str = "the daemon config (the `--config` file, else \
+                          terminal-commander.toml in the data dir)";
+    if profile == PolicyProfile::FullAccess {
+        return format!(
+            "This daemon runs the `full_access` profile (the default, which allows \
+             everything), so a `[policy.caps]` false override in {CONFIG} denies this; \
+             remove it."
+        );
+    }
+    format!(
+        "This daemon runs the `{}` profile (default is full_access, which allows \
+         everything); to change it set `[policy] profile = \"full_access\"` in {CONFIG}.",
+        profile.as_str()
+    )
 }
 
 /// Action being evaluated.
@@ -146,8 +182,8 @@ pub struct PolicyVerdict {
     pub reason: String,
 }
 
-/// Why `allow_shell` is off when `developer_local` withheld its default
-/// because `[policy.commands] allow_roots` is set (see
+/// Why `allow_shell` is off when the profile withheld its default because
+/// `[policy.commands] allow_roots` is set (see
 /// `DaemonConfig::shell_withheld_by_allow_roots`).
 pub const SHELL_WITHHELD_BY_ALLOW_ROOTS: &str = "allow_shell is off because [policy.commands] \
      allow_roots confines commands; set [policy.caps] allow_shell = true explicitly to enable \
@@ -155,7 +191,8 @@ pub const SHELL_WITHHELD_BY_ALLOW_ROOTS: &str = "allow_shell is off because [pol
 
 /// Resolved capability set fed to the engine (mirror of `[policy.caps]`).
 ///
-/// All-false by default except `allow_shell` on `developer_local` (see
+/// All-true on the default `full_access`, `allow_shell` only on
+/// `developer_local`, all-false otherwise (see
 /// [`Self::default_for_profile`]); deny-first preserved. These are INPUTS to
 /// `evaluate()`, never a bypass: a cap being on only flips a gated action
 /// from `Deny` to `AllowWithAudit` on an exec-capable profile.
@@ -181,7 +218,7 @@ impl PolicyCaps {
                 allow_privileged: true,
                 allow_remote: true,
             },
-            // Shell passthrough is on for the default developer profile: an
+            // Shell passthrough is on for the developer profile too: an
             // LLM caller abandons a denied tool for raw Bash, and shell output
             // stays combed, bounded, and audited (`command_shell_start`).
             // `[policy.caps] allow_shell = false` is the opt-in hardening.
@@ -515,8 +552,9 @@ pub struct PolicyEngine {
     /// Same exact-match semantics as `probe_allow_kinds`. Set by
     /// `with_probe_kinds`.
     probe_deny_kinds: Vec<String>,
-    /// When false (default), MCP `recipe_activate` / `recipe_deactivate`
-    /// are denied. Set by [`Self::with_llm_can_activate_recipes`].
+    /// When false, MCP `recipe_activate` / `recipe_deactivate` are denied on
+    /// a hardened profile (`full_access` ignores it). Set by
+    /// [`Self::with_llm_can_activate_recipes`].
     llm_can_activate_recipes: bool,
     /// `allow_shell` is off only because `allow_roots` withheld the
     /// `developer_local` default. Selects the shell deny text. Set by
@@ -704,23 +742,25 @@ impl PolicyEngine {
         self
     }
 
-    /// Record that `allow_roots` withheld the `developer_local` shell default.
+    /// Record that `allow_roots` withheld the profile's shell default.
     #[must_use]
     pub const fn with_shell_withheld_by_allow_roots(mut self, withheld: bool) -> Self {
         self.shell_withheld_by_allow_roots = withheld;
         self
     }
 
-    /// Whether `allow_roots` withheld the `developer_local` shell default.
+    /// Whether `allow_roots` withheld the profile's shell default.
     #[must_use]
     pub const fn shell_withheld_by_allow_roots(&self) -> bool {
         self.shell_withheld_by_allow_roots
     }
 
-    /// Whether MCP may activate or deactivate recipes.
+    /// Whether MCP may activate or deactivate recipes. Always under the
+    /// default `full_access` profile; otherwise `[policy]
+    /// llm_can_activate_recipes`.
     #[must_use]
     pub const fn llm_can_activate_recipes(&self) -> bool {
-        self.llm_can_activate_recipes
+        self.llm_can_activate_recipes || matches!(self.profile, PolicyProfile::FullAccess)
     }
 
     /// Build an engine carrying a resolved capability set (Hybrid trust model,
@@ -784,7 +824,7 @@ impl PolicyEngine {
         self.caps
     }
 
-    /// Default-constructed engine uses the `developer_local` profile.
+    /// Default-constructed engine uses the `full_access` profile.
     #[must_use]
     pub fn default_engine() -> Self {
         Self::new(PolicyProfile::default())
@@ -804,8 +844,11 @@ impl PolicyEngine {
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn evaluate(&self, action: &PolicyAction<'_>) -> PolicyVerdict {
-        // First: structural denies that apply across every profile.
-        if let PolicyAction::CommandStart { argv, .. } = action
+        // Structural denies (escalators, sensitive paths, the shell-line
+        // scan) are hardening: every profile except the default full_access.
+        let structural = self.profile != PolicyProfile::FullAccess;
+        if structural
+            && let PolicyAction::CommandStart { argv, .. } = action
             && let Some(arg0) = argv.first()
         {
             let basename = std::path::Path::new(arg0.as_str())
@@ -816,7 +859,9 @@ impl PolicyEngine {
                 return PolicyVerdict {
                     decision: PolicyDecision::Deny,
                     reason: format!(
-                        "command '{basename}' is in the closed deny set (sudo/doas/su/pkexec/kexec)"
+                        "command '{basename}' is in the closed deny set \
+                         (sudo/doas/su/pkexec/kexec). {}",
+                        profile_change_hint(self.profile)
                     ),
                 };
             }
@@ -860,12 +905,13 @@ impl PolicyEngine {
         {
             // Normalize the subject ONCE; every check below matches this form.
             let canonical = canonicalize_lexical(path);
-            if Self::path_default_denied(&canonical) {
+            if structural && Self::path_default_denied(&canonical) {
                 return PolicyVerdict {
                     decision: PolicyDecision::Deny,
                     reason: format!(
-                        "path '{}' matches a default-deny sensitive suffix (SECURITY.md \u{a7}5)",
-                        path.display()
+                        "path '{}' matches a default-deny sensitive suffix (SECURITY.md \u{a7}5). {}",
+                        path.display(),
+                        profile_change_hint(self.profile)
                     ),
                 };
             }
@@ -901,12 +947,13 @@ impl PolicyEngine {
         // on. The literal-command scan is defense in depth only; arbitrary
         // shell expansion cannot be proven safe by source-text inspection.
         if let PolicyAction::CommandShellStart { shell_line, .. } = action {
-            if let Some(denied) = denied_command_in_shell_line(shell_line) {
+            if structural && let Some(denied) = denied_command_in_shell_line(shell_line) {
                 return PolicyVerdict {
                     decision: PolicyDecision::Deny,
                     reason: format!(
                         "command '{denied}' is in the closed deny set \
-                         (sudo/doas/su/pkexec/kexec) inside shell_line"
+                         (sudo/doas/su/pkexec/kexec) inside shell_line. {}",
+                        profile_change_hint(self.profile)
                     ),
                 };
             }
@@ -931,9 +978,11 @@ impl PolicyEngine {
             }
             return PolicyVerdict {
                 decision: PolicyDecision::Deny,
-                reason:
-                    "shell execution denied: allow_shell capability is off or profile forbids shell"
-                        .to_owned(),
+                reason: format!(
+                    "shell execution denied: allow_shell capability is off or profile forbids \
+                     shell. {}",
+                    profile_change_hint(self.profile)
+                ),
             };
         }
 
@@ -956,9 +1005,11 @@ impl PolicyEngine {
             }
             return PolicyVerdict {
                 decision: PolicyDecision::Deny,
-                reason:
-                    "shell_session_start denied: allow_session capability is off or profile forbids sessions"
-                        .to_owned(),
+                reason: format!(
+                    "shell_session_start denied: allow_session capability is off or profile \
+                     forbids sessions. {}",
+                    profile_change_hint(self.profile)
+                ),
             };
         }
 
@@ -1020,9 +1071,11 @@ impl PolicyEngine {
                 ) {
                     PolicyVerdict {
                         decision: PolicyDecision::Deny,
-                        reason:
-                            "read_only_observer denies command_*, registry_*, and file_write mutations"
-                                .to_owned(),
+                        reason: format!(
+                            "read_only_observer denies command_*, registry_*, and file_write \
+                             mutations. {}",
+                            profile_change_hint(self.profile)
+                        ),
                     }
                 } else {
                     PolicyVerdict {
@@ -1040,7 +1093,10 @@ impl PolicyEngine {
                 ) {
                     PolicyVerdict {
                         decision: PolicyDecision::Deny,
-                        reason: "admin_debug is inspect-only; registry mutations denied".to_owned(),
+                        reason: format!(
+                            "admin_debug is inspect-only; registry mutations denied. {}",
+                            profile_change_hint(self.profile)
+                        ),
                     }
                 } else {
                     PolicyVerdict {
@@ -1076,7 +1132,7 @@ impl PolicyEngine {
                     );
                     return PolicyVerdict {
                         decision: PolicyDecision::Deny,
-                        reason,
+                        reason: format!("{reason}. {}", profile_change_hint(self.profile)),
                     };
                 }
                 self.dev_local_repo_only_verdict(action)
@@ -1437,8 +1493,76 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
 
+    /// Owner decision: TC inherits the harness's trust. The default profile is
+    /// `full_access` and denies nothing structural (escalators, sensitive paths,
+    /// the shell-line scan); `developer_local` is the opt-in hardening that
+    /// keeps every one of those denies.
     #[test]
-    fn sudo_denied_in_every_profile() {
+    fn default_profile_is_full_access_and_denies_nothing() {
+        assert_eq!(PolicyProfile::default(), PolicyProfile::FullAccess);
+        let open = PolicyEngine::default_engine();
+        let hardened = PolicyEngine::new(PolicyProfile::DeveloperLocal);
+        let cwd = PathBuf::from(".");
+
+        let argv = vec!["sudo".to_owned(), "-n".to_owned(), "true".to_owned()];
+        let start = PolicyAction::CommandStart {
+            argv: &argv,
+            cwd: &cwd,
+        };
+        assert_ne!(open.evaluate(&start).decision, PolicyDecision::Deny);
+        let denied = hardened.evaluate(&start);
+        assert_eq!(denied.decision, PolicyDecision::Deny);
+        assert!(
+            denied
+                .reason
+                .contains(r#"[policy] profile = "full_access""#),
+            "hardened deny must name the profile switch: {}",
+            denied.reason
+        );
+
+        let line = PolicyAction::CommandShellStart {
+            shell_line: "sudo -n true",
+            cwd: &cwd,
+            shell: "/bin/bash",
+        };
+        assert_eq!(
+            open.evaluate(&line).decision,
+            PolicyDecision::AllowWithAudit
+        );
+        assert_eq!(hardened.evaluate(&line).decision, PolicyDecision::Deny);
+
+        let key = std::env::temp_dir().join(".ssh").join("id_rsa");
+        for action in [
+            PolicyAction::FileRead { path: &key },
+            PolicyAction::FileWatch { path: &key },
+            PolicyAction::FileWrite { path: &key },
+        ] {
+            assert_eq!(open.evaluate(&action).decision, PolicyDecision::Allow);
+            let denied = hardened.evaluate(&action);
+            assert_eq!(denied.decision, PolicyDecision::Deny);
+            assert!(
+                denied
+                    .reason
+                    .contains(r#"[policy] profile = "full_access""#),
+                "{}",
+                denied.reason
+            );
+        }
+
+        let session = PolicyAction::SessionStart {
+            shell: "/bin/bash",
+            cwd: &cwd,
+        };
+        assert_eq!(
+            open.evaluate(&session).decision,
+            PolicyDecision::AllowWithAudit
+        );
+        assert!(open.llm_can_activate_recipes());
+        assert!(!hardened.llm_can_activate_recipes());
+    }
+
+    #[test]
+    fn sudo_denied_in_every_hardened_profile() {
         for prof in [
             PolicyProfile::DeveloperLocal,
             PolicyProfile::RepoOnly,
@@ -1466,7 +1590,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn default_deny_path_denied() {
-        let e = PolicyEngine::default_engine();
+        let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
         for s in [
             "/home/dev/.ssh/id_rsa",
             "/etc/shadow",
@@ -1494,7 +1618,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn default_deny_path_normalizes_windows_aliases() {
-        let engine = PolicyEngine::default_engine();
+        let engine = PolicyEngine::new(PolicyProfile::DeveloperLocal);
         let paths = [
             PathBuf::from(r"C:\Users\Dev\.SSH\ID_RSA"),
             PathBuf::from(r"C:\Users\Dev\.ssh\id_rsa."),
@@ -1792,7 +1916,7 @@ mod tests {
 
     #[test]
     fn developer_local_allows_normal_command() {
-        let e = PolicyEngine::default_engine();
+        let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
         let argv = vec!["cargo".to_owned(), "test".to_owned()];
         let cwd = PathBuf::from(".");
         let v = e.evaluate(&PolicyAction::CommandStart {
@@ -1804,7 +1928,7 @@ mod tests {
 
     #[test]
     fn developer_local_registry_activate_requires_audit() {
-        let e = PolicyEngine::default_engine();
+        let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
         let v = e.evaluate(&PolicyAction::RegistryActivate);
         assert_eq!(v.decision, PolicyDecision::AllowWithAudit);
     }
@@ -1818,7 +1942,7 @@ mod tests {
 
     #[test]
     fn file_read_allowed_when_not_in_default_deny() {
-        let e = PolicyEngine::default_engine();
+        let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
         let p = Path::new("/home/dev/repo/src/main.rs");
         let v = e.evaluate(&PolicyAction::FileRead { path: p });
         assert_eq!(v.decision, PolicyDecision::Allow);
@@ -1920,7 +2044,7 @@ mod tests {
     fn developer_local_no_list_allows_any_non_deny_command() {
         // Zero-config developer_local: default-deny is opt-in, so any
         // command surviving the structural deny set is allowed.
-        let e = PolicyEngine::default_engine();
+        let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
         let cwd = PathBuf::from(".");
         for cmd in ["echo", "python", "node", "rm", "cargo", "some-obscure-tool"] {
             let argv = vec![cmd.to_owned()];

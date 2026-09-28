@@ -56,9 +56,12 @@ fn write_text(path: &std::path::Path, text: &str) {
     f.write_all(text.as_bytes()).unwrap();
 }
 
+/// `developer_local`: the hardened profile whose default-deny path set these
+/// tests pin. The default `full_access` profile applies no path deny.
 fn build_server() -> (PathBuf, Arc<DaemonState>, terminal_commanderd::ServerHandle) {
     let data = tmp_data_dir("server");
-    let cfg = DaemonConfig::defaults_in(&data);
+    let mut cfg = DaemonConfig::defaults_in(&data);
+    cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
     let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
     let socket = state.config.socket_path();
     let handle = IpcServer::new(Arc::clone(&state), socket).spawn().unwrap();
@@ -783,6 +786,43 @@ fn make_symlink_to_secret(data: &std::path::Path) -> (PathBuf, PathBuf) {
     let link = data.join("innocent.txt");
     std::os::unix::fs::symlink(&secret, &link).unwrap();
     (secret, link)
+}
+
+/// Owner decision: the default `full_access` profile reads a credential
+/// path like any file. `developer_local` (see `build_server`) still denies it.
+#[test]
+fn file_read_window_reads_sensitive_suffix_under_default_profile() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("default-trust");
+        let state = Arc::new(DaemonState::bootstrap(DaemonConfig::defaults_in(&data)).unwrap());
+        let handle = IpcServer::new(Arc::clone(&state), state.config.socket_path())
+            .spawn()
+            .unwrap();
+        let (secret, _link) = make_symlink_to_secret(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let resp = client
+            .call(
+                1,
+                IpcRequest::FileReadWindow(FileReadWindowParams {
+                    path: secret,
+                    start_line: None,
+                    max_lines: None,
+                    max_bytes: None,
+                }),
+            )
+            .await
+            .expect("full_access reads .ssh/id_rsa");
+        let IpcResponse::FileReadWindow(r) = resp else {
+            panic!("unexpected: {resp:?}");
+        };
+        assert_eq!(r.lines[0].text, "BEGIN OPENSSH PRIVATE KEY");
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
 }
 
 /// BUG 1 (security): a symlink whose own name is innocuous must NOT

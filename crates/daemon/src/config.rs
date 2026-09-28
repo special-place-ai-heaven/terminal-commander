@@ -241,7 +241,8 @@ pub struct PolicyCommandsSection {
 /// `[policy.caps]` (Hybrid trust model -- reconciliation Decision 1/5).
 ///
 /// Granular capability overrides. Omitted values inherit the selected profile
-/// (`developer_local` grants `allow_shell`; every other cap is off);
+/// (`full_access`, the default, grants all four; `developer_local` grants
+/// `allow_shell`; every other profile grants none);
 /// explicit true/false values override that profile's preset.
 // 4 independent opt-in capability flags; a bitfield/enum would hurt the config/serde surface
 #[allow(clippy::struct_excessive_bools)]
@@ -451,11 +452,11 @@ impl DaemonConfig {
         Ok(cfg)
     }
 
-    /// `developer_local` grants `allow_shell` by default, but `shell_exec`
-    /// does not consult `[policy.commands] allow_roots`. An operator who
-    /// confined commands keeps that confinement: with a non-empty
-    /// `allow_roots` and no explicit `[policy.caps] allow_shell`, the
-    /// default is withheld. An explicit `allow_shell = true` still wins.
+    /// `full_access` and `developer_local` grant `allow_shell` by default, but
+    /// `shell_exec` does not consult `[policy.commands] allow_roots`. An
+    /// operator who confined commands keeps that confinement: with a non-empty
+    /// `allow_roots` and no explicit `[policy.caps] allow_shell`, the default
+    /// is withheld. An explicit `allow_shell = true` still wins.
     #[must_use]
     pub const fn shell_withheld_by_allow_roots(&self) -> bool {
         let explicit = match &self.policy.caps {
@@ -466,7 +467,11 @@ impl DaemonConfig {
             Some(commands) => !commands.allow_roots.is_empty(),
             None => false,
         };
-        matches!(self.policy.profile, PolicyProfile::DeveloperLocal) && confined && !explicit
+        matches!(
+            self.policy.profile,
+            PolicyProfile::DeveloperLocal | PolicyProfile::FullAccess
+        ) && confined
+            && !explicit
     }
 
     /// Resolve the effective capability set fed to the policy engine.

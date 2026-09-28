@@ -111,7 +111,7 @@ pub(in crate::ipc::server) fn handle_recipe_upsert(
     params
         .definition
         .validate(state.policy.caps_allow_shell())
-        .map_err(|err| map_recipe_argv_error(&err))?;
+        .map_err(|err| map_recipe_argv_error(&state.policy, &err))?;
     let version = state
         .store
         .create_recipe_version(&params.definition)
@@ -245,35 +245,44 @@ fn deny_mcp_recipe_activate(
         if peer_image_name(peer).is_none() {
             return Err(IpcError::new(
                 IpcErrorCode::PolicyDenied,
-                "recipe_activate_requires_admin: llm_can_activate_recipes is false and the \
+                format!(
+                    "recipe_activate_requires_admin: llm_can_activate_recipes is false and the \
                  daemon could not resolve the calling program's executable on this \
                  platform, so it cannot recognize the admin CLI (`terminal-commander`) and \
-                 denies recipe_activate, recipe_deactivate, and recipe_tombstone. An \
-                 operator enables recipe admin by setting `[policy] \
-                 llm_can_activate_recipes = true` in the daemon config. recipe_run is \
-                 allowed once a recipe is activated.",
+                 denies recipe_activate, recipe_deactivate, and recipe_tombstone. Setting \
+                 `[policy] llm_can_activate_recipes = true` in the daemon config opens \
+                 recipe admin to the model. recipe_run is allowed once a recipe is \
+                 activated. {}",
+                    crate::policy::profile_change_hint(state.policy.profile)
+                ),
             ));
         }
         return Err(IpcError::new(
             IpcErrorCode::PolicyDenied,
-            "recipe_activate_requires_admin: llm_can_activate_recipes is false, so only the \
-             admin CLI peer (`terminal-commander`) may recipe_activate, recipe_deactivate, \
-             or recipe_tombstone. Omitting from_mcp does not grant admin, and the MCP \
-             adapter image cannot claim it. An operator runs `terminal-commander recipes \
-             activate`, `terminal-commander recipes deactivate`, or \
-             `terminal-commander recipes tombstone`. recipe_run is allowed once a recipe \
-             is activated. Same-user code can still exec that CLI; the socket is not a \
-             privilege boundary.",
+            format!(
+                "recipe_activate_requires_admin: llm_can_activate_recipes is false, so only \
+                 the admin CLI peer (`terminal-commander`) may recipe_activate, \
+                 recipe_deactivate, or recipe_tombstone. Omitting from_mcp does not grant \
+                 admin, and the MCP adapter image cannot claim it. The admin CLI runs \
+                 `terminal-commander recipes activate`, `terminal-commander recipes \
+                 deactivate`, or `terminal-commander recipes tombstone`. recipe_run is \
+                 allowed once a recipe is activated. Same-user code can still exec that CLI; \
+                 the socket is not a privilege boundary. {}",
+                crate::policy::profile_change_hint(state.policy.profile)
+            ),
         ));
     }
     if peer_started_by_daemon(peer) {
         return Err(IpcError::new(
             IpcErrorCode::PolicyDenied,
-            "recipe_activate_requires_admin: recipe admin is refused to processes started \
+            format!(
+                "recipe_activate_requires_admin: recipe admin is refused to processes started \
              by the daemon; run the CLI from your own terminal (`terminal-commander \
              recipes activate|deactivate|tombstone`), or set `[policy] \
              llm_can_activate_recipes = true` in the daemon config to let the model \
-             activate recipes. recipe_run is allowed once a recipe is activated.",
+             activate recipes. recipe_run is allowed once a recipe is activated. {}",
+                crate::policy::profile_change_hint(state.policy.profile)
+            ),
         ));
     }
     Ok(())
@@ -380,14 +389,19 @@ fn recipe_actor_label(peer: &PeerIdentity, from_mcp: Option<bool>) -> &'static s
     }
 }
 
-fn map_recipe_argv_error(err: &terminal_commander_core::RecipeError) -> IpcError {
+fn map_recipe_argv_error(
+    policy: &crate::policy::PolicyEngine,
+    err: &terminal_commander_core::RecipeError,
+) -> IpcError {
     let message = err.to_string();
-    let code = if message.contains("shell interpreter") {
-        IpcErrorCode::ShellInterpreterDenied
-    } else {
-        IpcErrorCode::RecipeInvalid
-    };
-    IpcError::new(code, message)
+    if message.contains("shell interpreter") {
+        let hint = crate::policy::profile_change_hint(policy.profile);
+        return IpcError::new(
+            IpcErrorCode::ShellInterpreterDenied,
+            format!("{message} {hint}"),
+        );
+    }
+    IpcError::new(IpcErrorCode::RecipeInvalid, message)
 }
 
 pub(in crate::ipc::server) fn handle_recipe_activate(
@@ -648,10 +662,10 @@ pub(in crate::ipc::server) fn handle_recipe_test(
     let allow_shell = state.policy.caps_allow_shell();
     definition
         .validate(allow_shell)
-        .map_err(|err| map_recipe_argv_error(&err))?;
+        .map_err(|err| map_recipe_argv_error(&state.policy, &err))?;
     let argv = definition
         .resolve_argv(&params.fills, allow_shell)
-        .map_err(|err| map_recipe_argv_error(&err))?;
+        .map_err(|err| map_recipe_argv_error(&state.policy, &err))?;
     let (expects_met, notes) = params.expect_argv0.as_deref().map_or_else(
         || (true, Vec::new()),
         |expected| {
@@ -732,7 +746,7 @@ pub(in crate::ipc::server) fn handle_recipe_run(
     let allow_shell = state.policy.caps_allow_shell();
     let argv = definition
         .resolve_argv(&params.fills, allow_shell)
-        .map_err(|err| map_recipe_argv_error(&err))?;
+        .map_err(|err| map_recipe_argv_error(&state.policy, &err))?;
     // Same predicate as `resolve_argv` (which already re-validates). This is
     // the run re-check: a stored argv cannot reach `command_start` if resolve
     // ever stops applying the deny.
@@ -742,8 +756,8 @@ pub(in crate::ipc::server) fn handle_recipe_run(
             format!(
                 "shell interpreter '{shell}' is denied on recipe_run: allow_shell is off. \
                  Use a recipe whose argv runs the program directly (e.g. \
-                 [\"cargo\",\"build\"]), or have the operator set [policy.caps] \
-                 allow_shell = true, which allows shell recipes and shell_exec."
+                 [\"cargo\",\"build\"]). {}",
+                crate::policy::profile_change_hint(state.policy.profile)
             ),
         ));
     }
@@ -970,8 +984,20 @@ mod tests {
             std::process::id()
         ));
         let mut cfg = crate::config::DaemonConfig::defaults_in(&data);
+        // The admin gate is hardening: the default full_access profile
+        // leaves recipe admin open to the model.
+        cfg.policy.profile = crate::policy::PolicyProfile::DeveloperLocal;
         cfg.recipe_admin_test_seam = seam;
         Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"))
+    }
+
+    #[test]
+    fn default_profile_lets_the_model_administer_recipes() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let cfg = crate::config::DaemonConfig::defaults_in(data.path());
+        let state = Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"));
+        deny_mcp_recipe_activate(&state, &PeerIdentity::unknown(), true)
+            .expect("full_access default allows MCP recipe admin");
     }
 
     #[test]

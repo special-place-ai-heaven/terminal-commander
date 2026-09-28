@@ -135,13 +135,14 @@ pub(in crate::ipc::server) fn enrich_shell_teach(
     let Some(class) = class else {
         return err;
     };
+    let hint = crate::policy::profile_change_hint(policy.profile);
     let reason = match class {
         ShellDenyClass::ShellCapabilityOff if policy.shell_withheld_by_allow_roots() => format!(
             "Shell execution denied: {}. Retry with an argv array.",
             crate::policy::SHELL_WITHHELD_BY_ALLOW_ROOTS
         ),
-        ShellDenyClass::ShellInterpreterDenied => err.message.clone(),
-        _ => class.reason().to_owned(),
+        ShellDenyClass::ShellInterpreterDenied => format!("{} {hint}", err.message),
+        _ => format!("{} {hint}", class.reason()),
     };
     err.message.clone_from(&reason);
     err.teach = Some(Box::new(ShellTeach {
@@ -227,9 +228,7 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
             format!(
                 "shell interpreter '{shell}' denied: allow_shell is off. \
                  Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of \
-                 {}), or have the operator set \
-                 [policy.caps] allow_shell = true, which allows this argv and enables \
-                 shell_exec (command with action=\"exec\" on the compact MCP surface).",
+                 {}).",
                 terminal_commander_core::shell_deny::denied_argv_example(&shell)
             ),
         ),
@@ -244,9 +243,7 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
             IpcErrorCode::ShellInterpreterDenied,
             format!(
                 "unrecognized '{carrier}' construction denied (fail closed): allow_shell is off. \
-                 Use a recognized form ({carrier} -e <program> ..., or {carrier} --list / --status), \
-                 or have the operator set [policy.caps] allow_shell = true, which allows this \
-                 argv and enables shell_exec."
+                 Use a recognized form ({carrier} -e <program> ..., or {carrier} --list / --status)."
             ),
         ),
         CommandError::WslNestedShellDenied {
@@ -256,10 +253,7 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
             IpcErrorCode::ShellInterpreterDenied,
             format!(
                 "shell interpreter '{interpreter}' denied inside a '{carrier}' invocation: \
-                 allow_shell is off. Run the Linux program directly ({carrier} -e <program> ...), \
-                 or have the operator set [policy.caps] allow_shell = true, which allows this \
-                 argv and enables shell_exec (command with action=\"exec\" on the compact MCP \
-                 surface)."
+                 allow_shell is off. Run the Linux program directly ({carrier} -e <program> ...)."
             ),
         ),
         CommandError::EmptyArgv => {
@@ -879,15 +873,21 @@ mod tests {
     }
 
     /// Sensitive-path policy must be enforced on the platform-native canonical
-    /// path, including Windows backslash separators.
+    /// path, including Windows backslash separators, under a hardened profile.
+    /// The default `full_access` profile reads the same file.
     #[test]
     fn native_sensitive_path_is_denied_before_file_access() {
         let data = unique_data_dir("sensitive");
-        let state = state_for(&data);
         let ssh_dir = data.join(".ssh");
         std::fs::create_dir_all(&ssh_dir).expect("create fake sensitive parent");
         let secret = ssh_dir.join("id_rsa");
         std::fs::write(&secret, b"FAKE TEST KEY\n").expect("create fake sensitive file");
+        resolve_and_authorize_file(&state_for(&data), &secret, false)
+            .expect("full_access default reads a sensitive path");
+
+        let mut cfg = crate::config::DaemonConfig::defaults_in(&data);
+        cfg.policy.profile = PolicyProfile::DeveloperLocal;
+        let state = Arc::new(DaemonState::bootstrap(cfg).expect("bootstrap"));
 
         let read_err = resolve_and_authorize_file(&state, &secret, false)
             .expect_err("native sensitive read path must be denied");
@@ -1118,7 +1118,14 @@ mod tests {
         assert_eq!(teach.denied_capability.as_deref(), Some("allow_shell"));
         assert_eq!(teach.denied_tool, "shell_exec");
         assert!(teach.recipe_id.is_none());
-        assert_eq!(teach.reason, ShellDenyClass::ShellCapabilityOff.reason());
+        assert_eq!(
+            teach.reason,
+            format!(
+                "{} {}",
+                ShellDenyClass::ShellCapabilityOff.reason(),
+                crate::policy::profile_change_hint(PolicyProfile::DeveloperLocal)
+            )
+        );
         assert!(!teach.reason.contains("set allow_shell"));
         assert!(!teach.reason.to_ascii_lowercase().contains("enable shell"));
 
@@ -1155,8 +1162,8 @@ mod tests {
         assert!(
             interpreter
                 .message
-                .contains("[policy.caps] allow_shell = true"),
-            "mcp-facing message must name the operator knob; got: {}",
+                .contains(r#"[policy] profile = "full_access""#),
+            "mcp-facing message must name the profile switch; got: {}",
             interpreter.message
         );
 
@@ -1197,7 +1204,7 @@ mod tests {
             for needle in [
                 "'bash'",
                 "'wsl.exe'",
-                "[policy.caps] allow_shell = true",
+                r#"[policy] profile = "full_access""#,
                 "wsl.exe -e <program>",
             ] {
                 assert!(text.contains(needle), "{needle} missing from: {text}");
@@ -1212,7 +1219,7 @@ mod tests {
         // Same text as `reason` in crates/mcp/tests/fixtures/a2/shell_interpreter_denied.json.
         assert_eq!(
             direct.message,
-            "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]), or have the operator set [policy.caps] allow_shell = true, which allows this argv and enables shell_exec (command with action=\"exec\" on the compact MCP surface)."
+            "shell interpreter 'bash' denied: allow_shell is off. Run the program directly as argv (e.g. [\"cargo\",\"build\"] instead of [\"bash\",\"-c\",\"cargo build\"]). This daemon runs the `developer_local` profile (default is full_access, which allows everything); to change it set `[policy] profile = \"full_access\"` in the daemon config (the `--config` file, else terminal-commander.toml in the data dir)."
         );
         assert_eq!(direct.teach.expect("teach").reason, direct.message);
 
@@ -1226,7 +1233,14 @@ mod tests {
             let teach = err.teach.expect("profile forbid carries teach");
             assert_eq!(teach.deny_class, ShellDenyClass::ProfileForbidsShell);
             assert!(teach.denied_capability.is_none(), "{profile:?}");
-            assert_eq!(teach.reason, ShellDenyClass::ProfileForbidsShell.reason());
+            assert_eq!(
+                teach.reason,
+                format!(
+                    "{} {}",
+                    ShellDenyClass::ProfileForbidsShell.reason(),
+                    crate::policy::profile_change_hint(profile)
+                )
+            );
             assert!(err.message.contains("forbids shell"), "{}", err.message);
             assert!(!err.message.contains("allow_shell"), "{}", err.message);
         }

@@ -5,7 +5,7 @@
   "profile": "DeveloperLocal",
   "denied_capability": "allow_shell",
   "denied_tool": "shell_exec",
-  "reason": "Shell execution denied: allow_shell is off. Retry with an argv array, or ask the operator to set [policy.caps] allow_shell = true.",
+  "reason": "Shell execution denied: allow_shell is off. Retry with an argv array.",
   "intended_tool": "recipe_run",
   "intended_example": {"recipe_id": "git.status", "scope": {"kind": "global"}},
   "alternatives": [
@@ -14,8 +14,7 @@
     {"tool": "file_read_window"},
     {"tool": "file_search"},
     {"tool": "file_write"},
-    {"tool": "pty_command_start"},
-    {"tool": "shell_exec", "tag": "operator_opt_in"}
+    {"tool": "pty_command_start"}
   ],
   "recover_hint": "retry_with_recipe"
 }

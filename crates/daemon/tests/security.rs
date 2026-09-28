@@ -32,7 +32,7 @@ fn structural_deny_sudo_all_profiles() {
 
 #[test]
 fn fully_qualified_sudo_path_also_denied() {
-    let e = PolicyEngine::default_engine();
+    let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
     for path in [
         "/usr/bin/sudo",
         "/usr/local/bin/sudo",
@@ -58,7 +58,7 @@ fn fully_qualified_sudo_path_also_denied() {
 #[cfg(unix)]
 #[test]
 fn sensitive_path_default_deny_paths_all_variants() {
-    let e = PolicyEngine::default_engine();
+    let e = PolicyEngine::new(PolicyProfile::DeveloperLocal);
     let paths = [
         "/home/dev/.ssh/id_rsa",
         "/home/dev/.ssh/id_ed25519",

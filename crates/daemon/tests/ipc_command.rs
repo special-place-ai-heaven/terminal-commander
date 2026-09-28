@@ -64,6 +64,7 @@ fn build_server_shell_off(
     data: &std::path::Path,
 ) -> (Arc<DaemonState>, terminal_commanderd::ServerHandle) {
     let mut cfg = DaemonConfig::defaults_in(data);
+    cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
     cfg.policy.caps = Some(terminal_commanderd::PolicyCapsSection {
         allow_shell: Some(false),
         ..Default::default()
@@ -102,6 +103,46 @@ fn audit_rows_have_both_start_rows(rows: &[terminal_commander_store::AuditRow]) 
         && rows
             .iter()
             .any(|r| r.action == "command_start" && r.decision == "allow")
+}
+
+/// Owner decision: the default `full_access` profile runs an escalator like
+/// any argv (audited `command_start`); `developer_local` denies it pre-spawn.
+/// `sudo -n` never prompts: it runs or fails, and either is not a policy deny.
+#[test]
+fn sudo_argv_runs_under_default_and_is_denied_under_developer_local() {
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("sudo-default");
+        let (_state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        let result = client
+            .call(
+                1,
+                IpcRequest::CommandStartCombed(small_start_params(&["sudo", "-n", "true"])),
+            )
+            .await;
+        if let Err(err) = &result {
+            assert_ne!(err.code, IpcErrorCode::PolicyDenied, "{err:?}");
+        }
+        handle.shutdown().await;
+        cleanup(&data);
+
+        let data = tmp_data_dir("sudo-hardened");
+        let mut cfg = DaemonConfig::defaults_in(&data);
+        cfg.policy.profile = terminal_commanderd::PolicyProfile::DeveloperLocal;
+        let (_state, handle) = build_server_with(cfg);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf());
+        let err = client
+            .call(
+                2,
+                IpcRequest::CommandStartCombed(small_start_params(&["sudo", "-n", "true"])),
+            )
+            .await
+            .expect_err("developer_local denies sudo");
+        assert_eq!(err.code, IpcErrorCode::PolicyDenied);
+        handle.shutdown().await;
+        cleanup(&data);
+    });
 }
 
 #[test]

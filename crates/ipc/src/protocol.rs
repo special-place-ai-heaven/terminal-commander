@@ -908,7 +908,9 @@ pub struct PolicyCapsView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyStatusResponse {
     pub profile: String,
+    /// Active structural command denies (sudo/doas/su/...); 0 under `full_access`.
     pub commands_deny_count: usize,
+    /// Active default-deny path suffixes; 0 under `full_access`.
     pub default_deny_path_suffix_count: usize,
     /// Per-call file_read_window cap (from `LimitsSection`, clamped
     /// at config load to the codebase hard cap).
@@ -920,8 +922,9 @@ pub struct PolicyStatusResponse {
     /// and a base profile + `[policy.caps] allow_shell = true` both show the
     /// active set, with no opaque "full_access magic".
     pub caps: PolicyCapsView,
-    /// MCP `recipe_activate` / `recipe_deactivate` gate. Default false:
-    /// an MCP caller is denied with `recipe_activate_requires_admin`.
+    /// MCP `recipe_activate` / `recipe_deactivate` gate. True under the
+    /// default `full_access`; false on a hardened profile unless configured,
+    /// where an MCP caller is denied with `recipe_activate_requires_admin`.
     #[serde(default)]
     pub llm_can_activate_recipes: bool,
 }
@@ -1082,18 +1085,16 @@ pub enum ShellDenyClass {
 }
 
 impl ShellDenyClass {
-    /// Short human sentence. Steers to argv first; names the operator knob
-    /// (`allow_shell`) when the cap is what gates the call.
+    /// Short human sentence that steers to argv. The daemon appends the one
+    /// profile sentence that says how the config enables shell.
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
             Self::ShellCapabilityOff => {
-                "Shell execution denied: allow_shell is off. Retry with an argv array, \
-                 or ask the operator to set [policy.caps] allow_shell = true."
+                "Shell execution denied: allow_shell is off. Retry with an argv array."
             }
             Self::ShellInterpreterDenied => {
-                "Shell interpreter denied: allow_shell is off. Retry with a direct argv, \
-                 or ask the operator to set [policy.caps] allow_shell = true."
+                "Shell interpreter denied: allow_shell is off. Retry with a direct argv."
             }
             Self::ProfileForbidsShell => {
                 "This profile forbids shell execution; retry with an argv array."
