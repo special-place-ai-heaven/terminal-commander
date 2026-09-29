@@ -420,9 +420,9 @@ pub(in crate::ipc::server) async fn handle_credential_request(
     }
 }
 
-/// `credential_provide`: the owner typed a password into the admin CLI.
-/// Only the CLI image from the owner's own terminal passes; an MCP-labelled
-/// or daemon-started peer is denied even if it sends the request raw.
+/// `credential_provide`: the owner supplied a password through the admin CLI.
+/// The CLI may read a terminal or piped stdin. An MCP-labelled or
+/// daemon-started peer is denied even if it sends the request raw.
 #[cfg(any(unix, windows))]
 pub(in crate::ipc::server) async fn handle_credential_provide(
     state: &Arc<DaemonState>,
@@ -432,8 +432,8 @@ pub(in crate::ipc::server) async fn handle_credential_provide(
     if !super::recipe::caller_is_owner_cli(state, peer, params.from_mcp) {
         return Err(IpcError::new(
             IpcErrorCode::PolicyDenied,
-            "credential_provide_requires_owner: only the admin CLI run from the owner's own \
-             terminal (`terminal-commander credential provide <job_id>`) may answer a password \
+            "credential_provide_requires_owner: only the owner's admin CLI \
+             (`terminal-commander credential provide <job_id>`) may answer a password \
              prompt; the model never supplies a password. From MCP, call credential_request \
              {job_id} and the owner is asked directly.",
         ));
@@ -446,7 +446,16 @@ pub(in crate::ipc::server) async fn handle_credential_provide(
     }
     match state
         .pty
-        .deliver_credential(params.job_id, params.secret.as_bytes(), None, "cli")
+        .deliver_credential(
+            params.job_id,
+            params.secret.as_bytes(),
+            None,
+            if params.interactive {
+                "cli-tty"
+            } else {
+                "cli-stdin"
+            },
+        )
         .await
     {
         Ok(generation) => {
@@ -461,7 +470,7 @@ pub(in crate::ipc::server) async fn handle_credential_provide(
         Err(crate::pty_command::PtyRuntimeError::NotAwaitingCredential(id)) => Err(IpcError::new(
             IpcErrorCode::UnknownJob,
             format!(
-                "pty job '{}' is not waiting for a password; nothing was typed",
+                "pty job '{}' is not waiting for a password; nothing was provided",
                 id.to_wire_string()
             ),
         )),

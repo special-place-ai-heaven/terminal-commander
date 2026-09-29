@@ -535,7 +535,10 @@ audit row. All other IPC requests bump the idle clock and audit normally.
 > the model calls `credential_request` and the owner is asked directly (a
 > one-time local page the MCP client links to, a native dialog, else
 > `terminal-commander credential provide <job_id>` in the owner's terminal),
-> so the password never passes through the model.
+> so the password never passes through the model. That holds when TC is the
+> model's only way to run programs: a harness that also hands the model a raw
+> shell can pipe `credential provide` itself, and the audit row then reads
+> `cli-stdin` rather than `cli-tty`.
 
 > [!TIP]
 > Persistent shell sessions (`shell_session_*`) and workspace snapshots
