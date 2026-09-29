@@ -23,7 +23,9 @@
 //!
 //! ponytail: this is a guard rail, not a kernel boundary. It matches command
 //! basenames and path operands as strings. INDIRECT deletion is NOT caught:
-//! `find / -delete`, `python -c "shutil.rmtree('/usr')"`, an interactive
+//! `find / -delete` or `find /usr -exec rm -rf {} +`, `xargs rm -rf` fed from
+//! a pipe, PowerShell pipeline input (`Get-ChildItem C:\Windows |
+//! Remove-Item`), `python -c "shutil.rmtree('/usr')"`, an interactive
 //! `diskpart` script, a Makefile target, a path held in a variable. The
 //! complete control is a hardened profile plus OS permissions; this stops the
 //! obvious `rm -rf /` mistakes.
@@ -378,6 +380,22 @@ fn is_flag(token: &str) -> bool {
     (1..=2).contains(&head.len()) && head.chars().all(|c| c.is_ascii_alphabetic())
 }
 
+/// The value of a PowerShell colon-form parameter (`-Path:C:\Windows`,
+/// `-LiteralPath:'C:\Windows'`), which names an operand although the token
+/// starts with `-`. Only an alphabetic parameter name qualifies, so a POSIX
+/// `-rf` or `--no-preserve-root` is never split.
+fn pwsh_flag_value(token: &str) -> Option<&str> {
+    let (name, value) = token.strip_prefix('-')?.split_once(':')?;
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let value = value
+        .strip_prefix(['\'', '"'])
+        .and_then(|v| v.strip_suffix(['\'', '"']))
+        .unwrap_or(value);
+    (!value.is_empty()).then_some(value)
+}
+
 /// The destructive-deletion hit for a fully-formed argv, or `None`.
 ///
 /// Escalators and command wrappers (`env`, `nohup`, `timeout`, ...) are
@@ -428,13 +446,19 @@ fn argv_hit(argv: &[String], cwd: Option<&str>, depth: usize) -> Option<OsGuardH
     match kind {
         DestructiveKind::PathOperands => {
             for operand in operands {
-                if is_flag(operand) {
-                    continue;
-                }
-                if operand_is_protected(operand, cwd) {
+                let candidate = if is_flag(operand) {
+                    // PowerShell `-Path:C:\Windows`: the value is the operand.
+                    match pwsh_flag_value(operand) {
+                        Some(value) => value,
+                        None => continue,
+                    }
+                } else {
+                    operand.as_str()
+                };
+                if operand_is_protected(candidate, cwd) {
                     return Some(OsGuardHit {
                         op: name,
-                        path: operand.clone(),
+                        path: candidate.to_owned(),
                     });
                 }
             }
@@ -1388,6 +1412,40 @@ mod tests {
             "/dev/shm/x",
         ] {
             assert!(!is_os_critical_path(p), "must allow {p}");
+        }
+    }
+
+    #[test]
+    fn pwsh_colon_form_parameter_value_is_an_operand() {
+        for parts in [
+            &["Remove-Item", "-Recurse", r"-Path:C:\Windows"][..],
+            &[
+                "Remove-Item",
+                "-Recurse",
+                r"-LiteralPath:C:\Windows\System32",
+            ],
+            &["ri", "-Recurse", "-Force", r"-Path:'C:\Windows'"],
+        ] {
+            let hit = argv_deletion_hit(&argv(parts), None);
+            assert!(hit.is_some(), "must refuse {parts:?}");
+        }
+        assert!(
+            shell_line_deletion_hit(
+                r"Remove-Item -Recurse -Force -Path:'C:\Windows'",
+                "pwsh",
+                None
+            )
+            .is_some()
+        );
+        for parts in [
+            &["Remove-Item", "-Recurse", "-Path:node_modules"][..],
+            &["Remove-Item", "-Recurse", "-Path:"],
+            &["rm", "-rf", "target"],
+        ] {
+            assert!(
+                argv_deletion_hit(&argv(parts), None).is_none(),
+                "must allow {parts:?}"
+            );
         }
     }
 

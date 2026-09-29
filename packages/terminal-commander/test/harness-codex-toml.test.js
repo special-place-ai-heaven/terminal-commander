@@ -35,6 +35,7 @@ test("codex writer emits [.env] with TC_SESSION + TC_SURFACE", () => {
   assert.match(text, /\[mcp_servers\.terminal_commander\.env\]/);
   assert.match(text, /TC_SESSION = "tc-aaa111"/);
   assert.match(text, /TC_SURFACE = "compact"/);
+  assert.match(text, /CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"/);
 });
 
 test("codex force-rewrite replaces the env table cleanly (no orphaned/duplicate keys)", () => {
@@ -60,6 +61,7 @@ test("codex force-rewrite replaces the env table cleanly (no orphaned/duplicate 
     "expected exactly one env sub-table header",
   );
   assert.match(text, /TC_SURFACE = "full"/);
+  assert.equal((text.match(/CODEX_MCP_PROTOCOL_VERSION = /g) || []).length, 1);
   assert.equal(text.includes('"compact"'), false, "stale compact value must be gone");
 });
 

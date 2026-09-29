@@ -115,6 +115,23 @@ function writeJsonMcpConfig(opts) {
       hint: `terminal-commander: entry ${serverName} already exists; use --force`,
     };
   }
+  if (o.enableServer === true) {
+    for (const key of ["enabledServers", "disabledServers"]) {
+      if (key in merged.value && !Array.isArray(merged.value[key])) {
+        return {
+          status: JSON_MCP_STATUSES.INVALID_JSON,
+          path: target,
+          hint: `terminal-commander: invalid ${key} at ${target}`,
+        };
+      }
+    }
+    if (Array.isArray(merged.value.enabledServers) && !merged.value.enabledServers.includes(serverName)) {
+      merged.value.enabledServers.push(serverName);
+    }
+    if (Array.isArray(merged.value.disabledServers)) {
+      merged.value.disabledServers = merged.value.disabledServers.filter((name) => name !== serverName);
+    }
+  }
   const fileExisted = existingBuf != null;
   const contents = JSON.stringify(merged.value, null, 2) + "\n";
   const wrote = atomicWriteWithBackup(target, contents, {

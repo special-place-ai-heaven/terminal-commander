@@ -235,6 +235,7 @@ impl Harness {
             job_id,
             secret: OwnerSecret::new(SECRET.to_owned()),
             from_mcp,
+            interactive: false,
         }))
         .await
     }
@@ -802,7 +803,11 @@ fn credential_provide_is_denied_to_mcp_labelled_peers_and_answers_for_the_admin_
         let rows = h.credential_audit_rows().await;
         assert_eq!(rows.len(), 1, "{rows:?}");
         let meta: serde_json::Value = serde_json::from_str(&rows[0].1).unwrap();
-        assert_eq!(meta, serde_json::json!({"kind": "sudo", "source": "cli"}));
+        // Piped, not typed: the row says so.
+        assert_eq!(
+            meta,
+            serde_json::json!({"kind": "sudo", "source": "cli-stdin"})
+        );
 
         h.assert_secret_never_surfaced(job_id).await;
     });

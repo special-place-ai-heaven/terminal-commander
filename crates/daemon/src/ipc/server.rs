@@ -1580,6 +1580,7 @@ mod tests {
                 job_id: JobId::new(),
                 secret: terminal_commander_ipc::OwnerSecret::new(String::new()),
                 from_mcp: true,
+                interactive: false,
             }),
             IpcRequest::CredentialUrl(terminal_commander_ipc::CredentialUrlParams {
                 job_id: JobId::new(),

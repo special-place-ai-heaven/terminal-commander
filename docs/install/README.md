@@ -29,14 +29,9 @@ Primary user install:
 npm install -g terminal-commander@latest
 ```
 
-The npm install is intentionally passive:
-
-- no `postinstall` bootstrap
-- no MCP config writes
-- no daemon start
-- no WSL install
-- no shell wrapper
-- no hidden-window helper spawn
+npm installs outside CI run a guarded `postinstall` setup for detected
+harnesses. CI and `TC_NO_AUTO_SETUP=1` skip it. Run the explicit command below
+to configure or repair a harness whenever auto-setup was skipped.
 
 Development builds can still run the Rust crates directly:
 
@@ -46,23 +41,24 @@ cargo build --release -p terminal-commanderd -p terminal-commander-mcp -p termin
 
 ## 3. Explicit setup
 
-Harness configuration is an explicit operator action:
+To configure or repair detected harnesses explicitly:
 
 ```bash
 terminal-commander setup harness
 ```
 
-Provider-specific setup is also explicit:
+To target one provider:
 
 ```bash
 terminal-commander setup harness --provider cursor
 terminal-commander setup harness --provider codex-cli
+terminal-commander setup harness --provider omp
 terminal-commander setup harness --provider claude-code
 terminal-commander setup harness --provider claude-desktop
 ```
 
-Repair commands are explicit. Install and update paths do not silently
-write harness config or WSL files.
+The setup command refreshes only Terminal Commander's entry and backs up an
+existing config before writing.
 
 ## 4. Startup model
 

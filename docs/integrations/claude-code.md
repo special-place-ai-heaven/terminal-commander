@@ -9,8 +9,8 @@ npm install -g terminal-commander@latest
 terminal-commander setup harness --provider claude-code
 ```
 
-The npm install is passive. The setup command is the explicit step that merges
-Terminal Commander into Claude Code's MCP config.
+npm install outside CI attempts setup. The explicit command configures or
+repairs Terminal Commander in Claude Code's MCP config.
 
 ## Config Shape
 
@@ -75,7 +75,7 @@ the opt-in logon-task option.
 2. Restart Claude Code.
 3. Run `/mcp` and confirm `terminal_commander` is connected.
 
-Connect uses MCP **2026-07-28** only. See
+Claude Code connects with MCP **2026-07-28**. See
 [MCP protocol floor](README.md#mcp-protocol-floor). Tip `tools/list` emits
 SEP-2549 cache hints `ttlMs: 0` and `cacheScope: "public"` (#191
 emit-conform). Claude Code **2.1.283** and later lists Terminal Commander

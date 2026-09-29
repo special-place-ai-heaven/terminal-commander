@@ -16,6 +16,7 @@ const { writeCodexTomlConfig, buildCodexEnv } = require("./io/toml_mcp.js");
 const { resolveDirectExePath } = require("./stable_bin.js");
 const {
   codexConfigPath,
+  ompConfigPath,
   claudeCodeMcpConfigPath,
   claudeDesktopConfigPath,
 } = require("./paths.js");
@@ -173,10 +174,14 @@ function writeProvider(id, opts) {
     };
   }
 
-  if (id === "claude-code" || id === "claude-desktop") {
+  if (id === "claude-code" || id === "claude-desktop" || id === "omp") {
     const target =
       detection.config_path ||
-      (id === "claude-code" ? claudeCodeMcpConfigPath(o) : claudeDesktopConfigPath(o));
+      (id === "claude-code"
+        ? claudeCodeMcpConfigPath(o)
+        : id === "omp"
+          ? ompConfigPath(o)
+          : claudeDesktopConfigPath(o));
     const stanza = buildJsonMcpStanza({ ...o, sessionToken });
     if (dryRun) {
       return { id, status: HARNESS_WRITE_STATUSES.OK, dry_run: true, path: target, stanza };
@@ -185,6 +190,7 @@ function writeProvider(id, opts) {
       path: target,
       serverName: provider.serverName,
       serverConfig: stanza,
+      enableServer: id === "omp",
       force,
       clobber_backup,
       randomSuffix: o.randomSuffix,

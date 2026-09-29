@@ -115,6 +115,20 @@ test("Fix 3: malformed JSON is reported and the file is NEVER overwritten", () =
   assert.equal(baks.length, 0, "a refused write must not create a backup");
 });
 
+test("OMP setup refuses a malformed enabledServers list without touching the config", () => {
+  const target = tmpCfg("omp.json");
+  const prior = JSON.stringify({ mcpServers: {}, enabledServers: "wrong-type" });
+  fs.writeFileSync(target, prior);
+  const r = writeJsonMcpConfig({
+    path: target,
+    serverName: "terminal-commander",
+    serverConfig: STANZA,
+    enableServer: true,
+  });
+  assert.equal(r.status, "invalid_json");
+  assert.equal(fs.readFileSync(target, "utf8"), prior);
+});
+
 test("Fix 3: a leading UTF-8 BOM is stripped on read (parses + merges cleanly)", () => {
   const target = tmpCfg();
   fs.writeFileSync(

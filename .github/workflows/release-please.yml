@@ -1443,6 +1443,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions: { contents: read, issues: write }
     steps:
+      - uses: actions/checkout@v4
       - name: Wait for npm registry propagation
         shell: bash
         env:
@@ -1478,6 +1479,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions: { contents: read, issues: write }
     steps:
+      - uses: actions/checkout@v4
       - name: Wait for npm registry propagation
         shell: bash
         env:
@@ -1509,6 +1511,7 @@ jobs:
     runs-on: windows-2022
     permissions: { contents: read, issues: write }
     steps:
+      - uses: actions/checkout@v4
       - name: Wait for npm registry propagation
         shell: bash
         env:
@@ -1561,6 +1564,7 @@ jobs:
     runs-on: macos-15-intel   # Intel — macos-13 retired 2025-12-04; macos-15-intel is the supported Intel image. Keep a runner pinning task in runbook to rotate when GitHub deprecates.
     permissions: { contents: read, issues: write }
     steps:
+      - uses: actions/checkout@v4
       - name: Wait for npm registry propagation
         shell: bash
         env:
@@ -1604,6 +1608,7 @@ jobs:
     runs-on: macos-14   # Apple Silicon
     permissions: { contents: read, issues: write }
     steps:
+      - uses: actions/checkout@v4
       - name: Wait for npm registry propagation
         shell: bash
         env:

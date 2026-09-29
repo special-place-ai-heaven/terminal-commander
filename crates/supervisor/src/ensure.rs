@@ -376,6 +376,11 @@ async fn spawn_daemon_impl(opts: EnsureDaemonOptions, start: Instant) -> EnsureD
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_file_err));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {

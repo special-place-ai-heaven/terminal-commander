@@ -828,9 +828,13 @@ impl std::fmt::Debug for TerminalCommanderMcpServer {
 
 /// Adapter-level constant tied to `Cargo.toml`.
 const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// MCP revision for `get_info`, negotiation, and `system_discover.mcp_spec`.
+/// Preferred MCP revision for `get_info` and `system_discover.mcp_spec`.
 pub(crate) use terminal_commander_ipc::MCP_SPEC_REVISION;
-const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
+const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
+    ProtocolVersion::V_2026_07_28,
+    ProtocolVersion::V_2025_11_25,
+    ProtocolVersion::V_2025_06_18,
+];
 
 #[tool_router]
 impl TerminalCommanderMcpServer {
@@ -2908,7 +2912,7 @@ impl TerminalCommanderMcpServer {
 
     /// `pty_command_write_stdin` — bounded stdin write.
     #[tool(
-        description = "Write bounded UTF-8 stdin bytes to a running PTY job. Returns SecretInputDenied while a secret prompt is active: TC never accepts passwords from the model; call credential_request with the job_id so the owner is asked directly."
+        description = "Write bounded UTF-8 stdin bytes to a running PTY job. Returns SecretInputDenied while a secret prompt is active: no TC surface accepts a password from the model; call credential_request with the job_id so the owner is asked directly."
     )]
     async fn pty_command_write_stdin(
         &self,
@@ -2992,7 +2996,7 @@ impl TerminalCommanderMcpServer {
     /// CLI. The daemon owns every write. There is deliberately no MCP tool
     /// for `credential_provide`.
     #[tool(
-        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). TC never accepts passwords from the model: if your client supports URL elicitation it shows the owner a link to a one-time local page; otherwise the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop). The daemon types the answer into that job itself. Returns only {job_id, status}: provided | declined | pending (the owner has the link and has not answered yet; the page stays open 5 minutes: call credential_request again every few seconds to poll) | timeout (a dialog not answered within 60 s; it stays open, call again to keep waiting) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls poll, never re-ask. Never returns or accepts the password or the link."
+        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). No TC surface accepts a password from the model (this holds when TC is the model's only way to run programs; a harness that also gives the model a raw shell can defeat any owner-only channel): if your client supports URL elicitation it shows the owner a link to a one-time local page; otherwise the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop). The daemon types the answer into that job itself. Returns only {job_id, status}: provided | declined | pending (the owner has the link and has not answered yet; the page stays open 5 minutes: call credential_request again every few seconds to poll) | timeout (a dialog not answered within 60 s; it stays open, call again to keep waiting, and tell the owner a credential dialog is open: on Windows it may sit behind other windows with its taskbar entry flashing) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls poll, never re-ask. Never returns or accepts the password or the link."
     )]
     async fn credential_request(
         &self,
@@ -3668,7 +3672,7 @@ sub_seek, sub_close, sub_list."
         name = "session",
         description = "PTY commands and persistent shell sessions. To start a PTY command use \
 action=\"pty_start\"; write stdin with pty_stdin; stop with pty_stop; list with pty_list. \
-A job whose status shows awaiting_credential is at a password prompt: TC never accepts passwords \
+A job whose status shows awaiting_credential is at a password prompt: no TC surface accepts a password \
 from the model, so call credential_request with its job_id and the owner is asked directly. \
 For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires allow_session), sh_exec, sh_status, sh_stop, sh_list."
     )]
@@ -3810,7 +3814,7 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
 // complete result with `.into()`. This handler re-wraps `Complete` the same
 // way so the manual return stays explicit.
 //
-// Advertises MCP `2026-07-28` only, negotiated with `server/discover`.
+// Prefers `2026-07-28`; older clients use legacy `initialize`.
 impl ServerHandler for TerminalCommanderMcpServer {
     async fn list_tools(
         &self,
