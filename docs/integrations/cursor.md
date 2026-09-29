@@ -2,6 +2,10 @@
 
 Connect Cursor to Terminal Commander through MCP stdio.
 
+Cursor's older `initialize` handshake is supported by the adapter. On Windows,
+use a build whose `terminal-commander-mcp.exe` is a GUI subsystem executable;
+it keeps MCP stdio while avoiding a visible console window.
+
 Cursor reads MCP servers from `mcp.json`. Terminal Commander can write that
 file for you:
 
@@ -10,8 +14,8 @@ npm install -g terminal-commander@latest
 terminal-commander setup harness --provider cursor
 ```
 
-The npm install is passive. The setup command is the explicit step that merges
-the Cursor MCP stanza.
+npm install outside CI attempts setup. The explicit command configures or
+repairs the Cursor MCP stanza.
 
 ## Config Locations
 

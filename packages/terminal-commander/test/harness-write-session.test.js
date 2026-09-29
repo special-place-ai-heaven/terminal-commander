@@ -124,9 +124,10 @@ test("codex-cli TOML block emits TC_WSL_DISTRO only on win32", () => {
   assert.equal(lin.includes("TC_WSL_DISTRO"), false);
 });
 
-test("codex-cli TOML block omits the env sub-table when there are no env values", () => {
+test("codex-cli TOML block always keeps the modern protocol marker", () => {
   const block = buildCodexTomlBlock({ exePath: "x" });
-  assert.equal(block.includes("[mcp_servers.terminal_commander.env]"), false);
+  assert.match(block, /\[mcp_servers\.terminal_commander\.env\]/);
+  assert.match(block, /CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"/);
 });
 
 test("codex-cli TOML block rejects an unsafe TC_SESSION token", () => {

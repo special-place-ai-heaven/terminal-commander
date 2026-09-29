@@ -16,6 +16,15 @@ function entryConfigured(id, opts) {
     const text = fs.readFileSync(d.config_path, "utf8");
     if (id === "cursor") return text.includes("terminal-commander-mcp");
     if (id === "codex-cli") return text.includes("[mcp_servers.terminal_commander]");
+    if (id === "omp") {
+      const config = JSON.parse(text);
+      const name = "terminal-commander";
+      if ("enabledServers" in config && !Array.isArray(config.enabledServers)) return false;
+      if ("disabledServers" in config && !Array.isArray(config.disabledServers)) return false;
+      return Boolean(config.mcpServers?.[name]?.command) &&
+        (!Array.isArray(config.enabledServers) || config.enabledServers.includes(name)) &&
+        (!Array.isArray(config.disabledServers) || !config.disabledServers.includes(name));
+    }
     if (id === "claude-code") {
       return text.includes("terminal-commander-mcp") && text.includes('"terminal_commander"');
     }

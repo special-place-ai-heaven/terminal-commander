@@ -185,11 +185,9 @@ shell wrappers.
 
 ## Protocol floor
 
-Harness setup is unchanged. Tip Terminal Commander accepts MCP protocol
-**2026-07-28** only. Codex still needs its opt-in. OMP that initializes
-with `2025-11-25` stays out of support. See
-[MCP protocol floor](README.md#mcp-protocol-floor). This surface does
-not reopen dual-protocol or OMP client work.
+Harness setup is unchanged. Terminal Commander prefers **2026-07-28** and
+accepts legacy **2025-11-25** and **2025-06-18** clients. See
+[MCP protocol floor](README.md#mcp-protocol-floor).
 
 ## See also
 

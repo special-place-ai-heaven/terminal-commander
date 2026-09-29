@@ -8,10 +8,10 @@ npm root wrapper for [Terminal Commander](https://github.com/special-place-ai-he
 npm install -g terminal-commander@latest
 ```
 
-Install is passive: no lifecycle bootstrap, no automatic MCP config writes, no
-daemon start, no WSL install, and no hidden-window subprocess request.
+npm install outside CI attempts guarded setup for detected harnesses.
+CI and `TC_NO_AUTO_SETUP=1` skip auto-setup.
 
-Configure harnesses explicitly:
+Configure or repair harnesses explicitly:
 
 ```powershell
 terminal-commander setup harness
@@ -22,6 +22,7 @@ Or target one provider:
 ```powershell
 terminal-commander setup harness --provider cursor
 terminal-commander setup harness --provider codex-cli
+terminal-commander setup harness --provider omp
 terminal-commander setup harness --provider claude-code
 terminal-commander setup harness --provider claude-desktop
 ```

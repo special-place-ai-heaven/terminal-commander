@@ -28,8 +28,8 @@ package by default. The legacy WSL bridge is opt-in with
 
 ## Bootstrap behavior today
 
-`npm install -g terminal-commander` is passive and does not run harness
-detection. `terminal-commander setup harness` detects providers explicitly. If
+Interactive `npm install -g terminal-commander` attempts harness detection;
+`terminal-commander setup harness` runs it explicitly. If
 Gemini install markers are not found, the provider is skipped with no config
 write. If markers are found but the config path is unverified, setup reports
 `gemini: config_path_unverified` and does not modify files.

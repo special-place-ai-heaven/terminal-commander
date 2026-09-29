@@ -87,13 +87,16 @@ function isLikelyMalformedToml(text) {
  */
 function buildCodexEnv(opts) {
   const o = opts || {};
-  return buildHarnessEnv({
-    sessionToken: o.sessionToken,
-    surface: o.surface,
-    distro: o.distro,
-    gateDistroOnWin32: true, // Codex: win32-only distro
-    platform: o.platform,
-  });
+  return {
+    ...buildHarnessEnv({
+      sessionToken: o.sessionToken,
+      surface: o.surface,
+      distro: o.distro,
+      gateDistroOnWin32: true,
+      platform: o.platform,
+    }),
+    CODEX_MCP_PROTOCOL_VERSION: "2026-07-28",
+  };
 }
 
 function buildCodexTomlBlock(opts) {

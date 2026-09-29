@@ -13,10 +13,8 @@ function shouldSkipBootstrap(env) {
 }
 
 /**
- * Heuristic CI / non-interactive / headless detection. A postinstall must be a
- * SAFE no-op in CI and in any non-interactive install so it never blocks or
- * surprises an automated pipeline (Fix 4). Honors the de-facto `CI` standard
- * plus the common provider flags, and treats a non-TTY stdout as headless.
+ * Detect CI environments where postinstall auto-setup must be a no-op.
+ * Honors the de-facto `CI` standard plus common provider flags.
  *
  * @param {NodeJS.ProcessEnv} [env]
  * @returns {boolean}
@@ -62,7 +60,7 @@ function isGlobalNpmInstall(env) {
 /** True when npm is running this package's install lifecycle script. */
 function isPackageInstallLifecycle(env) {
   const e = env || process.env;
-  return e.npm_lifecycle_event === "install" && e.npm_lifecycle_script != null;
+  return e.npm_lifecycle_event === "postinstall" && e.npm_lifecycle_script != null;
 }
 
 module.exports = {

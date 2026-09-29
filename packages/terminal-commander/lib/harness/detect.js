@@ -10,6 +10,7 @@ const path = require("node:path");
 const { getCursorGlobalConfigPath } = require("../cursor/config.js");
 const {
   codexConfigPath,
+  ompConfigPath,
   claudeCodeSettingsPath,
   claudeCodeMcpConfigPath,
   claudeDesktopConfigPath,
@@ -45,6 +46,14 @@ function detectCodex(opts) {
   const codexDir = path.dirname(p);
   if (pathExists(p) || pathExists(codexDir)) {
     return { detected: true, reason: "codex_config_or_dir", config_path: p };
+  }
+  return { detected: false, reason: "not_found" };
+}
+
+function detectOmp(opts) {
+  const p = ompConfigPath(opts);
+  if (pathExists(p) || pathExists(path.dirname(p))) {
+    return { detected: true, reason: "omp_config_or_dir", config_path: p };
   }
   return { detected: false, reason: "not_found" };
 }
@@ -112,6 +121,7 @@ function detectKimi(opts) {
 const DETECTORS = Object.freeze({
   cursor: detectCursor,
   "codex-cli": detectCodex,
+  omp: detectOmp,
   "claude-code": detectClaudeCode,
   "claude-desktop": detectClaudeDesktop,
   gemini: detectGemini,
@@ -144,6 +154,7 @@ module.exports = {
   detectAllHarnesses,
   detectCursor,
   detectCodex,
+  detectOmp,
   detectClaudeCode,
   detectClaudeDesktop,
   detectGemini,

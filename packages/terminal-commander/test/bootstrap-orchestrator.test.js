@@ -30,12 +30,11 @@ test("runBootstrap install mode auto-configures harnesses (force)", async () => 
     mode: "install",
     platform: "linux",
     env: {
-      npm_lifecycle_event: "install",
-      npm_lifecycle_script: "terminal-commander setup harness",
+      npm_lifecycle_event: "postinstall",
+      npm_lifecycle_script: "node scripts/postinstall.js",
       HOME: process.env.HOME || process.env.USERPROFILE || "/tmp",
     },
     acquireLock: false,
-    require_install_lifecycle: false,
     writeAllHarnesses: (opts) => {
       wrote.push(opts.force);
       return [];

@@ -21,6 +21,13 @@ const PROVIDERS = Object.freeze([
     stub: false,
   },
   {
+    id: "omp",
+    label: "OMP",
+    format: "json-mcp",
+    serverName: "terminal-commander",
+    stub: false,
+  },
+  {
     id: "claude-code",
     label: "Claude Code",
     format: "json-mcp",

@@ -51,8 +51,8 @@ Language: ASCII only.
    [`codex-cli.md`](codex-cli.md). Claude Code lists tools on tip
    (`ttlMs: 0`, `cacheScope: "public"`); see
    [`claude-code.md`](claude-code.md).
-   OMP is not a setup provider; see [`omp.md`](omp.md). The protocol floor
-   for every harness is [MCP 2026-07-28 only](README.md#mcp-protocol-floor).
+    OMP can be configured with `--provider omp`; see [`omp.md`](omp.md).
+    Supported revisions are listed in [MCP protocol floor](README.md#mcp-protocol-floor).
 
 2. Confirm the daemon is reachable: `terminal-commander doctor daemon`.
 3. For the session check, the operator must have enabled `allow_session`

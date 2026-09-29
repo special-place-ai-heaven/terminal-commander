@@ -828,9 +828,13 @@ impl std::fmt::Debug for TerminalCommanderMcpServer {
 
 /// Adapter-level constant tied to `Cargo.toml`.
 const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// MCP revision for `get_info`, negotiation, and `system_discover.mcp_spec`.
+/// Preferred MCP revision for `get_info` and `system_discover.mcp_spec`.
 pub(crate) use terminal_commander_ipc::MCP_SPEC_REVISION;
-const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
+const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
+    ProtocolVersion::V_2026_07_28,
+    ProtocolVersion::V_2025_11_25,
+    ProtocolVersion::V_2025_06_18,
+];
 
 #[tool_router]
 impl TerminalCommanderMcpServer {
@@ -3810,7 +3814,7 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
 // complete result with `.into()`. This handler re-wraps `Complete` the same
 // way so the manual return stays explicit.
 //
-// Advertises MCP `2026-07-28` only, negotiated with `server/discover`.
+// Prefers `2026-07-28`; older clients use legacy `initialize`.
 impl ServerHandler for TerminalCommanderMcpServer {
     async fn list_tools(
         &self,

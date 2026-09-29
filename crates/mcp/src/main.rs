@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 //! `terminal-commander-mcp`: real rmcp stdio MCP adapter.
 //!
 //! Boots an rmcp `ServerHandler` over the stdio transport and forwards

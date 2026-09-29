@@ -9,7 +9,7 @@
 // HARD SAFETY CONTRACT (must never break `npm install`):
 //   - The whole body is wrapped in try/catch and ALWAYS exits 0. A setup
 //     failure prints a one-line hint and is swallowed — `npm install` succeeds.
-//   - SAFE no-op in CI / non-interactive (isCiOrNonInteractive) and when
+//   - SAFE no-op in CI (isCiOrNonInteractive) and when
 //     TC_NO_AUTO_SETUP=1 / TC_SKIP_BOOTSTRAP=1 (shouldSkipBootstrap).
 //   - Routed through runBootstrap({ mode:"install" }), which is fail-soft,
 //     autoConfigures (force-refresh, idempotent), and uses the atomic +
@@ -39,7 +39,7 @@ function main() {
     return;
   }
 
-  // Guard 2: CI / non-interactive installs are a SAFE no-op. The user can run
+  // Guard 2: CI installs are a SAFE no-op. The user can run
   // `terminal-commander setup harness` explicitly when they want it.
   if (isCiOrNonInteractive(env)) {
     return;

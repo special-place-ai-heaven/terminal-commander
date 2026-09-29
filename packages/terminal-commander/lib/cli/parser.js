@@ -368,8 +368,8 @@ FLAGS
   --install-wsl-runtime               Alias for default WSL ensure (always on
                                       for bootstrap unless TC_SKIP_BOOTSTRAP=1).
   --provider <id>                     Configure only one harness (cursor,
-                                      codex-cli, claude-code, claude-desktop,
-                                      gemini, kimi).
+                                      codex-cli, omp, claude-code,
+                                      claude-desktop, gemini, kimi).
   --surface <compact|full>            MCP tool surface the configured server
                                       advertises. Writes env.TC_SURFACE into
                                       each harness stanza (cursor, claude-code,

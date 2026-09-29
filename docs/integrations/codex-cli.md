@@ -9,24 +9,21 @@ npm install -g terminal-commander@latest
 terminal-commander setup harness --provider codex-cli
 ```
 
-The npm install is passive. The setup command is the explicit step that merges
-the server block into `~/.codex/config.toml`. It does not turn on Codex's
-MCP 2026-07-28 feature. Add that opt-in yourself, below.
+npm install outside CI attempts setup; the explicit command configures or
+repairs the server block and protocol marker in `~/.codex/config.toml`. It leaves
+Codex's optional MCP 2026-07-28 feature flag to you.
 
 ## MCP 2026-07-28 opt-in
 
-Tip accepts protocol **2026-07-28** only. See
+The adapter accepts Codex's default **2025-06-18** handshake and prefers
+**2026-07-28**. See
 [MCP protocol floor](README.md#mcp-protocol-floor).
 
 Codex CLI's legacy default (no opt-in) still opens `initialize` with
-**2025-06-18**. Tip rejects that handshake with JSON-RPC `-32022`
-Unsupported protocol version (`requested` `2025-06-18`, `supported`
-`["2026-07-28"]`). That default is out of support for this tip until you
-opt in. Dogfood on **0.157.1** already speaks Discover when the opt-in is
-on, and the same build still sends `2025-06-18` when it is off. The
-connecting change is this opt-in, on `>= 0.147.0` (pin **0.157.1**).
+**2025-06-18**, which the adapter now accepts. Dogfood on **0.157.1**
+speaks Discover when the opt-in is on. Prefer that path when available.
 
-Both of these are required:
+For the modern path, set both of these:
 
 1. In `~/.codex/config.toml`, enable the feature:
 
@@ -35,8 +32,7 @@ Both of these are required:
 mcp_2026_07_28 = true
 ```
 
-2. On the Terminal Commander server env block, set the protocol marker Codex
-   documents for stdio:
+2. Setup writes the protocol marker in the Terminal Commander server env block:
 
 ```toml
 [mcp_servers.terminal_commander.env]
@@ -44,13 +40,10 @@ CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"
 ```
 
 `terminal-commander setup harness --provider codex-cli` writes
-`[mcp_servers.terminal_commander]` and, when it has values, the env table
-(`TC_SESSION`, plus `TC_SURFACE` or Windows `TC_WSL_DISTRO` when you asked
-for them). Put `CODEX_MCP_PROTOCOL_VERSION` in that same env table and leave
-the setup keys in place. `[features]` sits outside the server table, so a
-later setup leaves it alone. A `--force` rewrite replaces the server block
-and its env table and drops `CODEX_MCP_PROTOCOL_VERSION`; put that line back
-after a force rewrite.
+`[mcp_servers.terminal_commander]` and its env table with `TC_SESSION`,
+`CODEX_MCP_PROTOCOL_VERSION`, and requested optional settings. A force
+refresh writes the marker again. `[features]` sits outside the server
+table, so setup leaves your feature choice alone.
 
 Codex warns that the under-development feature `mcp_2026_07_28` is enabled.
 `suppress_unstable_features_warning = true` in the same file hides that
