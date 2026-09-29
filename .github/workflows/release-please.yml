@@ -1534,7 +1534,11 @@ jobs:
           # WaitForExit(10000) times the child process itself, so a real hang
           # or crash is measured accurately and a failed handshake fails loud.
           $psi = [System.Diagnostics.ProcessStartInfo]::new()
-          $psi.FileName = "terminal-commander-mcp"
+          # npm's global shim on Windows is terminal-commander-mcp.cmd. Process.Start
+          # with UseShellExecute=false resolves only .exe on PATH, so it cannot find
+          # it; run the shim's JS entry under node, exactly what the .cmd wrapper does.
+          $psi.FileName = (Get-Command node).Source
+          $psi.Arguments = '"' + (Join-Path (npm root -g) 'terminal-commander/bin/terminal-commander-mcp.js') + '"'
           $psi.RedirectStandardInput = $true
           $psi.RedirectStandardOutput = $true
           $psi.UseShellExecute = $false
