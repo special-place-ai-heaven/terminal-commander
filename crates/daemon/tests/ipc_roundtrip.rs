@@ -58,7 +58,7 @@ fn system_discover_round_trip() {
         let data = tmp_data_dir("discover");
         let (state, handle) = build_server(&data);
         let client = DaemonClient::new(handle.socket_path().to_path_buf())
-            .with_timeout(Duration::from_secs(2));
+            .with_timeout(Duration::from_secs(15));
         let resp = client.call(1, IpcRequest::SystemDiscover).await.unwrap();
         match resp {
             IpcResponse::SystemDiscover(d) => {
@@ -70,7 +70,16 @@ fn system_discover_round_trip() {
                 assert_eq!(d.environment.os, std::env::consts::OS);
                 assert_eq!(d.environment.arch, std::env::consts::ARCH);
                 assert!(!d.environment.shells.is_empty());
-                assert!(d.environment.discovery_ms < 2_000);
+                // Discovery is bounded, not fast: every probe runs under a
+                // 2 s per-probe timeout, and a loaded CI runner can hit it
+                // (a slow `bash -lc` did on 2026-09-29). The bound asserted
+                // here must sit above that worst case, or the suite fails
+                // without any product regression.
+                assert!(
+                    d.environment.discovery_ms < 10_000,
+                    "discovery must stay bounded, took {}ms",
+                    d.environment.discovery_ms
+                );
             }
             other => panic!("unexpected response: {other:?}"),
         }
