@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.2](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.1...v0.3.2) (2026-09-29)
+
+
+### Bug Fixes
+
+* audit credential input and guard colon paths ([ab0f5d2](https://github.com/special-place-ai-heaven/terminal-commander/commit/ab0f5d250625a6b0e730519a99e322878510e7cc))
+* restore harness onboarding and legacy MCP clients ([ab0f5d2](https://github.com/special-place-ai-heaven/terminal-commander/commit/ab0f5d250625a6b0e730519a99e322878510e7cc))
+* restore harness onboarding and legacy MCP clients ([0ae4781](https://github.com/special-place-ai-heaven/terminal-commander/commit/0ae4781123e774eb17e703886a005c11d6b7cdfa))
+* restore harness onboarding and legacy MCP clients ([f5cf925](https://github.com/special-place-ai-heaven/terminal-commander/commit/f5cf92528f6e593bf8d575486fcf8d774d4b4746))
+
 ## [0.3.1](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.0...v0.3.1) (2026-09-28)
 
 
