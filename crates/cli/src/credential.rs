@@ -75,8 +75,8 @@ pub(crate) fn run_provide(job_id: &str) -> ExitCode {
         )
     );
 
-    let secret = match read_secret() {
-        Ok(s) => OwnerSecret::new(s),
+    let (secret, interactive) = match read_secret() {
+        Ok((s, tty)) => (OwnerSecret::new(s), tty),
         Err(e) => {
             eprintln!("terminal-commander: credential provide: could not read the password: {e}");
             return ExitCode::from(1);
@@ -86,6 +86,7 @@ pub(crate) fn run_provide(job_id: &str) -> ExitCode {
         job_id,
         secret,
         from_mcp: false,
+        interactive,
     });
     match rt.block_on(connect_or_unavailable(2, request)) {
         Ok(IpcResponse::CredentialProvide(_)) => {
@@ -104,8 +105,9 @@ pub(crate) fn run_provide(job_id: &str) -> ExitCode {
 }
 
 /// One line from stdin, echo off when stdin is a terminal. Piped stdin is
-/// read as-is (scripted owners, tests).
-fn read_secret() -> std::io::Result<String> {
+/// read as-is (scripted owners, tests); the flag tells the daemon which it
+/// was, so the audit row can say `cli-tty` or `cli-stdin`.
+fn read_secret() -> std::io::Result<(String, bool)> {
     use std::io::{BufRead, IsTerminal, Write};
 
     let stdin = std::io::stdin();
@@ -123,7 +125,7 @@ fn read_secret() -> std::io::Result<String> {
     while line.ends_with(['\n', '\r']) {
         line.pop();
     }
-    Ok(line)
+    Ok((line, tty))
 }
 
 /// Terminal echo off for the guard's lifetime.

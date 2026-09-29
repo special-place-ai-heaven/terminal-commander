@@ -2925,6 +2925,11 @@ pub struct CredentialProvideParams {
     /// defaults to true, and only the admin CLI image can provide.
     #[serde(default = "default_true")]
     pub from_mcp: bool,
+    /// The CLI read the answer from a terminal with echo off, not from
+    /// piped stdin. Audit only (`cli-tty` / `cli-stdin`), never a gate: a
+    /// caller with a shell of its own can pipe, and the log should say so.
+    #[serde(default)]
+    pub interactive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4866,6 +4871,7 @@ mod tests {
             job_id: JobId::new(),
             secret: OwnerSecret::new("hunter2-marker".to_owned()),
             from_mcp: false,
+            interactive: true,
         });
         assert!(!format!("{req:?}").contains("hunter2-marker"));
         let frame = encode_frame(&RequestEnvelope {
@@ -4879,10 +4885,12 @@ mod tests {
         };
         assert_eq!(p.secret.as_bytes(), b"hunter2-marker");
         assert!(!p.from_mcp);
-        // An omitted claim is not admin.
+        assert!(p.interactive);
+        // An omitted claim is not admin, and an omitted flag is not a terminal.
         let raw = serde_json::json!({ "job_id": p.job_id, "secret": "x" });
         let parsed: CredentialProvideParams = serde_json::from_value(raw).unwrap();
         assert!(parsed.from_mcp);
+        assert!(!parsed.interactive);
     }
 
     #[test]

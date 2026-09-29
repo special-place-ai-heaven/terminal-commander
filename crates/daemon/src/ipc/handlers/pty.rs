@@ -446,7 +446,16 @@ pub(in crate::ipc::server) async fn handle_credential_provide(
     }
     match state
         .pty
-        .deliver_credential(params.job_id, params.secret.as_bytes(), None, "cli")
+        .deliver_credential(
+            params.job_id,
+            params.secret.as_bytes(),
+            None,
+            if params.interactive {
+                "cli-tty"
+            } else {
+                "cli-stdin"
+            },
+        )
         .await
     {
         Ok(generation) => {

@@ -42,7 +42,7 @@ sub_seek, sub_close, sub_list.";
 /// Description for the `session` facade.
 pub(crate) const SESSION_FACADE_DESCRIPTION: &str = "PTY commands and persistent shell sessions. To start a PTY command use \
 action=\"pty_start\"; write stdin with pty_stdin; stop with pty_stop; list with pty_list. \
-A job whose status shows awaiting_credential is at a password prompt: TC never accepts passwords \
+A job whose status shows awaiting_credential is at a password prompt: no TC surface accepts a password \
 from the model, so call credential_request with its job_id and the owner is asked directly. \
 For sticky-cwd sessions (unix-only; unavailable on Windows): sh_start (requires allow_session), sh_exec, sh_status, sh_stop, sh_list.";
 
