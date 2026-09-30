@@ -25,6 +25,7 @@
 pub mod daemon_client;
 pub mod facade_strict;
 pub mod facades;
+pub mod implicit_init;
 pub mod surface;
 pub mod surface_list;
 pub mod target_router;

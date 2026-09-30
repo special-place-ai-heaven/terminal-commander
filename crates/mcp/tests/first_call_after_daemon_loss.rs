@@ -171,7 +171,15 @@ fn read_only_call_right_after_daemon_loss_succeeds() {
         is_success(&after),
         "first call after the daemon went away must restart it and succeed, got: {after}"
     );
-    let new = daemon_pid(&a.state_dir).expect("a daemon should be running again");
+    // The restarted daemon records its pid just after it starts listening, so
+    // the pidfile can briefly lag the successful call under load.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut new = daemon_pid(&a.state_dir);
+    while new == Some(old) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        new = daemon_pid(&a.state_dir);
+    }
+    let new = new.expect("a daemon should be running again");
     assert_ne!(new, old, "the daemon should have been restarted");
 }
 
