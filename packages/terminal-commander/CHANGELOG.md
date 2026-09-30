@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.2...v0.3.3) (2026-09-30)
+
+
+### Bug Fixes
+
+* **release:** wait for the npm tarball before verify installs ([8ef042e](https://github.com/special-place-ai-heaven/terminal-commander/commit/8ef042eeea4fae92ae99d6d33cf71cf816d6b21b))
+
 ## [0.3.2](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.1...v0.3.2) (2026-09-29)
 
 
