@@ -12,7 +12,7 @@
 
 "use strict";
 
-const { spawn } = require("child_process");
+const { spawn, execFileSync } = require("child_process");
 const fs = require("fs");
 const https = require("https");
 const path = require("path");
@@ -42,8 +42,7 @@ function isJsCliRequest(argv) {
   return false;
 }
 
-function npmInvocation() {
-  const args = ["install", "-g", "terminal-commander@latest"];
+function npmInvocation(args = ["install", "-g", "terminal-commander@latest"]) {
   if (process.platform !== "win32") {
     return { command: "npm", args };
   }
@@ -205,6 +204,27 @@ function runUpdate() {
   });
 }
 
+// Ask npm itself for its global package root (`npm root -g`), run the same
+// AV-safe way as the update (node + npm-cli.js, no shell). This is right for
+// any prefix, including a custom one set in .npmrc, which no environment
+// variable reveals when `terminal-commander update` is typed in a shell.
+function npmGlobalRoot() {
+  const invocation = npmInvocation(["root", "-g"]);
+  if (!invocation) return null;
+  try {
+    const out = execFileSync(invocation.command, invocation.args, {
+      encoding: "utf8",
+      timeout: 15000,
+      stdio: ["ignore", "pipe", "ignore"],
+      shell: false,
+    });
+    const root = out.trim().split(/\r?\n/).pop();
+    return root || null;
+  } catch (_e) {
+    return null;
+  }
+}
+
 // Locate the freshly-installed launcher's JS entry under the npm GLOBAL root so
 // we can re-run setup with the NEW version via `node <new>/bin/terminal-commander.js`.
 // Spawning `process.execPath` + the resolved JS entry (no shell, no Windows
@@ -220,6 +240,13 @@ function globalLauncherEntry() {
       path.join(prefix, "node_modules", "terminal-commander", "bin", "terminal-commander.js"),
     );
   }
+  const npmRoot = npmGlobalRoot();
+  if (npmRoot) {
+    candidates.push(path.join(npmRoot, "terminal-commander", "bin", "terminal-commander.js"));
+  }
+  // This launcher's own install: `update` treats it as the global install (its
+  // preflight scopes are derived from it), and npm replaced it in place.
+  candidates.push(__filename);
   // Fallback: the global root that hosts node itself (npm's default prefix).
   candidates.push(
     path.join(path.dirname(process.execPath), "node_modules", "terminal-commander", "bin", "terminal-commander.js"),

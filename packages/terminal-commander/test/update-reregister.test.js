@@ -193,3 +193,38 @@ test("bin/terminal-commander.js wires the re-register into the npm-success branc
     "reregisterHarnesses must spawn `node <entry> setup harness` (new process, new binary)",
   );
 });
+
+test("update finds the new launcher without npm environment variables (custom global prefix)", () => {
+  // `terminal-commander update` is normally typed in a shell, not run by npm, so
+  // npm_config_prefix / PREFIX are unset. With a custom npm prefix (for example
+  // ~/.npm-global) the old lookup found nothing and printed "could not locate the
+  // new launcher" after every successful update. The lookup must still resolve a
+  // real launcher: npm's own global root, or this launcher's install path.
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tc-update-noprefix-"));
+  try {
+    const recordPath = path.join(tmpDir, "spawns.json");
+    fs.writeFileSync(recordPath, "[]", "utf8");
+    const injector = makeSpawnRecorder(tmpDir, recordPath);
+    const env = { ...process.env, __TEST_NPM_EXIT__: "0" };
+    for (const key of Object.keys(env)) {
+      if (/^npm_config_prefix$|^PREFIX$/i.test(key)) delete env[key];
+    }
+    const result = spawnSync(process.execPath, ["--require", injector, UPDATE_SHIM, "update"], {
+      encoding: "utf8",
+      timeout: 30_000,
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+      env,
+    });
+    assert.equal(result.status, 0, `stderr=${result.stderr}`);
+    assert.doesNotMatch(result.stderr, /could not locate the new launcher/);
+    const spawns = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+    const setupSpawn = spawns.find(isSetupHarnessSpawn);
+    assert.ok(setupSpawn, `expected a 'setup harness' spawn; spawns=${JSON.stringify(spawns)}`);
+    const entry = setupSpawn.args[0];
+    assert.match(entry, /terminal-commander[\\/]bin[\\/]terminal-commander\.js$/);
+    assert.ok(fs.existsSync(entry), `re-register must target an existing launcher: ${entry}`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
