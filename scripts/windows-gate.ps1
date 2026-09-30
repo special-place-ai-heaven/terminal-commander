@@ -57,6 +57,14 @@ Invoke-Gate 'terminal-commanderd' 'runtime_state_windows' @('collect_probes_pty_
 # the argument fails the gate instead of silently removing the guarantee.
 Invoke-Gate 'terminal-commanderd' 'windows_job_object_ownership' @()
 
+# The daemon the adapter starts must not inherit the adapter's stdio pipes: the
+# v0.3.3 verify-windows-x64 job hung on exactly that. The test drives the real
+# adapter and daemon binaries, and `cargo test -p terminal-commander-mcp` builds
+# only the adapter, so build the daemon first.
+& cargo build -p terminal-commanderd
+if ($LASTEXITCODE -ne 0) { Write-Error 'tc-gate: terminal-commanderd build FAILED'; exit 1 }
+Invoke-Gate 'terminal-commander-mcp' 'daemon_releases_adapter_stdout' @()
+
 # F-010 / O-07: live ConPTY child-output + secret-gate e2e. Runs on GitHub Actions
 # (required pre-build-gates-windows) and when a developer opts in with
 # TC_CONPTY_E2E=1. Refuse a vacuous pass if the opt-in tests self-skip (headless
