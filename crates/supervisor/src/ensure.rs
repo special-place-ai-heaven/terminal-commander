@@ -283,6 +283,35 @@ pub(crate) async fn spawn_under_lock(
 /// so the locked path (`spawn_under_lock`) and the lock-unavailable
 /// fallback can share it. Callers are responsible for the single-flight
 /// lock; this function performs no locking of its own.
+/// Windows `CreateProcess` runs with handle inheritance on, so the daemon
+/// receives every inheritable handle this process holds, not only the log
+/// files set as its stdio. This process's own stdin/stdout/stderr are
+/// inheritable pipes from whoever launched the MCP adapter; a daemon holding
+/// them keeps that pipe open after the adapter exits, and the launcher never
+/// sees end-of-output. Clearing the inherit flag on our copies stops that.
+/// Children spawned with `Stdio::inherit` are unaffected: std duplicates the
+/// handle as inheritable at spawn time.
+#[cfg(windows)]
+fn stop_std_handle_inheritance() {
+    use windows::Win32::Foundation::{HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation};
+    use windows::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle only reads the process parameter block. A
+        // missing or invalid handle comes back as Err or null and is skipped;
+        // SetHandleInformation on a live handle changes only its inherit bit.
+        unsafe {
+            if let Ok(h) = GetStdHandle(which)
+                && !h.is_invalid()
+                && !h.0.is_null()
+            {
+                let _ = SetHandleInformation(h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0));
+            }
+        }
+    }
+}
+
 async fn spawn_daemon_impl(opts: EnsureDaemonOptions, start: Instant) -> EnsureDaemonStatus {
     // Spawn daemon. Only fail-fast on BinaryNotFound when the caller
     // gave us an absolute or relative path (something with a separator).
@@ -380,6 +409,7 @@ async fn spawn_daemon_impl(opts: EnsureDaemonOptions, start: Instant) -> EnsureD
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        stop_std_handle_inheritance();
     }
     let child = match cmd.spawn() {
         Ok(c) => c,

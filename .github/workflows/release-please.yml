@@ -1441,6 +1441,7 @@ jobs:
     needs: [release-context, publish-root]
     if: always() && needs.publish-root.result == 'success'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
     permissions: { contents: read, issues: write }
     steps:
       - uses: actions/checkout@v4
@@ -1477,6 +1478,7 @@ jobs:
     needs: [release-context, publish-root]
     if: always() && needs.publish-root.result == 'success'
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
     permissions: { contents: read, issues: write }
     steps:
       - uses: actions/checkout@v4
@@ -1509,6 +1511,7 @@ jobs:
     needs: [release-context, publish-root]
     if: always() && needs.publish-root.result == 'success'
     runs-on: windows-2022
+    timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
     permissions: { contents: read, issues: write }
     steps:
       - uses: actions/checkout@v4
@@ -1543,6 +1546,10 @@ jobs:
           $psi.RedirectStandardOutput = $true
           $psi.UseShellExecute = $false
           $proc = [System.Diagnostics.Process]::Start($psi)
+          # Read stdout asynchronously and bound the wait: if the daemon the
+          # adapter starts inherits the stdout pipe, a blocking ReadToEnd never
+          # returns and the job hangs (v0.3.3 did). Fail loudly instead.
+          $read = $proc.StandardOutput.ReadToEndAsync()
           $proc.StandardInput.WriteLine($env:MCP_DISCOVER)
           $proc.StandardInput.Close()
           $completed = $proc.WaitForExit(10000)
@@ -1550,7 +1557,10 @@ jobs:
             Write-Host "smoke: stdio probe timed out (expected for unbounded server)"
             try { $proc.Kill() } catch {}
           } else {
-            $output = $proc.StandardOutput.ReadToEnd()
+            if (-not $read.Wait(15000)) {
+              throw "verify-windows-x64: adapter exited but its stdout never closed; the daemon it started holds the pipe"
+            }
+            $output = $read.Result
             if ($output) { Write-Host "stdio: $output" }
             if ($proc.ExitCode -ne 0) {
               throw "verify-windows-x64: MCP exited fast with code $($proc.ExitCode) — install is broken"
@@ -1559,6 +1569,8 @@ jobs:
               throw "verify-windows-x64: stdio probe got no server/discover result"
             }
           }
+          # Stop the adapter and daemon the probe started so no process outlives the step.
+          Get-Process terminal-commander-mcp, terminal-commanderd -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host "verify-windows-x64: OK"
 
   verify-mac-x64:
@@ -1566,6 +1578,7 @@ jobs:
     needs: [release-context, publish-root]
     if: always() && needs.publish-root.result == 'success'
     runs-on: macos-15-intel   # Intel — macos-13 retired 2025-12-04; macos-15-intel is the supported Intel image. Keep a runner pinning task in runbook to rotate when GitHub deprecates.
+    timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
     permissions: { contents: read, issues: write }
     steps:
       - uses: actions/checkout@v4
@@ -1610,6 +1623,7 @@ jobs:
     needs: [release-context, publish-root]
     if: always() && needs.publish-root.result == 'success'
     runs-on: macos-14   # Apple Silicon
+    timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
     permissions: { contents: read, issues: write }
     steps:
       - uses: actions/checkout@v4
