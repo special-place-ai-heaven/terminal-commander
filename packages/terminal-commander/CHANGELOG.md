@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.7](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.6...v0.3.7) (2026-09-30)
+
+
+### Bug Fixes
+
+* **cli:** find the new launcher after `update` with any npm prefix ([9ed089d](https://github.com/special-place-ai-heaven/terminal-commander/commit/9ed089d0af755f3ff59eb94101a369594d9c8009))
+* **cli:** use npm's own global root as the only launcher lookup ([c2b9fcd](https://github.com/special-place-ai-heaven/terminal-commander/commit/c2b9fcddd3a9f6d22c297ce1e2382ea64e508d31))
+* **cli:** use npm's own global root to find the new launcher after update ([5d988a9](https://github.com/special-place-ai-heaven/terminal-commander/commit/5d988a91c74d37f4d20ecc6a462d5065083cc758))
+
 ## [0.3.6](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.5...v0.3.6) (2026-09-30)
 
 
