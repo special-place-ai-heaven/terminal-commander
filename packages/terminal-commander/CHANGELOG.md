@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.5](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.4...v0.3.5) (2026-09-30)
+
+
+### Bug Fixes
+
+* **install:** replace a duplicate Terminal Commander entry instead of adding one ([1989ef3](https://github.com/special-place-ai-heaven/terminal-commander/commit/1989ef35ef3cd6c331c61a7815ad2d23fcf4019f))
+* **mcp:** succeed on the first call after the daemon goes away ([8a60735](https://github.com/special-place-ai-heaven/terminal-commander/commit/8a60735ce2aba3dbd6ba34d0ad6560b611821e52))
+* recover the daemon on the first call, restart crashed daemons, no duplicate installer entries ([497ebb7](https://github.com/special-place-ai-heaven/terminal-commander/commit/497ebb789ff78dc003a3e2713afc9564327765e8))
+* **supervisor:** let a crashed daemon be restarted on Linux and macOS ([8a60735](https://github.com/special-place-ai-heaven/terminal-commander/commit/8a60735ce2aba3dbd6ba34d0ad6560b611821e52))
+
 ## [0.3.4](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.3...v0.3.4) (2026-09-30)
 
 
