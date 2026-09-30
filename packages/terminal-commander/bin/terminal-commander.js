@@ -230,43 +230,25 @@ function npmGlobalRoot() {
 // Spawning `process.execPath` + the resolved JS entry (no shell, no Windows
 // shim) keeps the AV-safe contract. Returns null when the global path is
 // unresolvable.
+//
+// One source of truth: npm installed the package, so npm's own global root is
+// where the new launcher is. No guessing from environment variables or the
+// node folder, which are wrong for a custom prefix.
 function globalLauncherEntry() {
-  const prefix = process.env.npm_config_prefix || process.env.PREFIX;
-  const candidates = [];
-  if (prefix) {
-    // Unix global: <prefix>/lib/node_modules; Windows global: <prefix>/node_modules.
-    candidates.push(
-      path.join(prefix, "lib", "node_modules", "terminal-commander", "bin", "terminal-commander.js"),
-      path.join(prefix, "node_modules", "terminal-commander", "bin", "terminal-commander.js"),
-    );
-  }
-  const npmRoot = npmGlobalRoot();
-  if (npmRoot) {
-    candidates.push(path.join(npmRoot, "terminal-commander", "bin", "terminal-commander.js"));
-  }
-  // This launcher's own install: `update` treats it as the global install (its
-  // preflight scopes are derived from it), and npm replaced it in place.
-  candidates.push(__filename);
-  // Fallback: the global root that hosts node itself (npm's default prefix).
-  candidates.push(
-    path.join(path.dirname(process.execPath), "node_modules", "terminal-commander", "bin", "terminal-commander.js"),
-  );
-  return candidates.find((c) => {
-    try {
-      return fs.existsSync(c);
-    } catch (_e) {
-      return false;
-    }
-  }) || null;
+  const root = npmGlobalRoot();
+  if (!root) return { entry: null, reason: "`npm root -g` did not answer" };
+  const entry = path.join(root, "terminal-commander", "bin", "terminal-commander.js");
+  if (!fs.existsSync(entry)) return { entry: null, reason: `no launcher at ${entry}` };
+  return { entry, reason: null };
 }
 
 // Re-run `setup harness` with the freshly-installed launcher. Always invokes
 // `done` (success or not) so a setup hiccup never fails the update.
 function reregisterHarnesses(done) {
-  const entry = globalLauncherEntry();
+  const { entry, reason } = globalLauncherEntry();
   if (!entry) {
     process.stderr.write(
-      "terminal-commander: update installed; could not locate the new launcher to refresh harness configs. Run 'terminal-commander setup harness'.\n",
+      `terminal-commander: update installed, but harness setup was not re-run (${reason}). Run 'terminal-commander setup harness'.\n`,
     );
     done();
     return;

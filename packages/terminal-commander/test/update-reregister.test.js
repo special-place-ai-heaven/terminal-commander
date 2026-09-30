@@ -55,6 +55,16 @@ function record(command, args) {
   fs.writeFileSync(recordPath, JSON.stringify(list), "utf8");
 }
 
+// The launcher asks npm for its global root (\`npm root -g\`); answer from
+// __TEST_NPM_ROOT__, or fail like an npm that cannot answer.
+cp.execFileSync = function patchedExecFileSync(_command, args) {
+  const a = (args || []).map(String);
+  if (a.includes("root") && a.includes("-g") && process.env.__TEST_NPM_ROOT__) {
+    return process.env.__TEST_NPM_ROOT__ + "\\n";
+  }
+  throw new Error("npm root -g unavailable in this test");
+};
+
 const realSpawn = cp.spawn;
 cp.spawn = function patchedSpawn(command, args, _opts) {
   record(command, args);
@@ -103,7 +113,7 @@ function runUpdate(npmExitCode) {
     const env = {
       ...process.env,
       __TEST_NPM_EXIT__: String(npmExitCode),
-      npm_config_prefix: prefixDir,
+      __TEST_NPM_ROOT__: path.join(prefixDir, "lib", "node_modules"),
     };
 
     const result = spawnSync(
@@ -194,20 +204,26 @@ test("bin/terminal-commander.js wires the re-register into the npm-success branc
   );
 });
 
-test("update finds the new launcher without npm environment variables (custom global prefix)", () => {
-  // `terminal-commander update` is normally typed in a shell, not run by npm, so
-  // npm_config_prefix / PREFIX are unset. With a custom npm prefix (for example
-  // ~/.npm-global) the old lookup found nothing and printed "could not locate the
-  // new launcher" after every successful update. The lookup must still resolve a
-  // real launcher: npm's own global root, or this launcher's install path.
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tc-update-noprefix-"));
+// Run `update` with no npm environment variables (as when typed in a shell) and
+// the given answer to `npm root -g`; returns the result and recorded spawns.
+function runUpdateWithNpmRoot(npmRoot) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tc-update-root-"));
   try {
     const recordPath = path.join(tmpDir, "spawns.json");
     fs.writeFileSync(recordPath, "[]", "utf8");
     const injector = makeSpawnRecorder(tmpDir, recordPath);
     const env = { ...process.env, __TEST_NPM_EXIT__: "0" };
     for (const key of Object.keys(env)) {
-      if (/^npm_config_prefix$|^PREFIX$/i.test(key)) delete env[key];
+      if (/^npm_config_prefix$|^PREFIX$|^__TEST_NPM_ROOT__$/i.test(key)) delete env[key];
+    }
+    let fakeEntry = null;
+    if (npmRoot === "custom") {
+      // A custom global prefix such as ~/.npm-global: npm reports its own root.
+      const root = path.join(tmpDir, "custom-prefix", "node_modules");
+      fakeEntry = path.join(root, "terminal-commander", "bin", "terminal-commander.js");
+      fs.mkdirSync(path.dirname(fakeEntry), { recursive: true });
+      fs.writeFileSync(fakeEntry, "// fake launcher (never executed; spawn is mocked)\n", "utf8");
+      env.__TEST_NPM_ROOT__ = root;
     }
     const result = spawnSync(process.execPath, ["--require", injector, UPDATE_SHIM, "update"], {
       encoding: "utf8",
@@ -216,15 +232,30 @@ test("update finds the new launcher without npm environment variables (custom gl
       shell: false,
       env,
     });
-    assert.equal(result.status, 0, `stderr=${result.stderr}`);
-    assert.doesNotMatch(result.stderr, /could not locate the new launcher/);
     const spawns = JSON.parse(fs.readFileSync(recordPath, "utf8"));
-    const setupSpawn = spawns.find(isSetupHarnessSpawn);
-    assert.ok(setupSpawn, `expected a 'setup harness' spawn; spawns=${JSON.stringify(spawns)}`);
-    const entry = setupSpawn.args[0];
-    assert.match(entry, /terminal-commander[\\/]bin[\\/]terminal-commander\.js$/);
-    assert.ok(fs.existsSync(entry), `re-register must target an existing launcher: ${entry}`);
+    return { result, spawns, fakeEntry };
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+}
+
+test("update re-runs setup with the launcher in npm's own global root (custom prefix, no npm env)", () => {
+  // `terminal-commander update` is normally typed in a shell, so npm_config_prefix
+  // / PREFIX are unset, and with a custom prefix (~/.npm-global) the node folder
+  // is the wrong place. The old lookup guessed from those and printed "could not
+  // locate the new launcher" after every successful update. npm installed the
+  // package, so npm's `root -g` is the one right answer.
+  const { result, spawns, fakeEntry } = runUpdateWithNpmRoot("custom");
+  assert.equal(result.status, 0, `stderr=${result.stderr}`);
+  assert.equal(result.stderr.includes("harness setup was not re-run"), false, result.stderr);
+  const setupSpawn = spawns.find(isSetupHarnessSpawn);
+  assert.ok(setupSpawn, `expected a 'setup harness' spawn; spawns=${JSON.stringify(spawns)}`);
+  assert.equal(setupSpawn.args[0], fakeEntry);
+});
+
+test("update says plainly why setup was not re-run when npm cannot report its root", () => {
+  const { result, spawns } = runUpdateWithNpmRoot(null);
+  assert.equal(result.status, 0, "a successful install must not turn into a failure");
+  assert.match(result.stderr, /harness setup was not re-run \(`npm root -g` did not answer\)/);
+  assert.equal(spawns.find(isSetupHarnessSpawn), undefined);
 });
