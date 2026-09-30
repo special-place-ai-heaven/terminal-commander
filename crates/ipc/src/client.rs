@@ -100,9 +100,11 @@ impl DaemonClient {
     }
 
     async fn round_trip(&self, env: &RequestEnvelope) -> Result<ResponseEnvelope, IpcError> {
+        // Nothing is written until the connect succeeds, so a failed connect
+        // is not-connected: safe to re-send once the daemon is back.
         let mut stream = UnixStream::connect(&self.socket_path)
             .await
-            .map_err(|e| IpcError::transport(format!("connect: {e}")))?;
+            .map_err(|e| IpcError::transport_not_connected(format!("connect: {e}")))?;
         let frame = encode_frame(env)?;
         stream
             .write_all(&frame)

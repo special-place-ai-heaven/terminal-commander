@@ -64,6 +64,10 @@ Invoke-Gate 'terminal-commanderd' 'windows_job_object_ownership' @()
 & cargo build -p terminal-commanderd
 if ($LASTEXITCODE -ne 0) { Write-Error 'tc-gate: terminal-commanderd build FAILED'; exit 1 }
 Invoke-Gate 'terminal-commander-mcp' 'daemon_releases_adapter_stdout' @()
+# The first tool call after the daemon goes away (idle shutdown, crash) must
+# restart it and succeed. On Windows a missing pipe used to run the connect
+# loop to the call deadline and surface as a timeout, which is never re-sent.
+Invoke-Gate 'terminal-commander-mcp' 'first_call_after_daemon_loss' @()
 
 # F-010 / O-07: live ConPTY child-output + secret-gate e2e. Runs on GitHub Actions
 # (required pre-build-gates-windows) and when a developer opts in with

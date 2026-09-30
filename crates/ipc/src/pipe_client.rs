@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
-use tokio::net::windows::named_pipe::ClientOptions;
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 
 use crate::framing::read_frame;
 use crate::protocol::{
@@ -88,7 +88,24 @@ impl DaemonClient {
             correlation_id,
             request,
         };
-        let resp_env = tokio::time::timeout(timeout, self.round_trip(&env))
+        let started = tokio::time::Instant::now();
+        // Connecting shares the call deadline. A connect that never succeeds
+        // is reported as not-connected rather than as a timeout: nothing was
+        // written, so the daemon cannot have acted on the request and the
+        // caller may re-send it once the daemon is back. A dead daemon lands
+        // here (its pipe name no longer exists), as does the transient
+        // accept/recreate gap if it outlasts the whole deadline.
+        let client = tokio::time::timeout(timeout, self.connect())
+            .await
+            .map_err(|_| {
+                IpcError::transport_not_connected(format!(
+                    "pipe {} did not accept a connection within {}ms",
+                    self.pipe_path.display(),
+                    timeout.as_millis()
+                ))
+            })??;
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let resp_env = tokio::time::timeout(remaining, Self::exchange(client, &env))
             .await
             .map_err(|_| IpcError::transport_timeout(timeout))??;
         if resp_env.correlation_id != correlation_id {
@@ -103,7 +120,7 @@ impl DaemonClient {
         }
     }
 
-    async fn round_trip(&self, env: &RequestEnvelope) -> Result<ResponseEnvelope, IpcError> {
+    async fn connect(&self) -> Result<NamedPipeClient, IpcError> {
         let pipe_name = self.pipe_path.to_string_lossy().into_owned();
 
         // The accept loop keeps one pending pipe instance and recreates it after
@@ -117,29 +134,35 @@ impl DaemonClient {
         // `call_with_timeout` owns the one authoritative deadline. A second,
         // shorter retry budget here made healthy but CPU-starved daemons look
         // absent before the caller's promised timeout elapsed.
-        let mut client = {
-            loop {
-                match ClientOptions::new().open(&pipe_name) {
-                    Ok(p) => break p,
-                    // Both errors are the transient accept/recreate gap of a
-                    // single-pending-instance server: BUSY = instances exist
-                    // but none listening; FILE_NOT_FOUND = the consumed
-                    // instance closed before the replacement was listening
-                    // (routine under CPU starvation -- see the constant docs).
-                    Err(e)
-                        if matches!(
-                            e.raw_os_error(),
-                            Some(ERROR_PIPE_BUSY_OS | ERROR_FILE_NOT_FOUND_OS)
-                        ) =>
-                    {
-                        tokio::time::sleep(Duration::from_millis(PIPE_BUSY_DELAY_MS)).await;
-                    }
-                    Err(e) => {
-                        return Err(IpcError::transport(format!("pipe connect: {e}")));
-                    }
+        loop {
+            match ClientOptions::new().open(&pipe_name) {
+                Ok(p) => return Ok(p),
+                // Both errors are the transient accept/recreate gap of a
+                // single-pending-instance server: BUSY = instances exist
+                // but none listening; FILE_NOT_FOUND = the consumed
+                // instance closed before the replacement was listening
+                // (routine under CPU starvation -- see the constant docs).
+                Err(e)
+                    if matches!(
+                        e.raw_os_error(),
+                        Some(ERROR_PIPE_BUSY_OS | ERROR_FILE_NOT_FOUND_OS)
+                    ) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(PIPE_BUSY_DELAY_MS)).await;
+                }
+                Err(e) => {
+                    return Err(IpcError::transport_not_connected(format!(
+                        "pipe connect: {e}"
+                    )));
                 }
             }
-        };
+        }
+    }
+
+    async fn exchange(
+        mut client: NamedPipeClient,
+        env: &RequestEnvelope,
+    ) -> Result<ResponseEnvelope, IpcError> {
         let frame = crate::protocol::encode_frame(env)?;
         client
             .write_all(&frame)

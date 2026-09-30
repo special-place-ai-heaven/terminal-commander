@@ -47,7 +47,7 @@ fn adapter_stdout_reaches_eof_after_it_starts_a_daemon_and_exits() {
     #[cfg(unix)]
     let socket = dir.path().join("tcd.sock").display().to_string();
     #[cfg(windows)]
-    let socket = format!(r"\.\pipe\tc-test-stdout-eof-{}", std::process::id());
+    let socket = format!(r"\\.\pipe\tc-test-stdout-eof-{}", std::process::id());
 
     let mut mcp = Command::new(&mcp_bin)
         .arg("--state-dir")

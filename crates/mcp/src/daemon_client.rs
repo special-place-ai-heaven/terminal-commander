@@ -442,6 +442,12 @@ impl McpDaemonClient {
     ///     (transport-tagged) error is returned immediately after the self-heal
     ///     attempt; the tool edge surfaces an honest reconcile-don't-retry
     ///     envelope (see [`crate::tools`]).
+    ///   - Either kind is re-sent once when the failure was
+    ///     [`IpcError::is_transport_not_connected`] AND self-heal brought the
+    ///     daemon back: the connect never succeeded, so nothing was written
+    ///     and the daemon cannot have acted on it. This is the first call
+    ///     after a daemon idle shutdown or crash, which previously failed
+    ///     even though it had just restarted the daemon.
     ///
     /// If an idempotent retry still fails on transport, the (transport-tagged)
     /// error is returned so the tool edge surfaces a CLEAN `daemon_unavailable`
@@ -485,9 +491,11 @@ impl McpDaemonClient {
                 // the next call, even for mutating RPCs after a daemon
                 // replace). `try_self_heal` is a no-op (returns false) when
                 // there is no status handle.
-                let _recovered = self.try_self_heal().await;
-                if request.is_idempotent() && !e.is_transport_timeout() {
-                    // Safe to re-send: a pure read / idempotent reposition can
+                let recovered = self.try_self_heal().await;
+                let never_sent = e.is_transport_not_connected() && recovered;
+                if never_sent || (request.is_idempotent() && !e.is_transport_timeout()) {
+                    // Safe to re-send: the request never reached the daemon,
+                    // or it is a pure read / idempotent reposition that can
                     // run twice without a server-side double-effect.
                     let retry_id = self.next_id.fetch_add(1, Ordering::Relaxed);
                     self.call_inner(retry_id, request, deadline).await
