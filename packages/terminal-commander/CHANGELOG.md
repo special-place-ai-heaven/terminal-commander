@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.6](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.5...v0.3.6) (2026-09-30)
+
+
+### Bug Fixes
+
+* **install:** stop running instances so an npm upgrade is never blocked ([b1add0c](https://github.com/special-place-ai-heaven/terminal-commander/commit/b1add0cf35d969d5851fcfce149f46fd33746fe0))
+* **install:** stop running instances so an npm upgrade is never blocked ([790df3b](https://github.com/special-place-ai-heaven/terminal-commander/commit/790df3b9b5408a21fcc54ca2fe8568cfb0bf1657))
+
 ## [0.3.5](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.4...v0.3.5) (2026-09-30)
 
 
