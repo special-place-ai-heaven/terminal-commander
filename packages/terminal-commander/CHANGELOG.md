@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.3...v0.3.4) (2026-09-30)
+
+
+### Bug Fixes
+
+* **supervisor:** stop the daemon inheriting the adapter's stdio pipes ([7c27cad](https://github.com/special-place-ai-heaven/terminal-commander/commit/7c27cad4fead16f41792d9f366aa6bf865bdc640))
+
 ## [0.3.3](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.2...v0.3.3) (2026-09-30)
 
 
