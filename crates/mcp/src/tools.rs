@@ -4512,7 +4512,15 @@ fn remote_denied_error(target_id: &str) -> McpError {
 ///     and explicitly does NOT say "retry the tool": it tells the agent to
 ///     reconcile actual state via `command_status` / `runtime_state` first.
 fn transport_unavailable_error(operation_is_idempotent: bool, cause: &IpcError) -> McpError {
-    let (recovery, remedy) = if operation_is_idempotent {
+    let (recovery, remedy) = if cause.is_transport_not_connected() {
+        (
+            "auto-recovery (health re-probe + daemon restart) was attempted; \
+             the request never reached the daemon",
+            "the daemon could not be reached or restarted and nothing ran; \
+             retry the tool, and check `terminal-commanderd` logs if it \
+             keeps failing",
+        )
+    } else if operation_is_idempotent {
         (
             "auto-recovery (health re-probe + one retry) was attempted",
             "the daemon was unavailable; retry the tool -- the adapter \
@@ -9015,6 +9023,28 @@ mod tests {
             data["message"].as_str(),
             Some("terminal-commanderd became unreachable mid-call"),
             "top-level envelope message stays clean; got: {data}"
+        );
+    }
+
+    /// Source-status: test-only. A request that never connected never reached
+    /// the daemon, so even a MUTATING one must not claim it "may have taken
+    /// effect": the envelope says nothing ran.
+    #[test]
+    fn never_connected_envelope_says_nothing_ran() {
+        let transport = IpcError::transport_not_connected("pipe connect: os error 2");
+        let mcp = into_mcp_error_for(false, &transport);
+        assert_eq!(mcp.message, "daemon_unavailable");
+        let data = mcp.data.expect("envelope carries a data payload");
+        let remedy = data["details"]["remedy"]
+            .as_str()
+            .expect("remedy is a string");
+        assert!(remedy.contains("nothing ran"), "got: {remedy}");
+        assert!(!remedy.contains("may or may not"), "got: {remedy}");
+        assert!(
+            data["details"]["recovery"]
+                .as_str()
+                .is_some_and(|r| r.contains("never reached the daemon")),
+            "got: {data}"
         );
     }
 

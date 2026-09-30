@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 /// appear verbatim in [`ALLOWED_SITES`]. Anything else (tasklist, taskkill,
 /// powershell, wmic, cmd.exe, or a non-literal program) fails the gate and
 /// requires a deliberate decision plus an allowlist edit here.
-const ALLOWED_PROGRAMS: &[&str] = &["kill", "pgrep"];
+/// `ps` is the macOS / BSD liveness probe in `pidfile::pid_alive` (it reports a
+/// zombie's state, which `kill -0` cannot).
+const ALLOWED_PROGRAMS: &[&str] = &["kill", "pgrep", "ps"];
 
 /// Documented non-literal spawn sites (cross-platform by design).
 /// `spawn_daemon_impl` launches the GUI-subsystem daemon binary itself, which

@@ -74,12 +74,15 @@ pub fn read_pidfile_raw(state_dir: &Path) -> Option<RunningDaemon> {
 /// Cross-platform "is this pid alive" check. Uses OS facilities rather
 /// than a libc dependency so the supervisor crate stays dep-light.
 ///
-/// On Linux this reads `/proc/<pid>` existence -- fork-free, so the
+/// On Linux this reads `/proc/<pid>/stat` -- fork-free, so the
 /// liveness checks on the daemon bring-up and reap paths no longer pay a
 /// `fork`+`exec` per call (review finding #5).
 ///
+/// A zombie (exited, not yet reaped) reads as dead on every Unix: it cannot
+/// serve, and counting it alive blocked daemon restarts after a crash.
+///
 /// Cross-user semantics (Linux). `/proc/<pid>` exists for a live process
-/// (and for a not-yet-reaped zombie) regardless of its owner, so unlike the
+/// regardless of its owner, so unlike the
 /// previous `kill -0` probe this never reports another user's live process
 /// as dead via `EPERM`. The one environment where the two diverge in the
 /// other direction is `hidepid=2`, under which another user's `/proc/<pid>`
@@ -96,22 +99,34 @@ pub fn read_pidfile_raw(state_dir: &Path) -> Option<RunningDaemon> {
 pub fn pid_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
-        // A live process or unreaped zombie always has a /proc/<pid> dir.
-        // `exists()` returns false on any stat error, preserving the old
-        // "treat as dead on failure" default.
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
+        // `/proc/<pid>/stat` exists for a running process AND for an unreaped
+        // zombie. A zombie has exited and can serve nothing: a daemon that
+        // crashed under an adapter that never waited on it stays one until
+        // the adapter exits, and counting it alive made every restart exit
+        // with "a live daemon already serves this endpoint". So read the
+        // state field (the first char after the last ')', since the command
+        // name may contain parentheses) and treat Z/X as dead. A read error
+        // keeps the old "treat as dead on failure" default.
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
+                .is_some_and(|state| state != 'Z' && state != 'X')
+        })
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        // macOS / *BSD have no /proc; keep the portable, fork-based probe.
-        // `kill -0 <pid>` exits 0 iff the process exists and is signalable;
-        // non-zero otherwise. No signal is delivered. (Out of scope for the
-        // /proc optimization, which is Linux-only.)
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        // macOS / *BSD have no /proc. `ps -o stat= -p <pid>` fails when the
+        // pid does not exist and prints a state starting with 'Z' for a
+        // zombie, which is dead for the same reason as on Linux.
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|out| {
+                out.status.success()
+                    && !String::from_utf8_lossy(&out.stdout)
+                        .trim_start()
+                        .starts_with('Z')
+            })
     }
     #[cfg(windows)]
     {
@@ -236,6 +251,31 @@ mod tests {
         assert!(
             !pid_alive(0xFFFF_FFF0),
             "an absent high pid must read as dead (no /proc entry)"
+        );
+    }
+
+    // A daemon that crashed while its launcher (the MCP adapter) never waited
+    // on it lingers as a zombie. It cannot serve anything, so it must read as
+    // dead: otherwise the restarted daemon sees "a live daemon already serves
+    // this endpoint", exits, and the adapter can never recover it.
+    #[cfg(unix)]
+    #[test]
+    fn pid_alive_false_for_unreaped_zombie() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn short-lived child");
+        let pid = child.id();
+        // Do not wait yet: once the child exits it stays a zombie until reaped.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pid_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let alive = pid_alive(pid);
+        let _ = child.wait();
+        assert!(
+            !alive,
+            "an exited, unreaped child (zombie) must read as dead"
         );
     }
 

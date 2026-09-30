@@ -1312,6 +1312,29 @@ impl IpcError {
                 .strip_prefix(Self::TRANSPORT_PREFIX)
                 .is_some_and(|rest| rest.starts_with(Self::TIMEOUT_LEAD))
     }
+
+    /// Lead-in of the never-connected message after [`Self::TRANSPORT_PREFIX`].
+    const NOT_CONNECTED_LEAD: &'static str = "not connected: ";
+
+    /// Construct a transport failure for a request that never reached the
+    /// daemon: the connection could not be opened, so nothing was written.
+    /// Unlike a timeout or a dropped reply, the daemon cannot have acted on
+    /// it, so re-sending after recovery is safe for any request.
+    #[must_use]
+    pub fn transport_not_connected(detail: impl AsRef<str>) -> Self {
+        Self::transport(format!("{}{}", Self::NOT_CONNECTED_LEAD, detail.as_ref()))
+    }
+
+    /// True when this transport failure happened before the request was sent
+    /// (see [`Self::transport_not_connected`]).
+    #[must_use]
+    pub fn is_transport_not_connected(&self) -> bool {
+        self.code == IpcErrorCode::Internal
+            && self
+                .message
+                .strip_prefix(Self::TRANSPORT_PREFIX)
+                .is_some_and(|rest| rest.starts_with(Self::NOT_CONNECTED_LEAD))
+    }
 }
 
 /// Parameters for `bucket_events_since`.
@@ -3730,6 +3753,32 @@ mod tests {
         assert!(
             !fixable.is_transport(),
             "only Internal-coded marker-prefixed errors are transport"
+        );
+    }
+
+    #[test]
+    fn not_connected_is_transport_but_never_a_timeout() {
+        let nc = IpcError::transport_not_connected("pipe connect: os error 2");
+        assert!(
+            nc.is_transport(),
+            "not-connected is still a transport failure"
+        );
+        assert!(nc.is_transport_not_connected());
+        assert!(
+            !nc.is_transport_timeout(),
+            "a never-sent request is not a timeout"
+        );
+        assert!(nc.message.contains("pipe connect: os error 2"));
+
+        let timeout = IpcError::transport_timeout(std::time::Duration::from_secs(5));
+        assert!(
+            !timeout.is_transport_not_connected(),
+            "a timeout may have been delivered"
+        );
+        let dropped = IpcError::transport("read length: early eof");
+        assert!(
+            !dropped.is_transport_not_connected(),
+            "a dropped reply was delivered"
         );
     }
 

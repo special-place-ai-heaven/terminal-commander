@@ -50,15 +50,32 @@ function parseJsonMcp(buffer) {
   }
 }
 
+// True when a server entry launches the Terminal Commander MCP adapter,
+// whatever it is named: the stable exe, the node_modules exe, or node running
+// the npm shim script.
+function launchesTerminalCommander(entry) {
+  if (entry == null || typeof entry !== "object") return false;
+  const parts = [entry.command, ...(Array.isArray(entry.args) ? entry.args : [])];
+  return parts.some(
+    (p) => typeof p === "string" && /(^|[\\/])terminal-commander-mcp(\.[a-z]+)?$/i.test(p),
+  );
+}
+
 function mergeJsonMcpServers(existing, serverName, serverConfig, opts) {
   const o = opts || {};
   const wasPresent = Object.prototype.hasOwnProperty.call(existing.mcpServers, serverName);
-  if (wasPresent && o.force !== true) {
-    return { ok: false, reason: JSON_MCP_STATUSES.ALREADY_EXISTS };
+  // The same adapter registered under another name would be a second TC
+  // server next to this one. Force (every install refresh) replaces it; a
+  // plain write refuses rather than adding a duplicate.
+  const otherNames = Object.keys(existing.mcpServers).filter(
+    (name) => name !== serverName && launchesTerminalCommander(existing.mcpServers[name]),
+  );
+  if ((wasPresent || otherNames.length > 0) && o.force !== true) {
+    return { ok: false, reason: JSON_MCP_STATUSES.ALREADY_EXISTS, existing_names: otherNames };
   }
   const mergedServers = {};
   for (const name of Object.keys(existing.mcpServers)) {
-    if (name === serverName) continue;
+    if (name === serverName || otherNames.includes(name)) continue;
     mergedServers[name] = existing.mcpServers[name];
   }
   mergedServers[serverName] = serverConfig;
@@ -66,6 +83,7 @@ function mergeJsonMcpServers(existing, serverName, serverConfig, opts) {
     ok: true,
     value: { ...existing, mcpServers: mergedServers },
     was_present: wasPresent,
+    replaced: otherNames,
   };
 }
 
@@ -109,10 +127,14 @@ function writeJsonMcpConfig(opts) {
     force: o.force === true,
   });
   if (!merged.ok) {
+    const others = merged.existing_names || [];
     return {
       status: merged.reason,
       path: target,
-      hint: `terminal-commander: entry ${serverName} already exists; use --force`,
+      hint:
+        others.length > 0
+          ? `terminal-commander: Terminal Commander is already configured as ${others.join(", ")}; use --force to replace it with ${serverName}`
+          : `terminal-commander: entry ${serverName} already exists; use --force`,
     };
   }
   if (o.enableServer === true) {
@@ -151,10 +173,12 @@ function writeJsonMcpConfig(opts) {
   const status = fileExisted
     ? JSON_MCP_STATUSES.CONFIG_UPDATED
     : JSON_MCP_STATUSES.CONFIG_CREATED;
+  const replacedNote =
+    merged.replaced.length > 0 ? ` (replaced duplicate entry ${merged.replaced.join(", ")})` : "";
   return {
     status,
     path: target,
-    hint: `terminal-commander: ${status.replace(/_/g, " ")} ${target}`,
+    hint: `terminal-commander: ${status.replace(/_/g, " ")} ${target}${replacedNote}`,
   };
 }
 
