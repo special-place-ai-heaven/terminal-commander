@@ -136,3 +136,24 @@ grep -Fq 'feat!: remove old API' <<<"$output" || {
   echo 'non-feature breaking subject did not synthesize a breaking entry' >&2
   exit 1
 }
+
+seed_repo "$tmp/release-scripts"
+mkdir -p scripts/release docs
+printf 'doc only
+' > docs/note.md
+git add docs/note.md
+git commit -qm 'fix(docs): a docs-only change is not release-bearing'
+output="$(DRY_RUN=1 bash "$repo_root/scripts/release/synthesize-crates-release-trigger.sh")"
+if grep -Fq 'fix(docs): a docs-only change is not release-bearing' <<<"$output"; then
+  echo 'docs-only change was attributed as release-bearing' >&2
+  exit 1
+fi
+printf 'wait for the tarball
+' > scripts/release/wait-for-npm-registry.sh
+git add scripts/release/wait-for-npm-registry.sh
+git commit -qm 'fix(release): wait for the npm tarball before verify installs'
+output="$(DRY_RUN=1 bash "$repo_root/scripts/release/synthesize-crates-release-trigger.sh")"
+grep -Fq 'fix(release): wait for the npm tarball before verify installs' <<<"$output" || {
+  echo 'scripts/release fix was not attributed as release-bearing' >&2
+  exit 1
+}

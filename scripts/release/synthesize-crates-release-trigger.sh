@@ -54,7 +54,9 @@ fi
 # "type(scope)!: ...".
 # `perf` is treated as a fix-level bump because user-observable perf changes ship
 # in Rust crates and must produce a release (e.g. PR #47 /proc liveness).
-mapfile -t crate_shas < <(git log --reverse --format='%H' "${base_tag}..HEAD" -- crates)
+# scripts/release/** ships the release itself (publish waits, verify probes),
+# so a fix there is release-bearing too and must reach the changelog.
+mapfile -t crate_shas < <(git log --reverse --format='%H' "${base_tag}..HEAD" -- crates scripts/release)
 if [ "${#crate_shas[@]}" -eq 0 ]; then
   echo "[synth] no crate commits since ${base_tag}. Skipping."
   emit trigger_pushed false
@@ -151,7 +153,7 @@ commit_subject="${release_messages[0]}"
 # Body: provenance first, then every additional release-please message at the
 # bottom where its parser treats each as a distinct changelog entry.
 commit_body="Synthesized by synthesize-crates-release-trigger.sh so release-please
-attributes crates/** changes to the canonical version source. Crate commits
+attributes crates/** and scripts/release/** changes to the canonical version source. Attributed commits
 newly attributed since ${base_tag}: ${#pending_shas[@]} of ${#crate_shas[@]} total
 (fingerprint ${fingerprint})."
 for message in "${release_messages[@]:1}"; do
@@ -163,7 +165,7 @@ echo "[synth] strongest type: ${strongest} -> commit subject: '${commit_subject}
 # Write the sentinel (fingerprint + audit trail of the crate SHAs).
 {
   echo "# release-please crates trigger"
-  echo "# Auto-generated. Forces release-please to attribute crates/** changes"
+  echo "# Auto-generated. Forces release-please to attribute crates/** and scripts/release/** changes"
   echo "# to packages/terminal-commander. Do not edit by hand."
   echo "fingerprint: ${fingerprint}"
   echo "base_tag: ${base_tag}"

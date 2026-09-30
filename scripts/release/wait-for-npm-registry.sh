@@ -34,5 +34,23 @@ for spec in "$@"; do
     echo "waiting for ${spec} on npm registry (attempt ${attempt}/${max_attempts})..."
     sleep "$interval_secs"
   done
-  echo "registry-ready: ${spec}"
+  # Metadata lands minutes before the tarball is downloadable (v0.3.2: ~12 min
+  # for the root package while its platform packages were served at once), and
+  # npm install fetches the tarball, so wait for an HTTP 200 on it as well.
+  tarball="$(npm view "$spec" dist.tarball 2>/dev/null || true)"
+  if [ -z "$tarball" ]; then
+    echo "::error::${spec} has no dist.tarball in its registry metadata"
+    exit 1
+  fi
+  attempt=0
+  until [ "$(curl -s -o /dev/null -w "%{http_code}" "$tarball")" = "200" ]; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      echo "::error::${spec} tarball ${tarball} not downloadable after $((max_attempts * interval_secs / 60)) minutes"
+      exit 1
+    fi
+    echo "waiting for ${spec} tarball (attempt ${attempt}/${max_attempts})..."
+    sleep "$interval_secs"
+  done
+  echo "registry-ready: ${spec} (metadata + tarball)"
 done
