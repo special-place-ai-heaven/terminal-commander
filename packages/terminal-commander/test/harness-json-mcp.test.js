@@ -180,3 +180,63 @@ test("mergeJsonMcpServers replaces only the named key under force", () => {
   assert.deepEqual(r.value.mcpServers.terminal_commander, STANZA);
   assert.deepEqual(r.value.mcpServers.keep, { command: "k" });
 });
+
+// One Terminal Commander server per config: an entry that already launches the
+// adapter under ANOTHER name (hand-added, older installer) must not survive
+// next to the canonical one, or the harness shows two TC servers and every
+// session runs two adapters and two daemons.
+const HAND_ENTRY = Object.freeze({
+  command: "C:\\nvm4w\\nodejs\\node.exe",
+  args: ["C:\\Users\\op\\.npm-global\\node_modules\\terminal-commander\\bin\\terminal-commander-mcp.js"],
+  env: { TC_SESSION: "tc-claude-code", TC_SURFACE: "full" },
+});
+
+test("force replaces a Terminal Commander entry registered under another name instead of adding a second", () => {
+  const target = tmpCfg();
+  fs.writeFileSync(
+    target,
+    JSON.stringify({
+      mcpServers: {
+        "terminal-commander": HAND_ENTRY,
+        "terminal-notes": { command: "notes-server", args: [] },
+      },
+    }),
+  );
+  const r = writeJsonMcpConfig({
+    path: target,
+    serverName: "terminal_commander",
+    serverConfig: STANZA,
+    force: true,
+  });
+  assert.equal(r.status, "config_updated");
+  const servers = JSON.parse(fs.readFileSync(target, "utf8")).mcpServers;
+  assert.deepEqual(Object.keys(servers).sort(), ["terminal-notes", "terminal_commander"]);
+  assert.deepEqual(servers.terminal_commander, STANZA);
+  assert.match(r.hint, /terminal-commander/, "the hint names the entry it replaced");
+});
+
+test("without force, an existing Terminal Commander entry under another name blocks a duplicate", () => {
+  const target = tmpCfg();
+  const before = JSON.stringify({ mcpServers: { "terminal-commander": HAND_ENTRY } });
+  fs.writeFileSync(target, before);
+  const r = writeJsonMcpConfig({
+    path: target,
+    serverName: "terminal_commander",
+    serverConfig: STANZA,
+  });
+  assert.equal(r.status, "already_exists");
+  assert.match(r.hint, /terminal-commander/);
+  assert.equal(fs.readFileSync(target, "utf8"), before, "config is left untouched");
+});
+
+test("merge keeps servers that do not launch the Terminal Commander adapter", () => {
+  const existing = {
+    mcpServers: {
+      "terminal-notes": { command: "notes-server", args: ["--terminal-commander-style"] },
+      symforge: { command: "symforge", args: [] },
+    },
+  };
+  const m = mergeJsonMcpServers(existing, "terminal_commander", STANZA, { force: true });
+  assert.equal(m.ok, true);
+  assert.deepEqual(Object.keys(m.value.mcpServers).sort(), ["symforge", "terminal-notes", "terminal_commander"]);
+});
