@@ -12,7 +12,7 @@
 
 "use strict";
 
-const { spawn } = require("child_process");
+const { spawn, execFileSync } = require("child_process");
 const fs = require("fs");
 const https = require("https");
 const path = require("path");
@@ -42,8 +42,7 @@ function isJsCliRequest(argv) {
   return false;
 }
 
-function npmInvocation() {
-  const args = ["install", "-g", "terminal-commander@latest"];
+function npmInvocation(args = ["install", "-g", "terminal-commander@latest"]) {
   if (process.platform !== "win32") {
     return { command: "npm", args };
   }
@@ -205,41 +204,51 @@ function runUpdate() {
   });
 }
 
+// Ask npm itself for its global package root (`npm root -g`), run the same
+// AV-safe way as the update (node + npm-cli.js, no shell). This is right for
+// any prefix, including a custom one set in .npmrc, which no environment
+// variable reveals when `terminal-commander update` is typed in a shell.
+function npmGlobalRoot() {
+  const invocation = npmInvocation(["root", "-g"]);
+  if (!invocation) return null;
+  try {
+    const out = execFileSync(invocation.command, invocation.args, {
+      encoding: "utf8",
+      timeout: 15000,
+      stdio: ["ignore", "pipe", "ignore"],
+      shell: false,
+    });
+    const root = out.trim().split(/\r?\n/).pop();
+    return root || null;
+  } catch (_e) {
+    return null;
+  }
+}
+
 // Locate the freshly-installed launcher's JS entry under the npm GLOBAL root so
 // we can re-run setup with the NEW version via `node <new>/bin/terminal-commander.js`.
 // Spawning `process.execPath` + the resolved JS entry (no shell, no Windows
 // shim) keeps the AV-safe contract. Returns null when the global path is
 // unresolvable.
+//
+// One source of truth: npm installed the package, so npm's own global root is
+// where the new launcher is. No guessing from environment variables or the
+// node folder, which are wrong for a custom prefix.
 function globalLauncherEntry() {
-  const prefix = process.env.npm_config_prefix || process.env.PREFIX;
-  const candidates = [];
-  if (prefix) {
-    // Unix global: <prefix>/lib/node_modules; Windows global: <prefix>/node_modules.
-    candidates.push(
-      path.join(prefix, "lib", "node_modules", "terminal-commander", "bin", "terminal-commander.js"),
-      path.join(prefix, "node_modules", "terminal-commander", "bin", "terminal-commander.js"),
-    );
-  }
-  // Fallback: the global root that hosts node itself (npm's default prefix).
-  candidates.push(
-    path.join(path.dirname(process.execPath), "node_modules", "terminal-commander", "bin", "terminal-commander.js"),
-  );
-  return candidates.find((c) => {
-    try {
-      return fs.existsSync(c);
-    } catch (_e) {
-      return false;
-    }
-  }) || null;
+  const root = npmGlobalRoot();
+  if (!root) return { entry: null, reason: "`npm root -g` did not answer" };
+  const entry = path.join(root, "terminal-commander", "bin", "terminal-commander.js");
+  if (!fs.existsSync(entry)) return { entry: null, reason: `no launcher at ${entry}` };
+  return { entry, reason: null };
 }
 
 // Re-run `setup harness` with the freshly-installed launcher. Always invokes
 // `done` (success or not) so a setup hiccup never fails the update.
 function reregisterHarnesses(done) {
-  const entry = globalLauncherEntry();
+  const { entry, reason } = globalLauncherEntry();
   if (!entry) {
     process.stderr.write(
-      "terminal-commander: update installed; could not locate the new launcher to refresh harness configs. Run 'terminal-commander setup harness'.\n",
+      `terminal-commander: update installed, but harness setup was not re-run (${reason}). Run 'terminal-commander setup harness'.\n`,
     );
     done();
     return;
