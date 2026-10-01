@@ -186,13 +186,28 @@ test("JS-only control-plane commands route before native binary spawn", () => {
   }
 });
 
-test("setup harness --force refreshes a stale codex entry without colliding on a pre-existing .bak", () => {
+test("setup harness --force refreshes a stale codex entry without colliding on a pre-existing .bak", (t) => {
   // Fixes 1 + 3: `setup harness --force` REFRESHES a stale terminal_commander
   // entry (it must not skip with already_exists), and the timestamped backup
   // never collides with a pre-existing `config.toml.bak`, so a re-run succeeds
   // instead of the old broken `backup_failed`. The pre-existing .bak is left
   // untouched and a fresh `<config>.<UTC>.bak` is created alongside it.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "tc-setup-output-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const wrapper = path.join(root, "wrapper");
+  fs.mkdirSync(wrapper);
+  for (const dir of ["lib", "bin"]) fs.cpSync(path.join(PKG_ROOT, dir), path.join(wrapper, dir), { recursive: true });
+  fs.copyFileSync(path.join(PKG_ROOT, "package.json"), path.join(wrapper, "package.json"));
+  const { SUPPORTED_TARGETS } = require("../lib/resolve-binary.js");
+  const target = SUPPORTED_TARGETS.find((entry) => entry.platform === process.platform && entry.arch === process.arch);
+  assert.ok(target, "test host has a supported native package");
+  const platformPackage = path.join(wrapper, "node_modules", target.pkg);
+  fs.mkdirSync(path.join(platformPackage, "bin"), { recursive: true });
+  fs.writeFileSync(path.join(platformPackage, "package.json"), JSON.stringify({ name: target.pkg, version: "0.0.0" }));
+  // Setup only copies these fixtures; daemon autostart is disabled below.
+  for (const binary of ["terminal-commander-mcp", "terminal-commanderd"]) {
+    fs.writeFileSync(path.join(platformPackage, "bin", binary + (process.platform === "win32" ? ".exe" : "")), "native fixture");
+  }
   const codexDir = path.join(root, ".codex");
   fs.mkdirSync(codexDir, { recursive: true });
   const configPath = path.join(codexDir, "config.toml");
@@ -202,7 +217,7 @@ test("setup harness --force refreshes a stale codex entry without colliding on a
   );
   fs.writeFileSync(path.join(codexDir, "config.toml.bak"), "existing backup\n");
 
-  const shim = path.join(PKG_ROOT, "bin", "terminal-commander.js");
+  const shim = path.join(wrapper, "bin", "terminal-commander.js");
   // S9 host-env leak: TC_WSL_DISTRO / TC_USE_LEGACY_WSL_BRIDGE flip the
   // orchestrator into the legacy WSL bootstrap lane, which emits
   // "WSL runtime already present." instead of the native-path diagnostic.
@@ -212,10 +227,14 @@ test("setup harness --force refreshes a stale codex entry without colliding on a
     ...process.env,
     HOME: root,
     USERPROFILE: root,
+    LOCALAPPDATA: path.join(root, "local-app-data"),
+    APPDATA: path.join(root, "app-data"),
+    XDG_DATA_HOME: path.join(root, "data"),
     TC_SKIP_DAEMON_AUTOSTART: "1",
   };
   delete cleanEnv.TC_WSL_DISTRO;
   delete cleanEnv.TC_USE_LEGACY_WSL_BRIDGE;
+  delete cleanEnv.CODEX_HOME;
   const r = spawnSync(
     process.execPath,
     [shim, "setup", "harness", "--provider", "codex-cli", "--force"],

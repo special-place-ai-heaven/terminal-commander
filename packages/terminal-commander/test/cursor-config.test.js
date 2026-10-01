@@ -178,6 +178,15 @@ test("buildTerminalCommanderCommandConfig defaults to this package's JS shim", (
   assert.match(s.args[0].replace(/\\/g, "/"), /\/bin\/terminal-commander-mcp\.js$/);
 });
 
+test("implicit launch fallback is independent of PATH on every platform", () => {
+  for (const platform of ["win32", "linux", "darwin"]) {
+    const stanza = buildTerminalCommanderCommandConfig({ platform });
+    assert.equal(stanza.command, process.execPath);
+    assert.ok(path.isAbsolute(stanza.command));
+    assert.deepEqual(stanza.args, [path.resolve(__dirname, "../bin/terminal-commander-mcp.js")]);
+  }
+});
+
 test("buildTerminalCommanderServerConfig rejects unsafe distro before emitting any stanza", () => {
   assert.throws(
     () => buildTerminalCommanderServerConfig({ distro: "Ubuntu; rm -rf /" }),

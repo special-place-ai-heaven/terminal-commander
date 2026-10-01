@@ -10,6 +10,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const path = require("node:path");
 
 const {
   buildTerminalCommanderCommandConfig,
@@ -37,12 +38,10 @@ test("exePath takes precedence over nodePath/scriptPath", () => {
   assert.deepEqual(c.args, []);
 });
 
-test("without exePath on non-Windows the fallback is the portable bare-name command", () => {
-  // On Unix the MCP client's PATH + shell resolution finds the installed
-  // `terminal-commander-mcp` shim, so a bare command is portable and acceptable.
+test("without exePath on non-Windows the fallback uses the installed node and shim", () => {
   const c = buildTerminalCommanderCommandConfig({ platform: "linux" });
-  assert.equal(c.command, "terminal-commander-mcp");
-  assert.deepEqual(c.args, []);
+  assert.equal(c.command, process.execPath);
+  assert.deepEqual(c.args, [path.resolve(__dirname, "../bin/terminal-commander-mcp.js")]);
 });
 
 test("without exePath on Windows the fallback must NOT be the bare command when a resolver yields an absolute exe", () => {
@@ -62,23 +61,20 @@ test("without exePath on Windows the fallback must NOT be the bare command when 
   assert.notEqual(c.command, "terminal-commander-mcp");
 });
 
-test("win32 fallback: a resolver that throws or returns null degrades safely (last-resort bare, no crash)", () => {
-  // Defense in depth: a resolver hiccup must never throw out of the pure builder.
-  // When NO absolute path can be recovered on win32, the builder returns the bare
-  // name as a caller-prevented last resort (the orchestrator's resolver chain is
-  // expected to have produced o.exePath or warned). We assert it does not crash.
+test("win32 fallback: a resolver that throws or returns null uses a coherent node launch", () => {
   const throwing = buildTerminalCommanderCommandConfig({
     platform: "win32",
     resolveExePath: () => {
       throw new Error("resolver boom");
     },
   });
-  assert.equal(throwing.command, "terminal-commander-mcp");
+  assert.equal(throwing.command, process.execPath);
+  assert.deepEqual(throwing.args, [path.resolve(__dirname, "../bin/terminal-commander-mcp.js")]);
   const nullish = buildTerminalCommanderCommandConfig({
     platform: "win32",
     resolveExePath: () => null,
   });
-  assert.equal(nullish.command, "terminal-commander-mcp");
+  assert.deepEqual(nullish, throwing);
 });
 
 test("exePath still wins over an injected resolver (precedence preserved)", () => {

@@ -47,10 +47,12 @@ function main() {
 
   runBootstrap({ mode: "install", env, emitOutput: true })
     .then((r) => {
-      if (r && r.status === "bootstrap_ready") {
+      if (r && r.status === "bootstrap_ready" && r.harness_results?.some((result) => result.status === "ok")) {
         process.stdout.write(
           "terminal-commander: MCP harnesses configured. Restart your coding agent to pick up the new server.\n",
         );
+      } else if (r && r.status === "bootstrap_partial") {
+        process.stdout.write("terminal-commander: no MCP harness configured; run 'terminal-commander setup harness --provider <id>' and review its diagnostics.\n");
       }
     })
     .catch((err) => {

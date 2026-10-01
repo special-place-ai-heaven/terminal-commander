@@ -25,7 +25,26 @@ terminal-commander setup harness --provider codex-cli
 terminal-commander setup harness --provider omp
 terminal-commander setup harness --provider claude-code
 terminal-commander setup harness --provider claude-desktop
+terminal-commander setup harness --provider gemini
+terminal-commander setup harness --provider grok
+terminal-commander setup harness --provider kilo-code
 ```
+
+Explicit provider selection also works before the harness creates a config
+file. Add `--project <absolute-project-path>` for project scope; Claude Desktop
+supports global configuration only. Grok Bot installations using Cursor should
+select `cursor`; `grok` selects Grok CLI.
+
+Setup refreshes the complete launch command and arguments while retaining
+existing policy fields, custom environment values, and unrelated servers.
+Native launches use an absolute executable path and empty arguments. If no
+usable native adapter resolves, bootstrap defers registration without changing
+the configuration. Changed configs receive
+timestamped backups. Kilo uses its modern `mcp`/argv-array format; JSONC writes
+normalize formatting and remove comments.
+
+See the [harness configuration reference](https://github.com/special-place-ai-heaven/terminal-commander/blob/main/docs/integrations/harnesses.md)
+for Windows, Linux, WSL, and cloud-host paths, discovery, and reload steps.
 
 ## Update
 

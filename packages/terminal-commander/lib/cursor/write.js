@@ -167,6 +167,10 @@ function writeCursorMcpConfig(opts) {
   try {
     stanza = buildTerminalCommanderServerConfig({
       exePath: o.exePath,
+      platform: o.platform,
+      resolveExePath: o.resolveExePath,
+      nodePath: o.nodePath,
+      scriptPath: o.scriptPath,
       sessionToken: o.sessionToken,
       distro: o.distro,
       knownDistros: o.knownDistros,
@@ -243,6 +247,7 @@ function writeCursorMcpConfig(opts) {
   // (4) Merge.
   const merged = mergeCursorMcpConfig(parsed.value, stanza, {
     force: o.force === true,
+    surfaceExplicit: o.surface != null,
   });
   if (!merged.ok) {
     if (merged.reason === CONFIG_STATUSES.ALREADY_EXISTS) {
@@ -268,6 +273,13 @@ function writeCursorMcpConfig(opts) {
     });
   }
 
+  const contents = serializeCursorMcpConfig(merged.value);
+  if (existingBuf != null && existingBuf.toString("utf8") === contents) {
+    return buildResult({ status: CONFIG_STATUSES.ALREADY_EXISTS, path: target,
+      server: merged.value.mcpServers["terminal-commander"], was_present: true,
+      hint: "terminal-commander: configuration unchanged" });
+  }
+
   // (5) Backup before overwrite (only if target existed).
   let backupPath = null;
   if (fileExisted) {
@@ -287,7 +299,6 @@ function writeCursorMcpConfig(opts) {
   }
 
   // (6) Atomic write.
-  const contents = serializeCursorMcpConfig(merged.value);
   const wrote = atomicWrite(target, contents, {
     scopeDir,
     randomSuffix: o.randomSuffix,

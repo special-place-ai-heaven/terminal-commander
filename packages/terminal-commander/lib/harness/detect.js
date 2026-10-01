@@ -7,14 +7,17 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { getCursorGlobalConfigPath } = require("../cursor/config.js");
 const {
+  cursorConfigPath,
   codexConfigPath,
   ompConfigPath,
   claudeCodeSettingsPath,
   claudeCodeMcpConfigPath,
   claudeDesktopConfigPath,
-  homeDir,
+  geminiConfigPath,
+  grokConfigPath,
+  kiloConfigPath,
+  isProjectScope,
   expandHome,
 } = require("./paths.js");
 const { listProviders } = require("./registry.js");
@@ -30,7 +33,7 @@ function pathExists(p) {
 function detectCursor(opts) {
   const o = opts || {};
   try {
-    const globalCfg = getCursorGlobalConfigPath(o);
+    const globalCfg = cursorConfigPath(o);
     const cursorDir = path.dirname(globalCfg);
     if (pathExists(cursorDir) || pathExists(globalCfg)) {
       return { detected: true, reason: "cursor_dir_or_config", config_path: globalCfg };
@@ -38,7 +41,7 @@ function detectCursor(opts) {
   } catch (_e) {
     return { detected: false, reason: "unsupported_host" };
   }
-  return { detected: false, reason: "not_found" };
+  return { detected: false, reason: "not_found", config_path: cursorConfigPath(o) };
 }
 
 function detectCodex(opts) {
@@ -47,7 +50,7 @@ function detectCodex(opts) {
   if (pathExists(p) || pathExists(codexDir)) {
     return { detected: true, reason: "codex_config_or_dir", config_path: p };
   }
-  return { detected: false, reason: "not_found" };
+  return { detected: false, reason: "not_found", config_path: p };
 }
 
 function detectOmp(opts) {
@@ -55,11 +58,14 @@ function detectOmp(opts) {
   if (pathExists(p) || pathExists(path.dirname(p))) {
     return { detected: true, reason: "omp_config_or_dir", config_path: p };
   }
-  return { detected: false, reason: "not_found" };
+  return { detected: false, reason: "not_found", config_path: p };
 }
 
 function detectClaudeCode(opts) {
   const mcpPath = claudeCodeMcpConfigPath(opts);
+  if (isProjectScope(opts)) {
+    return { detected: pathExists(mcpPath), reason: pathExists(mcpPath) ? "claude_project_config" : "not_found", config_path: mcpPath };
+  }
   const settingsPath = claudeCodeSettingsPath(opts);
   const claudeDir = path.dirname(settingsPath);
   if (pathExists(mcpPath)) {
@@ -68,7 +74,7 @@ function detectClaudeCode(opts) {
   if (pathExists(settingsPath) || pathExists(claudeDir)) {
     return { detected: true, reason: "claude_settings_or_dir", config_path: mcpPath };
   }
-  return { detected: false, reason: "not_found" };
+  return { detected: false, reason: "not_found", config_path: mcpPath };
 }
 
 function detectClaudeDesktop(opts) {
@@ -80,26 +86,25 @@ function detectClaudeDesktop(opts) {
   if (pathExists(parent)) {
     return { detected: true, reason: "claude_desktop_dir", config_path: p };
   }
-  return { detected: false, reason: "not_found" };
+  return { detected: false, reason: "not_found", config_path: p };
 }
 
 function detectGemini(opts) {
-  const markers = [
-    expandHome("~/.gemini", opts),
-    expandHome("~/.config/gemini", opts),
-  ];
-  for (const m of markers) {
-    if (pathExists(m)) {
-      return {
-        detected: true,
-        reason: "gemini_marker",
-        config_path: null,
-        stub: true,
-        note: "config_path_unverified",
-      };
-    }
-  }
-  return { detected: false, reason: "not_found", stub: true };
+  return detectConfig(geminiConfigPath(opts), "gemini");
+}
+
+function detectGrok(opts) {
+  return detectConfig(grokConfigPath(opts), "grok");
+}
+
+function detectKilo(opts) {
+  const p = kiloConfigPath(opts);
+  return { ...detectConfig(p, "kilo"), config_format: path.basename(p) === "mcp.json" ? "json-mcp" : "json-kilo" };
+}
+
+function detectConfig(p, id) {
+  const detected = pathExists(p) || pathExists(path.dirname(p));
+  return { detected, reason: detected ? `${id}_config_or_dir` : "not_found", config_path: p };
 }
 
 function detectKimi(opts) {
@@ -125,13 +130,19 @@ const DETECTORS = Object.freeze({
   "claude-code": detectClaudeCode,
   "claude-desktop": detectClaudeDesktop,
   gemini: detectGemini,
+  grok: detectGrok,
+  "kilo-code": detectKilo,
   kimi: detectKimi,
 });
 
 function detectProvider(id, opts) {
   const fn = DETECTORS[id];
   if (!fn) return { detected: false, reason: "unknown_provider" };
-  return fn(opts);
+  try {
+    return fn(opts);
+  } catch (error) {
+    return { detected: false, reason: isProjectScope(opts) ? "project_root_required" : "unsupported_host" };
+  }
 }
 
 function detectAllHarnesses(opts) {
@@ -158,5 +169,7 @@ module.exports = {
   detectClaudeCode,
   detectClaudeDesktop,
   detectGemini,
+  detectGrok,
+  detectKilo,
   detectKimi,
 };

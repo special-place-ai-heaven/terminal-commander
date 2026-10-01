@@ -24,7 +24,7 @@ User scope is `~/.omp/agent/mcp.json`. Setup merges a
 {
   "mcpServers": {
     "terminal-commander": {
-      "command": "terminal-commander-mcp",
+      "command": "/home/<user>/.local/share/terminal-commander/bin/terminal-commander-mcp",
       "args": []
     }
   }
@@ -33,12 +33,13 @@ User scope is `~/.omp/agent/mcp.json`. Setup merges a
 
 `stdio` is OMP's default when `type` is omitted, and `command` is required.
 Optional `args` and `env` use the same stdio shape as OMP's other local
-servers. Setup adds `terminal-commander` to `enabledServers` when that list
-exists and removes it from `disabledServers`.
+servers. Explicit setup adds `terminal-commander` to `enabledServers` when
+that list exists and removes it from `disabledServers`. Automatic installation
+refreshes preserve those lists, including an intentionally disabled entry.
 A project file `.omp/mcp.json` is also read and, for that working
 directory, precedes the user file. Use the user file when you want Terminal
 Commander in every OMP session. OMP's own MCP config guide
-(<https://omp.sh/docs/mcp>) covers the optional `$schema` line and named
+(<https://github.com/can1357/oh-my-pi/blob/main/docs/mcp-config.md>) covers the optional `$schema` line and named
 profiles; those are OMP file layout, not a Terminal Commander handshake.
 
 On Windows, prefer the AV-safe direct exe the other harnesses use after
@@ -55,10 +56,12 @@ On Windows, prefer the AV-safe direct exe the other harnesses use after
 }
 ```
 
-That path drops the npm-shim launch chain. If the copy never ran, the bare
-`terminal-commander-mcp` command is the fallback. See
-[`cursor.md`](cursor.md#av-safe-direct-exe-launch) for why the stable exe
-exists. Add `env.TC_SOCKET` only for a non-default daemon endpoint. On
+That path drops the npm-shim launch chain. If the stable copy cannot be made,
+setup uses a resolved installed native adapter. If no usable native adapter
+resolves, registration is deferred without changing the configuration; install
+the platform package and rerun setup. Setup does not write a bare command that
+depends on OMP's `PATH`. See [harness configuration](harnesses.md) for discovery
+and refresh rules. Add `env.TC_SOCKET` only for a non-default daemon endpoint. On
 Windows the default endpoint is a local named pipe and normally does not
 need `TC_SOCKET`.
 
@@ -70,9 +73,17 @@ profile and the config key that changes it.
 
 ## Setup scope
 
-The provider is `omp`. Setup writes the user config; project-specific
-`.omp/mcp.json` remains yours to manage. `terminal-commander doctor harness`
-reports whether the OMP entry is enabled in the user config.
+The provider is `omp`. Setup writes the user config by default. To configure
+a project, supply its root:
+
+```sh
+terminal-commander setup harness --provider omp --project /absolute/project/path
+```
+
+This writes `<project>/.omp/mcp.json`. Use an absolute Windows path on Windows.
+An explicit provider selection can create the configuration without existing
+OMP markers. `terminal-commander doctor harness` reports whether the OMP entry
+is enabled in the user config.
 
 ## Protocol compatibility
 
@@ -84,7 +95,7 @@ analogous to Codex's `mcp_2026_07_28`.
 
 1. Confirm `terminal-commander-mcp --help` works from the same user account
    (or that the Windows exe path above exists).
-2. Start a new OMP session so it reloads MCP config.
+2. Run `/mcp reload` or start a new OMP session so it reloads MCP config.
 3. Ask OMP to list MCP tools and call `system_discover`.
 
 Expected Terminal Commander tools include `system_discover`, `health`,

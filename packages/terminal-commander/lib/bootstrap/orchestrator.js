@@ -381,6 +381,7 @@ async function runBootstrap(opts) {
     // path can be resolved (e.g. the only candidate lives in the npx cache).
     // In dry-run / print-config the path is resolved but nothing is copied.
     let stableExePath;
+    let launchFailureReason;
     if (autoConfigure || needsHarness || noWrite) {
       const stable = (o.ensureStableBinaries || ensureStableBinaries)({
         platform,
@@ -403,8 +404,9 @@ async function runBootstrap(opts) {
           );
         } else {
           stableExePath = undefined;
+          launchFailureReason = direct.reason || "resolve_failed";
           lines.push(
-            `terminal-commander: WARNING could not resolve an absolute MCP binary path (${stable.reason}/${direct.reason}); harness configs fall back to the PATH-dependent bare command 'terminal-commander-mcp' which only works if its shim is on PATH. Run 'npm install -g terminal-commander' then 'terminal-commander setup harness' to write an absolute path.`,
+            `terminal-commander: native MCP binary unavailable (${stable.reason}/${direct.reason}); harness registration deferred. Install the platform package and rerun setup.`,
           );
         }
       }
@@ -417,6 +419,7 @@ async function runBootstrap(opts) {
       env,
       distro,
       exePath: stableExePath,
+      launchFailureReason,
       knownDistros,
       requireKnownDistro: platform === "win32" && distro != null,
       force: o.force === true || autoConfigure,
@@ -425,6 +428,7 @@ async function runBootstrap(opts) {
       cursor_scope: o.cursor_scope || "global",
       projectRoot: o.projectRoot,
       providerFilter: o.providerFilter,
+      activate: o.activate === true,
       surface: o.surface,
       cursorOnly: o.cursorOnly === true,
       randomSuffix: o.randomSuffix,

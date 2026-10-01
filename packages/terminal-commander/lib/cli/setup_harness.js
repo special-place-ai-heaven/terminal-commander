@@ -25,6 +25,7 @@ async function runSetupHarness(opts) {
     // and preserves every other server/key (idempotent by construction). The
     // explicit `--force` flag remains supported for parity.
     auto_configure: true,
+    activate: true,
     force: flags.force === true,
     clobber_backup: flags["clobber-backup"] === true,
     dry_run: flags["dry-run"] === true,

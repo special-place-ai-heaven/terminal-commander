@@ -78,83 +78,20 @@ function defaultMcpScriptPath() {
 
 function buildTerminalCommanderCommandConfig(opts) {
   const o = opts || {};
-  // Platform drives ONLY the last-resort fallback below (bare command is
-  // ENOENT-fatal on Windows shell:false). Pure: defaults to process.platform,
-  // overridable by callers/tests; no FS, no spawn.
-  const platform = o.platform || process.platform;
-  // Highest precedence: a resolved native exe at a STABLE per-user path.
-  // The MCP client launches it directly (no npm script-launcher shim, no
-  // node hop), which removes the script-interpreter-then-spawn chain that
-  // heuristic AV reads as a loader. The path is a fixed per-user dir the
-  // package owns (e.g. %LOCALAPPDATA%\terminal-commander\bin\...), NOT the
-  // hoist-prone node_modules path, so npm updates never silently break it.
-  if (o.exePath) {
-    return {
-      command: o.exePath,
-      args: [],
-    };
-  }
-  // Explicit node+script overrides (used by callers that know the exact
-  // installed paths) -> emit the node.exe + JS-shim form.
+  if (o.exePath) return { command: o.exePath, args: [] };
   if (o.scriptPath || o.nodePath) {
-    return {
-      command: o.nodePath || process.execPath,
-      args: [o.scriptPath || defaultMcpScriptPath()],
-    };
+    return { command: o.nodePath || process.execPath, args: [o.scriptPath || defaultMcpScriptPath()] };
   }
-  // Last-resort fallback: no exePath and no node+script override were passed.
-  //
-  // The bare `terminal-commander-mcp` command is FATAL on Windows when the MCP
-  // client spawns the server with Node `child_process` `shell:false` (which
-  // Claude Code and similar harnesses do). Under shell:false on Windows, Node
-  // does NOT perform PATHEXT resolution and cannot exec a non-PE script shim
-  // (the npm-generated Windows launcher), so a bare name => ENOENT and the
-  // server never launches (it shows up as "0 tools" because the process never
-  // started). Verified live:
-  //   spawnSync("terminal-commander-mcp", ["--version"], { shell:false }) -> ENOENT
-  //   spawnSync("C:\\...\\terminal-commander-mcp.exe", [...], { shell:false }) -> ok
-  // So on Windows we must NEVER emit the bare name; we need an absolute exe path.
-  //
-  // This module is pure (no FS / no child_process / no resolve-binary require --
-  // enforced by cursor-static-guards). The orchestrator (lib/bootstrap) already
-  // resolves an absolute exe via ensureStableBinaries -> resolveDirectExePath and
-  // passes it as o.exePath, so this fallback is only hit by callers that did NOT
-  // pre-resolve. Such callers may inject `o.resolveExePath` (e.g. the stable_bin
-  // resolver) to recover an absolute path here WITHOUT this pure module taking an
-  // FS dependency. Do NOT "simplify" this back to an unconditional bare command:
-  // that silently breaks every Windows shell:false harness.
   if (typeof o.resolveExePath === "function") {
-    let resolved = null;
     try {
-      resolved = o.resolveExePath({ platform, arch: o.arch });
+      const resolved = o.resolveExePath({ platform: o.platform || process.platform, arch: o.arch });
+      if (typeof resolved === "string" && resolved.length > 0) return { command: resolved, args: [] };
     } catch (_e) {
-      resolved = null;
-    }
-    if (resolved && typeof resolved === "string" && resolved.length > 0) {
-      return { command: resolved, args: [] };
+      // The installed Node shim remains usable when native resolution fails.
     }
   }
-  if (platform === "win32") {
-    // No absolute path could be resolved on Windows. Bare is ENOENT-fatal here
-    // (see above), so this is a caller-prevented condition: the orchestrator's
-    // resolver chain should have produced o.exePath or warned. We still return
-    // the bare name (there is nothing else to return) but the caller MUST treat
-    // a Windows fallback that reaches this point as a setup failure, not success.
-    return {
-      command: SERVER_COMMAND,
-      args: [],
-    };
-  }
-  // Non-Windows: emit the PATH-resolved command form. On Unix the MCP client's
-  // PATH + shell resolution find the installed `terminal-commander-mcp` shim, so
-  // a bare command is portable and never leaks this machine's absolute checkout
-  // path (which would embed a private /home/ or \Users\ path into a config).
-  return {
-    command: SERVER_COMMAND,
-    args: [],
-  };
+  return { command: process.execPath, args: [defaultMcpScriptPath()] };
 }
-
 /**
  * Derive the Cursor global mcp.json path from injected platform +
  * env. Never hardcodes a username; uses standard env vars only.
@@ -377,7 +314,8 @@ function validateCursorConfigShape(obj) {
   for (const name of Object.keys(obj.mcpServers)) {
     const s = obj.mcpServers[name];
     if (!s || typeof s !== "object" || Array.isArray(s)) return false;
-    if (typeof s.command !== "string" || s.command.length === 0) return false;
+    if ((typeof s.command !== "string" || s.command.length === 0) &&
+        ![s.url, s.httpUrl, s.serverUrl].some((url) => typeof url === "string" && url.length > 0)) return false;
   }
   return true;
 }
@@ -414,9 +352,13 @@ function mergeCursorMcpConfig(existing, serverConfig, opts) {
   const mergedServers = {};
   for (const name of Object.keys(existing.mcpServers)) {
     if (name === SERVER_NAME) continue; // we are about to overwrite
-    mergedServers[name] = existing.mcpServers[name];
+    Object.defineProperty(mergedServers, name, { value: existing.mcpServers[name], enumerable: true, configurable: true, writable: true });
   }
-  mergedServers[SERVER_NAME] = serverConfig;
+  const entry = require("../harness/io/managed_server.js").mergeManagedServer(
+    existing.mcpServers[SERVER_NAME], serverConfig, o,
+  );
+  if (!entry.ok) return entry;
+  mergedServers[SERVER_NAME] = entry.value;
   const merged = { ...existing, mcpServers: mergedServers };
   return { ok: true, value: merged, mutated: true, was_present: wasPresent };
 }

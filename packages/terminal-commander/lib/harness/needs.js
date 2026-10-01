@@ -6,6 +6,7 @@
 const fs = require("node:fs");
 const { listProviders } = require("./registry.js");
 const { detectProvider } = require("./detect.js");
+const { stripJsonc } = require("./io/json_mcp.js");
 
 function entryConfigured(id, opts) {
   const o = opts || {};
@@ -14,8 +15,7 @@ function entryConfigured(id, opts) {
     if (!d.detected || !d.config_path) return false;
     if (!fs.existsSync(d.config_path)) return false;
     const text = fs.readFileSync(d.config_path, "utf8");
-    if (id === "cursor") return text.includes("terminal-commander-mcp");
-    if (id === "codex-cli") return text.includes("[mcp_servers.terminal_commander]");
+    if (id === "codex-cli" || id === "grok") return /^\s*\[mcp_servers\.terminal_commander\]\s*(?:#.*)?$/m.test(text);
     if (id === "omp") {
       const config = JSON.parse(text);
       const name = "terminal-commander";
@@ -25,10 +25,15 @@ function entryConfigured(id, opts) {
         (!Array.isArray(config.enabledServers) || config.enabledServers.includes(name)) &&
         (!Array.isArray(config.disabledServers) || !config.disabledServers.includes(name));
     }
-    if (id === "claude-code") {
-      return text.includes("terminal-commander-mcp") && text.includes('"terminal_commander"');
-    }
-    return text.includes("terminal-commander-mcp");
+    const provider = listProviders().find((p) => p.id === id);
+    const config = JSON.parse(d.config_path.endsWith(".jsonc") ? stripJsonc(text) : text);
+    const entry = (d.config_format === "json-kilo" ? config.mcp : config.mcpServers)?.[provider.serverName];
+    if (!entry || typeof entry !== "object") return false;
+    if (entry.url || entry.httpUrl || entry.serverUrl) return true;
+    return d.config_format === "json-kilo"
+      ? Array.isArray(entry.command) && entry.command.length > 0 && entry.command.every((part) => typeof part === "string")
+      : typeof entry.command === "string" && entry.command.length > 0 &&
+        (entry.args == null || (Array.isArray(entry.args) && entry.args.every((arg) => typeof arg === "string")));
   } catch (_e) {
     return false;
   }
