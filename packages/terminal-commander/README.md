@@ -54,9 +54,10 @@ terminal-commander update
 
 This runs `npm install -g terminal-commander@latest`.
 
-On Windows, update first runs a native scoped lock preflight. It terminates only
-Terminal Commander binaries currently running from the installed npm platform
-package `bin` directory. It does not invoke `cmd.exe`, PowerShell, `taskkill`, or
+On Windows, update first runs a native scoped lock preflight. It asks matching
+daemons to exit, then terminates Terminal Commander binaries still running from
+the installed package. If one cannot be stopped, update stops and the installed
+version is unchanged. It does not invoke `cmd.exe`, PowerShell, `taskkill`, or
 downloaded scripts.
 
 ## Commands

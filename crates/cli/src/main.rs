@@ -1032,6 +1032,57 @@ async fn shutdown_via_ipc(
         .flatten()
 }
 
+/// Ask the daemon recorded for `pid` to shut itself down.
+///
+/// Used by the Windows update preflight when `TerminateProcess` is denied.
+/// Connects only to a live pidfile under the state base whose endpoint is in
+/// the product pipe namespace. Returns `Ok` once a `ShutdownAck` arrives; the
+/// caller still has to observe the process exit.
+#[cfg(windows)]
+pub(crate) fn request_daemon_shutdown(pid: u32) -> Result<(), String> {
+    let base = terminal_commander_supervisor::paths::resolve_state_dir_base();
+    let entries = terminal_commander_supervisor::sessions::enumerate(&base);
+    let Some(entry) = entries
+        .into_iter()
+        .find(|entry| entry.alive && entry.pid == pid)
+    else {
+        return Err(format!("no live session pidfile for pid {pid}"));
+    };
+    if !crate::update_locks::accepted_shutdown_pipe(&entry.endpoint) {
+        let endpoint = entry.endpoint;
+        return Err(format!("refusing endpoint {endpoint}"));
+    }
+    let endpoint = endpoint_from_recorded(&entry.endpoint);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("tokio runtime: {err}"))?;
+    rt.block_on(async {
+        let exchange = async {
+            let terminal_commander_supervisor::ensure::Endpoint::WindowsPipe { name } = &endpoint
+            else {
+                return Err("shutdown endpoint is not a named pipe".to_owned());
+            };
+            let mut stream = tokio::net::windows::named_pipe::ClientOptions::new()
+                .open(name.as_str())
+                .map_err(|err| format!("shutdown pipe: {err}"))?;
+            match run_shutdown_exchange(
+                &mut stream,
+                br#"{"correlation_id":0,"request":{"method":"shutdown"}}"#,
+                64 * 1024,
+            )
+            .await
+            {
+                Some(_) => Ok(()),
+                None => Err("shutdown response was not a ShutdownAck".to_owned()),
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), exchange)
+            .await
+            .unwrap_or_else(|_| Err("shutdown request timed out".to_owned()))
+    })
+}
+
 /// Length-prefix the Shutdown request, write it, read one length-prefixed
 /// frame, parse it as the daemon's response envelope, return
 /// `Some(draining)` iff it deserializes as `ShutdownAck { draining }`.

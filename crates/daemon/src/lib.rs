@@ -32,6 +32,8 @@ pub mod runtime;
 pub mod shell;
 #[cfg(unix)]
 pub mod shell_session;
+#[cfg(windows)]
+pub(crate) mod shutdown_event;
 pub mod state;
 pub mod store_actor;
 pub mod subscriptions;

@@ -434,6 +434,9 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     // Re-assert the pidfile if it goes missing (cross-platform; see the Unix
     // arm). Closes the pidfile-less window mis-read as stale by the replace path.
     spawn_pidfile_reasserter(state_dir.clone(), pipe_name.clone());
+    // Same-user shutdown event at medium integrity. A normal update can signal
+    // it when TerminateProcess is denied; it does not expose the command pipe.
+    crate::shutdown_event::spawn_waiter(Arc::clone(&state));
 
     // Two shutdown sources, mirroring the Unix arm: an OS signal
     // (Ctrl-C) or an internal `Shutdown` IPC request that flipped the

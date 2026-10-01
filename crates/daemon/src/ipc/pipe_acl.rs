@@ -20,7 +20,7 @@ pub fn build_sddl_for_current_user() -> std::io::Result<String> {
     Ok(sddl)
 }
 
-fn current_user_sid() -> std::io::Result<String> {
+pub(crate) fn current_user_sid() -> std::io::Result<String> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token)
