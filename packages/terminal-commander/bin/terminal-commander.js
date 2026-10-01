@@ -161,7 +161,7 @@ function runUpdate() {
   runUpdatePreflight().then((preflightCode) => {
     if (preflightCode !== 0) {
       process.stderr.write(
-        `terminal-commander: update preflight failed with exit code ${preflightCode}; close Terminal Commander processes and retry.\n`,
+        `terminal-commander: update preflight failed with exit code ${preflightCode}; installed version unchanged. Follow the preflight lines above, then retry \`terminal-commander update\`.\n`,
       );
       process.exit(preflightCode || 1);
       return;

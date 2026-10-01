@@ -709,10 +709,13 @@ terminal-commander update
 
 `update` runs the same public npm command (`npm install -g
 terminal-commander@latest`). On Windows it first runs a native preflight that
-terminates only Terminal Commander binaries whose executable path is inside
-the current npm platform package `bin` directory — no `cmd.exe`, PowerShell,
-`taskkill`, hidden windows, broad process-name matches, or downloaded helper
-scripts.
+stops Terminal Commander binaries whose executable path is inside the
+installed npm package scope. It asks a matching daemon to exit (a same-user
+shutdown event, then its own pipe) and only then terminates a process that
+is still running. It does not invoke `cmd.exe`, PowerShell, `taskkill`,
+hidden windows, broad process-name matches, or downloaded helper scripts.
+If a process is still running, the preflight exits non-zero and the installed
+version is left unchanged.
 
 On startup the adapter calls `ensure_daemon`, then `replace_if_stale` when
 spawn is allowed — a running daemon older than the installed adapter is

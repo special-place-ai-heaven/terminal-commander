@@ -9,6 +9,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
 const path = require("node:path");
 
 const { runRestart, DAEMON_RESTART_CMD } = require("../lib/cli/restart.js");
@@ -376,6 +377,16 @@ test("update preflight execution is sequential and stops on the first failure", 
   assert.deepEqual(seen.map((call) => call.args[2]), ["one", "two"]);
   assert.ok(seen.every((call) => call.options.shell === false));
   assert.deepEqual(diagnostics, ["planned\n"]);
+});
+
+test("update preflight failure says the installed version was not changed", () => {
+  const src = fs.readFileSync(
+    path.join(__dirname, "..", "bin", "terminal-commander.js"),
+    "utf8",
+  );
+  assert.match(src, /installed version unchanged/);
+  assert.match(src, /preflight failed with exit code/);
+  assert.doesNotMatch(src, /close Terminal Commander processes and retry/);
 });
 
 test("update preflight maps a malformed spawn result to a clear executable error", async () => {

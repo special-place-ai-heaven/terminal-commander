@@ -12,3 +12,4 @@ pub mod proc_lock;
 pub mod replace;
 pub mod session;
 pub mod sessions;
+pub mod shutdown_handoff;
