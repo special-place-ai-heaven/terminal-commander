@@ -49,9 +49,7 @@ use crate::command::{CommandError, CommandRuntime, CommandStartRequest, CommandS
 /// `shell_line`, bounded by the same per-item
 /// argv cap that [`CommandRuntime::start_combed_shell`] enforces via
 /// `validate_argv`. A larger cap here would lie — `validate_argv` would
-/// reject the oversize line as `ArgvItemTooLong`. Raising
-/// this later requires a lane-aware validator that exempts the line item under
-/// the shell lane; that is an explicit follow-up, NOT TC49.
+/// reject the oversize line as `ArgvItemTooLong`.
 pub const MAX_SHELL_LINE_BYTES: usize = crate::command::MAX_ARGV_ITEM_BYTES;
 
 /// Default shell used when the request does not name one.

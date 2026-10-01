@@ -22,7 +22,7 @@ pub const MAX_RECIPE_SUMMARY_BYTES: usize = 2_000;
 /// Matches the command-start argv item cap.
 pub const MAX_RECIPE_ARGV_ITEMS: usize = 256;
 /// Matches the command-start per-item cap.
-pub const MAX_RECIPE_ARGV_ITEM_BYTES: usize = 4_096;
+pub const MAX_RECIPE_ARGV_ITEM_BYTES: usize = 32_768;
 /// Maximum tags stored on one version.
 pub const MAX_RECIPE_TAGS: usize = 32;
 /// Maximum bytes in one tag.

@@ -859,6 +859,86 @@ fn command_status_returns_lifecycle_counters_after_exit() {
 }
 
 #[test]
+fn command_start_combed_accepts_long_inline_argument() {
+    // Inline interpreter payloads (`python -c`, `node -e`) legitimately
+    // exceed the old 4,096-byte per-item cap. 8,192 bytes is the size class
+    // that failed before the cap raise and must now start cleanly under the
+    // 32,768-byte cap. `echo -n` keeps the test deterministic across gate VMs.
+    let runtime = rt();
+    runtime.block_on(async {
+        let data = tmp_data_dir("longarg");
+        let (_state, handle) = build_server(&data);
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(2));
+
+        let long = "a".repeat(8_192);
+        let start = match client
+            .call(
+                41,
+                IpcRequest::CommandStartCombed(small_start_params(&["/bin/echo", "-n", &long])),
+            )
+            .await
+            .expect("8 KiB inline argv item must be accepted under the 32 KiB cap")
+        {
+            IpcResponse::CommandStartCombed(s) => s,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        assert_ne!(
+            start.job_id,
+            terminal_commander_core::JobId::new(),
+            "start must carry a real job id"
+        );
+
+        // Poll command_status until a terminal state (mirrors
+        // command_status_returns_lifecycle_counters_after_exit), then require
+        // the echoed job to have exited 0.
+        let query_status = |seq: u64, job_id| {
+            let client = &client;
+            async move {
+                match client
+                    .call(
+                        seq,
+                        IpcRequest::CommandStatus(CommandStatusParams { job_id }),
+                    )
+                    .await
+                    .expect("status")
+                {
+                    IpcResponse::CommandStatus(s) => s,
+                    other => panic!("unexpected response: {other:?}"),
+                }
+            }
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut status = query_status(42, start.job_id).await;
+        let mut seq = 43;
+        while !matches!(
+            status.state,
+            terminal_commander_core::JobState::Exited
+                | terminal_commander_core::JobState::Cancelled
+                | terminal_commander_core::JobState::Failed
+        ) && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            status = query_status(seq, start.job_id).await;
+            seq += 1;
+        }
+        assert!(
+            matches!(status.state, terminal_commander_core::JobState::Exited),
+            "echo must reach Exited, got {:?}",
+            status.state
+        );
+        assert_eq!(
+            status.exit_code,
+            Some(0),
+            "echo -n with an 8 KiB argv item must exit 0"
+        );
+
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+#[test]
 fn command_status_for_unknown_job_returns_typed_error() {
     let runtime = rt();
     runtime.block_on(async {

@@ -59,8 +59,11 @@ use crate::store_actor::StoreClient;
 /// Maximum argv size accepted in a single request. Prevents an
 /// operator from smuggling raw stream content as "command args".
 pub const MAX_ARGV_ITEMS: usize = 256;
-/// Maximum length of any single argv item.
-pub const MAX_ARGV_ITEM_BYTES: usize = 4096;
+/// Maximum length of any single argv item. 32,768 matches the Windows
+/// CreateProcessW command-line ceiling (UTF-16 chars), so a validated item
+/// is within what the OS can spawn; Linux's per-arg limit is 128 KiB.
+/// Larger payloads belong in a file (`file_write`, then run the script).
+pub const MAX_ARGV_ITEM_BYTES: usize = 32_768;
 
 /// Closed-set deny list for `argv[0]` basenames at the command-
 /// runtime layer.
@@ -3186,7 +3189,7 @@ mod pipeline_tests {
 
 #[cfg(test)]
 mod redact_tests {
-    use super::redact_argv_head;
+    use super::{CommandError, CommandRuntime, MAX_ARGV_ITEM_BYTES, redact_argv_head};
 
     /// Joins a redacted head into one string for substring assertions. Asserts
     /// here are on the secret PATTERN, never on length, so a longer/shorter
@@ -3394,6 +3397,25 @@ mod redact_tests {
             head[0].len()
         );
         // If we got here without panicking, the slice respected char boundaries.
+    }
+
+    #[test]
+    fn validate_argv_accepts_item_at_cap_and_rejects_one_over() {
+        let argv = vec![
+            "python".to_owned(),
+            "-c".to_owned(),
+            "a".repeat(MAX_ARGV_ITEM_BYTES),
+        ];
+        assert!(CommandRuntime::validate_argv(&argv).is_ok());
+        let over = vec![
+            "python".to_owned(),
+            "-c".to_owned(),
+            "a".repeat(MAX_ARGV_ITEM_BYTES + 1),
+        ];
+        assert!(matches!(
+            CommandRuntime::validate_argv(&over),
+            Err(CommandError::ArgvItemTooLong { index: 2, len }) if len == MAX_ARGV_ITEM_BYTES + 1
+        ));
     }
 
     #[test]

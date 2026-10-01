@@ -65,15 +65,16 @@ gate, so the default surface stays exactly as safe as before.
 
 | Field | Cap |
 |---|---|
-| `shell_line` | `MAX_SHELL_LINE_BYTES = 4096` (= `MAX_ARGV_ITEM_BYTES`) |
+| `shell_line` | `MAX_SHELL_LINE_BYTES = 32768` (= `MAX_ARGV_ITEM_BYTES`) |
 | Redacted audit subject | 128 bytes (char boundary) |
 
 `MAX_SHELL_LINE_BYTES` equals `MAX_ARGV_ITEM_BYTES` ON PURPOSE: the
 lane assembles `argv = [shell, "-lc", shell_line]`, so `shell_line`
-lands as `argv[2]` and `validate_argv` would reject anything over 4096
-as `ArgvItemTooLong { index: 2, .. }`. A larger cap here would lie.
-Raising it later needs a lane-aware validator that exempts `argv[2]`
-under the shell lane -- an explicit follow-up, NOT TC49.
+lands as `argv[2]` and `validate_argv` would reject anything over the
+cap as `ArgvItemTooLong { index: 2, .. }`. A larger cap here would lie.
+The two constants move together by construction (shell.rs derives
+`MAX_SHELL_LINE_BYTES` from `command.rs`); raising the command-lane cap
+raises the shell lane with it.
 
 `ShellRuntime::exec` reports an oversize line as
 `CommandError::ArgvItemTooLong { index: 0, .. }` -- `index: 0` names the

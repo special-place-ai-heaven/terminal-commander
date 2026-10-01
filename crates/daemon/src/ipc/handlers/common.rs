@@ -9,7 +9,7 @@ use terminal_commander_store::AuditEntry;
 use terminal_commander_supervisor::identity::PeerIdentity;
 
 use crate::audit::AuditSink;
-use crate::command::CommandError;
+use crate::command::{CommandError, MAX_ARGV_ITEM_BYTES};
 use crate::ipc::protocol::{IpcError, IpcErrorCode, ShellDenyClass, ShellTeach};
 use crate::policy::{PolicyEngine, PolicyProfile};
 use crate::state::DaemonState;
@@ -275,7 +275,7 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
         }
         CommandError::ArgvItemTooLong { index, len } => IpcError::new(
             IpcErrorCode::ArgvInvalid,
-            format!("argv[{index}] is {len} bytes; exceeds per-item cap"),
+            format!("argv[{index}] is {len} bytes; cap is {MAX_ARGV_ITEM_BYTES}"),
         ),
         CommandError::PosixPathOnWindows { index, path } => IpcError::new(
             IpcErrorCode::PathDenied,

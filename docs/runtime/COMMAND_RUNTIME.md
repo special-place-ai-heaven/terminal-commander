@@ -63,7 +63,7 @@ The LLM never sees raw stdout/stderr.
 | Field | Cap |
 |---|---|
 | `argv` items | `MAX_ARGV_ITEMS = 256` |
-| Single argv item | `MAX_ARGV_ITEM_BYTES = 4096` |
+| Single argv item | `MAX_ARGV_ITEM_BYTES = 32768` |
 | Subject in audit | 256 chars (truncated to char boundary at insert) |
 | `format_argv_metadata` per item | 128 chars |
 | Audit `metadata_json` | `MAX_AUDIT_METADATA_BYTES = 4096` (store-side) |
