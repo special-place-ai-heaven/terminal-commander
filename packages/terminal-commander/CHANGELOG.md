@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.9](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.8...v0.3.9) (2026-10-01)
+
+
+### Bug Fixes
+
+* **harness:** repair portable registration ([7d08451](https://github.com/special-place-ai-heaven/terminal-commander/commit/7d084516c6645acb90bb73cfa09f8b247b6d93e4))
+* **tests:** keep TC47 runtime_state live-load probes alive until explicit stop ([f0680cc](https://github.com/special-place-ai-heaven/terminal-commander/commit/f0680cc93374572efbdf361c0dcfa1085a668943))
+
 ## [0.3.8](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.7...v0.3.8) (2026-10-01)
 
 
