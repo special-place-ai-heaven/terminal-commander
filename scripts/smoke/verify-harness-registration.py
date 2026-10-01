@@ -62,7 +62,11 @@ def probe(command, args, env):
     reader.start()
 
     def request(identifier, method, params):
-        child.stdin.write(json.dumps({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params}) + "\n")
+        child.stdin.write(json.dumps({"jsonrpc": "2.0", "id": identifier, "method": method, "params": {**params, "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "harness-registration-smoke", "version": "1"},
+        }}}) + "\n")
         child.stdin.flush()
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
@@ -74,10 +78,7 @@ def probe(command, args, env):
         raise TimeoutError(method)
 
     try:
-        request(1, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
-                                  "clientInfo": {"name": "harness-registration-smoke", "version": "1"}})
-        child.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
-        child.stdin.flush()
+        request(1, "server/discover", {})
         tools = request(2, "tools/list", {})["tools"]
         assert any(tool["name"] == "health" for tool in tools), "health missing"
         request(3, "tools/call", {"name": "health", "arguments": {}})
