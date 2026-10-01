@@ -1514,19 +1514,52 @@ jobs:
     timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
     permissions: { contents: read, issues: write }
     steps:
-      - uses: actions/checkout@v4
+      # No actions/checkout and no actions/setup-node. Run 36858930018
+      # printed verify-windows-x64: OK, then Post setup-node and Post
+      # checkout failed in the same second as "Cleaning up orphan
+      # processes" — no ##[error] from the smoke (#251). persist-credentials
+      # would still run Post checkout; those post scripts never reached a
+      # git error. windows-2022 already has Node on PATH (that run's
+      # registry wait called npm before setup-node).
+      # ponytail: fetch the one self-contained wait script at GITHUB_SHA.
+      # Ceiling: if it gains a repo-local dependency, checkout@v4 with
+      # persist-credentials: false, and still no setup-node.
       - name: Wait for npm registry propagation
         shell: bash
         env:
+          # GITHUB_TOKEN is not in the default runner env. set -u would abort
+          # before curl if this mapping were missing.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VER: ${{ needs.release-context.outputs.version }}
-        run: bash scripts/release/wait-for-npm-registry.sh "terminal-commander@${VER}" "@terminal-commander/windows-x64@${VER}"
-      - uses: actions/setup-node@v4
-        with: { node-version: "20" }
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.raw" \
+            -o wait-for-npm-registry.sh \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/scripts/release/wait-for-npm-registry.sh?ref=${GITHUB_SHA}"
+          bash wait-for-npm-registry.sh "terminal-commander@${VER}" "@terminal-commander/windows-x64@${VER}"
       - shell: pwsh
         env:
           VER: ${{ needs.release-context.outputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $proc = $null
+          function Stop-TcTree([System.Diagnostics.Process]$p) {
+            if ($null -eq $p) { return }
+            try {
+              if (-not $p.HasExited) { $p.Kill($true) }
+            } catch {
+              Write-Host "verify-windows-x64: cleanup pid $($p.Id): $($_.Exception.Message)"
+            }
+          }
+          try {
+          $nodeVer = (node -p "process.versions.node").Trim()
+          $nodeMajor = [int]($nodeVer.Split('.')[0])
+          if ($nodeMajor -lt 20) {
+            throw "verify-windows-x64: windows-2022 node on PATH is $nodeVer; need 20+"
+          }
+          Write-Host "verify-windows-x64: node $nodeVer ($((Get-Command node).Source))"
           npm install -g "terminal-commander@$env:VER"
           terminal-commander-mcp --version
           # Stdio probe: start the real process directly and wait on IT with a
@@ -1555,7 +1588,7 @@ jobs:
           $completed = $proc.WaitForExit(10000)
           if (-not $completed) {
             Write-Host "smoke: stdio probe timed out (expected for unbounded server)"
-            try { $proc.Kill() } catch {}
+            Stop-TcTree $proc
           } else {
             if (-not $read.Wait(15000)) {
               throw "verify-windows-x64: adapter exited but its stdout never closed; the daemon it started holds the pipe"
@@ -1569,9 +1602,27 @@ jobs:
               throw "verify-windows-x64: stdio probe got no server/discover result"
             }
           }
-          # Stop the adapter and daemon the probe started so no process outlives the step.
-          Get-Process terminal-commander-mcp, terminal-commanderd -ErrorAction SilentlyContinue | Stop-Process -Force
           Write-Host "verify-windows-x64: OK"
+          } finally {
+            # Process name is node, not terminal-commander-mcp. Kill the tree,
+            # the daemon, and any leftover node still pointing at the adapter,
+            # then wait so file handles drop before the runner sweeps orphans.
+            # Cleanup must not turn a green smoke red; a failed assert above still fails.
+            Stop-TcTree $proc
+            try {
+              Get-CimInstance Win32_Process -Filter "Name = 'node.exe' OR Name = 'terminal-commanderd.exe'" -ErrorAction SilentlyContinue |
+                Where-Object {
+                  $_.Name -eq 'terminal-commanderd.exe' -or
+                  ($_.CommandLine -and $_.CommandLine -like '*terminal-commander-mcp*')
+                } |
+                ForEach-Object {
+                  Stop-TcTree (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue)
+                }
+            } catch {
+              Write-Host "verify-windows-x64: cleanup scan: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds 2
+          }
 
   verify-mac-x64:
     name: verify-mac-x64
