@@ -59,10 +59,12 @@ use crate::store_actor::StoreClient;
 /// Maximum argv size accepted in a single request. Prevents an
 /// operator from smuggling raw stream content as "command args".
 pub const MAX_ARGV_ITEMS: usize = 256;
-/// Maximum length of any single argv item. 32,768 matches the Windows
-/// CreateProcessW command-line ceiling (UTF-16 chars), so a validated item
-/// is within what the OS can spawn; Linux's per-arg limit is 128 KiB.
-/// Larger payloads belong in a file (`file_write`, then run the script).
+/// Maximum length of any single argv item (32,768 bytes).
+///
+/// Matches the Windows CreateProcessW command-line ceiling (UTF-16 chars),
+/// so a validated item is within what the OS can spawn; Linux's per-arg
+/// limit is 128 KiB. Larger payloads belong in a file (`file_write`, then
+/// run the script).
 pub const MAX_ARGV_ITEM_BYTES: usize = 32_768;
 
 /// Closed-set deny list for `argv[0]` basenames at the command-
