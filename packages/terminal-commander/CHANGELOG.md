@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.10](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.9...v0.3.10) (2026-10-01)
+
+
+### Features
+
+* **daemon:** raise argv per-item cap to 32768 bytes ([affaee2](https://github.com/special-place-ai-heaven/terminal-commander/commit/affaee298f2bd2abda87d2efa942c07339468dae))
+
+
+### Bug Fixes
+
+* **ci:** keep a green Windows verify from failing in post-hooks ([f68d6c1](https://github.com/special-place-ai-heaven/terminal-commander/commit/f68d6c10abd4014b55958e884beca08db8352575))
+* **update:** recover Windows daemon stop without requiring Admin ([f8e4b61](https://github.com/special-place-ai-heaven/terminal-commander/commit/f8e4b61df0f948984d16dc8aa5c3c30c6414fbcd))
+* **update:** recover Windows daemon stop without requiring Admin ([15cd8c5](https://github.com/special-place-ai-heaven/terminal-commander/commit/15cd8c53aa5bbf19d8db9606a11950e67e74c9fc))
+
 ## [0.3.9](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.8...v0.3.9) (2026-10-01)
 
 
