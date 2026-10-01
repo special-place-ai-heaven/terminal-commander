@@ -746,13 +746,17 @@ fn runtime_state_stays_bounded_under_live_load() {
 
         // Spawn 3 concurrent noisy jobs.
         let mut probe_ids: Vec<ProbeId> = Vec::new();
+        let mut job_ids = Vec::new();
+        let mut argv = noisy_argv(2_000, 5);
+        // Keep probes live until explicitly stopped; the alarm bounds failure cleanup.
+        argv[3].push_str("\nimport signal\nsignal.alarm(60)\nsignal.pause()\n");
         for i in 0..3 {
             let r = client
                 .call(
                     1,
                     IpcRequest::CommandStartCombed(CommandStartParams {
                         environment: None,
-                        argv: noisy_argv(2_000, 5),
+                        argv: argv.clone(),
                         cwd: None,
                         env: vec![],
                         bucket_config: None,
@@ -770,6 +774,7 @@ fn runtime_state_stays_bounded_under_live_load() {
                 .expect("start");
             if let IpcResponse::CommandStartCombed(s) = r {
                 probe_ids.push(s.probe_id);
+                job_ids.push(s.job_id);
             }
         }
 
@@ -807,6 +812,15 @@ fn runtime_state_stays_bounded_under_live_load() {
         let payload = serde_json::to_string(&ps).unwrap();
         assert!(payload.len() <= MAX_RESPONSE_BYTES);
 
+        for job_id in job_ids {
+            client
+                .call(
+                    4,
+                    IpcRequest::CommandStop(terminal_commanderd::CommandStopParams { job_id }),
+                )
+                .await
+                .expect("stop noisy job");
+        }
         handle.shutdown().await;
         cleanup(&data);
     });
