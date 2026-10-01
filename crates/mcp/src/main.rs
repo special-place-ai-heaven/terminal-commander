@@ -23,7 +23,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
-use rmcp::{ServiceExt, service::ServerInitializeError, transport::stdio};
+use rmcp::{ServiceExt, service::ServerInitializeError};
 use terminal_commander_mcp::daemon_client::{
     DaemonStatusHandle, McpDaemonClient, detect_version_skew, resolve_socket_path,
 };
@@ -226,26 +226,40 @@ fn main() -> ExitCode {
         };
         let server = TerminalCommanderMcpServer::with_targets(daemon, targets);
 
-        let service = match server.serve(stdio()).await {
-            Ok(svc) => svc,
-            // stdin EOF before the session is established (the transport
-            // closed before any message arrived), or cancellation during
-            // startup. Treat both as clean shutdown — the host dropped the
-            // pipe immediately (e.g. the stdin_eof_survives test).
-            Err(ServerInitializeError::ConnectionClosed(_) | ServerInitializeError::Cancelled) => {
-                return ExitCode::SUCCESS;
-            }
-            Err(e) => {
-                eprintln!("terminal-commander-mcp: stdio serve failed: {e}");
-                return ExitCode::from(2);
-            }
-        };
-
-        // stdin EOF surfaces as an Err from service.waiting(); treat it as
-        // clean shutdown — the MCP host closed the pipe.
-        // stdin EOF surfaces as Err; normal quit as Ok(QuitReason).
-        // Both are clean shutdown from the MCP host's perspective.
-        let _ = service.waiting().await;
-        ExitCode::SUCCESS
+        serve_stdio(server).await
     })
+}
+
+/// Serve the MCP session on stdio until the host closes it.
+///
+/// Stdio goes through the handshake bridge so a harness that reconnects and
+/// sends its first request without `initialize` is still served instead of
+/// being rejected for missing 2026-07-28 `_meta` fields.
+async fn serve_stdio(server: TerminalCommanderMcpServer) -> ExitCode {
+    let bridge = terminal_commander_mcp::implicit_init::bridge_stdio();
+    let output_done = bridge.output_done;
+    let exit = match server.serve((bridge.reader, bridge.writer)).await {
+        Ok(service) => {
+            // stdin EOF surfaces as an Err from service.waiting(); normal
+            // quit as Ok(QuitReason). Both are clean shutdown from the MCP
+            // host's perspective.
+            let _ = service.waiting().await;
+            ExitCode::SUCCESS
+        }
+        // stdin EOF before the session is established (the transport
+        // closed before any message arrived), or cancellation during
+        // startup. Treat both as clean shutdown — the host dropped the
+        // pipe immediately (e.g. the stdin_eof_survives test).
+        Err(ServerInitializeError::ConnectionClosed(_) | ServerInitializeError::Cancelled) => {
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("terminal-commander-mcp: stdio serve failed: {e}");
+            ExitCode::from(2)
+        }
+    };
+    // rmcp has dropped its end of the bridge; let every reply it wrote reach
+    // stdout before exiting (a client may pipe one request and close stdin).
+    let _ = tokio::time::timeout(Duration::from_secs(5), output_done).await;
+    exit
 }

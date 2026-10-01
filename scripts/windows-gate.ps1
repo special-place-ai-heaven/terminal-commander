@@ -68,6 +68,9 @@ Invoke-Gate 'terminal-commander-mcp' 'daemon_releases_adapter_stdout' @()
 # restart it and succeed. On Windows a missing pipe used to run the connect
 # loop to the call deadline and surface as a timeout, which is never re-sent.
 Invoke-Gate 'terminal-commander-mcp' 'first_call_after_daemon_loss' @()
+# A harness that reconnects without `initialize` (e.g. after an upgrade replaced
+# the adapter) must still be served, not rejected for missing 2026 `_meta`.
+Invoke-Gate 'terminal-commander-mcp' 'first_request_without_initialize' @()
 
 # F-010 / O-07: live ConPTY child-output + secret-gate e2e. Runs on GitHub Actions
 # (required pre-build-gates-windows) and when a developer opts in with
