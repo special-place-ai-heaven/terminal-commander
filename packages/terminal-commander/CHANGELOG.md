@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.8](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.7...v0.3.8) (2026-10-01)
+
+
+### Bug Fixes
+
+* **mcp:** serve a client that reconnects without the initialize handshake ([90737e6](https://github.com/special-place-ai-heaven/terminal-commander/commit/90737e6d27b057945f9c394e7149605ffec12614))
+* **mcp:** serve a client that reconnects without the initialize handshake ([90737e6](https://github.com/special-place-ai-heaven/terminal-commander/commit/90737e6d27b057945f9c394e7149605ffec12614))
+
 ## [0.3.7](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.6...v0.3.7) (2026-09-30)
 
 
