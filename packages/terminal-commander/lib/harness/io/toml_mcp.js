@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 //
-// Minimal TOML writer for Codex [mcp_servers.terminal_commander] blocks,
+// Scoped TOML writer for Codex/Grok [mcp_servers.terminal_commander] blocks,
 // including the [mcp_servers.terminal_commander.env] sub-table (TC_SESSION /
 // TC_SURFACE / TC_WSL_DISTRO). Section-scoped merge only; does not parse a
 // full TOML AST.
@@ -19,8 +19,7 @@ const {
 const SECTION_HEADER = "[mcp_servers.terminal_commander]";
 const ENV_SECTION_HEADER = "[mcp_servers.terminal_commander.env]";
 const SERVER_NAME = "terminal_commander";
-// Standalone marker comment for our block. Stripped by removeSection on a
-// force-rewrite so it is not duplicated each time the block is re-emitted.
+// Added only when creating a managed entry.
 const BLOCK_COMMENT =
   "# Terminal Commander MCP stdio adapter (merged by terminal-commander bootstrap).";
 const MAX_CONFIG_BYTES = 256 * 1024;
@@ -31,14 +30,10 @@ const TOML_MCP_STATUSES = Object.freeze({
   ALREADY_EXISTS: "already_exists",
   CONFIG_TOO_LARGE: "config_too_large",
   INVALID_TOML: "invalid_toml",
+  UNSUPPORTED: "unsupported",
   BACKUP_FAILED: "backup_failed",
   WRITE_FAILED: "write_failed",
 });
-
-function sectionExists(text, header) {
-  const re = new RegExp(`^\\s*${header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "m");
-  return re.test(text);
-}
 
 /**
  * Conservative malformed-TOML guard. We ship no TOML AST parser (zero-dep), so
@@ -95,7 +90,9 @@ function buildCodexEnv(opts) {
       gateDistroOnWin32: true,
       platform: o.platform,
     }),
-    CODEX_MCP_PROTOCOL_VERSION: "2026-07-28",
+    ...(o.providerId === "grok" || o.codexDefaults === false
+      ? {}
+      : { CODEX_MCP_PROTOCOL_VERSION: "2026-07-28" }),
   };
 }
 
@@ -108,6 +105,9 @@ function buildCodexTomlBlock(opts) {
     `command = ${JSON.stringify(commandConfig.command)}`,
     `args = [${commandConfig.args.map((arg) => JSON.stringify(arg)).join(", ")}]`,
   ];
+  if (o.providerId !== "grok" && o.codexDefaults !== false) {
+    lines.push("required = true", "startup_timeout_sec = 60");
+  }
   // Emit the env sub-table when there are values. Keys are bare TOML keys;
   // values are TOML basic strings (JSON.stringify is a valid TOML basic-string
   // encoder for the [A-Za-z0-9._-] + compact|full value charset these keys carry).
@@ -122,34 +122,132 @@ function buildCodexTomlBlock(opts) {
   return lines.join("\n") + "\n";
 }
 
-function removeSection(text, header) {
-  const lines = text.split(/\r?\n/);
-  const out = [];
-  let skipping = false;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
-    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-      if (trimmed === SECTION_HEADER || trimmed === ENV_SECTION_HEADER) {
-        // Skip BOTH our main table and its `.env` sub-table (and their body
-        // lines) on a force-rewrite. Setting skipping=true for the env header
-        // too is what strips the old TC_SESSION/TC_SURFACE lines; otherwise
-        // they would be orphaned and duplicated by the re-emitted block.
-        skipping = true;
-        continue;
+// Split at statement boundaries, keeping comments and multiline values intact.
+// ponytail: this is a scoped editor, not a full TOML validator; unsupported
+// managed key layouts are refused instead of being rewritten speculatively.
+function tomlStatements(text) {
+  const statements = [];
+  let start = 0, quote = null, triple = false, comment = false, depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (comment) {
+      if (c !== "\n") continue;
+      comment = false;
+    } else if (quote) {
+      if (quote === '"' && c === "\\") { i++; continue; }
+      if (c === quote && (!triple || text.slice(i, i + 3) === quote.repeat(3))) {
+        if (triple) i += 2;
+        quote = null;
+      } else if (c === "\n" && !triple) {
+        throw new Error("invalid_toml");
       }
-      skipping = false;
+      continue;
+    } else if (c === "#") {
+      comment = true;
+      continue;
+    } else if (c === '"' || c === "'") {
+      quote = c;
+      triple = text.slice(i, i + 3) === c.repeat(3);
+      if (triple) i += 2;
+      continue;
+    } else if (c === "[" || c === "{") {
+      depth++;
+    } else if (c === "]" || c === "}") {
+      if (--depth < 0) throw new Error("invalid_toml");
     }
-    // Drop our standalone marker comment; buildCodexTomlBlock re-adds exactly one.
-    if (trimmed === BLOCK_COMMENT) {
+    if (c === "\n" && depth === 0) {
+      statements.push(text.slice(start, i + 1));
+      start = i + 1;
+    }
+  }
+  if (quote || depth) throw new Error("invalid_toml");
+  if (start < text.length) statements.push(text.slice(start));
+  return statements;
+}
+
+function tomlKeyPath(key) {
+  const token = /(?:[A-Za-z0-9_-]+|"(?:[^"\\]|\\.)*"|'[^']*')/g;
+  const parts = key.match(token);
+  if (!parts || !/^\s*K\s*(?:\.\s*K\s*)*$/.test(key.replace(token, "K"))) {
+    throw new Error("unsupported");
+  }
+  return parts.map((part) => part[0] === '"' ? JSON.parse(part) : part[0] === "'" ? part.slice(1, -1) : part);
+}
+
+function refreshTomlEntry(text, opts) {
+  const statements = tomlStatements(text);
+  const sections = [];
+  let current = { name: "", keys: new Map() };
+  const isManaged = (name) => name === "mcp_servers.terminal_commander" || name.startsWith("mcp_servers.terminal_commander.");
+  sections.push(current);
+  for (let i = 0; i < statements.length; i++) {
+    const line = statements[i].trim();
+    if (!line || line.startsWith("#")) continue;
+    const header = line.match(/^(\[\[?)([^\n]+?)(\]\]?)\s*(?:#.*)?$/);
+    if (header) {
+      const name = tomlKeyPath(header[2]).map((part) => part.includes(".") ? JSON.stringify(part) : part).join(".");
+      if (header[1].length !== header[3].length) throw new Error("invalid_toml");
+      if (header[1].length === 2 && (name === "mcp_servers" || isManaged(name))) throw new Error("unsupported");
+      current.end = i;
+      current = { name, keys: new Map() };
+      sections.push(current);
       continue;
     }
-    if (skipping && trimmed.startsWith("[mcp_servers.")) {
-      skipping = false;
+    const assignment = line.match(/^((?:[^="'\n]|"(?:[^"\\]|\\.)*"|'[^']*')+)\s*=/);
+    if (!assignment) {
+      throw new Error("invalid_toml");
     }
-    if (!skipping) out.push(line);
+    if (!line.slice(assignment[0].length).trim() || line.slice(assignment[0].length).trim().startsWith("#")) throw new Error("invalid_toml");
+    const keys = tomlKeyPath(assignment[1].trim());
+    if ((current.name === "" && keys[0] === "mcp_servers" &&
+        (keys.length === 1 || keys[1] === SERVER_NAME)) ||
+        (current.name === "mcp_servers" && keys[0] === SERVER_NAME)) throw new Error("unsupported");
+    if (current.name === "mcp_servers.terminal_commander" || current.name === "mcp_servers.terminal_commander.env") {
+      if (keys.length !== 1 || current.keys.has(keys[0])) throw new Error("unsupported");
+      current.keys.set(keys[0], i);
+    }
   }
-  return out.join("\n").replace(/\n{3,}/g, "\n\n");
+  current.end = statements.length;
+  const mains = sections.filter((section) => section.name === "mcp_servers.terminal_commander");
+  const envs = sections.filter((section) => section.name === "mcp_servers.terminal_commander.env");
+  if (mains.length > 1 || envs.length > 1) throw new Error("unsupported");
+  if (!mains.length) {
+    if (envs.length || sections.some((section) => section.name.startsWith("mcp_servers.terminal_commander."))) throw new Error("unsupported");
+    return { exists: false, text: text.trimEnd() + (text.trim() ? "\n\n" : "") + buildCodexTomlBlock(opts) };
+  }
+  const main = mains[0];
+  if (["url", "httpUrl", "env"].some((key) => main.keys.has(key))) throw new Error("unsupported");
+  if (main.keys.has("type") && !/^\s*type\s*=\s*['"]stdio['"]\s*(?:#.*)?$/.test(statements[main.keys.get("type")].trim())) throw new Error("unsupported");
+  if (opts.force !== true) return { exists: true, text };
+  const inserts = new Map();
+  function update(section, key, value) {
+    if (section.keys.has(key)) {
+      statements[section.keys.get(key)] = value === null ? "" : `${key} = ${JSON.stringify(value)}\n`;
+    } else if (value !== null) {
+      inserts.set(section.end, (inserts.get(section.end) || "") + `${key} = ${JSON.stringify(value)}\n`);
+    }
+  }
+  const launch = buildTerminalCommanderCommandConfig(opts);
+  update(main, "command", launch.command);
+  update(main, "args", launch.args);
+  if (opts.providerId !== "grok" && opts.codexDefaults !== false) {
+    if (!main.keys.has("required")) update(main, "required", true);
+    if (!main.keys.has("startup_timeout_sec")) update(main, "startup_timeout_sec", 60);
+  }
+  const env = buildCodexEnv(opts);
+  if (envs.length) {
+    const section = envs[0];
+    if (!Object.hasOwn(env, "TC_WSL_DISTRO")) update(section, "TC_WSL_DISTRO", null);
+    for (const [key, value] of Object.entries(env)) update(section, key, value);
+  } else if (Object.keys(env).length) {
+    statements.push(`\n${ENV_SECTION_HEADER}\n` + Object.entries(env).map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`).join(""));
+  }
+  let merged = "";
+  for (let i = 0; i <= statements.length; i++) {
+    if (inserts.has(i)) merged += (merged && !merged.endsWith("\n") ? "\n" : "") + inserts.get(i);
+    if (i < statements.length) merged += statements[i];
+  }
+  return { exists: true, text: merged };
 }
 
 function writeCodexTomlConfig(opts) {
@@ -175,32 +273,23 @@ function writeCodexTomlConfig(opts) {
     } catch (_e) {
       return { status: TOML_MCP_STATUSES.WRITE_FAILED, path: target, hint: "" };
     }
-    // Malformed-safe: if the existing config is grossly broken TOML, do NOT
-    // overwrite it — report and let the caller continue with other harnesses.
-    if (isLikelyMalformedToml(existing)) {
-      return {
-        status: TOML_MCP_STATUSES.INVALID_TOML,
-        path: target,
-        hint: `terminal-commander: existing config.toml at ${target} is malformed; the file was NOT modified`,
-      };
-    }
-    if (sectionExists(existing, SECTION_HEADER) && o.force !== true) {
-      return {
-        status: TOML_MCP_STATUSES.ALREADY_EXISTS,
-        path: target,
-        hint: "terminal-commander: [mcp_servers.terminal_commander] already in config.toml; use --force",
-      };
-    }
   }
-  let merged;
-  if (fileExisted && o.force === true) {
-    merged = removeSection(existing, SECTION_HEADER).trimEnd();
-    if (merged.length > 0) merged += "\n\n";
-    merged += buildCodexTomlBlock(o);
-  } else if (fileExisted) {
-    merged = existing.trimEnd() + "\n\n" + buildCodexTomlBlock(o);
-  } else {
-    merged = buildCodexTomlBlock(o);
+  let refreshed;
+  try {
+    refreshed = refreshTomlEntry(existing, o);
+  } catch (error) {
+    return {
+      status: error.message === "invalid_toml" ? TOML_MCP_STATUSES.INVALID_TOML : TOML_MCP_STATUSES.UNSUPPORTED,
+      path: target,
+      hint: "terminal-commander: unsupported or malformed MCP TOML configuration; file not modified",
+    };
+  }
+  if (refreshed.exists && o.force !== true) {
+    return { status: TOML_MCP_STATUSES.ALREADY_EXISTS, path: target, hint: "terminal-commander: managed server already configured; use --force" };
+  }
+  const merged = refreshed.text;
+  if (fileExisted && merged === existing) {
+    return { status: TOML_MCP_STATUSES.ALREADY_EXISTS, path: target, server_name: SERVER_NAME, hint: "terminal-commander: managed server already configured" };
   }
   // Shared atomic write-with-backup: brings this writer to fsync + tmp/.bak
   // scope-check parity with the JSON and Cursor writers (it previously skipped

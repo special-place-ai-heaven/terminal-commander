@@ -369,7 +369,8 @@ FLAGS
                                       for bootstrap unless TC_SKIP_BOOTSTRAP=1).
   --provider <id>                     Configure only one harness (cursor,
                                       codex-cli, omp, claude-code,
-                                      claude-desktop, gemini, kimi).
+                                      claude-desktop, gemini, grok, kilo-code,
+                                      kimi [unverified]).
   --surface <compact|full>            MCP tool surface the configured server
                                       advertises. Writes env.TC_SURFACE into
                                       each harness stanza (cursor, claude-code,

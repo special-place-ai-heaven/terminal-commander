@@ -599,7 +599,10 @@ config for supported providers, minting a per-harness `TC_SESSION`. Use
 | Codex CLI | `terminal_commander` | TOML `[mcp_servers.terminal_commander]` | Live |
 | Claude Code | `terminal_commander` | JSON `mcpServers` | Live |
 | Claude Desktop | `terminal_commander` | JSON `mcpServers` | Live |
-| Gemini | `terminal_commander` | Stub | Path verification pending |
+| OMP | `terminal-commander` | JSON `mcpServers` | Live |
+| Gemini CLI | `terminal_commander` | JSON `mcpServers` | Live |
+| Grok CLI | `terminal_commander` | TOML `[mcp_servers.terminal_commander]` | Live |
+| Kilo Code | `terminal_commander` | JSON/JSONC `mcp`, argv-array command | Live |
 | Kimi | `terminal_commander` | Stub | Path verification pending |
 
 Generated Cursor stanza (with per-harness session token):
@@ -609,7 +612,7 @@ Generated Cursor stanza (with per-harness session token):
   "mcpServers": {
     "terminal-commander": {
       "type": "stdio",
-      "command": "terminal-commander-mcp",
+      "command": "/absolute/stable/bin/terminal-commander-mcp",
       "args": [],
       "env": {
         "TC_SESSION": "tc-<12 hex chars>"

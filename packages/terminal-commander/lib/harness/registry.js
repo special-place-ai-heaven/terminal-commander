@@ -44,9 +44,23 @@ const PROVIDERS = Object.freeze([
   {
     id: "gemini",
     label: "Gemini",
-    format: "stub",
+    format: "json-mcp",
     serverName: "terminal_commander",
-    stub: true,
+    stub: false,
+  },
+  {
+    id: "grok",
+    label: "Grok CLI",
+    format: "toml-mcp",
+    serverName: "terminal_commander",
+    stub: false,
+  },
+  {
+    id: "kilo-code",
+    label: "Kilo Code",
+    format: "json-kilo",
+    serverName: "terminal_commander",
+    stub: false,
   },
   {
     id: "kimi",

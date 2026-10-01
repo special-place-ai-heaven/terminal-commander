@@ -159,10 +159,7 @@ test("runBootstrap resolves the absolute node_modules exe when the stable copy f
   assert.match(r.output, /absolute node_modules exe/);
 });
 
-test("runBootstrap falls back to bare command only when NO absolute path resolves (loud warning)", async () => {
-  // Last resort: stable copy failed AND the only resolvable binary is transient
-  // (temp/npx cache). The writer's exePath is left unset (bare-name fallback),
-  // and a loud warning is emitted naming the upgrade path.
+test("runBootstrap reports deferred registration when no native path resolves", async () => {
   const writes = [];
   const r = await runBootstrap({
     mode: "cli",
@@ -180,8 +177,11 @@ test("runBootstrap falls back to bare command only when NO absolute path resolve
   });
   assert.equal(r.exit_code, 0);
   assert.equal(writes.length, 1);
-  assert.equal(writes[0].exePath, undefined, "no absolute path -> writer uses the bare-name fallback");
-  assert.match(r.output, /WARNING could not resolve an absolute MCP binary path/);
+  assert.equal(writes[0].exePath, undefined, "no native path is supplied to the writer");
+  assert.equal(writes[0].launchFailureReason, "transient_path");
+  assert.match(r.output, /native MCP binary unavailable \(copy_failed\/transient_path\)/);
+  assert.match(r.output, /harness registration deferred/);
+  assert.match(r.output, /Install the platform package and rerun setup/);
 });
 
 test("runBootstrap cli mode fails loudly when requested harness write fails", async () => {

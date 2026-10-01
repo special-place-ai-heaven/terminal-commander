@@ -211,7 +211,7 @@ test("force replaces a Terminal Commander entry registered under another name in
   assert.equal(r.status, "config_updated");
   const servers = JSON.parse(fs.readFileSync(target, "utf8")).mcpServers;
   assert.deepEqual(Object.keys(servers).sort(), ["terminal-notes", "terminal_commander"]);
-  assert.deepEqual(servers.terminal_commander, STANZA);
+  assert.deepEqual(servers.terminal_commander, { ...STANZA, env: HAND_ENTRY.env });
   assert.match(r.hint, /terminal-commander/, "the hint names the entry it replaced");
 });
 

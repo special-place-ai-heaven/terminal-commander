@@ -19,6 +19,7 @@ const {
   ompConfigPath,
   claudeCodeMcpConfigPath,
   claudeDesktopConfigPath,
+  isProjectScope,
 } = require("./paths.js");
 const { detectProvider } = require("./detect.js");
 const { getProvider, listProviders } = require("./registry.js");
@@ -74,8 +75,10 @@ function writeProvider(id, opts) {
     return { id, status: HARNESS_WRITE_STATUSES.FAILED, hint: "unknown provider" };
   }
   const detection = o.detection || detectProvider(id, o);
-  if (!detection.detected) {
-    return { id, status: HARNESS_WRITE_STATUSES.SKIPPED, hint: `${id}: not detected` };
+  const explicitlySelected = o.providerFilter === id || o.providers?.includes(id);
+  if (!detection.detected && !(explicitlySelected && detection.config_path)) {
+    return { id, status: explicitlySelected && !provider.stub ? HARNESS_WRITE_STATUSES.FAILED : HARNESS_WRITE_STATUSES.SKIPPED,
+      hint: `${id}: ${detection.reason || "not detected"}` };
   }
   if (provider.stub) {
     return {
@@ -83,6 +86,13 @@ function writeProvider(id, opts) {
       status: HARNESS_WRITE_STATUSES.STUB_UNVERIFIED,
       hint: `${id}: config_path_unverified (see docs/integrations/${id}.md)`,
     };
+  }
+  if (id === "claude-desktop" && isProjectScope(o)) {
+    return { id, status: HARNESS_WRITE_STATUSES.SKIPPED, hint: "claude-desktop: global configuration only" };
+  }
+  if (o.launchFailureReason) {
+    return { id, status: HARNESS_WRITE_STATUSES.FAILED, harness_status: "binary_unavailable",
+      hint: `${id}: MCP binary unavailable (${o.launchFailureReason}); configuration not modified` };
   }
   const force = o.force === true;
   const clobber_backup = o.clobber_backup === true;
@@ -111,11 +121,14 @@ function writeProvider(id, opts) {
       return { id, status: HARNESS_WRITE_STATUSES.OK, dry_run: true, stanza };
     }
     const r = writeCursorMcpConfig({
-      scope: o.cursor_scope || "global",
+      scope: isProjectScope(o) ? "project" : "global",
       projectRoot: o.projectRoot,
       platform: o.platform,
       env: o.env,
       exePath: o.exePath,
+      resolveExePath: o.resolveExePath || defaultResolveExePath,
+      nodePath: o.nodePath,
+      scriptPath: o.scriptPath,
       sessionToken,
       distro: o.distro,
       knownDistros: o.knownDistros,
@@ -127,14 +140,14 @@ function writeProvider(id, opts) {
     });
     return {
       id,
-      status: r.status.includes("created") || r.status.includes("updated") ? HARNESS_WRITE_STATUSES.OK : HARNESS_WRITE_STATUSES.FAILED,
+      status: ["config_created", "config_updated", "already_exists"].includes(r.status) ? HARNESS_WRITE_STATUSES.OK : HARNESS_WRITE_STATUSES.FAILED,
       harness_status: r.status,
       path: r.path,
       hint: r.hint,
     };
   }
 
-  if (id === "codex-cli") {
+  if (id === "codex-cli" || id === "grok") {
     const target = detection.config_path || codexConfigPath(o);
     // Codex now gets the same per-harness env as the JSON harnesses: its own
     // TC_SESSION daemon endpoint, the TC_SURFACE tool surface, and TC_WSL_DISTRO
@@ -145,13 +158,14 @@ function writeProvider(id, opts) {
       surface: o.surface,
       distro: o.distro,
       platform: o.platform,
+      providerId: id,
     };
     if (dryRun) {
       const cmd = buildTerminalCommanderCommandConfig({
         resolveExePath: defaultResolveExePath,
         ...o,
       });
-      const env = buildCodexEnv(codexEnvOpts);
+      const env = id === "grok" ? buildHarnessEnv({ ...codexEnvOpts, gateDistroOnWin32: true }) : buildCodexEnv(codexEnvOpts);
       const stanza = { command: cmd.command, args: cmd.args };
       if (Object.keys(env).length > 0) stanza.env = env;
       return { id, status: HARNESS_WRITE_STATUSES.OK, dry_run: true, path: target, stanza };
@@ -159,12 +173,15 @@ function writeProvider(id, opts) {
     const r = writeCodexTomlConfig({
       path: target,
       exePath: o.exePath,
+      resolveExePath: o.resolveExePath || defaultResolveExePath,
+      nodePath: o.nodePath,
+      scriptPath: o.scriptPath,
       force,
       clobber_backup,
       ...codexEnvOpts,
     });
     const ok =
-      r.status === "config_created" || r.status === "config_updated";
+      ["config_created", "config_updated", "already_exists"].includes(r.status);
     return {
       id,
       status: ok ? HARNESS_WRITE_STATUSES.OK : HARNESS_WRITE_STATUSES.FAILED,
@@ -174,7 +191,7 @@ function writeProvider(id, opts) {
     };
   }
 
-  if (id === "claude-code" || id === "claude-desktop" || id === "omp") {
+  if (provider.format === "json-mcp" || provider.format === "json-kilo") {
     const target =
       detection.config_path ||
       (id === "claude-code"
@@ -182,7 +199,9 @@ function writeProvider(id, opts) {
         : id === "omp"
           ? ompConfigPath(o)
           : claudeDesktopConfigPath(o));
-    const stanza = buildJsonMcpStanza({ ...o, sessionToken });
+    const classic = buildJsonMcpStanza({ ...o, sessionToken });
+    const kilo = id === "kilo-code" && detection.config_format !== "json-mcp";
+    const stanza = kilo ? { type: "local", command: [classic.command, ...classic.args], environment: classic.env } : classic;
     if (dryRun) {
       return { id, status: HARNESS_WRITE_STATUSES.OK, dry_run: true, path: target, stanza };
     }
@@ -190,13 +209,17 @@ function writeProvider(id, opts) {
       path: target,
       serverName: provider.serverName,
       serverConfig: stanza,
-      enableServer: id === "omp",
+      enableServer: id === "omp" && o.activate !== false,
+      mapKey: kilo ? "mcp" : "mcpServers",
+      envKey: kilo ? "environment" : "env",
+      jsonc: kilo && target.endsWith(".jsonc"),
+      surfaceExplicit: o.surface != null,
       force,
       clobber_backup,
       randomSuffix: o.randomSuffix,
     });
     const ok =
-      r.status === "config_created" || r.status === "config_updated";
+      ["config_created", "config_updated", "already_exists"].includes(r.status);
     return {
       id,
       status: ok ? HARNESS_WRITE_STATUSES.OK : HARNESS_WRITE_STATUSES.FAILED,
@@ -218,7 +241,7 @@ function writeAllHarnesses(opts) {
   const o = opts || {};
   let ids = listProviders({ includeStubs: true }).map((p) => p.id);
   if (o.providerFilter) {
-    ids = ids.filter((id) => id === o.providerFilter);
+    ids = [o.providerFilter];
   } else if (Array.isArray(o.providers) && o.providers.length > 0) {
     ids = o.providers;
   } else if (o.cursorOnly === true) {
