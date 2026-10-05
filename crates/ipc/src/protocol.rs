@@ -3056,6 +3056,9 @@ pub enum CredentialUrlOp {
     /// The client could not show the elicitation: close the page so
     /// `credential_request` falls back to the native prompt.
     Abandon,
+    /// The client accepted: the owner has the link. A page nobody opens
+    /// soon after falls back to the native prompt by itself.
+    Accepted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

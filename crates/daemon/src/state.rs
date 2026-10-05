@@ -448,6 +448,9 @@ impl DaemonState {
             config
                 .credential_url_ttl_test_seam
                 .unwrap_or(crate::credential::CREDENTIAL_URL_TTL),
+            config
+                .credential_page_open_test_seam
+                .unwrap_or(crate::credential::CREDENTIAL_PAGE_OPEN_WITHIN),
             // The endpoint the runtime binds (see `run_ipc_server`).
             #[cfg(windows)]
             config.pipe_name(),

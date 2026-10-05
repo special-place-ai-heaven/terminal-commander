@@ -41,9 +41,11 @@ sys.exit(0 if ok else 3)\n";
 /// How the client answers `elicitation/create`.
 #[derive(Clone, Copy, Default)]
 enum Reply {
-    /// Accept, then the owner GETs and POSTs the page.
+    /// Accept, then the owner opens the page and later POSTs the answer.
     #[default]
     Accept,
+    /// Accept, but nobody ever opens the link: the client showed nothing.
+    AcceptNeverOpen,
     /// Never answer: the client showed the owner nothing.
     Silent,
     Decline,
@@ -88,16 +90,18 @@ impl ClientHandler for OwnerClient {
         self.urls.lock().unwrap().push(url.clone());
         match self.reply {
             Reply::Accept => {}
+            Reply::AcceptNeverOpen => return Ok(ElicitResult::new(ElicitationAction::Accept)),
             Reply::Silent => std::future::pending::<()>().await,
             Reply::Decline => return Ok(ElicitResult::new(ElicitationAction::Decline)),
             Reply::Error => return Err(McpError::internal_error("no dialog", None)),
         }
-        // The owner opens the link after accepting, like a browser would.
+        // The browser opens the link at once; the owner answers later.
         let answer_after = self.answer_after.max(Duration::from_millis(200));
         tokio::spawn(async move {
-            tokio::time::sleep(answer_after).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
             let (status, page) = http(&url, "GET", "").await;
             assert_eq!(status, 200, "{page}");
+            tokio::time::sleep(answer_after).await;
             let (status, done) = http(&url, "POST", &format!("password={SECRET}")).await;
             assert_eq!(status, 200, "{done}");
         });
@@ -153,8 +157,19 @@ fn python3() -> Option<&'static str> {
 /// fallback) can answer. The seam also admits this in-process adapter to
 /// `credential_url` (its image is the test binary, not the MCP adapter).
 fn spawn_daemon(data: &std::path::Path) -> ServerHandle {
+    spawn_daemon_with(data, "none", None)
+}
+
+/// `prompter` stands in for the native prompt; `open_within` shortens how
+/// long an accepted page may go unopened.
+fn spawn_daemon_with(
+    data: &std::path::Path,
+    prompter: &str,
+    open_within: Option<Duration>,
+) -> ServerHandle {
     let mut cfg = DaemonConfig::defaults_in(data);
-    cfg.credential_prompter_test_seam = Some("none".to_owned());
+    cfg.credential_prompter_test_seam = Some(prompter.to_owned());
+    cfg.credential_page_open_test_seam = open_within;
     let state = Arc::new(DaemonState::bootstrap(cfg).expect("daemon bootstrap"));
     let socket = state.config.socket_path();
     IpcServer::new(state, socket)
@@ -535,4 +550,126 @@ async fn a_declined_elicitation_falls_back_in_the_same_call() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_error_on_the_elicitation_falls_back_in_the_same_call() {
     untaken_elicitation_falls_back("error", Reply::Error).await;
+}
+
+/// The residual gap: a client that ACCEPTS the elicitation but never shows
+/// the link. Nobody opens the page, so after the open deadline the daemon
+/// closes it and asks through the native prompt (here answering), without
+/// the model polling `pending` for five minutes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_accepted_link_nobody_opens_falls_back_to_the_native_prompt() {
+    let Some(python) = python3() else {
+        eprintln!("skipping: python3 not found");
+        return;
+    };
+    let data = tmp_data_dir("never-open");
+    let handle = spawn_daemon_with(
+        &data,
+        &format!("test:{SECRET}"),
+        Some(Duration::from_millis(500)),
+    );
+    {
+        let owner = OwnerClient {
+            url_mode: true,
+            reply: Reply::AcceptNeverOpen,
+            ..OwnerClient::default()
+        };
+        let (_server, client) = connect(&handle, owner.clone()).await;
+        let job_id = start_prompting_child(&client, python).await;
+
+        let mut results = Vec::new();
+        let mut status = String::new();
+        for _ in 0..5 {
+            let r = call(
+                &client,
+                "credential_request",
+                serde_json::json!({"job_id": job_id}),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+            status = v["status"].as_str().unwrap_or_default().to_owned();
+            results.push(r);
+            if status != "pending" {
+                break;
+            }
+        }
+        // The native seam typed the answer: the child exits 0.
+        assert_eq!(status, "provided", "{results:?}");
+        assert_eq!(exit_code(&client, &job_id).await, Some(0));
+        assert_eq!(owner.elicitations.load(Ordering::SeqCst), 1);
+        // The abandoned link is dead: the late URL cannot be used.
+        let url = owner.urls.lock().unwrap()[0].clone();
+        assert!(page_is_closed(&url).await, "the unopened page must close");
+        for _ in 0..40 {
+            if owner.completed.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            owner.completed.load(Ordering::SeqCst),
+            "the client's waiting state must be closed"
+        );
+        let token = url.rsplit('/').next().unwrap();
+        for r in &results {
+            assert!(!r.contains("http://") && !r.contains(token), "{r}");
+            assert!(!r.contains(SECRET), "{r}");
+        }
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// An opened page keeps its normal life: the owner is looking at it. The
+/// native prompt (here answering WRONG, so using it would fail the child)
+/// is never used, even well past the open deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_opened_page_stays_pending_and_never_reaches_the_native_prompt() {
+    let Some(python) = python3() else {
+        eprintln!("skipping: python3 not found");
+        return;
+    };
+    let data = tmp_data_dir("opened");
+    let handle = spawn_daemon_with(&data, "test:wrong-answer", Some(Duration::from_millis(500)));
+    {
+        let owner = OwnerClient {
+            url_mode: true,
+            // Past the first call's 10 s page wait, so it must say `pending`.
+            answer_after: Duration::from_secs(12),
+            ..OwnerClient::default()
+        };
+        let (_server, client) = connect(&handle, owner.clone()).await;
+        let job_id = start_prompting_child(&client, python).await;
+        let first = call(
+            &client,
+            "credential_request",
+            serde_json::json!({"job_id": job_id}),
+        )
+        .await;
+        assert!(first.contains("\"pending\""), "{first}");
+        let mut status = String::new();
+        for _ in 0..5 {
+            let r = call(
+                &client,
+                "credential_request",
+                serde_json::json!({"job_id": job_id}),
+            )
+            .await;
+            let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+            status = v["status"].as_str().unwrap_or_default().to_owned();
+            if status != "pending" {
+                break;
+            }
+        }
+        assert_eq!(status, "provided");
+        assert_eq!(
+            exit_code(&client, &job_id).await,
+            Some(0),
+            "the page answered, not the native seam"
+        );
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
 }

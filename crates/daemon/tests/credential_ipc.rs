@@ -106,16 +106,22 @@ struct Harness {
 
 impl Harness {
     fn new(tag: &str, prompter: &str) -> Self {
-        Self::with(tag, Some(prompter), None)
+        Self::with(tag, Some(prompter), None, None)
     }
 
     /// `prompter: None` leaves the real native prompt in place, so such a
     /// harness must never reach `credential_request`.
-    fn with(tag: &str, prompter: Option<&str>, url_ttl: Option<Duration>) -> Self {
+    fn with(
+        tag: &str,
+        prompter: Option<&str>,
+        url_ttl: Option<Duration>,
+        open_within: Option<Duration>,
+    ) -> Self {
         let data = tmp_data_dir(tag);
         let mut cfg = DaemonConfig::defaults_in(&data);
         cfg.credential_prompter_test_seam = prompter.map(str::to_owned);
         cfg.credential_url_ttl_test_seam = url_ttl;
+        cfg.credential_page_open_test_seam = open_within;
         cfg.recipe_admin_test_seam = true;
         #[cfg(windows)]
         {
@@ -661,7 +667,12 @@ fn credential_url_page_expires_and_a_declined_elicitation_is_final() {
         return;
     };
     rt().block_on(async {
-        let mut h = Harness::with("url-ttl", Some("none"), Some(Duration::from_millis(800)));
+        let mut h = Harness::with(
+            "url-ttl",
+            Some("none"),
+            Some(Duration::from_millis(800)),
+            None,
+        );
         let job_id = h.start_child(&python).await;
         h.wait_awaiting(job_id).await;
 
@@ -708,12 +719,42 @@ fn credential_url_abandon_falls_back_to_the_native_prompt() {
     });
 }
 
+/// A client that accepted but whose owner never opened the link: after the
+/// open deadline the page is closed and the native prompt answers, and the
+/// audit row names the channel that did.
+#[test]
+fn an_accepted_page_nobody_opens_hands_over_to_the_native_prompt() {
+    let Some(python) = python() else {
+        eprintln!("skipping: python not on PATH");
+        return;
+    };
+    rt().block_on(async {
+        let mut h = Harness::with(
+            "url-unopened",
+            Some(&format!("test:{SECRET}")),
+            None,
+            Some(Duration::from_millis(300)),
+        );
+        let job_id = h.start_child(&python).await;
+        h.wait_awaiting(job_id).await;
+        let url = h.url(job_id, CredentialUrlOp::Open).await.url.unwrap();
+        h.url(job_id, CredentialUrlOp::Accepted).await;
+        assert_eq!(h.request(job_id).await.0, CredentialStatus::Provided);
+        assert!(page_is_closed(&url).await, "the unopened page must close");
+        assert_eq!(h.wait_exit_code(job_id).await, Some(0));
+        let rows = h.credential_audit_rows().await;
+        let meta: serde_json::Value = serde_json::from_str(&rows[0].1).unwrap();
+        assert_eq!(meta["source"], "native");
+        h.assert_secret_never_surfaced(job_id).await;
+    });
+}
+
 #[test]
 fn credential_url_is_denied_to_peers_other_than_the_mcp_adapter() {
     rt().block_on(async {
         // No seams: the in-process client is an unknown image, like a
         // script the model wrote to talk to the socket.
-        let mut h = Harness::with("url-gate", None, None);
+        let mut h = Harness::with("url-gate", None, None, None);
         let denied = h
             .call(IpcRequest::CredentialUrl(CredentialUrlParams {
                 job_id: JobId::new(),

@@ -390,6 +390,10 @@ pub struct DaemonConfig {
     /// `CREDENTIAL_URL_TTL`, 300 s). Not a TOML key.
     #[serde(skip, default)]
     pub credential_url_ttl_test_seam: Option<std::time::Duration>,
+    /// In-process tests shorten how long an accepted page may go unopened
+    /// (default `CREDENTIAL_PAGE_OPEN_WITHIN`, 30 s). Not a TOML key.
+    #[serde(skip, default)]
+    pub credential_page_open_test_seam: Option<std::time::Duration>,
 }
 
 const fn default_retention() -> RetentionSection {
@@ -443,6 +447,7 @@ impl DaemonConfig {
             recipe_admin_test_seam: false,
             credential_prompter_test_seam: None,
             credential_url_ttl_test_seam: None,
+            credential_page_open_test_seam: None,
         }
     }
 

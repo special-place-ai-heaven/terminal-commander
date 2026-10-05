@@ -3041,7 +3041,7 @@ impl TerminalCommanderMcpServer {
     /// CLI. The daemon owns every write. There is deliberately no MCP tool
     /// for `credential_provide`.
     #[tool(
-        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). No TC surface accepts a password from the model (this holds when TC is the model's only way to run programs; a harness that also gives the model a raw shell can defeat any owner-only channel): if your client supports URL elicitation it offers the owner a link to a one-time local page (the first call may take up to 30 s while it does); if the client does not take it, the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop). The daemon types the answer into that job itself. Returns only {job_id, status}: provided | declined | pending (the owner accepted the link and has not answered yet; the page stays open 5 minutes: call credential_request again every few seconds to poll) | timeout (not answered in time: a credential dialog stays open, call again to keep waiting, and tell the owner it is open: on Windows it may sit behind other windows with its taskbar entry flashing; an expired link is offered again) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls poll, never re-ask. Never returns or accepts the password or the link."
+        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). No TC surface accepts a password from the model (this holds when TC is the model's only way to run programs; a harness that also gives the model a raw shell can defeat any owner-only channel): if your client supports URL elicitation it offers the owner a link to a one-time local page (the first call may take up to 30 s while it does); if the client does not take it, the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop). The daemon types the answer into that job itself. Returns only {job_id, status}: provided | declined | pending (the owner was shown a link to a one-time local page and has not answered yet: call credential_request again every few seconds; if the link is not opened within 30 s, TC switches to the credential dialog by itself; an opened page stays 5 minutes) | timeout (not answered in time: a credential dialog stays open, call again to keep waiting, and tell the owner it is open: on Windows it may sit behind other windows with its taskbar entry flashing; an expired link is offered again) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls poll, never re-ask. Never returns or accepts the password or the link."
     )]
     async fn credential_request(
         &self,
@@ -3051,8 +3051,17 @@ impl TerminalCommanderMcpServer {
         self.ensure_daemon_available().await?;
         use terminal_commander_core::ids::JobIdKind;
         let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
-        let on_page = url_elicitation_supported(ctx.client_capabilities().as_ref())
-            && self.elicit_owner_page(&ctx, job_id).await;
+        let caps = ctx.client_capabilities();
+        let on_page = if url_elicitation_supported(caps.as_ref()) {
+            self.elicit_owner_page(&ctx, job_id, elicitation_client(caps.as_ref()))
+                .await
+        } else {
+            eprintln!(
+                "{}",
+                elicitation_log_line(job_id, elicitation_client(caps.as_ref()), "not-offered")
+            );
+            false
+        };
         // With the owner's page open, answer `pending` within seconds and
         // let the model poll; otherwise the daemon asks through its native
         // prompt or the CLI and waits up to 60 s.
@@ -3089,6 +3098,7 @@ impl TerminalCommanderMcpServer {
         &self,
         ctx: &RequestContext<RoleServer>,
         job_id: terminal_commander_core::JobId,
+        client: &'static str,
     ) -> bool {
         use rmcp::model::{ElicitRequest, ElicitRequestParams, ServerRequest};
         let Ok(IpcResponse::CredentialUrl(opened)) = self
@@ -3147,9 +3157,11 @@ impl TerminalCommanderMcpServer {
                 elicitation_id,
                 handle,
                 accepted_tx,
+                client,
             ));
             return accepted.await.unwrap_or(false);
         }
+        eprintln!("{}", elicitation_log_line(job_id, client, "error"));
         let _ = self
             .daemon
             .call(IpcRequest::CredentialUrl(CredentialUrlParams {
@@ -6613,24 +6625,38 @@ async fn follow_elicitation(
     elicitation_id: String,
     handle: rmcp::service::RequestHandle<RoleServer>,
     accepted: tokio::sync::oneshot::Sender<bool>,
+    client: &'static str,
 ) {
     use rmcp::model::{ClientResult, ElicitationAction};
-    if !matches!(
-        handle.await_response().await,
-        Ok(ClientResult::ElicitResult(r)) if r.action == ElicitationAction::Accept
-    ) {
-        let _ = daemon
-            .call(IpcRequest::CredentialUrl(CredentialUrlParams {
-                job_id,
-                op: CredentialUrlOp::Abandon,
-            }))
-            .await;
-        let _ = accepted.send(false);
+    let outcome = match handle.await_response().await {
+        Ok(ClientResult::ElicitResult(r)) => match r.action {
+            ElicitationAction::Accept => "accepted",
+            ElicitationAction::Decline => "declined",
+            ElicitationAction::Cancel => "cancelled",
+            _ => "error",
+        },
+        Err(rmcp::ServiceError::Timeout { .. }) => "no-reply",
+        _ => "error",
+    };
+    eprintln!("{}", elicitation_log_line(job_id, client, outcome));
+    let op = if outcome == "accepted" {
+        // Arms the page's open deadline: unopened, it falls back by itself.
+        CredentialUrlOp::Accepted
+    } else {
+        CredentialUrlOp::Abandon
+    };
+    let _ = daemon
+        .call(IpcRequest::CredentialUrl(CredentialUrlParams {
+            job_id,
+            op,
+        }))
+        .await;
+    let _ = accepted.send(op == CredentialUrlOp::Accepted);
+    if op != CredentialUrlOp::Accepted {
         return;
     }
-    let _ = accepted.send(true);
-    // Each call waits up to 60 s on the page's outcome; the page settles
-    // within its TTL (answered, declined, or expired).
+    // Each call waits up to 60 s on the outcome; the page settles within its
+    // TTL (answered, declined, expired, or handed to the native prompt).
     loop {
         let status = match daemon
             .call(IpcRequest::CredentialRequest(CredentialRequestParams {
@@ -6642,22 +6668,48 @@ async fn follow_elicitation(
             Ok(IpcResponse::CredentialRequest(r)) => r.status,
             _ => return,
         };
-        match status {
-            CredentialStatus::Pending => {}
-            CredentialStatus::Provided => {
-                let _ = peer
-                    .send_notification(rmcp::model::ServerNotification::CustomNotification(
-                        rmcp::model::CustomNotification::new(
-                            "notifications/elicitation/complete",
-                            Some(serde_json::json!({ "elicitationId": elicitation_id })),
-                        ),
-                    ))
-                    .await;
-                return;
-            }
-            _ => return,
+        if status != CredentialStatus::Pending {
+            // The link's interaction is over either way: close the client's
+            // waiting state.
+            let _ = peer
+                .send_notification(rmcp::model::ServerNotification::CustomNotification(
+                    rmcp::model::CustomNotification::new(
+                        "notifications/elicitation/complete",
+                        Some(serde_json::json!({ "elicitationId": elicitation_id })),
+                    ),
+                ))
+                .await;
+            return;
         }
     }
+}
+
+/// Which elicitation modes the client declared, for the log line.
+fn elicitation_client(caps: Option<&rmcp::model::ClientCapabilities>) -> &'static str {
+    match caps
+        .and_then(|c| c.elicitation.as_ref())
+        .map(|e| (e.form.is_some(), e.url.is_some()))
+    {
+        None => "none",
+        // A bare `elicitation: {}` is form mode (MCP spec).
+        Some((_, false)) => "form",
+        Some((true, true)) => "form+url",
+        Some((false, true)) => "url",
+    }
+}
+
+/// One stderr line per elicitation: job id, the client's declared modes and
+/// the outcome, so an owner who saw nothing can be diagnosed from the log.
+/// Never the link, token, elicitation id, or anything the owner typed.
+fn elicitation_log_line(
+    job_id: terminal_commander_core::JobId,
+    client: &str,
+    outcome: &str,
+) -> String {
+    format!(
+        "terminal-commander-mcp: credential elicitation job={} client={client} outcome={outcome}",
+        job_id.to_wire_string()
+    )
 }
 
 /// Channel 1 of `credential_request` needs a client that declared URL-mode
@@ -7488,6 +7540,33 @@ mod tests {
     }
 
     // --- TC-1b: run_and_watch degraded / superset result builder ---
+
+    #[test]
+    fn the_elicitation_log_line_names_modes_and_outcome_only() {
+        let caps = |v: serde_json::Value| -> rmcp::model::ClientCapabilities {
+            serde_json::from_value(v).unwrap()
+        };
+        assert_eq!(elicitation_client(None), "none");
+        assert_eq!(
+            elicitation_client(Some(&caps(serde_json::json!({"elicitation": {}})))),
+            "form"
+        );
+        assert_eq!(
+            elicitation_client(Some(&caps(
+                serde_json::json!({"elicitation": {"form": {}, "url": {}}})
+            ))),
+            "form+url"
+        );
+        // The whole line, so nothing else (link, token, id) can ride along.
+        let job = terminal_commander_core::JobId::new();
+        assert_eq!(
+            elicitation_log_line(job, "form+url", "no-reply"),
+            format!(
+                "terminal-commander-mcp: credential elicitation job={} client=form+url outcome=no-reply",
+                job.to_wire_string()
+            )
+        );
+    }
 
     #[test]
     fn only_a_url_elicitation_client_gets_the_owner_page() {
