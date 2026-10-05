@@ -652,7 +652,11 @@ async fn registry_tools(h: &mut Harness) {
         "description": "fixture shape", "pattern": null, "keywords": ["shape"],
         "captures": [], "summary_template": "matched", "tags": ["shape"],
         "rate_limit_per_min": null, "redact": [],
-        "context_hint": {"before_lines": 0, "after_lines": 0}, "examples": []
+        "context_hint": {"before_lines": 0, "after_lines": 0},
+        "examples": [
+            {"input": "shape here", "expect": {"kind": "shape_event"}},
+            {"input": "nothing relevant", "expect": {"match": false}}
+        ]
     });
     h.check(
         "registry_upsert",

@@ -23,9 +23,11 @@
 //! Source-status: live (TC10/TC11). Persistence in TC12; daemon
 //! activation in TC13/TC21.
 
+pub mod examples;
 pub mod noise;
 pub mod suggest;
 pub mod universal;
+pub use examples::{ExampleOutcome, evaluate_examples};
 pub use noise::{
     DEFAULT_DEDUPE_WINDOW, Dedupe, DedupeAggregatePatch, DedupeApplyResult, NoisePolicy,
     ProgressDetector, dedupe_bypass_kind,

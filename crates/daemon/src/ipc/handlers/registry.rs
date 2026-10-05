@@ -9,9 +9,9 @@ use crate::ipc::protocol::{
     MAX_REGISTRY_TEST_SAMPLE_BYTES, MAX_REGISTRY_TEST_SAMPLES, MAX_SUGGEST_PROPOSED_RULES,
     MAX_SUGGEST_SAMPLES, RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
     RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse, RegistryDeactivateParams,
-    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportFailure,
-    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
-    RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
+    RegistryDeactivateResponse, RegistryExampleResult, RegistryGetParams, RegistryGetResponse,
+    RegistryImportFailure, RegistryImportPackParams, RegistryImportPackResponse,
+    RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
     RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse, RegistryTestMatch,
     RegistryTestParams, RegistryTestResponse, RegistryUpsertParams, RegistryUpsertResponse,
 };
@@ -79,6 +79,43 @@ pub(in crate::ipc::server) fn handle_registry_get(
     }))
 }
 
+/// Most failing examples quoted in one rejection message.
+const MAX_EXAMPLE_FAILURES_LISTED: usize = 5;
+
+/// `Some(teaching message)` when any of the rule's own `examples` contradicts
+/// the rule, naming each failing example by index and why. Evaluation errors
+/// (an invalid rule) are left to `validate()`, which has already run.
+fn example_failure_message(def: &terminal_commander_core::RuleDefinition) -> Option<String> {
+    let outcomes = terminal_commander_sifters::evaluate_examples(def).ok()?;
+    let failures: Vec<String> = outcomes
+        .iter()
+        .filter_map(|o| {
+            o.failure
+                .as_ref()
+                .map(|why| format!("examples[{}]: {why}", o.index))
+        })
+        .collect();
+    if failures.is_empty() {
+        return None;
+    }
+    let total = failures.len();
+    let shown = failures
+        .into_iter()
+        .take(MAX_EXAMPLE_FAILURES_LISTED)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let more = total.saturating_sub(MAX_EXAMPLE_FAILURES_LISTED);
+    let tail = if more > 0 {
+        format!(" (+{more} more)")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "rule '{}' contradicts its own examples: {shown}{tail}. Fix the example or the rule;          registry_test on a stored version shows every example's result.",
+        def.id
+    ))
+}
+
 pub(in crate::ipc::server) fn handle_registry_upsert(
     state: &Arc<DaemonState>,
     params: &RegistryUpsertParams,
@@ -89,6 +126,11 @@ pub(in crate::ipc::server) fn handle_registry_upsert(
         .definition
         .validate()
         .map_err(|e| IpcError::new(IpcErrorCode::RuleInvalid, e.to_string()))?;
+    // A rule that contradicts its own examples is wrong; refuse it now, while
+    // the author can still fix either side.
+    if let Some(message) = example_failure_message(&params.definition) {
+        return Err(IpcError::new(IpcErrorCode::RuleInvalid, message));
+    }
     let version = state
         .store
         .create_rule_version(&params.definition)
@@ -185,10 +227,26 @@ pub(in crate::ipc::server) fn handle_registry_test(
         }
     }
 
+    // The rule's own examples go through the same sifter evaluation as the
+    // caller's samples (`evaluate_examples` builds a `SifterRuntime` and
+    // calls `evaluate`), so there is no second matcher.
+    let example_results: Vec<RegistryExampleResult> =
+        terminal_commander_sifters::evaluate_examples(&def)
+            .map_err(|e| IpcError::new(IpcErrorCode::RuleInvalid, e.to_string()))?
+            .into_iter()
+            .map(|o| RegistryExampleResult {
+                index: o.index,
+                passed: o.passed(),
+                reason: o.failure,
+            })
+            .collect();
+
     Ok(IpcResponse::RegistryTest(RegistryTestResponse {
         matches,
         truncated_bytes: truncated_total,
         stream_mismatches,
+        examples_evaluated: u32::try_from(example_results.len()).unwrap_or(u32::MAX),
+        example_results,
     }))
 }
 
@@ -315,6 +373,11 @@ pub(in crate::ipc::server) fn handle_registry_import_pack(
              for explicit global activation",
         ));
     }
+    // A built-in pack must agree with its own examples before anything is
+    // written; a contradiction is a pack bug, reported instead of imported.
+    if let Some(message) = pack_example_failure_message(&params.pack) {
+        return Err(IpcError::new(IpcErrorCode::RuleInvalid, message));
+    }
     // Import the pack (promote rules to Active iff we will activate
     // them, so the activation eligibility gate below passes honestly).
     let import = state
@@ -336,6 +399,17 @@ pub(in crate::ipc::server) fn handle_registry_import_pack(
             failed,
         },
     ))
+}
+
+/// `Some(message)` when a known built-in pack has a rule that contradicts its
+/// own examples. Unknown pack names fall through to the store's own
+/// teaching error.
+fn pack_example_failure_message(pack: &str) -> Option<String> {
+    let json = terminal_commander_store::resolve_pack_json(pack)?;
+    let parsed: terminal_commander_store::RulePackFile = serde_json::from_str(json).ok()?;
+    parsed.rules.iter().find_map(|rule| {
+        example_failure_message(rule).map(|m| format!("built-in pack '{pack}': {m}"))
+    })
 }
 
 /// M7 (partial-success): activate each imported rule independently,
@@ -989,5 +1063,191 @@ mod tests {
         let failed = json2.get("failed").expect("failed present when non-empty");
         assert_eq!(failed[0]["rule_id"], "bad.rule");
         assert_eq!(failed[0]["reason"], "not runtime-eligible");
+    }
+}
+
+#[cfg(test)]
+mod example_tests {
+    use super::*;
+    use crate::config::DaemonConfig;
+    use terminal_commander_core::{
+        ContextHint, RuleDefinition, RuleExample, RuleExampleExpect, RuleStatus, RuleType,
+        Severity, SourceStream,
+    };
+
+    fn temp_state() -> (Arc<DaemonState>, std::path::PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "tc-registry-examples-{}-{nanos}",
+            std::process::id()
+        ));
+        let state = DaemonState::bootstrap(DaemonConfig::defaults_in(&dir)).expect("bootstrap");
+        (Arc::new(state), dir)
+    }
+
+    fn rule(examples: Vec<RuleExample>) -> RuleDefinition {
+        RuleDefinition {
+            id: "ex.missing-pkg".to_owned(),
+            version: 1,
+            kind: RuleType::Regex,
+            status: RuleStatus::Active,
+            severity: Severity::High,
+            event_kind: "missing_package".to_owned(),
+            stream: Some(SourceStream::Stderr),
+            description: None,
+            pattern: Some(r"^E: Unable to locate package (?P<package>\S+)$".to_owned()),
+            keywords: None,
+            captures: vec!["package".to_owned()],
+            summary_template: "missing ${package}".to_owned(),
+            tags: vec![],
+            rate_limit_per_min: None,
+            redact: vec![],
+            context_hint: ContextHint::default(),
+            examples,
+        }
+    }
+
+    fn positive(input: &str, kind: &str) -> RuleExample {
+        RuleExample {
+            stream: None,
+            input: input.to_owned(),
+            expect: RuleExampleExpect::Match {
+                kind: Some(kind.to_owned()),
+                captures: terminal_commander_core::Captures::default(),
+            },
+        }
+    }
+
+    fn negative(input: &str) -> RuleExample {
+        RuleExample {
+            stream: None,
+            input: input.to_owned(),
+            expect: RuleExampleExpect::NoMatch { match_: false },
+        }
+    }
+
+    const HIT: &str = "E: Unable to locate package libssl-dev";
+
+    fn upsert(state: &Arc<DaemonState>, def: RuleDefinition) -> Result<IpcResponse, IpcError> {
+        handle_registry_upsert(state, &RegistryUpsertParams { definition: def })
+    }
+
+    #[test]
+    fn upsert_rejects_a_rule_that_contradicts_its_own_examples() {
+        let (state, dir) = temp_state();
+        // examples[1] says the rule must NOT match a line it does match.
+        let err = upsert(
+            &state,
+            rule(vec![positive(HIT, "missing_package"), negative(HIT)]),
+        )
+        .expect_err("a contradictory rule must be refused");
+        assert_eq!(err.code, IpcErrorCode::RuleInvalid);
+        assert!(
+            err.message.contains("examples[1]") && err.message.contains("expected no match"),
+            "message must name the failing example and why: {}",
+            err.message
+        );
+        assert!(!err.message.contains("examples[0]"), "{}", err.message);
+        // Nothing was persisted.
+        assert!(
+            state
+                .store
+                .get_latest_rule("ex.missing-pkg")
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upsert_rejects_wrong_kind_example_naming_both_kinds() {
+        let (state, dir) = temp_state();
+        let err = upsert(&state, rule(vec![positive(HIT, "compile_error")])).unwrap_err();
+        assert!(
+            err.message.contains("examples[0]")
+                && err.message.contains("'compile_error'")
+                && err.message.contains("'missing_package'"),
+            "{}",
+            err.message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upsert_accepts_consistent_examples_and_registry_test_reports_them() {
+        let (state, dir) = temp_state();
+        upsert(
+            &state,
+            rule(vec![positive(HIT, "missing_package"), negative("all good")]),
+        )
+        .expect("consistent rule is accepted");
+        let resp = handle_registry_test(
+            &state,
+            &RegistryTestParams {
+                rule_id: "ex.missing-pkg".to_owned(),
+                version: None,
+                samples: vec![],
+            },
+        )
+        .expect("registry_test");
+        let IpcResponse::RegistryTest(r) = resp else {
+            panic!("wrong variant");
+        };
+        assert_eq!(r.examples_evaluated, 2);
+        assert!(
+            r.example_results
+                .iter()
+                .all(|e| e.passed && e.reason.is_none()),
+            "{:?}",
+            r.example_results
+        );
+        assert_eq!(
+            r.example_results
+                .iter()
+                .map(|e| e.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn registry_test_on_a_rule_without_examples_reports_zero() {
+        let (state, dir) = temp_state();
+        upsert(&state, rule(vec![])).expect("upsert");
+        let IpcResponse::RegistryTest(r) = handle_registry_test(
+            &state,
+            &RegistryTestParams {
+                rule_id: "ex.missing-pkg".to_owned(),
+                version: None,
+                samples: vec![],
+            },
+        )
+        .expect("registry_test") else {
+            panic!("wrong variant");
+        };
+        assert_eq!(r.examples_evaluated, 0);
+        assert!(r.example_results.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn example_failure_message_caps_the_listed_failures() {
+        let many: Vec<RuleExample> = (0..8).map(|_| negative(HIT)).collect();
+        let msg = example_failure_message(&rule(many)).expect("all eight fail");
+        assert!(
+            msg.contains("examples[4]") && !msg.contains("examples[5]"),
+            "{msg}"
+        );
+        assert!(msg.contains("(+3 more)"), "{msg}");
+    }
+
+    #[test]
+    fn every_built_in_pack_agrees_with_its_own_examples() {
+        for pack in terminal_commander_store::known_pack_names() {
+            assert_eq!(pack_example_failure_message(pack), None, "pack {pack}");
+        }
     }
 }
