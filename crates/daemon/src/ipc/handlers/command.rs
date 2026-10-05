@@ -78,8 +78,8 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
 /// bounded [`CommandStartResponse`](crate::ipc::protocol::CommandStartResponse)
 /// shape and never raw stdout/stderr.
 ///
-/// SYNC: `exec` never awaits, so no `.await` here — the async dispatcher
-/// calls this inline.
+/// SYNC: `exec` never awaits. It can block on shell probe processes, so the
+/// async dispatcher runs it on the blocking pool.
 pub(in crate::ipc::server) fn handle_shell_exec(
     state: &Arc<DaemonState>,
     params: &ShellExecParams,

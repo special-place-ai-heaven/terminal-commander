@@ -21,7 +21,12 @@ pub async fn forward_to_runner(
     distro: &str,
     request: &IpcRequest,
 ) -> Result<RouteOutcome, RouteError> {
-    let sock = runner_socket_path(distro)?;
+    // The lookup runs `wsl.exe` and waits for it, so it goes on the blocking
+    // pool; inline it stalled every other request on this daemon.
+    let owned = distro.to_owned();
+    let sock = tokio::task::spawn_blocking(move || runner_socket_path(&owned))
+        .await
+        .map_err(|e| RouteError::Bootstrap(format!("runner lookup failed: {e}")))??;
     #[cfg(unix)]
     {
         use std::time::Duration;
