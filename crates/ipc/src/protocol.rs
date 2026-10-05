@@ -3291,6 +3291,10 @@ pub struct WorkspaceSnapshotApplyResponse {
     pub applied: bool,
     pub session_id: SessionId,
     pub cwd: Option<String>,
+    /// Env keys NOT restored because the snapshot holds only their masked
+    /// value; empty and omitted when every key was restored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_redacted: Vec<String>,
 }
 
 // =====================================================================

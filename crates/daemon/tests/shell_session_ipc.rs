@@ -22,7 +22,8 @@ use terminal_commanderd::ipc::protocol::{AuditSinceParams, AuditSinceResponse};
 use terminal_commanderd::{
     DaemonClient, DaemonConfig, DaemonState, IpcErrorCode, IpcRequest, IpcResponse, IpcServer,
     PolicyProfile, SessionState, ShellSessionExecParams, ShellSessionStartParams,
-    ShellSessionStatusParams, ShellSessionStopParams, WorkspaceSnapshotCreateParams,
+    ShellSessionStatusParams, ShellSessionStopParams, WorkspaceSnapshotApplyParams,
+    WorkspaceSnapshotCreateParams,
 };
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
@@ -510,6 +511,129 @@ fn session_env_secret_is_redacted_in_snapshot_and_status() {
         let _ = client
             .call(
                 4,
+                IpcRequest::ShellSessionStop(ShellSessionStopParams {
+                    session_id: started.session_id,
+                }),
+            )
+            .await;
+        handle.shutdown().await;
+        cleanup(&data);
+    });
+}
+
+/// A snapshot holds `<redacted>` for a masked value (F-003), so applying it
+/// must not export that marker over the real value: the key is skipped and
+/// named in the response.
+#[test]
+#[allow(clippy::too_many_lines)] // one start -> snapshot -> apply -> read flow
+fn snapshot_apply_skips_masked_values_instead_of_exporting_the_marker() {
+    if !bash_available() {
+        eprintln!("skipping: /bin/bash not present");
+        return;
+    }
+    let runtime = rt();
+    runtime.block_on(async {
+        let (data, _state, handle) = build_server_full_access();
+        let client = DaemonClient::new(handle.socket_path().to_path_buf())
+            .with_timeout(Duration::from_secs(5));
+        let mut rule = tmp_rule();
+        rule.id = "session.valmark".to_owned();
+        rule.keywords = Some(vec!["VALMARK".to_owned()]);
+        let started = match client
+            .call(
+                1,
+                IpcRequest::ShellSessionStart(ShellSessionStartParams {
+                    shell: None,
+                    cwd: None,
+                    env: vec![
+                        ("FOO_TOKEN".to_owned(), "real".to_owned()),
+                        ("PLAIN_VAR".to_owned(), "kept".to_owned()),
+                    ],
+                    rules: vec![rule],
+                    bucket_config: None,
+                    tag: None,
+                }),
+            )
+            .await
+            .expect("session start")
+        {
+            IpcResponse::ShellSessionStart(s) => s,
+            other => panic!("unexpected: {other:?}"),
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let snap = match client
+            .call(
+                2,
+                IpcRequest::WorkspaceSnapshotCreate(WorkspaceSnapshotCreateParams {
+                    session_id: started.session_id,
+                    name: None,
+                }),
+            )
+            .await
+            .expect("snapshot create")
+        {
+            IpcResponse::WorkspaceSnapshotCreate(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let applied = match client
+            .call(
+                3,
+                IpcRequest::WorkspaceSnapshotApply(WorkspaceSnapshotApplyParams {
+                    snapshot_id: snap.snapshot_id,
+                    session_id: started.session_id,
+                }),
+            )
+            .await
+            .expect("snapshot apply")
+        {
+            IpcResponse::WorkspaceSnapshotApply(r) => r,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // Read FOO_TOKEN back from the shell.
+        let mut cursor = 0u64;
+        let mut seen: Vec<String> = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut seq = 4u64;
+        while std::time::Instant::now() < deadline
+            && !seen
+                .iter()
+                .any(|s| s.contains("VALMARK:") && !s.contains('$'))
+        {
+            let resp = match client
+                .call(
+                    seq,
+                    IpcRequest::ShellSessionExec(ShellSessionExecParams {
+                        session_id: started.session_id,
+                        line: "echo \"VALMARK:$FOO_TOKEN:$PLAIN_VAR:\"".to_owned(),
+                        cursor,
+                        wait_ms: Some(800),
+                    }),
+                )
+                .await
+                .expect("exec echo")
+            {
+                IpcResponse::ShellSessionExec(r) => r,
+                other => panic!("unexpected: {other:?}"),
+            };
+            seq += 1;
+            cursor = resp.next_cursor;
+            seen.extend(resp.events.iter().map(|e| e.summary.clone()));
+        }
+        assert!(
+            !seen.iter().any(|s| s.contains("VALMARK:<redacted>:")),
+            "the marker was exported over the real value: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|s| s.contains("VALMARK:real:kept:")),
+            "FOO_TOKEN must keep its real value and PLAIN_VAR must be restored: {seen:?}"
+        );
+        assert_eq!(applied.skipped_redacted, vec!["FOO_TOKEN".to_owned()]);
+
+        let _ = client
+            .call(
+                seq,
                 IpcRequest::ShellSessionStop(ShellSessionStopParams {
                     session_id: started.session_id,
                 }),

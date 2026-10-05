@@ -3392,11 +3392,21 @@ impl TerminalCommanderMcpServer {
                 applied,
                 session_id,
                 cwd,
-            })) => json_tool_result(&serde_json::json!({
-                "applied": applied,
-                "session_id": session_id,
-                "cwd": cwd,
-            })),
+                skipped_redacted,
+            })) => {
+                let mut body = serde_json::json!({
+                    "applied": applied,
+                    "session_id": session_id,
+                    "cwd": cwd,
+                });
+                if !skipped_redacted.is_empty() {
+                    body["skipped_redacted"] = serde_json::json!({
+                        "names": skipped_redacted,
+                        "note": "Not restored: the snapshot holds only a masked value for these. Set them again in the session if needed.",
+                    });
+                }
+                json_tool_result(&body)
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
         }

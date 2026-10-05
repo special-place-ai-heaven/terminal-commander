@@ -2819,7 +2819,7 @@ const ARGV_HEAD_ITEMS: usize = 3;
 /// Per-item byte cap applied AFTER masking, on a UTF-8 char boundary.
 const ARGV_HEAD_ITEM_BYTES: usize = 128;
 /// Replacement token substituted for any masked secret span.
-const ARGV_HEAD_REDACTED: &str = "<redacted>";
+pub(crate) const ARGV_HEAD_REDACTED: &str = "<redacted>";
 
 /// Flags whose VALUE is a pure secret to mask WHOLLY -- the canonical names
 /// plus common real-world aliases (an external review found `--api-key=` /
