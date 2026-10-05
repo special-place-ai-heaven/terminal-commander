@@ -40,7 +40,7 @@ pub fn lock_path(state_dir: &Path) -> PathBuf {
 
 /// Write the pidfile atomically (tmp + rename).
 pub fn write_pidfile(state_dir: &Path, rec: &RunningDaemon) -> std::io::Result<()> {
-    std::fs::create_dir_all(state_dir)?;
+    crate::paths::ensure_private_dir(state_dir)?;
     let path = pidfile_path(state_dir);
     let tmp = path.with_extension(format!("pid.tmp-{}", std::process::id()));
     let bytes = serde_json::to_vec_pretty(rec).map_err(std::io::Error::other)?;

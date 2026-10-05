@@ -126,7 +126,12 @@ impl IpcServer {
         if self.socket_path.exists() {
             std::fs::remove_file(&self.socket_path)?;
         }
+        // Bound inside the owner-only data directory, so nobody else can
+        // reach the socket between bind and this chmod; owner-only after
+        // it, so a socket placed elsewhere (`TC_SOCKET`) is too. The peer
+        // uid check in `handle_connection` is the backstop either way.
         let listener = UnixListener::bind(&self.socket_path)?;
+        terminal_commander_supervisor::paths::restrict_file(&self.socket_path)?;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let socket_path = self.socket_path.clone();
         let state = Arc::clone(&self.state);
@@ -286,6 +291,32 @@ async fn handle_connection(
             let _ = write_envelope(&mut stream, &env).await;
             return;
         }
+    }
+
+    // Only the daemon's own user may drive it: the socket's mode says the
+    // same, this holds even for a socket a caller placed elsewhere.
+    if let Some(c) = peer_cred
+        && !peer::same_user(c.uid)
+    {
+        emit_audit(
+            &state,
+            "ipc_connect",
+            &identity_audit_subject(&identity),
+            "deny",
+            Some("peer is another user; connection refused".to_owned()),
+            &identity,
+        );
+        let env = ResponseEnvelope {
+            correlation_id: 0,
+            result: IpcResult::Err {
+                error: IpcError::new(
+                    IpcErrorCode::PeerCredentialFailure,
+                    "this daemon serves only the user it runs as; connection refused",
+                ),
+            },
+        };
+        let _ = write_envelope(&mut stream, &env).await;
+        return;
     }
 
     // Audit the connection itself once, before any request.
@@ -1284,6 +1315,9 @@ async fn handle_self_check(state: &Arc<DaemonState>) -> IpcResponse {
     match state.store.audit_count() {
         Ok(n) => lines.push(format!("audit_count: {n}")),
         Err(e) => lines.push(format!("audit_count: error: {e}")),
+    }
+    for note in &state.tightened {
+        lines.push(format!("warning: {note}"));
     }
     #[cfg(windows)]
     if let Some(line) = std::env::var("WSLENV")

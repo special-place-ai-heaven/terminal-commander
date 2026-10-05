@@ -69,6 +69,10 @@ windows = { version = "0.62", features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 
+# geteuid() for the same-user check on every accepted socket connection.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 test-util = []
 

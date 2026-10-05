@@ -31,6 +31,9 @@ pub mod client;
 #[cfg(windows)]
 pub mod pipe_client;
 
+#[cfg(any(unix, windows))]
+mod server_identity;
+
 pub use protocol::MCP_SPEC_REVISION;
 pub use protocol::{
     AccessRoute, AuditRowWire, AuditSinceParams, AuditSinceResponse, AwaitingCredential,

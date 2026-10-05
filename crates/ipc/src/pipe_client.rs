@@ -136,7 +136,12 @@ impl DaemonClient {
         // absent before the caller's promised timeout elapsed.
         loop {
             match ClientOptions::new().open(&pipe_name) {
-                Ok(p) => return Ok(p),
+                Ok(p) if crate::server_identity::served_by_current_user(&p) => return Ok(p),
+                Ok(_) => {
+                    return Err(IpcError::transport_not_connected(format!(
+                        "pipe {pipe_name} is served by another user's process; nothing was sent"
+                    )));
+                }
                 // Both errors are the transient accept/recreate gap of a
                 // single-pending-instance server: BUSY = instances exist
                 // but none listening; FILE_NOT_FOUND = the consumed

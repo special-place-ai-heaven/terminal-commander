@@ -212,7 +212,7 @@ pub async fn ensure_daemon(opts: EnsureDaemonOptions) -> EnsureDaemonStatus {
 
     // 2. Single-flight the bring-up. The lock lives under state_dir, so
     // ensure it exists before opening the lock file.
-    let _ = std::fs::create_dir_all(&opts.state_dir);
+    let _ = crate::paths::ensure_private_dir(&opts.state_dir);
     let lock_path = crate::pidfile::lock_path(&opts.state_dir);
     match proc_lock::try_acquire(&lock_path) {
         Ok(TryLockResult::Acquired(guard)) => {
@@ -343,14 +343,18 @@ async fn spawn_daemon_impl(opts: EnsureDaemonOptions, start: Instant) -> EnsureD
             },
         };
     }
-    let _ = std::fs::create_dir_all(&opts.log_dir);
+    let _ = crate::paths::ensure_private_dir(&opts.log_dir);
     let log_path = opts.log_dir.join("terminal-commanderd.log");
-    let log_file = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
-        Ok(f) => f,
+    let mut log_options = std::fs::OpenOptions::new();
+    log_options.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut log_options, 0o600);
+    let log_file = match log_options.open(&log_path) {
+        Ok(f) => {
+            // A log created before files were owner-only.
+            let _ = crate::paths::restrict_file(&log_path);
+            f
+        }
         Err(e) => {
             return EnsureDaemonStatus::Unavailable {
                 reason: DaemonUnavailableReason::SpawnFailed,

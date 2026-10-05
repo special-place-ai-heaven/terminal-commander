@@ -41,8 +41,11 @@ use crate::state::{BootstrapError, DaemonState};
 /// in integration tests) does not cause a panic.
 fn init_file_logging(data_dir: &std::path::Path) -> tracing_appender::non_blocking::WorkerGuard {
     let log_dir = data_dir.join("logs");
-    let _ = std::fs::create_dir_all(&log_dir);
+    let _ = terminal_commander_supervisor::paths::ensure_private_dir(&log_dir);
     let file_appender = tracing_appender::rolling::never(&log_dir, "terminal-commanderd.log");
+    let _ = terminal_commander_supervisor::paths::restrict_file(
+        &log_dir.join("terminal-commanderd.log"),
+    );
     let (nb, guard) = tracing_appender::non_blocking(file_appender);
     let _ = tracing_subscriber::fmt()
         .with_writer(nb)

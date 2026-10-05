@@ -817,7 +817,7 @@ pub async fn ensure_or_replace(
         };
     }
 
-    let _ = std::fs::create_dir_all(&opts.state_dir);
+    let _ = crate::paths::ensure_private_dir(&opts.state_dir);
     let lock_path = pidfile::lock_path(&opts.state_dir);
     match proc_lock::try_acquire(&lock_path) {
         Ok(TryLockResult::Acquired(guard)) => {

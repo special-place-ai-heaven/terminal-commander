@@ -23,10 +23,34 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { workspace = true, features = ["net", "io-util", "time"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
 ] }
 
-[lints]
-workspace = true
+# Replicate workspace lints so `server_identity` can call geteuid / the
+# Win32 token APIs (the only unsafe in this crate). All other lint
+# settings match the workspace.
+[lints.rust]
+unsafe_code = "allow"
+unreachable_pub = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"
+significant_drop_tightening = "allow"
