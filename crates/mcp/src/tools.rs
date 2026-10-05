@@ -5242,14 +5242,14 @@ pub struct McpCommandStartParams {
     /// `RuleDefinition`s. Prefer the typed `rules` field. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
-    /// Optional per-bucket tag (Phase 3). Tag this probe so a subscription
+    /// Optional per-bucket tag. Tag this probe so a subscription
     /// opened with a matching `tag` predicate routes to it. Omit for none.
     #[serde(default)]
     pub tag: Option<String>,
     /// Strip ANSI/CSI/OSC color + control escapes before rule matching and
-    /// in emitted summaries (TC-B1). RAW bytes are always preserved in the
+    /// in emitted summaries. RAW bytes are always preserved in the
     /// frame store (retrievable via `command_output_tail` / `event_context`);
-    /// this affects ONLY what the sifter matches and what summaries echo.
+    /// this affects ONLY what rules match and what summaries echo.
     /// Defaults to `true` so anchored rules (`^ERROR`) and summaries are not
     /// silently defeated by color codes. Set `false` to match raw bytes.
     #[serde(default = "default_true_mcp")]
@@ -5264,13 +5264,12 @@ pub struct McpCommandStartParams {
     #[serde(default, deserialize_with = "de_opt_u32_lenient")]
     #[schemars(with = "u32")]
     pub receipt_tail_lines: Option<u32>,
-    /// P5 remote federation: optional registered `target_id`. Omitted/None
+    /// Optional registered `target_id`. Omitted/None
     /// (the default) runs LOCALLY -- exact backward compatibility. When set,
     /// the command runs on that target's daemon, reached ONLY through the
     /// operator-forwarded LOCAL socket (no public TCP). Requires the
     /// operator to have enabled `allow_remote`; an unknown id is rejected.
-    /// Combing + bounded output are identical local vs remote. Adapter-side
-    /// routing only -- never forwarded into the IPC request.
+    /// Combing + bounded output are identical local vs remote.
     #[serde(default)]
     pub target_id: Option<String>,
 }
@@ -5336,7 +5335,7 @@ pub struct McpCommandStatusParams {
     /// `run_and_watch` (e.g. `job_<32hex>`); copy it verbatim, not
     /// free-form.
     pub job_id: String,
-    /// P5: optional `target_id` of the daemon that owns this job. Must
+    /// Optional `target_id` of the daemon that owns this job. Must
     /// match the target the job was started on. Omit for a local job.
     #[serde(default)]
     pub target_id: Option<String>,
@@ -5350,7 +5349,7 @@ pub struct McpCommandStopParams {
     /// `run_and_watch` (e.g. `job_<32hex>`); copy it verbatim, not
     /// free-form.
     pub job_id: String,
-    /// P5: optional `target_id` of the daemon that owns this job. Must
+    /// Optional `target_id` of the daemon that owns this job. Must
     /// match the target the job was started on. Omit for a local job.
     #[serde(default)]
     pub target_id: Option<String>,
@@ -5399,7 +5398,7 @@ pub struct McpShellExecParams {
     /// `{ "max_events": N, "ttl": <seconds> }`. Omit for daemon defaults.
     #[serde(default)]
     pub bucket_config_json: Option<String>,
-    /// Optional per-bucket tag (Phase 3). Tag this probe so a
+    /// Optional per-bucket tag. Tag this probe so a
     /// subscription opened with a matching `tag` predicate routes to it.
     /// Omit for none.
     #[serde(default)]
@@ -5592,13 +5591,13 @@ pub struct McpRunAndWatchParams {
     #[serde(default, deserialize_with = "de_opt_usize_lenient")]
     #[schemars(with = "usize")]
     pub max_signals: Option<usize>,
-    /// Optional per-bucket tag (Phase 3). Tag this probe so a subscription
+    /// Optional per-bucket tag. Tag this probe so a subscription
     /// opened with a matching `tag` predicate routes to it, and so the
     /// runtime_state / probe_list rows carry it. Omit for none.
     #[serde(default)]
     pub tag: Option<String>,
-    /// Strip ANSI/CSI/OSC escapes before rule matching and in summaries
-    /// (TC-B1); see `command_start_combed`. Default `true`. Raw bytes stay
+    /// Strip ANSI/CSI/OSC escapes before rule matching and in summaries;
+    /// see `command_start_combed`. Default `true`. Raw bytes stay
     /// in the frame store.
     #[serde(default = "default_true_mcp")]
     pub strip_ansi: bool,
@@ -5612,20 +5611,20 @@ pub struct McpRunAndWatchParams {
     #[serde(default, deserialize_with = "de_opt_u32_lenient")]
     #[schemars(with = "u32")]
     pub receipt_tail_lines: Option<u32>,
-    /// Compact projection (TC-E1): when `true`, each returned signal carries
+    /// Compact projection: when `true`, each returned signal carries
     /// ONLY `{summary, stream, seq, severity}` -- the load-bearing fields --
     /// dropping the id plumbing that dominates token cost for the common
     /// case. Default `false` (full signal records). Presentation-only; the
     /// event store is unchanged and the same signals are re-fetchable in full.
     #[serde(default)]
     pub compact: bool,
-    /// Honest wait mode (TC-E2). `"exit"` waits for the job to reach a
+    /// Honest wait mode. `"exit"` waits for the job to reach a
     /// terminal state, bounded by the SAME server-side `wait_ms` cap (never
     /// exceeded). Any other value (or omitted) keeps the default
     /// signal-cap-or-budget wait. The cap is advertised in the response.
     #[serde(default)]
     pub wait_until: Option<String>,
-    /// P5 remote federation: optional registered `target_id`. Omitted/None
+    /// Optional registered `target_id`. Omitted/None
     /// runs LOCALLY (default; exact backward compatibility). When set, the
     /// whole one-shot runs on that target's daemon, reached ONLY through the
     /// operator-forwarded LOCAL socket; combed signals come back from THAT
@@ -5820,7 +5819,7 @@ pub struct McpBucketSummaryParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpEventContextParams {
     /// Opaque bucket id from a prior call (e.g. `bkt_<32hex>`); copy it
-    /// verbatim, not free-form. OPTIONAL (US5 / FR-040): omit it to
+    /// verbatim, not free-form. OPTIONAL: omit it to
     /// resolve the owning bucket from `event_id` alone. When supplied it
     /// must be the event's real bucket -- a contradiction errors
     /// (EventNotFound), it is never silently corrected.
@@ -6174,6 +6173,9 @@ pub struct McpRegistrySuggestFromSamplesParams {
     /// schemars does NOT advertise the alias: `tools/list` exposes only
     /// `sample_lines`, so schema-introspecting clients see and send that.
     #[serde(alias = "samples")]
+    #[schemars(
+        description = "Raw output sample lines to analyze. Bounded by the daemon (sample count + per-line bytes); excess is ignored. The legacy key `samples` is also accepted."
+    )]
     pub sample_lines: Vec<String>,
     /// Optional free-text hint about the tool/intent. Advisory only.
     #[serde(default)]
@@ -6192,7 +6194,7 @@ pub struct McpRegistryActivateParams {
     #[serde(default, deserialize_with = "de_opt_u32_lenient")]
     #[schemars(with = "u32")]
     pub version: Option<u32>,
-    /// REQUIRED scope (TC42c/TC42d). There is no default and it is in the
+    /// REQUIRED scope. There is no default and it is in the
     /// schema `required[]`: an omitted scope is rejected so a rule is
     /// never silently widened to global. Use `{ "kind": "global" }` for
     /// the common single-agent case (watch every command you start).
@@ -6243,9 +6245,7 @@ pub struct McpRegistryImportPackParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct McpRegistryDeactivateParams {
     /// Selector: a single rule id. Schema-optional; exactly one of
-    /// `rule_id` / `rule_ids` / `pack` must be supplied. Advertised as a
-    /// plain `string` (like the `rule_id` on other registry actions) so
-    /// the facade flatten stays collision-safe; optionality is expressed
+    /// `rule_id` / `rule_ids` / `pack` must be supplied. Optionality is expressed
     /// by absence from the schema `required[]`.
     #[serde(default)]
     #[schemars(with = "String")]
@@ -6270,7 +6270,7 @@ pub struct McpRegistryDeactivateParams {
     #[serde(default, deserialize_with = "de_opt_u32_lenient")]
     #[schemars(with = "u32")]
     pub version: Option<u32>,
-    /// REQUIRED scope (TC42c/TC42d). No default and it is in the schema
+    /// REQUIRED scope. No default and it is in the schema
     /// `required[]`: an omitted scope is rejected. MUST match the scope
     /// used at activation; deactivating with a different scope will not
     /// close the previously-opened activation row. Use
@@ -6475,7 +6475,7 @@ pub struct McpFileWatchStartParams {
     /// `RuleDefinition`s). Prefer `rules`. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
-    /// Optional per-bucket tag (Phase 3). Tag this watch so a subscription
+    /// Optional per-bucket tag. Tag this watch so a subscription
     /// opened with a matching `tag` predicate routes to it. Omit for none.
     #[serde(default)]
     pub tag: Option<String>,
@@ -6531,7 +6531,7 @@ pub struct McpPtyCommandStartParams {
     /// `RuleDefinition`s). Prefer `rules`. Omit for none.
     #[serde(default)]
     pub rules_json: Option<String>,
-    /// Optional per-bucket tag (Phase 3). Tag this PTY job so a subscription
+    /// Optional per-bucket tag. Tag this PTY job so a subscription
     /// opened with a matching `tag` predicate routes to it. Omit for none.
     #[serde(default)]
     pub tag: Option<String>,
@@ -6552,8 +6552,8 @@ pub struct McpPtyCommandWriteStdinParams {
     pub cursor: Option<u64>,
     /// Bounded wait (ms) for combed signals to appear after the write.
     /// Clamped daemon-side. Omit for today's immediate return; supply it
-    /// to receive the echo + result signals in the SAME call (US5 /
-    /// FR-041, same shape family as `shell_session_exec`).
+    /// to receive the echo + result signals in the SAME call (like
+    /// `shell_session_exec`).
     #[serde(default, deserialize_with = "de_opt_u64_lenient")]
     #[schemars(with = "u64")]
     pub wait_ms: Option<u64>,
@@ -8043,6 +8043,153 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Maintainer-only identifier shapes that must never reach an LLM:
+    /// ticket/phase/spec ids (`TC-B1`, `TC42c`, `US5`, `FR-040`, `T050`,
+    /// `Phase 3`, `P5:`) and Rust-internal names.
+    fn internal_jargon(text: &str) -> Option<String> {
+        const SUBSTRINGS: &[&str] = &[
+            "schemars",
+            "#[serde",
+            "into_ipc",
+            "::finalize",
+            "crates/",
+            "DTO",
+            "internally tagged",
+            "unit variant",
+            "facade flatten",
+            "constitution",
+            "TC erg",
+            "TCE-",
+            "TC-",
+        ];
+        for needle in SUBSTRINGS {
+            for (i, _) in text.match_indices(needle) {
+                // `TC-` alone is fine (e.g. a hyphenated word); only `TC-<Upper><digit>` is an id.
+                if *needle == "TC-" {
+                    let b = text.as_bytes();
+                    let id = b.get(i + 3).is_some_and(u8::is_ascii_uppercase)
+                        && b.get(i + 4).is_some_and(u8::is_ascii_digit);
+                    if !id {
+                        continue;
+                    }
+                }
+                return Some((*needle).to_owned());
+            }
+        }
+        if let Some(i) = text.find("Phase ")
+            && text.as_bytes().get(i + 6).is_some_and(u8::is_ascii_digit)
+        {
+            return Some("Phase <n>".to_owned());
+        }
+        let b = text.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if !b[i].is_ascii_alphanumeric() {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < b.len() && b[i].is_ascii_alphanumeric() {
+                i += 1;
+            }
+            let tok = &text[start..i];
+            let digits = |t: &str| !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit());
+            let id = ["US", "FR", "TC"]
+                .iter()
+                .any(|p| tok.strip_prefix(p).is_some_and(|r| {
+                    let r = r.strip_suffix(|c: char| c.is_ascii_lowercase()).unwrap_or(r);
+                    digits(r)
+                }))
+                || (tok.len() == 4 && tok.starts_with('T') && digits(&tok[1..]))
+                // `P5:` / `P5 remote`, not a bare `P1` inside an example.
+                || (tok.len() == 2
+                    && tok.starts_with('P')
+                    && digits(&tok[1..])
+                    && (b.get(i) == Some(&b':') || text[i..].starts_with(" remote")));
+            if id {
+                return Some(tok.to_owned());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn jargon_scan_flags_ids_but_not_legit_text() {
+        for bad in [
+            "(TC-B1)",
+            "TC42c/TC42d",
+            "(US5 / FR-040)",
+            "Phase 3",
+            "P5: optional",
+            "P5 remote federation",
+            "T050",
+            "schemars does NOT",
+            "RuleInput::finalize",
+        ] {
+            assert!(internal_jargon(bad).is_some(), "should flag {bad:?}");
+        }
+        for ok in [
+            "Terminal Commander (TC) runs commands",
+            "pattern P1 and F1 are example names",
+            "Phase transition names, e.g. phase 3 of a build",
+            "TC-style hyphen, TC_SESSION, TCP socket",
+            "USB and FRAME are words",
+            "a T5 or T1234 token",
+        ] {
+            assert_eq!(internal_jargon(ok), None, "should not flag {ok:?}");
+        }
+    }
+
+    #[test]
+    fn full_surface_llm_text_has_no_internal_jargon() {
+        use serde_json::Value;
+        fn walk(v: &Value, path: &str, out: &mut Vec<String>) {
+            match v {
+                Value::Object(m) => {
+                    for (k, x) in m {
+                        if k == "description"
+                            && let Some(t) = x.as_str()
+                            && let Some(hit) = internal_jargon(t)
+                        {
+                            out.push(format!("{path}: `{hit}` in {t:?}"));
+                        }
+                        walk(x, &format!("{path}/{k}"), out);
+                    }
+                }
+                Value::Array(a) => a.iter().for_each(|x| walk(x, path, out)),
+                _ => {}
+            }
+        }
+        let mut hits = Vec::new();
+        for tool in &advertised_lists()[0].1 {
+            if let Some(hit) = tool.description.as_deref().and_then(internal_jargon) {
+                hits.push(format!("{} (tool description): `{hit}`", tool.name));
+            }
+            walk(
+                &Value::Object((*tool.input_schema).clone()),
+                &tool.name,
+                &mut hits,
+            );
+        }
+        if let Some(hit) = unavailable_status_server()
+            .get_info()
+            .instructions
+            .as_deref()
+            .and_then(internal_jargon)
+        {
+            hits.push(format!("server instructions: `{hit}`"));
+        }
+        assert!(
+            hits.is_empty(),
+            "internal jargon reached the LLM:
+{}",
+            hits.join(
+                "
+"
+            )
+        );
     }
 
     #[test]
