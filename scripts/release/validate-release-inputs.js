@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { PLATFORM_PACKAGES } = require("./platform-packages.js");
 const { SEMVER } = require("./resolve-release-context.js");
+const { findUnreleasedMarkers } = require("./stamp-readme-release-status.js");
 
 const PACKAGE_DIRS = [
   "packages/terminal-commander",
@@ -19,7 +20,7 @@ function readJson(repoRoot, relativePath) {
   return JSON.parse(fs.readFileSync(path.join(repoRoot, relativePath), "utf8"));
 }
 
-function validateReleaseInputs(repoRoot, expectedVersion) {
+function validateReleaseInputs(repoRoot, expectedVersion, { requireReadmeStamped = false } = {}) {
   if (!SEMVER.test(expectedVersion || "")) {
     throw new Error(`expected release version is invalid: '${expectedVersion || ""}'`);
   }
@@ -65,13 +66,28 @@ function validateReleaseInputs(repoRoot, expectedVersion) {
     }
   }
 
+  // Only in the release context: on an ordinary branch "not yet in a tagged
+  // release" is true. The sync job stamps it on the release PR; reaching the
+  // prepublish gate with it still in place means that stamp did not happen.
+  if (requireReadmeStamped) {
+    const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8");
+    if (findUnreleasedMarkers(readme).length > 0) {
+      throw new Error(
+        `README.md still says "not yet in a tagged release" on a <!-- release-status --> line while releasing ${expectedVersion}; ` +
+          `run: node scripts/release/stamp-readme-release-status.js ${expectedVersion}`,
+      );
+    }
+  }
+
   return { version: expectedVersion, checkedVersions: versions.length };
 }
 
 if (require.main === module) {
   try {
     const expectedVersion = process.argv[2] || process.env.EXPECTED_VERSION;
-    const result = validateReleaseInputs(path.resolve(__dirname, "../.."), expectedVersion);
+    const result = validateReleaseInputs(path.resolve(__dirname, "../.."), expectedVersion, {
+      requireReadmeStamped: process.argv.includes("--require-readme-stamped"),
+    });
     process.stdout.write(
       `release-inputs: ${result.checkedVersions} version anchors agree on ${result.version}\n`,
     );

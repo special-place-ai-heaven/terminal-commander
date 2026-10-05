@@ -56,6 +56,17 @@ jobs:
           echo "target version: ${target_ver}"
           python3 scripts/release/sync-cargo-versions.py "${target_ver}"
 
+      - name: Stamp README release status
+        run: |
+          # Rewrites the `<!-- release-status -->` line in README.md from
+          # "not yet in a tagged release" to "released in v<version>".
+          # No-op when already stamped. The prepublish gate fails the release
+          # if this did not happen (validate-release-inputs.js
+          # --require-readme-stamped).
+          set -euo pipefail
+          target_ver=$(node -p "require('./packages/terminal-commander/package.json').version")
+          node scripts/release/stamp-readme-release-status.js "${target_ver}"
+
       - name: Ensure release PR title includes version
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
@@ -89,6 +100,7 @@ jobs:
             crates/daemon/Cargo.toml
             crates/mcp/Cargo.toml
             crates/probes/Cargo.toml
+            README.md
           )
           if git diff --quiet "${paths[@]}"; then
             echo "no version sync changes required"

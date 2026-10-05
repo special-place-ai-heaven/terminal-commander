@@ -50,9 +50,9 @@ result is ever silent or misleading.
 > supplied, Terminal Commander follows the
 > highest-ranked interpreter route proven by `system_discover`.
 
-## Recent improvements (unreleased)
+## Recent improvements
 
-Landed 2026-10-05, not yet in a tagged release.
+<!-- release-status -->Landed 2026-10-05, not yet in a tagged release.
 
 - **Quiet receipt you can shape:** `lines_omitted` says how much the receipt
   leaves out, and `receipt_head_lines` / `receipt_tail_lines` choose how many
@@ -72,7 +72,7 @@ Landed 2026-10-05, not yet in a tagged release.
 
 ## Contents
 
-- [Recent improvements (unreleased)](#recent-improvements-unreleased)
+- [Recent improvements](#recent-improvements)
 - [Why Terminal Commander](#why-terminal-commander)
 - [Innovations](#innovations)
 - [Quick Start](#quick-start)
