@@ -15,8 +15,6 @@
 //! fails this test. Optional keys need a per-call allow-list entry with a
 //! reason; an unused allow-list entry also fails (it would hide nothing).
 
-#![cfg(unix)]
-
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,59 +26,103 @@ use serde_json::{Value, json};
 
 use terminal_commander_mcp::daemon_client::McpDaemonClient;
 use terminal_commander_mcp::tools::TerminalCommanderMcpServer;
-use terminal_commanderd::{DaemonConfig, DaemonState, IpcServer};
+#[cfg(unix)]
+use terminal_commanderd::IpcServer;
+#[cfg(windows)]
+use terminal_commanderd::PipeServer;
+use terminal_commanderd::{DaemonConfig, DaemonState};
 
 /// Tools deliberately not driven by this test. Each entry carries its reason.
-const SKIPPED: &[(&str, &str)] = &[
-    (
-        "command_status",
-        "being changed on another branch (receipt head/lines_omitted, liveness fields) - enable after integration",
-    ),
-    (
-        "system_discover",
-        "being changed on another branch (discovery age field, `detail` parameter with lean default) - enable after integration",
-    ),
-    (
-        "credential_request",
-        "needs a PTY job blocked on a real password prompt; not deterministic or harmless to provoke",
-    ),
-    (
-        "target_probe",
-        "needs a registered remote target in the adapter-side targets.toml",
-    ),
-    (
-        "recipe_search",
-        "no per-tool fixture yet (fixture map status missing_fixture)",
-    ),
-    (
-        "recipe_get",
-        "no per-tool fixture yet (fixture map status missing_fixture)",
-    ),
-    (
-        "recipe_upsert",
-        "no per-tool fixture yet (fixture map status missing_fixture)",
-    ),
-    (
-        "recipe_test",
-        "no per-tool fixture yet (fixture map status missing_fixture)",
-    ),
-    (
-        "recipe_activate",
-        "no per-tool fixture yet (fixture map status missing_fixture)",
-    ),
-    (
-        "recipe_deactivate",
-        "no per-tool fixture yet (fixture map status missing_fixture)",
-    ),
-    (
-        "recipe_list_active",
-        "no per-tool fixture yet (fixture map status missing_fixture)",
-    ),
-    (
-        "recipe_run",
-        "no per-tool fixture yet (fixture map status missing_fixture)",
-    ),
-];
+fn skipped() -> Vec<(&'static str, &'static str)> {
+    #[allow(unused_mut)] // only the Windows build pushes more entries
+    let mut skips = vec![
+        (
+            "command_status",
+            "being changed on another branch (receipt head/lines_omitted, liveness fields) - enable after integration",
+        ),
+        (
+            "system_discover",
+            "being changed on another branch (discovery age field, `detail` parameter with lean default) - enable after integration",
+        ),
+        (
+            "credential_request",
+            "needs a PTY job blocked on a real password prompt; not deterministic or harmless to provoke",
+        ),
+        (
+            "target_probe",
+            "needs a registered remote target in the adapter-side targets.toml",
+        ),
+    ];
+    #[cfg(windows)]
+    for tool in [
+        "shell_session_start",
+        "shell_session_exec",
+        "shell_session_status",
+        "shell_session_list",
+        "shell_session_stop",
+        "workspace_snapshot_create",
+        "workspace_snapshot_apply",
+    ] {
+        skips.push((
+            tool,
+            "persistent shell sessions and workspace snapshots are unix-only (unsupported_platform on Windows)",
+        ));
+    }
+    skips
+}
+
+/// Harmless argv that prints `text` and exits, on every platform.
+fn echo_argv(text: &str) -> Vec<String> {
+    if cfg!(windows) {
+        ["cmd", "/C", "echo", text].map(str::to_owned).to_vec()
+    } else {
+        ["echo", text].map(str::to_owned).to_vec()
+    }
+}
+
+/// Harmless argv that stays alive ~30 s unless stopped.
+fn sleeper_argv() -> Vec<String> {
+    if cfg!(windows) {
+        ["ping", "-n", "30", "127.0.0.1"]
+            .map(str::to_owned)
+            .to_vec()
+    } else {
+        ["sleep", "30"].map(str::to_owned).to_vec()
+    }
+}
+
+/// Harmless interactive program for the PTY tools (echoes its stdin).
+fn pty_argv() -> Vec<String> {
+    if cfg!(windows) {
+        ["cmd", "/Q"].map(str::to_owned).to_vec()
+    } else {
+        vec!["cat".to_owned()]
+    }
+}
+
+/// Start an in-process daemon on an isolated endpoint (UDS on unix, a
+/// uniquely named pipe on Windows) and return the client endpoint plus the
+/// server handle that must stay alive for the test.
+#[cfg(unix)]
+fn start_daemon(state: Arc<DaemonState>) -> (PathBuf, impl Sized) {
+    let socket = state.config.socket_path();
+    let handle = IpcServer::new(state, socket)
+        .spawn()
+        .expect("ipc server spawn");
+    (handle.socket_path().to_path_buf(), handle)
+}
+
+#[cfg(windows)]
+fn start_daemon(state: Arc<DaemonState>) -> (PathBuf, impl Sized) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let pipe = format!(r"\\.\pipe\tc-fixture-shape-{}-{nanos}", std::process::id());
+    let handle = PipeServer::new(state, pipe.clone())
+        .spawn()
+        .expect("pipe server spawn");
+    (PathBuf::from(pipe), handle)
+}
 
 #[derive(Default, Clone)]
 struct TestClient;
@@ -235,14 +277,10 @@ async fn fixtures_match_live_tool_responses() {
     let state = Arc::new(
         DaemonState::bootstrap(DaemonConfig::defaults_in(&data)).expect("daemon bootstrap"),
     );
-    let socket = state.config.socket_path();
-    let handle = IpcServer::new(Arc::clone(&state), socket)
-        .spawn()
-        .expect("ipc server spawn");
+    let (endpoint, _daemon) = start_daemon(Arc::clone(&state));
 
     let (server_transport, client_transport) = tokio::io::duplex(256 * 1024);
-    let daemon = McpDaemonClient::new(handle.socket_path().to_path_buf())
-        .with_timeout(Duration::from_secs(10));
+    let daemon = McpDaemonClient::new(endpoint).with_timeout(Duration::from_secs(10));
     let server = TerminalCommanderMcpServer::new(daemon);
     let server_task =
         tokio::spawn(async move { server.serve(server_transport).await.expect("server serve") });
@@ -276,8 +314,9 @@ async fn fixtures_match_live_tool_responses() {
         .iter()
         .map(|t| t["name"].as_str().expect("tool name").to_owned())
         .collect();
-    let skipped: BTreeSet<String> = SKIPPED.iter().map(|(n, _)| (*n).to_owned()).collect();
-    for (name, reason) in SKIPPED {
+    let skip_list = skipped();
+    let skipped: BTreeSet<String> = skip_list.iter().map(|(n, _)| (*n).to_owned()).collect();
+    for (name, reason) in &skip_list {
         assert!(!reason.is_empty(), "skip entry {name} needs a reason");
     }
     let both: Vec<_> = h.covered.intersection(&skipped).collect();
@@ -294,7 +333,8 @@ async fn fixtures_match_live_tool_responses() {
         "covered/skipped names not in the fixture map: {unknown:?}"
     );
     eprintln!(
-        "fixture live-shape coverage: {} covered, {} skipped, {} live tools",
+        "fixture live-shape coverage on {}: {} covered, {} skipped, {} live tools",
+        std::env::consts::OS,
         h.covered.len(),
         skipped.len(),
         live.len()
@@ -318,7 +358,9 @@ async fn scenario(h: &mut Harness, data: &Path) {
     let work_s = work.to_string_lossy().into_owned();
     let bucket = command_chain(h).await;
     long_lived_command(h).await;
+    #[cfg(unix)]
     shell_tools(h, &work_s).await;
+    recipe_tools(h).await;
     pty_and_file_tools(h, &work_s, &work).await;
     status_tools(h).await;
     registry_tools(h).await;
@@ -326,11 +368,19 @@ async fn scenario(h: &mut Harness, data: &Path) {
 }
 
 async fn command_chain(h: &mut Harness) -> String {
+    // Quiet run (no rules): the response carries the bounded exit receipt.
+    h.check(
+        "run_and_watch",
+        json!({"argv": echo_argv("quiet"), "wait_ms": 3000, "wait_until": "exit"}),
+        "/response_example",
+        &[],
+    )
+    .await;
     // --- command / bucket / probe / event chain ---------------------------
     let run = h
         .check(
             "run_and_watch",
-            json!({"argv": ["echo", "hello"], "wait_ms": 3000, "wait_until": "exit",
+            json!({"argv": echo_argv("hello"), "wait_ms": 3000, "wait_until": "exit",
                    "rules": [{"pattern": "hello", "severity": "high"}]}),
             "/response_example",
             &[],
@@ -384,6 +434,13 @@ async fn command_chain(h: &mut Harness) -> String {
     )
     .await;
 
+    h.check(
+        "shell_exec",
+        json!({"shell_line": "echo hi"}),
+        "/response_example",
+        &[],
+    )
+    .await;
     bucket
 }
 
@@ -392,7 +449,7 @@ async fn long_lived_command(h: &mut Harness) {
     let sleeper = h
         .check(
             "command_start_combed",
-            json!({"argv": ["sleep", "30"]}),
+            json!({"argv": sleeper_argv()}),
             "/response_example",
             &[],
         )
@@ -436,15 +493,9 @@ async fn long_lived_command(h: &mut Harness) {
     .await;
 }
 
+#[cfg(unix)]
 async fn shell_tools(h: &mut Harness, work_s: &str) {
     // --- shell -------------------------------------------------------------
-    h.check(
-        "shell_exec",
-        json!({"shell_line": "echo hi | wc -c"}),
-        "/response_example",
-        &[],
-    )
-    .await;
     let session = h
         .check(
             "shell_session_start",
@@ -499,7 +550,7 @@ async fn pty_and_file_tools(h: &mut Harness, work_s: &str, work: &Path) {
     let pty = h
         .check(
             "pty_command_start",
-            json!({"argv": ["cat"], "cwd": work_s}),
+            json!({"argv": pty_argv(), "cwd": work_s}),
             "/response_example",
             &[],
         )
@@ -507,7 +558,7 @@ async fn pty_and_file_tools(h: &mut Harness, work_s: &str, work: &Path) {
     let pjob = s(&pty, "job_id");
     h.check(
         "pty_command_write_stdin",
-        json!({"job_id": pjob, "bytes": "hello\n"}),
+        json!({"job_id": pjob, "bytes": "hello\r\n"}),
         "/response_example",
         &[],
     )
@@ -581,18 +632,12 @@ async fn status_tools(h: &mut Harness) {
         .await;
     h.check(
         "audit_since",
-        json!({"cursor": 0, "limit": 5}),
+        json!({"cursor": 0, "limit": 5, "action_filter": "file_write"}),
         "/response_examples/with_rows",
-        &[
-            (
-                "rows[].profile",
-                "AuditRowWire.profile: skip_serializing_if None",
-            ),
-            (
-                "rows[].reason",
-                "AuditRowWire.reason: skip_serializing_if None",
-            ),
-        ],
+        &[(
+            "rows[].reason",
+            "AuditRowWire.reason: skip_serializing_if None",
+        )],
     )
     .await;
     h.check("target_list", json!({}), "/response_example", &[])
@@ -732,6 +777,69 @@ async fn subscription_tools(h: &mut Harness, bucket: &str) {
     h.check(
         "subscription_close",
         json!({"sub_id": sub_id}),
+        "/response_example",
+        &[],
+    )
+    .await;
+}
+
+/// Argv recipes: one harmless watched recipe through its whole lifecycle.
+async fn recipe_tools(h: &mut Harness) {
+    let argv = echo_argv("FIXTURESHAPE");
+    let argv0 = argv[0].clone();
+    let definition = json!({
+        "recipe_id": "fixture.echo", "version": 1, "title": "Fixture echo",
+        "summary": "Print a marker and exit", "argv": argv, "status": "active",
+        "tags": ["fixture"], "cwd": null, "env_allowlist": [],
+        "timeout_ms": 5000, "rule_pack_ids": [], "placeholders": []
+    });
+    h.check(
+        "recipe_upsert",
+        json!({"definition_json": definition.to_string()}),
+        "/response_example",
+        &[],
+    )
+    .await;
+    h.check(
+        "recipe_get",
+        json!({"recipe_id": "fixture.echo"}),
+        "/response_example",
+        &[],
+    )
+    .await;
+    h.check(
+        "recipe_search",
+        json!({"query": "fixture"}),
+        "/response_example",
+        &[],
+    )
+    .await;
+    h.check(
+        "recipe_test",
+        json!({"recipe_id": "fixture.echo", "expect_argv0": argv0}),
+        "/response_example",
+        &[],
+    )
+    .await;
+    h.check(
+        "recipe_activate",
+        json!({"recipe_id": "fixture.echo", "scope": {"kind": "global"}}),
+        "/response_example",
+        &[],
+    )
+    .await;
+    h.check("recipe_list_active", json!({}), "/response_example", &[])
+        .await;
+    h.check(
+        "recipe_run",
+        json!({"recipe_id": "fixture.echo", "scope": {"kind": "global"}}),
+        "/response_example",
+        &[],
+    )
+    .await;
+    h.check(
+        "recipe_deactivate",
+        json!({"recipe_id": "fixture.echo", "scope": {"kind": "global"}}),
         "/response_example",
         &[],
     )

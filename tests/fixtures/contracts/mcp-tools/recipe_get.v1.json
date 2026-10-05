@@ -1,0 +1,68 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "recipe_get",
+      "arguments": {
+        "recipe_id": "fixture.echo",
+        "version": 1
+      }
+    }
+  },
+  "tool": "recipe_get",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/recipe_get-v1",
+    "fixture_id": "contracts/mcp-tools/recipe_get.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "fixture_live_shape_contract"
+    ],
+    "note": "Daemon-backed recipe lookup. Omit version for latest. Success example generated from a real response by fixture_live_shape_contract's scenario."
+  },
+  "response_example": {
+    "definition": {
+      "argv": [
+        "echo",
+        "FIXTURESHAPE"
+      ],
+      "recipe_id": "fixture.echo",
+      "status": "active",
+      "summary": "Print a marker and exit",
+      "tags": [
+        "fixture"
+      ],
+      "timeout_ms": 5000,
+      "title": "Fixture echo",
+      "version": 1
+    },
+    "tombstoned": false
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "recipe_id is required",
+    "version is optional",
+    "tombstoned is true when the id was retired"
+  ]
+}

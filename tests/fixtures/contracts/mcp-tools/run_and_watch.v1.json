@@ -36,8 +36,10 @@
     "compact": false,
     "receipt": {
       "exit_code": 0,
-      "frames_suppressed": 0,
-      "tail": []
+      "lines_suppressed": 1,
+      "lines_omitted": 0,
+      "tail_incomplete": false,
+      "tail": ["quiet"]
     },
     "complete": true,
     "wait_exhausted": false,
