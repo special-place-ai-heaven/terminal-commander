@@ -23,6 +23,9 @@ use terminal_commander_core::ActivationScope;
 use terminal_commander_ipc::{DaemonClient, IpcRequest, IpcResponse, RegistryImportPackParams};
 use terminal_commander_supervisor::pidfile::{pidfile_path, read_pidfile_raw};
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 /// Cross-package binary discovery for the sibling `terminal-commanderd` crate:
 /// derive its path from the test binary's `target/<profile>/deps/<test>`
 /// location -> sibling `target/<profile>/<name>[.exe]`.
@@ -109,7 +112,7 @@ impl LiveDaemon {
             "daemon binary not found at {}; cargo dev-dep should have built it",
             daemon_bin.display()
         );
-        let child = Command::new(&daemon_bin)
+        let child = isolated_env::isolate(&mut Command::new(&daemon_bin), &base)
             .args(["start", "--mode", "ipc-server"])
             .env("TC_DATA", &base)
             .env("TC_SESSION", token)
@@ -155,13 +158,16 @@ impl LiveDaemon {
     }
 
     fn run_cli(&self, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_terminal-commander"))
-            .args(args)
-            .env("TC_DATA", &self.base)
-            .env("TC_SESSION", &self.token)
-            .env_remove("TC_SOCKET")
-            .output()
-            .expect("run cli")
+        isolated_env::isolate(
+            &mut Command::new(env!("CARGO_BIN_EXE_terminal-commander")),
+            &self.base,
+        )
+        .args(args)
+        .env("TC_DATA", &self.base)
+        .env("TC_SESSION", &self.token)
+        .env_remove("TC_SOCKET")
+        .output()
+        .expect("run cli")
     }
 }
 

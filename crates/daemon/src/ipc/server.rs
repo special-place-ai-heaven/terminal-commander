@@ -34,7 +34,6 @@ use terminal_commander_supervisor::identity::PeerIdentity;
 #[path = "handlers/mod.rs"]
 mod handlers;
 
-use crate::environment::{EnvironmentRouter, RouteOutcome};
 #[cfg(unix)]
 use crate::ipc::peer;
 use crate::ipc::protocol::{
@@ -627,28 +626,12 @@ async fn dispatch(
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
         },
-        IpcRequest::CommandStartCombed(p) => {
-            let env = p.environment.clone().unwrap_or_default();
-            if matches!(env, EnvironmentSpec::Local) {
-                match handlers::command::handle_command_start_combed(state, p, peer) {
-                    Ok(r) => IpcResult::Ok { response: r },
-                    Err(e) => IpcResult::Err { error: e },
-                }
-            } else {
-                match EnvironmentRouter::route_request(state, &env, &req_env.request).await {
-                    Ok(RouteOutcome::RunnerResponse(r)) => IpcResult::Ok { response: *r },
-                    Ok(RouteOutcome::Local) => {
-                        match handlers::command::handle_command_start_combed(state, p, peer) {
-                            Ok(r) => IpcResult::Ok { response: r },
-                            Err(e) => IpcResult::Err { error: e },
-                        }
-                    }
-                    Err(e) => IpcResult::Err {
-                        error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
-                    },
-                }
-            }
-        }
+        IpcRequest::CommandStartCombed(p) => match local_environment_only(p.environment.as_ref())
+            .and_then(|()| handlers::command::handle_command_start_combed(state, p, peer))
+        {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
         IpcRequest::CommandStatus(p) => match handlers::command::handle_command_status(state, p) {
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
@@ -813,28 +796,12 @@ async fn dispatch(
             let r = handlers::file::handle_file_watch_list(state);
             IpcResult::Ok { response: r }
         }
-        IpcRequest::PtyCommandStart(p) => {
-            let env = p.environment.clone().unwrap_or_default();
-            if matches!(env, EnvironmentSpec::Local) {
-                match handlers::pty::handle_pty_command_start(state, p) {
-                    Ok(r) => IpcResult::Ok { response: r },
-                    Err(e) => IpcResult::Err { error: e },
-                }
-            } else {
-                match EnvironmentRouter::route_request(state, &env, &req_env.request).await {
-                    Ok(RouteOutcome::RunnerResponse(r)) => IpcResult::Ok { response: *r },
-                    Ok(RouteOutcome::Local) => {
-                        match handlers::pty::handle_pty_command_start(state, p) {
-                            Ok(r) => IpcResult::Ok { response: r },
-                            Err(e) => IpcResult::Err { error: e },
-                        }
-                    }
-                    Err(e) => IpcResult::Err {
-                        error: IpcError::new(IpcErrorCode::Internal, e.to_string()),
-                    },
-                }
-            }
-        }
+        IpcRequest::PtyCommandStart(p) => match local_environment_only(p.environment.as_ref())
+            .and_then(|()| handlers::pty::handle_pty_command_start(state, p))
+        {
+            Ok(r) => IpcResult::Ok { response: r },
+            Err(e) => IpcResult::Err { error: e },
+        },
         IpcRequest::PtyCommandWriteStdin(p) => {
             match handlers::pty::handle_pty_command_write_stdin(state, p).await {
                 Ok(r) => IpcResult::Ok { response: r },
@@ -1043,6 +1010,22 @@ async fn run_blocking<P: Clone + Send + Sync + 'static>(
         Err(e) => IpcResult::Err {
             error: IpcError::new(IpcErrorCode::Internal, format!("{method_name} failed: {e}")),
         },
+    }
+}
+
+/// Refuse a start request that names a non-local `environment`. Environment
+/// runners were never built; the field stays on the wire only so older clients
+/// that send `null` or `local` keep working.
+fn local_environment_only(environment: Option<&EnvironmentSpec>) -> Result<(), IpcError> {
+    match environment {
+        None | Some(EnvironmentSpec::Local) => Ok(()),
+        Some(_) => Err(IpcError::new(
+            IpcErrorCode::SchemaMismatch,
+            "environment runners are not supported: omit `environment` or send `local`. \
+             To run inside WSL, use a `wsl_argv` or `wsl_shell` access route from \
+             system_discover; to run on another machine, pass the `target_id` of a \
+             registered remote daemon",
+        )),
     }
 }
 
@@ -1812,5 +1795,64 @@ mod tests {
         );
         assert!(status.default_deny_path_suffix_count > 0);
         assert!(!status.llm_can_activate_recipes);
+    }
+
+    /// Once the daemon has discovered the host, a call made after the reuse
+    /// window still answers from that discovery and refreshes it in the
+    /// background. `shell_exec` without a shell reads the same discovery for
+    /// its default shell.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_host_discovery_does_not_hold_up_discover_or_shell_exec() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let state = Arc::new(
+            DaemonState::bootstrap(crate::config::DaemonConfig::defaults_in(data.path()))
+                .expect("daemon bootstrap"),
+        );
+        let peer = PeerIdentity::unknown_because("test");
+        let envelope = |request| RequestEnvelope {
+            correlation_id: 1,
+            request,
+        };
+        let discover = envelope(IpcRequest::SystemDiscover);
+        let shell_exec = envelope(
+            serde_json::from_value(serde_json::json!(
+                {"method": "shell_exec", "params": {"shell_line": "echo hi"}}
+            ))
+            .expect("shell_exec request"),
+        );
+        dispatch(&state, Instant::now(), &discover, &peer).await;
+
+        // From here a call that waits for discovery takes more than five
+        // seconds; one that does not is done well inside two.
+        crate::environment::slow_down_discovery(true);
+        crate::environment::advance_discovery_clock(std::time::Duration::from_secs(31));
+        let started = Instant::now();
+        let reply = dispatch(&state, Instant::now(), &discover, &peer).await;
+        let took = started.elapsed();
+        let IpcResult::Ok {
+            response: IpcResponse::SystemDiscover(discovered),
+        } = reply.result
+        else {
+            panic!("system_discover failed: {:?}", reply.result);
+        };
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "system_discover waited {took:?}"
+        );
+        assert!(discovered.environment.discovery_age_ms >= 31_000);
+
+        let started = Instant::now();
+        let reply = dispatch(&state, Instant::now(), &shell_exec, &peer).await;
+        let took = started.elapsed();
+        assert!(
+            matches!(reply.result, IpcResult::Ok { .. }),
+            "shell_exec failed: {:?}",
+            reply.result
+        );
+        crate::environment::slow_down_discovery(false);
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "shell_exec waited {took:?}"
+        );
     }
 }

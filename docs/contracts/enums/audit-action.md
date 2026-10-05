@@ -13,8 +13,8 @@ a closed set in the store (`allow`, `deny`, `allow_with_audit`, `error`,
 `registry_create`, `policy_decision`, `policy_invalid`, `bucket_export` and
 `default_deny_override_loaded` below are not emitted by any code path.
 
-The closed set of action strings emitted in the `audit-record.vN`
-contract. New entries require a doctrine amendment first
+The closed set of action strings emitted in the audit rows (`AuditRow`,
+`tests/fixtures/contracts/mcp-tools/audit_since.v1.json`). New entries require a doctrine amendment first
 (`SECURITY.md` section 4 + `POLICY.md` section 4).
 
 | Action | Implementing goal |

@@ -16,6 +16,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 fn target_bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
     let profile_dir = exe.parent().and_then(|p| p.parent()).expect("profile dir");
@@ -77,7 +80,7 @@ impl Adapter {
             std::process::id(),
             dir.path().file_name().unwrap().to_string_lossy()
         );
-        let mut child = Command::new(&mcp_bin)
+        let mut child = isolated_env::isolate(&mut Command::new(&mcp_bin), dir.path())
             .arg("--state-dir")
             .arg(&state_dir)
             .env("TC_SOCKET", &socket)
@@ -220,16 +223,19 @@ fn piped_requests_then_eof_still_get_their_replies() {
     let socket = dir.path().join("tcd.sock").display().to_string();
     #[cfg(windows)]
     let socket = format!(r"\\.\pipe\tc-test-no-init-eof-{}", std::process::id());
-    let mut child = Command::new(target_bin("terminal-commander-mcp"))
-        .arg("--state-dir")
-        .arg(&state_dir)
-        .env("TC_SOCKET", &socket)
-        .env("TC_DATA", dir.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn adapter");
+    let mut child = isolated_env::isolate(
+        &mut Command::new(target_bin("terminal-commander-mcp")),
+        dir.path(),
+    )
+    .arg("--state-dir")
+    .arg(&state_dir)
+    .env("TC_SOCKET", &socket)
+    .env("TC_DATA", dir.path())
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .expect("spawn adapter");
     {
         let mut stdin = child.stdin.take().unwrap();
         // A 2026-07-28 stateless request (as the release verify probes send)...

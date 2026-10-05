@@ -130,7 +130,7 @@ requires an amendment to this document and to
 6. **Pointer-or-reason for severity >= Medium.** Every `SignalEvent`
    at Medium or higher carries a `SourcePointer` OR a
    `pointer_unavailable_reason`. The TC02 negative-contract fixture
-   `forbidden/missing-pointer.v1.json` and `SignalEvent::validate`
+   `tests/fixtures/contracts/forbidden/missing-pointer.v1.json` and `SignalEvent::validate`
    enforce this.
 7. **Closed-set enums** for `Severity`, `PolicyDecision`,
    `PolicyProfile`, `PolicyAction`, `RuleType`, `RuleStatus`,
@@ -190,9 +190,10 @@ There is no `stream_tail`, no `command_read_stdout`, no
 When `bucket_wait` times out without matching events, it MUST return
 a heartbeat (`heartbeat = true`, empty `events`, `next_cursor` ==
 input cursor). It MUST NEVER return raw stream data as the timeout
-fallback. The forbidden negative-contract fixture
-`tests/fixtures/contracts/forbidden/raw-stream-as-events.v1.json` is
-the structural test oracle.
+fallback. The shape is pinned by
+`tests/fixtures/contracts/mcp-tools/bucket_wait.v1.json`; the heartbeat
+behavior is covered by `bucket_wait_returns_heartbeat_when_no_events_arrive`
+in `crates/daemon/tests/ipc_bucket.rs`.
 
 ## 9. Registry semantics
 

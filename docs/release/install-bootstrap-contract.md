@@ -30,7 +30,7 @@ Otherwise it runs the same bootstrap as `terminal-commander setup harness`, in f
 
 1. Stops running Terminal Commander processes of this install and removes npm leftover folders, so an upgrade is not blocked (`packages/terminal-commander/lib/bootstrap/release_instances.js`).
 2. Windows with the WSL runtime selected (`TC_WSL_DISTRO` or `TC_USE_LEGACY_WSL_BRIDGE=1`): runs the WSL steps in section 5. Otherwise the native Windows path is used and WSL is not touched.
-3. Linux / WSL: installs daemon autostart (a systemd user unit, or a profile hook plus a background start), unless `TC_SKIP_DAEMON_AUTOSTART=1` or `TC_BOOTSTRAP_START_DAEMON=0`.
+3. Linux / WSL: installs daemon autostart (a systemd user unit, or a profile hook plus a background start), unless `TC_SKIP_DAEMON_AUTOSTART=1` or `TC_BOOTSTRAP_START_DAEMON=0`. The profile hook runs only in interactive shells. `autostart.sh` starts nothing when `TC_DAEMON_CHILD`, `TC_SOCKET` or `TC_SESSION` is set (a Terminal Commander process tree), when `$TC_DATA/terminal-commanderd.sock` exists, or when `$TC_DATA/terminal-commanderd.pid` names a live `terminal-commanderd`. `TC_DATA` defaults to `~/.local/share/terminal-commanderd`.
 4. Writes the MCP config of every detected harness, pointing at the native MCP executable (a stable per-user copy where possible), with backups before overwrite.
 
 npm does not run `postinstall` with `--ignore-scripts` or `ignore-scripts=true`, or when npm's install-script policy (`allow-scripts` / `allowScripts`, npm 11) does not allow `terminal-commander`. The install still succeeds. Nothing is configured or repaired until the operator runs:
@@ -78,7 +78,7 @@ On Windows, when the WSL runtime is selected, bootstrap runs these steps in this
 1. Repair: if `~/.config/terminal-commander/autostart.sh` or its profile snippet exists, rewrite both. This step uses non-login `bash -c`, because a <= 0.3.11 snippet exits every login shell once the daemon socket exists. It writes nothing on a fresh machine.
 2. Runtime ensure: probe the runtime version; on skew, run the locked constant `npm install -g terminal-commander`, verify `terminal-commander-mcp` and the platform package, and swap the live daemon. These steps run in `bash -lc`, with `PATH` stripped of Windows `nodejs` / `npm` shims before Linux paths.
 3. Daemon autostart: the full install. It runs after the runtime because it chooses systemd only when the daemon binary already exists.
-4. Start the daemon.
+4. Start the daemon. When `TC_DAEMON_CHILD`, `TC_SOCKET` or `TC_SESSION` is set in the bootstrap's own environment (it runs inside a Terminal Commander session), this step does not run. It reports `daemon_start: { status: "skipped", reason }` and an informational line, not a warning. If `autostart.sh` declines anyway, it prints `terminal-commander: autostart skipped (inside a Terminal Commander session)`, which is also reported as `skipped`, never `ok`. The Linux install and `setup daemon-autostart` report the same skip.
 
 Every `bash -lc` step prints a shell-ran sentinel before its command. Exit 0 without the sentinel means a startup file ended the shell early. Such a step fails with `shell_exited_early` and names the likely cause; it is never reported as success.
 

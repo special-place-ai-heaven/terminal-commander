@@ -1237,10 +1237,15 @@ mod runtime {
             // clearing it stripped OS-essential vars (e.g. `SystemRoot`, `PATH`
             // on Windows) and crashed Windows children at startup whenever a
             // non-empty env was supplied. An empty `config.env` leaves the
-            // loop a no-op, which is exactly "inherit the parent env".
+            // loop a no-op, which is exactly "inherit the parent env" -- less
+            // the daemon's own endpoint (see `DAEMON_ENDPOINT_ENV`).
+            for key in terminal_commander_core::DAEMON_ENDPOINT_ENV {
+                cmd = cmd.env_remove(key);
+            }
             for (k, v) in &config.env {
                 cmd = cmd.env(k, v);
             }
+            cmd = cmd.env(terminal_commander_core::DAEMON_CHILD_ENV, "1");
             // Keep the spawn's io error typed so a missing program stays
             // `ErrorKind::NotFound` for the daemon's `program_not_found`.
             let mut child = cmd.spawn(pts).map_err(|e| match e {
@@ -2088,15 +2093,20 @@ mod runtime_win {
 
             // OVERLAY semantics matching the unix lane: `CommandBuilder::new`
             // seeds the env from the parent process (`get_base_env`), and each
-            // supplied `(key, value)` is ADDED/overrides. No `env_clear`.
+            // supplied `(key, value)` is ADDED/overrides. No `env_clear`, but
+            // the daemon's own endpoint is removed (see `DAEMON_ENDPOINT_ENV`).
             let mut cmd = CommandBuilder::new(&argv[0]);
             cmd.args(&argv[1..]);
             if let Some(cwd) = &config.cwd {
                 cmd.cwd(cwd);
             }
+            for key in terminal_commander_core::DAEMON_ENDPOINT_ENV {
+                cmd.env_remove(key);
+            }
             for (k, v) in &config.env {
                 cmd.env(k, v);
             }
+            cmd.env(terminal_commander_core::DAEMON_CHILD_ENV, "1");
             // FCR2-003 (BatBadBut): for a `.bat`/`.cmd` CreateProcessW runs
             // cmd.exe, which re-parses `&|<>^%` that `portable-pty`'s CRT
             // quoting leaves bare, and it has no raw command-line API. Hand

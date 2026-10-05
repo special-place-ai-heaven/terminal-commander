@@ -17,6 +17,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 fn target_bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
     let profile_dir = exe.parent().and_then(|p| p.parent()).expect("profile dir");
@@ -54,7 +57,11 @@ struct Adapter {
 
 impl Adapter {
     fn start() -> Self {
-        let dir = TempDir::new().unwrap();
+        Self::start_in(TempDir::new().unwrap())
+    }
+
+    /// Start with `dir` as the adapter's home, data dir and socket dir.
+    fn start_in(dir: TempDir) -> Self {
         let state_dir = dir.path().join("state");
         let mcp_bin = target_bin("terminal-commander-mcp");
         assert!(
@@ -69,7 +76,7 @@ impl Adapter {
             std::process::id(),
             dir.path().file_name().unwrap().to_string_lossy()
         );
-        let mut child = Command::new(&mcp_bin)
+        let mut child = isolated_env::isolate(&mut Command::new(&mcp_bin), dir.path())
             .arg("--state-dir")
             .arg(&state_dir)
             .env("TC_SOCKET", &socket)
@@ -210,4 +217,121 @@ fn command_right_after_daemon_loss_runs_exactly_once() {
         1,
         "the command must run exactly once, marker file: {runs:?}"
     );
+}
+
+/// What an installed autostart snippet amounts to, written the way the fixed
+/// autostart behaves: anything that sources the profile runs it, it would act
+/// on whatever endpoint it inherited, and it does nothing inside a TC-managed
+/// process tree (`autostart-ran` stands for the daemon it would start).
+#[cfg(unix)]
+const HOSTILE_PROFILE: &str = r#"echo "$$" >> "$HOME/profile-sourced"
+if [ -n "${TC_DATA-}${TC_SOCKET-}" ]; then
+  echo "TC_DATA=${TC_DATA-} TC_SOCKET=${TC_SOCKET-}" >> "$HOME/endpoint-leaked"
+fi
+if [ -z "${TC_DAEMON_CHILD-}" ]; then
+  echo "$$" >> "$HOME/autostart-ran"
+fi
+"#;
+
+/// The installed Linux autostart lives in the user's profile and starts a
+/// daemon on the `TC_DATA`/`TC_SOCKET` it inherits. The daemon's discovery
+/// probes used to run login shells carrying the session's endpoint, so every
+/// daemon start -- the first and the one that replaces a lost daemon -- put a
+/// second daemon on the session's socket. A daemon must never source the
+/// profile on its own; a login shell a model runs does, and must find neither
+/// the endpoint nor a reason to start a daemon.
+#[cfg(unix)]
+#[test]
+fn a_daemon_loss_and_recovery_never_runs_the_users_login_profile() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join(".profile"), HOSTILE_PROFILE).unwrap();
+    let mut a = Adapter::start_in(dir);
+    // `system_discover` waits for the discovery probes, so they have all run.
+    let first = a.call_tool("system_discover", &json!({}));
+    assert!(is_success(&first), "system_discover before loss: {first}");
+    a.lose_daemon();
+    let after = a.call_tool("system_discover", &json!({}));
+    assert!(is_success(&after), "system_discover after loss: {after}");
+
+    let home = a.dir.path().to_path_buf();
+    let read = |name: &str| std::fs::read_to_string(home.join(name)).unwrap_or_default();
+    let sourced = read("profile-sourced");
+    assert!(
+        sourced.is_empty(),
+        "the daemon ran a login shell (pids {sourced:?}); it must not source the user's profile"
+    );
+
+    let login = a.call_tool(
+        "run_and_watch",
+        &json!({"argv": ["sh", "-lc", "true"], "wait_ms": 20000, "wait_until": "exit"}),
+    );
+    assert!(is_success(&login), "run_and_watch sh -lc: {login}");
+    assert_eq!(
+        read("profile-sourced").lines().count(),
+        1,
+        "the model's login shell should have sourced the profile"
+    );
+    let leaked = read("endpoint-leaked");
+    assert!(
+        leaked.is_empty(),
+        "a login shell under the daemon saw its endpoint: {leaked}"
+    );
+    let autostart = read("autostart-ran");
+    assert!(
+        autostart.is_empty(),
+        "an autostart that honours TC_DAEMON_CHILD would have started a daemon"
+    );
+}
+
+/// The daemon is started with `TC_SOCKET` (and here `TC_DATA`) naming its own
+/// endpoint. A command it runs, in either lane, must not inherit them -- a
+/// terminal-commander process that command starts would attach to this
+/// daemon's socket, or start a second daemon on it -- and must carry
+/// `TC_DAEMON_CHILD=1`.
+#[test]
+fn commands_carry_the_child_marker_and_not_the_daemons_endpoint() {
+    let mut a = Adapter::start();
+    for tool in ["run_and_watch", "pty_command_start"] {
+        let out = a.dir.path().join(format!("{tool}.env"));
+        #[cfg(windows)]
+        let argv = json!(["cmd", "/c", format!("set>{}", out.display())]);
+        #[cfg(unix)]
+        let argv = json!([
+            "sh",
+            "-c",
+            format!("env > '{p}.tmp' && mv '{p}.tmp' '{p}'", p = out.display())
+        ]);
+        let args = if tool == "run_and_watch" {
+            json!({"argv": argv, "wait_ms": 20000, "wait_until": "exit"})
+        } else {
+            json!({"argv": argv})
+        };
+        let ran = a.call_tool(tool, &args);
+        assert!(is_success(&ran), "{tool}: {ran}");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let env = loop {
+            let env = std::fs::read_to_string(&out).unwrap_or_default();
+            if env.lines().any(|l| l.to_ascii_uppercase().starts_with("PATH="))
+                || std::time::Instant::now() >= deadline
+            {
+                break env;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert!(
+            env.lines()
+                .any(|l| l.to_ascii_uppercase().starts_with("PATH=")),
+            "{tool}: the command must still inherit the rest of the environment: {env:?}"
+        );
+        let leaked: Vec<&str> = env
+            .lines()
+            .filter(|l| l.starts_with("TC_SOCKET=") || l.starts_with("TC_DATA="))
+            .collect();
+        assert!(leaked.is_empty(), "{tool}: the command inherited {leaked:?}");
+        assert!(
+            env.lines().any(|l| l.trim_end() == "TC_DAEMON_CHILD=1"),
+            "{tool}: the command must carry TC_DAEMON_CHILD=1"
+        );
+    }
 }

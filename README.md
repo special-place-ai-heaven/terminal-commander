@@ -60,6 +60,10 @@ result is ever silent or misleading.
   background process. `terminal-commander setup`, `update`, or
   `setup daemon-autostart` replaces the old hook. See
   [Doctor And Repair](#doctor-and-repair).
+- **Autostart never starts a second daemon:** the hook now fires only in
+  interactive shells, and the start script does nothing inside a Terminal
+  Commander process tree (`TC_DAEMON_CHILD`, `TC_SOCKET` or `TC_SESSION` set)
+  or when a live daemon's pidfile is already in its data directory.
 
 <!-- release-status -->Landed 2026-10-05, released in v0.3.11.
 
@@ -234,8 +238,8 @@ children are never orphaned and receipts never lost. `command_stop` kills the
 whole process tree, identity-gated so a recycled PID is never signalled.
 
 The daemon also stays answerable while it works. `system_discover`, `file_search`
-on a directory, `file_list_dir`, `file_read_window`, `shell_exec` without an
-explicit shell, and the WSL runner lookup used to run inline in the async
+on a directory, `file_list_dir`, `file_read_window` and `shell_exec` without an
+explicit shell used to run inline in the async
 dispatcher and held up every other request, Health included. They now run on the
 blocking pool (`run_blocking` in `crates/daemon/src/ipc/server.rs`). On the
 development machine Health waited several seconds behind `system_discover` and

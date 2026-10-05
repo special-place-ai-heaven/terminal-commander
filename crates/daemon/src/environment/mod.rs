@@ -1,18 +1,25 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 //
-// Parent → environment runner orchestration.
+// Host environment discovery.
 
 mod probe;
-mod router;
-#[cfg(windows)]
-pub mod wsl;
 
 pub use probe::{
     cached_host_environment, discover_host_environment, preferred_shell, shell_launch_argv,
 };
 
-pub use router::{EnvironmentRouter, RouteError, RouteOutcome};
+/// Move the shared discovery cache's clock forward, as if `by` had passed.
+#[cfg(test)]
+pub(crate) fn advance_discovery_clock(by: std::time::Duration) {
+    probe::advance_discovery_clock(by);
+}
+
+/// Make every later discovery through the shared cache five seconds slower.
+#[cfg(test)]
+pub(crate) fn slow_down_discovery(slow: bool) {
+    probe::SLOW_DISCOVERY.store(slow, std::sync::atomic::Ordering::SeqCst);
+}
 
 /// Remove execution routes that the active policy cannot honor, then recompute
 /// the public ranking and beachhead from the surviving routes.

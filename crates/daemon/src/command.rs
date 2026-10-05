@@ -1989,9 +1989,10 @@ impl CommandRuntime {
     /// this lived in the handler an embedding host accumulated receipt rows it
     /// had no supported typed API to read back.
     ///
-    /// NOTE: this read performs a WRITE -- it stamps the receipt's restart
-    /// marker so the durable row records that it was read post-restart. That is
-    /// deliberate and best-effort; a failed stamp does not change the response.
+    /// NOTE: reading a receipt written by an earlier boot performs a WRITE -- it
+    /// stamps the receipt's restart marker so the durable row records that it
+    /// was read post-restart. That is deliberate and best-effort; a failed stamp
+    /// does not change the response.
     ///
     /// Counters come from the evidence captured at the terminal transition, so
     /// a reconstructed pass is USABLE rather than merely labelled. Receipts
@@ -2046,13 +2047,24 @@ impl CommandRuntime {
         // the exact false negative this feature exists to remove.
         let abandoned =
             row.end_cause.as_deref() == Some(terminal_commander_store::ABANDONED_END_CAUSE);
+        // The job ledger is in memory only and starts empty on every boot, so a
+        // job it still holds was started -- and its receipt written -- by the
+        // daemon answering now. That outcome was observed live; it is served
+        // from the receipt only because the lane dropped its live binding (an
+        // operator stop, a reaped watch). Only a receipt from an earlier boot is
+        // a reconstruction.
+        let this_boot = self.jobs.get(job_id).is_some();
         let (state_enum, exit_code, outcome_trust) = if abandoned {
             (JobState::Cancelled, None, OutcomeTrust::Abandoned)
+        } else if this_boot {
+            (state_enum, row.exit_code, OutcomeTrust::Observed)
         } else {
             (state_enum, row.exit_code, OutcomeTrust::Reconstructed)
         };
 
-        let _ = self.store.mark_job_receipt_restarted(&wire);
+        if !this_boot {
+            let _ = self.store.mark_job_receipt_restarted(&wire);
+        }
 
         Some(CommandStatusResponse {
             job_id,

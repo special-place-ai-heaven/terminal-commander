@@ -19,6 +19,9 @@ use terminal_commander_ipc::{
 };
 use terminal_commander_supervisor::pidfile::{pidfile_path, read_pidfile_raw};
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 const SECRET: &str = "cli-s3cret-marker-Q9";
 
 /// Reads one line with echo on and exits 0 only on the secret, compared
@@ -73,16 +76,17 @@ impl LiveDaemon {
         let token = format!("c{:x}{:04x}", std::process::id(), nanos & 0xffff);
         let base = std::env::temp_dir().join(format!("tc-cli-cred-{}-{nanos}", std::process::id()));
         let state_dir = base.join(&token);
-        let child = Command::new(target_bin("terminal-commanderd"))
-            .args(["start", "--mode", "ipc-server"])
-            .env("TC_DATA", &base)
-            .env("TC_SESSION", &token)
-            .env_remove("TC_SOCKET")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn daemon");
+        let child =
+            isolated_env::isolate(&mut Command::new(target_bin("terminal-commanderd")), &base)
+                .args(["start", "--mode", "ipc-server"])
+                .env("TC_DATA", &base)
+                .env("TC_SESSION", &token)
+                .env_remove("TC_SOCKET")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn daemon");
         let mut daemon = Self {
             child,
             base,
@@ -99,16 +103,19 @@ impl LiveDaemon {
     }
 
     fn cli(&self, args: &[&str], stdin: &str) -> std::process::Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_terminal-commander"))
-            .args(args)
-            .env("TC_DATA", &self.base)
-            .env("TC_SESSION", &self.token)
-            .env_remove("TC_SOCKET")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("run cli");
+        let mut child = isolated_env::isolate(
+            &mut Command::new(env!("CARGO_BIN_EXE_terminal-commander")),
+            &self.base,
+        )
+        .args(args)
+        .env("TC_DATA", &self.base)
+        .env("TC_SESSION", &self.token)
+        .env_remove("TC_SOCKET")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run cli");
         child
             .stdin
             .take()

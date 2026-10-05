@@ -1,6 +1,11 @@
 # ADR: Environment runners (parent daemon + optional remote runner)
 
-Status: Accepted; only partly implemented (checked against code 2026-10-05).
+Status: Accepted; only point 1 was ever built. The partly built runner path
+described below (the router, the WSL forward and its lookup) was removed on
+2026-10-05 because nothing could reach it: the `environment` field stays on the
+IPC params for wire compatibility, and a non-local value is now refused with an
+error that names `wsl_argv` / `wsl_shell` access routes and `target_id` instead.
+The notes below describe the code as it stood before that removal.
 - Implemented as written: point 1 (parent adapter and daemon stay on the
   harness host; MCP never runs inside WSL).
 - Partly built, not usable: points 2 and 3. The IPC params
@@ -8,9 +13,9 @@ Status: Accepted; only partly implemented (checked against code 2026-10-05).
   `environment: Option<EnvironmentSpec>` (`crates/ipc/src/protocol.rs`; the
   field is `environment`, not `environment_id`), and `CommandStartCombed`
   and `PtyCommandStart` with a non-local value go through `EnvironmentRouter`
-  (`crates/daemon/src/ipc/server.rs`, `crates/daemon/src/environment/router.rs`). The WSL
+  (`crates/daemon/src/ipc/server.rs` and the since-removed environment router module). The WSL
   forward is a stub: from a Windows parent `forward_to_runner` returns
-  "frame relay (planned)" (`crates/daemon/src/environment/wsl.rs`), and a non-Windows parent
+  "frame relay (planned)" (in the since-removed WSL forward module), and a non-Windows parent
   refuses; `SshHost` returns "not implemented". No runner bootstrap exists
   and no test routes a non-local environment; every in-repo caller passes
   `environment: None`. The MCP tools expose no environment parameter.

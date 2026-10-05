@@ -234,7 +234,8 @@ pty_command_stop { job_id }
   owns the probe. This is also the only surface that reports a FINISHED PTY
   job's exit code, because `pty_command_list` filters terminal jobs out.
   Every status response carries `outcome_trust` (`observed` | `reconstructed` |
-  `lost` | `abandoned`) saying how the daemon knows.
+  `abandoned`) saying how the daemon knows. A job the daemon has no record of
+  is the `job_lost` error, not a trust value.
 - Honest host caveat: live Windows ConPTY child-output end-to-end is
   gated behind `TC_CONPTY_E2E=1` and not yet fully closed on every dev
   host; check `system_discover` before relying on it on native Windows.

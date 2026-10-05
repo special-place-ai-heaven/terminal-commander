@@ -244,7 +244,7 @@ async fn live_system_discover_roundtrip_reports_daemon() {
         let (_server, client) = paired_against_live_daemon(&handle).await;
 
         let result = client
-            .call_tool(CallToolRequestParams::new("system_discover"))
+            .call_tool(full_system_discover())
             .await
             .expect("system_discover should succeed");
         let payload = first_text_content(&result);
@@ -309,7 +309,7 @@ async fn live_system_discover_under_allow_shell_false_steers_argv() {
     {
         let (_server, client) = paired_against_live_daemon(&handle).await;
         let result = client
-            .call_tool(CallToolRequestParams::new("system_discover"))
+            .call_tool(full_system_discover())
             .await
             .expect("system_discover should succeed");
         let body: serde_json::Value = serde_json::from_str(&first_text_content(&result))
@@ -320,6 +320,13 @@ async fn live_system_discover_under_allow_shell_false_steers_argv() {
     }
     handle.shutdown().await;
     cleanup(&data);
+}
+
+/// These tests check the whole payload, which the default summary trims.
+fn full_system_discover() -> CallToolRequestParams {
+    let arguments: rmcp::model::JsonObject =
+        serde_json::from_value(serde_json::json!({"detail": "full"})).expect("arguments");
+    CallToolRequestParams::new("system_discover").with_arguments(arguments)
 }
 
 fn assert_environment_routes(body: &serde_json::Value, shell_on: bool) {

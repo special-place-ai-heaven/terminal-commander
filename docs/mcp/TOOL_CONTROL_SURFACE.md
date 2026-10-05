@@ -251,9 +251,10 @@ omitted matches so a later `wait` from that cursor recovers every capped signal.
 { heartbeat: false, events: [...non-empty], next_cursor: <max(seq)> }
 ```
 
-A response with raw stream text in `events` is invalid. The forbidden
-fixture `tests/fixtures/contracts/forbidden/raw-stream-as-events.v1.json`
-is the structural test oracle.
+A response with raw stream text in `events` is invalid: `events` is
+`Vec<SignalEvent>`, and the shapes are pinned by
+`tests/fixtures/contracts/mcp-tools/bucket_wait.v1.json` and
+`bucket_events_since.v1.json`.
 
 ## 5. Policy and audit
 

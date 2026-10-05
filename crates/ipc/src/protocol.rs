@@ -142,14 +142,17 @@ pub struct CommandReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutcomeTrust {
-    /// The daemon witnessed this outcome live. Every counter is a real
-    /// observation.
+    /// The daemon answering witnessed this outcome live. Every counter is a
+    /// real observation. A job whose lane has released it (a stopped file
+    /// watch or PTY job) is served from the receipt this same daemon wrote when
+    /// it ended, so its counters are the values captured at that moment.
     #[default]
     Observed,
-    /// Read back from the durable receipt after the in-memory job was gone.
-    /// `state` and `exit_code` are truthful; the counters are the values
-    /// captured when the job finished. Receipts written before the evidence
-    /// migration carry no counters, and that absence is reported honestly.
+    /// Read back from the durable receipt written by an EARLIER daemon boot
+    /// (the daemon restarted since the job ended). `state` and `exit_code` are
+    /// truthful; the counters are the values captured when the job finished.
+    /// Receipts written before the evidence migration carry no counters, and
+    /// that absence is reported honestly.
     Reconstructed,
     /// Ended by daemon shutdown or stale replacement rather than reaching its
     /// own conclusion. Reported with lifecycle state `Cancelled` and no exit
@@ -183,14 +186,15 @@ pub struct CommandStatusResponse {
     /// with zero rule-driven events. See [`CommandReceipt`].
     pub receipt: Option<CommandReceipt>,
     /// TC-B3 (FR-027): `true` when this status was reconstructed from a
-    /// PERSISTED job receipt because the in-memory job was gone (a daemon
+    /// PERSISTED job receipt written by an earlier daemon boot (a daemon
     /// restart happened since the job ran).
     ///
     /// Retained as the backward-compatible alias for "this outcome was NOT
     /// observed live", i.e. `outcome_trust != OutcomeTrust::Observed`. It is
-    /// therefore `true` for both `Reconstructed` and `Abandoned`, both of which
-    /// are read back from the durable receipt. Derive it from `outcome_trust`
-    /// rather than setting the two independently, so they cannot drift.
+    /// therefore `true` for both `Reconstructed` and `Abandoned`, and `false`
+    /// for a receipt the answering daemon wrote itself. Derive it from
+    /// `outcome_trust` rather than setting the two independently, so they
+    /// cannot drift.
     ///
     /// NOTE: an earlier version of this comment said the live counters are
     /// "zero because the in-memory probe metrics did not survive". That is no
@@ -911,7 +915,13 @@ pub struct HostEnvironment {
     pub beachhead: Option<AccessRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_shell: Option<String>,
+    /// How long the discovery that produced these facts took.
     pub discovery_ms: u64,
+    /// How long ago that discovery finished. The daemon reuses a discovery
+    /// and refreshes it in the background, so the facts can be this old
+    /// (up to ten minutes). Probes that timed out are reported as timed out.
+    #[serde(default)]
+    pub discovery_age_ms: u64,
 }
 
 /// MCP revision advertised on [`DiscoverResponse::mcp_spec`].

@@ -12,6 +12,9 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 /// Resolve a sibling binary in the same `target/<profile>/` directory
 /// as the current test executable. This works for any crate in the
 /// workspace because Cargo places all binaries under the same
@@ -75,6 +78,7 @@ async fn mcp_stdin_eof_does_not_kill_daemon() {
     };
 
     let mut daemon_cmd = std::process::Command::new(&daemon_bin);
+    isolated_env::isolate(&mut daemon_cmd, &data_dir);
     daemon_cmd
         .arg("--data-dir")
         .arg(&data_dir)
@@ -94,6 +98,7 @@ async fn mcp_stdin_eof_does_not_kill_daemon() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let mut mcp_cmd = std::process::Command::new(&mcp_bin);
+    isolated_env::isolate(&mut mcp_cmd, &data_dir);
     mcp_cmd
         .env("TC_SUPERVISOR_ALLOW_SPAWN", "0")
         .stdin(std::process::Stdio::piped())

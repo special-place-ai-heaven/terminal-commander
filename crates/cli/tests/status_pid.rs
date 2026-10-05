@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 
 use terminal_commander_supervisor::pidfile::pidfile_path;
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 /// Cross-package binary discovery: `CARGO_BIN_EXE_<name>` is only defined for
 /// binaries in the SAME package. The daemon is a sibling crate (a cli
 /// dev-dependency, so cargo builds it before these tests), so derive its path
@@ -80,7 +83,7 @@ fn status_shows_real_pid_of_live_daemon() {
         daemon_bin.exists(),
         "daemon binary not found at {daemon_bin:?}; cargo dev-dep should have built it"
     );
-    let mut daemon = Command::new(&daemon_bin)
+    let mut daemon = isolated_env::isolate(&mut Command::new(&daemon_bin), &base)
         .args(["start", "--mode", "ipc-server"])
         .env("TC_DATA", &base)
         .env("TC_SESSION", token)
@@ -110,13 +113,16 @@ fn status_shows_real_pid_of_live_daemon() {
 
     // Run `status` with the SAME TC_DATA + TC_SESSION so the CLI probes the
     // daemon's exact endpoint and reads its exact pidfile.
-    let out = Command::new(env!("CARGO_BIN_EXE_terminal-commander"))
-        .arg("status")
-        .env("TC_DATA", &base)
-        .env("TC_SESSION", token)
-        .env_remove("TC_SOCKET")
-        .output()
-        .expect("run status");
+    let out = isolated_env::isolate(
+        &mut Command::new(env!("CARGO_BIN_EXE_terminal-commander")),
+        &base,
+    )
+    .arg("status")
+    .env("TC_DATA", &base)
+    .env("TC_SESSION", token)
+    .env_remove("TC_SOCKET")
+    .output()
+    .expect("run status");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
@@ -150,13 +156,16 @@ fn status_offline_shows_dash_and_nonzero_exit() {
     // Ensure nothing pre-exists.
     let _ = std::fs::remove_dir_all(&base);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_terminal-commander"))
-        .arg("status")
-        .env("TC_DATA", &base)
-        .env("TC_SESSION", token)
-        .env_remove("TC_SOCKET")
-        .output()
-        .expect("run status");
+    let out = isolated_env::isolate(
+        &mut Command::new(env!("CARGO_BIN_EXE_terminal-commander")),
+        &base,
+    )
+    .arg("status")
+    .env("TC_DATA", &base)
+    .env("TC_SESSION", token)
+    .env_remove("TC_SOCKET")
+    .output()
+    .expect("run status");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     let _ = std::fs::remove_dir_all(&base);

@@ -38,6 +38,7 @@ struct MapCounts {
 #[derive(Debug, Deserialize)]
 struct SystemDiscoverFixture {
     response_example_daemon_unavailable: SystemDiscoverExample,
+    response_example_summary_daemon_unavailable: SystemDiscoverSummaryExample,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +49,49 @@ struct SystemDiscoverExample {
 #[derive(Debug, Deserialize)]
 struct SystemDiscoverTool {
     name: String,
+    #[serde(default)]
+    available: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SystemDiscoverSummaryExample {
+    detail: String,
+    tool_catalogue: SummaryCatalogue,
+}
+
+#[derive(Debug, Deserialize)]
+struct SummaryCatalogue {
+    count: usize,
+    unavailable: Vec<SystemDiscoverTool>,
+}
+
+/// The default (summary) reply drops tool descriptions but must still name
+/// every tool that is unavailable, so the omission never hides a decision.
+#[test]
+fn system_discover_summary_example_lists_every_unavailable_tool() {
+    let discover = read_json::<SystemDiscoverFixture>(
+        &workspace_root().join("tests/fixtures/contracts/mcp-tools/system_discover.v1.json"),
+    );
+    let summary = &discover.response_example_summary_daemon_unavailable;
+    assert_eq!(summary.detail, "summary");
+    assert_eq!(summary.tool_catalogue.count, tool_catalogue().len());
+    let summary_unavailable: BTreeSet<&str> = summary
+        .tool_catalogue
+        .unavailable
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    let full_unavailable: BTreeSet<&str> = discover
+        .response_example_daemon_unavailable
+        .tools
+        .iter()
+        .filter(|tool| !tool.available)
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(
+        summary_unavailable, full_unavailable,
+        "the summary example must list exactly the unavailable tools of the full example"
+    );
 }
 
 #[test]

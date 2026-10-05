@@ -142,7 +142,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "system_discover",
             status: ToolStatus::Live,
-            description: "Return adapter/daemon metadata, tool catalogue, and bounded host-environment probes with ranked access routes and an exact beachhead argv template.",
+            description: "Return adapter/daemon metadata and bounded host-environment probes with ranked access routes and an exact beachhead argv template. Summary by default; detail:\"full\" adds every tool's description and the daemon method list.",
         },
         ToolCatalogueEntry {
             name: "health",
@@ -597,7 +597,7 @@ fn tool_policy_block_reason(name: &str, caps: PolicyCapsView) -> Option<&'static
 }
 
 #[must_use]
-fn discovered_tools(
+pub(crate) fn discovered_tools(
     daemon_available: bool,
     caps: Option<PolicyCapsView>,
 ) -> Vec<DiscoveredToolEntry> {
@@ -1060,9 +1060,12 @@ impl TerminalCommanderMcpServer {
     /// the daemon is unreachable the response still carries the
     /// adapter-side catalogue with the daemon error surfaced.
     #[tool(
-        description = "Discover adapter/daemon metadata and the execution environment. Returns bounded OS, terminal, shell/PowerShell, WSL, and tool probes plus capability-filtered ranked access_routes and an exact beachhead argv template; call this before choosing an interpreter. Use direct_argv/wsl_argv with argv actions; shell routes appear only when exec is enabled. Normal path and command policy checks still apply at execution time."
+        description = "Discover adapter/daemon metadata and the execution environment; call this before choosing an interpreter. The default summary has OS, terminal, shell/PowerShell, WSL, and tool probes, the ranked shell and WSL routes, the tools runnable as argv, an exact beachhead argv template, and every tool that is unavailable now. Pass detail:\"full\" for every tool's description, the daemon method list, and every route. Shell routes appear only when exec is enabled; normal policy checks still apply at execution time."
     )]
-    async fn system_discover(&self) -> Result<CallToolResult, McpError> {
+    async fn system_discover(
+        &self,
+        Parameters(params): Parameters<crate::discover_summary::McpSystemDiscoverParams>,
+    ) -> Result<CallToolResult, McpError> {
         let (daemon, daemon_error) = match self
             .daemon
             .call_with_timeout(IpcRequest::SystemDiscover, SYSTEM_DISCOVER_CLIENT_TIMEOUT)
@@ -1108,7 +1111,12 @@ impl TerminalCommanderMcpServer {
             tools: discovered_tools(daemon_available, caps),
             omni_status,
         };
-        json_tool_result(&payload)
+        match params.detail {
+            crate::discover_summary::DiscoverDetail::Full => json_tool_result(&payload),
+            crate::discover_summary::DiscoverDetail::Summary => {
+                json_tool_result(&crate::discover_summary::summarize(&payload))
+            }
+        }
     }
 
     /// Assemble the US6/T056 omni capability matrix HONESTLY from live state.
@@ -1368,7 +1376,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING (elapsed_ms/last_output_age_ms show liveness); continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | abandoned; a job whose end was never recorded comes back as a typed `JobLost` error instead) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING (elapsed_ms/last_output_age_ms show liveness); continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
     )]
     async fn run_and_watch(
         &self,
@@ -3825,7 +3833,7 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
             St::RuntimeState(p) => self.runtime_state(Parameters(p)).await,
             St::ProbeList(p) => self.probe_list(Parameters(p)).await,
             St::ProbeStatus(p) => self.probe_status(Parameters(p)).await,
-            St::SystemDiscover => self.system_discover().await,
+            St::SystemDiscover(p) => self.system_discover(Parameters(p)).await,
             St::TargetList => self.target_list().await,
             St::TargetProbe(p) => self.target_probe(Parameters(p)).await,
         }
@@ -8935,7 +8943,9 @@ mod tests {
         // Exemption: system_discover returns its catalogue (daemon_error in the
         // payload), never a skew gate error.
         server
-            .system_discover()
+            .system_discover(Parameters(
+                crate::discover_summary::McpSystemDiscoverParams::default(),
+            ))
             .await
             .expect("system_discover must not be blocked by the skew gate");
 

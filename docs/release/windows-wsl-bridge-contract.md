@@ -223,8 +223,8 @@ setup-time hosting). Bridge visibility is load-bearing EDR legitimacy — the
 operator sees `wsl.exe` start the MCP session.
 
 **Daemon runtime** children (`command_start_combed` via `ProcessProbe::spawn` in
-`crates/probes/src/process.rs`, and the one-shot `wsl.exe` bootstrap in
-`wsl_username` in `crates/daemon/src/environment/wsl.rs`) **must** use
+`crates/probes/src/process.rs`, and the `wsl.exe` discovery probes in
+`crates/daemon/src/environment/probe.rs`) **must** use
 `CREATE_NO_WINDOW` (`0x08000000`) through the shared `windows_silent()` helper
 in `crates/core/src/platform.rs`. Those processes are LLM payload children with
 no operator console expectation; allocating a visible console is outward-filter

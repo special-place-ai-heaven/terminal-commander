@@ -10,7 +10,7 @@
 /// table and the bridge contract §4.4 paragraph.
 const IN_SCOPE_SITES: &[(&str, &str)] = &[
     ("S1 ProcessProbe::spawn", "../probes/src/process.rs"),
-    ("S2 wsl_username", "src/environment/wsl.rs"),
+    ("S2 host discovery probes", "src/environment/probe.rs"),
 ];
 
 #[test]
@@ -27,23 +27,23 @@ fn in_scope_spawn_sites_use_windows_silent() {
 }
 
 /// SECURITY gate (mirror of JS `wsl-static-guards`): every in-scope site that
-/// launches a Linux process via `wsl.exe ... bash -lc` must REBUILD `WSLENV`
+/// launches a Linux process via `wsl.exe -e sh -c` must REBUILD `WSLENV`
 /// (via `sanitize_wslenv`) so an ambient `WSLENV=SOME_SECRET/u` cannot leak
 /// across the Windows->WSL boundary. The host-side `wsl -l -q` discovery call
 /// launches no Linux process and is exempt.
 #[test]
 fn wsl_linux_spawn_sites_rebuild_wslenv() {
-    let path = "src/environment/wsl.rs";
+    let path = "src/environment/probe.rs";
     let source =
         std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
             .unwrap_or_else(|e| panic!("read {path}: {e}"));
     assert!(
-        source.contains("bash") && source.contains("-lc"),
+        source.contains(r#"&["-e", "sh", "-c""#),
         "{path} should still spawn a Linux process (test invariant moved if not)"
     );
     assert!(
         source.contains("sanitize_wslenv"),
-        "{path} spawns `wsl.exe ... bash -lc`; it MUST call sanitize_wslenv to \
+        "{path} spawns `wsl.exe -e sh -c`; it MUST call sanitize_wslenv to \
          rebuild WSLENV (stop ambient credential leak across the WSL boundary)"
     );
 }

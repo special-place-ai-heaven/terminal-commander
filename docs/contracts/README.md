@@ -40,19 +40,8 @@ docs/contracts/
 tests/fixtures/
   contracts/                           # versioned wire-shape examples
     event.signal.v1.json
-    bucket-read-response.v1.json
-    bucket-summary.v1.json
     rule-definition.v1.json
-    probe-descriptor.v1.json
-    job-status.v1.json
-    source-pointer.v1.json
-    event-context-request.v1.json
-    event-context-response.v1.json
-    policy-decision.v1.json
-    audit-record.v1.json
-    registry-search-result.v1.json
     forbidden/                         # negative examples
-      raw-stream-as-events.v1.json
       missing-pointer.v1.json
     mcp-tool-fixture-map.v1.json       # live/obsolete MCP fixture catalogue
     mcp-tools/                         # one file per live MCP tool fixture
@@ -158,10 +147,6 @@ exist to drive negative tests in TC23/TC29.
 
 Current entries:
 
-- `raw-stream-as-events.v1.json`: a bucket-read response whose
-  events carry raw multi-line stream content instead of a structured
-  summary. Forbidden per `SECURITY.md` section 3 B5 and the prime
-  directive (no raw-output leakage as a success path).
 - `missing-pointer.v1.json`: an event with `severity >= medium` that
   has neither a `pointer` field nor a `pointer_unavailable_reason`
   explanation. Forbidden per the TC02 invariant (every signal event
@@ -263,46 +248,52 @@ mini-spec:
 - When `heartbeat = true`, the `events` array MUST be empty and
   `next_cursor` MUST equal the input cursor (no progress beyond
   what was already known).
-- Raw stdout/stderr text is NEVER a `bucket_wait` success shape.
-  The forbidden example
-  `tests/fixtures/contracts/forbidden/raw-stream-as-events.v1.json`
-  shows what MUST NOT be returned.
+- Raw stdout/stderr text is NEVER a `bucket_wait` success shape. The
+  response type carries `Vec<SignalEvent>`, not text; no fixture
+  rejects a raw-text payload.
 
 ## 9. Source-status
 
 | Fixture set | Status until consumed |
 |---|---|
-| event/bucket/rule/probe/job/source-pointer/context | informative-until-TC06 |
-| policy-decision/audit-record | informative-until-TC22 |
+| event.signal, rule-definition | live shape (match `SignalEvent`, `RuleDefinition`) |
 | mcp-tool-fixture-map.v1.json | live authoritative live/obsolete inventory |
 | mcp-tools/* classified by the map as `covered_live` | current per-tool contract |
 | map entries with `placeholder_for_live_tool` or `missing_fixture` | live-tool coverage debt, blocker before use |
 | mcp-tools/* classified by the map as `obsolete_fixture_present` | obsolete debt, not supported tools |
-| forbidden/* | live (negative-test oracle from now on) |
+| forbidden/missing-pointer | live (negative-test oracle for the pointer-or-reason invariant) |
 
-## 9a. Live wire shapes vs the TC05 fixtures (checked 2026-10-05)
+## 9a. Where the live response shapes are pinned (checked 2026-10-05)
 
-Most TC05 fixtures are still `informative-until-TC0x` drafts; the types in
-`crates/ipc/src/protocol.rs` and `crates/core` are the live shapes. Where
-they differ, the code wins:
+The old top-level drafts for bucket reads, bucket summary, source pointer,
+event context, job status, probe descriptor, registry search, policy
+decision and audit record were deleted: nothing consumed them and they had
+drifted from the code. The shapes are pinned by the per-tool fixtures in
+`tests/fixtures/contracts/mcp-tools/`:
 
-| Fixture | Live shape |
-|---|---|
-| `event.signal.v1.json` | Matches `SignalEvent` (`crates/core/src/event.rs`); the live type adds optional `count`, `first_seen`, `last_seen`, `suppressed`. |
-| `bucket-read-response.v1.json` | `BucketEventsSinceResponse`: `bucket_id`, `cursor_in`, `next_cursor`, `has_more`, `dropped_count`, `events`. No `back_pressure` field exists. |
-| `bucket-summary.v1.json` | `BucketSummaryResponse`: `bucket_id`, `head_seq`, `tail_seq`, `event_count`, `dropped_count`, `by_severity` (7 counters, `trace` to `critical`). No `by_kind`, `created_at` or `*_cursor` fields. |
-| `source-pointer.v1.json` | `SourcePointer`: `frame_id`, optional `line`, `byte_start`, `byte_end`, `stream`, and `context_available`. No `byte_offset` or `context_window_id`. |
-| `event-context-request/response` | Params: optional `bucket_id`, `event_id`, optional `before`, `after`, `max_bytes`. Response: `bucket_id`, `event_id`, `anchor_missing`, `unavailable_reason` (`no_pointer`, `synthetic_event`, `anchor_evicted`, `unknown_probe`), `pointer_unavailable_reason`, `frames` (`probe_id`, `frame_id`, `stream`, `line`, `text`), `total_bytes`, `truncated`. No `context_window_id` or `evicted`. |
-| `job-status.v1.json` | The live status type is `CommandStatusResponse`: `job_id`, `bucket_id`, `probe_id`, `state`, frame and byte counters, `exit_code`, `signal`, `duration_ms`, `receipt`, `outcome_trust`, and more. It has no `argv`, `started_at` or `exited_at`. |
-| `probe-descriptor.v1.json` | The live listing type is `ProbeListEntry` (`kind` is `command`, `file_watch` or `pty`, plus `liveness`, counters, `argv_head`, `tag`). |
-| `registry-search-result.v1.json` | `RegistrySearchResponse { hits }`; each hit has `rule_id`, `version`, `event_kind`, `summary_template`, `tags`, `severity`, `status`. No `query`, `total`, `facets` or `score`. |
-| `policy-decision.v1.json`, `audit-record.v1.json` | There is no policy-decision wire type. Audit rows are `AuditRow` (`audit_id` integer, `timestamp`, `action`, `subject`, `decision`, `profile`, `reason`, `actor`, `metadata_json`). No `result`, `rule_id`, `monotonic_clock_ns` or `aud_` id prefix. |
-| `rule-definition.v1.json` | Matches `RuleDefinition` (`crates/core/src/rule.rs`); the live type also has optional `keywords`. |
+| Shape | Fixture | Rust type |
+|---|---|---|
+| bucket read | `bucket_events_since.v1.json`, `bucket_wait.v1.json` | `BucketEventsSinceResponse`, `BucketWaitResponse` |
+| bucket summary | `bucket_summary.v1.json` | `BucketSummaryResponse` (7 severity counters) |
+| event context | `event_context.v1.json` | `EventContextResponse` (`anchor_missing`, `unavailable_reason`, `frames`) |
+| job status | `command_status.v1.json` | `CommandStatusResponse` |
+| probe listing | `probe_list.v1.json`, `probe_status.v1.json` | `ProbeListEntry` (`kind`: `command`, `file_watch`, `pty`) |
+| registry search | `registry_search.v1.json` | `RegistrySearchResponse { hits }` |
+| audit rows | `audit_since.v1.json` | `AuditRow` fields (`audit_id` integer, `profile`, `metadata_json`) |
+
+All Rust types are in `crates/ipc/src/protocol.rs`. A source pointer is
+`SourcePointer` in `crates/core/src/pointer.rs`. There is no policy-decision
+wire type. The two kept top-level fixtures match the code:
+`event.signal.v1.json` (`SignalEvent`, `crates/core/src/event.rs`, which
+adds optional `count`, `first_seen`, `last_seen`, `suppressed`) and
+`rule-definition.v1.json` (`RuleDefinition`, `crates/core/src/rule.rs`).
+`SignalEvent::validate` enforces the pointer-or-reason invariant that
+`tests/fixtures/contracts/forbidden/missing-pointer.v1.json` illustrates.
 
 `CommandStatusResponse`, `CommandReceipt` and the discovery payloads are
 being extended in the working tree (receipt `head`/`lines_omitted`,
-`elapsed_ms`, `last_output_age_ms`), so re-check those rows against
-`crates/ipc/src/protocol.rs` before relying on this table for them.
+`elapsed_ms`, `last_output_age_ms`); the per-tool fixtures are the
+reference for them.
 
 ## 10. Verification
 
