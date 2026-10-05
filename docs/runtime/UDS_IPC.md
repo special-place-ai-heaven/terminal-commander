@@ -192,9 +192,11 @@ daemon.socket_path (TOML)               -> use as-is
 otherwise                              -> <data_dir>/terminal-commanderd.sock
 ```
 
-The socket file is created with the daemon's UID and the default
-filesystem umask. Operators who want stricter ACLs should place
-the socket under a directory they own with `chmod 700`.
+The socket file is created with the daemon's UID and mode `0600`
+whatever the umask; the data directory is `0700` (a looser existing
+one is tightened and named by `self_check`). The daemon refuses a peer
+whose uid differs from its own, and the client refuses a server that
+does not run as the client's own uid.
 
 ## 9. Subcommand surface
 

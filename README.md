@@ -591,7 +591,8 @@ audit row. All other IPC requests bump the idle clock and audit normally.
 > A PTY job stopped at a sudo/ssh/password prompt shows `awaiting_credential`;
 > the model calls `credential_request` and the owner is asked directly (a
 > one-time local page the MCP client links to, a native dialog, else
-> `terminal-commander credential provide <job_id>` in the owner's terminal),
+> `terminal-commander credential provide <job_id> --socket <endpoint>` in the
+> owner's terminal, given verbatim in the response),
 > so the password never passes through the model. That holds when TC is the
 > model's only way to run programs: a harness that also hands the model a raw
 > shell can pipe `credential provide` itself, and the audit row then reads
@@ -838,7 +839,8 @@ Everything lives under the per-session state dir
   default under `full_access`: `allow_shell`
   (shell_exec), `allow_session` (persistent
   sessions, unix-only), `allow_remote` (remote targets via an operator
-  `ssh -L` forward, no public TCP). `allow_privileged` is wired but gates a
+  `ssh -L` forward, no public TCP). `allow_privileged` is accepted but gates
+  nothing (the daemon names it as a config warning): it is reserved for a
   PLAN-ONLY helper -- no privileged code ships (blocked on a threat review;
   see [`docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md`](docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md)).
 - Tool responses are bounded JSON, not raw stream dumps; credential-shaped
@@ -848,8 +850,9 @@ Everything lives under the per-session state dir
   rejected, not silently accepted.
 - Force-kill on reap/replace is identity-gated at both signal legs; a PID
   recycled mid-grace is never signalled.
-- Win→WSL forwarding is a TC-only allowlist (`TC_SESSION/u`); ambient `WSLENV`
-  is dropped.
+- Win→WSL forwarding: the legacy bridge forwards only `TC_SESSION/u`; the
+  daemon and every command it starts get the ambient `WSLENV` minus
+  secret-shaped names, which the response names in `wslenv_dropped`.
 - Daemon idle self-reap reclaims abandoned daemons without an external
   watcher; live work (running commands, watches, PTYs) defers it.
 - Stale daemon availability and version-skew state are refreshed through

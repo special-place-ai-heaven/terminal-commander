@@ -12,7 +12,9 @@ mutation gates (sections relating to read_only_observer / admin_debug /
 registry_activate). NOT YET SHIPPED: command allow-lists, the
 default-deny posture of section 6, $REPO_ROOT containment, the
 declarative profile schema of section 4, the limits of section 4, and
-the allow_override mechanism of section 5. WARNING: `repo_only`
+the allow_override mechanism of section 5. A config key the daemon does
+not act on (unknown, or listed as unused) is named as a warning at startup,
+in `self_check`, and in `policy_status.config_warnings`. WARNING: `repo_only`
 (section 2.2) does NOT yet confine to $REPO_ROOT — it currently behaves
 identically to `developer_local`. Do not rely on it as a sandbox. The
 implementation plan is `docs/specs/2026-05-29-tc22-policy-engine-
@@ -231,7 +233,7 @@ A daemon instance loads exactly one profile at startup, named in
 [policy]
 profile = "full_access"  # the default; or developer_local, repo_only,
                          # read_only_observer, admin_debug (hardened)
-profile_version = "1"
+profile_version = "1"   # accepted but unused: named as a config warning
 ```
 
 When `--config` is supplied, that file is authoritative. Otherwise the daemon
