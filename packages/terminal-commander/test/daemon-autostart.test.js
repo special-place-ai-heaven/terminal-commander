@@ -32,6 +32,15 @@ test("renderAutostartScript checks the pidfile, not a socket file, before start"
   assert.match(s, /nohup/);
 });
 
+test("renderAutostartScript starts the daemon in its own session when setsid exists", () => {
+  const s = renderAutostartScript();
+  // A terminal's hangup must not reach the daemon: nohup alone does not
+  // survive the npm shim. nohup stays as the fallback.
+  assert.match(s, /command -v setsid/);
+  assert.match(s, /\$TC_SETSID nohup terminal-commanderd /);
+  assert.match(s, /<\/dev\/null >>"\$HOME\/\.local\/state\/terminal-commander\/daemon\.log" 2>&1 &/);
+});
+
 test("renderSystemdUnit uses ipc-server mode", () => {
   const u = renderSystemdUnit("/usr/bin/terminal-commanderd");
   assert.match(u, /ExecStart=\/usr\/bin\/terminal-commanderd/);

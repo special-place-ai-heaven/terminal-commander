@@ -416,3 +416,55 @@ async fn a_daemon_refuses_a_socket_another_daemon_serves() {
     );
     assert!(first_serves, "the first daemon must still answer");
 }
+
+/// A daemon started from a terminal (the Linux profile hook runs in an
+/// interactive shell) gets SIGHUP when that terminal closes. A server has no
+/// use for it: the daemon keeps serving, and SIGTERM still stops it cleanly.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_daemon_keeps_serving_after_sighup() {
+    let state_dir = fresh_state_dir("sighup");
+    let (endpoint, _) = endpoint_for(&state_dir);
+    let mut daemon = raw_daemon(&state_dir, &endpoint);
+    let pid = daemon.id();
+    let up = poll_until(Instant::now() + Duration::from_secs(10), || {
+        pidfile::read_pidfile(&state_dir).is_some_and(|r| r.pid == pid)
+    })
+    .await;
+    assert!(up, "daemon did not write its pidfile within 10s");
+
+    let signal = |name: &str| {
+        std::process::Command::new("kill")
+            .args(["-s", name, &pid.to_string()])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    assert!(signal("HUP"), "kill -s HUP failed");
+    let mut status = None;
+    let died = poll_until(Instant::now() + Duration::from_secs(1), || {
+        status = daemon.try_wait().ok().flatten();
+        status.is_some()
+    })
+    .await;
+    let answers = !died && endpoint_answers_health(&state_dir, &endpoint).await;
+
+    let stopped = !died && signal("TERM") && {
+        poll_until(Instant::now() + Duration::from_secs(10), || {
+            status = daemon.try_wait().ok().flatten();
+            status.is_some()
+        })
+        .await
+    };
+    if !stopped {
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+    }
+    teardown(&state_dir).await;
+
+    assert!(!died, "SIGHUP ended the daemon: {status:?}");
+    assert!(answers, "the daemon must still answer Health after SIGHUP");
+    assert!(
+        stopped && status.is_some_and(|s| s.success()),
+        "SIGTERM must still shut it down cleanly: {status:?}"
+    );
+}

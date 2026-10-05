@@ -91,8 +91,15 @@ if ! command -v terminal-commanderd >/dev/null 2>&1; then
   exit 0
 fi
 mkdir -p "\$TC_DATA" "$HOME/.local/state/terminal-commander"
-nohup terminal-commanderd --data-dir "\$TC_DATA" start --mode ipc-server \\
-  >>"$HOME/.local/state/terminal-commander/daemon.log" 2>&1 &
+# Its own session (setsid), so closing the terminal that ran this hangs up
+# nothing it started: nohup alone does not survive the npm shim, whose child
+# gets SIGHUP's default action back.
+TC_SETSID=
+if command -v setsid >/dev/null 2>&1; then
+  TC_SETSID=setsid
+fi
+$TC_SETSID nohup terminal-commanderd --data-dir "\$TC_DATA" start --mode ipc-server \\
+  </dev/null >>"$HOME/.local/state/terminal-commander/daemon.log" 2>&1 &
 )
 `;
 }

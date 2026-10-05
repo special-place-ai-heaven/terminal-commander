@@ -199,6 +199,25 @@ test("socket absent: sourcing .profile starts the daemon exactly once and leaves
   assert.ok(fs.existsSync(path.join(home, ".local", "state", "terminal-commander", "daemon.log")));
 });
 
+const SETSID_SKIP = SKIP || (spawnSync("sh", ["-c", "command -v setsid && command -v ps"]).status === 0
+  ? false
+  : "needs setsid and ps");
+
+test("the daemon starts in its own session, so the terminal's hangup cannot reach it", { skip: SETSID_SKIP }, async () => {
+  const home = makeHome({ stubDaemon: true });
+  // Stub that records whether it leads its own session.
+  fs.writeFileSync(
+    path.join(home, ".local", "bin", "terminal-commanderd"),
+    '#!/bin/sh\necho "pid=$$ sid=$(ps -o sid= -p $$ | tr -d \' \')" >> "$HOME/daemon-starts.log"\n',
+    { mode: 0o755 },
+  );
+  assertShellUntouched(sourceAndProbe(home, path.join(home, ".profile")), ".profile");
+  const starts = await waitForStarts(home);
+  assert.equal(starts.length, 1, JSON.stringify(starts));
+  const [, pid, sid] = starts[0].match(/^pid=(\d+) sid=(\d+)$/) || [];
+  assert.ok(pid && pid === sid, `the daemon must lead its own session: ${starts[0]}`);
+});
+
 // A daemon that died leaves its socket file behind: a socket nothing listens on.
 function leaveStaleSocket(home) {
   const dir = path.join(home, ".local", "share", "terminal-commanderd");
@@ -574,7 +593,9 @@ test("a startup file that exits 0 makes every login-shell step fail with the cau
   });
   assert.equal(doc.status, "shell_exited_early");
 
-  // doctor daemon spawns wslPath directly: a fake wsl.exe that drops `-d X --`.
+  // doctor daemon is not a login-shell step: its read-only probe runs a
+  // non-login shell, so the exiting profile never runs and it still answers.
+  // wslPath is a fake wsl.exe that drops `-d X -e`.
   const fakeWsl = path.join(home, "fake-wsl");
   fs.writeFileSync(fakeWsl, '#!/bin/sh\nshift 3\nexec "$@"\n', { mode: 0o755 });
   const daemon = await runDoctorDaemon({
@@ -584,8 +605,6 @@ test("a startup file that exits 0 makes every login-shell step fail with the cau
     detect: async () => ({ reason: "ok", distros: [{ name: "Ubuntu" }], default_distro: "Ubuntu" }),
     wslPath: fakeWsl,
   });
-  assert.equal(daemon.status, "probe_failed");
-  assert.notEqual(daemon.exit_code, 0);
-  assert.match(daemon.output, /daemon_running: unknown/);
-  assert.match(daemon.output, /startup file/);
+  assert.equal(daemon.status, "ok", daemon.output);
+  assert.match(daemon.output, /daemon_running: no/);
 });

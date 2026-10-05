@@ -366,6 +366,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     use crate::ipc::IpcServer;
 
     let _log_guard = init_file_logging(&config.daemon.data_dir);
+    ignore_sighup()?;
     let state_dir = config.daemon.data_dir.clone();
     let _data_dir_lock = claim_data_dir(&state_dir).await?;
 
@@ -817,6 +818,25 @@ async fn wait_for_shutdown_signal_windows() -> Result<(), RuntimeError> {
     tokio::signal::ctrl_c()
         .await
         .map_err(|e| RuntimeError::Signal(format!("ctrl-c listen: {e}")))?;
+    Ok(())
+}
+
+/// A server has no use for SIGHUP, but a daemon started from a terminal (the
+/// Linux profile hook, the npm shim) still gets it when that terminal closes,
+/// and its default action ends the process.
+///
+/// Handled rather than set to `SIG_IGN`, so the commands the daemon starts
+/// get the default disposition back at exec.
+#[cfg(unix)]
+fn ignore_sighup() -> Result<(), RuntimeError> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut hangup = signal(SignalKind::hangup())
+        .map_err(|e| RuntimeError::Signal(format!("SIGHUP listen: {e}")))?;
+    tokio::spawn(async move {
+        while hangup.recv().await.is_some() {
+            tracing::info!("SIGHUP ignored; send SIGINT or SIGTERM to shut down");
+        }
+    });
     Ok(())
 }
 
