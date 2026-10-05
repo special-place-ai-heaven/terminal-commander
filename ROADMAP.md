@@ -136,8 +136,12 @@ The MVP-target list at `README.md:333-343` is satisfied when:
 Explicitly deferred:
 
 - macOS native port. PTY abstraction will keep this addressable but
-  no goal currently scopes it.
-- Windows-native port (ConPTY via `portable-pty`). Same status.
+  no goal currently scopes it. (Update 2026-10-05: macOS npm platform
+  packages `mac-x64` / `mac-arm64` now ship; live macOS runtime
+  verification is still open, see the omni chain below.)
+- Windows-native port (ConPTY via `portable-pty`). (Update 2026-10-05:
+  SHIPPED in the omni chain, P3 TC56-TC58; `portable-pty` is a
+  `crates/probes` dependency and Windows named-pipe IPC is live.)
 - Encryption at rest (sqlcipher feature on rusqlite).
 - Kernel-enforced policy via Landlock and seccomp-bpf.
 - Cross-host federated audit log.
@@ -182,8 +186,14 @@ P0 items the MVP wave left open. All goals below have landed on
 Out-of-runtime-chain (still deferred):
 
 - Native notify / inotify file-watch backend (TC43 polling remains).
-- Windows-native ConPTY (TC44 is Unix-only).
-- Daemon-side `frames_suppressed` counter (BACKLOG P1.1).
+  (Update 2026-10-05: SHIPPED in omni P3 TC56-TC58, `notify` backend
+  with a poll fallback for WSL `/mnt/c`.)
+- Windows-native ConPTY (TC44 is Unix-only). (Update 2026-10-05:
+  SHIPPED in omni P3 TC56-TC58.)
+- Daemon-side `frames_suppressed` counter (BACKLOG P1.1). (Update
+  2026-10-05: SHIPPED, `frames_suppressed` /
+  `frames_suppressed_progress` / `frames_suppressed_dedupe` in
+  `crates/daemon/src/command.rs`.)
 - Live provider-harness validation against Codex CLI and Claude Code
   on a host where both binaries work (BACKLOG P1.2 / P1.3).
 
@@ -203,17 +213,19 @@ landed at this commit.
 |-------|---------|--------|
 | WWS01 | Windows + WSL install UX contract; D-01..D-15 binding decisions | `6220eb2` |
 | WWS02 | Root npm package `os: ["linux", "win32"]`; bridge-required resolver branch | `1da40f3` |
-| WWS03 | WSL discovery + read-only doctor helpers (`lib/wsl/{distro-name,detect,doctor}.js`) | `ec8441e` |
-| WWS04 | Windows → WSL bridge shim (`lib/wsl/spawn.js`) | `d86e73f` |
-| WWS05 | Cursor MCP config writer (`lib/cursor/{config,write,index}.js`) | `ae37878` |
-| WWS06 | Setup / doctor / pair CLI (`lib/cli/**`) | `4936904` |
+| WWS03 | WSL discovery + read-only doctor helpers (`packages/terminal-commander/lib/wsl/{distro-name,detect,doctor}.js`) | `ec8441e` |
+| WWS04 | Windows → WSL bridge shim (`packages/terminal-commander/lib/wsl/spawn.js`) | `d86e73f` |
+| WWS05 | Cursor MCP config writer (`packages/terminal-commander/lib/cursor/{config,write,index}.js`) | `ae37878` |
+| WWS06 | Setup / doctor / pair CLI (`packages/terminal-commander/lib/cli/**`) | `4936904` |
 | WWS07 | Windows bridge smoke script (`scripts/smoke/verify-windows-bridge-smoke.ps1`) | `785d410` |
 | WWS08 | Public README + release contract + checklist + backlog + risk + roadmap updates | (this commit) |
-| WWS09 | Pre-publish readiness review | Pending |
+| WWS09 | Pre-publish readiness review | Closed 2026-05-23 (`docs/release/windows-wsl-bridge-final-report.md`) |
 
 Out-of-WWS-chain (deferred):
 
-- First live npm publish (operator-driven; BACKLOG WWS-B1).
+- First live npm publish (operator-driven; BACKLOG WWS-B1). (Update
+  2026-10-05: DONE 2026-07-17; releases now publish from
+  `release-please.yml`, current version 0.3.11.)
 - Windows → WSL MCP bridge round-trip live evidence (BACKLOG
   WWS-B2; blocked on WWS-B1 + inside-WSL install).
 - Cursor provider GUI live smoke transcript (BACKLOG WWS-B3;
@@ -243,8 +255,9 @@ Commander from a signal-combing tool (39 MCP tools) to a 100%
 self-reliant **omni** terminal tool for LLM agents -- an agent never
 needs a separate raw shell. Delivered as six independently-shippable
 priority slices (P1-P6) mapped to omni acceptance gates O-01..O-14,
-plus folded field-ledger trust/ergonomics fixes. The live surface is
-now **49 MCP tools** and **25 rule packs**. Spec and per-gate detail
+plus folded field-ledger trust/ergonomics fixes. The live surface at
+chain close was 49 MCP tools; as of 2026-10-05 it is **60 MCP tools**
+(`docs/mcp/TOOL_CONTROL_SURFACE.md`) and **25 rule packs**. Spec and per-gate detail
 live in `specs/001-omni-completion/`; the agent lane map is
 `docs/mcp/OMNI_PLAYBOOK.md`.
 
@@ -256,20 +269,25 @@ Per-slice outcome and HONEST status:
 | P2 (US2) | TC53-TC55 | `registry_suggest_from_samples` (pure-Rust heuristics; NEVER auto-activates; loop is suggest -> test -> activate), config-gated universal extractors (`sifters.universal_extractors`), rule-pack set grown 8 -> 25, `pack_available` hints. | DONE. |
 | P3 (US3) | TC56-TC58 | Platform parity: Windows ConPTY backend (`portable-pty`, dual-backend behind PtyProbe), event-driven file-watch (notify; poll retained for WSL `/mnt/c` 9P), graceful SIGTERM->SIGKILL terminate ladder shared by command/PTY/session stop. | DONE on unix + Windows lifecycle. BLOCKED: live ConPTY child-output e2e gated behind `TC_CONPTY_E2E=1` (env 0xC0000142 DLL-init on the dev host; must run on CI/desktop to close O-07). macOS parity is code + smoke script only, BLOCKED-no-Mac-host. |
 | P4 (US4) | TC61-TC65 | Operator-gated privileged helper: separate `terminal-commander-privileged` binary, closed named-op allow-list, human-approval flow, `allow_privileged` cap, audit-before-exec. | PLAN-ONLY by decision. NO code shipped. BLOCKED on a threat review (`docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md`). `omni_status.privileged_helper` reports `available:false, reason:"threat_review_pending"`. |
-| P5 (US5) | TC66-TC69 | Remote federation: `target_list` / `target_probe`, `target_id` routing on the command path, `allow_remote` cap + audit. Transport is an operator-established `ssh -L` forward to the remote daemon's LOCAL socket (NO public TCP; adapter never spawns ssh). | SIM-VERIFIED via a second-local-socket simulation. BLOCKED: real-SSH transit NOT tested (no sshd in the smoke env). `target_id` is wired on the command path, not yet all 51 full-surface tools. |
+| P5 (US5) | TC66-TC69 | Remote federation: `target_list` / `target_probe`, `target_id` routing on the command lane (`command_start_combed`, `run_and_watch`, `command_status`, `command_stop`), `allow_remote` cap + audit. Transport is an operator-established `ssh -L` forward to the remote daemon's LOCAL socket (NO public TCP; adapter never spawns ssh). | SIM-VERIFIED via a second-local-socket simulation. BLOCKED: real-SSH transit NOT tested (no sshd in the smoke env). Checked 2026-10-05 in `crates/mcp/src/tools.rs`: `target_id` is accepted and routed (via `TargetRouter::resolve`, which only dials the target's operator-forwarded local socket) on exactly those four command tools, plus `target_probe` (required) and `target_list`; bucket, event, file, PTY, shell-session, subscription, registry and recipe tools have no `target_id` and always hit the local daemon. |
 | P6 (US6) | TC70-TC74 | Certification: `system_discover.omni_status` honest capability matrix; `scripts/smoke/verify-omni-{linux,wsl,windows,macos}` running gates O-01..O-14. | DONE -- runnable gates pass; host-blocked gates (O-06 privileged, O-07 ConPTY, O-09/O-10 remote, O-13 fault-injection) are LOUDLY skipped, not faked. |
 
 Out-of-omni-chain (deferred / blocked):
 
 - P4 privileged helper code -- blocked on threat-review sign-off.
 - Live ConPTY child-output e2e on native Windows (`TC_CONPTY_E2E=1`;
-  run on CI/desktop to close O-07).
+  run on CI/desktop to close O-07). Update 2026-10-05: DONE in CI wiring,
+  `scripts/windows-gate.ps1` sets it on GitHub Actions and refuses a
+  vacuous pass.
 - macOS live runtime verification (no Mac host; closes the P3 macOS
-  gate when a Mac smoke run lands).
+  gate when a Mac smoke run lands). Update 2026-10-05: STILL OPEN (no
+  workflow runs `verify-omni-macos.sh`).
 - Real-SSH remote-federation transit (needs a host with sshd;
-  closes O-09/O-10).
-- `target_id` threaded through every one of the 51 full-surface tools (currently
-  on the command path).
+  closes O-09/O-10). Update 2026-10-05: STILL OPEN (the runner skips
+  O-09/O-10).
+- `target_id` on tools beyond the command lane (today only
+  `command_start_combed`, `run_and_watch`, `command_status`, `command_stop`
+  and `target_probe` take it; see the P5 row above).
 
 The goal-numbering above (TC61-TC74) follows the slice plans in
 `docs/plans/2026-06-09-tc-omni-wave*.md`; the canonical task list is

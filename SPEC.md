@@ -3,6 +3,11 @@
 Status: Baseline (TC01 wave 0 deliverable).
 Audience: implementers of TC02 through TC32.
 Language: ASCII only.
+Note (2026-10-05): `README.md:NNN` line citations in this document point at
+the README as of the TC01 baseline; the README has since been rewritten and
+those line numbers no longer match. Sections 6, 7, 8, 9 and 14 were
+corrected against the code on that date; sections 1-5 and 10-13 are the
+TC01 baseline.
 
 ## 1. Name and pitch
 
@@ -158,43 +163,48 @@ re-litigated by downstream goals without an explicit user decision
 update.
 
 - Language: Rust, edition 2024.
-- Async runtime: tokio (used by rmcp 1.8.0's `tokio = "1"` dep, per
+- Async runtime: tokio (used by rmcp's `tokio = "1"` dep, per
   `docs/research/mcp-rust-sdk.md`).
-- MCP SDK: rmcp `=1.8.0` exact pin. MSRV Rust 1.92.
-- Storage: rusqlite 0.39 with `bundled` feature (FTS5 included) +
-  refinery 0.9 migrations + WAL mode. See
+- MCP SDK: rmcp `=3.4.1` exact pin (was `=1.8.0` at TC01; see root
+  `Cargo.toml`). MSRV Rust 1.92.
+- Storage: rusqlite 0.40 with `bundled` feature (FTS5 included) +
+  a manual migration runner (refinery is not linked) + WAL mode. See
   `docs/research/sqlite-fts5.md`.
-- File watcher: notify 8.2 + notify-debouncer-full 0.7 with explicit
-  per-target transport (inotify on Linux/WSL native; `PollWatcher`
-  forced on WSL `/mnt/c` 9P). See `docs/research/file-watcher.md` and
-  `docs/research/wsl-boundary.md`.
-- PTY (MVP): pty-process 0.5.3 with `async` feature. POSIX only;
-  portable-pty bridge deferred for Windows native. See
+- File watcher: notify 8.2, event-driven on native filesystems; the
+  file probe's own re-stat polling backend on WSL `/mnt/c` 9P
+  (`notify-debouncer-full` is not used). See
+  `docs/research/file-watcher.md` and `docs/research/wsl-boundary.md`.
+- PTY: pty-process 0.5.3 with `async` feature on unix, and
+  `portable-pty` 0.9 (ConPTY) on Windows. See
   `docs/research/pty-crate.md`.
 - License: PolyForm-Noncommercial-1.0.0 (SPDX `PolyForm-Noncommercial-1.0.0`). See
   `docs/research/license-decision.md`.
-- Process model: two-process (thin MCP + persistent daemon). IPC
-  transport between the two is deferred to TC21 (local Unix domain
-  socket via `interprocess` v2 is the leading candidate per
-  `docs/research/mcp-transport-pattern.md` but not locked yet).
-- Platforms: Linux native + WSL2 primary. macOS / Windows-native
-  deferred.
+- Process model: two-process (thin MCP + persistent daemon), or the
+  daemon library embedded in a trusted host (`docs/EMBEDDING.md`). IPC
+  transport between the two is a local-only endpoint: Unix domain
+  socket on Unix, named pipe on Windows, no TCP listener (settled in
+  TC21 and TC37; `ARCHITECTURE.md` section 2.3).
+- Platforms: Windows-x64 native and Linux-x64 native (incl. WSL2) are
+  tier-1; macOS is tier-3 build-only (section 2a).
 
 ## 7. Crate list (canonical)
 
 Seven crates per `docs/research/_USER_DECISIONS.md` and per TC04's
-locked layout. All crates live under `crates/<short>/` in a flat
-workspace; package names use hyphens.
+locked layout, plus `crates/ipc/` and `crates/supervisor/` added later
+(the workspace in root `Cargo.toml` has nine members). All crates live
+under `crates/<short>/` in a flat workspace; package names use hyphens.
 
 | Path | Package name | One-line role |
 |---|---|---|
 | `crates/core/` | `terminal-commander-core` | Domain types, identifiers, severity, event/source/pointer models, errors, traits. No I/O. |
 | `crates/sifters/` | `terminal-commander-sifters` | Sifter runtime: keyword, regex, condition, multiline, dedupe, suppression, stall, progress, prompt, correlation, artifact parsers. |
 | `crates/probes/` | `terminal-commander-probes` | Probe runners: process probe, file probe, PTY probe, directory probe, future journal/artifact probes. Owns notify integration and PTY bridging. |
-| `crates/store/` | `terminal-commander-store` | rusqlite + refinery persistence: event store, bucket cursors, rule registry, audit log. FTS5 search lane. |
+| `crates/store/` | `terminal-commander-store` | rusqlite persistence with a manual migration runner: event store, bucket cursors, rule and recipe registry, audit log. FTS5 search lane. |
 | `crates/daemon/` | `terminal-commanderd` | Long-running daemon binary. Owns bucket manager, context spool, policy engine, audit emitter, and the local API. |
-| `crates/mcp/` | `terminal-commander-mcp` | Thin MCP server adapter (rmcp 1.8.0 stdio). Forwards every tool call to the daemon over IPC. |
-| `crates/cli/` | `terminal-commander-cli` | Operator CLI. Talks to the daemon. Subcommands per TC25 (status, doctor, rules, buckets, jobs, probes, policy, audit). |
+| `crates/mcp/` | `terminal-commander-mcp` | Thin MCP server adapter (rmcp 3.4.1 stdio). Forwards every tool call to the daemon over IPC. |
+| `crates/cli/` | `terminal-commander-cli` | Operator CLI. Talks to the daemon. Subcommands per TC25 (status, doctor, rules, buckets, jobs, probes, policy, audit) plus later additions (recipes, session, credential, update-locks, subscription-stream, subscription-pull). |
+| `crates/ipc/` | `terminal-commander-ipc` | IPC request/response types, limits, and the daemon client shared by the adapter, CLI and daemon. |
+| `crates/supervisor/` | `terminal-commander-supervisor` | Daemon bring-up, pidfile, version-aware replace, per-session endpoints, and state/socket path resolution. |
 
 ### README reconciliation
 
@@ -284,6 +294,14 @@ The complete set above is the planned MVP MCP surface. The exact tool
 count and naming may shift by a handful as TC23/TC24 finalize schemas;
 any change requires a goal-file mini-spec update.
 
+As shipped (2026-10-05), some planned names differ: there is no
+`bucket_create`, `probe_create`, `probe_bind_rules`, `registry_create`,
+`command_write_stdin`, `command_send_signal` or `file_watch` tool. The
+shipped equivalents are `registry_upsert`, `pty_command_write_stdin`,
+`command_stop` and `file_watch_start`/`file_watch_stop`/`file_watch_list`;
+buckets are created by the job or watch that owns them. The authoritative
+list is `tool_catalogue()` in `crates/mcp/src/tools.rs` (section 14.1).
+
 ## 9. Probe types
 
 Six probe types per `README.md:124-130`. Three ship in MVP wave; the
@@ -301,6 +319,11 @@ other three are scoped to follow-on goals.
 Per the no-mock invariant, a probe type whose implementation is not
 present must not appear in `system_discover` output or in any
 configuration default.
+
+As shipped (2026-10-05), the probe kinds are `command`, `file_watch` and
+`pty` (`ProbeKind` in `crates/ipc/src/protocol.rs`). No directory,
+artifact or journal probe exists; directory listing is the
+`file_list_dir` operation.
 
 ## 10. Sifter types
 
@@ -429,10 +452,10 @@ MVP deliberately deferred).
 The product identity is now **omni**: an LLM agent should never need a
 separate raw terminal tool. The MVP signal-combing core (sections 1-13)
 is unchanged; the omni program added stateful, interactive, parsing, and
-federation lanes on top of it. The full MCP surface is **51 tools** (up
-from the MVP/runtime-chain count; TC22 A3 added the policy-gated
-filesystem-write tool `file_write`, and persistent audit reads added
-`audit_since`); the compact surface exposes five action-dispatched facades.
+federation lanes on top of it. The full MCP surface is **60 tools** (as of
+2026-10-05, `tool_catalogue()` in `crates/mcp/src/tools.rs`; it was 51
+when this section was written); the compact surface exposes six action-dispatched facades
+(`command`, `files`, `recipe`, `registry`, `session`, `status`).
 The rule-pack set is **25 packs** (up
 from the section-10 seed of six). The authoritative tool list and pack
 list live in `README.md` and `docs/mcp/TOOL_CONTROL_SURFACE.md`; the
@@ -448,9 +471,10 @@ the original boundary:
   US5 / P5, but NARROWLY. Remote daemons are reached ONLY through an
   operator-established `ssh -L` forward to the remote daemon's LOCAL
   socket -- there is still NO public TCP listener, and the adapter never
-  spawns ssh. Gated by `allow_remote` (default deny). `target_id` is
-  wired on the command path; it is not yet threaded through all 50
-  tools. Proven via a second-local-socket simulation; real-SSH transit
+  spawns ssh. Gated by `allow_remote` (default deny under the hardened
+  profiles; on under the default `full_access`, `POLICY.md` section 4.1).
+  `target_id` is wired on the command path; it is not threaded through
+  every tool (`docs/mcp/TOOL_CONTROL_SURFACE.md`). Proven via a second-local-socket simulation; real-SSH transit
   is not yet exercised in CI (no sshd in the smoke env).
 - **macOS support beyond build artifacts** (was tier-3, section 3): now
   intended as platform parity (US3 / P3), but code-plus-smoke-script
@@ -467,7 +491,8 @@ the original boundary:
 
 - **Persistent shell sessions + workspace snapshots** (US1 / P1, LIVE,
   UNIX-ONLY). PTY-backed sticky cwd/env sessions gated by
-  `allow_session` (default deny), plus SQLite-persisted snapshots.
+  `allow_session` (default deny under the hardened profiles; on under the
+  default `full_access`), plus SQLite-persisted snapshots.
   Contract: `docs/runtime/SHELL_SESSION.md`.
 - **Rule suggestion from samples** (US2 / P2, LIVE).
   `registry_suggest_from_samples` proposes DRAFT rules from raw output;

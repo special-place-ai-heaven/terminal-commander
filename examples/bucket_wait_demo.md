@@ -9,10 +9,8 @@ terminal output directly.
 1. LLM tool call: `system_discover()` -> confirms `bucket_wait`,
    `bucket_events_since`, `event_context` are available.
 
-2. (Out of scope at MVP) LLM kicks off the build via a future
-   `command_start_combed` tool. For now, the operator starts the
-   command via the CLI and shares the resulting `bucket_id` with
-   the LLM.
+2. LLM kicks off the build with `command_start_combed` (argv, plus
+   any `rules`) and keeps the returned `bucket_id` and `job_id`.
 
 3. LLM tool call: `bucket_wait(bucket_id="build_42", cursor=0,
    severity_min="high", timeout_ms=30000)`.
@@ -49,8 +47,8 @@ terminal output directly.
      whether to keep waiting.
 
 5. If the event has `pointer.context_available = true`, the LLM may
-   call `event_context(probe_id, anchor=pointer.frame_id, before=3,
-   after=5)` to retrieve bounded context for diagnosis.
+   call `event_context(event_id, before=3, after=5)` (`bucket_id` is
+   optional) to retrieve bounded context for diagnosis.
 
 6. The LLM NEVER calls `event_context` with unbounded `before`/`after`
    — the server caps the response at `MAX_WINDOW_BYTES` (64 KiB).

@@ -99,11 +99,11 @@ this file" is a contract violation, not a workaround.
 | Context rings | Per-probe ring buffers of `SourceFrame`. Anchored windows by `FrameId`. | `crates/core::context` |
 | Event store | Durable SQLite, manual migration runner, FTS5 search lane. | `crates/store` |
 | Registry | Versioned, tagged rule library. Search, get, create, test, activate, bind. | `crates/store::registry` |
-| Policy engine | Evaluates allow / deny / allow-with-audit for every gated action. Four locked profiles. | `crates/daemon::policy` |
+| Policy engine | Evaluates allow / deny / allow-with-audit for every gated action. Five profiles (see section 11). | `crates/daemon::policy` |
 | Audit log | Durable record of policy-relevant runtime actions. Persistent SQLite-backed since TC35. | `crates/daemon::audit::PersistentAudit` + `crates/store::audit` |
 | Daemon runtime bootstrap | Loads config, opens store, applies V0003, wires Router with PersistentAudit, idles in foreground. | `crates/daemon::state::DaemonState`, `crates/daemon::runtime` |
-| Daemon UDS IPC | Unix-domain socket transport with SO_PEERCRED / getpeereid peer identity, length-prefixed JSON frames, bounded `MAX_FRAME_BYTES`, closed-set error codes, audit on every accepted request. Method set today: `system_discover` / `health` / `policy_status` / `self_check`. | `crates/daemon::ipc::{server,client,protocol,peer}` |
-| Command runtime | argv-only `command_start_combed`. Policy gate -> ProcessProbe -> DaemonEventSink -> Router::bucket_append (PersistentAudit). Bounded response (job_id / bucket_id / probe_id / cursor). Lifecycle events written to bucket. No raw stdout/stderr returned. | `crates/daemon::command::CommandRuntime` |
+| Daemon IPC | Unix-domain socket (Unix) or named pipe (Windows) transport with peer identity, length-prefixed JSON frames, bounded `MAX_FRAME_BYTES`, closed-set error codes, audit on every accepted request. The method set is `DISCOVERABLE_METHODS` (65 methods). | `crates/daemon::ipc::{server,pipe_server,peer}`, `crates/ipc` (protocol, framing, clients) |
+| Command runtime | argv `command_start_combed` (the gated `shell_exec` lane is separate). Policy gate -> ProcessProbe -> DaemonEventSink -> Router::bucket_append (PersistentAudit). Bounded response (job_id / bucket_id / probe_id / cursor). Lifecycle events written to bucket. No raw stdout/stderr returned. | `crates/daemon::command::CommandRuntime` |
 | Daemon signal-retrieval API | `bucket_events_since` (cursor read), `bucket_wait` (Notify-backed, heartbeat-on-timeout), `bucket_summary`, `event_context` (bounded window resolved by `(bucket_id, event_id)`). All bounded, all audited through PersistentAudit. | `crates/daemon::ipc::server` + `protocol` |
 
 ## 5. Locked invariants
@@ -161,8 +161,9 @@ explicit user decision:
 - A general log shipper or metrics pipeline.
 - A kernel-sandbox enforcer at MVP. Landlock / seccomp-bpf is post-MVP
   hardening per `BACKLOG.md` P2.
-- A macOS / Windows-native binary at MVP. Linux native + WSL2 first;
-  macOS / Windows deferred per `_USER_DECISIONS.md`.
+- (Superseded) A macOS / Windows-native binary: Windows-x64 native is
+  tier-1 and macOS is tier-3 build-only per
+  `docs/adr/ADR-native-tier1-runtime.md`.
 - A TUI or GUI. Operator surface is the admin CLI; LLM surface is MCP.
 - A privileged default install. Privilege paths only behind explicit
   later goals.
@@ -178,9 +179,8 @@ Raw frames remain available **only** through:
   no longer in the ring.
 - `file_read_window(path, offset, max_bytes)` returns capped bytes
   with `truncated`, `next_offset`, and `total_size` set.
-- Future `file_search` (TC43) returns matches with bounded snippets.
-- Future `file_watch` (TC43) returns structured change events, never
-  raw deltas.
+- `file_search` returns matches with bounded snippets.
+- `file_watch_start` returns structured change events, never raw deltas.
 
 There is no `stream_tail`, no `command_read_stdout`, no
 `file_read_all`. A tool that streams raw text is a contract violation.
@@ -222,32 +222,36 @@ normalize.
 | Probe | Source | Status on `main` | Goal that lands real behavior |
 |---|---|---|---|
 | `process_probe` | Non-interactive child process via `tokio::process::Command`. | live | n/a (live since TC15) |
-| `terminal_probe` / PTY | Interactive PTY-attached process. | normalizer-only on `main` (`AnsiNormalizer` + `PromptDetector` live; spawn deferred) | TC44 |
-| `file_probe` | A single file, follow / scan / create-after-start / rotation. | live (polling backend; native notify deferred) | n/a; notify swap is BACKLOG P1 |
-| `directory_probe` | A directory, create / modify / delete events; JUnit-XML summary. | live (polling backend) | n/a; native inotify is BACKLOG P1 |
+| `terminal_probe` / PTY | Interactive PTY-attached process. | live (unix `pty-process`, Windows ConPTY) | n/a (TC44 landed) |
+| `file_probe` | A single file, follow / scan / create-after-start / rotation. | live (`notify` backend on native filesystems; polling on WSL 9p) | n/a |
+| `directory_probe` | A directory, create / modify / delete events; JUnit-XML summary. | not implemented as a probe (`file_list_dir` lists a directory) | none |
 | `journal_probe` | systemd journal. | not implemented | post-MVP |
-| `artifact_probe` | Arbitrary structured reports beyond JUnit-XML. | partial (JUnit only) | post-MVP |
+| `artifact_probe` | Arbitrary structured reports beyond JUnit-XML. | not implemented | post-MVP |
 
 ## 11. Policy contract
 
-Every gated action passes through `PolicyEngine::evaluate`. The four
+Every gated action passes through `PolicyEngine::evaluate`. The five
 profiles are closed:
 
 | Profile | Headline behavior |
 |---|---|
-| `developer_local` (default) | Common operations allow; mutating registry actions require audit; sensitive paths deny. |
+| `full_access` (default) | Inherits the harness's trust: all caps on, no sensitive-path or escalator deny; only the OS-critical-deletion failsafe applies (`POLICY.md` section 2.5). |
+| `developer_local` | Common operations allow; mutating registry actions require audit; sensitive paths deny. |
 | `repo_only` | Same as developer_local with stricter path scoping. |
 | `read_only_observer` | All mutations deny; reads allow. |
 | `admin_debug` | Broader allow surface; mutating registry actions still deny by default. |
 
 Policy denials surface as `McpError::PolicyDenied(reason)` to the LLM.
 Audit emission is REQUIRED for every `AllowWithAudit` decision. The
-audit log is durable (TC35) once that goal lands; on `main` today it
-is an in-memory placeholder, which is a known scaffold seam.
+audit log is durable (`PersistentAudit`, TC35).
 
 ## 12. Recorded drifts (TC33 evidence, fixed elsewhere — NOT in TC34)
 
-These drifts are real on `main` and are explicitly NOT fixed by TC34:
+Status (2026-10-05): both drifts below are historical. The audit table
+exists (V0003, `audit_records`). `rust-version` is still 1.92 (the MSRV
+floor) while `rust-toolchain.toml` pins 1.97.1.
+
+These drifts were real on `main` and were explicitly NOT fixed by TC34:
 
 - **`crates/store/src/lib.rs` doc claims audit log "rides on the same
   database file."** No `audit` table or writer exists on `main`. The
@@ -309,5 +313,5 @@ file when it lands.
 - `README.md` — product overview, planned tool list, safety model.
 - `BACKLOG.md` — P0/P1/P2/P3 deferrals.
 - `docs/security/PRIVILEGE_MODEL.md` — privilege boundaries.
-- `docs/security/SECURITY.md` — security envelope.
+- `SECURITY.md` — security envelope.
 - `docs/contracts/README.md` — wire-shape fixtures.

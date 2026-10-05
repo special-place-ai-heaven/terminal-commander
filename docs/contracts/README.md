@@ -87,6 +87,9 @@ tests/fixtures/
       probe_status.v1.json
 ```
 
+The `mcp-tools/` list above is the TC05 set; the directory now holds one
+file per live tool (`mcp-tool-fixture-map.v1.json` is the inventory).
+
 Each fixture starts with a `_meta` field describing it (fixture id,
 schema anchor, status). The `_meta` field is part of the FIXTURE
 shape only; live wire payloads do not carry it.
@@ -171,10 +174,11 @@ Per the contract requirements in TC05 the following enums are
 canonical. Each domain is reserved at MVP-draft status; concrete
 behavior lands in the goal noted.
 
-### 6.1 Severity (5 values)
+### 6.1 Severity (7 values)
 
-`trace`, `low`, `medium`, `high`, `critical`. Documented in
-`enums/severity.md`. Concrete `Severity` enum lands in TC06.
+`trace`, `debug`, `info`, `low`, `medium`, `high`, `critical`. Documented
+in `enums/severity.md`; the `Severity` enum is in
+`crates/core/src/severity.rs`.
 
 ### 6.2 Sifter type (11 discriminators)
 
@@ -206,19 +210,24 @@ errors.
 
 ### 6.4 Probe kind
 
-`process`, `terminal`, `file`, `directory`, `journal`, `artifact`.
-Per `SPEC.md` and `POLICY.md`. Concrete probes land in TC15, TC18,
-TC19, TC20.
+`process`, `terminal`, `file`, `directory`, `journal`, `artifact` are the
+values of an event's `source.source_type` (`SourceType` in
+`crates/core/src/source.rs`). The runtime probe kinds listed by
+`probe_list` and used by `[policy.probes]` are different: `command`,
+`file_watch`, `pty` (`ProbeKind` in `crates/ipc/src/protocol.rs`). No
+directory, journal or artifact probe ships.
 
 ### 6.5 Policy decision
 
-`allow`, `deny`, `allow_with_audit`, `error`. Per `POLICY.md`
-section 6. Implementation in TC22.
+`allow`, `deny`, `allow_with_audit`, `error` (`PolicyDecision` in
+`crates/daemon/src/policy.rs`). Audit rows additionally accept `info`
+(`ALLOWED_AUDIT_DECISIONS` in `crates/store/src/audit.rs`).
 
 ### 6.6 Audit action
 
-Listed in `enums/audit-action.md`. Closed set; producers may NOT
-invent new audit actions without amending the doctrine.
+Listed in `enums/audit-action.md`. The store enforces a closed set only
+for the decision string; action strings are free text, and the daemon
+emits more than that file lists (see its status note).
 
 ## 7. MCP tool fixtures
 
@@ -255,7 +264,8 @@ mini-spec:
   `next_cursor` MUST equal the input cursor (no progress beyond
   what was already known).
 - Raw stdout/stderr text is NEVER a `bucket_wait` success shape.
-  The forbidden example `forbidden/raw-stream-as-events.v1.json`
+  The forbidden example
+  `tests/fixtures/contracts/forbidden/raw-stream-as-events.v1.json`
   shows what MUST NOT be returned.
 
 ## 9. Source-status
@@ -269,6 +279,30 @@ mini-spec:
 | map entries with `placeholder_for_live_tool` or `missing_fixture` | live-tool coverage debt, blocker before use |
 | mcp-tools/* classified by the map as `obsolete_fixture_present` | obsolete debt, not supported tools |
 | forbidden/* | live (negative-test oracle from now on) |
+
+## 9a. Live wire shapes vs the TC05 fixtures (checked 2026-10-05)
+
+Most TC05 fixtures are still `informative-until-TC0x` drafts; the types in
+`crates/ipc/src/protocol.rs` and `crates/core` are the live shapes. Where
+they differ, the code wins:
+
+| Fixture | Live shape |
+|---|---|
+| `event.signal.v1.json` | Matches `SignalEvent` (`crates/core/src/event.rs`); the live type adds optional `count`, `first_seen`, `last_seen`, `suppressed`. |
+| `bucket-read-response.v1.json` | `BucketEventsSinceResponse`: `bucket_id`, `cursor_in`, `next_cursor`, `has_more`, `dropped_count`, `events`. No `back_pressure` field exists. |
+| `bucket-summary.v1.json` | `BucketSummaryResponse`: `bucket_id`, `head_seq`, `tail_seq`, `event_count`, `dropped_count`, `by_severity` (7 counters, `trace` to `critical`). No `by_kind`, `created_at` or `*_cursor` fields. |
+| `source-pointer.v1.json` | `SourcePointer`: `frame_id`, optional `line`, `byte_start`, `byte_end`, `stream`, and `context_available`. No `byte_offset` or `context_window_id`. |
+| `event-context-request/response` | Params: optional `bucket_id`, `event_id`, optional `before`, `after`, `max_bytes`. Response: `bucket_id`, `event_id`, `anchor_missing`, `unavailable_reason` (`no_pointer`, `synthetic_event`, `anchor_evicted`, `unknown_probe`), `pointer_unavailable_reason`, `frames` (`probe_id`, `frame_id`, `stream`, `line`, `text`), `total_bytes`, `truncated`. No `context_window_id` or `evicted`. |
+| `job-status.v1.json` | The live status type is `CommandStatusResponse`: `job_id`, `bucket_id`, `probe_id`, `state`, frame and byte counters, `exit_code`, `signal`, `duration_ms`, `receipt`, `outcome_trust`, and more. It has no `argv`, `started_at` or `exited_at`. |
+| `probe-descriptor.v1.json` | The live listing type is `ProbeListEntry` (`kind` is `command`, `file_watch` or `pty`, plus `liveness`, counters, `argv_head`, `tag`). |
+| `registry-search-result.v1.json` | `RegistrySearchResponse { hits }`; each hit has `rule_id`, `version`, `event_kind`, `summary_template`, `tags`, `severity`, `status`. No `query`, `total`, `facets` or `score`. |
+| `policy-decision.v1.json`, `audit-record.v1.json` | There is no policy-decision wire type. Audit rows are `AuditRow` (`audit_id` integer, `timestamp`, `action`, `subject`, `decision`, `profile`, `reason`, `actor`, `metadata_json`). No `result`, `rule_id`, `monotonic_clock_ns` or `aud_` id prefix. |
+| `rule-definition.v1.json` | Matches `RuleDefinition` (`crates/core/src/rule.rs`); the live type also has optional `keywords`. |
+
+`CommandStatusResponse`, `CommandReceipt` and the discovery payloads are
+being extended in the working tree (receipt `head`/`lines_omitted`,
+`elapsed_ms`, `last_output_age_ms`), so re-check those rows against
+`crates/ipc/src/protocol.rs` before relying on this table for them.
 
 ## 10. Verification
 

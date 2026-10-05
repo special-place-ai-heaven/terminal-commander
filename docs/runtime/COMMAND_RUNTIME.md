@@ -1,5 +1,14 @@
 # Command Runtime (TC38)
 
+Historical as of 2026-10-05: this is the TC38 design record. Since then the
+IPC and MCP `command_*` surface, PTY commands, stdin control, hot rebind and
+the gated `shell_exec` lane have shipped, so the "not in scope" and
+"reserved/deferred" lists below are stale and "shell-string passthrough is
+forbidden" no longer holds on the shell lane (`docs/runtime/SHELL_RUNTIME.md`).
+The argv caps (`MAX_ARGV_ITEMS` 256, `MAX_ARGV_ITEM_BYTES` 32768), the audit
+actions `command_start`/`command_rejected`/`command_exit` and the lifecycle
+event shapes still match `crates/daemon/src/command.rs`.
+
 Status: Live (TC38). argv-only, non-PTY. PTY-backed interactive
 commands remain deferred to TC44.
 

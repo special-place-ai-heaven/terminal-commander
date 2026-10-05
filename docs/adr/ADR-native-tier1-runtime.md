@@ -1,6 +1,7 @@
 # ADR: Native tier-1 runtime for Windows and Linux
 
-Status: Accepted
+Status: Accepted. Detail updated since: the active toolchain is Rust 1.97.1
+(`rust-toolchain.toml`; MSRV floor 1.92), not 1.95 as written in point 3.
 Date: 2026-05-24
 Supersedes: parts of SPEC.md §3 (non-goals) and earlier statements in
 `docs/research/_USER_DECISIONS.md` that excluded Windows native shipping.

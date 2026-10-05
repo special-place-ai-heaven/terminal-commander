@@ -1,5 +1,18 @@
 # Audit-action enum (closed set, MVP)
 
+Status (2026-10-05): not what the daemon emits. Only the decision string is
+a closed set in the store (`allow`, `deny`, `allow_with_audit`, `error`,
+`info`). Action strings are free text; the daemon writes IPC method names
+(for example `file_read_window`, `file_write`, `registry_upsert`,
+`pty_command_write_stdin`) plus lifecycle labels (`command_start`,
+`command_shell_start`, `command_rejected`, `command_shell_rejected`,
+`command_exit`, `pty_command_exit`, `file_watch_exit`,
+`shell_session_start`, `credential_provided`,
+`recipe_activate_requires_admin`). The names `command_stdin`,
+`command_signal`, `file_read`, `probe_create`, `probe_bind`,
+`registry_create`, `policy_decision`, `policy_invalid`, `bucket_export` and
+`default_deny_override_loaded` below are not emitted by any code path.
+
 The closed set of action strings emitted in the `audit-record.vN`
 contract. New entries require a doctrine amendment first
 (`SECURITY.md` section 4 + `POLICY.md` section 4).

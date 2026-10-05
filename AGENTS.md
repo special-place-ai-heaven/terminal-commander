@@ -10,4 +10,4 @@
 - `cargo-nextest` is required for workspace tests and `scripts/linux-gate.sh`; the VM update script installs it on first boot when missing.
 - JS wrapper unit tests (`npm --prefix packages/terminal-commander test`) do not require `npm install` or platform optional-deps.
 - `bash scripts/smoke/verify-runtime-smoke.sh` is the quickest daemon+MCP end-to-end check; it builds into `target-wsl/` by default (`CARGO_TARGET_DIR`), separate from `target/`.
-- In some cloud VMs, `session_reap_token_shuts_down_the_daemon` can hang for many minutes; when iterating locally, exclude it with `cargo nextest run --workspace -E 'not test(session_reap_token_shuts_down_the_daemon)'`.
+- In some cloud VMs, `session_reap_token_shuts_down_the_daemon` can hang; `.config/nextest.toml` now kills it after 90 s (30 s period x 3) and retries twice, so a hang costs a blip rather than a wedged run. To skip it entirely when iterating locally: `cargo nextest run --workspace -E 'not test(session_reap_token_shuts_down_the_daemon)'`.

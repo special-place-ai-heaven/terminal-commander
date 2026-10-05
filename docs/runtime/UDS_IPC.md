@@ -1,8 +1,10 @@
 # Daemon UDS IPC (TC37)
 
+Historical as of 2026-10-05: this is the TC37/TC39 design record. Superseded by the code: the wire types and limits live in `crates/ipc/src/protocol.rs` and `framing.rs` (they moved out of the daemon crate), the method list is `DISCOVERABLE_METHODS` in `crates/daemon/src/ipc/server.rs` (about 65 methods, not 4 or 8), `IpcErrorCode` has many more codes, Windows native is supported through a named pipe (`crates/daemon/src/ipc/pipe_server.rs`, `crates/ipc/src/pipe_client.rs`), and the default profile is `full_access`. Still accurate: 4-byte big-endian length-prefixed JSON frames, `MAX_FRAME_BYTES` 256 KiB, the bucket/context limits in section 2, and the absence of any TCP listener for IPC.
+
 Status: Live (TC37) on Linux / WSL2 / macOS / BSD.
 Status: Unsupported on Windows native (use WSL2).
-Crate paths: `crates/daemon/src/ipc/{mod,protocol,peer,server,client}.rs`.
+Crate paths: `crates/daemon/src/ipc/{mod,peer,server}.rs` and `crates/ipc/src/{protocol,framing,client}.rs`.
 
 ## 1. Purpose
 
@@ -323,7 +325,7 @@ The response NEVER fabricates raw text when context is missing.
 
 ## 12. Test coverage
 
-Unit (`crates/daemon/src/ipc/protocol.rs`):
+Unit (originally `crates/daemon/src/ipc/protocol.rs`; now `crates/ipc/src/protocol.rs`):
 - `encode_decode_envelope_round_trip`
 - `malformed_json_rejected_with_typed_code`
 - `schema_mismatch_is_malformed_json_today`

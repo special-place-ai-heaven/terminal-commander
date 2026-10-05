@@ -146,8 +146,8 @@ PTY password prompts (owner credential path):
   up as long as the page); the model polls `credential_request`, which never
   re-elicits for the same prompt. Plain HTTP is
   acceptable there because loopback traffic never leaves the host, and the
-  listener exists only while that prompt is pending. This is constitution
-  Principle IV's one stated exception to the local-socket-only rule.
+  listener exists only while that prompt is pending. This is the one
+  stated exception to the local-socket-only rule.
   Otherwise the daemon
   opens a native prompt: Windows CredUI; on a unix desktop the first
   of `$SSH_ASKPASS`, `ssh-askpass`, `zenity`, `kdialog`, `pinentry`. The

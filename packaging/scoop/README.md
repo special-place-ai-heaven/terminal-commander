@@ -39,5 +39,10 @@ placeholders. Publishing it is a separate CI/infra task that needs:
 `checkver` + `autoupdate` are pre-wired so that, once the release zip exists,
 `scoop update` can pick up new tags automatically.
 
+Checked 2026-10-05: still true. No workflow in `.github/workflows/` builds or
+uploads `terminal-commander-windows-x64.zip` (the Windows binaries ship only as
+the npm package `@terminal-commander/windows-x64`), so `url` and `hash` cannot
+resolve and the manifest does not work as written.
+
 To finish a release manually before CI lands: set `version`, point `url` at the
 published zip, and replace `hash` with its SHA256.

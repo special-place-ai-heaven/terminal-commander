@@ -1,7 +1,7 @@
 # MCP Tool Surface - Terminal Commander
 
 `terminal-commander-mcp` is the thin LLM-facing adapter. It serves MCP over
-stdio with rmcp 1.8.0 and forwards tool calls to `terminal-commanderd` over the
+stdio with rmcp 3.4.1 and forwards tool calls to `terminal-commanderd` over the
 local IPC endpoint. The adapter does not spawn commands, open user files, or
 bind a network listener.
 

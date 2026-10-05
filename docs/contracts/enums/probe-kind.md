@@ -1,5 +1,11 @@
 # Probe-kind enum
 
+Status (2026-10-05): this table is the `source_type` domain (`SourceType`,
+`crates/core/src/source.rs`). The runtime `ProbeKind` used by `probe_list`
+and `[policy.probes]` is `command`, `file_watch`, `pty`
+(`crates/ipc/src/protocol.rs`). Only process, terminal (PTY) and file
+sources are produced; no directory, journal or artifact probe ships.
+
 | Kind | Implementing goal | Notes |
 |---|---|---|
 | `process` | TC15 | Spawns a non-interactive command, captures stdout/stderr. |

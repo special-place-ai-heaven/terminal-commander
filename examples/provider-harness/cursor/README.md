@@ -38,6 +38,8 @@ terminal-commander setup harness --provider cursor
 
 - No secrets or API keys are included.
 - No HTTP or SSE transport is configured.
-- npm install is passive; setup writes config only when explicitly run.
+- npm install outside CI runs a guarded, fail-soft `postinstall` that registers
+  the MCP entry in detected harnesses (skipped in CI or with `TC_NO_AUTO_SETUP=1`);
+  `terminal-commander setup harness` configures or repairs it explicitly.
 - The native Windows path does not require WSL.
 - The legacy WSL bridge example is retained for compatibility only.

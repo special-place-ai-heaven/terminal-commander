@@ -1,5 +1,11 @@
 # NPM06 — release-please manifest-mode contract
 
+> HISTORICAL as of 2026-10-05: the NPM06 contract as written on 2026-05-23. Since then the
+> package set grew to six (five platform packages), `prerelease` is false in
+> `.github/release-please-config.json`, and the release PR is auto-merged by
+> `release-pr-sync.yml` via `gh pr merge --merge --auto` (required checks, no `--admin`).
+> Current rules: `release-pipeline-invariants.md` and `.github/workflows/release-please.yml`.
+
 Status: NPM06 deliverable.
 Branch: `main`.
 Date: 2026-05-23.

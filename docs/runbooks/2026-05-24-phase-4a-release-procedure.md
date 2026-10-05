@@ -1,5 +1,18 @@
 # Phase 4a — Release Procedure Runbook
 
+> Dated runbook (2026-05-24), corrected against `.github/workflows/` on
+> 2026-10-05. Differences from the text below: there are 8 cargo crates, not 7
+> (the chain is core, sifters, probes, store, supervisor, ipc, terminal-commanderd,
+> mcp); crates.io publishing uses `CARGO_REGISTRY_TOKEN_TC`, not OIDC (the
+> workflow header says crates.io has no trusted-publishing cutover yet), only npm
+> uses OIDC; the macOS runners are `macos-15-intel` (Intel) and `macos-14` (arm),
+> `macos-13` was retired 2025-12-04; the release PR is auto-merged by
+> `release-pr-sync.yml` after required checks, so step 3 of "Normal release flow"
+> is not a manual merge; `NPM_TOKEN_TC` was replaced on 2026-10-05 (owner report)
+> by a granular stage-only token that can deprecate but not publish, and
+> `deprecate-version.yml` still uses it. Current rules:
+> `docs/release/release-pipeline-invariants.md`.
+
 Owner: terminal-commander maintainers
 Created: 2026-05-24
 

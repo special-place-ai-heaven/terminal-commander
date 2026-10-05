@@ -1,5 +1,9 @@
 # WWS01 — Windows + WSL install UX contract for Terminal Commander
 
+> HISTORICAL / partly superseded as of 2026-10-05 (`lib/` and `bin/` paths below are under `packages/terminal-commander/`): written 2026-05-23 when Windows ran the
+> runtime only through WSL. Native Windows (`@terminal-commander/windows-x64`) is now the
+> default and the WSL bridge is opt-in (`TC_USE_LEGACY_WSL_BRIDGE=1`). Current: `../install/README.md`.
+
 Status: WWS01 deliverable.
 Branch: `main`.
 Date: 2026-05-23.

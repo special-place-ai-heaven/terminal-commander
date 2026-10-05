@@ -2,6 +2,11 @@
 
 Status: TC48 beta gate snapshot.
 
+> HISTORICAL as of 2026-10-05: a point-in-time evidence record of the TC33-TC47
+> chain (29-tool catalogue, Linux/WSL2 only). It is not maintained as current
+> state; see `README.md`, `docs/mcp/TOOL_CONTROL_SURFACE.md` (60 tools) and
+> `RELEASE_CHECKLIST.md` for the live picture.
+
 This document consolidates the TC33-TC47 evidence trail. Each goal
 section records the verified work commit, the goal status commit,
 the live source-status (`live` / `partial` / `not run` / etc.), and

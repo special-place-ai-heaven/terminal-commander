@@ -5,17 +5,18 @@ Scope: documentation only. This document defines the policy shape that
 TC22 (policy engine) MUST implement, and that TC23, TC24, TC25, TC26,
 TC29 MUST honor.
 
-Implementation status (as of 2026-05-29): PARTIALLY implemented in
+Implementation status (as of 2026-10-05): PARTIALLY implemented in
 `crates/daemon/src/policy.rs`. SHIPPED: the cross-profile command deny
-set, the default-deny sensitive-path suffix list, and the per-profile
+set, the default-deny sensitive-path suffix list, the per-profile
 mutation gates (sections relating to read_only_observer / admin_debug /
-registry_activate). NOT YET SHIPPED: command allow-lists, the
-default-deny posture of section 6, $REPO_ROOT containment, the
-declarative profile schema of section 4, the limits of section 4, and
-the allow_override mechanism of section 5. WARNING: `repo_only`
-(section 2.2) does NOT yet confine to $REPO_ROOT — it currently behaves
-identically to `developer_local`. Do not rely on it as a sandbox. The
-implementation plan is `docs/specs/2026-05-29-tc22-policy-engine-
+registry_activate), the `[policy.commands] allow_roots` allow-list,
+the `[policy.paths]` and `[policy.probes]` lists, `[policy.caps]`, the
+`full_access` default, the OS-critical-deletion failsafe, and `repo_only`
+$REPO_ROOT containment (file read/watch and command cwd outside the
+configured `repo_root` are denied). NOT YET SHIPPED: the `[limits]`
+checks of sections 2 and 4.2 (max active jobs, event and stream rates),
+the full declarative `[profile]` schema of section 4.2, and the
+`allow_override` mechanism of section 5. The implementation plan is `docs/specs/2026-05-29-tc22-policy-engine-
 implementation.md`.
 
 Language: ASCII only.
@@ -325,7 +326,8 @@ Rules:
 
 **Accepted residual risk (Decision 1), under a hardened profile.** The
 command deny set (`COMMANDS_DENY`: `sudo`, `doas`, `su`, `pkexec`,
-`kexec`; not applied under the default `full_access`) is checked on
+`kexec`, `polkit-agent`, `polkit-auth-agent-1`; not applied under the
+default `full_access`) is checked on
 `argv[0]` ONLY. It deliberately does NOT scan the
 `shell_line` of a `shell_exec` call. Once `allow_shell` is on, a host
 where `sudo` is otherwise reachable can have `sudo ...` embedded INSIDE
@@ -419,7 +421,7 @@ and the best-effort `status.cwd` caveat are in
 
 #### WSL nested-shell gate (US8)
 
-The argv shell-interpreter deny (`SHELL_INTERPRETERS_DENY`, `command.rs`)
+The argv shell-interpreter deny (`SHELL_INTERPRETERS_DENY`, `crates/core/src/shell_deny.rs`)
 catches a bare interpreter in `argv[0]` (`bash`, `sh`, `pwsh`, `cmd`, ...).
 Before US8 it did NOT catch a shell smuggled through a `wsl`/`wsl.exe`
 carrier: `wsl.exe -e bash -lc "<arbitrary shell>"` has `argv[0] = wsl.exe`,
@@ -468,12 +470,12 @@ column:
 | nested shell (`-e bash`, bare `wsl bash`, `-- sh -c ...`, bare `echo $(id)`, bare `wsl.exe`) | **DENY** -- `shell_interpreter_denied`, naming the interpreter + the wsl carrier + the `allow_shell` gate / `shell_exec` remedy | runs; `command_start` audit row tagged `"nested_shell": "<interpreter>"` |
 | unknown construction (novel WSL flag in payload position) | **DENY** (fail closed) | runs; audit tagged `"wsl_construction": "unknown"` |
 
-**Rationale.** The constitution (Principle II) forbids argv smuggling and
-requires the interpreter deny to stay intact in spirit, not just letter.
+**Rationale.** The argv lane must not become an unaudited route to a shell, so the
+interpreter deny has to hold in spirit, not just letter.
 Adding `wsl.exe` wholesale to `SHELL_INTERPRETERS_DENY` was rejected: it
 would break every legitimate non-shell use (`wsl.exe -e cargo build`,
 `wsl --list`). Inspecting the Linux-side binary was rejected: argv-only is
-the constitutional boundary, and file inspection is unreliable across the
+the design boundary, and file inspection is unreliable across the
 WSL boundary anyway.
 
 #### Argv interpreter deny: wrappers, flags, remote carriers
@@ -739,7 +741,7 @@ password. The job reports `awaiting_credential`, and `credential_request`
 makes the daemon ask the OWNER directly (a one-shot `127.0.0.1` page the MCP
 client links the owner to via URL-mode elicitation, else a native dialog the
 daemon opens, else the admin CLI `terminal-commander credential provide
-<job_id>`). The loopback page is constitution Principle IV's one exception
+<job_id>`). The loopback page is the one exception to the local-socket-only rule
 (127.0.0.1 only, single-use token path, at most 300 s, Host-checked; the
 value goes only to the waiting child, is overwritten best-effort (OS and
 browser copies are not wiped), and is never returned over IPC). The

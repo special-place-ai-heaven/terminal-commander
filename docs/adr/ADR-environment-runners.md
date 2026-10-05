@@ -1,6 +1,30 @@
 # ADR: Environment runners (parent daemon + optional remote runner)
 
-Status: Accepted
+Status: Accepted; only partly implemented (checked against code 2026-10-05).
+- Implemented as written: point 1 (parent adapter and daemon stay on the
+  harness host; MCP never runs inside WSL).
+- Partly built, not usable: points 2 and 3. The IPC params
+  `CommandStartParams` and `PtyCommandStartParams` carry
+  `environment: Option<EnvironmentSpec>` (`crates/ipc/src/protocol.rs`; the
+  field is `environment`, not `environment_id`), and `CommandStartCombed`
+  and `PtyCommandStart` with a non-local value go through `EnvironmentRouter`
+  (`crates/daemon/src/ipc/server.rs`, `crates/daemon/src/environment/router.rs`). The WSL
+  forward is a stub: from a Windows parent `forward_to_runner` returns
+  "frame relay (planned)" (`crates/daemon/src/environment/wsl.rs`), and a non-Windows parent
+  refuses; `SshHost` returns "not implemented". No runner bootstrap exists
+  and no test routes a non-local environment; every in-repo caller passes
+  `environment: None`. The MCP tools expose no environment parameter.
+- Superseded by `system_discover` access routes (July 2026, commits
+  cd0d906 and d135e27, `crates/daemon/src/environment/probe.rs`): an MCP
+  client reaches WSL by running the route's `wsl_argv` or `wsl_shell`
+  template through `run_and_watch`/`exec` on the parent daemon. See
+  `docs/mcp/TOOL_CONTROL_SURFACE.md` section 1.
+- Point 4: `TC_WSL_DISTRO` is read by the npm launcher and forwarded by the
+  supervisor allowlist (`crates/supervisor/src/ensure.rs`); it does not
+  select a runner daemon. `TC_USE_LEGACY_WSL_BRIDGE` still exists
+  (`packages/terminal-commander/bin/terminal-commander-mcp.js`), past the
+  "one release cycle" below.
+The decision text below is unchanged.
 Date: 2026-05-23
 Builds-on: [`ADR-native-tier1-runtime`](./ADR-native-tier1-runtime.md) — the
 native tier-1 decision establishes that the runtime is native Rust on every

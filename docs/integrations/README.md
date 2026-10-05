@@ -18,7 +18,8 @@ Per-provider walk-throughs:
   inside-WSL, and legacy Windows-Cursor-to-WSL bridge). Copy-pasteable
   configs in
   [`examples/provider-harness/cursor/`](../../examples/provider-harness/cursor/).
-- [`gemini.md`](gemini.md) - Gemini stub (INSTALL01; path unverified).
+- [`gemini.md`](gemini.md) - Gemini CLI MCP stdio config
+  (`~/.gemini/settings.json`; a supported setup provider, not a stub).
 - [`kimi.md`](kimi.md) - Kimi stub (INSTALL01; path unverified).
 - [`omp.md`](omp.md) - OMP (oh-my-pi) MCP stdio config
   (`~/.omp/agent/mcp.json`); setup manages its enabled list.
@@ -69,8 +70,9 @@ Operational guides (not provider-specific):
 guarded auto-setup for detected harnesses. CI and `TC_NO_AUTO_SETUP=1` skip it.
 Run `terminal-commander setup harness` to configure or repair detected
 harnesses, or add `--provider cursor`, `--provider codex-cli`,
-`--provider omp`, `--provider claude-code`, or `--provider claude-desktop`
-to target one harness. Codex setup writes its protocol marker; enabling
+`--provider omp`, `--provider claude-code`, `--provider claude-desktop`,
+`--provider gemini`, `--provider grok`, or `--provider kilo-code`
+to target one harness (see [`harnesses.md`](harnesses.md)). Codex setup writes its protocol marker; enabling
 Codex's modern feature flag remains optional because its legacy default works.
 
 A local daemon + MCP stdio smoke (no provider in the loop) lives at
@@ -82,7 +84,7 @@ above and observing tool calls in the session transcript.
 
 The rest of this page is the older provider-neutral baseline kept for historical
 context; the modern full surface advertises 60 tools and the per-provider
-walk-throughs above are the authoritative source.
+walk-throughs above are more detailed (the config writers in `packages/terminal-commander/lib/harness/` are the ground truth for what setup writes).
 
 Language: ASCII only.
 
@@ -120,7 +122,7 @@ compile_error, retrieve event_context around it.
 
 ## 2. Codex CLI
 
-Codex CLI reads MCP servers from `~/.codex/config.toml` (authoritative
+Codex CLI reads MCP servers from `~/.codex/config.toml` (detailed
 shape in [`codex-cli.md`](codex-cli.md)):
 
 ```toml
@@ -157,7 +159,7 @@ pipe stdout through any pretty-printer.
 | `bucket_events_since(bucket_id, cursor, severity_min?, kind?, limit?)` | `BucketReadResponse` | Read recent events past a cursor. |
 | `bucket_wait(bucket_id, cursor, ..., timeout)` | `BucketWaitResponse` (events OR heartbeat) | Block for matching events; heartbeat on timeout. |
 | `bucket_summary(bucket_id)` | `BucketSummary` | Per-bucket counters. |
-| `event_context(probe_id, anchor, before, after, max_bytes?)` | `ContextWindowResponse` (frames bounded) | Pull bounded raw frame text around an event. |
+| `event_context(event_id, bucket_id?, before?, after?, max_bytes?)` | `ContextWindowResponse` (frames bounded) | Pull bounded raw frame text around an event. |
 
 ## 5. Examples directory
 
@@ -166,7 +168,7 @@ pipe stdout through any pretty-printer.
 - `examples/bucket_wait_demo.md`: walk-through showing how an LLM
   should use bucket_wait to avoid polling.
 - `examples/dynamic_rule_demo.md`: walk-through showing the
-  registry_create / registry_test / registry_activate flow (TC24
+  registry_upsert / registry_test / registry_activate flow (TC24
   tools).
 
 These are markdown narratives, not runnable code. They document the

@@ -1,5 +1,8 @@
 # NPM02 — npm binary packaging contract for Terminal Commander
 
+> Historical as of 2026-10-05: this records the 2026-05-23 NPM02 plan. Windows x64 and macOS x64/arm64 now ship as platform packages and the release pipeline is `.github/workflows/release-please.yml`.
+> Current truth: `packages/terminal-commander/package.json` (`optionalDependencies`), `packages/terminal-commander/lib/resolve-binary.js` (`SUPPORTED_TARGETS`) and that workflow.
+
 Status: NPM02 deliverable.
 Branch: `main`.
 Date: 2026-05-23.
@@ -132,15 +135,20 @@ dedicated TC-level runtime goal first (not an NPM01-style audit).
   }
   ```
 
-- A JS resolver (`packages/terminal-commander/lib/resolve-platform.js`)
+- A JS resolver (`packages/terminal-commander/lib/resolve-binary.js`)
   picks the matching platform package by `process.platform` +
   `process.arch` and returns the absolute path to the requested
   Rust binary.
 - The shims `require()` the resolver and `child_process.spawn` the
   resolved binary, forwarding `argv` + `stdio: 'inherit'` (or
   `stdio: ['inherit', 'inherit', 'inherit']`).
-- NO postinstall script.
-- NO network access at install time.
+- NO postinstall download. The root package's only lifecycle script is
+  the guarded auto-setup `postinstall`
+  ([`install-bootstrap-contract.md`](install-bootstrap-contract.md));
+  platform packages have none.
+- NO network access at install time beyond npm's own fetch. One
+  exception: on Windows with the WSL runtime selected, auto-setup runs
+  `npm install -g terminal-commander` inside WSL.
 
 ### 4.2 Rejected by default (LOCKED)
 
@@ -165,13 +173,13 @@ dedicated TC-level runtime goal first (not an NPM01-style audit).
 Each shim (`terminal-commanderd.js`, `terminal-commander-mcp.js`,
 `terminal-commander.js`):
 
-1. `require('../lib/resolve-platform.js')` → returns
-   `{ platformPackage, binaryPath, supportedTargets }`.
-2. If `binaryPath` is `null`:
-   - Print one line to stderr naming the user's `process.platform`
-     + `process.arch`, the supported targets, and the fact that
-     `optionalDependencies` may not have been installed (often a
-     `--no-optional` flag or an older npm).
+1. `require('../lib/resolve-binary.js')` → `resolveBinary()` returns
+   `{ platformPackage, binaryPath, reason, supportedTargets }`.
+2. If `reason` is not `ok`:
+   - Print one line to stderr (`formatResolveError`): for an
+     unsupported `process.platform` + `process.arch`, the supported
+     targets; for a missing platform package, its name and the
+     reinstall command.
    - Exit with code `64` (matches the existing TC40 unsupported-
      platform exit code on the MCP binary).
 3. Otherwise `child_process.spawn(binaryPath, process.argv.slice(2),
@@ -191,7 +199,7 @@ packages/
 │  │  ├─ terminal-commander-mcp.js              # Node shim → MCP adapter
 │  │  └─ terminal-commander.js                  # Node shim → admin CLI
 │  └─ lib/
-│     └─ resolve-platform.js                    # process.{platform,arch} resolver
+│     └─ resolve-binary.js                      # process.{platform,arch} resolver
 ├─ terminal-commander-linux-x64/
 │  ├─ package.json                              # "os":["linux"], "cpu":["x64"]
 │  ├─ LICENSE
@@ -346,8 +354,11 @@ Specifically:
   via `npm install -g`; re-run `scripts/smoke/verify-runtime-smoke.sh`
   with `PATH=${prefix}/bin:$PATH` so the npm-installed binaries
   are exercised end-to-end.
-- **NPM05 (CI build matrix):** GitHub Actions workflow at
-  `.github/workflows/release.yml`. Stages: `verify-main-push`
+- **NPM05 (CI build matrix):** a planned `release.yml` workflow that
+  never landed; the release pipeline is
+  `.github/workflows/release-please.yml` (with
+  `.github/workflows/release-pr-sync.yml` and
+  `.github/workflows/npm-binary-build.yml`). Planned stages: `verify-main-push`
   (regression gates) → `build` (linux-x64 + linux-arm64) →
   `build-npm-package` → `upload-release-assets`. Toolchain pinned
   to `1.95.0`. No `cargo publish`. No auto-merge.
@@ -433,7 +444,7 @@ Preserved (UNCHANGED at WWS02):
 - §3.2 Unsupported (Windows-native runtime still rejected;
   macOS / musl / Alpine still rejected).
 - §4.1 Package architecture (`optionalDependencies`-via-npm
-  filtering, no postinstall, no RT-compile).
+  filtering, no postinstall download, no RT-compile).
 - §4.3 `optionalDependencies` semantics (`engines.npm: ">=8"`
   preserved on root so Windows installs cleanly skip the
   Linux platform packages).
@@ -472,10 +483,10 @@ Behavioral evidence (WWS02 verification commit):
   `-linux-arm64/package.json` unchanged).
 
 WWS chain landing follow-up (recorded at WWS08, docs-only): WWS03
-(`lib/wsl/{distro-name,detect,doctor}.js`, commit `ec8441e`),
-WWS04 (`lib/wsl/spawn.js`, commit `d86e73f`), WWS05
-(`lib/cursor/{config,write,index}.js`, commit `ae37878`), WWS06
-(`lib/cli/**`, commit `4936904`), WWS07 (`scripts/smoke/verify-windows-bridge-smoke.ps1`,
+(`packages/terminal-commander/lib/wsl/{distro-name,detect,doctor}.js`, commit `ec8441e`),
+WWS04 (`packages/terminal-commander/lib/wsl/spawn.js`, commit `d86e73f`), WWS05
+(`packages/terminal-commander/lib/cursor/{config,write,index}.js`, commit `ae37878`), WWS06
+(`packages/terminal-commander/lib/cli/**`, commit `4936904`), WWS07 (`scripts/smoke/verify-windows-bridge-smoke.ps1`,
 commit `785d410`), WWS08 (this commit) ALL landed AFTER the WWS02
 package contract change above. NONE of them modified any other
 field in this contract: root `os` stayed at `["linux", "win32"]`;

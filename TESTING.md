@@ -3,8 +3,9 @@
 Status: Baseline (TC03 wave 0 deliverable).
 Scope: methodology + fixture taxonomy. Test code itself lands in
 later goals (TC05 golden fixtures, TC06+ unit tests, TC15+
-integration). This document is binding for every goal that adds
-behavior.
+integration). Written for the 2026-05 goal chain; the "MUST" wording
+below is that era's process language, and only what the gate scripts
+and CI enforce is checked automatically.
 
 Language: ASCII only.
 
@@ -20,7 +21,7 @@ they added or modified.
 | Doctest | `///` rustdoc examples | `cargo test --doc` | Every public type/trait with non-trivial usage |
 | Integration | per-crate `tests/*.rs` | `cargo nextest run` | Crate-boundary contracts |
 | Fixture | `tests/fixtures/<category>/...` | exercised by unit + integration | Every parser, sifter, schema, golden output |
-| Snapshot | `cargo insta test` | `insta` (locked) | Output that is easier to compare by snapshot than by hand |
+| Snapshot | `cargo insta test` | `insta` (decided, NOT adopted: no manifest depends on it as of 2026-10-05) | Output that is easier to compare by snapshot than by hand |
 | Load | `crates/core/tests/load.rs` | `cargo nextest run -p terminal-commander-core --test load` | TC11, TC17, TC28 backpressure proof |
 | Security | `crates/daemon/tests/security.rs` | `cargo nextest run -p terminal-commanderd --test security` | TC22, TC29 (policy / fuzz-like) |
 | End-to-end | `crates/mcp/tests/e2e.rs` | `cargo nextest run -p terminal-commander-mcp --test e2e` | TC27, TC30 demo scenarios |
@@ -29,41 +30,79 @@ Locked dev-time dependencies (deferred to TC04 Cargo manifests):
 
 | Concern | Crate | Decision |
 |---|---|---|
-| ANSI parsing in PTY corpus | `vte` (5.x) | TC03 (2026-05-21 operator decision) |
-| Snapshot framework | `insta` (1.x) with `cargo-insta` CLI | TC03 (2026-05-21 operator decision) |
-| JSON-Schema validation | `jsonschema` (0.x latest) | TC03 (2026-05-21 operator decision) |
+| ANSI parsing in PTY corpus | `vte` (adopted: `crates/probes`, 0.15) | TC03 (2026-05-21 operator decision) |
+| Snapshot framework | `insta` (1.x) with `cargo-insta` CLI (not adopted) | TC03 (2026-05-21 operator decision) |
+| JSON-Schema validation | `jsonschema` (0.x latest) (not adopted) | TC03 (2026-05-21 operator decision) |
 
-## 2. The seven-step CI pipeline
+## 2. What CI runs (and what it does not)
 
-Per `docs/research/_R2-gamma-summary.md` and `CONTRIBUTING.md`
-section 6, the canonical CI sequence is:
+`.github/workflows/npm-binary-build.yml` runs two pre-build gates on every
+pull request and push to `main`; the release pipeline needs them green.
+Both first run `npm test` in `packages/terminal-commander` (the wrapper
+unit tests, from a clean checkout), then:
+
+`pre-build-gates (linux-x64)` runs `bash scripts/linux-gate.sh`, which:
+
+1. checks the toolchain: `cargo`, `node`, `cargo-nextest`, `python3`
+   present; `rustc` equals `rust-toolchain.toml` channel (1.97.1) and the
+   workflow `RUST_TOOLCHAIN` pin;
+2. `node scripts/release/verify-optional-dependencies.js` and
+   `bash scripts/release/test-synthesize-crates-release-trigger.sh`;
+3. `cargo fmt --all --check`;
+4. `cargo clippy --workspace --all-targets -- -D warnings`;
+5. `cargo nextest run --workspace` (profile `default`, `.config/nextest.toml`);
+6. the TC47 load gate: `cargo test -p terminal-commanderd --test
+   load_noise_backpressure -- --nocapture`, failing if it self-skips
+   (no python3) or runs 0 tests;
+7. two grep guards: no process/socket spawn and no direct filesystem
+   access in `crates/mcp/src`.
+
+`pre-build-gates (windows-x64)` runs `pwsh scripts/windows-gate.ps1`,
+which builds `terminal-commanderd` and runs a fixed list of Windows
+regression test binaries (`windows_no_console_spawn`,
+`probe_handshake_windows`, `windows_spawn_site_coverage`,
+`shell_deny_windows`, `pty_windows` subset, the MCP daemon-loss and
+first-request tests), refusing a 0-tests-run pass, plus the live ConPTY
+e2e (`TC_CONPTY_E2E=1`, set automatically on GitHub Actions). It does not
+run fmt, clippy or the full nextest suite.
+
+Commands for the same checks by hand:
 
 ```bash
-# 1. Format check (fast).
 cargo fmt --all -- --check
-
-# 2. Clippy on the full workspace, warnings denied.
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-# 3. License / advisory / dup / source policy.
-cargo deny --all-features check
-
-# 4. Compile matrix: each individual feature on/off.
-cargo hack check --workspace --each-feature --no-dev-deps
-
-# 5. MSRV gate: compile with the declared rust-version (1.92.0).
-cargo hack check --workspace --rust-version
-
-# 6. Tests (nextest for unit + integration; cargo test for doctests).
+cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace
-cargo test --workspace --doc
-
-# 7. Unused-dep audit.
-cargo machete --with-metadata
 ```
 
-Steps 1, 2, 6 (default profile) are also the pre-commit subset
-(see `CONTRIBUTING.md` section 5).
+### Not enforced by CI today
+
+These tools are recommended, not wired into any workflow or gate script.
+Run them by hand when relevant. `deny.toml` exists at the repo root for
+`cargo deny`.
+
+```bash
+# License / advisory / dup / source policy (deny.toml exists).
+cargo deny --all-features check
+
+# Compile matrix: each individual feature on/off.
+cargo hack check --workspace --each-feature --no-dev-deps
+
+# MSRV gate: compile with the declared rust-version (1.92). The MSRV is a
+# documented floor, not an automated check.
+cargo hack check --workspace --rust-version
+
+# Doctests (the gate runs nextest, which does not run doctests).
+cargo test --workspace --doc
+
+# Unused-dependency audit.
+cargo machete --with-metadata
+
+# clippy with every feature enabled (the gate omits --all-features).
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+The pre-commit subset (see `CONTRIBUTING.md` section 5) is fmt, clippy
+and nextest, the same hot subset the linux gate runs.
 
 ## 3. Verification command per goal class
 
@@ -85,8 +124,8 @@ proves files exist and contain the right invariants.
 
 ```bash
 git diff --check
-test -d contracts/
-for f in contracts/*.json; do python3 -m json.tool "$f" > /dev/null; done
+test -d tests/fixtures/contracts/
+for f in tests/fixtures/contracts/*.json; do python3 -m json.tool "$f" > /dev/null; done
 # After TC05 lands: cargo nextest run -p terminal-commander-core --tests
 ```
 
@@ -278,6 +317,7 @@ tests/
         native-linux.mountinfo
         wsl2-9p-drvfs.mountinfo
         wsl2-ext4.mountinfo
+    contracts/                # added after TC03 (TC05): JSON contract fixtures
 ```
 
 Goals add to these directories within their `allowed_files_or_area`
@@ -287,7 +327,10 @@ section in a TC03-class goal.
 ## 9. Scripts
 
 `scripts/dev/verify-baseline.sh` runs a minimal, no-toolchain check
-suitable for early goals (before TC04 lands the workspace). It:
+suitable for early goals (before TC04 lands the workspace). It is a
+TC03-era script: its branch guard fails on any branch other than
+`feature/terminal-commander-mvp`, so it is not a general pre-push
+check (use `scripts/linux-gate.sh` / `scripts/windows-gate.ps1`). It:
 
 - proves the branch is `feature/terminal-commander-mvp`;
 - confirms the required doctrine files exist (`README.md`, `LICENSE`,

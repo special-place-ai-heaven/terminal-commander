@@ -52,6 +52,15 @@ result is ever silent or misleading.
 
 ## Recent improvements
 
+<!-- release-status -->Landed 2026-10-05, not yet in a tagged release.
+
+- **Linux/WSL shells survive the daemon autostart hook:** the hook sourced its
+  start script into your shell, so once the daemon was up every login and
+  interactive shell exited silently. It now runs the script as a separate
+  background process. `terminal-commander setup`, `update`, or
+  `setup daemon-autostart` replaces the old hook. See
+  [Doctor And Repair](#doctor-and-repair).
+
 <!-- release-status -->Landed 2026-10-05, released in v0.3.11.
 
 - **Quiet receipt you can shape:** `lines_omitted` says how much the receipt
@@ -278,11 +287,15 @@ Install from npm:
 npm install -g terminal-commander@latest
 ```
 
-The npm install is intentionally passive: no `postinstall` bootstrap, no MCP
-config writes, no daemon start, no WSL install, no shell wrapper, no
-hidden-window helper spawn.
+Outside CI, npm runs a guarded, fail-soft `postinstall` that performs the same
+setup as `terminal-commander setup harness` and always exits 0. That setup
+writes MCP config for detected harnesses, installs daemon autostart on Linux,
+and runs the WSL runtime steps when WSL is selected. `TC_NO_AUTO_SETUP=1` turns
+it off. It uses no CMD or PowerShell wrapper and no hidden-window helper. npm
+can also skip install scripts (`--ignore-scripts`, or npm 11's `allow-scripts`
+policy); in that case nothing is configured until you run setup.
 
-Configure detected harnesses explicitly:
+Configure or repair detected harnesses explicitly:
 
 ```powershell
 terminal-commander setup harness
@@ -778,7 +791,7 @@ version is left unchanged.
 
 The npm wrapper's per-user stable bin directory holds only the MCP adapter and
 daemon; on every mirror run it removes a stale `terminal-commander` CLI copy
-left there (`lib/harness/stable_bin.js`).
+left there (`packages/terminal-commander/lib/harness/stable_bin.js`).
 
 On startup the adapter calls `ensure_daemon`, then `replace_if_stale` when
 spawn is allowed — a running daemon older than the installed adapter is

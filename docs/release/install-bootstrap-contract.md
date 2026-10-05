@@ -1,53 +1,60 @@
 # INSTALL01 — Explicit setup harness contract
 
-Status: Superseded by AV-safe explicit setup posture.
+Status: Current. The passive-install rule was replaced by guarded postinstall auto-setup (section 1).
 Branch: `main`.
 Date: 2026-05-23.
 Supersedes: WWS01 §2.1 (two-step happy path), WWS01 §8 / D-08 (opt-in WSL install only).
-Preserves: NPM02 no install/postinstall bootstrap, TC44 native runtime, WWS04 bridge shim rules without hidden-window options.
+Preserves: TC44 native runtime, WWS04 bridge shim rules without hidden-window options.
 
 Language: ASCII only.
 
-## 1. Operator contract (Windows)
-
-The primary Windows operator path is intentionally two explicit operator steps:
+## 1. Operator contract (all platforms)
 
 ```powershell
 npm install -g terminal-commander
 terminal-commander setup harness
 ```
 
-`npm install -g terminal-commander` MUST be passive:
+The package has one lifecycle script, `postinstall` (`packages/terminal-commander/scripts/postinstall.js`). It is fail-soft: it always exits 0, so it can never fail `npm install`.
 
-1. No `install`, `preinstall`, or `postinstall` lifecycle script.
-2. No MCP config writes.
-3. No WSL probing, nested `npm install`, daemon autostart, or process spawning.
-4. No CMD, PowerShell, hidden-window, taskkill, downloaded helper, or broad process-control behavior.
+History: this contract first required a passive install with no lifecycle script (2026-05-26). 393f89c (2026-06-25) replaced that rule with guarded, fail-soft auto-setup. The install may run the same bootstrap as `setup harness`, but only through that guarded `postinstall`. The `postinstall` script itself spawns no process and only delegates. Under CI or an opt-out it is a no-op that exits 0. Like all runtime JS, it never requests a hidden window and never invokes CMD or PowerShell. `packages/terminal-commander/test/av-safe-install-runtime.test.js` enforces these constraints.
 
-`terminal-commander setup harness` is the explicit config-writing command. It writes only detected provider MCP config files, creates backups before overwrite, and reports structured status. Current generated MCP stanzas use an executable `node` command plus a package `.js` shim in `args`; they do not use npm, CMD, or PowerShell as the MCP command.
+It does nothing when any of these hold:
 
-First MCP connect MUST NOT perform hidden lazy bootstrap. If setup was not run, the harness reports the missing configuration/runtime state honestly.
+- `TC_NO_AUTO_SETUP=1` or `TC_SKIP_BOOTSTRAP=1`.
+- A CI environment (`CI=true` or `CI=1`, or a provider variable such as `GITHUB_ACTIONS`).
+- It is not running as npm's `postinstall` lifecycle event.
+- Another bootstrap holds the bootstrap lock.
 
-Opt-out:
+Otherwise it runs the same bootstrap as `terminal-commander setup harness`, in fail-soft mode:
 
-- `TC_SKIP_BOOTSTRAP=1` is retained only as a compatibility no-op for older call sites.
-- `TC_SKIP_DAEMON_AUTOSTART=1` to skip daemon service/profile install only.
-- `npm install -g terminal-commander --ignore-scripts` is safe but unnecessary because the package has no lifecycle scripts.
+1. Stops running Terminal Commander processes of this install and removes npm leftover folders, so an upgrade is not blocked (`packages/terminal-commander/lib/bootstrap/release_instances.js`).
+2. Windows with the WSL runtime selected (`TC_WSL_DISTRO` or `TC_USE_LEGACY_WSL_BRIDGE=1`): runs the WSL steps in section 5. Otherwise the native Windows path is used and WSL is not touched.
+3. Linux / WSL: installs daemon autostart (a systemd user unit, or a profile hook plus a background start), unless `TC_SKIP_DAEMON_AUTOSTART=1` or `TC_BOOTSTRAP_START_DAEMON=0`.
+4. Writes the MCP config of every detected harness, pointing at the native MCP executable (a stable per-user copy where possible), with backups before overwrite.
 
-## 2. Operator contract (Linux / WSL)
+npm does not run `postinstall` with `--ignore-scripts` or `ignore-scripts=true`, or when npm's install-script policy (`allow-scripts` / `allowScripts`, npm 11) does not allow `terminal-commander`. The install still succeeds. Nothing is configured or repaired until the operator runs:
 
-`npm install -g terminal-commander` on Linux or inside WSL is also passive. Run `terminal-commander setup harness` explicitly to write MCP provider config.
+- `terminal-commander setup` (or `setup harness`): the same steps, reporting failures instead of swallowing them, without the process release.
+- `terminal-commander update`: runs `npm install -g terminal-commander@latest`, then re-runs `setup harness` with the new launcher.
 
-Daemon startup is a runtime concern, not npm install work. Setup commands may report what they would do, but they must not hide daemon/profile/service installation inside npm lifecycle hooks.
+`setup daemon-autostart` reinstalls only the daemon autostart.
 
-## 3. npm lifecycle (NPM02 amendment)
+Generated MCP stanzas never use npm, CMD, or PowerShell as the MCP command. No step opens a CMD, PowerShell, or hidden window, downloads a helper, or uses taskkill.
 
-| Rule | Locked |
+## 2. First MCP connect
+
+The MCP shims and the legacy WSL bridge never run bootstrap, install, or config writes. A missing runtime or configuration is reported, for example as `runtime_missing`, and `terminal-commander setup` repairs it.
+
+## 3. npm lifecycle
+
+| Rule | Current |
 |------|--------|
-| `preinstall` / `install` / `postinstall` lifecycle script | **Forbidden**. |
-| Postinstall downloader | **Forbidden** (GitHub Releases fetch or any other hidden network fetch). |
-| Network from install script | **Forbidden** because install scripts are forbidden. |
-| stdout/stderr from install script | **Forbidden** because install scripts are forbidden. |
+| `preinstall` / `install` lifecycle script | None. |
+| `postinstall` lifecycle script | Present, fail-soft, exits 0 (section 1). |
+| Postinstall downloader | **Forbidden** (no GitHub Releases or other binary fetch; native binaries come from `optionalDependencies`). |
+| Network from install script | Only the WSL runtime `npm install -g` of section 5 (Windows with the WSL runtime selected). |
+| stdout/stderr from install script | Status lines only. |
 
 ## 4. Harness registry (INSTALL01 scope)
 
@@ -66,24 +73,24 @@ Full registry at `packages/terminal-commander/lib/harness/registry.js`.
 
 ## 5. WSL runtime ensure (supersedes D-08 default)
 
-On Windows global bootstrap, WSL runtime install is **ON by default**.
+On Windows, when the WSL runtime is selected, bootstrap runs these steps in this order:
 
-- Command: locked constant `npm install -g terminal-commander` inside `bash -lc`, with `PATH` stripped of Windows `nodejs` / `npm` shims before Linux paths.
-- NO `sudo`. NO password prompts. NO operator argv interpolation into `bash -lc`.
-- After install: verify `command -v terminal-commander-mcp` and optional platform package resolution inside WSL.
-- `--install-wsl-runtime` on `setup cursor-wsl` remains an alias for the same ensure path.
+1. Repair: if `~/.config/terminal-commander/autostart.sh` or its profile snippet exists, rewrite both. This step uses non-login `bash -c`, because a <= 0.3.11 snippet exits every login shell once the daemon socket exists. It writes nothing on a fresh machine.
+2. Runtime ensure: probe the runtime version; on skew, run the locked constant `npm install -g terminal-commander`, verify `terminal-commander-mcp` and the platform package, and swap the live daemon. These steps run in `bash -lc`, with `PATH` stripped of Windows `nodejs` / `npm` shims before Linux paths.
+3. Daemon autostart: the full install. It runs after the runtime because it chooses systemd only when the daemon binary already exists.
+4. Start the daemon.
 
-## 6. Lazy bootstrap (MCP bridge)
+Every `bash -lc` step prints a shell-ran sentinel before its command. Exit 0 without the sentinel means a startup file ended the shell early. Such a step fails with `shell_exited_early` and names the likely cause; it is never reported as success.
 
-When `spawnWslBridge` sees `runtime_missing` and `TC_SKIP_BOOTSTRAP !== "1"`:
+NO `sudo`. NO password prompts. NO operator argv interpolation into `bash -lc`. `--install-wsl-runtime` is still accepted (for example on `setup cursor-wsl`), but it changes nothing: the ensure path always runs.
 
-- Acquire `%LOCALAPPDATA%\terminal-commander\bootstrap.lock`.
-- Run the same `ensureWslRuntime` once.
-- Retry doctor; then existing refusal paths.
+## 6. Lazy bootstrap
+
+None. See section 2.
 
 ## 7. Deprecation
 
-- `terminal-commander setup cursor-wsl` prints a migration notice and delegates to harness bootstrap (Cursor included).
+- `terminal-commander setup cursor-wsl` prints a migration notice and runs the same bootstrap, writing only the Cursor harness config.
 - Preferred: `terminal-commander setup` or `terminal-commander setup harness`.
 
 ## 8. Cross-links

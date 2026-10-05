@@ -1,6 +1,7 @@
 # Install / Startup - Terminal Commander
 
-Status: current install contract as of 2026-05-25.
+Status: install contract, corrected against the code on 2026-10-05
+(originally 2026-05-25).
 
 This document captures the supported install and startup behavior for
 Terminal Commander. Per `docs/security/PRIVILEGE_MODEL.md`, installers
@@ -68,21 +69,36 @@ adapter. The adapter talks to the local daemon over local IPC:
 - Unix-like systems use Unix domain sockets.
 - Windows native uses named pipes.
 
-Daemon startup is owned by the installed adapter/supervisor path when
-the harness invokes `terminal-commander-mcp`, not by npm lifecycle
-scripts. The daemon is local-only; it does not open a network listener
+The adapter starts the daemon on first connect when it is not running.
+On Linux (and inside WSL), the npm `postinstall` bootstrap also installs
+daemon autostart and starts the daemon: `packages/terminal-commander/lib/daemon/autostart.js` writes
+`~/.config/terminal-commander/autostart.sh` and a profile snippet, then
+either enables a systemd user service (`systemctl --user enable --now
+terminal-commanderd.service`) when a user systemd is available, or patches
+the shell rc files with a profile hook and runs the autostart script once.
+macOS and native Windows get no autostart from install (Windows has the
+opt-in `terminal-commander setup daemon-logon`). Skip it with
+`TC_SKIP_DAEMON_AUTOSTART=1` or `TC_BOOTSTRAP_START_DAEMON=0`; the whole
+postinstall is skipped in CI, with `TC_NO_AUTO_SETUP=1` or
+`TC_SKIP_BOOTSTRAP=1`. `postinstall.js` itself spawns nothing; the daemon
+start comes from the bootstrap it runs
+(`packages/terminal-commander/lib/bootstrap/orchestrator.js`). An install upgrade also stops running
+instances first (`packages/terminal-commander/lib/bootstrap/release_instances.js`). The daemon is local-only; it does not open a network listener
 (the owner's one-shot password page for `credential_request` binds
 `127.0.0.1` only, and only while a PTY password prompt is pending).
 
 Linux operators may still use the user-level systemd example at
 `config/terminal-commanderd.service.example`. The example unit does not
-install itself.
+install itself; the bootstrap above writes its own user unit instead.
 
 ## 5. Legacy WSL setup
 
-WSL setup is explicit and legacy-scoped. It is not run by npm install.
-Use WSL-specific setup or doctor commands only when intentionally using
-the legacy Windows-to-WSL bridge.
+WSL setup is legacy-scoped. On Windows, the install bootstrap skips WSL
+entirely when the native Windows path is selected. It runs the WSL runtime
+install and WSL daemon autostart only when WSL is explicitly selected
+(`--distro`, `TC_WSL_DISTRO`, or `TC_USE_LEGACY_WSL_BRIDGE=1`; see
+`packages/terminal-commander/lib/cli/runtime_environment.js`). Use WSL-specific setup or doctor commands
+only when intentionally using the legacy Windows-to-WSL bridge.
 
 Filesystem placement for WSL remains strict: the daemon SQLite database
 must live on a native Linux filesystem, never `/mnt/c` drvfs. See
@@ -112,7 +128,8 @@ directory. It is safe to commit because it contains no secrets.
 - No privileged helper.
 - No network-listening service (loopback-only credential page aside).
 - No hidden-window helper.
-- No automatic WSL runtime install.
+- No automatic WSL runtime install unless WSL is explicitly selected
+  (section 5).
 
 ## 9. Source-status
 

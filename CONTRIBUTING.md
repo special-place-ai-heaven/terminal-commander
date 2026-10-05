@@ -3,27 +3,34 @@
 Status: Baseline (TC01 wave 0 deliverable).
 Language: ASCII only. No smart quotes, no em-dashes.
 
-This document defines how changes land in Terminal Commander. It is
-mandatory reading for any contributor (human or AI). Every rule here
-is enforced by branch policy, CI, or the goal-driven workflow.
+This document describes how changes land in Terminal Commander. Only the
+parts enforced by code (the gate scripts in sections 5 and 6, CI, the
+release workflows) are checked automatically; the goal-file and
+branch-guard rules in sections 1 and 7 are the 2026-05 MVP-chain process
+and are no longer followed (see the notes there).
 
 ## 1. Branch policy
 
-The default working branch for the MVP chain is:
+The MVP chain was developed on:
 
 ```text
 feature/terminal-commander-mvp
 ```
 
-- `main` and `master` are prohibited working branches for any goal
-  in the `terminal-commander-mvp` chain. Direct edits to `main` or
-  `master` are not allowed.
-- Every goal file declares `target_branch` and `prohibited_branches`
-  in its frontmatter. The branch guard at the top of each goal file
-  must be run before any edit.
-- A new branch may be created only when an explicit goal scopes it.
+That branch no longer exists in the repo (no local or remote ref as of
+2026-10-05). Current practice: work on a topic branch (`feat/...`,
+`fix/...`, `docs/...`) and land it on `main` through a pull request;
+release-please PRs (`release-please--branches--main`) land the same way.
+
+- (historical, MVP chain) `main` and `master` were prohibited working
+  branches for goals in the `terminal-commander-mvp` chain, and each goal
+  file declared `target_branch` / `prohibited_branches`. Current practice
+  (272 commits since 2026-08-01, almost all via PRs; only 2 of their
+  subjects mention a TC goal id; `.agent/goals/` last touched 2026-08-07):
+  topic branch, PR into `main`, no goal-file frontmatter.
 - Push/force-push/PR creation against `main` requires explicit user
-  approval per the gstack CLAUDE.md rules.
+  approval for AI contributors (an agent-session rule, not enforced by
+  the repo).
 
 Branch-guard command (run before any edit):
 
@@ -218,9 +225,12 @@ can run the linux gate):
 
 ## 7. Goal-driven workflow
 
-Every behavior-changing edit in this repository must trace to a
-goal file under `.agent/goals/terminal-commander-mvp/`. The goal
-file's mini-spec is authoritative for that change.
+(historical: this goal-file workflow was the TC01-TC74 chain process and
+is no longer followed; recent work is tracked via `specs/<NNN-name>/`
+and pull requests. The text below is kept as the old record.)
+
+Every behavior-changing edit in this repository was to trace to a
+goal file under `.agent/goals/terminal-commander-mvp/`.
 
 Workflow per edit:
 
@@ -294,10 +304,11 @@ Per the project's prime directive:
 
 - Every public type, MCP tool, and CLI subcommand must be documented
   before it is treated as live.
-- ARCHITECTURE.md, SPEC.md, ROADMAP.md, and this file are the
-  cross-goal contracts. Changes to those land through a goal that
-  lists them in `allowed_files_or_area`. Do not update them as a
-  side effect of an implementation goal.
+- ARCHITECTURE.md, SPEC.md, ROADMAP.md, and this file were the
+  cross-goal contracts of the MVP chain (edited only through a goal that
+  listed them). They are ordinary docs now: keep them in step with the
+  code in the same PR, and treat code and tests as the truth when they
+  disagree.
 - Research documents under `docs/research/` are immutable historical
   evidence for TC01. New research lands in new files, not in edits
   to existing TC01 research files.
