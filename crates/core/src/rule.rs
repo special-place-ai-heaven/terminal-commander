@@ -245,7 +245,12 @@ pub struct RuleExample {
 }
 
 /// What an example expects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Wire forms: `{"match": false}` (the rule must NOT match) or
+/// `{"kind": <string>, "captures": {name: value}}` (must match; both members
+/// optional). Deserialization is hand-written because an untagged enum whose
+/// first variant is all-default swallowed `{"match": false}` as `Match`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum RuleExampleExpect {
     /// Expected match with captures.
@@ -260,6 +265,43 @@ pub enum RuleExampleExpect {
         #[serde(rename = "match")]
         match_: bool,
     },
+}
+
+impl<'de> Deserialize<'de> for RuleExampleExpect {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            #[serde(rename = "match")]
+            match_: Option<bool>,
+            kind: Option<String>,
+            captures: Option<IndexMap<String, String>>,
+        }
+        let raw = Raw::deserialize(d).map_err(|e| {
+            serde::de::Error::custom(format!(
+                "invalid example `expect` ({e}); accepted forms: {{\"match\": false}}                  (the rule must not match) or {{\"kind\": <string>, \"captures\": {{<name>: <value>}}}}                  (the rule must match; both members optional)"
+            ))
+        })?;
+        match raw {
+            Raw {
+                match_: Some(match_),
+                kind: None,
+                captures: None,
+            } if !match_ => Ok(Self::NoMatch { match_ }),
+            // `{"match": true}` is the unconstrained positive form.
+            Raw {
+                match_: Some(true) | None,
+                kind,
+                captures,
+            } => Ok(Self::Match {
+                kind,
+                captures: captures.unwrap_or_default(),
+            }),
+            Raw { .. } => Err(serde::de::Error::custom(
+                "invalid example `expect`: `match: false` cannot be combined with `kind` or                  `captures`; accepted forms: {\"match\": false} or                  {\"kind\": <string>, \"captures\": {<name>: <value>}}",
+            )),
+        }
+    }
 }
 
 /// A canonical rule definition.
@@ -1014,6 +1056,62 @@ mod tests {
     }
 
     #[test]
+    fn negative_example_expectation_deserializes_to_no_match() {
+        // Wire shape documented in rule-definition.v1.json: the rule must NOT
+        // match the input. It used to deserialize as an unconstrained `Match`
+        // (untagged enum, all-default first variant), silently turning the
+        // author's negative expectation into a positive one and losing the
+        // `match: false` on the next serialization.
+        let ex: RuleExample =
+            serde_json::from_str(r#"{"input":"x","expect":{"match":false}}"#).unwrap();
+        assert_eq!(ex.expect, RuleExampleExpect::NoMatch { match_: false });
+        assert_eq!(
+            serde_json::to_value(&ex).unwrap(),
+            serde_json::json!({"input": "x", "expect": {"match": false}})
+        );
+    }
+
+    #[test]
+    fn match_expectation_round_trips_with_kind_and_captures() {
+        let raw = r#"{"kind":"missing_package","captures":{"package":"libssl-dev"}}"#;
+        let e: RuleExampleExpect = serde_json::from_str(raw).unwrap();
+        let RuleExampleExpect::Match { kind, captures } = &e else {
+            panic!("expected Match, got {e:?}");
+        };
+        assert_eq!(kind.as_deref(), Some("missing_package"));
+        assert_eq!(
+            captures.get("package").map(String::as_str),
+            Some("libssl-dev")
+        );
+        assert_eq!(
+            serde_json::to_value(&e).unwrap(),
+            serde_json::from_str::<serde_json::Value>(raw).unwrap()
+        );
+        // Both members are optional: a bare `{}` still means "must match".
+        let bare: RuleExampleExpect = serde_json::from_str("{}").unwrap();
+        assert!(matches!(bare, RuleExampleExpect::Match { .. }));
+    }
+
+    #[test]
+    fn malformed_expectation_is_rejected_naming_the_accepted_forms() {
+        for bad in [
+            r#"{"match":false,"kind":"x"}"#,
+            r#"{"kind":"x","bogus":1}"#,
+            r#"{"match":"no"}"#,
+            r#""no match""#,
+            "false",
+        ] {
+            let err = serde_json::from_str::<RuleExampleExpect>(bad)
+                .expect_err(bad)
+                .to_string();
+            assert!(
+                err.contains(r#"{"match": false}"#) && err.contains("captures"),
+                "error for {bad} must name the accepted forms, got: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn committed_rule_fixture_parses_validates_and_renders() {
         // The canonical wire example MUST be real: deserialize the
         // ACTUAL committed fixture (not a Rust reconstruction), validate
@@ -1032,17 +1130,8 @@ mod tests {
             .remove("_meta");
         let def: RuleDefinition = serde_json::from_value(value.clone())
             .expect("fixture must deserialize as RuleDefinition");
-        // Re-serializing the real type must produce exactly the fixture
-        // key set, so a wire-field drift in either direction fails here.
-        // (Values are not compared: the untagged RuleExampleExpect parses
-        // the `{"match": false}` example as `Match`, so it does not
-        // round-trip.)
-        let keys = |v: &serde_json::Value| -> Vec<String> {
-            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
-            k.sort();
-            k
-        };
-        assert_eq!(keys(&serde_json::to_value(&def).unwrap()), keys(&value));
+        // Re-serializing the real type must reproduce the fixture exactly.
+        assert_eq!(serde_json::to_value(&def).unwrap(), value);
         def.validate().expect("fixture rule must validate");
         assert!(!def.event_kind.is_empty(), "event_kind must be present");
         assert_eq!(def.context_hint.before_lines, 3);
