@@ -232,7 +232,12 @@ blocking pool (`run_blocking` in `crates/daemon/src/ipc/server.rs`). On the
 development machine Health waited several seconds behind `system_discover` and
 up to 27 s behind a large directory search before; about 0.5 ms after (measured
 there, not a guarantee). Every adapter sends `system_discover` at startup, so
-this also removed a multi-second stall on the first tool call.
+this also removed a multi-second stall on the first tool call. Host discovery
+itself is bounded by one 3-second deadline with every probe running
+concurrently (a probe that has not finished is reported as timed out, not
+absent), its result is reused for 30 seconds, and the adapter's startup
+version-skew check reads the daemon version from Health, so it completes even
+while discovery is still running.
 
 ### Policy gate, audit trail, and the argv-only contract
 
