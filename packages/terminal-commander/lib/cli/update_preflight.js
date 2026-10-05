@@ -3,11 +3,9 @@
 
 "use strict";
 
-const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { resolveBinary, formatResolveError } = require("../resolve-binary.js");
-const { stableBinPath } = require("../harness/stable_bin.js");
 const {
   detectRuntimeEnvironment,
   windowsUpdateScopes,
@@ -27,7 +25,7 @@ function resolutionDiagnostic(formatResolutionError, resolution, platform, arch)
     if (typeof message === "string" && message.length > 0) return message;
   } catch (_err) {
     // The resolver's formatter is diagnostic-only. A malformed resolver result
-    // must not prevent the stable-helper or npm-repair recovery paths.
+    // must not prevent the npm-repair recovery path.
   }
   if (resolution && resolution.error) {
     return `terminal-commander: binary resolver failed: ${describeError(resolution.error)}`;
@@ -49,8 +47,6 @@ function planUpdatePreflight(opts) {
   const packageRoot = o.packageRoot ?? path.resolve(__dirname, "../..");
   const detect = o.detectRuntimeEnvironment || detectRuntimeEnvironment;
   const resolve = o.resolveBinary || resolveBinary;
-  const resolveStableBinPath = o.stableBinPath || stableBinPath;
-  const exists = o.existsSync || fs.existsSync;
   const resolveScopes = o.windowsUpdateScopes || windowsUpdateScopes;
   const formatResolutionError = o.formatResolveError || formatResolveError;
   const diagnostics = [];
@@ -99,7 +95,7 @@ function planUpdatePreflight(opts) {
     resolution = { ...resolution, reason: "invalid_ok_result" };
   }
 
-  let helperPath = resolution && resolution.reason === "ok" ? resolution.binaryPath : null;
+  const helperPath = resolution && resolution.reason === "ok" ? resolution.binaryPath : null;
   if (!helperPath) {
     const resolutionMessage = resolutionDiagnostic(
       formatResolutionError,
@@ -107,33 +103,12 @@ function planUpdatePreflight(opts) {
       platform,
       arch,
     );
-    let stableHelper = null;
-    try {
-      stableHelper = resolveStableBinPath("terminal-commander", { platform, env });
-      if (!exists(stableHelper)) stableHelper = null;
-    } catch (err) {
-      diagnostics.push(
-        diagnostic(
-          `terminal-commander: stable update helper lookup failed: ${describeError(err)}.`,
-        ),
-      );
-    }
-
-    if (stableHelper) {
-      helperPath = stableHelper;
-      diagnostics.push(
-        diagnostic(
-          `${resolutionMessage}; using stable update helper ${stableHelper}.`,
-        ),
-      );
-    } else {
-      diagnostics.push(
-        diagnostic(
-          `${resolutionMessage}; no update helper is available, continuing with npm repair.`,
-        ),
-      );
-      return { status: "degraded_repair", exitCode: 0, diagnostics, commands: [] };
-    }
+    diagnostics.push(
+      diagnostic(
+        `${resolutionMessage}; no update helper is available, continuing with npm repair.`,
+      ),
+    );
+    return { status: "degraded_repair", exitCode: 0, diagnostics, commands: [] };
   }
 
   let scopes;

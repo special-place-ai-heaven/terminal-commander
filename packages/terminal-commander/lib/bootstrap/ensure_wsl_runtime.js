@@ -11,7 +11,13 @@ const {
   buildFilteredEnv,
   ensureSessionInWslEnv,
 } = require("../wsl/filtered_env.js");
-const { INSTALL_PROBE_CMD, RUNTIME_VERIFY_CMD } = require("./constants.js");
+const {
+  INSTALL_PROBE_CMD,
+  RUNTIME_VERIFY_CMD,
+  withShellRanSentinel,
+  takeShellRanSentinel,
+  shellExitedEarlyHint,
+} = require("./constants.js");
 
 const ENSURE_STATUSES = Object.freeze({
   OK: "ok",
@@ -21,6 +27,7 @@ const ENSURE_STATUSES = Object.freeze({
   CHECK_TIMEOUT: "check_timeout",
   RUNTIME_VERIFY_FAILED: "runtime_verify_failed",
   UNSUPPORTED_HOST: "unsupported_host",
+  SHELL_EXITED_EARLY: "shell_exited_early",
 });
 
 function classifyNpmOutput(combined, code) {
@@ -58,9 +65,11 @@ function classifyNpmOutput(combined, code) {
   };
 }
 
+// Every result is checked for SHELL_RAN_SENTINEL: a login shell whose startup
+// file exits 0 never reaches `cmd`, and that must not read as success.
 function runWslBashLc({ distro, cmd, env, exec, wslPath, timeoutMs }) {
   return new Promise((resolve) => {
-    const argv = ["-d", distro, "--", "bash", "-lc", cmd];
+    const argv = ["-d", distro, "--", "bash", "-lc", withShellRanSentinel(cmd)];
     // Rebuild WSLENV to a TC-only allowlist after name-based filtering: this
     // spawn launches a Linux process (`bash -lc`), so an ambient
     // WSLENV=SOME_SECRET/u would otherwise forward SOME_SECRET into WSL.
@@ -117,6 +126,17 @@ function runWslBashLc({ distro, cmd, env, exec, wslPath, timeoutMs }) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      const shell = takeShellRanSentinel(stdoutBuf);
+      stdoutBuf = shell.stdout;
+      if (code === 0 && !shell.ran) {
+        resolve({
+          status: ENSURE_STATUSES.SHELL_EXITED_EARLY,
+          hint: shellExitedEarlyHint(distro),
+          exit_code: 0,
+          stdout: stdoutBuf,
+        });
+        return;
+      }
       const combined = (stdoutBuf + "\n" + stderrBuf).toLowerCase();
       const classified = classifyNpmOutput(combined, code);
       // Surface raw stdout (classifyNpmOutput only sees a lowercased copy) so

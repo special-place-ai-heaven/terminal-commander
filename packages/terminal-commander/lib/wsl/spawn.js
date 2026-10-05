@@ -283,6 +283,15 @@ async function spawnWslBridge(opts) {
         hint: hintFor(BRIDGE_STATUSES.RUNTIME_MISSING, distro),
       });
     }
+    // The bridge runs through the same login shell; launching it would end
+    // the same way (status 0, no MCP). Fail with the doctor's cause instead.
+    if (doc.status === DOCTOR_STATUSES.SHELL_EXITED_EARLY) {
+      return buildResult({
+        status: BRIDGE_STATUSES.WSL_COMMAND_FAILED,
+        distro,
+        hint: doc.hint,
+      });
+    }
     if (doc.status === DOCTOR_STATUSES.UNSAFE_DISTRO_NAME) {
       // Should never happen given the prior assertion, but mirror
       // the bounded error if it does.

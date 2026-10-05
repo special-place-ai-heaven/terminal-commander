@@ -61,10 +61,12 @@ async function runSetupDaemonAutostart(opts) {
       timeoutMs: o.timeoutMs,
     });
     if (r.status === ENSURE_DAEMON_STATUSES.OK) {
+      const warnings = (r.warnings || []).map((w) => `${w}\n`).join("");
       return {
         status: "ok",
         exit_code: 0,
-        output: `terminal-commander: ${r.hint}\n`,
+        output: `terminal-commander: ${r.hint}\n${warnings}`,
+        warnings: r.warnings || [],
       };
     }
     return {

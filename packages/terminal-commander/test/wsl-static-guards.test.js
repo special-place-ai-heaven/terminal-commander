@@ -462,3 +462,64 @@ test("spawn.js does not log token values; secret-key list is a STRIP list, not a
     );
   }
 });
+
+// A sourced autostart.sh runs its `exit` in the CALLER's shell: up to 0.3.11
+// that ended every login/interactive shell once the daemon socket existed,
+// and skipped whatever was chained after it (e.g. `exec terminal-commander-mcp`).
+// It must only ever be run as a process. Raw source is scanned (not stripped):
+// the shell commands live in string literals.
+const SOURCES_AUTOSTART = /(?:^|[\s;&|(){}`'"])(?:\.|source)\s+["']?[^"'\s;]*autostart\.sh/m;
+
+function listJsFiles(dir) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...listJsFiles(p));
+    else if (entry.name.endsWith(".js")) out.push(p);
+  }
+  return out;
+}
+
+test("nothing sources autostart.sh (lib/, bin/, scripts/, generated shell)", () => {
+  // The guard itself must catch the shipped 0.3.11 forms.
+  for (const legacy of [
+    '. "$HOME/.config/terminal-commander/autostart.sh" 2>/dev/null || true',
+    '  . "$TC_CFG/autostart.sh" || true',
+    '${LINUX_PATH_PREFIX}. "$HOME/.config/terminal-commander/autostart.sh"',
+  ]) {
+    assert.match(legacy, SOURCES_AUTOSTART);
+  }
+  for (const dir of ["lib", "bin", "scripts"]) {
+    for (const file of listJsFiles(path.join(PKG_ROOT, dir))) {
+      const src = fs.readFileSync(file, "utf8");
+      assert.equal(
+        SOURCES_AUTOSTART.test(src),
+        false,
+        `${path.relative(PKG_ROOT, file)} sources autostart.sh; run it with \`bash .../autostart.sh\``,
+      );
+    }
+  }
+  const autostart = require("../lib/daemon/autostart.js");
+  const constants = require("../lib/bootstrap/constants.js");
+  for (const [name, text] of [
+    ["renderProfileSnippet()", autostart.renderProfileSnippet()],
+    ["renderInstallBash()", autostart.renderInstallBash()],
+    ["BRIDGE_PROBE_CMD", constants.BRIDGE_PROBE_CMD],
+    ["AUTOSTART_RUN", constants.AUTOSTART_RUN],
+    ["DAEMON_START_CMD", constants.DAEMON_START_CMD],
+  ]) {
+    assert.equal(SOURCES_AUTOSTART.test(text), false, `${name} sources autostart.sh`);
+  }
+});
+
+test("profile snippet cannot exit, reconfigure or block the shell that sources it", () => {
+  const { renderProfileSnippet, renderAutostartScript } = require("../lib/daemon/autostart.js");
+  const snippet = renderProfileSnippet();
+  // Everything runs inside a backgrounded subshell; nothing at top level.
+  assert.match(snippet, /^\( bash "\$HOME\/\.config\/terminal-commander\/autostart\.sh" [^\n]*& \)\n$/);
+  // autostart.sh keeps exit/set/export inside one top-level subshell, so even
+  // a stale snippet that sources it cannot touch the caller's shell.
+  const body = renderAutostartScript().split("\n").filter((l) => l && !l.startsWith("#"));
+  assert.equal(body[0], "(");
+  assert.equal(body[body.length - 1], ")");
+});

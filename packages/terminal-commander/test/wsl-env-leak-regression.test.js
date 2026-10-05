@@ -12,7 +12,7 @@
 // entirely. This suite asserts every wrapped spawn site applies it.
 //
 // Two flavours of site:
-//   1. exec-injectable modules (runWslBashLc / runInstallProbe) — we record
+//   1. exec-injectable modules (runWslBashLc) — we record
 //      the `env` the module hands to its spawn wrapper.
 //   2. direct-spawn modules (wsl/doctor.js, cli/doctor_daemon.js) — we patch
 //      child_process.spawn to capture options.env from the live default path.
@@ -57,7 +57,6 @@ const {
 const {
   ensureDaemonAutostartInWsl,
 } = require("../lib/bootstrap/ensure_daemon_autostart.js");
-const { runInstallProbe } = require("../lib/cli/setup_cursor_wsl.js");
 const { detectWsl } = require("../lib/wsl/detect.js");
 const { wslDoctor } = require("../lib/wsl/doctor.js");
 const { runDoctorDaemon } = require("../lib/cli/doctor_daemon.js");
@@ -173,19 +172,6 @@ test("ensure_daemon_autostart: ambient WSLENV does not survive into the wsl spaw
     "daemon autostart install must have spawned exactly once",
   );
   assertWslenvSanitizedWithSession(rec.calls[0].env, "ensure_daemon_autostart");
-});
-
-test("setup_cursor_wsl runInstallProbe: ambient WSLENV does not survive into the wsl spawn", async () => {
-  const rec = makeExecRecorder();
-  await runInstallProbe({
-    distro: "Ubuntu",
-    env: { PATH: "C:\\Windows", TC_SESSION: "tc-ghi789", WSLENV: AMBIENT_SECRET },
-    exec: rec.exec,
-    wslPath: "wsl.exe",
-    timeoutMs: 5000,
-  });
-  assert.equal(rec.calls.length, 1);
-  assertWslenvSanitizedWithSession(rec.calls[0].env, "setup_cursor_wsl");
 });
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ const { ensureStableBinaries, resolveDirectExePath } = require("../harness/stabl
 const { ensureWslRuntime, ENSURE_STATUSES } = require("./ensure_wsl_runtime.js");
 const {
   ensureDaemonAutostartInWsl,
+  repairDaemonAutostartInWsl,
   ENSURE_DAEMON_STATUSES,
 } = require("./ensure_daemon_autostart.js");
 const {
@@ -30,7 +31,7 @@ const {
 } = require("./skip.js");
 const { harnessNeedsConfiguration } = require("../harness/needs.js");
 const { runWslBashLc } = require("./ensure_wsl_runtime.js");
-const { LINUX_PATH_PREFIX, RUNTIME_VERSION_CMD } = require("./constants.js");
+const { LINUX_PATH_PREFIX, RUNTIME_VERSION_CMD, DAEMON_START_CMD } = require("./constants.js");
 const { DAEMON_RESTART_CMD } = require("../cli/restart.js");
 const { detectRuntimeEnvironment } = require("../cli/runtime_environment.js");
 const { releaseRunningInstances } = require("./release_instances.js");
@@ -137,6 +138,7 @@ async function runBootstrap(opts) {
   let knownDistros = [];
   let harnessResults = [];
   let configured = [];
+  let daemonStart = null;
 
   try {
     // An upgrade must never be blocked or left half-replaced by running
@@ -211,6 +213,25 @@ async function runBootstrap(opts) {
       }
       distro = resolved.distro;
 
+      // Repair a <= 0.3.11 autostart snippet before anything else: once the
+      // daemon socket exists it exits every login shell, and every later WSL
+      // step here runs through `bash -lc`. Repair-only and non-login; the full
+      // install further down stays after the runtime install because it picks
+      // systemd only when the daemon binary is already present.
+      if (!noWrite && o.skipDaemonAutostart !== true) {
+        const repair = await (o.repairDaemonAutostartInWsl || repairDaemonAutostartInWsl)({
+          distro,
+          platform,
+          env,
+          exec: o.exec,
+          wslPath: o.wslPath,
+          timeoutMs: o.timeoutMs,
+        });
+        if (repair.status !== ENSURE_DAEMON_STATUSES.OK) {
+          lines.push(`terminal-commander: WSL autostart repair: ${repair.status}; ${repair.hint}`);
+        }
+      }
+
       const skipWslInstall = o.skipWslInstall === true;
       if (!skipWslInstall) {
         const doctor = o.doctor || wslDoctor;
@@ -274,7 +295,7 @@ async function runBootstrap(opts) {
             }
           } else {
             lines.push("terminal-commander: WSL runtime installed and verified.");
-            // On a DETECTED skew only, swap the live daemon once: re-sourcing
+            // On a DETECTED skew only, swap the live daemon once: re-running
             // autostart.sh won't replace a running stale daemon (its
             // `[ -S "$SOCK" ]` early-exit). failSoft: a swap failure is
             // non-fatal and only logged, matching the surrounding pattern.
@@ -289,6 +310,8 @@ async function runBootstrap(opts) {
               });
               if (restart.status === ENSURE_STATUSES.OK) {
                 lines.push("terminal-commander: live WSL daemon swapped to the upgraded runtime.");
+              } else if (restart.status === ENSURE_STATUSES.SHELL_EXITED_EARLY) {
+                lines.push(`terminal-commander: live WSL daemon swap after upgrade did not run: ${restart.hint}`);
               } else {
                 lines.push(
                   `terminal-commander: live WSL daemon swap after upgrade not completed (${restart.status}); restart WSL or run 'terminal-commander restart'.`,
@@ -312,6 +335,7 @@ async function runBootstrap(opts) {
         });
         if (daemonEnsure.status === ENSURE_DAEMON_STATUSES.OK) {
           lines.push("terminal-commander: WSL daemon autostart installed (systemd or profile).");
+          lines.push(...(daemonEnsure.warnings || []));
         } else if (daemonEnsure.status === ENSURE_DAEMON_STATUSES.SKIPPED) {
           /* no line */
         } else if (!failSoft) {
@@ -331,15 +355,37 @@ async function runBootstrap(opts) {
         (mode === "install" || mode === "lazy") &&
         shouldInstallDaemonAutostart(env)
       ) {
-        const startCmd = `${LINUX_PATH_PREFIX}. "$HOME/.config/terminal-commander/autostart.sh" 2>/dev/null || true`;
-        await runWslBashLc({
+        // Non-fatal, but never silent: a start that did not run or failed is
+        // a warning line and `daemon_start` in the result.
+        const start = await runWslBashLc({
           distro,
-          cmd: startCmd,
+          cmd: DAEMON_START_CMD,
           env,
           exec: o.exec,
           wslPath: o.wslPath,
           timeoutMs: o.startDaemonTimeoutMs || 45_000,
         });
+        const started =
+          start.exit_code === 0 && start.status !== ENSURE_STATUSES.SHELL_EXITED_EARLY;
+        // The runner's other statuses classify npm output; for a daemon start
+        // only "did not run" and "timed out" carry their own meaning.
+        const ownCause =
+          start.status === ENSURE_STATUSES.SHELL_EXITED_EARLY ||
+          start.status === ENSURE_STATUSES.CHECK_TIMEOUT;
+        daemonStart = started
+          ? { status: "ok" }
+          : {
+              status: ownCause ? start.status : "start_failed",
+              exit_code: start.exit_code,
+              hint: ownCause
+                ? start.hint
+                : `autostart.sh exited ${start.exit_code}; see ~/.local/state/terminal-commander/daemon.log in WSL`,
+            };
+        if (!started) {
+          lines.push(
+            `terminal-commander: WARNING: WSL daemon start did not complete (${daemonStart.status}): ${daemonStart.hint}`,
+          );
+        }
       }
       }
     }
@@ -496,6 +542,7 @@ async function runBootstrap(opts) {
       lines,
       harness_results: harnessResults,
       distro,
+      daemon_start: daemonStart,
     };
   } finally {
     if (o.acquireLock !== false) {

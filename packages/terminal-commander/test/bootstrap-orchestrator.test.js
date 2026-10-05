@@ -469,3 +469,76 @@ test("setup harness --print-config forwards the flag and does not persist state"
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+// The WSL "start the daemon" step used to be awaited and ignored. It must now
+// report like the steps before it: non-fatal, but never silent.
+function runLazyWithStart(startChild) {
+  const { SHELL_RAN_SENTINEL, DAEMON_START_CMD } = require("../lib/bootstrap/constants.js");
+  const seen = [];
+  const promise = runBootstrap({
+    mode: "lazy",
+    platform: "win32",
+    env: { USERPROFILE: "C:\Users\example", LOCALAPPDATA: os.tmpdir() },
+    distro: "Ubuntu",
+    acquireLock: false,
+    skipWslInstall: true,
+    detect: async () => ({ reason: "ok", distros: [{ name: "Ubuntu" }], default_distro: "Ubuntu" }),
+    repairDaemonAutostartInWsl: async () => ({ status: "ok", hint: "repaired" }),
+    ensureDaemonAutostartInWsl: async () => ({ status: "ok", hint: "installed", warnings: [] }),
+    exec: ({ argv }) => {
+      const cmd = argv[argv.length - 1];
+      seen.push(cmd);
+      return cmd.endsWith(DAEMON_START_CMD) ? startChild(SHELL_RAN_SENTINEL) : fakeWslChild(0, `${SHELL_RAN_SENTINEL}\n`);
+    },
+    ensureStableBinaries: () => ({ exePath: null, copied: [], reason: "skip" }),
+    resolveDirectExePath: () => ({ exePath: null, reason: "skip" }),
+    writeAllHarnesses: () => [{ id: "cursor", status: "ok" }],
+    writeState: () => ({ status: "ok" }),
+  });
+  return promise.then((r) => ({ r, seen, DAEMON_START_CMD }));
+}
+
+test("runBootstrap reports a WSL daemon start that ran: daemon_start ok, no warning", async () => {
+  const { r, seen, DAEMON_START_CMD } = await runLazyWithStart((s) => fakeWslChild(0, `${s}\n`));
+  assert.ok(seen.some((c) => c.endsWith(DAEMON_START_CMD)), "start step must run");
+  assert.equal(r.exit_code, 0);
+  assert.deepEqual(r.daemon_start, { status: "ok" });
+  assert.doesNotMatch(r.output, /daemon start did not complete/);
+});
+
+test("runBootstrap warns when the WSL daemon start never ran (startup file exited the shell)", async () => {
+  const { r } = await runLazyWithStart(() => fakeWslChild(0, ""));
+  assert.equal(r.exit_code, 0, "a start warning stays non-fatal");
+  assert.equal(r.daemon_start.status, "shell_exited_early");
+  assert.match(r.output, /WARNING: WSL daemon start did not complete \(shell_exited_early\): .*startup file/);
+});
+
+test("runBootstrap warns when autostart.sh fails", async () => {
+  const { r } = await runLazyWithStart((s) => fakeWslChild(1, `${s}\n`));
+  assert.equal(r.exit_code, 0);
+  assert.equal(r.daemon_start.status, "start_failed");
+  assert.equal(r.daemon_start.exit_code, 1);
+  assert.match(r.output, /WARNING: WSL daemon start did not complete \(start_failed\): autostart\.sh exited 1/);
+});
+
+test("runBootstrap surfaces WSL installer warnings (malformed rc markers)", async () => {
+  const { SHELL_RAN_SENTINEL } = require("../lib/bootstrap/constants.js");
+  const warning = "terminal-commander: malformed terminal-commander autostart markers left unchanged in /home/u/.bashrc";
+  const r = await runBootstrap({
+    mode: "lazy",
+    platform: "win32",
+    env: { USERPROFILE: "C:\Users\example", LOCALAPPDATA: os.tmpdir() },
+    distro: "Ubuntu",
+    acquireLock: false,
+    skipWslInstall: true,
+    detect: async () => ({ reason: "ok", distros: [{ name: "Ubuntu" }], default_distro: "Ubuntu" }),
+    repairDaemonAutostartInWsl: async () => ({ status: "ok", hint: "repaired" }),
+    ensureDaemonAutostartInWsl: async () => ({ status: "ok", hint: "installed", warnings: [warning] }),
+    exec: () => fakeWslChild(0, `${SHELL_RAN_SENTINEL}\n`),
+    ensureStableBinaries: () => ({ exePath: null, copied: [], reason: "skip" }),
+    resolveDirectExePath: () => ({ exePath: null, reason: "skip" }),
+    writeAllHarnesses: () => [{ id: "cursor", status: "ok" }],
+    writeState: () => ({ status: "ok" }),
+  });
+  assert.ok(r.lines.includes(warning), r.output);
+});

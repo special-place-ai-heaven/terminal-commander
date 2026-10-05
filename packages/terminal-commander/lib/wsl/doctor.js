@@ -47,6 +47,11 @@ const {
   ensureSessionInWslEnv,
 } = require("./filtered_env.js");
 const { spawn } = require("node:child_process");
+const {
+  withShellRanSentinel,
+  takeShellRanSentinel,
+  shellExitedEarlyHint,
+} = require("../bootstrap/constants.js");
 
 const DOCTOR_STATUSES = Object.freeze({
   OK: "ok",
@@ -60,6 +65,7 @@ const DOCTOR_STATUSES = Object.freeze({
   RUNTIME_PRESENT: "runtime_present",
   DOCTOR_NOT_RUN: "doctor_not_run",
   CHECK_TIMEOUT: "check_timeout",
+  SHELL_EXITED_EARLY: "shell_exited_early",
 });
 
 // Constant probe string. The doctor never interpolates operator
@@ -178,6 +184,8 @@ function hintFor(status, distro) {
       return "terminal-commander: WSL probe exceeded the configured timeout; re-run with --timeout-ms set higher if the distro is unusually slow to start.";
     case DOCTOR_STATUSES.DOCTOR_NOT_RUN:
       return "terminal-commander: runtime probe was not requested (probeRuntime: false); pass probeRuntime: true to check whether terminal-commander-mcp is installed inside the distro.";
+    case DOCTOR_STATUSES.SHELL_EXITED_EARLY:
+      return `terminal-commander: ${shellExitedEarlyHint(distro)}`;
     case DOCTOR_STATUSES.OK:
       return `terminal-commander: WSL distro '${distro}' is reachable.`;
     default:
@@ -310,7 +318,7 @@ async function wslDoctor(opts) {
 
   const probe = await exec({
     wslPath,
-    argv: ["-d", requestedDistro, "--", "bash", "-lc", RUNTIME_PROBE_CMD],
+    argv: ["-d", requestedDistro, "--", "bash", "-lc", withShellRanSentinel(RUNTIME_PROBE_CMD)],
     timeoutMs,
   });
 
@@ -329,7 +337,15 @@ async function wslDoctor(opts) {
     });
   }
 
-  const stdoutText = normalizeWslOutput(probe.stdout).trim();
+  const shell = takeShellRanSentinel(normalizeWslOutput(probe.stdout));
+  if (probe.status === 0 && !shell.ran) {
+    return buildResult({
+      status: DOCTOR_STATUSES.SHELL_EXITED_EARLY,
+      distro: requestedDistro,
+      hint: hintFor(DOCTOR_STATUSES.SHELL_EXITED_EARLY, requestedDistro),
+    });
+  }
+  const stdoutText = shell.stdout.trim();
   if (probe.status === 0 && stdoutText.length > 0) {
     return buildResult({
       status: DOCTOR_STATUSES.RUNTIME_PRESENT,
