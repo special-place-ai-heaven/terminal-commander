@@ -11,8 +11,8 @@ set, the default-deny sensitive-path suffix list, and the per-profile
 mutation gates (sections relating to read_only_observer / admin_debug /
 registry_activate). NOT YET SHIPPED: command allow-lists, the
 default-deny posture of section 6, $REPO_ROOT containment, the
-declarative profile schema of section 4, the limits of section 4, and
-the allow_override mechanism of section 5. A config key the daemon does
+declarative profile schema of section 4, and the limits of section 4.
+There is no default-deny override (section 5). A config key the daemon does
 not act on (unknown, or listed as unused) is named as a warning at startup,
 in `self_check`, and in `policy_status.config_warnings`. WARNING: `repo_only`
 (section 2.2) does NOT yet confine to $REPO_ROOT — it currently behaves
@@ -188,10 +188,10 @@ permits:
   - the gated session lane (shell_session_* + workspace_snapshot_*,
     allow_session ON; LIVE, unix-only) and remote federation
     (target_id, allow_remote ON; LIVE via an operator ssh -L forward).
-  - allow_privileged is preset ON but gates the Wave-4 privileged
-    helper, which is PLAN-ONLY: no privileged code ships this program
-    (blocked on a threat review), so the cap currently gates nothing
-    runnable. See docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md.
+  - allow_privileged is accepted but gates nothing: the Wave-4
+    privileged helper it was meant for is PLAN-ONLY (blocked on a
+    threat review), and setting the key is named as a config warning.
+    See docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md.
 denies: nothing structural. COMMANDS_DENY (sudo/doas/su/pkexec/kexec
   argv), the shell-line escalator scan, and the sensitive-path list
   apply only under the hardened profiles; an explicit `[policy.caps]`
@@ -233,7 +233,6 @@ A daemon instance loads exactly one profile at startup, named in
 [policy]
 profile = "full_access"  # the default; or developer_local, repo_only,
                          # read_only_observer, admin_debug (hardened)
-profile_version = "1"   # accepted but unused: named as a config warning
 ```
 
 When `--config` is supplied, that file is authoritative. Otherwise the daemon
@@ -268,9 +267,6 @@ allow_shell      = true    # gates shell_exec (TC49). Default true on
                            #   developer_local, false on the others.
 allow_session    = true    # gates shell_session_* + workspace_snapshot_*
                            #   (omni P1 / TC50; LIVE, unix-only). Default false.
-allow_privileged = false   # gates the Wave-4 privileged helper, NOT
-                           #   generic sudo. PLAN-ONLY; no code shipped
-                           #   (blocked on a threat review).
 allow_remote     = true    # gates remote federation / target_id
                            #   (omni P5; LIVE via operator ssh -L forward).
                            #   Default false.
@@ -289,8 +285,10 @@ Rules:
   default: `allow_shell` resolves `false` unless `[policy.caps]` sets it
   explicitly, because `shell_exec` does not consult `allow_roots` (an
   explicit `allow_shell = true` still enables it, unconfined by
-  `allow_roots`). `allow_session`, `allow_privileged`, and `allow_remote` do
-  nothing until explicitly turned on.
+  `allow_roots`). `allow_session` and `allow_remote` do nothing until
+  explicitly turned on. `allow_privileged` is accepted but gates nothing on
+  any profile (no privileged helper ships); setting it is named as a config
+  warning.
 - **Config / TOML ONLY.** Caps are NEVER MCP-flippable -- no tool can
   turn a cap on or off. Changing a cap means editing TOML and
   restarting the daemon, the same boundary as switching profiles
@@ -541,32 +539,35 @@ admits only the programs it names, so leave interpreters and launchers
 (`env`, `nice`, `timeout`, ...) off it, and it also withholds the
 `developer_local` `allow_shell` default (section 4.1).
 
-### 4.2 Full profile schema (informative)
+### 4.2 Full config schema
+
+Every key the daemon reads, with its default where it has one. A key not
+listed here (for example `[limits] max_jobs`, `[audit] retention_days`,
+`[registry] llm_can_*`, `[policy] profile_version`) is accepted but has
+no effect, and the daemon names it in `config_warnings` (startup log,
+`self_check`, `policy_status`).
 
 ```toml
-[profile]
-name = "developer_local"
-version = "1"
-description = "..."
+[daemon]
+data_dir      = "/home/me/.local/share/terminal-commander"  # --data-dir wins
+idle_ttl_secs = 1800      # self-reap after this idle time; 0 = never
+# socket_path = "/run/user/1000/terminal-commanderd.sock"  # TC_SOCKET wins
 
-[paths]
+[policy]
+profile = "developer_local"
+# repo_root = "/home/me/projects/app"   # required for repo_only
+llm_can_activate_recipes = false        # omitted: profile default
+
+[policy.commands]
+allow_roots = ["cargo", "npm", "pytest", "make", "ls", "git"]
+
+[policy.paths]
 read_allow  = ["/home/me/projects/**", "/srv/repos/**"]
 write_allow = ["/home/me/projects/**/target/**", "/tmp/tc/**"]
 watch_allow = ["/home/me/projects/**"]
 deny_extra  = []   # additional denies beyond default-deny list
 
-[commands]
-allow_roots = ["cargo", "npm", "pytest", "make", "ls", "git"]
-deny        = ["sudo", "doas", "su", "pkexec", "kexec"]
-shell_passthrough = false   # the argv command lane NEVER invokes a
-                            #   joined shell string. As of TC49, shell
-                            #   passthrough is its own gated lane
-                            #   (shell_exec) behind [policy.caps].allow_shell
-                            #   (section 4.1), on in developer_local -- NOT a flag
-                            #   on the argv lane.
-require_argv_quoting = true # MCP argv lists, not joined strings
-
-[probes]
+[policy.probes]
 # Closed kind set {command, file_watch, pty} (the ProbeKind snake_case wire
 # tags), matched case-sensitively. EMPTY allow_kinds == "not configured" ==
 # allow any kind (zero-config usable); a non-empty list is authoritative (a
@@ -575,30 +576,22 @@ require_argv_quoting = true # MCP argv lists, not joined strings
 allow_kinds = []          # allow all three kinds (zero-config posture)
 deny_kinds  = ["pty"]     # ...but forbid interactive PTY probes in this profile
 
+[policy.caps]             # section 4.1; omitted entries keep the profile preset
+allow_shell   = true
+allow_session = false
+allow_remote  = false
+
 [limits]
-max_jobs                   = 16
-per_bucket_event_rate_evt_s = 1000
-per_bucket_event_burst_evt_s = 5000
-per_probe_stream_mib_s      = 10
-context_spool_mib_per_probe = 64
-regex_compile_ms_max        = 50
-regex_step_ms_max           = 10
+file_window_bytes = 65536  # cap on one file_read_window (also the maximum)
+bucket_read_limit = 10000  # cap on events per bucket read (also the maximum)
 
-[audit]
-log_path  = "/var/lib/terminal-commander/audit.log"
-retention_days = 30
-sync = "fsync_per_record"  # or "fsync_per_batch" (operator choice)
+[shell_session]
+max_sessions  = 16
+idle_ttl_secs = 900
 
-[registry]
-llm_can_create   = true
-llm_can_test     = true
-llm_can_activate = false  # admin-CLI approval required
-llm_can_delete   = false
+[sifters]
+universal_extractors = false
 ```
-
-The exact schema (field names, defaults, validation) lands in TC22.
-This block is informative for TC03 fixture design and TC23/TC24 MCP
-test coverage.
 
 **Path allow/deny posture (SHIPPED, TC22 A1).** `read_allow`,
 `watch_allow`, and `deny_extra` are OPT-IN, matching the
@@ -652,29 +645,12 @@ writes; leaving `write_allow` empty there is an open write surface.
 
 ## 5. Default-deny override mechanism
 
-Default-denied paths (see `SECURITY.md` section 5) MAY be overridden
-only via the `paths.allow_override` list in a profile, with EACH entry
-requiring:
-
-1. an exact path or glob (no wildcard alone, no `**` alone);
-2. a justification string (free text; recorded in audit log);
-3. an explicit boolean `i_understand_risk = true`.
-
-Example:
-
-```toml
-[paths.allow_override]
-entries = [
-  { path = "/home/me/.npmrc",
-    justification = "tooling-research dev container only",
-    i_understand_risk = true }
-]
-```
-
-Loading a profile with `allow_override` entries MUST emit an audit
-record at daemon startup naming each overridden path. The override
-applies to that profile instance only; profile reload re-emits the
-audit record.
+None. Default-denied paths (see `SECURITY.md` section 5) cannot be
+re-allowed from config: there is no `allow_override` key, and a
+`[paths.allow_override]` or `[policy.paths.allow_override]` table is an
+unknown key that the daemon ignores and names in `config_warnings`. To
+reach a default-denied path, use a profile that does not apply the
+default-deny list (`full_access`).
 
 ## 6. Decision algorithm (informative)
 
@@ -683,8 +659,8 @@ Given request `(actor, action, subject, profile)`:
 ```text
 1. If profile is invalid or missing version, deny ("policy_invalid").
 2. If action is in section-4 gated list:
-   a. If subject path matches default-deny and no matching
-      allow_override exists -> deny ("default_deny_match").
+   a. If subject path matches default-deny -> deny
+      ("default_deny_match").
    b. If action is command_* and command argv[0] is in commands.deny
       -> deny ("command_denied").
    c. If action is probe_create and kind in probes.deny_kinds

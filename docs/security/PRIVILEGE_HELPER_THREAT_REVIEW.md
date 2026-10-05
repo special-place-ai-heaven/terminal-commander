@@ -191,7 +191,7 @@ Status of each element as of this document:
 | Privilege mechanism (setuid vs polkit) | UNDECIDED. A required review decision. |
 | Helper IPC protocol | NOT WRITTEN. |
 | `privileged_exec` / `privileged_list_ops` / `privileged_approve` | NOT WRITTEN. No such MCP/CLI surface ships. |
-| `allow_privileged` capability | Wired as a config switch (default false); gates nothing runnable. |
+| `allow_privileged` capability | Accepted in config but read by nothing; the daemon names it as a config warning and `policy_status` does not report it. |
 | `omni_status.privileged_helper` | Hard-coded `available: false`, `reason: "threat_review_pending"`. |
 
 No privileged code is written until this review is completed, reviewed
