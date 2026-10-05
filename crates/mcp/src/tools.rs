@@ -352,7 +352,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "credential_request",
             status: ToolStatus::Live,
-            description: "Ask the owner for the password a PTY job is waiting on: a one-time local page via URL elicitation when the client supports it, else a prompt the daemon opens, else the admin CLI. The daemon types the answer; returns only a status (provided, declined, timeout, owner_action_required with the CLI command, not_awaiting). Never returns or accepts the password.",
+            description: "Ask the owner for the password a PTY job is waiting on: a one-time local page via URL elicitation when the client accepts it, else a prompt the daemon opens, else the admin CLI. The daemon types the answer; returns only a status (provided, declined, timeout, owner_action_required with the CLI command, not_awaiting). Never returns or accepts the password.",
         },
         ToolCatalogueEntry {
             name: "shell_session_start",
@@ -3028,7 +3028,7 @@ impl TerminalCommanderMcpServer {
     /// CLI. The daemon owns every write. There is deliberately no MCP tool
     /// for `credential_provide`.
     #[tool(
-        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). No TC surface accepts a password from the model (this holds when TC is the model's only way to run programs; a harness that also gives the model a raw shell can defeat any owner-only channel): if your client supports URL elicitation it shows the owner a link to a one-time local page; otherwise the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop). The daemon types the answer into that job itself. Returns only {job_id, status}: provided | declined | pending (the owner has the link and has not answered yet; the page stays open 5 minutes: call credential_request again every few seconds to poll) | timeout (a dialog not answered within 60 s; it stays open, call again to keep waiting, and tell the owner a credential dialog is open: on Windows it may sit behind other windows with its taskbar entry flashing) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls poll, never re-ask. Never returns or accepts the password or the link."
+        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). No TC surface accepts a password from the model (this holds when TC is the model's only way to run programs; a harness that also gives the model a raw shell can defeat any owner-only channel): if your client supports URL elicitation it offers the owner a link to a one-time local page (the first call may take up to 30 s while it does); if the client does not take it, the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop). The daemon types the answer into that job itself. Returns only {job_id, status}: provided | declined | pending (the owner accepted the link and has not answered yet; the page stays open 5 minutes: call credential_request again every few seconds to poll) | timeout (not answered in time: a credential dialog stays open, call again to keep waiting, and tell the owner it is open: on Windows it may sit behind other windows with its taskbar entry flashing; an expired link is offered again) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls poll, never re-ask. Never returns or accepts the password or the link."
     )]
     async fn credential_request(
         &self,
@@ -3043,14 +3043,9 @@ impl TerminalCommanderMcpServer {
         // With the owner's page open, answer `pending` within seconds and
         // let the model poll; otherwise the daemon asks through its native
         // prompt or the CLI and waits up to 60 s.
-        let mut resp = self
+        let resp = self
             .credential_status(job_id, on_page.then_some(PAGE_POLL_MS))
             .await?;
-        if on_page && resp.status == CredentialStatus::NotAwaiting {
-            // The client could not show the elicitation and the page was
-            // abandoned meanwhile: the daemon's own chain takes over.
-            resp = self.credential_status(job_id, None).await?;
-        }
         json_tool_result(&resp)
     }
 
@@ -3073,9 +3068,10 @@ impl TerminalCommanderMcpServer {
         }
     }
 
-    /// URL-mode elicitation for `job_id`'s prompt. True while the owner
-    /// page is live; false sends `credential_request` down the daemon's
-    /// native-prompt / CLI chain. Never errors: every failure falls back.
+    /// URL-mode elicitation for `job_id`'s prompt. True once the client
+    /// accepted (the owner has the link); false sends `credential_request`
+    /// down the daemon's native-prompt / CLI chain. Never errors: every
+    /// failure falls back.
     async fn elicit_owner_page(
         &self,
         ctx: &RequestContext<RoleServer>,
@@ -3115,27 +3111,31 @@ impl TerminalCommanderMcpServer {
                 elicitation_id: elicitation_id.clone(),
             },
         ));
-        // Sent inside this tool call (SEP-2260), followed outside it: the
-        // owner may take minutes, and the dialog must stay up as long as the
-        // page does, so the timeout is the page's TTL.
+        // Sent inside this tool call (SEP-2260), and answered inside it: a
+        // sent request is no proof the owner sees anything, so only the
+        // client's accept makes the page the channel. Unanswered after
+        // ELICIT_ACK_MS, rmcp cancels the request (notifications/cancelled).
         let sent = ctx
             .peer
             .send_request_with_option(
                 request,
                 rmcp::service::PeerRequestOptions::with_timeout(std::time::Duration::from_millis(
-                    terminal_commanderd::ipc::protocol::CREDENTIAL_URL_TTL_MS,
+                    ELICIT_ACK_MS,
                 )),
             )
             .await;
         if let Ok(handle) = sent {
+            // Its own task, so a cancelled tool call still settles the page.
+            let (accepted_tx, accepted) = tokio::sync::oneshot::channel();
             tokio::spawn(follow_elicitation(
                 self.daemon.clone(),
                 ctx.peer.clone(),
                 job_id,
                 elicitation_id,
                 handle,
+                accepted_tx,
             ));
-            return true;
+            return accepted.await.unwrap_or(false);
         }
         let _ = self
             .daemon
@@ -6570,36 +6570,39 @@ pub struct McpPtyCommandStopParams {
 /// before answering `pending`.
 const PAGE_POLL_MS: u64 = 10_000;
 
-/// The owner's elicitation dialog, followed after the tool call answered.
-/// Decline or cancel is final for that prompt; a client error closes the
-/// page, so the next `credential_request` falls back to the daemon's native
-/// prompt. After accept, once the owner's answer lands,
-/// `notifications/elicitation/complete` closes the client's waiting state
-/// (rmcp 3.4.1 has no typed form of it).
+/// How long the client has to answer the URL elicitation before the owner
+/// is asked another way. The owner only has to agree to open the link.
+const ELICIT_ACK_MS: u64 = 30_000;
+
+/// The owner's elicitation dialog. Only accept keeps the page: decline,
+/// cancel, an error, or no answer within [`ELICIT_ACK_MS`] closes it, so the
+/// same `credential_request` falls back to the daemon's native prompt or
+/// the CLI. `accepted` reports which, after the page is settled. After
+/// accept, once the owner's answer lands, `notifications/elicitation/complete`
+/// closes the client's waiting state (rmcp 3.4.1 has no typed form of it).
 async fn follow_elicitation(
     daemon: crate::daemon_client::McpDaemonClient,
     peer: rmcp::service::Peer<RoleServer>,
     job_id: terminal_commander_core::JobId,
     elicitation_id: String,
     handle: rmcp::service::RequestHandle<RoleServer>,
+    accepted: tokio::sync::oneshot::Sender<bool>,
 ) {
     use rmcp::model::{ClientResult, ElicitationAction};
-    let op = match handle.await_response().await {
-        Ok(ClientResult::ElicitResult(r)) if r.action == ElicitationAction::Accept => None,
-        // Unanswered for the page's whole TTL: it expired with the dialog.
-        Err(rmcp::ServiceError::Timeout { .. }) => return,
-        Ok(ClientResult::ElicitResult(_)) => Some(CredentialUrlOp::Declined),
-        _ => Some(CredentialUrlOp::Abandon),
-    };
-    if let Some(op) = op {
+    if !matches!(
+        handle.await_response().await,
+        Ok(ClientResult::ElicitResult(r)) if r.action == ElicitationAction::Accept
+    ) {
         let _ = daemon
             .call(IpcRequest::CredentialUrl(CredentialUrlParams {
                 job_id,
-                op,
+                op: CredentialUrlOp::Abandon,
             }))
             .await;
+        let _ = accepted.send(false);
         return;
     }
+    let _ = accepted.send(true);
     // Each call waits up to 60 s on the page's outcome; the page settles
     // within its TTL (answered, declined, or expired).
     loop {

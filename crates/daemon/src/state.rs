@@ -448,6 +448,11 @@ impl DaemonState {
             config
                 .credential_url_ttl_test_seam
                 .unwrap_or(crate::credential::CREDENTIAL_URL_TTL),
+            // The endpoint the runtime binds (see `run_ipc_server`).
+            #[cfg(windows)]
+            config.pipe_name(),
+            #[cfg(unix)]
+            config.socket_path().display().to_string(),
         ));
 
         // Mint a fresh per-boot identity. A restart produces a new value;

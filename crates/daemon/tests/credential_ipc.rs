@@ -32,11 +32,11 @@ type ServerHandle = terminal_commanderd::ServerHandle;
 #[cfg(windows)]
 type ServerHandle = terminal_commanderd::PipeServerHandle;
 
-/// The in-process transport: a unix socket, or a named pipe on Windows.
-fn serve(state: &Arc<DaemonState>, tag: &str) -> (PathBuf, ServerHandle) {
+/// The in-process transport: a unix socket, or a named pipe on Windows,
+/// bound where the daemon's config says, as the runtime does.
+fn serve(state: &Arc<DaemonState>) -> (PathBuf, ServerHandle) {
     #[cfg(unix)]
     {
-        let _ = tag;
         let handle =
             terminal_commanderd::IpcServer::new(Arc::clone(state), state.config.socket_path())
                 .spawn()
@@ -45,13 +45,7 @@ fn serve(state: &Arc<DaemonState>, tag: &str) -> (PathBuf, ServerHandle) {
     }
     #[cfg(windows)]
     {
-        let name = format!(
-            r"\\.\pipe\tc-test-cred-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        );
+        let name = state.config.pipe_name();
         let handle = terminal_commanderd::PipeServer::new(Arc::clone(state), name.clone())
             .spawn()
             .unwrap();
@@ -101,6 +95,7 @@ fn tmp_data_dir(tag: &str) -> PathBuf {
 
 struct Harness {
     data: PathBuf,
+    endpoint: PathBuf,
     _state: Arc<DaemonState>,
     _handle: ServerHandle,
     client: DaemonClient,
@@ -122,11 +117,22 @@ impl Harness {
         cfg.credential_prompter_test_seam = prompter.map(str::to_owned);
         cfg.credential_url_ttl_test_seam = url_ttl;
         cfg.recipe_admin_test_seam = true;
+        #[cfg(windows)]
+        {
+            cfg.daemon.socket_path = Some(PathBuf::from(format!(
+                r"\\.\pipe\tc-test-cred-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            )));
+        }
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
-        let (endpoint, handle) = serve(&state, tag);
-        let client = DaemonClient::new(endpoint).with_timeout(Duration::from_secs(90));
+        let (endpoint, handle) = serve(&state);
+        let client = DaemonClient::new(endpoint.clone()).with_timeout(Duration::from_secs(90));
         Self {
             data,
+            endpoint,
             _state: state,
             _handle: handle,
             client,
@@ -729,9 +735,12 @@ fn credential_request_without_a_native_prompt_names_the_owner_cli_command() {
         let mut h = Harness::new("cli", "none");
         let job_id = h.start_child(&python).await;
         h.wait_awaiting(job_id).await;
+        // The owner's terminal has no TC_SESSION: the command must name the
+        // endpoint this daemon is actually serving.
         let expected = format!(
-            "terminal-commander credential provide {}",
-            job_id.to_wire_string()
+            "terminal-commander credential provide {} --socket {}",
+            job_id.to_wire_string(),
+            h.endpoint.display()
         );
         assert_eq!(
             h.request(job_id).await,

@@ -34,10 +34,24 @@ pub const CREDENTIAL_WAIT: Duration =
     Duration::from_millis(terminal_commander_ipc::protocol::CREDENTIAL_REQUEST_WAIT_MS);
 
 /// The command the owner runs when no native prompt is available.
+///
+/// It names this daemon's `endpoint`: the owner's terminal does not carry the
+/// harness's `TC_SESSION`, so without it the CLI reaches the per-user
+/// default daemon, which does not know the job.
 #[must_use]
-pub fn provide_command(job_id: JobId) -> String {
+pub fn provide_command(job_id: JobId, endpoint: &str) -> String {
+    // Quoted only when needed: a bare `\\.\pipe\...` works in PowerShell
+    // and cmd, a bare unix path in any POSIX shell.
+    let safe = endpoint
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "._-/\\:".contains(c));
+    let endpoint = if safe {
+        endpoint.to_owned()
+    } else {
+        format!("\"{endpoint}\"")
+    };
     format!(
-        "terminal-commander credential provide {}",
+        "terminal-commander credential provide {} --socket {endpoint}",
         job_id.to_wire_string()
     )
 }
@@ -70,6 +84,8 @@ pub struct CredentialBroker {
     prompter: Option<String>,
     /// Owner page lifetime ([`CREDENTIAL_URL_TTL`] outside tests).
     url_ttl: Duration,
+    /// The IPC endpoint this daemon binds, for [`provide_command`].
+    endpoint: String,
     asked: parking_lot::Mutex<HashMap<JobId, Ask>>,
 }
 
@@ -81,10 +97,11 @@ impl std::fmt::Debug for CredentialBroker {
 
 impl CredentialBroker {
     #[must_use]
-    pub fn new(prompter: Option<String>, url_ttl: Duration) -> Self {
+    pub fn new(prompter: Option<String>, url_ttl: Duration, endpoint: String) -> Self {
         Self {
             prompter,
             url_ttl,
+            endpoint,
             asked: parking_lot::Mutex::new(HashMap::new()),
         }
     }
@@ -109,7 +126,7 @@ impl CredentialBroker {
                 }
                 _ => {
                     let Some(awaiting) = prompt.awaiting else {
-                        return Ok(response(job_id, CredentialStatus::NotAwaiting));
+                        return Ok(response(job_id, CredentialStatus::NotAwaiting, ""));
                     };
                     let outcome: Outcome = Arc::new(watch::channel(None).0);
                     asked.insert(
@@ -146,7 +163,7 @@ impl CredentialBroker {
                 Ok(Ok(done)) => done.unwrap_or(unanswered),
                 _ => unanswered,
             };
-        Ok(response(job_id, status))
+        Ok(response(job_id, status, &self.endpoint))
     }
 
     /// Record an answer that arrived through the admin CLI, so a pending or
@@ -300,11 +317,12 @@ fn settle(outcome: &Outcome, status: CredentialStatus) {
     });
 }
 
-fn response(job_id: JobId, status: CredentialStatus) -> CredentialRequestResponse {
+fn response(job_id: JobId, status: CredentialStatus, endpoint: &str) -> CredentialRequestResponse {
     CredentialRequestResponse {
         job_id,
         status,
-        command: (status == CredentialStatus::OwnerActionRequired).then(|| provide_command(job_id)),
+        command: (status == CredentialStatus::OwnerActionRequired)
+            .then(|| provide_command(job_id, endpoint)),
     }
 }
 
@@ -922,9 +940,35 @@ mod tests {
     #[test]
     fn only_owner_action_required_carries_the_cli_command() {
         let job = JobId::new();
-        let r = response(job, CredentialStatus::OwnerActionRequired);
-        assert_eq!(r.command.as_deref(), Some(provide_command(job).as_str()));
-        assert!(response(job, CredentialStatus::Declined).command.is_none());
+        let r = response(job, CredentialStatus::OwnerActionRequired, "/s/tc.sock");
+        assert_eq!(
+            r.command.as_deref(),
+            Some(
+                format!(
+                    "terminal-commander credential provide {} --socket /s/tc.sock",
+                    job.to_wire_string()
+                )
+                .as_str()
+            )
+        );
+        assert!(
+            response(job, CredentialStatus::Declined, "/s/tc.sock")
+                .command
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_cli_command_names_this_daemon_and_quotes_only_when_needed() {
+        let job = JobId::new();
+        assert!(
+            provide_command(job, r"\\.\pipe\terminal-commander-agent-1")
+                .ends_with(r" --socket \\.\pipe\terminal-commander-agent-1")
+        );
+        assert!(
+            provide_command(job, r"\\.\pipe\terminal-commander-Jo Smith")
+                .ends_with(r#" --socket "\\.\pipe\terminal-commander-Jo Smith""#)
+        );
     }
 
     #[cfg(windows)]

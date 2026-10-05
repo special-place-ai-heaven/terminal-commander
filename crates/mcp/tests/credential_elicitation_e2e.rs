@@ -38,9 +38,24 @@ ok = line[::-1] == '7K-rekram-terc3s'\n\
 print('MARKER-OK' if ok else 'MARKER-BAD')\n\
 sys.exit(0 if ok else 3)\n";
 
+/// How the client answers `elicitation/create`.
+#[derive(Clone, Copy, Default)]
+enum Reply {
+    /// Accept, then the owner GETs and POSTs the page.
+    #[default]
+    Accept,
+    /// Never answer: the client showed the owner nothing.
+    Silent,
+    Decline,
+    Error,
+}
+
 #[derive(Clone, Default)]
 struct OwnerClient {
     url_mode: bool,
+    reply: Reply,
+    /// Every page URL the client received, to probe it after a fallback.
+    urls: Arc<std::sync::Mutex<Vec<String>>>,
     elicitations: Arc<AtomicUsize>,
     /// Every elicitation message, for the assertion on the owner text.
     messages: Arc<std::sync::Mutex<Vec<String>>>,
@@ -70,6 +85,13 @@ impl ClientHandler for OwnerClient {
             return Ok(ElicitResult::new(ElicitationAction::Decline));
         };
         self.messages.lock().unwrap().push(message);
+        self.urls.lock().unwrap().push(url.clone());
+        match self.reply {
+            Reply::Accept => {}
+            Reply::Silent => std::future::pending::<()>().await,
+            Reply::Decline => return Ok(ElicitResult::new(ElicitationAction::Decline)),
+            Reply::Error => return Err(McpError::internal_error("no dialog", None)),
+        }
         // The owner opens the link after accepting, like a browser would.
         let answer_after = self.answer_after.max(Duration::from_millis(200));
         tokio::spawn(async move {
@@ -397,9 +419,14 @@ async fn client_without_url_elicitation_falls_back_to_the_daemon_chain() {
         .await;
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["status"], "owner_action_required", "{result}");
+        // The owner's terminal has no TC_SESSION: the command names this
+        // daemon's endpoint.
         assert_eq!(
             v["command"],
-            format!("terminal-commander credential provide {job_id}")
+            format!(
+                "terminal-commander credential provide {job_id} --socket {}",
+                handle.socket_path().display()
+            )
         );
         assert_eq!(owner.elicitations.load(Ordering::SeqCst), 0);
         let _ = call(
@@ -412,4 +439,100 @@ async fn client_without_url_elicitation_falls_back_to_the_daemon_chain() {
     }
     handle.shutdown().await;
     let _ = std::fs::remove_dir_all(&data);
+}
+
+/// True once nothing serves the page any more: refused, or not a 200.
+async fn page_is_closed(url: &str) -> bool {
+    let rest = url.strip_prefix("http://").expect("http url");
+    let addr = &rest[..rest.find('/').expect("path")];
+    if tokio::net::TcpStream::connect(addr).await.is_err() {
+        return true;
+    }
+    http(url, "GET", "").await.0 != 200
+}
+
+/// A client that declared URL elicitation but does not take it (never
+/// answers, declines, or errors) must not leave the owner with nothing to
+/// answer while the model polls `pending`: the same call falls back to the
+/// daemon's chain (here no native prompt, so the CLI command), the
+/// abandoned page is closed, and later polls never re-elicit.
+async fn untaken_elicitation_falls_back(tag: &str, reply: Reply) {
+    let Some(python) = python3() else {
+        eprintln!("skipping: python3 not found");
+        return;
+    };
+    let data = tmp_data_dir(tag);
+    let handle = spawn_daemon(&data);
+    {
+        let owner = OwnerClient {
+            url_mode: true,
+            reply,
+            ..OwnerClient::default()
+        };
+        let (_server, client) = connect(&handle, owner.clone()).await;
+        let job_id = start_prompting_child(&client, python).await;
+
+        let first = call(
+            &client,
+            "credential_request",
+            serde_json::json!({"job_id": job_id}),
+        )
+        .await;
+        let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(v["status"], "owner_action_required", "{first}");
+        assert_eq!(
+            v["command"],
+            format!(
+                "terminal-commander credential provide {job_id} --socket {}",
+                handle.socket_path().display()
+            )
+        );
+        assert_eq!(owner.elicitations.load(Ordering::SeqCst), 1);
+        let url = owner.urls.lock().unwrap()[0].clone();
+        assert!(page_is_closed(&url).await, "the abandoned page must close");
+
+        let again = call(
+            &client,
+            "credential_request",
+            serde_json::json!({"job_id": job_id}),
+        )
+        .await;
+        assert!(again.contains("owner_action_required"), "{again}");
+        assert_eq!(
+            owner.elicitations.load(Ordering::SeqCst),
+            1,
+            "polls never re-elicit"
+        );
+        // The model never sees the page: no URL, token, or elicitation id.
+        let token = url.rsplit('/').next().unwrap();
+        for result in [&first, &again] {
+            assert!(!result.contains("http://"), "{result}");
+            assert!(!result.contains(token), "{result}");
+            assert!(!result.contains(SECRET), "{result}");
+        }
+        let _ = call(
+            &client,
+            "pty_command_stop",
+            serde_json::json!({"job_id": job_id}),
+        )
+        .await;
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_never_answers_the_elicitation_falls_back_in_the_same_call() {
+    untaken_elicitation_falls_back("silent", Reply::Silent).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declined_elicitation_falls_back_in_the_same_call() {
+    untaken_elicitation_falls_back("decline", Reply::Decline).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_error_on_the_elicitation_falls_back_in_the_same_call() {
+    untaken_elicitation_falls_back("error", Reply::Error).await;
 }
