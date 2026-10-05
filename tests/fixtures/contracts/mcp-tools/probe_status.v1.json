@@ -33,7 +33,8 @@
       "frames_suppressed_dedupe": 0,
       "secret_prompts_total": 0,
       "secret_prompt_active": false,
-      "path": "C:\\work\\app\\build.log"
+      "path": "C:\\work\\app\\build.log",
+      "liveness": { "state": "running" }
     }
   },
   "unavailable_error_example": {
