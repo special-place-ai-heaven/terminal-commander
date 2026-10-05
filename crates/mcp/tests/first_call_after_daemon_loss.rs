@@ -301,18 +301,20 @@ fn commands_carry_the_child_marker_and_not_the_daemons_endpoint() {
             "-c",
             format!("env > '{p}.tmp' && mv '{p}.tmp' '{p}'", p = out.display())
         ]);
-        let args = if tool == "run_and_watch" {
+        let params = if tool == "run_and_watch" {
             json!({"argv": argv, "wait_ms": 20000, "wait_until": "exit"})
         } else {
             json!({"argv": argv})
         };
-        let ran = a.call_tool(tool, &args);
+        let ran = a.call_tool(tool, &params);
         assert!(is_success(&ran), "{tool}: {ran}");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         let env = loop {
             let env = std::fs::read_to_string(&out).unwrap_or_default();
-            if env.lines().any(|l| l.to_ascii_uppercase().starts_with("PATH="))
+            if env
+                .lines()
+                .any(|l| l.to_ascii_uppercase().starts_with("PATH="))
                 || std::time::Instant::now() >= deadline
             {
                 break env;
@@ -328,7 +330,10 @@ fn commands_carry_the_child_marker_and_not_the_daemons_endpoint() {
             .lines()
             .filter(|l| l.starts_with("TC_SOCKET=") || l.starts_with("TC_DATA="))
             .collect();
-        assert!(leaked.is_empty(), "{tool}: the command inherited {leaked:?}");
+        assert!(
+            leaked.is_empty(),
+            "{tool}: the command inherited {leaked:?}"
+        );
         assert!(
             env.lines().any(|l| l.trim_end() == "TC_DAEMON_CHILD=1"),
             "{tool}: the command must carry TC_DAEMON_CHILD=1"
