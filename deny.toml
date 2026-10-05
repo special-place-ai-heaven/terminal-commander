@@ -31,6 +31,9 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# crates/cli is publish = false; its internal path deps carry no version pin. Registry
+# wildcards stay denied, and publishable crates must still pin path deps.
+allow-wildcard-paths = true
 highlight = "all"
 deny = []
 
