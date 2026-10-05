@@ -207,8 +207,9 @@ pub struct ContextWindowResponse {
     pub evicted_frames: u64,
 }
 
-/// Bounded tail of a probe ring. Used by the no-silence exit receipt
-/// (TCE-ERG-1) when a command finished with zero rule-driven events.
+/// Bounded tail (or, via `head_frames`, head) of a probe ring. Used by the
+/// no-silence exit receipt (TCE-ERG-1) when a command finished with zero
+/// rule-driven events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingTail {
     /// Last N frame texts in chronological order (oldest first).
@@ -322,6 +323,34 @@ impl RingInner {
         }
         RingTail {
             lines: chosen.into_iter().collect(),
+            evicted_frames: self.evicted_frames,
+            truncated,
+        }
+    }
+
+    /// Return the first `max_lines` RETAINED frame texts, oldest first,
+    /// bounded by `max_bytes` (oldest frames win). When `evicted_frames > 0`
+    /// these are not the true first lines of output; callers must check.
+    /// Pure read; never mutates.
+    fn head(&self, max_lines: usize, max_bytes: usize) -> RingTail {
+        let mut chosen: Vec<String> = Vec::new();
+        let mut bytes = 0usize;
+        let mut truncated = false;
+        for f in self.frames.iter().take(max_lines) {
+            let len = f.text.len();
+            if chosen.is_empty() {
+                if len > max_bytes {
+                    truncated = true;
+                }
+            } else if bytes + len > max_bytes {
+                truncated = true;
+                break;
+            }
+            bytes += len;
+            chosen.push(f.text.clone());
+        }
+        RingTail {
+            lines: chosen,
             evicted_frames: self.evicted_frames,
             truncated,
         }
@@ -545,6 +574,21 @@ impl ContextRingManager {
         let cell = self.cell(probe_id)?;
         let inner = cell.read();
         Ok(inner.tail(max_lines, max_bytes))
+    }
+
+    /// Read a bounded head (oldest retained frames) of a probe's ring.
+    /// Pure read; never mutates. Returns `NotFound` when the ring is absent.
+    /// When the returned `evicted_frames > 0` the lines are NOT the true
+    /// start of output. Used by the no-silence exit receipt.
+    pub fn head_frames(
+        &self,
+        probe_id: ProbeId,
+        max_lines: usize,
+        max_bytes: usize,
+    ) -> Result<RingTail, ContextError> {
+        let cell = self.cell(probe_id)?;
+        let inner = cell.read();
+        Ok(inner.head(max_lines, max_bytes))
     }
 
     /// Whether a ring exists for the probe.
@@ -930,5 +974,51 @@ mod tests {
         let mgr = ContextRingManager::new();
         let pid = ProbeId::new();
         assert!(mgr.tail_frames(pid, 5, 1000).is_err());
+    }
+
+    #[test]
+    fn head_frames_returns_oldest_retained_and_reports_eviction() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        mgr.create_ring(
+            pid,
+            ContextRingConfig {
+                max_frames: 3,
+                max_bytes: 1_000_000,
+            },
+        )
+        .unwrap();
+        for i in 0..2u64 {
+            mgr.append_frame(pid, frame(pid, &format!("l{i}"), i + 1))
+                .unwrap();
+        }
+        let head = mgr.head_frames(pid, 5, 1_000_000).unwrap();
+        assert_eq!(head.lines, vec!["l0", "l1"]);
+        assert_eq!(head.evicted_frames, 0);
+        for i in 2..6u64 {
+            mgr.append_frame(pid, frame(pid, &format!("l{i}"), i + 1))
+                .unwrap();
+        }
+        let head = mgr.head_frames(pid, 2, 1_000_000).unwrap();
+        // Oldest RETAINED frames; the eviction count says they are not
+        // the true start of output.
+        assert_eq!(head.lines, vec!["l3", "l4"]);
+        assert_eq!(head.evicted_frames, 3);
+    }
+
+    #[test]
+    fn head_frames_byte_cap_truncates_from_back() {
+        let mgr = ContextRingManager::new();
+        let pid = ProbeId::new();
+        mgr.create_ring(pid, ContextRingConfig::default()).unwrap();
+        for i in 0..5u64 {
+            mgr.append_frame(pid, frame(pid, &format!("xxx{i}"), i + 1))
+                .unwrap();
+        }
+        // 9 bytes fits the first 2 lines (8 bytes); the rest are dropped.
+        let head = mgr.head_frames(pid, 5, 9).unwrap();
+        assert_eq!(head.lines, vec!["xxx0", "xxx1"]);
+        assert!(head.truncated);
+        assert!(mgr.head_frames(ProbeId::new(), 5, 9).is_err());
     }
 }

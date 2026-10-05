@@ -90,6 +90,7 @@ fn progress_only_stdout_suppresses_before_evaluate() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })
@@ -149,6 +150,7 @@ fn dedupe_collapses_repeated_matches_within_window() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })

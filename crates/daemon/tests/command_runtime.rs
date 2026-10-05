@@ -151,6 +151,7 @@ fn command_start_emits_matching_signal_into_bucket_no_raw_text() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -252,6 +253,7 @@ fn recognized_tool_without_pack_gets_pack_available_hint() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -283,6 +285,7 @@ fn unrecognized_tool_gets_no_pack_hint() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -320,6 +323,7 @@ fn universal_extractors_emit_baseline_signal_when_enabled() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -376,6 +380,7 @@ fn universal_extractors_silent_when_disabled() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -439,6 +444,7 @@ fn recognized_tool_with_active_pack_gets_no_hint() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -489,6 +495,7 @@ fn command_start_denied_for_sudo_argv_under(profile: terminal_commanderd::Policy
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -543,6 +550,7 @@ fn command_start_with_invalid_inline_rule_fails_fast_without_leaking_bucket() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -587,6 +595,7 @@ fn command_start_denied_for_bare_sh_argv() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -642,6 +651,7 @@ fn command_start_denied_for_absolute_sh_argv() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -704,6 +714,7 @@ fn command_start_denies_all_known_shell_interpreters() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             };
@@ -754,6 +765,7 @@ fn command_start_denies_fcr001_shell_bypasses() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             };
@@ -888,6 +900,7 @@ fn argv_shell_interpreter_still_denied_unchanged() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -937,6 +950,7 @@ fn nonzero_exit_produces_command_failed_event_in_bucket() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -993,6 +1007,7 @@ fn empty_argv_is_rejected_before_spawn() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -1077,6 +1092,7 @@ fn dedup_req(
         grace: None,
         tag: None,
         dedup_nonce: nonce.map(str::to_owned),
+        receipt_shape: None,
         peer_discriminator: peer,
         strip_ansi: true,
     }
@@ -1294,6 +1310,7 @@ fn missing_program_yields_structured_program_not_found_receipt() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -1485,6 +1502,7 @@ fn wsl_req(argv: &[&str]) -> CommandStartRequest {
         grace: None,
         tag: None,
         dedup_nonce: None,
+        receipt_shape: None,
         strip_ansi: true,
         peer_discriminator: None,
     }

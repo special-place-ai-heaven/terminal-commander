@@ -811,6 +811,7 @@ pub(in crate::ipc::server) fn handle_recipe_run(
         grace_ms: None,
         tag: None,
         dedup_nonce: None,
+        receipt_shape: None,
         strip_ansi: true,
     };
     let started = match super::command::handle_command_start_combed(state, &start, peer)? {

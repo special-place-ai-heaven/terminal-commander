@@ -35,8 +35,8 @@ lane-selection map is [`docs/mcp/OMNI_PLAYBOOK.md`](docs/mcp/OMNI_PLAYBOOK.md).
 Raw terminal output stays out of the model transcript. The agent defines
 keyword/regex **rules**, runs the command, and receives only the matching
 **signal events** plus the exit state. A quiet command (zero matches) returns a
-bounded **receipt** — exit code, suppressed-line count, short tail, and
-`lines_omitted` (lines the tail leaves out) — so no
+bounded **receipt** — exit code, suppressed-line count, short tail (plus an
+optional `head` of first lines), and `lines_omitted` (lines neither shows) — so no
 result is ever silent or misleading.
 
 > [!IMPORTANT]

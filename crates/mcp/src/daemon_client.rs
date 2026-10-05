@@ -666,6 +666,7 @@ mod tests {
                 grace_ms: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
             },
         ))
@@ -702,6 +703,7 @@ mod tests {
                 rules: vec![],
                 bucket_config: None,
                 tag: None,
+                receipt_shape: None,
             },
         ))
         .expect("shell_exec is a spawn ack");

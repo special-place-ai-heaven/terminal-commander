@@ -69,7 +69,7 @@ use terminal_commanderd::ipc::protocol::{
     IpcErrorCode, IpcRequest, IpcResponse, ListLimitParams, PolicyCapsView, PolicyStatusResponse,
     ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse,
     PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
-    PtyCommandWriteStdinParams, RecipeActivateParams, RecipeActivateResponse,
+    PtyCommandWriteStdinParams, ReceiptShape, RecipeActivateParams, RecipeActivateResponse,
     RecipeDeactivateParams, RecipeDeactivateResponse, RecipeGetParams, RecipeGetResponse,
     RecipeListActiveResponse, RecipeRunParams, RecipeRunResponse, RecipeSearchParams,
     RecipeSearchResponse, RecipeTestParams, RecipeUpsertParams, RecipeUpsertResponse,
@@ -1368,7 +1368,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING; continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING (elapsed_ms/last_output_age_ms show liveness); continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
     )]
     async fn run_and_watch(
         &self,
@@ -1438,6 +1438,8 @@ impl TerminalCommanderMcpServer {
         let mut last_outcome_trust: Option<terminal_commander_ipc::OutcomeTrust> = None;
         let mut exit_code: Option<i32> = None;
         let mut pipeline_exit_masked = false;
+        let mut elapsed_ms = None;
+        let mut last_output_age_ms = None;
         // Deferred init: every normal loop exit assigns `receipt` first, and the
         // degraded arms pass `None` (a degraded result carries no receipt), so a
         // `= None` here would be a dead store under -D unused-assignments.
@@ -1468,6 +1470,8 @@ impl TerminalCommanderMcpServer {
                         last_outcome_trust,
                         exit_code,
                         pipeline_exit_masked,
+                        elapsed_ms,
+                        last_output_age_ms,
                         &signals,
                         None,
                         true,
@@ -1483,6 +1487,8 @@ impl TerminalCommanderMcpServer {
             last_outcome_trust = Some(status.outcome_trust);
             exit_code = status.exit_code;
             pipeline_exit_masked = status.pipeline_exit_masked;
+            elapsed_ms = status.elapsed_ms;
+            last_output_age_ms = status.last_output_age_ms;
             receipt = status.receipt.as_ref().map(|r| serde_json::json!(r));
 
             let terminal = matches!(
@@ -1537,6 +1543,8 @@ impl TerminalCommanderMcpServer {
                         last_outcome_trust,
                         exit_code,
                         pipeline_exit_masked,
+                        elapsed_ms,
+                        last_output_age_ms,
                         &signals,
                         None,
                         true,
@@ -1599,6 +1607,8 @@ impl TerminalCommanderMcpServer {
             last_outcome_trust,
             exit_code,
             pipeline_exit_masked,
+            elapsed_ms,
+            last_output_age_ms,
             &signals,
             receipt,
             false,
@@ -1619,7 +1629,7 @@ impl TerminalCommanderMcpServer {
 
     /// `command_status` — lifecycle counters + exit info for a job.
     #[tool(
-        description = "Lookup bounded counters and exit info for a previously started job. `outcome_trust` tells you HOW the daemon knows: `observed` (witnessed live -- every counter is a real observation), `reconstructed` (read back from the durable receipt after a restart -- state/exit_code are truthful and the counters are the values captured when the job finished), `abandoned` (ended by daemon shutdown or replacement rather than by the job itself; reported as cancelled with no exit code, and is NOT a failure). A job the daemon recorded STARTING but never recorded finishing is not a status at all -- it is returned as a typed `JobLost` error, never as an `outcome_trust` value, and must NEVER be read as success. `restarted` is the older boolean alias for 'not observed live'; prefer `outcome_trust`. Never returns raw stream text, with one exception: when the command finished and ZERO rules matched, a bounded exit receipt (exit code, suppressed-line count, short tail, lines_omitted = lines the tail leaves out) is included so a no-rule command is never silent. That receipt is memory-only and does NOT survive a daemon restart -- its absence after a restart does not mean the command produced no output. While a job runs, elapsed_ms and last_output_age_ms (absent until output is captured) report liveness. `pipeline_exit_masked: true` means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only the last stage (unless the script sets pipefail), so an earlier stage's failure can hide behind a 0. Not detected on reconstructed status, PTY jobs, cmd /C or pwsh -Command."
+        description = "Lookup bounded counters and exit info for a previously started job. `outcome_trust` tells you HOW the daemon knows: `observed` (witnessed live -- every counter is a real observation), `reconstructed` (read back from the durable receipt after a restart -- state/exit_code are truthful and the counters are the values captured when the job finished), `abandoned` (ended by daemon shutdown or replacement rather than by the job itself; reported as cancelled with no exit code, and is NOT a failure). A job the daemon recorded STARTING but never recorded finishing is not a status at all -- it is returned as a typed `JobLost` error, never as an `outcome_trust` value, and must NEVER be read as success. `restarted` is the older boolean alias for 'not observed live'; prefer `outcome_trust`. Never returns raw stream text, with one exception: when the command finished and ZERO rules matched, a bounded exit receipt (exit code, suppressed-line count, short tail, optional head of first lines, lines_omitted = lines neither shows) is included so a no-rule command is never silent. That receipt is memory-only and does NOT survive a daemon restart -- its absence after a restart does not mean the command produced no output. While a job runs, elapsed_ms and last_output_age_ms (absent until output is captured) report liveness. `pipeline_exit_masked: true` means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only the last stage (unless the script sets pipefail), so an earlier stage's failure can hide behind a 0. Not detected on reconstructed status, PTY jobs, cmd /C or pwsh -Command."
     )]
     async fn command_status(
         &self,
@@ -2452,6 +2462,8 @@ impl TerminalCommanderMcpServer {
             outcome_trust,
             exit_code,
             pipeline_exit_masked,
+            elapsed_ms,
+            last_output_age_ms,
             cursor,
             signals,
             receipt,
@@ -2474,6 +2486,8 @@ impl TerminalCommanderMcpServer {
             outcome_trust,
             exit_code,
             pipeline_exit_masked,
+            elapsed_ms,
+            last_output_age_ms,
             &signals,
             receipt,
             degraded,
@@ -2518,6 +2532,8 @@ impl TerminalCommanderMcpServer {
         let mut last_outcome_trust = None;
         let mut exit_code = None;
         let mut pipeline_exit_masked = false;
+        let mut elapsed_ms = None;
+        let mut last_output_age_ms = None;
         // Deferred init: every loop iteration assigns `receipt` before the
         // final Ok(..) below reads it; the early-return degraded arms never
         // read it (mirrors run_and_watch's same pattern).
@@ -2532,21 +2548,27 @@ impl TerminalCommanderMcpServer {
                 Ok(IpcResponse::CommandStatus(status)) => status,
                 Ok(other) => return Err(unexpected_variant(&other)),
                 Err(e) => {
-                    return Ok(degraded_recipe_watch(
-                        last_state,
-                        last_outcome_trust,
-                        exit_code,
-                        pipeline_exit_masked,
-                        resume_cursor,
-                        signals,
-                        &e,
-                    ));
+                    return Ok(RecipeWatch {
+                        elapsed_ms,
+                        last_output_age_ms,
+                        ..degraded_recipe_watch(
+                            last_state,
+                            last_outcome_trust,
+                            exit_code,
+                            pipeline_exit_masked,
+                            resume_cursor,
+                            signals,
+                            &e,
+                        )
+                    });
                 }
             };
             last_state = Some(status.state);
             last_outcome_trust = Some(status.outcome_trust);
             exit_code = status.exit_code;
             pipeline_exit_masked = status.pipeline_exit_masked;
+            elapsed_ms = status.elapsed_ms;
+            last_output_age_ms = status.last_output_age_ms;
             receipt = status.receipt.as_ref().map(|r| serde_json::json!(r));
             let terminal = matches!(
                 status.state,
@@ -2574,15 +2596,19 @@ impl TerminalCommanderMcpServer {
                 )
                 .await?
             {
-                return Ok(degraded_recipe_watch(
-                    last_state,
-                    last_outcome_trust,
-                    exit_code,
-                    pipeline_exit_masked,
-                    resume_cursor,
-                    signals,
-                    &err,
-                ));
+                return Ok(RecipeWatch {
+                    elapsed_ms,
+                    last_output_age_ms,
+                    ..degraded_recipe_watch(
+                        last_state,
+                        last_outcome_trust,
+                        exit_code,
+                        pipeline_exit_masked,
+                        resume_cursor,
+                        signals,
+                        &err,
+                    )
+                });
             }
             if terminal || signals.len() >= max_signals {
                 break;
@@ -2599,15 +2625,19 @@ impl TerminalCommanderMcpServer {
                     )
                     .await?
                 {
-                    return Ok(degraded_recipe_watch(
-                        last_state,
-                        last_outcome_trust,
-                        exit_code,
-                        pipeline_exit_masked,
-                        resume_cursor,
-                        signals,
-                        &err,
-                    ));
+                    return Ok(RecipeWatch {
+                        elapsed_ms,
+                        last_output_age_ms,
+                        ..degraded_recipe_watch(
+                            last_state,
+                            last_outcome_trust,
+                            exit_code,
+                            pipeline_exit_masked,
+                            resume_cursor,
+                            signals,
+                            &err,
+                        )
+                    });
                 }
                 break;
             }
@@ -2620,6 +2650,8 @@ impl TerminalCommanderMcpServer {
             outcome_trust: last_outcome_trust,
             exit_code,
             pipeline_exit_masked,
+            elapsed_ms,
+            last_output_age_ms,
             cursor: resume_cursor,
             signals,
             receipt,
@@ -4287,6 +4319,8 @@ fn run_and_watch_result(
     outcome_trust: Option<terminal_commander_ipc::OutcomeTrust>,
     exit_code: Option<i32>,
     pipeline_exit_masked: bool,
+    elapsed_ms: Option<u64>,
+    last_output_age_ms: Option<u64>,
     signals: &[terminal_commander_core::SignalEvent],
     receipt: Option<serde_json::Value>,
     degraded: bool,
@@ -4302,6 +4336,8 @@ fn run_and_watch_result(
         outcome_trust,
         exit_code,
         pipeline_exit_masked,
+        elapsed_ms,
+        last_output_age_ms,
         signals,
         receipt,
         degraded,
@@ -4329,6 +4365,9 @@ fn run_and_watch_result_value(
     exit_code: Option<i32>,
     // F1: last status saw a shell pipeline; `exit_code` may be its last stage's.
     pipeline_exit_masked: bool,
+    // Liveness from the last status; surfaced only on an incomplete result.
+    elapsed_ms: Option<u64>,
+    last_output_age_ms: Option<u64>,
     signals: &[terminal_commander_core::SignalEvent],
     receipt: Option<serde_json::Value>,
     degraded: bool,
@@ -4381,7 +4420,7 @@ fn run_and_watch_result_value(
     } else {
         serde_json::json!(RUN_AND_WATCH_POLL_HINT_MS)
     };
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "job_id": job_id,
         "bucket_id": bucket_id,
         "state": state_json,
@@ -4404,7 +4443,18 @@ fn run_and_watch_result_value(
         // spec 004 FR-006: present on every payload, null only when no status
         // was ever obtained. Never guessed.
         "outcome_trust": outcome_trust,
-    })
+    });
+    // Liveness for a job still running when the wait ended; omitted once
+    // complete (and absent whenever the last status did not report it).
+    if !complete {
+        if let Some(elapsed) = elapsed_ms {
+            v["elapsed_ms"] = serde_json::json!(elapsed);
+        }
+        if let Some(age) = last_output_age_ms {
+            v["last_output_age_ms"] = serde_json::json!(age);
+        }
+    }
+    v
 }
 
 /// Build a structured `daemon_unavailable` MCP error envelope.
@@ -5204,6 +5254,16 @@ pub struct McpCommandStartParams {
     /// silently defeated by color codes. Set `false` to match raw bytes.
     #[serde(default = "default_true_mcp")]
     pub strip_ansi: bool,
+    /// First output lines the quiet receipt shows as `head`. Default 0,
+    /// clamped to 0..=20; head + tail share 4096 bytes (head at most 2048).
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub receipt_head_lines: Option<u32>,
+    /// Last output lines the quiet receipt shows as `tail`. Default 5,
+    /// clamped to 0..=50; head + tail share 4096 bytes.
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub receipt_tail_lines: Option<u32>,
     /// P5 remote federation: optional registered `target_id`. Omitted/None
     /// (the default) runs LOCALLY -- exact backward compatibility. When set,
     /// the command runs on that target's daemon, reached ONLY through the
@@ -5242,8 +5302,22 @@ impl McpCommandStartParams {
             // only on a transport-layer re-send that reuses this exact
             // value, which this adapter no longer does after Phase 1.
             dedup_nonce: Some(fresh_dedup_nonce()),
+            receipt_shape: receipt_shape(self.receipt_head_lines, self.receipt_tail_lines),
         })
     }
+}
+
+/// Lower the optional MCP receipt-shape params. Both omitted keeps the
+/// field off the wire (the daemon default); the daemon clamps.
+fn receipt_shape(head: Option<u32>, tail: Option<u32>) -> Option<ReceiptShape> {
+    if head.is_none() && tail.is_none() {
+        return None;
+    }
+    let default = ReceiptShape::default();
+    Some(ReceiptShape {
+        head_lines: head.unwrap_or(default.head_lines),
+        tail_lines: tail.unwrap_or(default.tail_lines),
+    })
 }
 
 /// Params for `target_probe` (P5 / T051).
@@ -5330,6 +5404,16 @@ pub struct McpShellExecParams {
     /// Omit for none.
     #[serde(default)]
     pub tag: Option<String>,
+    /// First output lines the quiet receipt shows as `head`. Default 0,
+    /// clamped to 0..=20; head + tail share 4096 bytes (head at most 2048).
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub receipt_head_lines: Option<u32>,
+    /// Last output lines the quiet receipt shows as `tail`. Default 5,
+    /// clamped to 0..=50; head + tail share 4096 bytes.
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub receipt_tail_lines: Option<u32>,
     /// Reserved bounded-wait control (ms). Accepted for forward parity
     /// with `run_and_watch`; `shell_exec` is start-only and returns
     /// bounded start metadata immediately, so this is currently ignored.
@@ -5358,6 +5442,7 @@ impl McpShellExecParams {
             rules,
             bucket_config,
             tag: self.tag,
+            receipt_shape: receipt_shape(self.receipt_head_lines, self.receipt_tail_lines),
         })
     }
 }
@@ -5367,6 +5452,8 @@ struct RecipeWatch {
     outcome_trust: Option<terminal_commander_ipc::OutcomeTrust>,
     exit_code: Option<i32>,
     pipeline_exit_masked: bool,
+    elapsed_ms: Option<u64>,
+    last_output_age_ms: Option<u64>,
     cursor: u64,
     signals: Vec<terminal_commander_core::SignalEvent>,
     receipt: Option<serde_json::Value>,
@@ -5389,6 +5476,9 @@ fn degraded_recipe_watch(
         outcome_trust,
         exit_code,
         pipeline_exit_masked,
+        // Callers overlay the last status's liveness.
+        elapsed_ms: None,
+        last_output_age_ms: None,
         cursor,
         signals,
         // F6: an interrupted wait did not necessarily cap; degraded:true
@@ -5512,6 +5602,16 @@ pub struct McpRunAndWatchParams {
     /// in the frame store.
     #[serde(default = "default_true_mcp")]
     pub strip_ansi: bool,
+    /// First output lines the quiet receipt shows as `head`. Default 0,
+    /// clamped to 0..=20; head + tail share 4096 bytes (head at most 2048).
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub receipt_head_lines: Option<u32>,
+    /// Last output lines the quiet receipt shows as `tail`. Default 5,
+    /// clamped to 0..=50; head + tail share 4096 bytes.
+    #[serde(default, deserialize_with = "de_opt_u32_lenient")]
+    #[schemars(with = "u32")]
+    pub receipt_tail_lines: Option<u32>,
     /// Compact projection (TC-E1): when `true`, each returned signal carries
     /// ONLY `{summary, stream, seq, severity}` -- the load-bearing fields --
     /// dropping the id plumbing that dominates token cost for the common
@@ -5566,6 +5666,8 @@ impl McpRunAndWatchParams {
             tag: self.tag,
             // TC-B1: forward the strip flag onto the underlying start.
             strip_ansi: self.strip_ansi,
+            receipt_head_lines: self.receipt_head_lines,
+            receipt_tail_lines: self.receipt_tail_lines,
             // P5: carry the target_id onto the start params so run_and_watch
             // resolves the same daemon client for the whole one-shot.
             target_id: self.target_id,
@@ -7462,6 +7564,8 @@ mod tests {
                 None,
                 Some(0),
                 masked,
+                None,
+                None,
                 &[],
                 None,
                 false,
@@ -7471,6 +7575,39 @@ mod tests {
             );
             assert_eq!(v["pipeline_exit_masked"], serde_json::json!(masked));
         }
+    }
+
+    /// A wait-exhausted (still running) result carries the last status's
+    /// liveness; a complete one does not.
+    #[test]
+    fn run_and_watch_payload_carries_liveness_only_while_incomplete() {
+        let build = |state| {
+            run_and_watch_result_value(
+                terminal_commander_core::JobId::new(),
+                terminal_commander_core::BucketId::new(),
+                0,
+                Some(state),
+                None,
+                None,
+                false,
+                Some(1500),
+                Some(200),
+                &[],
+                None,
+                false,
+                None,
+                false,
+                false,
+            )
+        };
+        let running = build(terminal_commander_core::JobState::Running);
+        assert_eq!(running["complete"], serde_json::json!(false));
+        assert_eq!(running["elapsed_ms"], serde_json::json!(1500));
+        assert_eq!(running["last_output_age_ms"], serde_json::json!(200));
+        let done = build(terminal_commander_core::JobState::Exited);
+        assert_eq!(done["complete"], serde_json::json!(true));
+        assert!(done.get("elapsed_ms").is_none());
+        assert!(done.get("last_output_age_ms").is_none());
     }
 
     /// Build a `run_and_watch_result` payload and return its parsed JSON. A
@@ -7503,6 +7640,8 @@ mod tests {
             None,
             exit_code,
             false,
+            None,
+            None,
             signals,
             None,
             degraded,
@@ -9465,6 +9604,8 @@ mod tests {
             max_signals: None,
             tag: Some("X".to_string()),
             strip_ansi: true,
+            receipt_head_lines: None,
+            receipt_tail_lines: None,
             compact: false,
             wait_until: None,
             target_id: None,
@@ -9485,6 +9626,8 @@ mod tests {
             max_signals: None,
             tag: None,
             strip_ansi: true,
+            receipt_head_lines: None,
+            receipt_tail_lines: None,
             compact: false,
             wait_until: None,
             target_id: None,

@@ -647,6 +647,7 @@ impl WatchRuntime {
             (b.bucket_id, b.probe_id, m)
         };
         let rec = self.jobs.get(watch_id)?;
+        let elapsed_ms = crate::command::running_elapsed_ms(&rec);
         Some(terminal_commander_ipc::protocol::CommandStatusResponse {
             job_id: watch_id,
             bucket_id,
@@ -671,9 +672,10 @@ impl WatchRuntime {
             outcome_trust: OutcomeTrust::Observed,
             pipeline_exit_masked: false,
             awaiting_credential: None,
-            elapsed_ms: crate::command::running_elapsed_ms(&rec),
-            // File-probe metrics carry no last-frame time.
-            last_output_age_ms: None,
+            elapsed_ms,
+            last_output_age_ms: elapsed_ms
+                .and(metrics.last_frame_at)
+                .map(crate::command::output_age_ms),
         })
     }
 
@@ -851,6 +853,7 @@ mod tests {
             frames_suppressed: 7,
             frames_suppressed_progress: 4,
             frames_suppressed_dedupe: 3,
+            last_frame_at: None,
         };
         let snapshot = FileProbeMetrics::default();
 

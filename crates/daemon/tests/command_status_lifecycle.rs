@@ -54,6 +54,7 @@ fn command_status_counts_lifecycle_event_when_no_rules_match() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })
@@ -135,6 +136,7 @@ fn lifecycle_waiter_is_drained_before_store_close() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })
@@ -236,6 +238,7 @@ fn no_rule_command_returns_exit_receipt() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })
@@ -285,6 +288,7 @@ fn command_output_tail_returns_bounded_lines_without_a_rule() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })
@@ -335,6 +339,7 @@ fn command_output_tail_clamps_to_200_lines() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })
@@ -397,6 +402,7 @@ fn rule_match_command_has_no_receipt() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })
@@ -459,6 +465,7 @@ fn start_linger_child(state: &DaemonState) -> terminal_commander_ipc::CommandSta
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         })
@@ -616,6 +623,7 @@ async fn no_rule_receipt(helper: &str) -> terminal_commander_ipc::CommandReceipt
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         })
@@ -668,6 +676,269 @@ fn receipt_reports_lines_the_tail_omits() {
         assert_eq!(short.tail.len() as u64, short.lines_suppressed, "{short:?}");
         assert_eq!(short.lines_omitted, 0, "{short:?}");
     });
+}
+
+#[test]
+#[ignore = "child-process helper for the receipt tests, not a test"]
+fn helper_child_emit_hundred_lines() {
+    emit_lines_then_exit(100);
+}
+
+/// Prints past the default 4096-frame ring so the earliest output is evicted.
+#[test]
+#[ignore = "child-process helper for the receipt tests, not a test"]
+fn helper_child_emit_past_the_ring() {
+    emit_lines_then_exit(5000);
+}
+
+fn self_exec_argv(helper: &str) -> Vec<String> {
+    let exe = std::env::current_exe()
+        .expect("current test binary path")
+        .to_string_lossy()
+        .into_owned();
+    vec![
+        exe,
+        helper.to_owned(),
+        "--ignored".to_owned(),
+        "--exact".to_owned(),
+        "--nocapture".to_owned(),
+    ]
+}
+
+/// Run `argv` with no rules and the given receipt shape. Returns the
+/// receipt plus every line still retained in the ring, so a test can
+/// check positions without knowing the exact frame count.
+async fn shaped_receipt(
+    argv: Vec<String>,
+    shape: terminal_commander_ipc::ReceiptShape,
+) -> (terminal_commander_ipc::CommandReceipt, Vec<String>) {
+    let data = tmp_data_dir("receipt-shape");
+    let cfg = DaemonConfig::defaults_in(&data);
+    let state = DaemonState::bootstrap(cfg).unwrap();
+    let resp = state
+        .command
+        .start_combed(CommandStartRequest {
+            argv,
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            receipt_shape: Some(shape),
+            strip_ansi: true,
+            peer_discriminator: None,
+        })
+        .expect("start ok");
+    for _ in 0..200 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if matches!(
+            state.command.job_record(resp.job_id).map(|r| r.state),
+            Some(JobState::Exited | JobState::Failed | JobState::Cancelled)
+        ) {
+            break;
+        }
+    }
+    let status = state.command.status(resp.job_id).expect("status ok");
+    let probe_id = state.jobs.get(resp.job_id).expect("job").config.probe_id;
+    let retained = state
+        .rings
+        .tail_frames(probe_id, usize::MAX, usize::MAX)
+        .expect("ring")
+        .lines;
+    cleanup(&data);
+    let receipt = status
+        .receipt
+        .expect("zero-rule run must carry a no-silence receipt");
+    (receipt, retained)
+}
+
+const fn shape(head_lines: u32, tail_lines: u32) -> terminal_commander_ipc::ReceiptShape {
+    terminal_commander_ipc::ReceiptShape {
+        head_lines,
+        tail_lines,
+    }
+}
+
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(f)
+}
+
+/// Head = first H lines, tail = last T lines, `lines_omitted` = the gap.
+#[test]
+fn receipt_head_and_tail_split_the_output() {
+    let (r, all) = block_on(shaped_receipt(
+        self_exec_argv("helper_child_emit_ten_lines"),
+        shape(3, 4),
+    ));
+    let n = all.len();
+    assert_eq!(r.lines_suppressed, n as u64, "{r:?}");
+    assert_eq!(r.head, all[..3], "{r:?}");
+    assert_eq!(r.tail, all[n - 4..], "{r:?}");
+    assert_eq!(
+        r.tail.last().map(String::as_str),
+        Some("RECEIPT_CHILD_LINE_9")
+    );
+    assert_eq!(r.lines_omitted, n as u64 - 7, "{r:?}");
+    assert!(!r.tail_incomplete, "{r:?}");
+}
+
+/// A tail longer than what follows the head shrinks: no line is shown twice.
+#[test]
+fn receipt_tail_never_overlaps_the_head() {
+    let (r, all) = block_on(shaped_receipt(
+        self_exec_argv("helper_child_emit_ten_lines"),
+        shape(3, 50),
+    ));
+    assert_eq!(r.head, all[..3], "{r:?}");
+    assert_eq!(r.tail, all[3..], "{r:?}");
+    assert_eq!(r.lines_omitted, 0, "{r:?}");
+}
+
+/// Out-of-range counts clamp (head 20, tail 50); a zero tail is allowed.
+#[test]
+fn receipt_shape_clamps_and_allows_an_empty_tail() {
+    let (r, all) = block_on(shaped_receipt(
+        self_exec_argv("helper_child_emit_hundred_lines"),
+        shape(999, 999),
+    ));
+    let n = all.len();
+    assert_eq!(r.head, all[..20], "{r:?}");
+    assert_eq!(r.tail, all[n - 50..], "{r:?}");
+    assert_eq!(r.lines_omitted, n as u64 - 70, "{r:?}");
+
+    let (r, all) = block_on(shaped_receipt(
+        self_exec_argv("helper_child_emit_ten_lines"),
+        shape(0, 0),
+    ));
+    assert!(r.head.is_empty() && r.tail.is_empty(), "{r:?}");
+    assert_eq!(r.lines_omitted, all.len() as u64, "{r:?}");
+}
+
+/// Once the ring has evicted the earliest output the true head is gone:
+/// no head is shown (later lines never stand in for it) and the receipt
+/// says the window is lossy.
+#[test]
+fn receipt_head_is_empty_when_the_start_was_evicted() {
+    let (r, all) = block_on(shaped_receipt(
+        self_exec_argv("helper_child_emit_past_the_ring"),
+        shape(3, 5),
+    ));
+    let n = all.len();
+    assert!(r.head.is_empty(), "{:?}", r.head);
+    assert!(r.tail_incomplete);
+    assert_eq!(r.tail, all[n - 5..]);
+    assert_eq!(
+        r.tail.last().map(String::as_str),
+        Some("RECEIPT_CHILD_LINE_4999")
+    );
+    assert!(
+        r.lines_suppressed > n as u64,
+        "ring must have evicted frames"
+    );
+    assert_eq!(r.lines_omitted, r.lines_suppressed - 5);
+}
+
+#[test]
+#[ignore = "child-process helper for the receipt tests, not a test"]
+fn helper_child_emit_long_lines() {
+    use std::io::Write as _;
+    let mut out = std::io::stdout();
+    for i in 0..10 {
+        let _ = writeln!(out, "LONG_{i}_{}", "x".repeat(3000));
+    }
+    let _ = out.flush();
+    std::process::exit(0);
+}
+
+/// Head and tail share ONE 4096-byte raw-text budget (constitution III):
+/// long lines are dropped rather than overrunning it, and the receipt says
+/// the shown window is lossy.
+#[test]
+fn receipt_head_and_tail_share_one_byte_budget() {
+    let (r, all) = block_on(shaped_receipt(
+        self_exec_argv("helper_child_emit_long_lines"),
+        shape(3, 5),
+    ));
+    let bytes: usize = r.head.iter().chain(&r.tail).map(String::len).sum();
+    assert!(bytes <= 4096, "{bytes} bytes shown: {r:?}");
+    assert!(r.tail_incomplete, "{r:?}");
+    assert!(!r.tail.is_empty(), "{r:?}");
+    let n = all.len();
+    assert_eq!(r.head, all[..r.head.len()]);
+    assert_eq!(r.tail, all[n - r.tail.len()..]);
+    assert_eq!(
+        r.lines_omitted,
+        (n - r.head.len() - r.tail.len()) as u64,
+        "{r:?}"
+    );
+}
+
+#[test]
+#[ignore = "child-process helper for the receipt tests, not a test"]
+fn helper_child_emit_thirty_400_byte_lines() {
+    use std::io::Write as _;
+    let mut out = std::io::stdout();
+    for i in 0..30 {
+        let _ = writeln!(out, "L{i:02}_{}", "y".repeat(396));
+    }
+    let _ = out.flush();
+    std::process::exit(0);
+}
+
+/// Max line counts on ~400-byte lines: the shared 4096-byte budget, not the
+/// line caps, is what bounds the receipt.
+#[test]
+fn receipt_max_lines_stay_within_the_shared_byte_budget() {
+    let (r, all) = block_on(shaped_receipt(
+        self_exec_argv("helper_child_emit_thirty_400_byte_lines"),
+        shape(20, 50),
+    ));
+    let head_bytes: usize = r.head.iter().map(String::len).sum();
+    let tail_bytes: usize = r.tail.iter().map(String::len).sum();
+    assert!(head_bytes <= 2048, "head {head_bytes} bytes: {r:?}");
+    assert!(
+        head_bytes + tail_bytes <= 4096,
+        "{head_bytes}+{tail_bytes} bytes"
+    );
+    let n = all.len();
+    assert_eq!(r.head, all[..r.head.len()]);
+    assert_eq!(r.tail, all[n - r.tail.len()..]);
+    assert!(
+        r.head.len() + r.tail.len() < n,
+        "budget must have cut lines"
+    );
+    // Lines the line caps asked for were dropped by the byte budget.
+    assert!(r.tail_incomplete);
+    assert_eq!(
+        r.lines_omitted,
+        (n - r.head.len() - r.tail.len()) as u64,
+        "{r:?}"
+    );
+}
+
+/// Exact counts with a plain argv producer (no libtest banner).
+#[cfg(unix)]
+#[test]
+fn receipt_head_and_tail_exact_counts() {
+    let lines = |n: usize| -> Vec<String> {
+        let body: String = (1..=n).map(|i| i.to_string() + "\n").collect();
+        vec!["/usr/bin/printf".to_owned(), body]
+    };
+    let (r, _) = block_on(shaped_receipt(lines(10), shape(3, 4)));
+    assert_eq!(r.head, ["1", "2", "3"]);
+    assert_eq!(r.tail, ["7", "8", "9", "10"]);
+    assert_eq!(r.lines_omitted, 3);
+
+    let (r, _) = block_on(shaped_receipt(lines(6), shape(3, 5)));
+    assert_eq!(r.head, ["1", "2", "3"]);
+    assert_eq!(r.tail, ["4", "5", "6"]);
+    assert_eq!(r.lines_omitted, 0);
 }
 
 /// Liveness: a RUNNING job reports how long it has run and how long ago it
@@ -744,6 +1015,7 @@ fn command_status_silent_running_job_has_no_output_age() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })

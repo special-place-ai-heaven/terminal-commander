@@ -118,6 +118,7 @@ fn bucket_events_since_returns_structured_events_no_raw_text() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })
@@ -366,6 +367,7 @@ fn event_context_returns_bounded_window_around_event_pointer() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })
@@ -599,6 +601,7 @@ async fn boom_event(
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         })

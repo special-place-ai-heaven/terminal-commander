@@ -1154,6 +1154,7 @@ pub async fn selfcheck_spawn_probe(
         grace: None,
         tag: Some("selfcheck".to_owned()),
         dedup_nonce: Some(fresh_selfcheck_nonce()),
+        receipt_shape: None,
         peer_discriminator: None,
         // TC-B1: default-on; self_check output is trivial but consistent.
         strip_ansi: true,
@@ -1409,6 +1410,7 @@ mod tests {
                 grace_ms: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
             }),
             IpcRequest::CommandStatus(CommandStatusParams {
@@ -1431,6 +1433,7 @@ mod tests {
                 rules: vec![],
                 bucket_config: None,
                 tag: None,
+                receipt_shape: None,
             }),
             IpcRequest::RegistrySearch(RegistrySearchParams {
                 query: "x".to_owned(),

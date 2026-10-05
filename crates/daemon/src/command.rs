@@ -353,6 +353,10 @@ pub struct CommandStartRequest {
     /// the SAME nonce to the SAME `(job_id, bucket_id)` instead of spawning
     /// twice. `None` falls back to a very short peer-scoped signature window.
     pub dedup_nonce: Option<String>,
+    /// Shape of the no-silence receipt. `None` = the default (no head,
+    /// 5-line tail). Clamped when the receipt is built.
+    #[serde(default)]
+    pub receipt_shape: Option<ReceiptShape>,
     /// Optional pre-hashed peer discriminator (TC-2 peer-scoped fallback).
     /// Computed in `handle_command_start_combed` from the dispatching
     /// `PeerIdentity` (uid/sid). Folded into the nonce-less fallback key so a
@@ -370,7 +374,7 @@ pub struct CommandStartRequest {
 // re-import, and the crate-root `pub use command::{...}` surface stays
 // stable.
 pub use terminal_commander_ipc::protocol::{
-    CommandReceipt, CommandStartResponse, CommandStatusResponse, OutcomeTrust,
+    CommandReceipt, CommandStartResponse, CommandStatusResponse, OutcomeTrust, ReceiptShape,
 };
 
 /// EventSink that forwards drafts to the wired `Router`.
@@ -1409,6 +1413,7 @@ impl CommandRuntime {
         // Captured for the receipt's bucket_id field (req.bucket_id is not
         // available in the waiter; reuse the bound bucket).
         let waiter_bucket = bucket_id;
+        let waiter_receipt_shape = req.receipt_shape.unwrap_or_default();
         // Enqueue into the lifecycle JoinSet (not a detached
         // `tokio::spawn`) so a graceful shutdown can await this waiter
         // BEFORE the store actor closes; otherwise a command exiting in
@@ -1431,26 +1436,15 @@ impl CommandRuntime {
                 ProbeOutcome::Exited { code, .. } => *code,
                 ProbeOutcome::Cancelled => None,
             };
-            let receipt = if rule_driven_events == 0 {
-                let tail = waiter_rings.tail_frames(probe_id, 5, 4096).unwrap_or(
-                    terminal_commander_core::RingTail {
-                        lines: Vec::new(),
-                        evicted_frames: 0,
-                        truncated: false,
-                    },
-                );
-                Some(CommandReceipt {
-                    exit_code: receipt_exit_code,
-                    lines_suppressed: final_metrics.frames_total,
-                    lines_omitted: final_metrics
-                        .frames_total
-                        .saturating_sub(tail.lines.len() as u64),
-                    tail: tail.lines,
-                    tail_incomplete: tail.evicted_frames > 0 || tail.truncated,
-                })
-            } else {
-                None
-            };
+            let receipt = (rule_driven_events == 0).then(|| {
+                build_receipt(
+                    &waiter_rings,
+                    probe_id,
+                    waiter_receipt_shape,
+                    final_metrics.frames_total,
+                    receipt_exit_code,
+                )
+            });
 
             // Publish the receipt into the live binding BEFORE the job
             // state flips terminal. `status()` reads the state from
@@ -2191,6 +2185,80 @@ async fn drive_to_exit(mut probe: ProcessProbe) -> (ProcessProbeMetrics, ProbeOu
         },
     };
     (probe.metrics(), outcome)
+}
+
+/// Raw-text byte budget shared by the receipt's `head` and `tail`
+/// (constitution III: the receipt is bounded).
+const RECEIPT_MAX_BYTES: usize = 4096;
+/// Most of [`RECEIPT_MAX_BYTES`] a requested head may use; the tail gets the rest.
+const RECEIPT_HEAD_MAX_BYTES: usize = RECEIPT_MAX_BYTES / 2;
+
+fn text_bytes(lines: &[String]) -> usize {
+    lines.iter().map(String::len).sum()
+}
+
+/// Build the no-silence receipt from the probe's ring (TCE-ERG-1).
+///
+/// `head` = the first `head_lines` frames, `tail` = the last `tail_lines` of
+/// what follows the head, so no line appears in both. If the ring has
+/// evicted the earliest frames the true head is gone, so `head` stays empty
+/// rather than presenting later lines in its place. Head and tail share
+/// [`RECEIPT_MAX_BYTES`]; with no head requested the tail keeps today's
+/// behavior exactly.
+fn build_receipt(
+    rings: &ContextRingManager,
+    probe_id: ProbeId,
+    shape: ReceiptShape,
+    frames_total: u64,
+    exit_code: Option<i32>,
+) -> CommandReceipt {
+    let shape = shape.clamped();
+    let empty = || terminal_commander_core::RingTail {
+        lines: Vec::new(),
+        evicted_frames: 0,
+        truncated: false,
+    };
+    let total = u32::try_from(frames_total).unwrap_or(u32::MAX);
+    let head_want = shape.head_lines.min(total);
+    let head = if head_want == 0 {
+        empty()
+    } else {
+        rings
+            .head_frames(probe_id, head_want as usize, RECEIPT_HEAD_MAX_BYTES)
+            .unwrap_or_else(|_| empty())
+    };
+    let (mut head_lines, mut head_truncated) = if head.evicted_frames > 0 {
+        (Vec::new(), false)
+    } else {
+        (head.lines, head.truncated)
+    };
+    // The ring always returns at least one line even past the cap; the
+    // shared budget cannot, so an over-budget line is dropped instead.
+    while text_bytes(&head_lines) > RECEIPT_HEAD_MAX_BYTES {
+        head_lines.pop();
+        head_truncated = true;
+    }
+    let tail_budget = RECEIPT_MAX_BYTES - text_bytes(&head_lines);
+    let shown_head = u32::try_from(head_lines.len()).unwrap_or(u32::MAX);
+    let tail_want = shape.tail_lines.min(total.saturating_sub(shown_head));
+    let mut tail = rings
+        .tail_frames(probe_id, tail_want as usize, tail_budget)
+        .unwrap_or_else(|_| empty());
+    if shape.head_lines > 0 {
+        while text_bytes(&tail.lines) > tail_budget {
+            tail.lines.remove(0);
+            tail.truncated = true;
+        }
+    }
+    CommandReceipt {
+        exit_code,
+        lines_suppressed: frames_total,
+        lines_omitted: frames_total
+            .saturating_sub(head_lines.len() as u64 + tail.lines.len() as u64),
+        head: head_lines,
+        tail: tail.lines,
+        tail_incomplete: tail.evicted_frames > 0 || tail.truncated || head_truncated,
+    }
 }
 
 /// Milliseconds since `rec` started, only while it is still running; `None`

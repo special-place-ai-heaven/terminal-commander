@@ -259,6 +259,8 @@ pub struct FileProbeMetrics {
     pub frames_suppressed: u64,
     pub frames_suppressed_progress: u64,
     pub frames_suppressed_dedupe: u64,
+    /// When the most recent frame was captured; `None` until the first one.
+    pub last_frame_at: Option<std::time::Instant>,
 }
 
 /// Errors.
@@ -544,6 +546,7 @@ async fn run(
                             let mut m = metrics.lock();
                             m.frames_total = m.frames_total.saturating_add(1);
                             m.bytes_total = m.bytes_total.saturating_add(line.raw_len);
+                            m.last_frame_at = Some(std::time::Instant::now());
                         }
                         let mut events_emitted = metrics.lock().events_emitted;
                         {
