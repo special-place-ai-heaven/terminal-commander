@@ -52,7 +52,7 @@ result is ever silent or misleading.
 
 ## Recent improvements
 
-<!-- release-status -->Landed 2026-10-05, not yet in a tagged release.
+<!-- release-status -->Landed 2026-10-05, released in v0.3.11.
 
 - **Quiet receipt you can shape:** `lines_omitted` says how much the receipt
   leaves out, and `receipt_head_lines` / `receipt_tail_lines` choose how many
