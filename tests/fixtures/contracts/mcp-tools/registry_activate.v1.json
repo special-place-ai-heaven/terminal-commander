@@ -31,7 +31,8 @@
     "scope": {
       "kind": "global"
     },
-    "jobs_rebound": 0
+    "jobs_rebound": 0,
+    "superseded_versions": []
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",

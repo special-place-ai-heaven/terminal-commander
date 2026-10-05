@@ -1,0 +1,53 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "recipe_upsert",
+      "arguments": {
+        "definition_json": "{\"recipe_id\":\"fixture.echo\",\"version\":1,\"title\":\"Fixture echo\",\"summary\":\"Print a marker and exit\",\"argv\":[\"echo\",\"FIXTURESHAPE\"],\"status\":\"active\",\"tags\":[\"fixture\"],\"cwd\":null,\"env_allowlist\":[],\"timeout_ms\":5000,\"rule_pack_ids\":[],\"placeholders\":[]}"
+      }
+    }
+  },
+  "tool": "recipe_upsert",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/recipe_upsert-v1",
+    "fixture_id": "contracts/mcp-tools/recipe_upsert.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "fixture_live_shape_contract"
+    ],
+    "note": "Insert a new immutable argv recipe version from a JSON definition. Does not activate. Success example generated from a real response by fixture_live_shape_contract's scenario."
+  },
+  "response_example": {
+    "activated": false,
+    "recipe_id": "fixture.echo",
+    "version": 1
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "definition_json is required and is a JSON string of one recipe definition",
+    "upserting never activates; recipe_activate is a separate step"
+  ]
+}

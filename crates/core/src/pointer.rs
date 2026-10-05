@@ -4,7 +4,8 @@
 //! [`SourcePointer`] gives a bounded handle back to the underlying
 //! stream frames that produced a [`SignalEvent`].
 //!
-//! Wire shape lives in `tests/fixtures/contracts/source-pointer.v1.json`.
+//! Wire shape lives in `tests/fixtures/contracts/event.signal.v1.json`
+//! (the `pointer` member).
 //!
 //! Source-status: live (TC06). Concrete `event_context` retrieval
 //! lands in TC08.

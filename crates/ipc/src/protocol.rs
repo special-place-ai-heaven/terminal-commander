@@ -1900,6 +1900,25 @@ pub struct RegistryTestResponse {
     /// clients keep the historical shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stream_mismatches: Vec<usize>,
+    /// How many of the rule's own stored `examples` were evaluated (0 when
+    /// the rule has none). Always present; additive for older clients.
+    #[serde(default)]
+    pub examples_evaluated: u32,
+    /// One entry per evaluated example, in order. Omitted when the rule has
+    /// no examples. Bounded by the per-rule example cap.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub example_results: Vec<RegistryExampleResult>,
+}
+
+/// Outcome of one of a rule's own `examples` evaluated by `registry_test`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryExampleResult {
+    /// 0-based position in the rule's `examples` list.
+    pub index: usize,
+    pub passed: bool,
+    /// Why the example failed (expected vs actual); absent when it passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// `registry_suggest_from_samples` parameters (US2 / FR-007).

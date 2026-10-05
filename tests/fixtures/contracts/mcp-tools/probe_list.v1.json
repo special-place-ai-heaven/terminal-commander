@@ -20,7 +20,8 @@
   },
   "response_examples": {
     "empty": {
-      "probes": []
+      "probes": [],
+      "truncated": false
     },
     "with_live_probes": {
       "probes": [
@@ -31,9 +32,13 @@
           "probe_id": "prb_018f0000000000000000000000000001",
           "frames_total": 4,
           "events_emitted": 1,
+          "frames_suppressed": 0,
+          "frames_suppressed_progress": 0,
+          "frames_suppressed_dedupe": 0,
           "secret_prompts_total": 0,
           "secret_prompt_active": false,
           "path": null,
+          "liveness": { "state": "running" },
           "tag": "build",
           "argv_head": ["cargo", "build", "--release"]
         },
@@ -44,9 +49,13 @@
           "probe_id": "prb_018f0000000000000000000000000002",
           "frames_total": 8,
           "events_emitted": 2,
+          "frames_suppressed": 0,
+          "frames_suppressed_progress": 0,
+          "frames_suppressed_dedupe": 0,
           "secret_prompts_total": 0,
           "secret_prompt_active": false,
           "path": "C:\\work\\app\\build.log",
+          "liveness": { "state": "running" },
           "tag": null,
           "argv_head": ["file_watch:C:\\work\\app\\build.log"]
         },
@@ -57,13 +66,18 @@
           "probe_id": "prb_018f0000000000000000000000000003",
           "frames_total": 2,
           "events_emitted": 0,
+          "frames_suppressed": 0,
+          "frames_suppressed_progress": 0,
+          "frames_suppressed_dedupe": 0,
           "secret_prompts_total": 1,
           "secret_prompt_active": true,
           "path": null,
+          "liveness": { "state": "running" },
           "tag": "db",
           "argv_head": ["psql", "postgres://u:<redacted>@db/app"]
         }
-      ]
+      ],
+      "truncated": false
     }
   },
   "unavailable_error_example": {

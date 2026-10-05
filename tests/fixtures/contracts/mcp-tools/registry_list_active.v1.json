@@ -20,7 +20,8 @@
   },
   "response_examples": {
     "empty": {
-      "entries": []
+      "entries": [],
+      "truncated": false
     },
     "one_active_global_rule": {
       "entries": [
@@ -37,7 +38,8 @@
             "kind": "global"
           }
         }
-      ]
+      ],
+      "truncated": false
     }
   },
   "unavailable_error_example": {

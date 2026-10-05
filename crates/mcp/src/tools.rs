@@ -227,12 +227,12 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "registry_upsert",
             status: ToolStatus::Live,
-            description: "Insert a new immutable (rule_id, version+1) row from a JSON definition.",
+            description: "Insert a new immutable (rule_id, version+1) row from a JSON definition; rejects a rule that contradicts its own examples.",
         },
         ToolCatalogueEntry {
             name: "registry_test",
             status: ToolStatus::Live,
-            description: "Dry-run a rule against bounded samples; never persists, no raw stream lane.",
+            description: "Dry-run a rule against bounded samples and its own examples; never persists, no raw stream lane.",
         },
         ToolCatalogueEntry {
             name: "registry_activate",
@@ -1873,7 +1873,7 @@ impl TerminalCommanderMcpServer {
     /// `registry_upsert` — create a new immutable version from a JSON
     /// rule definition.
     #[tool(
-        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword; kind=keyword also accepts a singular `pattern`, normalized into a one-keyword list). NOTE: `version` is ASSIGNED by the store (monotonic, latest+1); any value you send is ignored and overwritten, and the assigned version (returned in the response) is the one registry_activate/registry_deactivate operate on. `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords; existing versions are never mutated."
+        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword; kind=keyword also accepts a singular `pattern`, normalized into a one-keyword list). NOTE: `version` is ASSIGNED by the store (monotonic, latest+1); any value you send is ignored and overwritten, and the assigned version (returned in the response) is the one registry_activate/registry_deactivate operate on. `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords and rejects a rule that contradicts its own `examples` (each failing example is named by index with the reason); existing versions are never mutated."
     )]
     async fn registry_upsert(
         &self,
@@ -1900,7 +1900,7 @@ impl TerminalCommanderMcpServer {
 
     /// `registry_test` — dry-run a rule against bounded sample texts.
     #[tool(
-        description = "Evaluate a rule against bounded sample texts. Returns matches with severity/kind/summary/captures; never persists; never echoes the input back as raw stream output."
+        description = "Evaluate a rule against bounded sample texts. Returns matches with severity/kind/summary/captures; never persists; never echoes the input back as raw stream output. Also checks the rule's own stored examples: examples_evaluated counts them and example_results gives each one's pass or fail with the reason."
     )]
     async fn registry_test(
         &self,
@@ -1928,9 +1928,15 @@ impl TerminalCommanderMcpServer {
                 matches,
                 truncated_bytes,
                 stream_mismatches,
+                examples_evaluated,
+                example_results,
             })) => json_tool_result(&serde_json::json!({
                 "matches": matches,
                 "truncated_bytes": truncated_bytes,
+                // How many of the rule's own stored examples were evaluated,
+                // and each one's pass/fail with the reason.
+                "examples_evaluated": examples_evaluated,
+                "example_results": example_results,
                 // F8b (trust): sample indices whose regex matched but whose
                 // stream the rule's `stream` filter excluded -- surfaced so
                 // the operator sees WHY an apparent match did not fire.

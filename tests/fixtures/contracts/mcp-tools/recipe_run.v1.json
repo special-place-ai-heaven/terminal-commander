@@ -1,0 +1,89 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "recipe_run",
+      "arguments": {
+        "recipe_id": "fixture.echo",
+        "scope": {
+          "kind": "global"
+        }
+      }
+    }
+  },
+  "tool": "recipe_run",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/recipe_run-v1",
+    "fixture_id": "contracts/mcp-tools/recipe_run.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "fixture_live_shape_contract"
+    ],
+    "note": "Run an activated argv recipe on the argv lane (never shell_exec). Watched when the recipe has timeout_ms or rule_pack_ids. Success example generated from a real response by fixture_live_shape_contract's scenario."
+  },
+  "response_example": {
+    "argv": [
+      "echo",
+      "FIXTURESHAPE"
+    ],
+    "bucket_id": "bkt_018f0000000000000000000000000001",
+    "compact": false,
+    "complete": true,
+    "cursor": 1,
+    "degraded": false,
+    "exit_code": 0,
+    "job_id": "job_018f0000000000000000000000000002",
+    "lane": "argv",
+    "outcome_trust": "observed",
+    "pipeline_exit_masked": false,
+    "poll_hint_ms": null,
+    "probe_id": "prb_018f0000000000000000000000000003",
+    "receipt": {
+      "exit_code": 0,
+      "lines_omitted": 0,
+      "lines_suppressed": 1,
+      "tail": [
+        "FIXTURESHAPE"
+      ],
+      "tail_incomplete": false
+    },
+    "recipe_id": "fixture.echo",
+    "recover_hint": null,
+    "signal_count": 0,
+    "signals": [],
+    "signals_capped": false,
+    "state": "exited",
+    "version": 1,
+    "wait_cap_ms": 60000,
+    "wait_exhausted": false,
+    "wait_ms": 5000,
+    "watched": true
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "refuses recipes that are not activated",
+    "argv is explicit; the shell lane is never used"
+  ]
+}

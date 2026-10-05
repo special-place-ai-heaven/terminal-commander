@@ -1,0 +1,59 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "recipe_test",
+      "arguments": {
+        "recipe_id": "fixture.echo",
+        "expect_argv0": "echo"
+      }
+    }
+  },
+  "tool": "recipe_test",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/recipe_test-v1",
+    "fixture_id": "contracts/mcp-tools/recipe_test.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "fixture_live_shape_contract"
+    ],
+    "note": "Dry-run an argv recipe: validates argv and optional expectations. Starts no job and activates nothing. Success example generated from a real response by fixture_live_shape_contract's scenario."
+  },
+  "response_example": {
+    "activated": false,
+    "argv": [
+      "echo",
+      "FIXTURESHAPE"
+    ],
+    "expects_met": true,
+    "notes": [],
+    "ok": true
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "recipe_id or an inline definition is required",
+    "never starts a job"
+  ]
+}

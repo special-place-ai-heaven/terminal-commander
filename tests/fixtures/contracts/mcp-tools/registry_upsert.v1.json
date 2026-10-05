@@ -53,6 +53,7 @@
     "the description surfaces the kind enum (keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom) and severity enum (trace|debug|info|low|medium|high|critical)",
     "the description discloses that new rules default to status=Draft and that status:active is needed for registry_activate eligibility (TB-4)",
     "the description points to registry_get as the canonical RuleDefinition shape",
+    "a rule whose own examples contradict it (expected match but none, wrong kind or capture, or expected no match but it matched) is rejected with rule_invalid naming each failing example by index and why; nothing is persisted",
     "success payload does not echo the rule definition",
     "invalid definitions fail instead of being silently accepted",
     "the submitted version is ignored; the store assigns version=latest+1, stamps it into the persisted definition, and returns it, so the returned version is the one activate/deactivate/list_active accept (no row-vs-definition version divergence)"

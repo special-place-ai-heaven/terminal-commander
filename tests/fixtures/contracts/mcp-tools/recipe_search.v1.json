@@ -1,0 +1,64 @@
+{
+  "request_example": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "recipe_search",
+      "arguments": {
+        "query": "echo",
+        "limit": 25
+      }
+    }
+  },
+  "tool": "recipe_search",
+  "_meta": {
+    "schema_anchor": "TC05/mcp-tools/recipe_search-v1",
+    "fixture_id": "contracts/mcp-tools/recipe_search.v1.json",
+    "status": "live",
+    "consumed_by": [
+      "fixture_live_shape_contract"
+    ],
+    "note": "Bounded FTS search over persisted argv recipes. Recipes are not rules. Success example generated from a real response by fixture_live_shape_contract's scenario."
+  },
+  "response_example": {
+    "hits": [
+      {
+        "argv0": "echo",
+        "recipe_id": "fixture.echo",
+        "status": "active",
+        "summary": "Print a marker and exit",
+        "tags": [
+          "fixture"
+        ],
+        "title": "Fixture echo",
+        "version": 1
+      }
+    ]
+  },
+  "unavailable_error_example": {
+    "message": "daemon_unavailable",
+    "data": {
+      "code": "daemon_unavailable",
+      "message": "terminal-commanderd is not reachable",
+      "details": {
+        "status": "unavailable",
+        "reason": "binary_not_found",
+        "diagnostics": {
+          "endpoint": {
+            "kind": "unix_socket",
+            "path": "/tmp/terminal-commanderd.sock"
+          },
+          "log_path": null,
+          "last_error": "test: binary not found",
+          "startup_attempted": false,
+          "startup_elapsed_ms": 0
+        }
+      }
+    }
+  },
+  "invariants": [
+    "query is required",
+    "hits are summaries, not full definitions; use recipe_get for argv"
+  ]
+}
