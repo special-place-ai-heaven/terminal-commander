@@ -24,8 +24,29 @@ const RUNTIME_VERSION_CMD = `${LINUX_PATH_PREFIX}terminal-commander-mcp --versio
 // BRIDGE_PROBE_CMD's stdout is the MCP stdio channel.
 const AUTOSTART_RUN = 'bash "$HOME/.config/terminal-commander/autostart.sh" >/dev/null 2>&1 || true';
 
-// Bootstrap's explicit daemon start: same script, but its exit status counts.
-const DAEMON_START_CMD = `${LINUX_PATH_PREFIX}bash "$HOME/.config/terminal-commander/autostart.sh"`;
+// Bootstrap's explicit daemon start: same script, but its exit status counts,
+// and TC_AUTOSTART_REPORT makes it print AUTOSTART_SKIPPED_LINE when it
+// declines to start inside a Terminal Commander session. Nobody else sets it:
+// a stale snippet sources the script into shells whose stdout is not ours.
+const DAEMON_START_CMD = `${LINUX_PATH_PREFIX}TC_AUTOSTART_REPORT=1 bash "$HOME/.config/terminal-commander/autostart.sh"`;
+const AUTOSTART_SKIPPED_LINE = "terminal-commander: autostart skipped (inside a Terminal Commander session)";
+
+// Set inside a Terminal Commander process tree: by the daemon on every child
+// (TC_DAEMON_CHILD), by harness configs and the daemon (TC_SOCKET,
+// TC_SESSION). When any is set, autostart.sh starts nothing.
+const TC_SESSION_VARS = Object.freeze(["TC_DAEMON_CHILD", "TC_SOCKET", "TC_SESSION"]);
+
+function tcSessionVar(env) {
+  return TC_SESSION_VARS.find((k) => env && env[k]) || null;
+}
+
+function daemonStartSkippedReason(name) {
+  return (
+    `running inside a Terminal Commander session${name ? ` (${name} is set)` : ""}; ` +
+    "the default daemon is not started from here. Start it from a normal shell with " +
+    "`terminal-commander setup daemon-autostart`, or open a new terminal."
+  );
+}
 
 // WSL must not resolve terminal-commander-mcp from /mnt/c (Windows npm shim);
 // that runs Node as linux and fails optionalDependency resolve.
@@ -67,6 +88,9 @@ module.exports = {
   RUNTIME_VERSION_CMD,
   AUTOSTART_RUN,
   DAEMON_START_CMD,
+  AUTOSTART_SKIPPED_LINE,
+  tcSessionVar,
+  daemonStartSkippedReason,
   BRIDGE_DAEMON_ENSURE,
   BRIDGE_PROBE_CMD,
   SHELL_RAN_SENTINEL,

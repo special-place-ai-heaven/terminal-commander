@@ -472,13 +472,13 @@ test("setup harness --print-config forwards the flag and does not persist state"
 
 // The WSL "start the daemon" step used to be awaited and ignored. It must now
 // report like the steps before it: non-fatal, but never silent.
-function runLazyWithStart(startChild) {
+function runLazyWithStart(startChild, extraEnv) {
   const { SHELL_RAN_SENTINEL, DAEMON_START_CMD } = require("../lib/bootstrap/constants.js");
   const seen = [];
   const promise = runBootstrap({
     mode: "lazy",
     platform: "win32",
-    env: { USERPROFILE: "C:\Users\example", LOCALAPPDATA: os.tmpdir() },
+    env: { USERPROFILE: "C:\Users\example", LOCALAPPDATA: os.tmpdir(), ...extraEnv },
     distro: "Ubuntu",
     acquireLock: false,
     skipWslInstall: true,
@@ -511,6 +511,30 @@ test("runBootstrap warns when the WSL daemon start never ran (startup file exite
   assert.equal(r.exit_code, 0, "a start warning stays non-fatal");
   assert.equal(r.daemon_start.status, "shell_exited_early");
   assert.match(r.output, /WARNING: WSL daemon start did not complete \(shell_exited_early\): .*startup file/);
+});
+
+test("runBootstrap inside a Terminal Commander session skips the WSL daemon start and says so", async () => {
+  for (const extra of [{ TC_SESSION: "harness-a" }, { TC_SOCKET: "\\\\.\\pipe\\tc-x" }, { TC_DAEMON_CHILD: "1" }]) {
+    const name = Object.keys(extra)[0];
+    const { r, seen, DAEMON_START_CMD } = await runLazyWithStart((s) => fakeWslChild(0, `${s}\n`), extra);
+    assert.ok(!seen.some((c) => c.endsWith(DAEMON_START_CMD)), `${name}: the start step must not run`);
+    assert.equal(r.exit_code, 0);
+    assert.equal(r.daemon_start.status, "skipped", name);
+    assert.match(r.daemon_start.reason, new RegExp(`inside a Terminal Commander session \\(${name} is set\\)`));
+    assert.match(r.daemon_start.reason, /terminal-commander setup daemon-autostart/);
+    assert.ok(r.lines.includes(`terminal-commander: WSL daemon start skipped: ${r.daemon_start.reason}`), r.output);
+    assert.doesNotMatch(r.output, /WARNING/);
+  }
+});
+
+test("runBootstrap maps autostart.sh's in-session line to skipped, not ok", async () => {
+  const { AUTOSTART_SKIPPED_LINE } = require("../lib/bootstrap/constants.js");
+  assert.equal(AUTOSTART_SKIPPED_LINE, "terminal-commander: autostart skipped (inside a Terminal Commander session)");
+  const { r } = await runLazyWithStart((s) => fakeWslChild(0, `${s}\n${AUTOSTART_SKIPPED_LINE}\n`));
+  assert.equal(r.exit_code, 0);
+  assert.equal(r.daemon_start.status, "skipped");
+  assert.match(r.daemon_start.reason, /inside a Terminal Commander session/);
+  assert.doesNotMatch(r.output, /WARNING/);
 });
 
 test("runBootstrap warns when autostart.sh fails", async () => {

@@ -15,7 +15,12 @@ const {
   managedBlockState,
   replaceManagedBlockBody,
 } = require("./managed_block.js");
-const { LINUX_PATH_PREFIX } = require("../bootstrap/constants.js");
+const {
+  LINUX_PATH_PREFIX,
+  AUTOSTART_SKIPPED_LINE,
+  tcSessionVar,
+  daemonStartSkippedReason,
+} = require("../bootstrap/constants.js");
 
 const AUTOSTART_STATUSES = Object.freeze({
   OK: "ok",
@@ -44,16 +49,36 @@ function shouldInstallDaemonAutostart(env) {
 
 // The body runs in a subshell so `exit`, `set -eu` and the PATH export stay
 // inside it even when a stale (<= 0.3.11) profile snippet still SOURCES this
-// file. Callers must run it as a process: `bash .../autostart.sh`.
+// file. Callers must run it as a process: `bash .../autostart.sh`. POSIX sh
+// only: a stale snippet may source it into dash or zsh.
 function renderAutostartScript() {
   return `#!/usr/bin/env bash
 # terminal-commander autostart — managed by terminal-commander; do not edit.
 (
+# Never from inside a Terminal Commander process tree: the daemon marks its
+# children (TC_DAEMON_CHILD), and TC_SOCKET / TC_SESSION select an endpoint
+# this script does not serve. The MCP adapter starts those daemons itself.
+# Only a caller that asks (TC_AUTOSTART_REPORT) is told.
+if [ -n "\${TC_DAEMON_CHILD:-}" ] || [ -n "\${TC_SOCKET:-}" ] || [ -n "\${TC_SESSION:-}" ]; then
+  if [ -n "\${TC_AUTOSTART_REPORT:-}" ]; then
+    echo "${AUTOSTART_SKIPPED_LINE}"
+  fi
+  exit 0
+fi
+unset TC_AUTOSTART_REPORT
 set -eu
+# TC_DATA is honoured on purpose: a user may export it in their own profile
+# to relocate the default daemon.
 TC_DATA="\${TC_DATA:-$HOME/.local/share/terminal-commanderd}"
 SOCK="\$TC_DATA/terminal-commanderd.sock"
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 if [ -S "\$SOCK" ]; then
+  exit 0
+fi
+# A daemon bound to another socket still writes its pidfile here. Read-only
+# (no lock taken, nothing to race); the cmdline check rejects a reused pid.
+TC_PID=$(sed -n 's/.*"pid":[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' "\$TC_DATA/terminal-commanderd.pid" 2>/dev/null || true)
+if [ -n "$TC_PID" ] && grep -qa terminal-commanderd "/proc/$TC_PID/cmdline" 2>/dev/null; then
   exit 0
 fi
 if ! command -v terminal-commanderd >/dev/null 2>&1; then
@@ -70,8 +95,10 @@ nohup terminal-commanderd --data-dir "\$TC_DATA" start --mode ipc-server \\
 // start, so it must not be able to exit that shell, change its options or
 // environment, block it, or print anything: run the script as a detached
 // background process from a subshell (no job-control noise, no `$!`).
+// Interactive shells only: tools run `bash -lc` constantly, and every step
+// that needs the daemon (bridge, setup, restart) starts it explicitly.
 function renderProfileSnippet() {
-  return `( bash "$HOME/.config/terminal-commander/autostart.sh" </dev/null >/dev/null 2>&1 & )
+  return `case $- in *i*) ( bash "$HOME/.config/terminal-commander/autostart.sh" </dev/null >/dev/null 2>&1 & ) ;; esac
 `;
 }
 
@@ -297,15 +324,30 @@ function installDaemonAutostart(opts) {
 
   const { patched, malformed } = patchProfileFiles(homeDir, true);
 
+  const baseHint =
+    patched.length > 0
+      ? `profile hook installed (${patched.join(", ")})`
+      : "autostart script installed; profile hook already present";
+
+  // autostart.sh would decline anyway; say so instead of reporting a run.
+  const sessionVar = tcSessionVar(env);
+  if (sessionVar) {
+    const reason = daemonStartSkippedReason(sessionVar);
+    return {
+      status: AUTOSTART_STATUSES.PROFILE_HOOK,
+      hint: `${baseHint}; daemon not started: ${reason}${malformedHint(malformed)}`,
+      mode: "profile",
+      patched,
+      malformed_rc_files: malformed,
+      daemon_start: { status: "skipped", reason },
+    };
+  }
+
   // Run the autostart script once. Do NOT swallow a non-zero exit (was a
   // silent failure): surface it in the result so operators/doctor can see it.
   const ran = runOnce(homeDir);
   const exitCode = typeof ran.exit_code === "number" ? ran.exit_code : null;
 
-  const baseHint =
-    patched.length > 0
-      ? `profile hook installed (${patched.join(", ")})`
-      : "autostart script installed; profile hook already present";
   const hint =
     (ran.ok === false && exitCode !== 0
       ? `${baseHint}; WARNING: autostart run exited ${exitCode} (daemon may not have started — check ~/.local/state/terminal-commander/daemon.log)`

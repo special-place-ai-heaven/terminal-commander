@@ -31,7 +31,14 @@ const {
 } = require("./skip.js");
 const { harnessNeedsConfiguration } = require("../harness/needs.js");
 const { runWslBashLc } = require("./ensure_wsl_runtime.js");
-const { LINUX_PATH_PREFIX, RUNTIME_VERSION_CMD, DAEMON_START_CMD } = require("./constants.js");
+const {
+  LINUX_PATH_PREFIX,
+  RUNTIME_VERSION_CMD,
+  DAEMON_START_CMD,
+  AUTOSTART_SKIPPED_LINE,
+  tcSessionVar,
+  daemonStartSkippedReason,
+} = require("./constants.js");
 const { DAEMON_RESTART_CMD } = require("../cli/restart.js");
 const { detectRuntimeEnvironment } = require("../cli/runtime_environment.js");
 const { releaseRunningInstances } = require("./release_instances.js");
@@ -356,35 +363,45 @@ async function runBootstrap(opts) {
         shouldInstallDaemonAutostart(env)
       ) {
         // Non-fatal, but never silent: a start that did not run or failed is
-        // a warning line and `daemon_start` in the result.
-        const start = await runWslBashLc({
-          distro,
-          cmd: DAEMON_START_CMD,
-          env,
-          exec: o.exec,
-          wslPath: o.wslPath,
-          timeoutMs: o.startDaemonTimeoutMs || 45_000,
-        });
+        // a warning line and `daemon_start` in the result. Inside a Terminal
+        // Commander session autostart.sh declines, so do not run it at all.
+        const sessionVar = tcSessionVar(env);
+        const start = sessionVar
+          ? null
+          : await runWslBashLc({
+              distro,
+              cmd: DAEMON_START_CMD,
+              env,
+              exec: o.exec,
+              wslPath: o.wslPath,
+              timeoutMs: o.startDaemonTimeoutMs || 45_000,
+            });
         const started =
-          start.exit_code === 0 && start.status !== ENSURE_STATUSES.SHELL_EXITED_EARLY;
+          start !== null && start.exit_code === 0 && start.status !== ENSURE_STATUSES.SHELL_EXITED_EARLY;
         // The runner's other statuses classify npm output; for a daemon start
         // only "did not run" and "timed out" carry their own meaning.
         const ownCause =
-          start.status === ENSURE_STATUSES.SHELL_EXITED_EARLY ||
-          start.status === ENSURE_STATUSES.CHECK_TIMEOUT;
-        daemonStart = started
-          ? { status: "ok" }
-          : {
-              status: ownCause ? start.status : "start_failed",
-              exit_code: start.exit_code,
-              hint: ownCause
-                ? start.hint
-                : `autostart.sh exited ${start.exit_code}; see ~/.local/state/terminal-commander/daemon.log in WSL`,
-            };
-        if (!started) {
-          lines.push(
-            `terminal-commander: WARNING: WSL daemon start did not complete (${daemonStart.status}): ${daemonStart.hint}`,
-          );
+          start !== null &&
+          (start.status === ENSURE_STATUSES.SHELL_EXITED_EARLY ||
+            start.status === ENSURE_STATUSES.CHECK_TIMEOUT);
+        if (start === null || (started && (start.stdout || "").split(/\r?\n/).includes(AUTOSTART_SKIPPED_LINE))) {
+          daemonStart = { status: "skipped", reason: daemonStartSkippedReason(sessionVar) };
+          lines.push(`terminal-commander: WSL daemon start skipped: ${daemonStart.reason}`);
+        } else {
+          daemonStart = started
+            ? { status: "ok" }
+            : {
+                status: ownCause ? start.status : "start_failed",
+                exit_code: start.exit_code,
+                hint: ownCause
+                  ? start.hint
+                  : `autostart.sh exited ${start.exit_code}; see ~/.local/state/terminal-commander/daemon.log in WSL`,
+              };
+          if (!started) {
+            lines.push(
+              `terminal-commander: WARNING: WSL daemon start did not complete (${daemonStart.status}): ${daemonStart.hint}`,
+            );
+          }
         }
       }
       }
@@ -396,6 +413,7 @@ async function runBootstrap(opts) {
         env,
         dry_run: noWrite,
       });
+      if (localDaemon.daemon_start) daemonStart = localDaemon.daemon_start;
       if (localDaemon.status === AUTOSTART_STATUSES.SYSTEMD_ENABLED) {
         lines.push(`terminal-commander: ${localDaemon.hint}`);
       } else if (

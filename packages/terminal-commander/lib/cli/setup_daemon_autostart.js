@@ -13,6 +13,7 @@ const {
   ensureDaemonAutostartInWsl,
   ENSURE_DAEMON_STATUSES,
 } = require("../bootstrap/ensure_daemon_autostart.js");
+const { tcSessionVar, daemonStartSkippedReason } = require("../bootstrap/constants.js");
 
 async function runSetupDaemonAutostart(opts) {
   const o = opts || {};
@@ -62,11 +63,16 @@ async function runSetupDaemonAutostart(opts) {
     });
     if (r.status === ENSURE_DAEMON_STATUSES.OK) {
       const warnings = (r.warnings || []).map((w) => `${w}\n`).join("");
+      // The installer's closing autostart.sh run declines inside a session.
+      const sessionVar = tcSessionVar(env);
+      const daemonStart = sessionVar ? { status: "skipped", reason: daemonStartSkippedReason(sessionVar) } : undefined;
+      const skipped = daemonStart ? `terminal-commander: daemon not started: ${daemonStart.reason}\n` : "";
       return {
         status: "ok",
         exit_code: 0,
-        output: `terminal-commander: ${r.hint}\n${warnings}`,
+        output: `terminal-commander: ${r.hint}\n${warnings}${skipped}`,
         warnings: r.warnings || [],
+        daemon_start: daemonStart,
       };
     }
     return {

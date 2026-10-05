@@ -31,6 +31,7 @@ const {
   BRIDGE_PROBE_CMD,
   AUTOSTART_RUN,
   DAEMON_START_CMD,
+  AUTOSTART_SKIPPED_LINE,
 } = require("../lib/bootstrap/constants.js");
 const { ensureDaemonAutostartInWsl } = require("../lib/bootstrap/ensure_daemon_autostart.js");
 const { ensureWslRuntime } = require("../lib/bootstrap/ensure_wsl_runtime.js");
@@ -73,8 +74,8 @@ function cfg(home, rel) {
   return path.join(home, ".config", "terminal-commander", rel);
 }
 
-function shellEnv(home) {
-  return { HOME: home, PATH: BASE_PATH };
+function shellEnv(home, extra) {
+  return { HOME: home, PATH: BASE_PATH, ...extra };
 }
 
 // Lay down exactly what installDaemonAutostart writes on the profile-hook
@@ -100,7 +101,7 @@ function makeHome({ legacy = false, stubDaemon = false } = {}) {
     fs.mkdirSync(bin, { recursive: true });
     fs.writeFileSync(
       path.join(bin, "terminal-commanderd"),
-      '#!/bin/sh\necho "$*" >> "$HOME/daemon-starts.log"\n',
+      '#!/bin/sh\necho "$*${TC_AUTOSTART_REPORT:+ TC_AUTOSTART_REPORT_LEAKED}" >> "$HOME/daemon-starts.log"\n',
       { mode: 0o755 },
     );
   }
@@ -122,13 +123,14 @@ async function withSocket(home, fn) {
   }
 }
 
-function bash(home, args) {
-  return spawnSync("bash", args, { env: shellEnv(home), encoding: "utf8", input: "" });
+function bash(home, args, extra) {
+  return spawnSync("bash", args, { env: shellEnv(home, extra), encoding: "utf8", input: "" });
 }
 
-// Source `file` into a clean non-login bash, then report whether the shell
+// Source `file` into a clean non-login bash (interactive unless told
+// otherwise: the snippet only acts there), then report whether the shell
 // survived, its option flags, and whether PATH was touched.
-function sourceAndProbe(home, file) {
+function sourceAndProbe(home, file, { interactive = true, env } = {}) {
   const script = [
     'before="$PATH"',
     `. "${file}"`,
@@ -136,8 +138,23 @@ function sourceAndProbe(home, file) {
     'echo "FLAGS=$-"',
     '[ "$PATH" = "$before" ] && echo PATH_SAME || echo "PATH_CHANGED=$PATH"',
   ].join("\n");
-  return bash(home, ["--noprofile", "--norc", "-c", script]);
+  return bash(home, ["--noprofile", "--norc", ...(interactive ? ["-i"] : []), "-c", script], env);
 }
+
+function countStarts(home) {
+  const log = path.join(home, "daemon-starts.log");
+  return fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter(Boolean).length : 0;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Set by the daemon on every child (TC_DAEMON_CHILD) or by harness configs /
+// the daemon (TC_SOCKET, TC_SESSION); a plain login environment has none.
+const TC_TREE_MARKERS = [
+  { TC_DAEMON_CHILD: "1" },
+  { TC_SOCKET: "/tmp/tc-elsewhere/terminal-commanderd.sock" },
+  { TC_SESSION: "harness-a" },
+];
 
 function assertShellUntouched(r, what) {
   assert.match(r.stdout, /^NEXT$/m, `${what}: the shell must keep running after it (stdout=${JSON.stringify(r.stdout)} stderr=${JSON.stringify(r.stderr)})`);
@@ -197,6 +214,86 @@ test("socket absent: a stale snippet sourcing the new autostart.sh still starts 
   assert.equal((await waitForStarts(home)).length, 1);
 });
 
+// Every way a shell or step can reach autostart.sh, socket absent, stub daemon
+// on PATH. Returns the homes so the caller can count starts after one wait.
+function reachAutostartEveryWay(extra) {
+  const marked = Object.keys(extra).length > 0;
+  const quiet = (r, what) => {
+    assert.match(r.stdout, /^NEXT$/m, what);
+    assert.doesNotMatch(r.stdout, /autostart skipped/, `${what}: only the explicit start step may report`);
+  };
+  const cur = makeHome({ stubDaemon: true });
+  const profile = sourceAndProbe(cur, path.join(cur, ".profile"), { env: extra });
+  assertShellUntouched(profile, ".profile, interactive");
+  quiet(profile, ".profile, interactive");
+  quiet(bash(cur, ["-l", "-i", "-c", "echo NEXT"], extra), "bash -l -i");
+  // The explicit start steps run autostart.sh as a process; only
+  // DAEMON_START_CMD asks it to report a skip.
+  const start = bash(cur, ["--noprofile", "--norc", "-c", DAEMON_START_CMD], extra);
+  assert.equal(start.stdout, marked ? `${AUTOSTART_SKIPPED_LINE}\n` : "", "DAEMON_START_CMD stdout");
+  const bridge = bash(cur, ["--noprofile", "--norc", "-c", `${LINUX_PATH_PREFIX}${BRIDGE_DAEMON_ENSURE}echo NEXT`], extra);
+  assert.equal(bridge.stdout, "NEXT\n", "the bridge ensure must print nothing (MCP stdio follows)");
+  // A 0.3.11 snippet still in place sources autostart.sh from EVERY login
+  // shell, including the `bash -lc` a daemon runs and the bridge's.
+  const old = makeHome({ stubDaemon: true });
+  fs.writeFileSync(cfg(old, "profile.d/terminal-commander.sh"), LEGACY_SNIPPET);
+  quiet(bash(old, ["-lc", "echo NEXT"], extra), "0.3.11 snippet, bash -lc");
+  return { cur, old };
+}
+
+test("inside a Terminal Commander process tree nothing starts a daemon (TC_DAEMON_CHILD / TC_SOCKET / TC_SESSION)", { skip: SKIP }, async () => {
+  const runs = TC_TREE_MARKERS.map((extra) => ({ extra, ...reachAutostartEveryWay(extra) }));
+  // Control: the same paths with no marker do start, so zero below means something.
+  const control = reachAutostartEveryWay({});
+  await sleep(1000);
+  assert.equal(countStarts(control.cur), 4, "control: .profile -i, bash -l -i, DAEMON_START_CMD, bridge ensure");
+  assert.equal(countStarts(control.old), 1, "control: 0.3.11 snippet in bash -lc");
+  // The report request must not reach the daemon (its children could source a 0.3.11 snippet).
+  assert.doesNotMatch(fs.readFileSync(path.join(control.cur, "daemon-starts.log"), "utf8"), /LEAKED/);
+  for (const { extra, cur, old } of runs) {
+    assert.equal(countStarts(cur), 0, `${JSON.stringify(extra)}: current files must start nothing`);
+    assert.equal(countStarts(old), 0, `${JSON.stringify(extra)}: 0.3.11 snippet + new autostart.sh must start nothing`);
+  }
+});
+
+test("non-interactive shells never start the daemon from the profile hook", { skip: SKIP }, async () => {
+  const home = makeHome({ stubDaemon: true });
+  assertShellUntouched(sourceAndProbe(home, path.join(home, ".profile"), { interactive: false }), ".profile, non-interactive");
+  assert.match(bash(home, ["-lc", "echo NEXT"]).stdout, /^NEXT$/m);
+  const sh = spawnSync("sh", ["-c", `. "${path.join(home, ".profile")}"; echo NEXT`], { env: shellEnv(home), encoding: "utf8" });
+  assert.match(sh.stdout, /^NEXT$/m);
+  await sleep(1000);
+  assert.equal(countStarts(home), 0);
+});
+
+test("socket absent but $TC_DATA's pidfile names a live terminal-commanderd: no second daemon", { skip: SKIP }, async () => {
+  const home = makeHome({ stubDaemon: true });
+  const data = path.join(home, ".local", "share", "terminal-commanderd");
+  fs.mkdirSync(data, { recursive: true });
+  // What the daemon writes at bind (serde_json pretty), for a daemon whose
+  // socket is NOT the default name in this directory.
+  const writePidfile = (pid) =>
+    fs.writeFileSync(
+      path.join(data, "terminal-commanderd.pid"),
+      JSON.stringify({ pid, version: "0.0.0", endpoint: "/tmp/tc-elsewhere/terminal-commanderd.sock" }, null, 2),
+    );
+  const daemon = spawn("bash", ["-c", "exec -a terminal-commanderd sleep 30"], { stdio: "ignore" });
+  const unrelated = spawn("sleep", ["30"], { stdio: "ignore" });
+  try {
+    writePidfile(daemon.pid);
+    assertShellUntouched(sourceAndProbe(home, path.join(home, ".profile")), "live pidfile");
+    await sleep(1000);
+    assert.equal(countStarts(home), 0, "a live daemon in $TC_DATA must not get a sibling");
+    // A live pid that is not terminal-commanderd (a reused pid) is no daemon.
+    writePidfile(unrelated.pid);
+    sourceAndProbe(home, path.join(home, ".profile"));
+    assert.equal((await waitForStarts(home)).length, 1);
+  } finally {
+    daemon.kill();
+    unrelated.kill();
+  }
+});
+
 const ZSH =
   process.platform === "win32"
     ? null
@@ -204,9 +301,9 @@ const ZSH =
 const ZSH_SKIP = SKIP || (ZSH ? false : "zsh not installed on this host");
 
 // zsh reads ~/.zshrc (never ~/.profile) and only when interactive: `-i -c` is that path.
-function zshInteractive(home) {
+function zshInteractive(home, extra) {
   const probe = `echo NEXT; [[ -o errexit || -o nounset ]] && echo OPTIONS_CHANGED; [ "$PATH" = "${BASE_PATH}" ] && echo PATH_SAME`;
-  return spawnSync(ZSH, ["-i", "-c", probe], { env: shellEnv(home), encoding: "utf8", input: "" });
+  return spawnSync(ZSH, ["-i", "-c", probe], { env: shellEnv(home, extra), encoding: "utf8", input: "" });
 }
 
 function assertZshUntouched(r, what) {
@@ -228,6 +325,13 @@ test("zsh: an interactive zsh reading ~/.zshrc keeps running, options and PATH u
   const cold = makeHome({ stubDaemon: true });
   assertZshUntouched(zshInteractive(cold), "socket absent");
   assert.equal((await waitForStarts(cold)).length, 1);
+  const marked = TC_TREE_MARKERS.map((extra) => {
+    const h = makeHome({ stubDaemon: true });
+    assertZshUntouched(zshInteractive(h, extra), JSON.stringify(extra));
+    return [extra, h];
+  });
+  await sleep(1000);
+  for (const [extra, h] of marked) assert.equal(countStarts(h), 0, `${JSON.stringify(extra)}: zsh must start nothing`);
 });
 
 test("socket present: the daemon-ensure prefix lets the chained command run", { skip: SKIP }, async () => {
