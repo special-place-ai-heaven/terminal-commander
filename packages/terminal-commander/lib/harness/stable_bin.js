@@ -37,6 +37,13 @@ const { resolveBinary } = require("../resolve-binary.js");
 // Task (Part B) can target a stable path too.
 const STABLE_BINARIES = Object.freeze(["terminal-commander-mcp", "terminal-commanderd"]);
 
+// Known Terminal Commander executables that must NOT live in the stable dir.
+// The admin CLI is resolved from the installed platform package, never mirrored
+// (a running CLI cannot overwrite its own exe on Windows during `update`), so a
+// copy here is a stale leftover that would run old behaviour next to a fresh
+// version stamp. Exact names only; never a glob.
+const STALE_UNMANAGED_BINARIES = Object.freeze(["terminal-commander"]);
+
 const STABLE_SUBDIR = Object.freeze(["terminal-commander", "bin"]);
 const VERSION_STAMP = ".version";
 
@@ -96,6 +103,27 @@ function stableBinPath(binary, opts) {
   return path.join(stableBinDir(o), name);
 }
 
+/**
+ * Best-effort removal of unmanaged, known Terminal Commander executables from
+ * the stable dir. Touches only the exact names in STALE_UNMANAGED_BINARIES;
+ * a locked / undeletable file is reported in `left` and retried next run.
+ */
+function removeStaleUnmanaged(dir, platform, exists, remove) {
+  const removed = [];
+  const left = [];
+  for (const binary of STALE_UNMANAGED_BINARIES) {
+    const target = path.join(dir, platform === "win32" ? `${binary}.exe` : binary);
+    if (!exists(target)) continue;
+    try {
+      remove(target);
+      removed.push(target);
+    } catch (_e) {
+      left.push(target);
+    }
+  }
+  return { removed, left };
+}
+
 function copyFileSync(src, dest) {
   // Plain user-space copy. No spawn, no shell, no hidden window.
   fs.copyFileSync(src, dest);
@@ -126,8 +154,12 @@ function copyFileSync(src, dest) {
  *     Test seam; defaults to the real resolver.
  * @param {(src:string,dest:string)=>void} [opts.copyFile]  Test seam.
  * @param {(dir:string)=>void} [opts.mkdirp]  Test seam.
+ * @param {(p:string)=>void} [opts.removeFile]  Test seam for stale-CLI removal.
  * @param {(p:string)=>boolean} [opts.existsSync]  Test seam.
- * @returns {{ exePath: string|null, copied: string[], reason: string }}
+ * @returns {{ exePath: string|null, copied: string[], reason: string,
+ *     removed?: string[], left?: string[] }}  `removed` / `left`: stale unmanaged
+ *     CLI copies deleted / that could not be deleted (locked); absent on dry-run
+ *     and when the dir could not be created.
  */
 function ensureStableBinaries(opts) {
   const o = opts || {};
@@ -138,6 +170,7 @@ function ensureStableBinaries(opts) {
   const resolve = o.resolveBinary || resolveBinary;
   const copy = o.copyFile || copyFileSync;
   const exists = o.existsSync || fs.existsSync;
+  const remove = o.removeFile || fs.unlinkSync;
   const mkdirp =
     o.mkdirp || ((dir) => fs.mkdirSync(dir, { recursive: true }));
   const version = o.version || readPackageVersion();
@@ -169,6 +202,10 @@ function ensureStableBinaries(opts) {
     return { exePath: null, copied: [], reason: "mkdir_failed" };
   }
 
+  // Enforce the invariant that the stable dir holds no TC executable older than
+  // its stamp: drop a stale unmanaged CLI copy (best-effort, never throws).
+  const stale = removeStaleUnmanaged(dir, platform, exists, remove);
+
   // A version stamp lets us skip re-copying unchanged builds while guaranteeing
   // a re-copy after an `npm update` bumps the version (kills version skew).
   const stampPath = path.join(dir, VERSION_STAMP);
@@ -186,7 +223,7 @@ function ensureStableBinaries(opts) {
       // The daemon exe may legitimately be absent on some hosts; only a missing
       // PRIMARY binary forces fallback.
       if (binary === primary) {
-        return { exePath: null, copied, reason: "resolve_failed" };
+        return { exePath: null, copied, reason: "resolve_failed", ...stale };
       }
       continue;
     }
@@ -198,7 +235,7 @@ function ensureStableBinaries(opts) {
       copied.push(dest);
     } catch (_e) {
       if (binary === primary) {
-        return { exePath: null, copied, reason: "copy_failed" };
+        return { exePath: null, copied, reason: "copy_failed", ...stale };
       }
     }
   }
@@ -213,9 +250,9 @@ function ensureStableBinaries(opts) {
 
   const exePath = stableBinPath(primary, { platform, env: o.env });
   if (!exists(exePath)) {
-    return { exePath: null, copied, reason: "missing_after_copy" };
+    return { exePath: null, copied, reason: "missing_after_copy", ...stale };
   }
-  return { exePath, copied, reason: "ok" };
+  return { exePath, copied, reason: "ok", ...stale };
 }
 
 function readPackageVersion() {
@@ -290,6 +327,7 @@ function resolveDirectExePath(opts) {
 
 module.exports = {
   STABLE_BINARIES,
+  STALE_UNMANAGED_BINARIES,
   VERSION_STAMP,
   stableBinDir,
   stableBinPath,

@@ -123,6 +123,39 @@ async fn stopping_a_watch_never_records_a_successful_exit() {
     cleanup(&data);
 }
 
+/// A running watch that has captured a line reports how long ago it did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_running_watch_reports_last_output_age() {
+    let data = tmp_data_dir("watch-age");
+    let state = DaemonState::bootstrap(DaemonConfig::defaults_in(&data)).unwrap();
+
+    // Follow from the beginning so the seed line is captured without racing
+    // an append against the probe's initial seek to the end.
+    let watched = data.join("watched.log");
+    std::fs::write(&watched, b"seed\n").expect("seed watched file");
+    let canonical = std::fs::canonicalize(&watched).expect("canonicalize");
+    let (watch_id, _bucket, _probe) = state
+        .watch
+        .start(canonical, BucketConfig::default(), vec![], true, None)
+        .expect("watch start");
+
+    let mut seen = None;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let status = state.watch.status(watch_id).expect("live watch status");
+        if status.frames_total > 0 {
+            seen = Some(status);
+            break;
+        }
+    }
+    state.watch.stop(watch_id).expect("stop");
+    let seen = seen.expect("watch must capture a line");
+    assert!(seen.elapsed_ms.is_some(), "{seen:?}");
+    assert!(seen.last_output_age_ms.is_some(), "{seen:?}");
+
+    cleanup(&data);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_watch_carries_its_real_counters_into_the_receipt() {
     // Readability alone is not enough -- the whole point of 004 is that the

@@ -282,3 +282,110 @@ test("resolveDirectExePath returns null/resolve_failed when no binary resolves",
   assert.equal(r.exePath, null);
   assert.equal(r.reason, "resolve_failed");
 });
+
+// --- Stale unmanaged CLI in the stable dir ---
+
+function seedStaleFixture(prefix, extra) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const srcDir = path.join(root, "src");
+  fs.mkdirSync(srcDir, { recursive: true });
+  const srcMcp = path.join(srcDir, "terminal-commander-mcp.exe");
+  const srcDaemon = path.join(srcDir, "terminal-commanderd.exe");
+  fs.writeFileSync(srcMcp, "MCP");
+  fs.writeFileSync(srcDaemon, "DAEMON");
+  const dir = path.join(root, "terminal-commander", "bin");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "terminal-commander.exe"), "OLD-CLI-0.1.98");
+  for (const [name, body] of Object.entries(extra || {})) {
+    fs.writeFileSync(path.join(dir, name), body);
+  }
+  const resolveBinary = ({ binary }) => ({
+    reason: "ok",
+    binaryPath: binary === "terminal-commander-mcp" ? srcMcp : srcDaemon,
+  });
+  return { root, dir, resolveBinary };
+}
+
+test("ensureStableBinaries removes a stale CLI exe and leaves unrelated names alone", () => {
+  const { root, dir, resolveBinary } = seedStaleFixture("tc-stable-stale-", {
+    "terminal-commander-notes.txt": "keep",
+    "terminal-commander.exe.bak": "keep",
+  });
+  const r = ensureStableBinaries({
+    platform: "win32",
+    env: { LOCALAPPDATA: root },
+    version: "0.3.10",
+    resolveBinary,
+  });
+  assert.equal(r.reason, "ok");
+  assert.deepEqual(r.removed, [path.join(dir, "terminal-commander.exe")]);
+  assert.deepEqual(r.left, []);
+  assert.equal(fs.existsSync(path.join(dir, "terminal-commander.exe")), false);
+  assert.equal(fs.readFileSync(path.join(dir, "terminal-commander-notes.txt"), "utf8"), "keep");
+  assert.equal(fs.readFileSync(path.join(dir, "terminal-commander.exe.bak"), "utf8"), "keep");
+  assert.equal(fs.readFileSync(path.join(dir, ".version"), "utf8").trim(), "0.3.10");
+});
+
+test("ensureStableBinaries removes the stale CLI even when the stamp already matches", () => {
+  const { root, dir, resolveBinary } = seedStaleFixture("tc-stable-stamped-");
+  fs.writeFileSync(path.join(dir, "terminal-commander-mcp.exe"), "MCP");
+  fs.writeFileSync(path.join(dir, "terminal-commanderd.exe"), "DAEMON");
+  fs.writeFileSync(path.join(dir, ".version"), "0.3.10\n");
+  const r = ensureStableBinaries({
+    platform: "win32",
+    env: { LOCALAPPDATA: root },
+    version: "0.3.10",
+    resolveBinary,
+  });
+  assert.equal(r.copied.length, 0);
+  assert.equal(r.removed.length, 1);
+  assert.equal(fs.existsSync(path.join(dir, "terminal-commander.exe")), false);
+});
+
+test("ensureStableBinaries reports a locked stale CLI as left in place without failing", () => {
+  const { root, dir, resolveBinary } = seedStaleFixture("tc-stable-lockedcli-");
+  const r = ensureStableBinaries({
+    platform: "win32",
+    env: { LOCALAPPDATA: root },
+    version: "0.3.10",
+    resolveBinary,
+    removeFile: () => {
+      const err = new Error("EBUSY: resource busy or locked");
+      err.code = "EBUSY";
+      throw err;
+    },
+  });
+  assert.equal(r.reason, "ok");
+  assert.deepEqual(r.removed, []);
+  assert.deepEqual(r.left, [path.join(dir, "terminal-commander.exe")]);
+  assert.equal(fs.readFileSync(path.join(dir, ".version"), "utf8").trim(), "0.3.10");
+});
+
+test("ensureStableBinaries is a no-op on removal when the dir is already clean", () => {
+  const { root, resolveBinary } = seedStaleFixture("tc-stable-clean-");
+  const args = { platform: "win32", env: { LOCALAPPDATA: root }, version: "1.0.0", resolveBinary };
+  ensureStableBinaries(args);
+  const again = ensureStableBinaries({
+    ...args,
+    removeFile: () => assert.fail("nothing to remove"),
+  });
+  assert.deepEqual(again.removed, []);
+  assert.deepEqual(again.left, []);
+});
+
+test("ensureStableBinaries uses the extensionless CLI name on Unix", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tc-stable-unix-"));
+  const src = path.join(root, "src-bin");
+  fs.writeFileSync(src, "BIN");
+  const dir = path.join(root, "data", "terminal-commander", "bin");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "terminal-commander"), "OLD");
+  const r = ensureStableBinaries({
+    platform: "linux",
+    env: { XDG_DATA_HOME: path.join(root, "data") },
+    version: "1.0.0",
+    resolveBinary: () => ({ reason: "ok", binaryPath: src }),
+  });
+  assert.equal(r.reason, "ok");
+  assert.equal(fs.existsSync(path.join(dir, "terminal-commander")), false);
+});

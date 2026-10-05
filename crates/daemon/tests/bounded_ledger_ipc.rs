@@ -72,6 +72,7 @@ fn sleeper_params() -> CommandStartParams {
         grace_ms: Some(2_000),
         tag: None,
         dedup_nonce: Some(format!("ledger-test-{n}")),
+        receipt_shape: None,
         strip_ansi: true,
     }
 }

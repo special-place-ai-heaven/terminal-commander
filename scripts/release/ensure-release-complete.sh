@@ -31,6 +31,7 @@ synced_paths=(
   crates/daemon/Cargo.toml
   crates/mcp/Cargo.toml
   crates/probes/Cargo.toml
+  README.md
 )
 
 manifest_consistent() {
@@ -50,6 +51,7 @@ if ! git rev-parse "v${root_ver}" >/dev/null 2>&1 && ! manifest_consistent; then
   echo "::warning::manifest is split (root package.json=${root_ver}); syncing platform/manifest/Cargo versions (release-pr-sync was skipped for this release)."
   node scripts/release/sync-optional-dependencies.js
   python3 scripts/release/sync-cargo-versions.py "${root_ver}"
+  node scripts/release/stamp-readme-release-status.js "${root_ver}"
   if git diff --quiet "${synced_paths[@]}"; then
     echo "::error::root is ${root_ver} with no tag and a split manifest, but the sync produced no change -- cannot self-heal. Manual investigation needed."
     exit 2

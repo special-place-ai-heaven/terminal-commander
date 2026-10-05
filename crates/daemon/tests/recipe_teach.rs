@@ -75,6 +75,7 @@ impl Session {
                     rules: Vec::new(),
                     bucket_config: None,
                     tag: None,
+                    receipt_shape: None,
                 }),
             )
             .await
@@ -123,6 +124,7 @@ impl Session {
                     grace_ms: Some(2_000),
                     tag: None,
                     dedup_nonce: None,
+                    receipt_shape: None,
                     strip_ansi: true,
                 }),
             )
@@ -350,6 +352,7 @@ fn two_runnable_scopes_fall_back_to_argv() {
                     grace_ms: Some(2_000),
                     tag: None,
                     dedup_nonce: None,
+                    receipt_shape: None,
                     strip_ansi: true,
                 }),
             )

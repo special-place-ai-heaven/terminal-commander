@@ -376,6 +376,8 @@ mod pty_core {
         pub frames_suppressed: u64,
         pub frames_suppressed_progress: u64,
         pub frames_suppressed_dedupe: u64,
+        /// When the most recent frame was captured; `None` until the first one.
+        pub last_frame_at: Option<std::time::Instant>,
     }
 
     /// Errors raised while spawning / driving a PTY probe.
@@ -713,6 +715,7 @@ mod pty_core {
         {
             let mut m = metrics.lock();
             m.frames_total = m.frames_total.saturating_add(1);
+            m.last_frame_at = Some(std::time::Instant::now());
             if !matches!(kind, PromptKind::None) {
                 if is_secret {
                     // M1: count the secret prompt (and the prompt

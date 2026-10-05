@@ -355,6 +355,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     spawn_idle_reaper(&state);
     // P1 / TC50: reclaim sessions idle past their per-session TTL.
     spawn_session_reaper(&state);
+    spawn_discovery_prewarm();
     // Re-assert the pidfile if it goes missing (the daemon writes it once at
     // bind above and never used to recover a lost one). Closes the
     // pidfile-less window the version-aware replace path mis-reads as stale.
@@ -431,6 +432,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     spawn_idle_reaper(&state);
     // Session idle-reap (no-op on non-unix; sessions are PTY-backed).
     spawn_session_reaper(&state);
+    spawn_discovery_prewarm();
     // Re-assert the pidfile if it goes missing (cross-platform; see the Unix
     // arm). Closes the pidfile-less window mis-read as stale by the replace path.
     spawn_pidfile_reasserter(state_dir.clone(), pipe_name.clone());
@@ -465,6 +467,15 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
     tracing::info!("IPC server exited cleanly.");
     Ok(())
+}
+
+/// Discover the host in the background once the daemon serves, so the first
+/// `system_discover` or default-shell lookup reuses the result instead of
+/// waiting for the probes.
+fn spawn_discovery_prewarm() {
+    std::thread::spawn(|| {
+        let _ = crate::environment::cached_host_environment();
+    });
 }
 
 /// Spawn the idle self-reap timer (F1).

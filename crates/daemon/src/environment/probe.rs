@@ -12,6 +12,25 @@ use crate::ipc::protocol::{AccessRoute, HostEnvironment, ProgramProbe, TerminalP
 use terminal_commander_core::windows_silent;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Every probe process, the WSL ones included, must finish within this long
+/// of discovery starting. A per-probe timeout alone did not bound discovery:
+/// it started only once the process existed, and process creation is
+/// serialized and takes seconds on a busy Windows host.
+const DISCOVERY_DEADLINE: Duration = Duration::from_secs(3);
+/// How long past the deadline discovery waits for probes to be killed and
+/// report. A probe still waiting to create its process is reported as timed
+/// out; its thread kills the process as soon as it exists.
+const DEADLINE_GRACE: Duration = Duration::from_millis(250);
+/// How long a discovery result is reused. Shells and tools rarely change
+/// while the daemon runs, but WSL can: a distro starts, or one is installed,
+/// and a probe that timed out on a busy host can succeed later. Reusing a
+/// result this briefly keeps such a change, or a timed-out probe, from
+/// being reported for long.
+const DISCOVERY_TTL: Duration = Duration::from_secs(30);
+
+/// The last discovery result and when it finished.
+static DISCOVERY_CACHE: std::sync::Mutex<Option<(Instant, HostEnvironment)>> =
+    std::sync::Mutex::new(None);
 const MAX_VERSION_CHARS: usize = 160;
 const MAX_WSL_DISTROS: usize = 16;
 const SHELL_SENTINEL: &str = "terminal-commander-shell-probe";
@@ -36,34 +55,102 @@ enum ProbeRun {
     Failed,
 }
 
+enum Probed {
+    Shell(usize, ProgramProbe),
+    Tool(usize, ProgramProbe),
+    /// The WSL list and execution runs; `None` off Windows or without WSL.
+    Wsl(Option<(ProbeRun, ProbeRun)>),
+}
+
+/// The host environment, reusing a discovery for `DISCOVERY_TTL`.
+///
+/// Otherwise this discovers now. Concurrent callers share one discovery, so
+/// a call waits at most `DISCOVERY_DEADLINE` + `DEADLINE_GRACE`.
+#[must_use]
+pub fn cached_host_environment() -> HostEnvironment {
+    let mut cache = DISCOVERY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((finished, environment)) = cache.as_ref()
+        && finished.elapsed() < DISCOVERY_TTL
+    {
+        return environment.clone();
+    }
+    let environment = discover_host_environment();
+    *cache = Some((Instant::now(), environment.clone()));
+    environment
+}
+
 /// Discover the current daemon host with a fixed, bounded probe set.
 #[must_use]
 pub fn discover_host_environment() -> HostEnvironment {
     let started = Instant::now();
+    let deadline = started + DISCOVERY_DEADLINE;
     let shell_specs = shell_specs();
     let tool_specs = tool_specs();
 
-    let (shells, tools) = std::thread::scope(|scope| {
-        let mut shell_jobs = Vec::with_capacity(shell_specs.len());
-        for &spec in &shell_specs {
-            shell_jobs.push(scope.spawn(move || probe_shell(spec)));
-        }
-        let mut tool_jobs = Vec::with_capacity(tool_specs.len());
-        for &spec in &tool_specs {
-            tool_jobs.push(scope.spawn(move || probe_program(spec)));
-        }
-        let shells = shell_jobs
-            .into_iter()
-            .map(|job| job.join().unwrap_or_else(|_| unavailable_probe("unknown")))
-            .collect::<Vec<_>>();
-        let tools = tool_jobs
-            .into_iter()
-            .map(|job| job.join().unwrap_or_else(|_| unavailable_probe("unknown")))
-            .collect::<Vec<_>>();
-        (shells, tools)
+    // Every probe runs on its own detached thread, and discovery stops
+    // waiting at the deadline; see `DEADLINE_GRACE`. A thread reports the
+    // probe as timed out as soon as its program is found, then reports again
+    // when the probe finishes.
+    let (sender, results) = std::sync::mpsc::channel();
+    for (index, &spec) in shell_specs.iter().enumerate() {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let Some(path) = resolve_program(spec.argv0) else {
+                let _ = sender.send(Probed::Shell(index, unavailable_probe(spec.name)));
+                return;
+            };
+            let _ = sender.send(Probed::Shell(
+                index,
+                timed_out_probe(spec, &path, "timed_out"),
+            ));
+            let _ = sender.send(Probed::Shell(index, probe_shell(spec, &path, deadline)));
+        });
+    }
+    for (index, &spec) in tool_specs.iter().enumerate() {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let Some(path) = resolve_program(spec.argv0) else {
+                let _ = sender.send(Probed::Tool(index, unavailable_probe(spec.name)));
+                return;
+            };
+            let _ = sender.send(Probed::Tool(
+                index,
+                timed_out_probe(spec, &path, "not_probed"),
+            ));
+            let _ = sender.send(Probed::Tool(index, probe_program(spec, &path, deadline)));
+        });
+    }
+    std::thread::spawn(move || {
+        let _ = sender.send(Probed::Wsl(wsl_runs(deadline)));
     });
+    let mut shells = vec![None; shell_specs.len()];
+    let mut tools = vec![None; tool_specs.len()];
+    let mut wsl_runs_done = None;
+    let give_up = deadline + DEADLINE_GRACE;
+    while let Ok(probed) = results.recv_timeout(give_up.saturating_duration_since(Instant::now())) {
+        match probed {
+            Probed::Shell(index, probe) => shells[index] = Some(probe),
+            Probed::Tool(index, probe) => tools[index] = Some(probe),
+            Probed::Wsl(runs) => wsl_runs_done = Some(runs),
+        }
+    }
+    let shells = shells
+        .into_iter()
+        .zip(&shell_specs)
+        .map(|(probe, &spec)| probe.unwrap_or_else(|| unreported_probe(spec, "timed_out")))
+        .collect::<Vec<_>>();
+    let tools = tools
+        .into_iter()
+        .zip(&tool_specs)
+        .map(|(probe, &spec)| probe.unwrap_or_else(|| unreported_probe(spec, "not_probed")))
+        .collect::<Vec<_>>();
 
-    let wsl = wsl_probe(&tools);
+    let wsl = wsl_probe(
+        &tools,
+        wsl_runs_done.unwrap_or(Some((ProbeRun::TimedOut, ProbeRun::TimedOut))),
+    );
     let mut access_routes = shell_access_routes(&shells);
     if let Some(route) = wsl_access_route(&wsl, &tools, access_routes.len() + 1) {
         access_routes.push(route);
@@ -118,14 +205,11 @@ pub fn shell_launch_argv(shell: &str, line: &str) -> Vec<String> {
     }
 }
 
-/// Resolve the first confirmed default shell without running it.
+/// Resolve the first confirmed default shell without running it, from the
+/// same discovery `system_discover` reports.
 #[must_use]
 pub fn preferred_shell() -> Option<String> {
-    shell_specs()
-        .into_iter()
-        .map(probe_shell)
-        .find(|probe| probe.execution_status == "confirmed")
-        .and_then(|probe| probe.path)
+    cached_host_environment().preferred_shell
 }
 
 fn shell_specs() -> Vec<ProbeSpec> {
@@ -361,11 +445,8 @@ fn tool_specs() -> Vec<ProbeSpec> {
     specs
 }
 
-fn probe_program(spec: ProbeSpec) -> ProgramProbe {
-    let Some(path) = resolve_program(spec.argv0) else {
-        return unavailable_probe(spec.name);
-    };
-    let run = run_bounded(&path, spec.version_args);
+fn probe_program(spec: ProbeSpec, path: &Path, deadline: Instant) -> ProgramProbe {
+    let run = run_bounded(path, spec.version_args, deadline);
     let (version, version_status) = match run {
         ProbeRun::Complete(output) if output.success => (nonempty(output.text), "confirmed"),
         ProbeRun::Complete(output) => (nonempty(output.text), "failed"),
@@ -383,10 +464,7 @@ fn probe_program(spec: ProbeSpec) -> ProgramProbe {
     }
 }
 
-fn probe_shell(spec: ProbeSpec) -> ProgramProbe {
-    let Some(path) = resolve_program(spec.argv0) else {
-        return unavailable_probe(spec.name);
-    };
+fn probe_shell(spec: ProbeSpec, path: &Path, deadline: Instant) -> ProgramProbe {
     let path_text = path.to_string_lossy().into_owned();
     let command_argv = shell_launch_argv(&path_text, shell_probe_line(&path_text));
     let interpreter_args = command_argv
@@ -395,8 +473,8 @@ fn probe_shell(spec: ProbeSpec) -> ProgramProbe {
         .map(String::as_str)
         .collect::<Vec<_>>();
     let (version_run, execution_run) = std::thread::scope(|scope| {
-        let version_job = scope.spawn(|| run_bounded(&path, spec.version_args));
-        let execution_job = scope.spawn(|| run_bounded(&path, &interpreter_args));
+        let version_job = scope.spawn(|| run_bounded(path, spec.version_args, deadline));
+        let execution_job = scope.spawn(|| run_bounded(path, &interpreter_args, deadline));
         (
             version_job.join().unwrap_or(ProbeRun::Failed),
             execution_job.join().unwrap_or(ProbeRun::Failed),
@@ -426,6 +504,28 @@ fn probe_shell(spec: ProbeSpec) -> ProgramProbe {
     }
 }
 
+/// A probe whose program was found but that has not finished.
+fn timed_out_probe(spec: ProbeSpec, path: &Path, execution_status: &str) -> ProgramProbe {
+    ProgramProbe {
+        name: spec.name.to_owned(),
+        available: true,
+        path: Some(path.to_string_lossy().into_owned()),
+        version: None,
+        evidence: "path_confirmed".to_owned(),
+        version_status: "timed_out".to_owned(),
+        execution_status: execution_status.to_owned(),
+    }
+}
+
+/// A probe whose thread did not even finish looking up its program by the
+/// deadline.
+fn unreported_probe(spec: ProbeSpec, execution_status: &str) -> ProgramProbe {
+    resolve_program(spec.argv0).map_or_else(
+        || unavailable_probe(spec.name),
+        |path| timed_out_probe(spec, &path, execution_status),
+    )
+}
+
 fn unavailable_probe(name: &str) -> ProgramProbe {
     ProgramProbe {
         name: name.to_owned(),
@@ -446,7 +546,12 @@ fn shell_probe_line(shell: &str) -> &'static str {
     }
 }
 
-fn run_bounded(program: &Path, args: &[&str]) -> ProbeRun {
+/// Run one probe process until it exits, `PROBE_TIMEOUT` after it started,
+/// or `deadline`, whichever comes first.
+fn run_bounded(program: &Path, args: &[&str], deadline: Instant) -> ProbeRun {
+    if Instant::now() >= deadline {
+        return ProbeRun::TimedOut;
+    }
     let mut command = Command::new(program);
     #[cfg(windows)]
     windows_silent(&mut command);
@@ -458,7 +563,7 @@ fn run_bounded(program: &Path, args: &[&str]) -> ProbeRun {
     let Ok(mut child) = command.spawn() else {
         return ProbeRun::Failed;
     };
-    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let deadline = deadline.min(Instant::now() + PROBE_TIMEOUT);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -586,7 +691,31 @@ fn bounded_env_marker(name: &str) -> Option<String> {
     (!bounded.is_empty()).then_some(bounded)
 }
 
-fn wsl_probe(tools: &[ProgramProbe]) -> WslProbe {
+/// The WSL list and execution probes, run concurrently. They need only the
+/// `wsl.exe` path, so they run alongside the other probes rather than after.
+fn wsl_runs(deadline: Instant) -> Option<(ProbeRun, ProbeRun)> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let path = resolve_program("wsl.exe")?;
+    let path = path.as_path();
+    Some(std::thread::scope(|scope| {
+        let list_job = scope.spawn(|| run_bounded(path, &["--list", "--quiet"], deadline));
+        let execution_job = scope.spawn(|| {
+            run_bounded(
+                path,
+                &["-e", "sh", "-lc", &format!("printf {WSL_SENTINEL}")],
+                deadline,
+            )
+        });
+        (
+            list_job.join().unwrap_or(ProbeRun::Failed),
+            execution_job.join().unwrap_or(ProbeRun::Failed),
+        )
+    }))
+}
+
+fn wsl_probe(tools: &[ProgramProbe], runs: Option<(ProbeRun, ProbeRun)>) -> WslProbe {
     if !cfg!(windows) {
         return WslProbe {
             available: false,
@@ -606,7 +735,7 @@ fn wsl_probe(tools: &[ProgramProbe]) -> WslProbe {
             ..Default::default()
         };
     };
-    let Some(path) = wsl.path.as_deref().map(Path::new) else {
+    let (Some(_), Some((list_run, execution_run))) = (wsl.path.as_deref(), runs) else {
         return WslProbe {
             available: false,
             status: "path_not_found".to_owned(),
@@ -614,19 +743,6 @@ fn wsl_probe(tools: &[ProgramProbe]) -> WslProbe {
             ..Default::default()
         };
     };
-    let (list_run, execution_run) = std::thread::scope(|scope| {
-        let list_job = scope.spawn(|| run_bounded(path, &["--list", "--quiet"]));
-        let execution_job = scope.spawn(|| {
-            run_bounded(
-                path,
-                &["-e", "sh", "-lc", &format!("printf {WSL_SENTINEL}")],
-            )
-        });
-        (
-            list_job.join().unwrap_or(ProbeRun::Failed),
-            execution_job.join().unwrap_or(ProbeRun::Failed),
-        )
-    });
     let distributions = match list_run {
         ProbeRun::Complete(output) if output.success => Some(
             output

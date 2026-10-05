@@ -49,4 +49,18 @@ fn instructions_name_signal_model_pitch_and_routing() {
         lower.contains("receipt"),
         "instructions must promise a receipt instead of silence: {instr}"
     );
+    // (e) the quick / long / more-output routing triad.
+    for route in ["run_and_watch", "bucket_wait", "command_output_tail"] {
+        assert!(
+            instr.contains(route),
+            "instructions must name {route}: {instr}"
+        );
+    }
+    // Clients may prepend this to every tool, so its length is multiplied
+    // by the tool count.
+    assert!(
+        instr.chars().count() <= 850,
+        "instructions must stay <= 850 chars, got {}",
+        instr.chars().count()
+    );
 }

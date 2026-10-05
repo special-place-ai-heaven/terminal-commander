@@ -162,6 +162,10 @@ key.
   `v0.1.0-beta.1`.
 - Bump `version` before tagging; commit the bump as its own commit.
 - Tag format: `vMAJOR.MINOR.PATCH[-PRERELEASE]`.
+- README `<!-- release-status -->` line (under "Recent improvements") is
+  stamped "released in vX.Y.Z" by the release-pr-sync job; check the release PR
+  diff shows it. The prepublish gate fails the release if it still says
+  "not yet in a tagged release".
 
 ## Beta artifact
 

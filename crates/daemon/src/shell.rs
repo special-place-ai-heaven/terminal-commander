@@ -95,6 +95,8 @@ pub struct ShellExecRequest {
     pub bucket_config: Option<BucketConfig>,
     /// Optional per-bucket tag for subscription routing.
     pub tag: Option<String>,
+    /// Shape of the no-silence receipt; `None` = the default.
+    pub receipt_shape: Option<crate::command::ReceiptShape>,
 }
 
 impl ShellExecRequest {
@@ -111,6 +113,7 @@ impl ShellExecRequest {
             rules: Vec::new(),
             bucket_config: None,
             tag: None,
+            receipt_shape: None,
         }
     }
 }
@@ -180,6 +183,7 @@ impl ShellRuntime {
             grace: None,
             tag: req.tag,
             dedup_nonce: None,
+            receipt_shape: req.receipt_shape,
             peer_discriminator: None,
             // TC-B1: the shell lane is combed output too; strip color codes
             // so anchored rules match and summaries stay clean. Raw bytes

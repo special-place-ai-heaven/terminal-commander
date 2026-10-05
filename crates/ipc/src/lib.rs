@@ -63,7 +63,7 @@ pub use protocol::{
     PolicyStatusResponse, ProbeKind, ProbeListEntry, ProbeListResponse, ProbeStatusParams,
     ProbeStatusResponse, ProgramProbe, PtyCommandListEntry, PtyCommandListResponse,
     PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
-    PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, RecipeActivateParams,
+    PtyCommandWriteStdinParams, PtyCommandWriteStdinResponse, ReceiptShape, RecipeActivateParams,
     RecipeActivateResponse, RecipeActiveEntry, RecipeDeactivateParams, RecipeDeactivateResponse,
     RecipeGetParams, RecipeGetResponse, RecipeImportFailure, RecipeImportSeedsParams,
     RecipeImportSeedsResponse, RecipeListActiveResponse, RecipeListVersionsParams,

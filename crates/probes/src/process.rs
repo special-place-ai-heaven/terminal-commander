@@ -82,6 +82,8 @@ pub struct ProcessProbeMetrics {
     pub frames_suppressed: u64,
     pub frames_suppressed_progress: u64,
     pub frames_suppressed_dedupe: u64,
+    /// When the most recent frame was captured; `None` until the first one.
+    pub last_frame_at: Option<std::time::Instant>,
 }
 
 /// Errors from running a process probe.
@@ -732,6 +734,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
                 _ => {}
             }
             m.bytes_total = m.bytes_total.saturating_add(bytes);
+            m.last_frame_at = Some(std::time::Instant::now());
         }
 
         // TC-B1: feed the sifter a STRIPPED view of the frame so anchored

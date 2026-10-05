@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tag: Some("embed-example".to_owned()),
         strip_ansi: true,
         dedup_nonce: None,
+        receipt_shape: None,
         peer_discriminator: None,
     })?;
 

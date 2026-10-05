@@ -395,7 +395,13 @@ jobs:
       - name: Validate every committed version anchor
         env:
           EXPECTED_VERSION: ${{ needs.release-context.outputs.version }}
-        run: node scripts/release/validate-release-inputs.js "$EXPECTED_VERSION"
+          RELEASE_SOURCE: ${{ needs.release-context.outputs.source }}
+        run: |
+          # A manual force-publish re-ships an existing version; main may by
+          # then carry a newer README notice that is legitimately unreleased.
+          stamp_flag="--require-readme-stamped"
+          if [ "$RELEASE_SOURCE" = "force-publish" ]; then stamp_flag=""; fi
+          node scripts/release/validate-release-inputs.js "$EXPECTED_VERSION" $stamp_flag
 
   # ----------------------------------------------------------------
   # PLATFORM JOBS — build + publish (NPM07).

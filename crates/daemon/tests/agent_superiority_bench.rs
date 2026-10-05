@@ -151,6 +151,7 @@ fn draft_inline_rule_is_skipped_not_fatal_to_command_start() {
                     grace_ms: Some(30_000),
                     tag: None,
                     dedup_nonce: None,
+                    receipt_shape: None,
                     strip_ansi: true,
                 }),
             )
@@ -272,6 +273,7 @@ fn tc_signal_cost_is_orders_of_magnitude_below_raw_shell_cost() {
                     grace_ms: Some(30_000),
                     tag: None,
                     dedup_nonce: None,
+                    receipt_shape: None,
                     strip_ansi: true,
                 }),
             )

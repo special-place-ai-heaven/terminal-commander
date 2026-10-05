@@ -1145,6 +1145,7 @@ mod runtime {
                 (b.bucket_id, b.probe_id, metrics, awaiting)
             };
             let rec = self.jobs.get(job_id)?;
+            let elapsed_ms = crate::command::running_elapsed_ms(&rec);
             Some(terminal_commander_ipc::protocol::CommandStatusResponse {
                 job_id,
                 bucket_id,
@@ -1171,6 +1172,10 @@ mod runtime {
                 outcome_trust: OutcomeTrust::Observed,
                 pipeline_exit_masked: false,
                 awaiting_credential,
+                elapsed_ms,
+                last_output_age_ms: elapsed_ms
+                    .and(metrics.last_frame_at)
+                    .map(crate::command::output_age_ms),
             })
         }
 
@@ -1448,6 +1453,7 @@ mod runtime {
                 frames_suppressed: 7,
                 frames_suppressed_progress: 4,
                 frames_suppressed_dedupe: 3,
+                last_frame_at: None,
             };
             let snapshot = PtyProbeMetrics::default();
 

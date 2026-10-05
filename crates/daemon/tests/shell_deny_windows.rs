@@ -64,6 +64,7 @@ fn windows_argv_lane_denies_shell_before_spawn() {
                     grace: None,
                     tag: None,
                     dedup_nonce: None,
+                    receipt_shape: None,
                     strip_ansi: true,
                     peer_discriminator: None,
                 })
@@ -115,6 +116,7 @@ fn windows_argv_lane_runs_shell_under_allow_shell_true() {
                 grace: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
             })

@@ -579,8 +579,19 @@ async fn dispatch(
     let method_name = method_name(&req_env.request);
     let response_result = match &req_env.request {
         IpcRequest::SystemDiscover => {
-            let r = handle_system_discover(state);
-            IpcResult::Ok { response: r }
+            // Discovery runs and waits on host probe processes, which takes
+            // seconds under load. On an async worker it stalled every other
+            // request on this daemon, including Health, for that long.
+            let state = Arc::clone(state);
+            match tokio::task::spawn_blocking(move || handle_system_discover(&state)).await {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err {
+                    error: IpcError::new(
+                        IpcErrorCode::Internal,
+                        format!("system_discover failed: {e}"),
+                    ),
+                },
+            }
         }
         IpcRequest::Health => {
             let r = IpcResponse::Health {
@@ -656,12 +667,12 @@ async fn dispatch(
         }
         // Shell-lane start (TC49). Local-only: the shell lane carries no
         // `environment` (no remote routing). `handle_shell_exec` is SYNC
-        // (the gated `ShellRuntime::exec` never awaits), so it is called
-        // inline without `.await`.
-        IpcRequest::ShellExec(p) => match handlers::command::handle_shell_exec(state, p) {
-            Ok(r) => IpcResult::Ok { response: r },
-            Err(e) => IpcResult::Err { error: e },
-        },
+        // (the gated `ShellRuntime::exec` never awaits). A request without
+        // `shell` resolves the default by running shell probe processes
+        // first, so it runs on the blocking pool.
+        IpcRequest::ShellExec(p) => {
+            run_blocking(method_name, state, p, handlers::command::handle_shell_exec).await
+        }
         IpcRequest::RegistrySearch(p) => match handlers::registry::handle_registry_search(state, p)
         {
             Ok(r) => IpcResult::Ok { response: r },
@@ -769,18 +780,23 @@ async fn dispatch(
                 Err(e) => IpcResult::Err { error: e },
             }
         }
-        IpcRequest::FileReadWindow(p) => match handlers::file::handle_file_read_window(state, p) {
-            Ok(r) => IpcResult::Ok { response: r },
-            Err(e) => IpcResult::Err { error: e },
-        },
-        IpcRequest::FileSearch(p) => match handlers::file::handle_file_search(state, p) {
-            Ok(r) => IpcResult::Ok { response: r },
-            Err(e) => IpcResult::Err { error: e },
-        },
-        IpcRequest::FileListDir(p) => match handlers::file::handle_file_list_dir(state, p) {
-            Ok(r) => IpcResult::Ok { response: r },
-            Err(e) => IpcResult::Err { error: e },
-        },
+        // Reading up to a far `start_line`, walking a directory tree, and
+        // listing a large directory all scale with what is on disk.
+        IpcRequest::FileReadWindow(p) => {
+            run_blocking(
+                method_name,
+                state,
+                p,
+                handlers::file::handle_file_read_window,
+            )
+            .await
+        }
+        IpcRequest::FileSearch(p) => {
+            run_blocking(method_name, state, p, handlers::file::handle_file_search).await
+        }
+        IpcRequest::FileListDir(p) => {
+            run_blocking(method_name, state, p, handlers::file::handle_file_list_dir).await
+        }
         IpcRequest::FileWrite(p) => match handlers::file::handle_file_write(state, p) {
             Ok(r) => IpcResult::Ok { response: r },
             Err(e) => IpcResult::Err { error: e },
@@ -1010,6 +1026,26 @@ async fn dispatch(
     }
 }
 
+/// Run a handler that blocks (child processes, directory walks, large reads)
+/// on the blocking pool. Inline on an async worker it stalled every other
+/// request on this daemon, Health included, until it returned.
+async fn run_blocking<P: Clone + Send + Sync + 'static>(
+    method_name: &str,
+    state: &Arc<DaemonState>,
+    params: &P,
+    handler: fn(&Arc<DaemonState>, &P) -> Result<IpcResponse, IpcError>,
+) -> IpcResult {
+    let state = Arc::clone(state);
+    let params = params.clone();
+    match tokio::task::spawn_blocking(move || handler(&state, &params)).await {
+        Ok(Ok(r)) => IpcResult::Ok { response: r },
+        Ok(Err(e)) => IpcResult::Err { error: e },
+        Err(e) => IpcResult::Err {
+            error: IpcError::new(IpcErrorCode::Internal, format!("{method_name} failed: {e}")),
+        },
+    }
+}
+
 fn handle_system_discover(state: &Arc<DaemonState>) -> IpcResponse {
     IpcResponse::SystemDiscover(DiscoverResponse {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -1154,6 +1190,7 @@ pub async fn selfcheck_spawn_probe(
         grace: None,
         tag: Some("selfcheck".to_owned()),
         dedup_nonce: Some(fresh_selfcheck_nonce()),
+        receipt_shape: None,
         peer_discriminator: None,
         // TC-B1: default-on; self_check output is trivial but consistent.
         strip_ansi: true,
@@ -1409,6 +1446,7 @@ mod tests {
                 grace_ms: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
             }),
             IpcRequest::CommandStatus(CommandStatusParams {
@@ -1431,6 +1469,7 @@ mod tests {
                 rules: vec![],
                 bucket_config: None,
                 tag: None,
+                receipt_shape: None,
             }),
             IpcRequest::RegistrySearch(RegistrySearchParams {
                 query: "x".to_owned(),

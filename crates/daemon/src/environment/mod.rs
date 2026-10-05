@@ -8,7 +8,9 @@ mod router;
 #[cfg(windows)]
 pub mod wsl;
 
-pub use probe::{discover_host_environment, preferred_shell, shell_launch_argv};
+pub use probe::{
+    cached_host_environment, discover_host_environment, preferred_shell, shell_launch_argv,
+};
 
 pub use router::{EnvironmentRouter, RouteError, RouteOutcome};
 

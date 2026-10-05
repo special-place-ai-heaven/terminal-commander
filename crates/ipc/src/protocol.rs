@@ -102,11 +102,25 @@ pub struct CommandReceipt {
     /// the agent would otherwise have scrolled. `frames_total` for a
     /// zero-rule run.
     pub lines_suppressed: u64,
+    /// First N frame texts (oldest first). `head` and `tail` share ONE
+    /// 4096-byte raw-text budget: a requested head uses at most 2048 bytes
+    /// and the tail gets the rest (all 4096 when no head is requested).
+    /// Empty unless a head was requested, and empty when the ring has already evicted the
+    /// earliest output (the true head is gone; later lines are never shown
+    /// in its place). Never shares a line with `tail`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub head: Vec<String>,
     /// Last N frame texts (oldest first), byte-capped.
     pub tail: Vec<String>,
-    /// True when the ring evicted earlier frames; the tail may omit
-    /// the start of output.
+    /// True when the retained window itself is lossy: the ring evicted
+    /// earlier frames or a head or tail line was byte-truncated.
+    /// Independent of `lines_omitted`, which counts lines merely not shown.
     pub tail_incomplete: bool,
+    /// Output lines neither `head` nor `tail` shows (`frames_total` minus
+    /// both); 0 when they cover the whole output. `command_output_tail`
+    /// recovers only those still retained in the ring.
+    #[serde(default)]
+    pub lines_omitted: u64,
 }
 
 /// How a reported outcome was established (spec 004 FR-006).
@@ -198,6 +212,15 @@ pub struct CommandStatusResponse {
     /// PTY only: the job is blocked on a password prompt. Omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_credential: Option<AwaitingCredential>,
+    /// Milliseconds since the job started, only while it is still running.
+    /// Omitted once terminal (`duration_ms` covers that).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    /// Milliseconds since the most recent captured output frame, only while
+    /// the job is running. Omitted when no output has been captured yet --
+    /// absent means "no output captured yet", NOT "hung".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_age_ms: Option<u64>,
 }
 
 /// Params for `command_stop` (TC-3): force-kill a running combed
@@ -1591,6 +1614,10 @@ pub struct CommandStartParams {
     /// collapse hint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedup_nonce: Option<String>,
+    /// Shape of the no-silence receipt. `None` = the default (no head,
+    /// 5-line tail). Additive: old clients omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_shape: Option<ReceiptShape>,
 }
 
 impl CommandStartParams {
@@ -1599,6 +1626,48 @@ impl CommandStartParams {
     pub fn grace(&self) -> Option<Duration> {
         self.grace_ms
             .map(|ms| Duration::from_millis(ms.min(MAX_COMMAND_GRACE_MS)))
+    }
+}
+
+/// Cap on [`ReceiptShape::head_lines`].
+pub const MAX_RECEIPT_HEAD_LINES: u32 = 20;
+/// Cap on [`ReceiptShape::tail_lines`].
+pub const MAX_RECEIPT_TAIL_LINES: u32 = 50;
+/// Default [`ReceiptShape::tail_lines`].
+pub const DEFAULT_RECEIPT_TAIL_LINES: u32 = 5;
+
+const fn default_receipt_tail_lines() -> u32 {
+    DEFAULT_RECEIPT_TAIL_LINES
+}
+
+/// How many first and last output lines a [`CommandReceipt`] shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptShape {
+    /// First lines to show. Clamped to 0..=[`MAX_RECEIPT_HEAD_LINES`].
+    #[serde(default)]
+    pub head_lines: u32,
+    /// Last lines to show. Clamped to 0..=[`MAX_RECEIPT_TAIL_LINES`].
+    #[serde(default = "default_receipt_tail_lines")]
+    pub tail_lines: u32,
+}
+
+impl Default for ReceiptShape {
+    fn default() -> Self {
+        Self {
+            head_lines: 0,
+            tail_lines: DEFAULT_RECEIPT_TAIL_LINES,
+        }
+    }
+}
+
+impl ReceiptShape {
+    /// The shape with both counts clamped to their caps.
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        Self {
+            head_lines: self.head_lines.min(MAX_RECEIPT_HEAD_LINES),
+            tail_lines: self.tail_lines.min(MAX_RECEIPT_TAIL_LINES),
+        }
     }
 }
 
@@ -1642,6 +1711,9 @@ pub struct ShellExecParams {
     /// Optional per-bucket tag for subscription routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+    /// Shape of the no-silence receipt; see [`CommandStartParams`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_shape: Option<ReceiptShape>,
 }
 
 /// Wire shape for `command_status`. Carries just the job id.
@@ -3864,6 +3936,52 @@ mod tests {
         assert!(IpcError::transport("x").teach.is_none());
     }
 
+    #[test]
+    fn receipt_shape_defaults_and_clamps() {
+        let decoded: CommandStartParams =
+            serde_json::from_str(r#"{"argv":["true"]}"#).expect("old payload decodes");
+        assert_eq!(decoded.receipt_shape, None);
+        let partial: ReceiptShape = serde_json::from_str(r#"{"head_lines":3}"#).expect("decode");
+        assert_eq!(
+            partial,
+            ReceiptShape {
+                head_lines: 3,
+                tail_lines: 5
+            }
+        );
+        assert_eq!(
+            ReceiptShape::default(),
+            ReceiptShape {
+                head_lines: 0,
+                tail_lines: 5
+            }
+        );
+        let clamped = ReceiptShape {
+            head_lines: 999,
+            tail_lines: 999,
+        }
+        .clamped();
+        assert_eq!(
+            clamped,
+            ReceiptShape {
+                head_lines: 20,
+                tail_lines: 50
+            }
+        );
+        let zero = ReceiptShape {
+            head_lines: 0,
+            tail_lines: 0,
+        }
+        .clamped();
+        assert_eq!(
+            zero,
+            ReceiptShape {
+                head_lines: 0,
+                tail_lines: 0
+            }
+        );
+    }
+
     // Source-status: test-only. TC-2: the dedup_nonce field is additive and
     // serde(default), so an OLD client payload that omits it must still
     // decode, and a payload carrying Some(nonce) must round-trip unchanged.
@@ -3890,6 +4008,7 @@ mod tests {
             grace_ms: None,
             tag: None,
             dedup_nonce: Some("mcp-1234-7".to_owned()),
+            receipt_shape: None,
             strip_ansi: true,
         };
         let json = serde_json::to_string(&with_nonce).expect("serialize ok");
@@ -3904,6 +4023,7 @@ mod tests {
         // old daemon never sees an unexpected key.
         let without = CommandStartParams {
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             ..with_nonce
         };
@@ -4047,6 +4167,7 @@ mod tests {
                     grace_ms: None,
                     tag: None,
                     dedup_nonce: None,
+                    receipt_shape: None,
                     strip_ansi: true,
                 }),
                 false,
@@ -4060,6 +4181,7 @@ mod tests {
                     rules: vec![],
                     bucket_config: None,
                     tag: None,
+                    receipt_shape: None,
                 }),
                 false,
             ),
@@ -4426,6 +4548,7 @@ mod tests {
                 grace_ms: None,
                 tag: None,
                 dedup_nonce: None,
+                receipt_shape: None,
                 strip_ansi: true,
             })
             .is_idempotent(),

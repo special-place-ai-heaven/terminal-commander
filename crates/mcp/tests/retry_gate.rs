@@ -104,6 +104,7 @@ fn command_start() -> IpcRequest {
         grace_ms: None,
         tag: None,
         dedup_nonce: None,
+        receipt_shape: None,
         strip_ansi: true,
     })
 }
@@ -179,6 +180,7 @@ async fn shell_exec_is_not_resent_on_transport_failure() {
         rules: vec![],
         bucket_config: None,
         tag: None,
+        receipt_shape: None,
     });
     let result = client.call(req).await;
     assert!(result.is_err(), "transport error expected");

@@ -265,7 +265,65 @@ where
     {
         schema.insert("dependentSchemas".to_owned(), variants);
     }
+    slim_schema(&mut schema);
     Tool::new(name, description, Arc::new(schema))
+}
+
+/// Drop annotation noise from an ADVERTISED schema: `$schema`, `default: null`
+/// and `format: "uint*"` (non-standard, schemars-emitted). Bounds, enums,
+/// types, `required` and descriptions are untouched. Display only: runtime
+/// validation is `facade_strict` (raw schemars) plus serde, never this copy.
+pub(crate) fn slim_schema(schema: &mut Map<String, Value>) {
+    schema.remove("$schema");
+    if schema.get("default") == Some(&Value::Null) {
+        schema.remove("default");
+    }
+    if schema
+        .get("format")
+        .and_then(Value::as_str)
+        .is_some_and(|f| f.starts_with("uint"))
+    {
+        schema.remove("format");
+    }
+    for (key, value) in schema.iter_mut() {
+        match key.as_str() {
+            // Data, not schemas.
+            "default" | "const" | "enum" | "examples" => {}
+            // Keys are names; only the values are schemas.
+            "properties" | "$defs" | "definitions" | "dependentSchemas" | "patternProperties" => {
+                if let Value::Object(named) = value {
+                    named.values_mut().for_each(slim_value);
+                }
+            }
+            _ => slim_value(value),
+        }
+    }
+}
+
+fn slim_value(value: &mut Value) {
+    match value {
+        Value::Object(m) => slim_schema(m),
+        Value::Array(a) => a.iter_mut().for_each(slim_value),
+        _ => {}
+    }
+}
+
+/// Slim one router `Tool` for advertising (clone, slim, re-wrap).
+fn slim_tool(mut tool: Tool) -> Tool {
+    let mut schema = (*tool.input_schema).clone();
+    slim_schema(&mut schema);
+    tool.input_schema = Arc::new(schema);
+    tool
+}
+
+/// `tools/list` payload for the full surface: the router's granular tools
+/// minus the facade names, with advertised schemas slimmed.
+#[must_use]
+pub(crate) fn full_surface_tools(all: Vec<Tool>) -> Vec<Tool> {
+    all.into_iter()
+        .filter(|t| !COMPACT_TOOL_NAMES.contains(&t.name.as_ref()))
+        .map(slim_tool)
+        .collect()
 }
 
 /// Per-action field sets from schemars' root `oneOf`, nested so tools/list
@@ -1068,6 +1126,44 @@ mod tests {
             COMMAND_FACADE_DESCRIPTION
                 .contains(r#"{"action":"run_and_watch","argv":["git","status"]}"#),
             "description must carry the copy-paste argv example"
+        );
+    }
+
+    #[test]
+    fn slim_schema_drops_only_the_three_annotations() {
+        let mut schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "default": null,
+            "properties": {
+                "a": {"type": ["integer", "null"], "format": "uint32", "minimum": 0, "default": null},
+                "b": {"type": "array", "items": {"type": "integer", "format": "uint64", "minimum": 1, "maximum": 9}, "default": []},
+                "flag": {"type": "boolean", "default": false},
+                "when": {"type": "string", "format": "date-time"},
+                "default": {"type": "string", "default": null},
+                "format": {"type": "integer", "format": "uint", "default": null}
+            },
+            "required": ["default", "format"],
+            "$defs": {"D": {"$schema": "x", "type": "integer", "format": "uint16", "default": null}},
+            "dependentSchemas": {"action": {"oneOf": [{"properties": {"n": {"format": "uint32", "type": "integer"}}}]}}
+        });
+        slim_schema(schema.as_object_mut().unwrap());
+        assert_eq!(
+            schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": ["integer", "null"], "minimum": 0},
+                    "b": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 9}, "default": []},
+                    "flag": {"type": "boolean", "default": false},
+                    "when": {"type": "string", "format": "date-time"},
+                    "default": {"type": "string"},
+                    "format": {"type": "integer"}
+                },
+                "required": ["default", "format"],
+                "$defs": {"D": {"type": "integer"}},
+                "dependentSchemas": {"action": {"oneOf": [{"properties": {"n": {"type": "integer"}}}]}}
+            })
         );
     }
 }

@@ -120,6 +120,7 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
                     grace_ms: Some(2_000),
                     tag: None,
                     dedup_nonce: None,
+                    receipt_shape: None,
                     strip_ansi: true,
                 }),
             )
@@ -292,6 +293,7 @@ fn exited_command_is_excluded_from_live_runtime_views() {
                     grace_ms: Some(2_000),
                     tag: None,
                     dedup_nonce: None,
+                    receipt_shape: None,
                     strip_ansi: true,
                 }),
             )
@@ -392,6 +394,7 @@ fn runtime_state_command_probe_carries_tag_and_redacted_argv_head() {
                     grace_ms: Some(2_000),
                     tag: Some("verify-4a".to_owned()),
                     dedup_nonce: None,
+                    receipt_shape: None,
                     strip_ansi: true,
                 }),
             )

@@ -21,9 +21,9 @@ they added or modified.
 | Integration | per-crate `tests/*.rs` | `cargo nextest run` | Crate-boundary contracts |
 | Fixture | `tests/fixtures/<category>/...` | exercised by unit + integration | Every parser, sifter, schema, golden output |
 | Snapshot | `cargo insta test` | `insta` (locked) | Output that is easier to compare by snapshot than by hand |
-| Load | `tests/load/*.rs` | `cargo nextest run --profile load` (separate profile) | TC11, TC17, TC28 backpressure proof |
-| Security | `tests/security/*.rs` | `cargo nextest run --profile security` | TC22, TC29 (policy / fuzz-like) |
-| End-to-end | `tests/e2e/*.rs` | `cargo nextest run --profile e2e` | TC27, TC30 demo scenarios |
+| Load | `crates/core/tests/load.rs` | `cargo nextest run -p terminal-commander-core --test load` | TC11, TC17, TC28 backpressure proof |
+| Security | `crates/daemon/tests/security.rs` | `cargo nextest run -p terminal-commanderd --test security` | TC22, TC29 (policy / fuzz-like) |
+| End-to-end | `crates/mcp/tests/e2e.rs` | `cargo nextest run -p terminal-commander-mcp --test e2e` | TC27, TC30 demo scenarios |
 
 Locked dev-time dependencies (deferred to TC04 Cargo manifests):
 
@@ -145,7 +145,7 @@ cargo nextest run -p terminal-commander-probes --tests
 Pre-commit subset PLUS:
 
 ```bash
-cargo nextest run --workspace --profile security
+cargo nextest run -p terminal-commanderd --test security
 # Includes: default-deny coverage, sudo-block, regex-safety, audit
 # emission ordering, profile-version validation.
 ```
@@ -155,8 +155,8 @@ cargo nextest run --workspace --profile security
 Pre-commit subset PLUS:
 
 ```bash
-cargo nextest run --workspace --profile e2e
-# E2E profile may run longer (up to ~120s); not in the pre-commit
+cargo nextest run -p terminal-commander-mcp --test e2e
+# E2E tests may run longer (up to ~120s); not in the pre-commit
 # subset.
 ```
 
@@ -233,8 +233,9 @@ Per `POLICY.md` section 2.1 and `RISK_REGISTER.md`:
   on a developer machine.
 - Every regex execution against a fixture MUST complete in under
   10 ms.
-- Tests that exercise large input (load / security profiles) have
-  their own per-profile timeout (default 60 s).
+- Tests that exercise large input (load / security tests) run under
+  the default profile's timeout (`.config/nextest.toml`: SLOW at 60 s, killed
+  at 5 min); no separate load/security/e2e nextest profiles exist.
 
 Regex test cases in `tests/fixtures/sifters/regex/` MUST include
 both "safe" and "expected-rejected" examples (TC10/TC29 will

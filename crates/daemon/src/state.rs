@@ -213,6 +213,7 @@ impl DaemonState {
                     frames_suppressed: s.frames_suppressed,
                     frames_suppressed_progress: s.frames_suppressed_progress,
                     frames_suppressed_dedupe: s.frames_suppressed_dedupe,
+                    last_frame_at: None,
                 };
                 (
                     Some(crate::command::evidence_json(
@@ -489,7 +490,7 @@ impl DaemonState {
     /// point for IPC and in-process embedders; it does not start an IPC server.
     #[must_use]
     pub fn discover_environment(&self) -> crate::ipc::protocol::HostEnvironment {
-        let mut environment = crate::environment::discover_host_environment();
+        let mut environment = crate::environment::cached_host_environment();
         crate::environment::apply_execution_policy(&mut environment, &self.policy);
         environment
     }

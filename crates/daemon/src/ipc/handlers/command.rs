@@ -51,6 +51,7 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
         // explicit assignment the field is silently dropped at this hand-
         // built conversion (amendment #7).
         dedup_nonce: params.dedup_nonce.clone(),
+        receipt_shape: params.receipt_shape,
         // TC-2 peer-scoped fallback: pre-hash the dispatching peer so the
         // nonce-less fingerprint window only collapses a SAME-peer retry,
         // never a sibling client guessing another peer's command.
@@ -77,8 +78,8 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
 /// bounded [`CommandStartResponse`](crate::ipc::protocol::CommandStartResponse)
 /// shape and never raw stdout/stderr.
 ///
-/// SYNC: `exec` never awaits, so no `.await` here — the async dispatcher
-/// calls this inline.
+/// SYNC: `exec` never awaits. It can block on shell probe processes, so the
+/// async dispatcher runs it on the blocking pool.
 pub(in crate::ipc::server) fn handle_shell_exec(
     state: &Arc<DaemonState>,
     params: &ShellExecParams,
@@ -103,6 +104,7 @@ pub(in crate::ipc::server) fn handle_shell_exec(
         rules: params.rules.clone(),
         bucket_config: params.bucket_config.clone(),
         tag: params.tag.clone(),
+        receipt_shape: params.receipt_shape,
     };
     let resp = state.shell.exec(req).map_err(|e| {
         let err = enrich_shell_teach(&state.policy, "shell_exec", map_command_error(e));

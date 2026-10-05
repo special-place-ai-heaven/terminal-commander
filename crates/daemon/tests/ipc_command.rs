@@ -91,6 +91,7 @@ fn small_start_params(argv: &[&str]) -> CommandStartParams {
         grace_ms: Some(2_000),
         tag: None,
         dedup_nonce: None,
+        receipt_shape: None,
         strip_ansi: true,
     }
 }
@@ -151,6 +152,7 @@ fn os_critical_deletion_denied_in_full_access_on_both_lanes() {
                     rules: Vec::new(),
                     bucket_config: None,
                     tag: None,
+                    receipt_shape: None,
                 }),
             )
             .await
@@ -200,6 +202,7 @@ fn os_guard_reads_payloads_and_shell_grammar() {
                 rules: Vec::new(),
                 bucket_config: None,
                 tag: None,
+                receipt_shape: None,
             })
         };
 
@@ -599,6 +602,7 @@ fn shell_exec_denied_under_allow_shell_false_maps_to_policy_denied() {
                     rules: Vec::new(),
                     bucket_config: None,
                     tag: None,
+                    receipt_shape: None,
                 }),
             )
             .await
@@ -675,6 +679,7 @@ fn wsl_nested_shell_allowed_and_audit_tagged_under_allow_shell_true() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         };
@@ -752,6 +757,7 @@ fn wsl_nested_shell_is_denied_when_repo_only_forbids_shell_profile() {
             grace: None,
             tag: None,
             dedup_nonce: None,
+            receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
         });
