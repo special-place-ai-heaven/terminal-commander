@@ -65,7 +65,8 @@ Rationale:
       crates/mcp` returns only doc / negative-assertion matches
 - [ ] `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end"
       crates/mcp/src` returns no matches
-- [ ] `cargo deny check licenses` PASS (legacy gate, kept)
+- [ ] `cargo deny check` PASS (all four checks; CI also enforces it in
+      `pre-build-gates (linux-x64)`)
 
 ## Provider-harness gate (out of CI; operator-driven)
 
@@ -106,9 +107,9 @@ attached to a follow-up artifact, the beta posture stays
       `scripts/release/verify-optional-dependencies.js`.
 - [ ] `.github/.release-please-manifest.json` agrees with all six
       `package.json` version fields.
-- [ ] `npm-binary-build` workflow latest run on `main` is `success`
-      on both `ubuntu-24.04` (full smoke) and `ubuntu-24.04-arm`
-      (build + pack).
+- [ ] `npm-binary-build` workflow latest run on `main` is `success`:
+      both `pre-build-gates` jobs (linux-x64, windows-x64), all five
+      `build-*` legs, and `npm-pack`.
 - [ ] `release-please` workflow latest run on `main` is `success`
       and the publish jobs were correctly `skipped` if no
       release PR was merged on that push (gate
@@ -219,15 +220,15 @@ chain (`scripts/release/publish-cargo-crate.js`); the primary install is
 `npm install -g terminal-commander@latest` (see `docs/install/README.md`).
 `cargo install --path crates/{daemon,mcp,cli}` still works from a checkout.
 
-## Cargo-deny gate (release-only stricter pass)
+## Cargo-deny gate
 
-For release tags, the cargo-deny gate runs with `--all-features`:
+CI runs `cargo deny check` on every PR and push to `main`
+(`pre-build-gates (linux-x64)` in `npm-binary-build.yml`); `deny.toml` sets
+`all-features = true`, so no extra flag is needed:
 
 ```bash
-cargo deny --all-features check
+cargo deny check
 ```
-
-The standard `cargo deny check licenses` is the MVP minimum.
 
 ## Beta limitations (current, recorded honestly)
 

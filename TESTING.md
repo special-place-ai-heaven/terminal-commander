@@ -41,7 +41,9 @@ pull request and push to `main`; the release pipeline needs them green.
 Both first run `npm test` in `packages/terminal-commander` (the wrapper
 unit tests, from a clean checkout), then:
 
-`pre-build-gates (linux-x64)` runs `bash scripts/linux-gate.sh`, which:
+`pre-build-gates (linux-x64)` first runs `cargo deny check` (advisories,
+bans, licenses, sources; policy in `deny.toml`), then `bash
+scripts/linux-gate.sh`, which:
 
 1. checks the toolchain: `cargo`, `node`, `cargo-nextest`, `python3`
    present; `rustc` equals `rust-toolchain.toml` channel (1.97.1) and the
@@ -77,13 +79,9 @@ cargo nextest run --workspace
 ### Not enforced by CI today
 
 These tools are recommended, not wired into any workflow or gate script.
-Run them by hand when relevant. `deny.toml` exists at the repo root for
-`cargo deny`.
+Run them by hand when relevant.
 
 ```bash
-# License / advisory / dup / source policy (deny.toml exists).
-cargo deny --all-features check
-
 # Compile matrix: each individual feature on/off.
 cargo hack check --workspace --each-feature --no-dev-deps
 
