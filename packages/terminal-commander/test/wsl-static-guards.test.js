@@ -515,8 +515,9 @@ test("nothing sources autostart.sh (lib/, bin/, scripts/, generated shell)", () 
 test("profile snippet cannot exit, reconfigure or block the shell that sources it", () => {
   const { renderProfileSnippet, renderAutostartScript } = require("../lib/daemon/autostart.js");
   const snippet = renderProfileSnippet();
-  // Interactive shells only; everything runs inside a backgrounded subshell.
-  assert.match(snippet, /^case \$- in \*i\*\) \( bash "\$HOME\/\.config\/terminal-commander\/autostart\.sh" [^\n]*& \) ;; esac\n$/);
+  // Interactive shells only; everything, the SIGHUP trap included, runs
+  // inside a subshell, so the sourcing shell keeps its own disposition.
+  assert.match(snippet, /^case \$- in \*i\*\) \( trap '' HUP; bash "\$HOME\/\.config\/terminal-commander\/autostart\.sh" [^\n]*& \) ;; esac\n$/);
   // autostart.sh keeps exit/set/export inside one top-level subshell, so even
   // a stale snippet that sources it cannot touch the caller's shell.
   const body = renderAutostartScript().split("\n").filter((l) => l && !l.startsWith("#"));

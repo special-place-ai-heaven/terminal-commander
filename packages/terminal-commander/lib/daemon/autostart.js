@@ -66,6 +66,10 @@ function renderAutostartScript() {
   return `#!/usr/bin/env bash
 # terminal-commander autostart — managed by terminal-commander; do not edit.
 (
+# First: a terminal that closes now must not end this before setsid below.
+# Inside the subshell, so a stale snippet that sources this file does not
+# change the user's shell.
+trap '' HUP
 # Never from inside a Terminal Commander process tree: the daemon marks its
 # children (TC_DAEMON_CHILD), and TC_SOCKET / TC_SESSION select an endpoint
 # this script does not serve. The MCP adapter starts those daemons itself.
@@ -110,8 +114,10 @@ $TC_SETSID nohup terminal-commanderd --data-dir "\$TC_DATA" start --mode ipc-ser
 // background process from a subshell (no job-control noise, no `$!`).
 // Interactive shells only: tools run `bash -lc` constantly, and every step
 // that needs the daemon (bridge, setup, restart) starts it explicitly.
+// `trap '' HUP` before the launch: a terminal that closes at once hangs up
+// the launcher before it reaches setsid; an ignored SIGHUP is inherited.
 function renderProfileSnippet() {
-  return `case $- in *i*) ( bash "$HOME/.config/terminal-commander/autostart.sh" </dev/null >/dev/null 2>&1 & ) ;; esac
+  return `case $- in *i*) ( trap '' HUP; bash "$HOME/.config/terminal-commander/autostart.sh" </dev/null >/dev/null 2>&1 & ) ;; esac
 `;
 }
 

@@ -23,6 +23,7 @@ const {
   renderAutostartScript,
   renderProfileSnippet,
   installDaemonAutostart,
+  renderRepairBash,
   resolveDaemonBinary,
 } = require("../lib/daemon/autostart.js");
 const {
@@ -216,6 +217,38 @@ test("the daemon starts in its own session, so the terminal's hangup cannot reac
   assert.equal(starts.length, 1, JSON.stringify(starts));
   const [, pid, sid] = starts[0].match(/^pid=(\d+) sid=(\d+)$/) || [];
   assert.ok(pid && pid === sid, `the daemon must lead its own session: ${starts[0]}`);
+});
+
+// What a terminal that closes at once does: its hangup reaches the launcher
+// the snippet backgrounds before that reaches setsid. Without job control the
+// launcher stays in the shell's process group, so `kill -HUP 0` right after
+// the snippet hits it deterministically; setsid keeps it off the test runner.
+function sourceSnippetThenHangUp(home) {
+  return spawnSync(
+    "setsid",
+    ["-w", "bash", "--noprofile", "--norc", "-i", "-c", `. "${cfg(home, "profile.d/terminal-commander.sh")}"; kill -HUP 0`],
+    { env: shellEnv(home), encoding: "utf8", input: "" },
+  );
+}
+
+test("a hangup right after the snippet runs does not stop the daemon start", { skip: SETSID_SKIP }, async () => {
+  const home = makeHome({ stubDaemon: true });
+  sourceSnippetThenHangUp(home);
+  const starts = await waitForStarts(home);
+  assert.equal(starts.length, 1, `the launcher must survive the hangup, got ${JSON.stringify(starts)}`);
+});
+
+test("the WSL repair rewrites an existing snippet without the HUP trap", { skip: SKIP }, () => {
+  const home = makeHome();
+  const snippet = cfg(home, "profile.d/terminal-commander.sh");
+  fs.writeFileSync(
+    snippet,
+    'case $- in *i*) ( bash "$HOME/.config/terminal-commander/autostart.sh" </dev/null >/dev/null 2>&1 & ) ;; esac\n',
+  );
+  const r = bash(home, ["-c", renderRepairBash()]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.readFileSync(snippet, "utf8"), renderProfileSnippet());
+  assert.match(fs.readFileSync(snippet, "utf8"), /trap '' HUP; bash /);
 });
 
 // A daemon that died leaves its socket file behind: a socket nothing listens on.

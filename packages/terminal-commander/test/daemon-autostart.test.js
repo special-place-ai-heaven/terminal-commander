@@ -4,6 +4,9 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const {
   applyManagedBlock,
   hasManagedBlock,
@@ -12,6 +15,8 @@ const {
 const {
   shouldInstallDaemonAutostart,
   renderAutostartScript,
+  renderProfileSnippet,
+  installDaemonAutostart,
   renderSystemdUnit,
   buildWslInstallCommand,
 } = require("../lib/daemon/autostart.js");
@@ -39,6 +44,42 @@ test("renderAutostartScript starts the daemon in its own session when setsid exi
   assert.match(s, /command -v setsid/);
   assert.match(s, /\$TC_SETSID nohup terminal-commanderd /);
   assert.match(s, /<\/dev\/null >>"\$HOME\/\.local\/state\/terminal-commander\/daemon\.log" 2>&1 &/);
+});
+
+// The line 0.3.12 and earlier wrote; existing installs carry it until rewritten.
+const SNIPPET_WITHOUT_HUP_TRAP =
+  'case $- in *i*) ( bash "$HOME/.config/terminal-commander/autostart.sh" </dev/null >/dev/null 2>&1 & ) ;; esac\n';
+
+test("the profile snippet makes its launcher ignore SIGHUP before backgrounding it", () => {
+  assert.equal(
+    renderProfileSnippet(),
+    `case $- in *i*) ( trap '' HUP; bash "$HOME/.config/terminal-commander/autostart.sh" </dev/null >/dev/null 2>&1 & ) ;; esac\n`,
+  );
+});
+
+test("autostart.sh ignores SIGHUP as the first statement of its subshell", () => {
+  const body = renderAutostartScript().split("\n").filter((l) => l.trim() && !l.startsWith("#"));
+  assert.deepEqual(body.slice(0, 2), ["(", "trap '' HUP"]);
+});
+
+test("setup rewrites an existing snippet without the HUP trap, also when the hook is already present", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tc-snippet-"));
+  const install = () =>
+    installDaemonAutostart({
+      platform: "linux",
+      homeDir: home,
+      env: { HOME: home, PATH: "/usr/bin:/bin" },
+      daemonBinary: "/fake/terminal-commanderd",
+      systemdUserAvailable: () => false,
+      runAutostartOnce: () => ({ ok: true, exit_code: 0 }),
+    });
+  install();
+  const snippet = path.join(home, ".config", "terminal-commander", "profile.d", "terminal-commander.sh");
+  fs.writeFileSync(snippet, SNIPPET_WITHOUT_HUP_TRAP);
+  const again = install();
+  assert.match(again.hint, /profile hook already present/);
+  assert.equal(fs.readFileSync(snippet, "utf8"), renderProfileSnippet());
+  assert.match(fs.readFileSync(snippet, "utf8"), /trap '' HUP; bash /);
 });
 
 test("renderSystemdUnit uses ipc-server mode", () => {
