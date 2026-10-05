@@ -579,8 +579,19 @@ async fn dispatch(
     let method_name = method_name(&req_env.request);
     let response_result = match &req_env.request {
         IpcRequest::SystemDiscover => {
-            let r = handle_system_discover(state);
-            IpcResult::Ok { response: r }
+            // Discovery runs and waits on host probe processes, which takes
+            // seconds under load. On an async worker it stalled every other
+            // request on this daemon, including Health, for that long.
+            let state = Arc::clone(state);
+            match tokio::task::spawn_blocking(move || handle_system_discover(&state)).await {
+                Ok(r) => IpcResult::Ok { response: r },
+                Err(e) => IpcResult::Err {
+                    error: IpcError::new(
+                        IpcErrorCode::Internal,
+                        format!("system_discover failed: {e}"),
+                    ),
+                },
+            }
         }
         IpcRequest::Health => {
             let r = IpcResponse::Health {
