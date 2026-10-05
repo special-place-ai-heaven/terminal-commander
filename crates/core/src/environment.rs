@@ -22,6 +22,17 @@ pub const DAEMON_ENDPOINT_ENV: [&str; 2] = ["TC_SOCKET", "TC_DATA"];
 /// autostart) can tell it runs inside a TC-managed process tree.
 pub const DAEMON_CHILD_ENV: &str = "TC_DAEMON_CHILD";
 
+/// Give a command the daemon is about to start the daemon-child environment.
+///
+/// [`DAEMON_ENDPOINT_ENV`] is removed and [`DAEMON_CHILD_ENV`] set. Call it
+/// before applying a caller's env, so an explicitly passed value still wins.
+pub fn as_daemon_child(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    for key in DAEMON_ENDPOINT_ENV {
+        cmd.env_remove(key);
+    }
+    cmd.env(DAEMON_CHILD_ENV, "1")
+}
+
 /// Which execution environment a start request targets.
 ///
 /// Only [`EnvironmentSpec::Local`] is supported. Environment runners were never

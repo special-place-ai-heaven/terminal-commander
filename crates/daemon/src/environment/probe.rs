@@ -706,10 +706,7 @@ fn run_bounded(program: &Path, args: &[&str], deadline: Instant) -> ProbeRun {
         return ProbeRun::TimedOut;
     }
     let mut command = Command::new(program);
-    for key in terminal_commander_core::DAEMON_ENDPOINT_ENV {
-        command.env_remove(key);
-    }
-    command.env(terminal_commander_core::DAEMON_CHILD_ENV, "1");
+    terminal_commander_core::as_daemon_child(&mut command);
     #[cfg(windows)]
     {
         windows_silent(&mut command);

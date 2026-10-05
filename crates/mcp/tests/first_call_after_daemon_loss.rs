@@ -287,45 +287,12 @@ fn a_daemon_loss_and_recovery_never_runs_the_users_login_profile() {
 /// endpoint. A command it runs, in either lane, must not inherit them -- a
 /// terminal-commander process that command starts would attach to this
 /// daemon's socket, or start a second daemon on it -- and must carry
-/// `TC_DAEMON_CHILD=1`.
+/// `TC_DAEMON_CHILD=1`. A value the caller passes explicitly still wins.
 #[test]
 fn commands_carry_the_child_marker_and_not_the_daemons_endpoint() {
     let mut a = Adapter::start();
     for tool in ["run_and_watch", "pty_command_start"] {
-        let out = a.dir.path().join(format!("{tool}.env"));
-        #[cfg(windows)]
-        let argv = json!(["cmd", "/c", format!("set>{}", out.display())]);
-        #[cfg(unix)]
-        let argv = json!([
-            "sh",
-            "-c",
-            format!("env > '{p}.tmp' && mv '{p}.tmp' '{p}'", p = out.display())
-        ]);
-        let params = if tool == "run_and_watch" {
-            json!({"argv": argv, "wait_ms": 20000, "wait_until": "exit"})
-        } else {
-            json!({"argv": argv})
-        };
-        let ran = a.call_tool(tool, &params);
-        assert!(is_success(&ran), "{tool}: {ran}");
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        let env = loop {
-            let env = std::fs::read_to_string(&out).unwrap_or_default();
-            if env
-                .lines()
-                .any(|l| l.to_ascii_uppercase().starts_with("PATH="))
-                || std::time::Instant::now() >= deadline
-            {
-                break env;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        assert!(
-            env.lines()
-                .any(|l| l.to_ascii_uppercase().starts_with("PATH=")),
-            "{tool}: the command must still inherit the rest of the environment: {env:?}"
-        );
+        let env = command_env(&mut a, tool, &json!([]));
         let leaked: Vec<&str> = env
             .lines()
             .filter(|l| l.starts_with("TC_SOCKET=") || l.starts_with("TC_DATA="))
@@ -338,5 +305,55 @@ fn commands_carry_the_child_marker_and_not_the_daemons_endpoint() {
             env.lines().any(|l| l.trim_end() == "TC_DAEMON_CHILD=1"),
             "{tool}: the command must carry TC_DAEMON_CHILD=1"
         );
+    }
+
+    let explicit = json!([
+        {"key": "TC_SOCKET", "value": "explicit.sock"},
+        {"key": "TC_DAEMON_CHILD", "value": "explicit"},
+    ]);
+    let env = command_env(&mut a, "run_and_watch", &explicit);
+    for wanted in ["TC_SOCKET=explicit.sock", "TC_DAEMON_CHILD=explicit"] {
+        assert!(
+            env.lines().any(|l| l.trim_end() == wanted),
+            "an explicitly passed {wanted} must win"
+        );
+    }
+}
+
+/// Run a command through `tool` that writes its environment to a file, and
+/// return what it wrote.
+fn command_env(a: &mut Adapter, tool: &str, env: &Value) -> String {
+    let out = a.dir.path().join(format!("{tool}-{}.env", a.next_id));
+    #[cfg(windows)]
+    let argv = json!(["cmd", "/c", format!("set>{}", out.display())]);
+    #[cfg(unix)]
+    let argv = json!([
+        "sh",
+        "-c",
+        format!("env > '{p}.tmp' && mv '{p}.tmp' '{p}'", p = out.display())
+    ]);
+    let params = if tool == "run_and_watch" {
+        json!({"argv": argv, "env": env, "wait_ms": 20000, "wait_until": "exit"})
+    } else {
+        json!({"argv": argv, "env": env})
+    };
+    let ran = a.call_tool(tool, &params);
+    assert!(is_success(&ran), "{tool}: {ran}");
+
+    let has_path = |env: &str| {
+        env.lines()
+            .any(|l| l.to_ascii_uppercase().starts_with("PATH="))
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let written = std::fs::read_to_string(&out).unwrap_or_default();
+        if has_path(&written) {
+            return written;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{tool}: the command did not write its environment (with PATH): {written:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
     }
 }

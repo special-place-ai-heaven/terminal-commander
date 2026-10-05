@@ -22,9 +22,12 @@ test("shouldInstallDaemonAutostart defaults on", () => {
   assert.equal(shouldInstallDaemonAutostart({ TC_BOOTSTRAP_START_DAEMON: "0" }), false);
 });
 
-test("renderAutostartScript checks socket before start", () => {
+test("renderAutostartScript checks the pidfile, not a socket file, before start", () => {
   const s = renderAutostartScript();
-  assert.match(s, /terminal-commanderd\.sock/);
+  // A dead daemon leaves its socket file; only a live pid means "running".
+  assert.match(s, /terminal-commanderd\.pid/);
+  assert.match(s, /\/proc\/\$TC_PID\/cmdline/);
+  assert.doesNotMatch(s, /\[ -S /);
   assert.match(s, /start --mode ipc-server/);
   assert.match(s, /nohup/);
 });

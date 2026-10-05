@@ -70,13 +70,11 @@ set -eu
 # TC_DATA is honoured on purpose: a user may export it in their own profile
 # to relocate the default daemon.
 TC_DATA="\${TC_DATA:-$HOME/.local/share/terminal-commanderd}"
-SOCK="\$TC_DATA/terminal-commanderd.sock"
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-if [ -S "\$SOCK" ]; then
-  exit 0
-fi
-# A daemon bound to another socket still writes its pidfile here. Read-only
-# (no lock taken, nothing to race); the cmdline check rejects a reused pid.
+# A live daemon is known by its pidfile, not by a socket file: a daemon that
+# died leaves its socket behind. Read-only (no lock taken); the cmdline check
+# rejects a reused pid. A start that loses a race to another one exits on the
+# daemon's data-dir lock, into daemon.log.
 TC_PID=$(sed -n 's/.*"pid":[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' "\$TC_DATA/terminal-commanderd.pid" 2>/dev/null || true)
 if [ -n "$TC_PID" ] && grep -qa terminal-commanderd "/proc/$TC_PID/cmdline" 2>/dev/null; then
   exit 0

@@ -199,6 +199,27 @@ test("socket absent: sourcing .profile starts the daemon exactly once and leaves
   assert.ok(fs.existsSync(path.join(home, ".local", "state", "terminal-commander", "daemon.log")));
 });
 
+// A daemon that died leaves its socket file behind: a socket nothing listens on.
+function leaveStaleSocket(home) {
+  const dir = path.join(home, ".local", "share", "terminal-commanderd");
+  fs.mkdirSync(dir, { recursive: true });
+  const sock = path.join(dir, "terminal-commanderd.sock");
+  const r = spawnSync(process.execPath, [
+    "-e",
+    `require("net").createServer().listen(${JSON.stringify(sock)}, () => process.exit(0))`,
+  ]);
+  assert.equal(r.status, 0, String(r.stderr));
+  assert.ok(fs.statSync(sock).isSocket(), "the dead listener must leave its socket file");
+}
+
+test("stale socket file, no daemon: sourcing .profile still starts the daemon exactly once", { skip: SKIP }, async () => {
+  const home = makeHome({ stubDaemon: true });
+  leaveStaleSocket(home);
+  assertShellUntouched(sourceAndProbe(home, path.join(home, ".profile")), "stale socket");
+  const starts = await waitForStarts(home);
+  assert.equal(starts.length, 1, `a socket file with no daemon must not block the start, got ${JSON.stringify(starts)}`);
+});
+
 test("socket present: a stale snippet that still sources the new autostart.sh is harmless", { skip: SKIP }, async () => {
   const home = makeHome();
   fs.writeFileSync(cfg(home, "profile.d/terminal-commander.sh"), LEGACY_SNIPPET);

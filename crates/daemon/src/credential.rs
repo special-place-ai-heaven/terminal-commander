@@ -740,6 +740,8 @@ mod native {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
+    use terminal_commander_core::as_daemon_child;
+
     use super::{Asked, PromptText, SecretBuf, wipe};
 
     /// First available of `$SSH_ASKPASS`, then (on a desktop) `ssh-askpass`,
@@ -752,18 +754,18 @@ mod native {
         let mut helpers = Vec::new();
         if let Some(askpass) = std::env::var_os("SSH_ASKPASS").filter(|v| !v.is_empty()) {
             let mut c = Command::new(askpass);
-            c.arg(&label);
+            as_daemon_child(&mut c).arg(&label);
             helpers.push(c);
         }
         if desktop {
             let mut c = Command::new("ssh-askpass");
-            c.arg(&label);
+            as_daemon_child(&mut c).arg(&label);
             helpers.push(c);
             let mut c = Command::new("zenity");
-            c.args(["--password", "--title", &text.title]);
+            as_daemon_child(&mut c).args(["--password", "--title", &text.title]);
             helpers.push(c);
             let mut c = Command::new("kdialog");
-            c.args(["--title", &text.title, "--password", &text.message]);
+            as_daemon_child(&mut c).args(["--title", &text.title, "--password", &text.message]);
             helpers.push(c);
         }
         for helper in helpers {
@@ -798,7 +800,7 @@ mod native {
 
     /// Minimal Assuan exchange: `D <pin>` answers, a cancel `ERR` declines.
     fn pinentry(text: &PromptText) -> Option<Asked> {
-        let mut child = Command::new("pinentry")
+        let mut child = as_daemon_child(&mut Command::new("pinentry"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
