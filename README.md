@@ -828,9 +828,11 @@ terminal-commander session list
 ```
 
 `doctor harness` warns "shared daemon mode" when multiple harnesses are
-present and at least one is not yet configured. `doctor daemon` connects to the
-socket (on WSL it checks the pidfile), so a socket file left by a dead daemon is
-reported as stale, not as a running daemon. Repair is explicit:
+present and at least one is not yet configured. `doctor daemon` checks the
+daemon of the configured mode: on Windows the native daemon's named pipe (the
+WSL daemon only with `--distro` or `TC_WSL_DISTRO`, where it checks the
+pidfile); on Linux it connects to the socket, so a socket file left by a dead
+daemon is reported as stale, not as a running daemon. Repair is explicit:
 
 ```powershell
 terminal-commander setup harness --force
