@@ -180,12 +180,10 @@ async fn live_policy_status_reports_profile_and_caps() {
             caps.is_object(),
             "policy_status must surface a caps object; got {body}"
         );
-        for key in [
-            "allow_shell",
-            "allow_session",
-            "allow_privileged",
-            "allow_remote",
-        ] {
+        // allow_privileged gates nothing (no privileged helper ships), so it
+        // is not reported as a control.
+        assert!(caps.get("allow_privileged").is_none(), "{body}");
+        for key in ["allow_shell", "allow_session", "allow_remote"] {
             assert_eq!(
                 caps[key].as_bool(),
                 Some(true),

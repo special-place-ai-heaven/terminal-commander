@@ -950,8 +950,6 @@ pub struct PolicyCapsView {
     pub allow_shell: bool,
     /// Gates the `shell_session_*` lane (TC50; not yet live).
     pub allow_session: bool,
-    /// Gates the Wave-4 privileged helper (not yet live).
-    pub allow_privileged: bool,
     /// Gates remote federation / `target_id` (Wave 5; not yet live).
     pub allow_remote: bool,
 }
@@ -979,6 +977,10 @@ pub struct PolicyStatusResponse {
     /// where an MCP caller is denied with `recipe_activate_requires_admin`.
     #[serde(default)]
     pub llm_can_activate_recipes: bool,
+    /// Config keys that have no effect (unknown, or accepted but not
+    /// enforced), one sentence each; omitted when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_warnings: Vec<String>,
 }
 
 /// `self_check` payload.

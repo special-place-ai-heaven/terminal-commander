@@ -1225,6 +1225,7 @@ impl TerminalCommanderMcpServer {
                 bucket_read_limit,
                 caps,
                 llm_can_activate_recipes,
+                config_warnings,
             })) => json_tool_result(&serde_json::json!({
                 "profile": profile,
                 "commands_deny_count": commands_deny_count,
@@ -1238,9 +1239,11 @@ impl TerminalCommanderMcpServer {
                 "caps": {
                     "allow_shell": caps.allow_shell,
                     "allow_session": caps.allow_session,
-                    "allow_privileged": caps.allow_privileged,
                     "allow_remote": caps.allow_remote,
                 },
+                // Settings in the config file that do nothing, so the model
+                // never assumes a protection that is not there.
+                "config_warnings": config_warnings,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),

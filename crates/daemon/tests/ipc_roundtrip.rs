@@ -168,7 +168,6 @@ fn policy_status_reports_active_caps() {
                 assert_eq!(p.default_deny_path_suffix_count, 0);
                 assert!(p.caps.allow_shell);
                 assert!(p.caps.allow_session);
-                assert!(p.caps.allow_privileged);
                 assert!(p.caps.allow_remote);
                 assert!(p.llm_can_activate_recipes);
             }
@@ -209,7 +208,6 @@ fn policy_status_surfaces_explicit_allow_shell_cap() {
                 );
                 // The other caps stay off (only allow_shell was opted in).
                 assert!(!p.caps.allow_session);
-                assert!(!p.caps.allow_privileged);
                 assert!(!p.caps.allow_remote);
             }
             other => panic!("unexpected response: {other:?}"),
