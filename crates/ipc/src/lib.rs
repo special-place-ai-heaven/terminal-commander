@@ -33,6 +33,8 @@ pub mod pipe_client;
 
 #[cfg(any(unix, windows))]
 mod server_identity;
+#[cfg(unix)]
+pub use server_identity::uid_label;
 
 pub use protocol::MCP_SPEC_REVISION;
 pub use protocol::{
