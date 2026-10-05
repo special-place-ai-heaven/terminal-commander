@@ -105,11 +105,12 @@ impl DaemonClient {
         let mut stream = UnixStream::connect(&self.socket_path)
             .await
             .map_err(|e| IpcError::transport_not_connected(format!("connect: {e}")))?;
-        if !crate::server_identity::served_by_current_user(&stream) {
-            return Err(IpcError::transport_not_connected(format!(
-                "{} is served by another user's process; nothing was sent",
-                self.socket_path.display()
-            )));
+        if let Err((server, client)) = crate::server_identity::check_server_user(&stream) {
+            return Err(crate::server_identity::foreign_server(
+                &self.socket_path.display().to_string(),
+                &server,
+                &client,
+            ));
         }
         let frame = encode_frame(env)?;
         stream

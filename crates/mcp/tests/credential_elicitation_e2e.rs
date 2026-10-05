@@ -129,8 +129,7 @@ async fn http(url: &str, method: &str, body: &str) -> (u16, String) {
         body.len()
     );
     stream.write_all(request.as_bytes()).await.expect("write");
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw).await.expect("read");
+    let raw = read_response(&mut stream).await.expect("read");
     let status = raw
         .split(' ')
         .nth(1)
@@ -672,4 +671,30 @@ async fn an_opened_page_stays_pending_and_never_reaches_the_native_prompt() {
     }
     handle.shutdown().await;
     let _ = std::fs::remove_dir_all(&data);
+}
+
+/// Read one response the way a browser does: the head, then
+/// `Content-Length` bytes, or to EOF when a proxy in the path dropped that
+/// header. The page leaves closing to the client.
+async fn read_response(stream: &mut tokio::net::TcpStream) -> std::io::Result<String> {
+    let mut got = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        if let Some(i) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&got[..i]).to_ascii_lowercase();
+            let len: Option<usize> = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse().ok());
+            if len.is_some_and(|len| got.len() >= i + 4 + len) {
+                break;
+            }
+        }
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&chunk[..n]);
+    }
+    Ok(String::from_utf8_lossy(&got).into_owned())
 }

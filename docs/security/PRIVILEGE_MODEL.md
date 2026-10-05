@@ -159,10 +159,11 @@ The planned shape (each element gated by the review):
   approval token bound to the exact op + params, single-use and
   short-lived, authorizes execution. The LLM can request and retry but
   can never approve.
-- **`allow_privileged` capability.** Gated by `[policy.caps]
-  allow_privileged` (default false on the hardened profiles, preset on under `full_access` but gating nothing runnable; POLICY.md section 4.1), evaluated by
-  the same policy engine as every other action. Per-call authorization,
-  not per-session. Off-list ops are refused regardless of approval.
+- **`allow_privileged` capability.** Planned gate: `[policy.caps]
+  allow_privileged`, evaluated by the same policy engine as every other
+  action, per call, not per session; off-list ops refused regardless of
+  approval. Today no helper exists, nothing reads the key, and the daemon
+  names it as a config warning (POLICY.md section 4.1).
 - **Audit before exec.** Every privileged op emits a high-severity audit
   record (redacted subject) BEFORE execution. The audit log stays
   daemon-owned; LLM access is the read-only `audit_since` tool only

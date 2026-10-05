@@ -107,4 +107,12 @@ fn only_the_daemons_own_uid_is_served() {
     assert!(!terminal_commanderd::ipc::peer::same_user(
         own.wrapping_add(1)
     ));
+    // The refusal names both identities and the fix.
+    let msg = terminal_commanderd::ipc::peer::foreign_peer_message(0);
+    assert!(msg.contains(&format!("daemon runs as uid {own}")), "{msg}");
+    assert!(msg.contains("client runs as uid 0 (root)"), "{msg}");
+    assert!(
+        msg.contains("Run the client as the user that owns the daemon"),
+        "{msg}"
+    );
 }

@@ -302,7 +302,7 @@ async fn handle_connection(
             "ipc_connect",
             &identity_audit_subject(&identity),
             "deny",
-            Some("peer is another user; connection refused".to_owned()),
+            Some(format!("peer is uid {}; connection refused", c.uid)),
             &identity,
         );
         let env = ResponseEnvelope {
@@ -310,7 +310,7 @@ async fn handle_connection(
             result: IpcResult::Err {
                 error: IpcError::new(
                     IpcErrorCode::PeerCredentialFailure,
-                    "this daemon serves only the user it runs as; connection refused",
+                    peer::foreign_peer_message(c.uid),
                 ),
             },
         };

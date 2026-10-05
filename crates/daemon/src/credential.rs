@@ -684,15 +684,17 @@ async fn write_response(stream: &mut TcpStream, status: &str, body: &str) -> std
     );
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body.as_bytes()).await?;
-    stream.shutdown().await?;
-    // Lingering close: wait for the client's FIN so closing with unread
-    // request bytes does not reset the connection before it reads this.
+    // Let the client close first (a browser does once it has
+    // Content-Length bytes), draining whatever it still sends; close
+    // ourselves only after this bound. An HTTP filter that proxies loopback
+    // (AdGuard on Windows) reset about 1 in 300 connections, the reply
+    // lost, when our FIN followed the reply at once.
     let mut sink = [0_u8; 512];
     let _ = tokio::time::timeout(Duration::from_secs(1), async {
         while matches!(stream.read(&mut sink).await, Ok(n) if n > 0) {}
     })
     .await;
-    Ok(())
+    stream.shutdown().await
 }
 
 pub(crate) fn wipe(buf: &mut [u8]) {
@@ -1066,5 +1068,89 @@ mod tests {
         assert_eq!(w.last(), Some(&0));
         assert!(native::FLAGS.contains(CREDUI_FLAGS_DO_NOT_PERSIST));
         assert!(native::FLAGS.contains(CREDUI_FLAGS_GENERIC_CREDENTIALS));
+    }
+
+    /// Read one response the way a browser does: the head, then
+    /// `Content-Length` bytes, or to EOF when a proxy in the path dropped
+    /// that header; the caller then closes.
+    async fn read_response(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+        let mut got = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            if let Some(i) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&got[..i]).to_ascii_lowercase();
+                let len: Option<usize> = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok());
+                if len.is_some_and(|len| got.len() >= i + 4 + len) {
+                    return Ok(got);
+                }
+            }
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Ok(got);
+            }
+            got.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    /// A refused request is answered, never reset: the page leaves closing
+    /// to the client. Through a loopback HTTP proxy (AdGuard on Windows) an
+    /// early FIN reset about 1 in 300 such connections before the client
+    /// read a byte; stress-run this test to see it.
+    #[test]
+    fn a_refused_request_is_answered_not_reset() {
+        const RUNS: usize = 100;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut failures = Vec::new();
+            for i in 0..RUNS {
+                let listener = bind_loopback().unwrap();
+                let addr = listener.local_addr().unwrap();
+                let job = PageJob {
+                    job_id: JobId::new(),
+                    generation: 1,
+                    host: addr.to_string(),
+                    token: "t".repeat(64),
+                    text: PromptText {
+                        title: String::new(),
+                        message: String::new(),
+                    },
+                    ttl: Duration::from_mins(1),
+                    open_within: Duration::from_mins(1),
+                    accepted: Arc::new(tokio::sync::Notify::new()),
+                    opened: std::sync::atomic::AtomicBool::new(false),
+                };
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let _ = read_answer(&mut stream, &job).await;
+                });
+                let mut client = TcpStream::connect(addr).await.unwrap();
+                let body = "password=x";
+                let request = format!(
+                    "POST /{} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {}\r\n\r\n{body}",
+                    "0".repeat(64),
+                    body.len()
+                );
+                client.write_all(request.as_bytes()).await.unwrap();
+                match read_response(&mut client).await {
+                    Ok(raw) if raw.starts_with(b"HTTP/1.1 404") => {}
+                    Ok(raw) => failures.push(format!("run {i}: {}", String::from_utf8_lossy(&raw))),
+                    Err(e) => failures.push(format!("run {i}: {e}")),
+                }
+                drop(client);
+                server.await.unwrap();
+            }
+            assert!(
+                failures.is_empty(),
+                "{} of {RUNS}: {failures:?}",
+                failures.len()
+            );
+        });
     }
 }
