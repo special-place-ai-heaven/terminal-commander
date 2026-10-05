@@ -39,6 +39,8 @@
         "severity": "high",
         "kind": "test_failure",
         "summary": "npm test failed in av-safe-install-runtime.test.js",
+        "captures": { "file": "av-safe-install-runtime.test.js" },
+        "rule": { "id": "rul_018f0000000000000000000000000007", "version": 1, "registry_id": "npm.test-failure" },
         "source": {
           "probe_id": "prb_018f0000000000000000000000000001",
           "source_type": "process",

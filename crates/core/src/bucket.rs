@@ -702,6 +702,7 @@ mod tests {
             rule: Some(RuleRef {
                 id: RuleId::new(),
                 version: 1,
+                registry_id: None,
             }),
             source: EventSource {
                 probe_id: ProbeId::new(),

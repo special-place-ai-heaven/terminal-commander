@@ -30,8 +30,16 @@ pub type Captures = IndexMap<String, String>;
 /// Reference to the rule that produced an event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleRef {
+    /// Internal typed id, a one-way UUIDv5 hash of the registry id (used for
+    /// dedupe keys). It cannot be turned back into the registry id, so a
+    /// caller must use [`Self::registry_id`] to look the rule up.
     pub id: RuleId,
     pub version: u32,
+    /// The human registry rule id (e.g. `cargo.compile-error`): the id a
+    /// caller passes to `registry_get` / `registry_activate`. `None` for
+    /// events stored before this field existed, and for synthetic events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_id: Option<String>,
 }
 
 /// Canonical signal event. One row in a bucket.

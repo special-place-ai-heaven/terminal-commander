@@ -68,6 +68,12 @@ const MIGRATION_V0001: &str = include_str!("../migrations/V0001__initial_schema.
 /// fresh and upgraded databases. Idempotent (`DROP ... IF EXISTS`).
 const MIGRATION_V0005: &str = include_str!("../migrations/V0005__drop_events_fts.sql");
 
+/// Embedded V0010 migration: adds the nullable `events.rule_registry_id`
+/// column carrying the human registry rule id. Applied in the core
+/// `migrate()` path; read-only connections never migrate and so detect the
+/// column instead (see `EventStore::has_registry_id`).
+const MIGRATION_V0010: &str = include_str!("../migrations/V0010__event_rule_registry_id.sql");
+
 /// Default per-bucket maximum event count (count-based retention).
 pub const DEFAULT_BUCKET_MAX_EVENTS: u64 = 100_000;
 
@@ -190,6 +196,9 @@ pub type Result<T> = core::result::Result<T, EventStoreError>;
 pub struct EventStore {
     conn: Connection,
     read_only: bool,
+    /// Whether `events.rule_registry_id` exists. Always true after `migrate()`;
+    /// a read-only connection to a not-yet-migrated database reads `NULL`.
+    has_registry_id: bool,
 }
 
 impl EventStore {
@@ -204,6 +213,7 @@ impl EventStore {
         let mut me = Self {
             conn,
             read_only: false,
+            has_registry_id: false,
         };
         me.migrate()?;
         Ok(me)
@@ -216,9 +226,11 @@ impl EventStore {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
         )?;
         configure_pragmas(&conn, true)?;
+        let has_registry_id = events_has_registry_id(&conn);
         Ok(Self {
             conn,
             read_only: true,
+            has_registry_id,
         })
     }
 
@@ -229,6 +241,7 @@ impl EventStore {
         let mut me = Self {
             conn,
             read_only: false,
+            has_registry_id: false,
         };
         me.migrate()?;
         Ok(me)
@@ -286,7 +299,44 @@ impl EventStore {
             )?;
             tx.commit()?;
         }
+        // V0010: nullable `events.rule_registry_id` (human registry rule id).
+        let v10: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 10",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if v10 == 0 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(MIGRATION_V0010)
+                .map_err(|e| EventStoreError::Migration(e.to_string()))?;
+            let now_s = OffsetDateTime::now_utc().format(&Rfc3339)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (10, ?1)",
+                params![now_s],
+            )?;
+            tx.commit()?;
+        }
+        self.has_registry_id = true;
         Ok(())
+    }
+
+    /// Column list for event SELECTs; the registry id is always the 19th
+    /// column (`NULL` when the database predates V0010).
+    fn event_columns(&self) -> String {
+        let registry = if self.has_registry_id {
+            "rule_registry_id"
+        } else {
+            "NULL"
+        };
+        format!(
+            "bucket_id, seq, event_id, timestamp, severity, kind, summary,
+                    rule_id, rule_version, captures, source, pointer,
+                    pointer_unavailable_reason, tags, count, first_seen, last_seen, suppressed,
+                    {registry}"
+        )
     }
 
     /// Whether this connection is read-only.
@@ -366,14 +416,17 @@ impl EventStore {
         };
         let rule_id_s = event.rule.as_ref().map(|r| r.id.to_wire_string());
         let rule_version_i: Option<i64> = event.rule.as_ref().map(|r| i64::from(r.version));
+        let rule_registry_id: Option<&str> =
+            event.rule.as_ref().and_then(|r| r.registry_id.as_deref());
 
         tx.execute(
             "INSERT INTO events
               (bucket_id, seq, event_id, timestamp, severity_rank, severity,
                kind, summary, rule_id, rule_version, captures, source, pointer,
-               pointer_unavailable_reason, tags, count, first_seen, last_seen, suppressed)
+               pointer_unavailable_reason, tags, count, first_seen, last_seen, suppressed,
+               rule_registry_id)
              VALUES
-              (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+              (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 bid.to_wire_string(),
                 seq_i,
@@ -394,6 +447,7 @@ impl EventStore {
                 first_seen_s,
                 last_seen_s,
                 i32::from(event.suppressed),
+                rule_registry_id,
             ],
         )?;
         tx.execute(
@@ -488,15 +542,14 @@ impl EventStore {
         let sev_rank = request.severity_min.map_or(0_i64, |s| i64::from(s.rank()));
         let kind_pat = request.kind_filter.as_deref();
 
-        let mut stmt = self.conn.prepare(
-            "SELECT bucket_id, seq, event_id, timestamp, severity, kind, summary,
-                    rule_id, rule_version, captures, source, pointer,
-                    pointer_unavailable_reason, tags, count, first_seen, last_seen, suppressed
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {}
              FROM events
              WHERE bucket_id = ?1 AND seq > ?2 AND severity_rank >= ?3
                AND (?4 IS NULL OR kind = ?4)
              ORDER BY seq ASC LIMIT ?5",
-        )?;
+            self.event_columns()
+        ))?;
         let mut rows = stmt.query(params![
             bucket_id.to_wire_string(),
             cursor_i,
@@ -544,12 +597,10 @@ impl EventStore {
 
     /// Look up a single event by id.
     pub fn get_event(&self, event_id: EventId) -> Result<SignalEvent> {
-        let mut stmt = self.conn.prepare(
-            "SELECT bucket_id, seq, event_id, timestamp, severity, kind, summary,
-                    rule_id, rule_version, captures, source, pointer,
-                    pointer_unavailable_reason, tags, count, first_seen, last_seen, suppressed
-             FROM events WHERE event_id = ?1",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM events WHERE event_id = ?1",
+            self.event_columns()
+        ))?;
         let mut rows = stmt.query(params![event_id.to_wire_string()])?;
         rows.next()?.map_or_else(
             || Err(EventStoreError::EventNotFound(event_id)),
@@ -705,6 +756,13 @@ fn check_filesystem(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether the `events` table already has the V0010 `rule_registry_id` column.
+fn events_has_registry_id(conn: &Connection) -> bool {
+    conn.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name = 'rule_registry_id'")
+        .and_then(|mut s| s.exists([]))
+        .unwrap_or(false)
+}
+
 fn row_to_event(row: &rusqlite::Row) -> Result<SignalEvent> {
     let bucket_id_s: String = row.get(0)?;
     let seq_i: i64 = row.get(1)?;
@@ -732,6 +790,7 @@ fn row_to_event(row: &rusqlite::Row) -> Result<SignalEvent> {
     let timestamp = OffsetDateTime::parse(&ts_s, &Rfc3339)?;
     let severity = Severity::parse(&severity_s)
         .map_err(|e| EventStoreError::InvalidPayload(format!("severity parse: {e}")))?;
+    let rule_registry_id: Option<String> = row.get(18)?;
     let rule = match (rule_id_s, rule_version_i) {
         (Some(rid_s), Some(v)) => {
             let id = terminal_commander_core::RuleId::parse_wire(&rid_s)
@@ -739,6 +798,7 @@ fn row_to_event(row: &rusqlite::Row) -> Result<SignalEvent> {
             Some(RuleRef {
                 id,
                 version: u32::try_from(v).unwrap_or(u32::MAX),
+                registry_id: rule_registry_id,
             })
         }
         _ => None,

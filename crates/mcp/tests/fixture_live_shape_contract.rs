@@ -344,20 +344,10 @@ async fn command_chain(h: &mut Harness) -> String {
             "bucket_events_since",
             json!({"bucket_id": bucket, "cursor": 0}),
             "/response_example",
-            &[
-                (
-                    "events[].captures",
-                    "SignalEvent optional field (skip_serializing_if None)",
-                ),
-                (
-                    "events[].rule",
-                    "SignalEvent optional field (skip_serializing_if None)",
-                ),
-                (
-                    "events[].source.job_id",
-                    "SignalEvent optional field (skip_serializing_if None)",
-                ),
-            ],
+            &[(
+                "events[].source.job_id",
+                "SignalEvent optional field (skip_serializing_if None)",
+            )],
         )
         .await;
     let event_id = s(&events["events"][0], "event_id");
@@ -373,16 +363,10 @@ async fn command_chain(h: &mut Harness) -> String {
         "bucket_wait",
         json!({"bucket_id": bucket, "cursor": 0, "timeout_ms": 200}),
         "/response_examples/with_events",
-        &[
-            (
-                "events[].rule",
-                "SignalEvent optional field (skip_serializing_if None)",
-            ),
-            (
-                "events[].source.job_id",
-                "SignalEvent optional field (skip_serializing_if None)",
-            ),
-        ],
+        &[(
+            "events[].source.job_id",
+            "SignalEvent optional field (skip_serializing_if None)",
+        )],
     )
     .await;
     h.check(

@@ -44,6 +44,7 @@
           "captures": {
             "code": "E0432"
           },
+          "rule": { "id": "rul_018f0000000000000000000000000007", "version": 1, "registry_id": "cargo.compile-error" },
           "source": {
             "probe_id": "prb_018f0000000000000000000000000001",
             "source_type": "process",

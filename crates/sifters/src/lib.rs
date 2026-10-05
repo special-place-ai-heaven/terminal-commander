@@ -536,6 +536,7 @@ fn build_draft(
     let rule_ref = RuleRef {
         id: stable_rule_id(&def.id),
         version: def.version,
+        registry_id: Some(def.id.clone()),
     };
 
     // Severity below Medium does not require a pointer, but we
@@ -622,6 +623,25 @@ mod tests {
             context_hint: terminal_commander_core::ContextHint::default(),
             examples: vec![],
         }
+    }
+
+    #[test]
+    fn emitted_draft_carries_the_registry_rule_id_and_version() {
+        // An agent reading a signal must be able to tell WHICH rule fired in
+        // the id it passes to registry_get / registry_activate; RuleRef.id is
+        // only a one-way hash of it.
+        let mut def = kw_rule("cargo.compile-error", &["error"], None);
+        def.version = 4;
+        let rt = SifterRuntime::build(&[def]).unwrap();
+        let frame = SourceFrame::new(
+            terminal_commander_core::ProbeId::new(),
+            SourceStream::Stderr,
+            "error: boom".to_owned(),
+        );
+        let drafts = rt.evaluate(&frame, BucketId::new());
+        let rule = drafts[0].rule.as_ref().expect("rule ref");
+        assert_eq!(rule.registry_id.as_deref(), Some("cargo.compile-error"));
+        assert_eq!(rule.version, 4);
     }
 
     #[test]

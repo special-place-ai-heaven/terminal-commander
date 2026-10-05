@@ -12,7 +12,7 @@
   "severity": "high",
   "kind": "missing_package",
   "summary": "APT could not locate package libssl-dev",
-  "rule": { "id": "rul_018f0000000000000000000000000007", "version": 1 },
+  "rule": { "id": "rul_018f0000000000000000000000000007", "version": 1, "registry_id": "apt-missing-package" },
   "source": {
     "probe_id": "prb_018f0000000000000000000000000001",
     "source_type": "process",
