@@ -9,7 +9,7 @@
 [![npm](https://img.shields.io/npm/v/terminal-commander?label=npm&color=cb3837)](https://www.npmjs.com/package/terminal-commander)
 [![CI](https://github.com/special-place-ai-heaven/terminal-commander/actions/workflows/npm-binary-build.yml/badge.svg)](https://github.com/special-place-ai-heaven/terminal-commander/actions/workflows/npm-binary-build.yml)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](./LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.95-orange?logo=rust)](./rust-toolchain.toml)
+[![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](./rust-toolchain.toml)
 [![MCP](https://img.shields.io/badge/protocol-MCP-8A2BE2)](https://modelcontextprotocol.io)
 [![Platforms](https://img.shields.io/badge/platforms-win--x64%20%7C%20linux--x64%20%7C%20linux--arm64%20%7C%20mac--arm64%20%7C%20mac--x64-555)](#platform-support)
 
@@ -50,8 +50,29 @@ result is ever silent or misleading.
 > supplied, Terminal Commander follows the
 > highest-ranked interpreter route proven by `system_discover`.
 
+## Recent improvements (unreleased)
+
+Landed 2026-10-05, not yet in a tagged release.
+
+- **Quiet receipt you can shape:** `lines_omitted` says how much the receipt
+  leaves out, and `receipt_head_lines` / `receipt_tail_lines` choose how many
+  first and last lines it shows. See [Bounded receipts](#bounded-receipts-that-never-go-silent).
+- **Liveness without a clock:** `command_status` reports `elapsed_ms` and
+  `last_output_age_ms` while a job runs, so a quiet job is distinguishable from
+  a hung one. See [How LLMs Should Use It](#how-llms-should-use-it).
+- **A daemon that stays responsive:** blocking requests (`system_discover`,
+  directory `file_search`, `file_list_dir`, `file_read_window`) no longer hold up
+  Health; measured Health wait dropped from seconds to about 0.5 ms. See
+  [Per-session daemons](#per-session-daemons-with-disciplined-lifecycles).
+- **A leaner tool surface:** server instructions are 849 characters (capped at
+  850 by test) and the full `tools/list` is about 12% smaller with the same 60
+  tools. See [MCP Tool Surface](#mcp-tool-surface).
+- **Install hygiene:** the npm wrapper removes a stale `terminal-commander` CLI
+  copy from the per-user stable bin directory. See [Update](#update).
+
 ## Contents
 
+- [Recent improvements (unreleased)](#recent-improvements-unreleased)
 - [Why Terminal Commander](#why-terminal-commander)
 - [Innovations](#innovations)
 - [Quick Start](#quick-start)
@@ -123,7 +144,14 @@ supersedes the old one in that scope, so one line never fires twice.
 
 A command whose output matched zero rules is not an error and not an empty
 success — it returns a **receipt**: exit code, how many lines were suppressed,
-and a short tail. The same no-silence rule runs through the whole surface:
+and a short tail, plus `lines_omitted` (lines the receipt does not show).
+`receipt_tail_lines` (0 to 50, default 5) and `receipt_head_lines` (0 to 20,
+default 0) on `command_start_combed`, `run_and_watch` and `shell_exec` shape
+it. Head and tail never share a line and share one 4096-byte raw-text budget
+(the head gets at most 2048). The head stays empty when the output ring has
+already evicted the earliest lines, and `tail_incomplete` marks a shown window
+that is itself lossy. `command_output_tail` recovers the omitted lines that
+are still retained. The same no-silence rule runs through the whole surface:
 `command_status` for a finished quiet job carries the receipt; a stopped job
 reports its real counters (snapshotted from the live probe metrics, not
 zeroes); truncation is always flagged (`truncated_lines`, `truncated_bytes`,
@@ -195,6 +223,16 @@ two harnesses never share state. An idle daemon self-reaps after
 reap**: a still-running command, file watch, or PTY job keeps the daemon up so
 children are never orphaned and receipts never lost. `command_stop` kills the
 whole process tree, identity-gated so a recycled PID is never signalled.
+
+The daemon also stays answerable while it works. `system_discover`, `file_search`
+on a directory, `file_list_dir`, `file_read_window`, `shell_exec` without an
+explicit shell, and the WSL runner lookup used to run inline in the async
+dispatcher and held up every other request, Health included. They now run on the
+blocking pool (`run_blocking` in `crates/daemon/src/ipc/server.rs`). On the
+development machine Health waited several seconds behind `system_discover` and
+up to 27 s behind a large directory search before; about 0.5 ms after (measured
+there, not a guarantee). Every adapter sends `system_discover` at startup, so
+this also removed a multi-second stall on the first tool call.
 
 ### Policy gate, audit trail, and the argv-only contract
 
@@ -449,6 +487,10 @@ Agent rules:
   when watching several jobs at once.
 - `wait_exhausted: true` means STILL RUNNING — call `command action=status`;
   do not treat it as finished. `degraded: true` means follow the `recover_hint`.
+- While a process, PTY, or file-watch job runs, `command action=status` (and a
+  wait-exhausted `run_and_watch` or `recipe_run` result) carries `elapsed_ms` and
+  `last_output_age_ms`. A missing `last_output_age_ms` means no output captured
+  yet, not hung. Both disappear once the job is terminal; `duration_ms` takes over.
 - The `cursor` returned by `run_and_watch` is a resume cursor. If `max_signals`
   caps the response, it remains before omitted matches so a later `wait` from
   that cursor recovers them instead of silently skipping evidence. A watched
@@ -499,6 +541,15 @@ ranked `access_routes`; `beachhead` is the highest-ranked route and includes the
 exact argv template an LLM can follow. Unavailable or timed-out candidates stay
 truthful evidence, never inferred availability. Discovery also carries the
 honest `omni_status` capability matrix (see below).
+
+The model-facing text is kept small. The server instructions are 849 characters
+(a test caps them at 850) and state the routing: quick command ->
+`run_and_watch`; long work -> `command_start_combed` + `bucket_wait` +
+`command_status`; more output -> `command_output_tail`. Advertised schemas drop
+`$schema`, `default: null` and `format: uint*` at list time, and a guard test
+keeps maintainer jargon out of parameter descriptions. Full `tools/list` went
+from 89,621 to 79,146 characters of compact JSON with the same 60 tools and
+required parameters (measured over stdio).
 
 Full contract: [`docs/mcp/TOOL_CONTROL_SURFACE.md`](docs/mcp/TOOL_CONTROL_SURFACE.md).
 Agent lane-selection map: [`docs/mcp/OMNI_PLAYBOOK.md`](docs/mcp/OMNI_PLAYBOOK.md).
@@ -675,7 +726,9 @@ Admin CLI subcommands (`terminal-commander <cmd>`):
 | `setup daemon-autostart` | Install Linux/WSL daemon autostart (systemd/profile). |
 | `session list` | Enumerate sessions (default + seeded), columns: SESSION/PID/STATE/IDLE/ENDPOINT. |
 | `session reap [<token>] [--all] [--idle --idle-secs N]` | Graceful Shutdown-IPC; identity-gated force fallback. |
-| `rules { list \| show <id> }`, `jobs`, `probes`, `policy`, `audit [--limit N]` | Daemon-backed inspection (exit 69 when daemon unavailable; no fake data). |
+| `credential provide <job_id>` | Type a password into a PTY job waiting at a prompt, echo off; the model never sees it. |
+| `subscription-stream`, `subscription-pull` | Emit an open subscription's events as NDJSON (looping / one-shot) for a harness monitor or hook. |
+| `rules { list \| show <id> }`, `buckets { list \| show <id> }`, `jobs`, `probes`, `policy`, `audit [--limit N]` | Daemon-backed inspection (exit 69 when daemon unavailable; no fake data). |
 | `recipes import [--activate]`, `recipes activate <id> [--version N]`, `recipes deactivate <id> [--version N]`, `recipes tombstone <id>` | Operator recipe lifecycle. Global scope only. MCP activate/deactivate stay denied while `llm_can_activate_recipes` is false. |
 | `update` | Run `npm install -g terminal-commander@latest` after a scoped Windows lock preflight. |
 
@@ -717,6 +770,10 @@ is still running. It does not invoke `cmd.exe`, PowerShell, `taskkill`,
 hidden windows, broad process-name matches, or downloaded helper scripts.
 If a process is still running, the preflight exits non-zero and the installed
 version is left unchanged.
+
+The npm wrapper's per-user stable bin directory holds only the MCP adapter and
+daemon; on every mirror run it removes a stale `terminal-commander` CLI copy
+left there (`lib/harness/stable_bin.js`).
 
 On startup the adapter calls `ensure_daemon`, then `replace_if_stale` when
 spawn is allowed — a running daemon older than the installed adapter is
