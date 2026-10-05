@@ -421,33 +421,20 @@ test("isSecretEnvKey matches explicit + pattern-shaped keys", () => {
     "MY_FANCY_TOKEN",
     "AWS_SESSION_TOKEN",
     "AWS_SECRET_ACCESS_KEY",
-    // Same rule as the daemon's Rust classifier (WSLENV filter): the name
-    // CONTAINS a secret word, ends in a key suffix, or is a sudo password.
-    "WSL_SUDO_CREDENTIAL",
-    "SECRET_NAME",
-    "MY_PASSWORD_FILE",
-    "DB_PASSWD",
-    "GPG_PASSPHRASE",
-    "SSH_PRIVATE_KEY",
-    "SIGNING_KEY",
-    "PATHTOKEN_X",
-    "SUDO_PW",
-    "SUDOPASS",
   ]) {
     assert.equal(isSecretEnvKey(key), true, `${key} must be classified secret`);
   }
-  for (const key of [
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "NORMAL",
-    "FOO",
-    "MONKEY",
-    "TC_SESSION",
-    "TC_WSL_DISTRO",
-    "SUDO_USER",
-    "SUDO_ASKPASS",
-  ]) {
+  for (const key of ["PATH", "HOME", "USERPROFILE", "NORMAL", "FOO", "PATHTOKEN_X"]) {
+    assert.equal(isSecretEnvKey(key), false, `${key} must NOT be classified secret`);
+  }
+  // buildFilteredEnv REMOVES what this matches from a child's real env, so
+  // the line stays narrow: config names that merely contain a secret-ish
+  // word keep reaching the child. (WSLENV needs no classifier here:
+  // ensureSessionInWslEnv drops the ambient value whole.)
+  for (const key of ["GITHUB_TOKEN", "DB_PASSWORD", "STRIPE_API_KEY", "SUDO_PASS"]) {
+    assert.equal(isSecretEnvKey(key), true, `${key} must be classified secret`);
+  }
+  for (const key of ["TOKENIZERS_PARALLELISM", "SSH_AUTH_SOCK", "SORT_KEY", "SUDO_ASKPASS"]) {
     assert.equal(isSecretEnvKey(key), false, `${key} must NOT be classified secret`);
   }
 });

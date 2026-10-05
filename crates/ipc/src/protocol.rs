@@ -76,8 +76,8 @@ pub struct CommandStartResponse {
     /// unrecognized or its pack is already active. Advisory only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<PackAvailableHint>,
-    /// Secret-shaped variable NAMES (never values) kept out of this WSL or
-    /// shell launch's `WSLENV`; empty and omitted when none were.
+    /// Secret-shaped variable NAMES (never values) kept out of this
+    /// command's `WSLENV`; empty and omitted when none were.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wslenv_dropped: Vec<String>,
 }

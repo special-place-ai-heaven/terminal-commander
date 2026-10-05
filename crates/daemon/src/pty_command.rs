@@ -625,7 +625,7 @@ mod runtime {
             cfg.probe_id = Some(probe_id);
             cfg.cwd = req.cwd.clone();
             cfg.env = req.env.clone();
-            let wslenv_dropped = crate::command::filter_wslenv_for_spawn(&req.argv, &mut cfg.env);
+            let wslenv_dropped = crate::command::filter_wslenv_for_spawn(&mut cfg.env);
             cfg.rows = req.rows;
             cfg.cols = req.cols;
 

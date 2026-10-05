@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 The Terminal Commander Authors
 
-//! A model-issued WSL launch must not forward a secret-shaped ambient
-//! `WSLENV` entry into WSL. `wsl.exe` forwards every Windows variable named in
+//! A model-issued command must not forward a secret-shaped ambient `WSLENV`
+//! entry into WSL. `wsl.exe` forwards every Windows variable named in
 //! `WSLENV`, so `WSLENV=SUDO_PASSWORD/u` would hand the password to the Linux
 //! process. The real adapter and daemon run with such an ambient `WSLENV`;
 //! `wsl.exe` here is a copy of `cmd.exe` that echoes the `WSLENV` it received,
@@ -38,10 +38,14 @@ struct Adapter {
     next_id: u64,
     /// Every message the adapter sent, for the leak check.
     seen: Vec<String>,
+    daemon: Option<Child>,
 }
 
 impl Adapter {
-    fn start() -> Self {
+    /// `own_daemon`: start the daemon directly under the ambient `WSLENV`,
+    /// as the logon task or the `terminal-commanderd` shim does, instead of
+    /// letting the adapter's supervisor spawn it.
+    fn start(own_daemon: bool) -> Self {
         let dir = TempDir::new().unwrap();
         let state_dir = dir.path().join("state");
         let socket = format!(
@@ -49,6 +53,30 @@ impl Adapter {
             std::process::id(),
             dir.path().file_name().unwrap().to_string_lossy()
         );
+        let daemon = own_daemon.then(|| {
+            let d = Command::new(target_bin("terminal-commanderd"))
+                .arg("--data-dir")
+                .arg(&state_dir)
+                .args(["start", "--mode", "ipc-server"])
+                .env("TC_SOCKET", &socket)
+                .env("WSLENV", AMBIENT)
+                .env(SECRET_NAME, SECRET_VALUE)
+                .env("TC_TEST_HARMLESS", "harmless")
+                .env_remove("TC_SESSION")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn daemon");
+            // The pidfile is written once the endpoint is bound.
+            for _ in 0..200 {
+                if terminal_commander_supervisor::pidfile::read_pidfile_raw(&state_dir).is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            d
+        });
         let mut child = Command::new(target_bin("terminal-commander-mcp"))
             .arg("--state-dir")
             .arg(&state_dir)
@@ -83,6 +111,7 @@ impl Adapter {
             dir,
             next_id: 0,
             seen: Vec::new(),
+            daemon,
         }
     }
 
@@ -138,6 +167,10 @@ impl Drop for Adapter {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(d) = self.daemon.as_mut() {
+            let _ = d.kill();
+            let _ = d.wait();
+        }
     }
 }
 
@@ -161,9 +194,34 @@ fn files_containing(dir: &Path, needle: &[u8], out: &mut Vec<PathBuf>) {
     }
 }
 
+/// No value of the variable anywhere: responses, audit, logs, state.
+fn assert_no_value(a: &Adapter) {
+    let all = a.seen.join("\n");
+    assert!(!all.contains(SECRET_VALUE), "a response carries the value");
+    let mut leaks = Vec::new();
+    files_containing(a.dir.path(), SECRET_VALUE.as_bytes(), &mut leaks);
+    assert!(leaks.is_empty(), "value written to {leaks:?}");
+}
+
+/// The adapter's supervisor starts the daemon with the ambient `WSLENV` minus
+/// secret-shaped entries, so the daemon never holds the secret name.
 #[test]
-fn secret_shaped_wslenv_entries_stay_out_of_model_issued_wsl_launches() {
-    let mut a = Adapter::start();
+fn a_supervisor_spawned_daemon_never_holds_secret_wslenv_names() {
+    let mut a = Adapter::start(false);
+    let bin = TempDir::new().unwrap();
+    let other = echo_program(bin.path(), "notwsl.exe");
+    let argv = [other.as_str(), "/c", "echo", "WSLENV=%WSLENV%"];
+    let (seen, r) = a.child_wslenv(&argv, &json!([]));
+    assert_eq!(seen, "WSLENV=TC_TEST_HARMLESS/u", "{r}");
+    assert!(r.get("wslenv_dropped").is_none(), "{r}");
+    let report = a.call("self_check", &json!({}));
+    assert!(!report.to_string().contains(SECRET_NAME), "{report}");
+    assert_no_value(&a);
+}
+
+#[test]
+fn secret_shaped_wslenv_entries_stay_out_of_every_model_issued_command() {
+    let mut a = Adapter::start(true);
     let bin = TempDir::new().unwrap();
     let wsl = echo_program(bin.path(), "wsl.exe");
     let other = echo_program(bin.path(), "notwsl.exe");
@@ -183,11 +241,17 @@ fn secret_shaped_wslenv_entries_stay_out_of_model_issued_wsl_launches() {
     assert_eq!(seen, "WSLENV=TC_TEST_SUDO_PASSWORD/u", "{r}");
     assert!(r.get("wslenv_dropped").is_none(), "{r}");
 
-    // Not WSL and not a shell: the env is untouched.
+    // Any other program is filtered the same way.
     let argv_other: Vec<&str> = std::iter::once(other.as_str()).chain(echo).collect();
     let (seen, r) = a.child_wslenv(&argv_other, &json!([]));
-    assert_eq!(seen, format!("WSLENV={AMBIENT}"), "{r}");
-    assert!(r.get("wslenv_dropped").is_none(), "{r}");
+    assert_eq!(seen, "WSLENV=TC_TEST_HARMLESS/u", "{r}");
+    assert_eq!(r["wslenv_dropped"]["names"], json!([SECRET_NAME]), "{r}");
+
+    // So is WSL launched further down by that program: `set` runs inside the
+    // inner `wsl.exe` and prints the WSLENV it inherited.
+    let nested = [other.as_str(), "/c", wsl.as_str(), "/c", "set", "WSLENV"];
+    let (seen, r) = a.child_wslenv(&nested, &json!([]));
+    assert_eq!(seen, "WSLENV=TC_TEST_HARMLESS/u", "{r}");
 
     // The PTY lane filters the same way.
     let p = a.call("pty_command_start", &json!({"argv": argv}));
@@ -219,10 +283,5 @@ fn secret_shaped_wslenv_entries_stay_out_of_model_issued_wsl_launches() {
     files_containing(a.dir.path(), b"wslenv_dropped", &mut audit);
     assert!(!audit.is_empty(), "no audit row names the dropped variable");
 
-    // No value of the variable anywhere: responses, audit, logs, state.
-    let all = a.seen.join("\n");
-    assert!(!all.contains(SECRET_VALUE), "a response carries the value");
-    let mut leaks = Vec::new();
-    files_containing(a.dir.path(), SECRET_VALUE.as_bytes(), &mut leaks);
-    assert!(leaks.is_empty(), "value written to {leaks:?}");
+    assert_no_value(&a);
 }

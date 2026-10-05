@@ -48,6 +48,7 @@ use terminal_commander_core::{
 use terminal_commander_probes::{EventSink, ProcessProbe, ProcessProbeConfig, ProcessProbeMetrics};
 use terminal_commander_sifters::SifterRuntime;
 use terminal_commander_store::AuditEntry;
+use terminal_commander_supervisor::ensure::split_wslenv;
 use tokio::sync::oneshot;
 
 use crate::activation::ActivationRegistry;
@@ -150,29 +151,30 @@ pub(crate) fn wsl_carrier_label(argv0: &str) -> String {
     argv_basename(argv0).to_owned()
 }
 
-/// Keep secret-shaped variables out of WSL on a spawn both argv lanes make.
+/// Keep secret-shaped variables out of WSL on every spawn both argv lanes make.
 ///
 /// `wsl.exe` forwards every Windows variable NAMED in `WSLENV` into the
 /// Linux process, so an ambient `WSLENV=SUDO_PASSWORD/u` hands the password
-/// to whatever the model runs there. When `argv` launches WSL, or a shell
-/// that can, this sets the child's `WSLENV` to the ambient value minus
-/// entries whose NAME is secret-shaped and returns those names (never a
-/// value). Harmless entries stay; a `WSLENV` the caller passes in `env` is
-/// used as given. Windows only: that is the side `wsl.exe` forwards from.
-#[cfg_attr(not(windows), allow(clippy::missing_const_for_fn))]
+/// to whatever the model runs there, directly or through any program that
+/// launches WSL further down. This sets the child's `WSLENV` to the ambient
+/// value minus entries whose NAME is secret-shaped and returns those names
+/// (never a value); with nothing to drop the env is left alone. A `WSLENV`
+/// the caller passes in `env` is used as given. Windows only: that is the
+/// side `wsl.exe` forwards from.
+#[cfg_attr(
+    not(windows),
+    allow(clippy::missing_const_for_fn, clippy::needless_pass_by_ref_mut)
+)]
 pub(crate) fn filter_wslenv_for_spawn(
-    argv: &[String],
     env: &mut Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> Vec<String> {
     #[cfg(windows)]
-    if let Some((value, dropped)) =
-        wslenv_for_spawn(argv, env, std::env::var("WSLENV").ok().as_deref())
-    {
+    if let Some((value, dropped)) = wslenv_for_spawn(env, std::env::var("WSLENV").ok().as_deref()) {
         env.push(("WSLENV".into(), value.into()));
         return dropped;
     }
     #[cfg(not(windows))]
-    let _ = (argv, env);
+    let _ = env;
     Vec::new()
 }
 
@@ -180,36 +182,14 @@ pub(crate) fn filter_wslenv_for_spawn(
 /// `Some((child WSLENV, dropped names))`, or `None` to leave the env alone.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn wslenv_for_spawn(
-    argv: &[String],
     env: &[(std::ffi::OsString, std::ffi::OsString)],
     ambient: Option<&str>,
 ) -> Option<(String, Vec<String>)> {
     if env.iter().any(|(k, _)| k.eq_ignore_ascii_case("WSLENV")) {
         return None;
     }
-    let launched = launched_argv(argv);
-    let head = launched.first()?;
-    if !is_wsl_carrier(head) && shell_interpreter_denied(head).is_none() {
-        return None;
-    }
     let (kept, dropped) = split_wslenv(ambient?);
     (!dropped.is_empty()).then_some((kept, dropped))
-}
-
-/// `wslenv` minus entries whose variable name is secret-shaped, and those
-/// names (deduplicated, in order).
-pub(crate) fn split_wslenv(wslenv: &str) -> (String, Vec<String>) {
-    let mut kept = Vec::new();
-    let mut dropped: Vec<String> = Vec::new();
-    for entry in wslenv.split(':').filter(|e| !e.is_empty()) {
-        let name = entry.split('/').next().unwrap_or(entry);
-        if !env_key_is_secret(&name.to_ascii_lowercase()) {
-            kept.push(entry);
-        } else if !dropped.iter().any(|d| d == name) {
-            dropped.push(name.to_owned());
-        }
-    }
-    (kept.join(":"), dropped)
 }
 
 /// The `self_check` line naming the secret-shaped variables an ambient
@@ -220,8 +200,8 @@ pub(crate) fn wslenv_exposure_line(wslenv: &str) -> Option<String> {
     (!names.is_empty()).then(|| {
         format!(
             "warning: the daemon's WSLENV names secret-shaped variables: {}. TC keeps them \
-             out of the WSL and shell commands it starts; any other program that launches \
-             WSL from this environment forwards them.",
+             out of the commands it starts; any other program that launches WSL from \
+             this environment forwards them.",
             names.join(", ")
         )
     })
@@ -1304,7 +1284,7 @@ impl CommandRuntime {
             .iter()
             .map(|(k, v)| (std::ffi::OsString::from(k), std::ffi::OsString::from(v)))
             .collect();
-        let wslenv_dropped = filter_wslenv_for_spawn(&req.argv, &mut env_os);
+        let wslenv_dropped = filter_wslenv_for_spawn(&mut env_os);
         let probe_cfg = ProcessProbeConfig {
             probe_id: Some(probe_id),
             bucket_id,
@@ -3030,10 +3010,8 @@ pub(crate) fn redact_env_pairs(env: &[(String, String)]) -> Vec<(String, String)
 /// Rule (e) helper: decide whether an env-style `KEY=VALUE` key names a secret
 /// whose value must be masked. `key_lower` is the already-lowercased portion of
 /// the token before the first `=`. Matches a curated set of well-known bare
-/// secret keys (`password`, `token`, `apikey`, ...), a suffix family
-/// (`*_token`, `*_secret`, `*_password`, `*_key`, ...), names containing
-/// `password`/`secret`/`token`/`credential`/..., and sudo password names. Also
-/// decides which `WSLENV` entries stay out of WSL ([`split_wslenv`]). Over-matching benign
+/// secret keys (`password`, `token`, `apikey`, ...) plus a suffix family
+/// (`*_token`, `*_secret`, `*_password`, `*_key`, ...). Over-matching benign
 /// keys is the SAFE direction for an operator-facing display, so the lists err
 /// toward inclusion rather than precision.
 fn env_key_is_secret(key_lower: &str) -> bool {
@@ -3052,7 +3030,7 @@ fn env_key_is_secret(key_lower: &str) -> bool {
         "auth",
         "authorization",
     ];
-    const SUFFIX: [&str; 11] = [
+    const SUFFIX: [&str; 10] = [
         "_token",
         "_secret",
         "_password",
@@ -3063,25 +3041,8 @@ fn env_key_is_secret(key_lower: &str) -> bool {
         "_api_key",
         "_access_key",
         "_secret_key",
-        "_pass",
     ];
-    // Anywhere in the name (`WSL_SUDO_CREDENTIAL`, `SECRET_NAME`, ...).
-    const CONTAINS: [&str; 7] = [
-        "password",
-        "passwd",
-        "passphrase",
-        "secret",
-        "token",
-        "credential",
-        "private_key",
-    ];
-    EXACT.contains(&key_lower)
-        || SUFFIX.iter().any(|s| key_lower.ends_with(s))
-        || CONTAINS.iter().any(|s| key_lower.contains(s))
-        // `SUDO_PW`, `SUDOPASS`; `SUDO_ASKPASS` names a helper program.
-        || (key_lower.starts_with("sudo")
-            && !key_lower.contains("askpass")
-            && (key_lower.contains("pass") || key_lower.contains("pw")))
+    EXACT.contains(&key_lower) || SUFFIX.iter().any(|s| key_lower.ends_with(s))
 }
 
 /// Layer B per-token masking. Applies, in a SECURITY-ORDERED sequence, the
@@ -4138,10 +4099,10 @@ mod redact_tests {
     }
 }
 
-/// Secret-shaped `WSLENV` entries on WSL launches.
+/// Secret-shaped `WSLENV` entries on every spawn.
 #[cfg(test)]
 mod wslenv_tests {
-    use super::{env_key_is_secret, split_wslenv, wslenv_exposure_line, wslenv_for_spawn};
+    use super::{env_key_is_secret, wslenv_exposure_line, wslenv_for_spawn};
 
     #[test]
     fn the_exposure_line_names_secret_entries_only() {
@@ -4151,96 +4112,45 @@ mod wslenv_tests {
         assert!(!line.contains("HARMLESS") && !line.contains("/u"), "{line}");
     }
 
-    fn argv(a: &[&str]) -> Vec<String> {
-        a.iter().map(|s| (*s).to_owned()).collect()
-    }
-
+    /// The masking rule also decides what a restored workspace snapshot
+    /// exports as `<redacted>`, so it stays at its narrow line: config names
+    /// that merely contain a secret-ish word keep their values.
     #[test]
-    fn secret_shaped_names_are_classified_by_name_alone() {
+    fn the_masking_rule_stays_narrow() {
         for name in [
-            "WSL_SUDO_CREDENTIAL",
-            "SUDO_PASSWORD",
-            "SUDO_PASS",
-            "SUDO_PW",
-            "SUDOPASS",
-            "MY_PASSWORD_FILE_CONTENT",
-            "DB_PASSWD",
+            "GITHUB_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "PGPASSWORD",
+            "STRIPE_API_KEY",
+            "MYSQL_PWD",
+        ] {
+            assert!(env_key_is_secret(&name.to_ascii_lowercase()), "{name}");
+        }
+        for name in [
+            "TOKENIZERS_PARALLELISM",
+            "SSH_AUTH_SOCK",
+            "NODE_OPTIONS",
+            "PATHTOKEN_X",
             "SECRET_NAME",
-            "GH_TOKEN",
-            "SSH_PRIVATE_KEY",
-            "SIGNING_KEY",
-            "GPG_PASSPHRASE",
-            "OPENAI_API_KEY",
         ] {
-            assert!(
-                env_key_is_secret(&name.to_ascii_lowercase()),
-                "{name} must be secret-shaped"
-            );
-        }
-        for name in [
-            "TC_SESSION",
-            "TC_WSL_DISTRO",
-            "HARMLESS",
-            "PATH",
-            "LANG",
-            "USERPROFILE",
-            "SUDO_USER",
-            "SUDO_ASKPASS",
-            "MONKEY",
-        ] {
-            assert!(
-                !env_key_is_secret(&name.to_ascii_lowercase()),
-                "{name} is not secret-shaped"
-            );
+            assert!(!env_key_is_secret(&name.to_ascii_lowercase()), "{name}");
         }
     }
 
     #[test]
-    fn split_drops_secret_names_and_keeps_the_rest_in_order() {
-        assert_eq!(
-            split_wslenv("SECRET_NAME/u:HARMLESS/u:TC_SESSION/u:SECRET_NAME/p::USERPROFILE/p"),
-            (
-                "HARMLESS/u:TC_SESSION/u:USERPROFILE/p".to_owned(),
-                vec!["SECRET_NAME".to_owned()]
-            )
-        );
-        assert_eq!(
-            split_wslenv("HARMLESS/u"),
-            ("HARMLESS/u".to_owned(), vec![])
-        );
-    }
-
-    #[test]
-    fn only_wsl_and_shell_launches_are_filtered() {
+    fn every_spawn_is_filtered_unless_the_caller_set_wslenv() {
         let ambient = Some("SECRET_NAME/u:HARMLESS/u");
-        let want = Some(("HARMLESS/u".to_owned(), vec!["SECRET_NAME".to_owned()]));
-        for launch in [
-            argv(&["wsl", "-d", "Ubuntu", "--", "sudo", "true"]),
-            argv(&["WSL.EXE", "--", "id"]),
-            argv(&[r"C:\Windows\System32\wsl.exe", "-e", "id"]),
-            argv(&["env", "wsl.exe", "-e", "id"]),
-            argv(&["pwsh", "-NoProfile", "-Command", "wsl -- id"]),
-            argv(&["cmd.exe", "/C", "wsl -- id"]),
-        ] {
-            assert_eq!(wslenv_for_spawn(&launch, &[], ambient), want, "{launch:?}");
-        }
-        // Not WSL, not a shell: the env is left alone, byte for byte.
+        // No program detection: whatever runs may launch WSL further down.
         assert_eq!(
-            wslenv_for_spawn(&argv(&["git", "status"]), &[], ambient),
-            None
+            wslenv_for_spawn(&[], ambient),
+            Some(("HARMLESS/u".to_owned(), vec!["SECRET_NAME".to_owned()]))
         );
-        // Nothing secret-shaped, or no ambient WSLENV: left alone too.
-        assert_eq!(
-            wslenv_for_spawn(&argv(&["wsl", "id"]), &[], Some("HARMLESS/u")),
-            None
-        );
-        assert_eq!(wslenv_for_spawn(&argv(&["wsl", "id"]), &[], None), None);
+        // Nothing secret-shaped, or no ambient WSLENV: left alone.
+        assert_eq!(wslenv_for_spawn(&[], Some("HARMLESS/u")), None);
+        assert_eq!(wslenv_for_spawn(&[], None), None);
         // A WSLENV the caller passes is theirs: used as given.
         let explicit = [("wslenv".into(), "SECRET_NAME/u".into())];
-        assert_eq!(
-            wslenv_for_spawn(&argv(&["wsl", "id"]), &explicit, ambient),
-            None
-        );
+        assert_eq!(wslenv_for_spawn(&explicit, ambient), None);
     }
 }
 
