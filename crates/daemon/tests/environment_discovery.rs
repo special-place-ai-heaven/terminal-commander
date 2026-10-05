@@ -104,6 +104,33 @@ fn host_discovery_is_bounded_and_evidence_backed() {
     );
 }
 
+/// The bound must hold when the host is busy. Concurrent discoveries compete
+/// for process creation, which is where an unbounded discovery spent its
+/// time: a probe's timeout started only once its process had been created,
+/// and the WSL probes ran only after every other probe had finished.
+#[test]
+fn host_discovery_stays_bounded_when_run_concurrently() {
+    let runs = std::thread::scope(|scope| {
+        // Collected so all four start before any is joined.
+        #[allow(clippy::needless_collect)]
+        let jobs = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    let started = Instant::now();
+                    let _ = discover_host_environment();
+                    started.elapsed()
+                })
+            })
+            .collect::<Vec<_>>();
+        jobs.into_iter()
+            .map(|job| job.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    for took in runs {
+        assert!(took < Duration::from_secs(5), "discovery took {took:?}");
+    }
+}
+
 #[test]
 fn shell_launch_uses_the_confirmed_interpreter_family() {
     assert_eq!(
