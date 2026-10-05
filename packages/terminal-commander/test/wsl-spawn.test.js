@@ -421,10 +421,33 @@ test("isSecretEnvKey matches explicit + pattern-shaped keys", () => {
     "MY_FANCY_TOKEN",
     "AWS_SESSION_TOKEN",
     "AWS_SECRET_ACCESS_KEY",
+    // Same rule as the daemon's Rust classifier (WSLENV filter): the name
+    // CONTAINS a secret word, ends in a key suffix, or is a sudo password.
+    "WSL_SUDO_CREDENTIAL",
+    "SECRET_NAME",
+    "MY_PASSWORD_FILE",
+    "DB_PASSWD",
+    "GPG_PASSPHRASE",
+    "SSH_PRIVATE_KEY",
+    "SIGNING_KEY",
+    "PATHTOKEN_X",
+    "SUDO_PW",
+    "SUDOPASS",
   ]) {
     assert.equal(isSecretEnvKey(key), true, `${key} must be classified secret`);
   }
-  for (const key of ["PATH", "HOME", "USERPROFILE", "NORMAL", "FOO", "PATHTOKEN_X"]) {
+  for (const key of [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "NORMAL",
+    "FOO",
+    "MONKEY",
+    "TC_SESSION",
+    "TC_WSL_DISTRO",
+    "SUDO_USER",
+    "SUDO_ASKPASS",
+  ]) {
     assert.equal(isSecretEnvKey(key), false, `${key} must NOT be classified secret`);
   }
 });

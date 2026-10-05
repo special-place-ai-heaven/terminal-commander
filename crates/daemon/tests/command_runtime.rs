@@ -1029,6 +1029,7 @@ fn response_types_have_no_raw_stream_lane() {
         probe_id: terminal_commander_core::ProbeId::new(),
         cursor: 0,
         hint: None,
+        wslenv_dropped: Vec::new(),
     };
     assert_small_response(&r);
     let s = CommandStatusResponse {

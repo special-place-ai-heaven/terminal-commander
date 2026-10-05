@@ -119,11 +119,13 @@ mod runtime {
         pub rebuild_failures: u32,
     }
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone)]
     pub struct PtyStartResponse {
         pub job_id: JobId,
         pub bucket_id: BucketId,
         pub probe_id: ProbeId,
+        /// See [`crate::command::filter_wslenv_for_spawn`].
+        pub wslenv_dropped: Vec<String>,
     }
 
     /// What `credential_request` needs to know about a PTY job's prompt.
@@ -623,6 +625,7 @@ mod runtime {
             cfg.probe_id = Some(probe_id);
             cfg.cwd = req.cwd.clone();
             cfg.env = req.env.clone();
+            let wslenv_dropped = crate::command::filter_wslenv_for_spawn(&req.argv, &mut cfg.env);
             cfg.rows = req.rows;
             cfg.cols = req.cols;
 
@@ -806,6 +809,9 @@ mod runtime {
             if let Some((key, val)) = &shell_tag {
                 metadata[*key] = serde_json::Value::String(val.clone());
             }
+            if !wslenv_dropped.is_empty() {
+                metadata["wslenv_dropped"] = serde_json::json!(wslenv_dropped);
+            }
             self.audit(
                 audit_action,
                 &job_id.to_wire_string(),
@@ -828,6 +834,7 @@ mod runtime {
                 job_id,
                 bucket_id,
                 probe_id,
+                wslenv_dropped,
             })
         }
 

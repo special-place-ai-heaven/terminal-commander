@@ -1341,6 +1341,7 @@ impl TerminalCommanderMcpServer {
                 probe_id,
                 cursor,
                 hint,
+                wslenv_dropped,
             })) => {
                 // US2 (FR-011): forward the optional pack-available hint
                 // verbatim. Omitted from the JSON when None.
@@ -1356,6 +1357,7 @@ impl TerminalCommanderMcpServer {
                 if let Some(h) = credential_hint {
                     body["credential_hint"] = serde_json::json!(h);
                 }
+                add_wslenv_dropped(&mut body, &wslenv_dropped);
                 json_tool_result(&body)
             }
             Ok(other) => Err(unexpected_variant(&other)),
@@ -1395,14 +1397,15 @@ impl TerminalCommanderMcpServer {
         let credential_hint = password_prompt_hint(&start_ipc.argv);
 
         // 1. Start.
-        let (job_id, bucket_id, mut cursor) =
+        let (job_id, bucket_id, mut cursor, wslenv_dropped) =
             match daemon.call(IpcRequest::CommandStartCombed(start_ipc)).await {
                 Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
                     job_id,
                     bucket_id,
                     cursor,
+                    wslenv_dropped,
                     ..
-                })) => (job_id, bucket_id, cursor),
+                })) => (job_id, bucket_id, cursor, wslenv_dropped),
                 Ok(other) => return Err(unexpected_variant(&other)),
                 Err(e) => {
                     return Err(into_mcp_error_for_tool(false, &e, Some("run_and_watch")));
@@ -1624,6 +1627,7 @@ impl TerminalCommanderMcpServer {
         if let Some(h) = credential_hint {
             body["credential_hint"] = serde_json::json!(h);
         }
+        add_wslenv_dropped(&mut body, &wslenv_dropped);
         json_tool_result(&body)
     }
 
@@ -2435,9 +2439,10 @@ impl TerminalCommanderMcpServer {
             bucket_id,
             probe_id,
             cursor,
+            wslenv_dropped,
         } = started;
         if !watched {
-            return json_tool_result(&serde_json::json!({
+            let mut body = serde_json::json!({
                 "recipe_id": recipe_id,
                 "version": version,
                 "argv": argv,
@@ -2455,7 +2460,9 @@ impl TerminalCommanderMcpServer {
                 "signal_count": 0,
                 "degraded": false,
                 "recover_hint": serde_json::Value::Null,
-            }));
+            });
+            add_wslenv_dropped(&mut body, &wslenv_dropped);
+            return json_tool_result(&body);
         }
         let RecipeWatch {
             state,
@@ -2505,6 +2512,7 @@ impl TerminalCommanderMcpServer {
         obj.insert("watched".to_owned(), serde_json::json!(watched));
         obj.insert("wait_ms".to_owned(), serde_json::json!(wait_ms));
         obj.insert("probe_id".to_owned(), serde_json::json!(probe_id));
+        add_wslenv_dropped(&mut value, &wslenv_dropped);
         json_tool_result(&value)
     }
 
@@ -2931,12 +2939,17 @@ impl TerminalCommanderMcpServer {
                 bucket_id,
                 probe_id,
                 cursor,
-            })) => json_tool_result(&serde_json::json!({
-                "job_id": job_id,
-                "bucket_id": bucket_id,
-                "probe_id": probe_id,
-                "cursor": cursor,
-            })),
+                wslenv_dropped,
+            })) => {
+                let mut body = serde_json::json!({
+                    "job_id": job_id,
+                    "bucket_id": bucket_id,
+                    "probe_id": probe_id,
+                    "cursor": cursor,
+                });
+                add_wslenv_dropped(&mut body, &wslenv_dropped);
+                json_tool_result(&body)
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
         }
@@ -3975,6 +3988,7 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
         probe_id,
         cursor,
         hint: _,
+        wslenv_dropped,
     } = response;
     let mut payload = serde_json::json!({
         "job_id": job_id,
@@ -3982,6 +3996,7 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
         "probe_id": probe_id,
         "cursor": cursor,
     });
+    add_wslenv_dropped(&mut payload, wslenv_dropped);
 
     let lower = shell_line.to_ascii_lowercase();
     let mut detected = Vec::new();
@@ -4021,6 +4036,17 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
     }
 
     payload
+}
+
+/// Name (never the value of) each secret-shaped variable the daemon kept out
+/// of this launch's `WSLENV`, and how to forward one on purpose.
+fn add_wslenv_dropped(body: &mut serde_json::Value, names: &[String]) {
+    if !names.is_empty() {
+        body["wslenv_dropped"] = serde_json::json!({
+            "names": names,
+            "note": "Not forwarded into WSL because the names look secret. To forward one on purpose, pass WSLENV in this call's env; it is used as given.",
+        });
+    }
 }
 
 /// Map a daemon `IpcError` to an MCP `ErrorData`, honest about the mutability
@@ -7013,7 +7039,26 @@ mod tests {
             probe_id: terminal_commander_core::ProbeId::new(),
             cursor: 0,
             hint: None,
+            wslenv_dropped: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_filtered_wslenv_names_the_variables_and_how_to_forward_one() {
+        let mut response = shell_start_response();
+        assert!(
+            shell_exec_payload(&response, "wsl -- id")
+                .get("wslenv_dropped")
+                .is_none()
+        );
+        response.wslenv_dropped = vec!["SUDO_PASSWORD".to_owned()];
+        let dropped = &shell_exec_payload(&response, "wsl -- id")["wslenv_dropped"];
+        assert_eq!(dropped["names"], serde_json::json!(["SUDO_PASSWORD"]));
+        assert!(
+            dropped["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("WSLENV"))
+        );
     }
 
     #[test]

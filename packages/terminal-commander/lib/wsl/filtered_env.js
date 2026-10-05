@@ -26,6 +26,13 @@ const SECRET_ENV_PATTERNS = Object.freeze([
   /_APIKEY$/i,
   /^AWS_SESSION_TOKEN$/i,
   /^AWS_SECRET_ACCESS_KEY$/i,
+  // Same rule as the daemon's Rust classifier (`env_key_is_secret`): a secret
+  // word anywhere in the name, a key suffix, or a sudo password name
+  // (`SUDO_ASKPASS` names a helper program, not a password).
+  /PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|CREDENTIAL|PRIVATE_KEY/i,
+  /_KEY$/i,
+  /_PWD$/i,
+  /^SUDO(?!.*ASKPASS).*(PASS|PW)/i,
 ]);
 
 function isSecretEnvKey(key) {

@@ -76,6 +76,10 @@ pub struct CommandStartResponse {
     /// unrecognized or its pack is already active. Advisory only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<PackAvailableHint>,
+    /// Secret-shaped variable NAMES (never values) kept out of this WSL or
+    /// shell launch's `WSLENV`; empty and omitted when none were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wslenv_dropped: Vec<String>,
 }
 
 /// No-silence exit receipt (TCE-ERG-1).
@@ -2376,6 +2380,9 @@ pub struct RecipeRunResponse {
     pub bucket_id: BucketId,
     pub probe_id: terminal_commander_core::ProbeId,
     pub cursor: u64,
+    /// As [`CommandStartResponse::wslenv_dropped`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wslenv_dropped: Vec<String>,
 }
 
 // =====================================================================
@@ -2741,6 +2748,9 @@ pub struct PtyCommandStartResponse {
     pub bucket_id: BucketId,
     pub probe_id: terminal_commander_core::ProbeId,
     pub cursor: u64,
+    /// As [`CommandStartResponse::wslenv_dropped`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wslenv_dropped: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

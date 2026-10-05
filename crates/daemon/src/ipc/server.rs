@@ -1285,6 +1285,13 @@ async fn handle_self_check(state: &Arc<DaemonState>) -> IpcResponse {
         Ok(n) => lines.push(format!("audit_count: {n}")),
         Err(e) => lines.push(format!("audit_count: error: {e}")),
     }
+    #[cfg(windows)]
+    if let Some(line) = std::env::var("WSLENV")
+        .ok()
+        .and_then(|w| crate::command::wslenv_exposure_line(&w))
+    {
+        lines.push(line);
+    }
 
     let mut failures = 0u32;
 
