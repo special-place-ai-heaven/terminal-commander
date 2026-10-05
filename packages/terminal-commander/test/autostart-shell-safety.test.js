@@ -220,6 +220,56 @@ test("stale socket file, no daemon: sourcing .profile still starts the daemon ex
   assert.equal(starts.length, 1, `a socket file with no daemon must not block the start, got ${JSON.stringify(starts)}`);
 });
 
+const STALE_LINE = "socket file present but no daemon answering; it will be replaced on next start";
+
+test("doctor daemon (native): a stale socket file is not a running daemon", { skip: SKIP }, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tc-doctor-"));
+  leaveStaleSocket(home);
+  const stale = await runDoctorDaemon({ platform: "linux", env: shellEnv(home), homeDir: home });
+  assert.match(stale.output, /daemon_running: no/, stale.output);
+  assert.ok(stale.output.includes(STALE_LINE), stale.output);
+  fs.unlinkSync(path.join(home, ".local", "share", "terminal-commanderd", "terminal-commanderd.sock"));
+  await withSocket(home, async () => {
+    const live = await runDoctorDaemon({ platform: "linux", env: shellEnv(home), homeDir: home });
+    assert.match(live.output, /daemon_running: yes/, live.output);
+    assert.ok(!live.output.includes(STALE_LINE), live.output);
+  });
+});
+
+const PROC_SKIP = SKIP || (fs.existsSync("/proc/self/cmdline") ? false : "needs /proc (Linux / WSL)");
+
+test("doctor daemon (WSL probe): a stale socket file is not a running daemon; a live pidfile is", { skip: PROC_SKIP }, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tc-doctor-"));
+  const fakeWsl = path.join(home, "fake-wsl");
+  fs.writeFileSync(fakeWsl, '#!/bin/sh\nshift 3\nexec "$@"\n', { mode: 0o755 });
+  const doctor = () =>
+    runDoctorDaemon({
+      platform: "win32",
+      env: shellEnv(home),
+      flags: { distro: "Ubuntu" },
+      detect: async () => ({ reason: "ok", distros: [{ name: "Ubuntu" }], default_distro: "Ubuntu" }),
+      wslPath: fakeWsl,
+    });
+  leaveStaleSocket(home);
+  const stale = await doctor();
+  assert.match(stale.output, /daemon_running: no/, stale.output);
+  assert.ok(stale.output.includes(STALE_LINE), stale.output);
+
+  // A process whose cmdline names terminal-commanderd, recorded in the pidfile.
+  const daemon = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "terminal-commanderd"], { stdio: "ignore" });
+  try {
+    fs.writeFileSync(
+      path.join(home, ".local", "share", "terminal-commanderd", "terminal-commanderd.pid"),
+      JSON.stringify({ pid: daemon.pid }),
+    );
+    const live = await doctor();
+    assert.match(live.output, /daemon_running: yes/, live.output);
+    assert.ok(!live.output.includes(STALE_LINE), live.output);
+  } finally {
+    daemon.kill();
+  }
+});
+
 test("socket present: a stale snippet that still sources the new autostart.sh is harmless", { skip: SKIP }, async () => {
   const home = makeHome();
   fs.writeFileSync(cfg(home, "profile.d/terminal-commander.sh"), LEGACY_SNIPPET);

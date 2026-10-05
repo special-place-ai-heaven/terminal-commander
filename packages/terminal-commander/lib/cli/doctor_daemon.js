@@ -3,7 +3,11 @@
 
 "use strict";
 
-const { doctorDaemonAutostart } = require("../daemon/autostart.js");
+const {
+  doctorDaemonAutostart,
+  renderDaemonAliveTest,
+  STALE_SOCKET_LINE,
+} = require("../daemon/autostart.js");
 const { resolveDistro } = require("./setup_cursor_wsl.js");
 const { detectWsl } = require("../wsl/detect.js");
 const {
@@ -32,7 +36,11 @@ async function runDoctorDaemon(opts) {
         output: `terminal-commander: could not resolve WSL distro (${resolved.status}).\n`,
       };
     }
-    const probeCmd = `${LINUX_PATH_PREFIX}test -S "$HOME/.local/share/terminal-commanderd/terminal-commanderd.sock" && echo running || echo stopped`;
+    // Shell only on this side: the pidfile rule autostart.sh uses decides.
+    const probeCmd =
+      `${LINUX_PATH_PREFIX}D="$HOME/.local/share/terminal-commanderd"; ` +
+      `if ${renderDaemonAliveTest("$D")}; then echo running; ` +
+      `elif [ -S "$D/terminal-commanderd.sock" ]; then echo stale; else echo stopped; fi`;
     const { spawn } = require("node:child_process");
     const {
       buildFilteredEnv,
@@ -52,7 +60,8 @@ async function runDoctorDaemon(opts) {
       if (child.stdout) child.stdout.on("data", (b) => { out += b.toString("utf8"); });
       child.on("close", (code) => {
         const shell = takeShellRanSentinel(out);
-        resolve({ ran: shell.ran, code, running: shell.stdout.trim().includes("running") });
+        const state = shell.stdout.trim();
+        resolve({ ran: shell.ran, code, running: state.endsWith("running"), stale: state.endsWith("stale") });
       });
       child.on("error", () => resolve({ ran: false, error: "wsl.exe failed to start" }));
     });
@@ -62,6 +71,7 @@ async function runDoctorDaemon(opts) {
       `  socket: ~/.local/share/terminal-commanderd/terminal-commanderd.sock`,
       `  daemon_running: ${!probe.ran ? "unknown" : probe.running ? "yes" : "no"}`,
     ];
+    if (probe.stale) lines.push(`  note: ${STALE_SOCKET_LINE}`);
     if (!probe.ran) {
       lines.push(
         `  error: ${probe.error || (probe.code === 0 ? shellExitedEarlyHint(resolved.distro) : `probe exited ${probe.code}`)}`,
@@ -71,11 +81,12 @@ async function runDoctorDaemon(opts) {
     return { status: "ok", exit_code: 0, output: `${lines.join("\n")}\n` };
   }
 
-  const d = doctorDaemonAutostart({ env, homeDir: o.homeDir });
+  const d = await doctorDaemonAutostart({ env, homeDir: o.homeDir });
   const lines = [
     "terminal-commander daemon doctor:",
     `  socket: ${d.socket_path}`,
     `  daemon_running: ${d.daemon_running ? "yes" : "no"}`,
+    ...(d.stale_socket ? [`  note: ${STALE_SOCKET_LINE}`] : []),
     `  autostart_installed: ${d.autostart_installed ? "yes" : "no"}`,
     `  systemd_user: ${d.systemd_user}`,
   ];

@@ -9,6 +9,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
+const net = require("node:net");
 const { spawnSync } = require("node:child_process");
 const {
   applyManagedBlock,
@@ -33,6 +34,8 @@ const AUTOSTART_STATUSES = Object.freeze({
 });
 
 const DEFAULT_DATA_DIR = "$HOME/.local/share/terminal-commanderd";
+const STALE_SOCKET_LINE =
+  "socket file present but no daemon answering; it will be replaced on next start";
 const CONFIG_DIR = "$HOME/.config/terminal-commander";
 const AUTOSTART_SH = `${CONFIG_DIR}/autostart.sh`;
 const PROFILE_SNIPPET = `${CONFIG_DIR}/profile.d/terminal-commander.sh`;
@@ -45,6 +48,14 @@ function shouldInstallDaemonAutostart(env) {
   if (e.TC_SKIP_DAEMON_AUTOSTART === "1") return false;
   if (e.TC_BOOTSTRAP_START_DAEMON === "0") return false;
   return true;
+}
+
+// Shell condition: the daemon whose pidfile is in `dataDir` is alive. A live
+// daemon is known by its pidfile, not by a socket file: a daemon that died
+// leaves its socket behind. Read-only (no lock taken); the cmdline check
+// rejects a reused pid. Linux only (/proc).
+function renderDaemonAliveTest(dataDir) {
+  return `TC_PID=$(sed -n 's/.*"pid":[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' "${dataDir}/terminal-commanderd.pid" 2>/dev/null || true); [ -n "$TC_PID" ] && grep -qa terminal-commanderd "/proc/$TC_PID/cmdline" 2>/dev/null`;
 }
 
 // The body runs in a subshell so `exit`, `set -eu` and the PATH export stay
@@ -71,12 +82,9 @@ set -eu
 # to relocate the default daemon.
 TC_DATA="\${TC_DATA:-$HOME/.local/share/terminal-commanderd}"
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-# A live daemon is known by its pidfile, not by a socket file: a daemon that
-# died leaves its socket behind. Read-only (no lock taken); the cmdline check
-# rejects a reused pid. A start that loses a race to another one exits on the
-# daemon's data-dir lock, into daemon.log.
-TC_PID=$(sed -n 's/.*"pid":[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' "\$TC_DATA/terminal-commanderd.pid" 2>/dev/null || true)
-if [ -n "$TC_PID" ] && grep -qa terminal-commanderd "/proc/$TC_PID/cmdline" 2>/dev/null; then
+# Already running (by its pidfile)? A start that loses a race to another one
+# exits on the daemon's data-dir lock, into daemon.log.
+if ${renderDaemonAliveTest("$TC_DATA")}; then
   exit 0
 fi
 if ! command -v terminal-commanderd >/dev/null 2>&1; then
@@ -503,14 +511,30 @@ function buildWslRepairCommand() {
   return wslPipeCommand(renderRepairBash());
 }
 
-function doctorDaemonAutostart(opts) {
+// True when a daemon accepts a connection on `sock` within `timeoutMs`. A
+// socket file alone proves nothing: a daemon that died leaves it behind.
+function socketAnswers(sock, timeoutMs = 1000) {
+  return new Promise((resolve) => {
+    const conn = net.createConnection(sock);
+    const done = (answered) => {
+      conn.destroy();
+      resolve(answered);
+    };
+    conn.setTimeout(timeoutMs, () => done(false));
+    conn.once("connect", () => done(true));
+    // EAGAIN: the listener is alive, its backlog is full.
+    conn.once("error", (err) => done(err.code === "EAGAIN"));
+  });
+}
+
+async function doctorDaemonAutostart(opts) {
   const o = opts || {};
   const homeDir = o.homeDir || os.homedir();
   const sock = path.join(
     expandHome(DEFAULT_DATA_DIR.replace("$HOME", homeDir), homeDir),
     "terminal-commanderd.sock",
   );
-  const running = fs.existsSync(sock);
+  const running = await socketAnswers(sock);
   const autostartPath = expandHome(AUTOSTART_SH, homeDir);
   const installed = fs.existsSync(autostartPath);
   let systemd = "n/a";
@@ -525,6 +549,7 @@ function doctorDaemonAutostart(opts) {
   return {
     socket_path: sock,
     daemon_running: running,
+    stale_socket: !running && fs.existsSync(sock),
     autostart_installed: installed,
     systemd_user: systemd,
   };
@@ -545,6 +570,8 @@ module.exports = {
   patchProfileFile,
   PROFILE_BLOCK_BODY,
   doctorDaemonAutostart,
+  renderDaemonAliveTest,
+  STALE_SOCKET_LINE,
   resolveDaemonBinary,
   systemdUserAvailable,
 };

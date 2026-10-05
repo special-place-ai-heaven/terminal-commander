@@ -304,7 +304,7 @@ async function runBootstrap(opts) {
             lines.push("terminal-commander: WSL runtime installed and verified.");
             // On a DETECTED skew only, swap the live daemon once: re-running
             // autostart.sh won't replace a running stale daemon (its
-            // `[ -S "$SOCK" ]` early-exit). failSoft: a swap failure is
+            // pidfile early-exit). failSoft: a swap failure is
             // non-fatal and only logged, matching the surrounding pattern.
             if (skewDetected) {
               const restart = await runWslBashLc({
