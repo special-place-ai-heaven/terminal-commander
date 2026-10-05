@@ -117,6 +117,35 @@ fn health_is_answered_while_system_discover_runs() {
     assert!(matches!(r, Ok(IpcResponse::SystemDiscover(_))), "{r:?}");
 }
 
+/// Host facts are reused between calls, so only the first `system_discover`
+/// waits for the probes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_repeated_system_discover_reuses_the_discovery() {
+    let data = tempfile::tempdir().unwrap();
+    let state = Arc::new(DaemonState::bootstrap(DaemonConfig::defaults_in(data.path())).unwrap());
+    let (endpoint, _handle) = serve(&state);
+    let client = DaemonClient::new(endpoint).with_timeout(Duration::from_mins(1));
+
+    let Ok(IpcResponse::SystemDiscover(first)) = client.call(1, IpcRequest::SystemDiscover).await
+    else {
+        panic!("first system_discover failed");
+    };
+    let started = Instant::now();
+    let Ok(IpcResponse::SystemDiscover(repeat)) = client.call(2, IpcRequest::SystemDiscover).await
+    else {
+        panic!("repeated system_discover failed");
+    };
+    let took = started.elapsed();
+    assert_eq!(
+        repeat.environment, first.environment,
+        "the repeated call must report the same discovery"
+    );
+    assert!(
+        took < Duration::from_millis(500),
+        "the repeated call took {took:?}"
+    );
+}
+
 /// Without `shell`, the default shell is resolved by running probe processes.
 #[test]
 fn health_is_answered_while_shell_exec_resolves_the_default_shell() {

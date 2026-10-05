@@ -21,6 +21,16 @@ const DISCOVERY_DEADLINE: Duration = Duration::from_secs(3);
 /// report. A probe still waiting to create its process is reported as timed
 /// out; its thread kills the process as soon as it exists.
 const DEADLINE_GRACE: Duration = Duration::from_millis(250);
+/// How long a discovery result is reused. Shells and tools rarely change
+/// while the daemon runs, but WSL can: a distro starts, or one is installed,
+/// and a probe that timed out on a busy host can succeed later. Reusing a
+/// result this briefly keeps such a change, or a timed-out probe, from
+/// being reported for long.
+const DISCOVERY_TTL: Duration = Duration::from_secs(30);
+
+/// The last discovery result and when it finished.
+static DISCOVERY_CACHE: std::sync::Mutex<Option<(Instant, HostEnvironment)>> =
+    std::sync::Mutex::new(None);
 const MAX_VERSION_CHARS: usize = 160;
 const MAX_WSL_DISTROS: usize = 16;
 const SHELL_SENTINEL: &str = "terminal-commander-shell-probe";
@@ -50,6 +60,25 @@ enum Probed {
     Tool(usize, ProgramProbe),
     /// The WSL list and execution runs; `None` off Windows or without WSL.
     Wsl(Option<(ProbeRun, ProbeRun)>),
+}
+
+/// The host environment, reusing a discovery for `DISCOVERY_TTL`.
+///
+/// Otherwise this discovers now. Concurrent callers share one discovery, so
+/// a call waits at most `DISCOVERY_DEADLINE` + `DEADLINE_GRACE`.
+#[must_use]
+pub fn cached_host_environment() -> HostEnvironment {
+    let mut cache = DISCOVERY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((finished, environment)) = cache.as_ref()
+        && finished.elapsed() < DISCOVERY_TTL
+    {
+        return environment.clone();
+    }
+    let environment = discover_host_environment();
+    *cache = Some((Instant::now(), environment.clone()));
+    environment
 }
 
 /// Discover the current daemon host with a fixed, bounded probe set.
@@ -176,21 +205,11 @@ pub fn shell_launch_argv(shell: &str, line: &str) -> Vec<String> {
     }
 }
 
-/// Resolve the first confirmed default shell without running it.
+/// Resolve the first confirmed default shell without running it, from the
+/// same discovery `system_discover` reports.
 #[must_use]
 pub fn preferred_shell() -> Option<String> {
-    shell_specs()
-        .into_iter()
-        .filter_map(|spec| {
-            let path = resolve_program(spec.argv0)?;
-            Some(probe_shell(
-                spec,
-                &path,
-                Instant::now() + DISCOVERY_DEADLINE,
-            ))
-        })
-        .find(|probe| probe.execution_status == "confirmed")
-        .and_then(|probe| probe.path)
+    cached_host_environment().preferred_shell
 }
 
 fn shell_specs() -> Vec<ProbeSpec> {

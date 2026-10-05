@@ -4,12 +4,17 @@ use std::time::{Duration, Instant};
 
 use terminal_commanderd::{discover_host_environment, shell_launch_argv};
 
+/// Discovery stops waiting for probes `DISCOVERY_DEADLINE` (3 s) plus
+/// `DEADLINE_GRACE` (250 ms) after it starts (src/environment/probe.rs). The
+/// rest is building the reply from what the probes reported.
+const DISCOVERY_BOUND: Duration = Duration::from_secs(4);
+
 #[test]
 fn host_discovery_is_bounded_and_evidence_backed() {
     let started = Instant::now();
     let host = discover_host_environment();
 
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(started.elapsed() < DISCOVERY_BOUND);
     assert_eq!(host.os, std::env::consts::OS);
     assert_eq!(host.arch, std::env::consts::ARCH);
     assert!(!host.terminal.kind.is_empty());
@@ -127,7 +132,7 @@ fn host_discovery_stays_bounded_when_run_concurrently() {
             .collect::<Vec<_>>()
     });
     for took in runs {
-        assert!(took < Duration::from_secs(5), "discovery took {took:?}");
+        assert!(took < DISCOVERY_BOUND, "discovery took {took:?}");
     }
 }
 

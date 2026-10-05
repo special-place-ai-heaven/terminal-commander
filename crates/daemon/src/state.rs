@@ -490,7 +490,7 @@ impl DaemonState {
     /// point for IPC and in-process embedders; it does not start an IPC server.
     #[must_use]
     pub fn discover_environment(&self) -> crate::ipc::protocol::HostEnvironment {
-        let mut environment = crate::environment::discover_host_environment();
+        let mut environment = crate::environment::cached_host_environment();
         crate::environment::apply_execution_policy(&mut environment, &self.policy);
         environment
     }

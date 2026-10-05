@@ -66,18 +66,30 @@ pub fn resolve_socket_path(cli_override: Option<&std::path::Path>) -> std::path:
 /// Returns `Some((daemon_version, adapter_version))` on skew, `None` when the
 /// versions match OR the daemon could not be reached (an unreachable daemon is
 /// the `daemon_unavailable` path, never a skew verdict). Bounded by
-/// [`SKEW_PROBE_TIMEOUT`]; no spawn, no fs, just one IPC round trip.
+/// [`SKEW_PROBE_TIMEOUT`]; no spawn, no fs, at most two IPC round trips.
+///
+/// A current daemon's `Health` carries its version, so that is asked first:
+/// `system_discover` also probes the host, which takes seconds on Windows,
+/// and this check used to give up before it answered. Only a legacy daemon,
+/// whose `Health` omits the version, is asked `system_discover`, within the
+/// same deadline.
 pub async fn detect_version_skew(
     socket_path: &std::path::Path,
     adapter_version: &str,
 ) -> Option<(String, String)> {
     let client = McpDaemonClient::new(socket_path).with_timeout(SKEW_PROBE_TIMEOUT);
-    match client.call(IpcRequest::SystemDiscover).await {
-        Ok(IpcResponse::SystemDiscover(d)) if d.version != adapter_version => {
-            Some((d.version, adapter_version.to_owned()))
+    let deadline = tokio::time::Instant::now() + SKEW_PROBE_TIMEOUT;
+    let version = match tokio::time::timeout_at(deadline, client.call(IpcRequest::Health)).await {
+        Ok(Ok(IpcResponse::Health { version, .. })) if !version.is_empty() => version,
+        Ok(Ok(IpcResponse::Health { .. })) => {
+            match tokio::time::timeout_at(deadline, client.call(IpcRequest::SystemDiscover)).await {
+                Ok(Ok(IpcResponse::SystemDiscover(d))) => d.version,
+                _ => return None,
+            }
         }
-        _ => None,
-    }
+        _ => return None,
+    };
+    (version != adapter_version).then(|| (version, adapter_version.to_owned()))
 }
 
 /// Shared, cheaply-cloneable handle to the `EnsureDaemonStatus`
@@ -892,6 +904,85 @@ mod tests {
         assert_eq!(refreshed, expected);
         assert_eq!(handle.version_skew(), expected);
         server.await.expect("legacy version server");
+    }
+
+    /// The adapter's startup skew check gives up after 750 ms. A real daemon
+    /// answers `system_discover` only after probing the host, seconds on
+    /// Windows, so the check must read the version from `Health`.
+    #[tokio::test]
+    async fn detect_version_skew_reads_health_not_slow_discovery() {
+        use terminal_commander_ipc::{
+            DiscoverResponse, IpcResult, ResponseEnvelope, read_request, write_response,
+        };
+        use tokio::io::{AsyncRead, AsyncWrite};
+
+        async fn answer<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S) {
+            let Ok(request) = read_request(&mut stream).await else {
+                return;
+            };
+            let response = match request.request {
+                IpcRequest::Health => IpcResponse::Health {
+                    uptime_secs: 1,
+                    idle_secs: Some(0),
+                    version: "9.9.9".to_owned(),
+                },
+                IpcRequest::SystemDiscover => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    IpcResponse::SystemDiscover(DiscoverResponse {
+                        version: "9.9.9".to_owned(),
+                        mcp_spec: String::new(),
+                        policy_profile: String::new(),
+                        methods: Vec::new(),
+                        environment: Box::default(),
+                    })
+                }
+                other => panic!("unexpected version probe: {other:?}"),
+            };
+            let _ = write_response(
+                &mut stream,
+                &ResponseEnvelope {
+                    correlation_id: request.correlation_id,
+                    result: IpcResult::Ok { response },
+                },
+            )
+            .await;
+        }
+
+        #[cfg(unix)]
+        let (_root, endpoint, server) = {
+            let root = tempfile::tempdir().unwrap();
+            let socket = root.path().join("slow-discover.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    tokio::spawn(answer(stream));
+                }
+            });
+            (root, socket, server)
+        };
+        #[cfg(windows)]
+        let (endpoint, server) = {
+            use tokio::net::windows::named_pipe::ServerOptions;
+            let name = missing_socket_path("slow-discover");
+            let mut pipe = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&name)
+                .unwrap();
+            let pipe_name = name.clone();
+            let server = tokio::spawn(async move {
+                while pipe.connect().await.is_ok() {
+                    let Ok(next) = ServerOptions::new().create(&pipe_name) else {
+                        return;
+                    };
+                    tokio::spawn(answer(std::mem::replace(&mut pipe, next)));
+                }
+            });
+            (name, server)
+        };
+
+        let skew = detect_version_skew(&endpoint, "0.1.0").await;
+        server.abort();
+        assert_eq!(skew, Some(("9.9.9".to_owned(), "0.1.0".to_owned())));
     }
 
     fn missing_socket_path(label: &str) -> std::path::PathBuf {
