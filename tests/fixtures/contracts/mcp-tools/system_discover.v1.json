@@ -108,6 +108,230 @@
       }
     }
   },
+  "response_example_summary": {
+    "adapter_version": "0.3.11",
+    "daemon": {
+      "environment": {
+        "arch": "x86_64",
+        "argv_rule": "Each argv_tools entry has a direct_argv route: run it with an argv action as [<that too...",
+        "argv_tools": [
+          "git"
+        ],
+        "beachhead": {
+          "argv_template": [
+            "/usr/bin/bash"
+          ],
+          "evidence": "path_confirmed+version_confirmed+execution_confirmed",
+          "executable": "/usr/bin/bash",
+          "family": "posix",
+          "kind": "shell",
+          "rank": 1,
+          "route_id": "shell:bash",
+          "version": "GNU bash, version 5.3.9(1)-release (x86_64-pc-linux-gnu) Copyright (C) 2025 Free Softwa..."
+        },
+        "discovery_age_ms": 847,
+        "discovery_ms": 225,
+        "os": "linux",
+        "preferred_shell": "/usr/bin/bash",
+        "routes": [
+          {
+            "argv_template": [
+              "/usr/bin/bash"
+            ],
+            "evidence": "path_confirmed+version_confirmed+execution_confirmed",
+            "executable": "/usr/bin/bash",
+            "family": "posix",
+            "kind": "shell",
+            "rank": 1,
+            "route_id": "shell:bash",
+            "version": "GNU bash, version 5.3.9(1)-release (x86_64-pc-linux-gnu) Copyright (C) 2025 Free Softwa..."
+          }
+        ],
+        "shells": [
+          {
+            "available": true,
+            "evidence": "path_confirmed",
+            "execution_status": "confirmed",
+            "name": "bash",
+            "path": "/usr/bin/bash",
+            "version": "GNU bash, version 5.3.9(1)-release (x86_64-pc-linux-gnu) Copyright (C) 2025 Free Softwa...",
+            "version_status": "confirmed"
+          }
+        ],
+        "terminal": {
+          "ci": false,
+          "evidence": "TERM",
+          "interactive": false,
+          "kind": "posix_term",
+          "name": "xterm-256color"
+        },
+        "tools": [
+          {
+            "available": true,
+            "evidence": "path_confirmed",
+            "name": "git",
+            "path": "/usr/bin/git",
+            "version": "git version 2.53.0",
+            "version_status": "confirmed"
+          }
+        ],
+        "wsl": {
+          "available": false,
+          "execution_status": "not_windows",
+          "status": "not_windows"
+        }
+      },
+      "method_count": 65,
+      "policy_profile": "FullAccess",
+      "version": "0.3.11"
+    },
+    "daemon_available": true,
+    "daemon_error": null,
+    "detail": "summary",
+    "mcp_spec": "2026-07-28",
+    "note": "Summary. Call system_discover with {\"detail\":\"full\"} for every tool's description, the ...",
+    "omni_status": {
+      "matrix": {
+        "privileged_helper": {
+          "available": false,
+          "reason": "threat_review_pending"
+        },
+        "pty": {
+          "available": true,
+          "platform": "posix"
+        },
+        "remote_targets": {
+          "count": 0,
+          "reachable": 0
+        },
+        "sessions": {
+          "available": true
+        },
+        "shell_exec": {
+          "available": true
+        }
+      },
+      "program_version": "0.3.11"
+    },
+    "tool_catalogue": {
+      "count": 60,
+      "unavailable": []
+    }
+  },
+  "response_example_full": {
+    "adapter_version": "0.3.11",
+    "daemon": {
+      "environment": {
+        "access_routes": [
+          {
+            "argv_template": [
+              "/usr/bin/bash"
+            ],
+            "evidence": "path_confirmed+version_confirmed+execution_confirmed",
+            "executable": "/usr/bin/bash",
+            "family": "posix",
+            "kind": "shell",
+            "rank": 1,
+            "route_id": "shell:bash",
+            "version": "GNU bash, version 5.3.9(1)-release (x86_64-pc-linux-gnu) Copyright (C) 2025 Free Softwa..."
+          }
+        ],
+        "arch": "x86_64",
+        "beachhead": {
+          "argv_template": [
+            "/usr/bin/bash"
+          ],
+          "evidence": "path_confirmed+version_confirmed+execution_confirmed",
+          "executable": "/usr/bin/bash",
+          "family": "posix",
+          "kind": "shell",
+          "rank": 1,
+          "route_id": "shell:bash",
+          "version": "GNU bash, version 5.3.9(1)-release (x86_64-pc-linux-gnu) Copyright (C) 2025 Free Softwa..."
+        },
+        "discovery_age_ms": 852,
+        "discovery_ms": 225,
+        "os": "linux",
+        "preferred_shell": "/usr/bin/bash",
+        "shells": [
+          {
+            "available": true,
+            "evidence": "path_confirmed",
+            "execution_status": "confirmed",
+            "name": "bash",
+            "path": "/usr/bin/bash",
+            "version": "GNU bash, version 5.3.9(1)-release (x86_64-pc-linux-gnu) Copyright (C) 2025 Free Softwa...",
+            "version_status": "confirmed"
+          }
+        ],
+        "terminal": {
+          "ci": false,
+          "evidence": "TERM",
+          "interactive": false,
+          "kind": "posix_term",
+          "name": "xterm-256color"
+        },
+        "tools": [
+          {
+            "available": true,
+            "evidence": "path_confirmed",
+            "execution_status": "not_probed",
+            "name": "git",
+            "path": "/usr/bin/git",
+            "version": "git version 2.53.0",
+            "version_status": "confirmed"
+          }
+        ],
+        "wsl": {
+          "available": false,
+          "execution_status": "not_windows",
+          "status": "not_windows"
+        }
+      },
+      "mcp_spec": "2026-07-28",
+      "methods": [
+        "system_discover"
+      ],
+      "policy_profile": "FullAccess",
+      "version": "0.3.11"
+    },
+    "daemon_available": true,
+    "daemon_error": null,
+    "mcp_spec": "2026-07-28",
+    "omni_status": {
+      "matrix": {
+        "privileged_helper": {
+          "available": false,
+          "reason": "threat_review_pending"
+        },
+        "pty": {
+          "available": true,
+          "platform": "posix"
+        },
+        "remote_targets": {
+          "count": 0,
+          "reachable": 0
+        },
+        "sessions": {
+          "available": true
+        },
+        "shell_exec": {
+          "available": true
+        }
+      },
+      "program_version": "0.3.11"
+    },
+    "tools": [
+      {
+        "available": true,
+        "description": "Return adapter/daemon metadata and bounded host-environment probes with ranked access r...",
+        "name": "system_discover",
+        "requires_daemon": false,
+        "status": "live",
+        "unavailable_reason": null
+      }
+    ]
+  },
   "availability_invariants": {
     "system_discover_requires_daemon": false,
     "daemon_backed_tools_require_daemon": true,

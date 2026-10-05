@@ -32,18 +32,25 @@ use terminal_commanderd::IpcServer;
 use terminal_commanderd::PipeServer;
 use terminal_commanderd::{DaemonConfig, DaemonState};
 
+/// `system_discover` keys whose presence depends on the machine (and its
+/// load) running the test: the terminal name comes from `TERM`, the WSL block
+/// exists only on Windows, and a version string is absent when its bounded
+/// probe timed out or failed (`ProgramProbe.version` is `None` then).
+const DISCOVER_HOST_DEPENDENT: &[&str] = &[
+    "daemon.environment.terminal.name",
+    "daemon.environment.wsl.default_shell",
+    "daemon.environment.wsl.distributions",
+    "daemon.environment.wsl.version",
+    "daemon.environment.beachhead.version",
+    "daemon.environment.routes[].version",
+    "daemon.environment.shells[].version",
+    "daemon.environment.tools[].version",
+];
+
 /// Tools deliberately not driven by this test. Each entry carries its reason.
 fn skipped() -> Vec<(&'static str, &'static str)> {
     #[allow(unused_mut)] // only the Windows build pushes more entries
     let mut skips = vec![
-        (
-            "command_status",
-            "being changed on another branch (receipt head/lines_omitted, liveness fields) - enable after integration",
-        ),
-        (
-            "system_discover",
-            "being changed on another branch (discovery age field, `detail` parameter with lean default) - enable after integration",
-        ),
         (
             "credential_request",
             "needs a PTY job blocked on a real password prompt; not deterministic or harmless to provoke",
@@ -80,14 +87,27 @@ fn echo_argv(text: &str) -> Vec<String> {
     }
 }
 
-/// Harmless argv that stays alive ~30 s unless stopped.
+/// Harmless argv that prints 40 numbered lines and exits.
+fn many_lines_argv() -> Vec<String> {
+    if cfg!(windows) {
+        ["cmd", "/C", "for /L %i in (1,1,40) do @echo line%i"]
+            .map(str::to_owned)
+            .to_vec()
+    } else {
+        ["seq", "1", "40"].map(str::to_owned).to_vec()
+    }
+}
+
+/// Harmless argv that prints one line, then stays alive ~30 s unless stopped.
 fn sleeper_argv() -> Vec<String> {
     if cfg!(windows) {
         ["ping", "-n", "30", "127.0.0.1"]
             .map(str::to_owned)
             .to_vec()
     } else {
-        ["sleep", "30"].map(str::to_owned).to_vec()
+        ["sh", "-c", "echo up; exec sleep 30"]
+            .map(str::to_owned)
+            .to_vec()
     }
 }
 
@@ -221,6 +241,18 @@ impl Harness {
             .unwrap_or_else(|e| panic!("{tool}: payload not JSON: {e}: {text}"))
     }
 
+    /// Poll `command_status` until the job has left `running` (bounded).
+    async fn wait_finished(&self, job: &str) {
+        for _ in 0..100 {
+            let st = self.call("command_status", json!({"job_id": job})).await;
+            if st["state"] != "running" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("job {job} still running after 10 s");
+    }
+
     /// Call `tool`, compare its key set with the fixture example at JSON
     /// pointer `example`, and record any unexplained difference. Returns the
     /// live payload so the scenario can thread ids through.
@@ -231,6 +263,21 @@ impl Harness {
         example: &str,
         allow: &[(&str, &str)],
     ) -> Value {
+        self.check_host(tool, args, example, allow, &[]).await
+    }
+
+    /// Like [`Self::check`], plus `host_dependent` key paths whose presence
+    /// depends on the machine running the test (terminal name from `TERM`,
+    /// the WSL block on Windows). They are tolerated in either direction and
+    /// never reported stale, because absence is as legitimate as presence.
+    async fn check_host(
+        &mut self,
+        tool: &'static str,
+        args: Value,
+        example: &str,
+        allow: &[(&str, &str)],
+        host_dependent: &[&str],
+    ) -> Value {
         let actual = self.call(tool, args).await;
         let fixture = read_json(&self.fixtures.join(format!("mcp-tools/{tool}.v1.json")));
         let expected = fixture
@@ -238,6 +285,8 @@ impl Harness {
             .unwrap_or_else(|| panic!("{tool}: fixture has no example at {example}"));
         let mut diffs = Vec::new();
         diff_keys("$", expected, &actual, &mut diffs);
+        let host: BTreeSet<String> = host_dependent.iter().map(|p| format!("$.{p}")).collect();
+        diffs.retain(|(_, p)| !host.contains(p));
         let allowed: BTreeSet<String> = allow.iter().map(|(p, _)| format!("$.{p}")).collect();
         for (p, reason) in allow {
             assert!(
@@ -389,6 +438,33 @@ async fn command_chain(h: &mut Harness) -> String {
     let job = s(&run, "job_id");
     let bucket = s(&run, "bucket_id");
 
+    // command_status: a finished job whose rule matched (no receipt) ...
+    h.wait_finished(&job).await;
+    h.check(
+        "command_status",
+        json!({"job_id": job}),
+        "/response_example",
+        &[],
+    )
+    .await;
+    // ... and a quiet finished job whose output is longer than the receipt
+    // tail, so the receipt carries head lines and lines_omitted.
+    let quiet = h
+        .call(
+            "command_start_combed",
+            json!({"argv": many_lines_argv(), "receipt_head_lines": 3, "receipt_tail_lines": 3}),
+        )
+        .await;
+    let quiet_job = s(&quiet, "job_id");
+    h.wait_finished(&quiet_job).await;
+    h.check(
+        "command_status",
+        json!({"job_id": quiet_job}),
+        "/response_example_no_rule_receipt",
+        &[],
+    )
+    .await;
+
     let events = h
         .check(
             "bucket_events_since",
@@ -454,6 +530,26 @@ async fn long_lived_command(h: &mut Harness) {
             &[],
         )
         .await;
+    // command_status on a still-running job carries live liveness fields;
+    // wait until its first output line has been captured so
+    // `last_output_age_ms` is present on every platform.
+    let sleeper_job = s(&sleeper, "job_id");
+    for _ in 0..50 {
+        let st = h
+            .call("command_status", json!({"job_id": sleeper_job}))
+            .await;
+        if st.get("last_output_age_ms").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    h.check(
+        "command_status",
+        json!({"job_id": s(&sleeper, "job_id")}),
+        "/response_example_running",
+        &[],
+    )
+    .await;
     h.check(
         "probe_status",
         json!({"probe_id": s(&sleeper, "probe_id")}),
@@ -625,6 +721,22 @@ async fn pty_and_file_tools(h: &mut Harness, work_s: &str, work: &Path) {
 
 async fn status_tools(h: &mut Harness) {
     // --- lists / status that want live state -------------------------------
+    h.check_host(
+        "system_discover",
+        json!({}),
+        "/response_example_summary",
+        &[],
+        DISCOVER_HOST_DEPENDENT,
+    )
+    .await;
+    h.check_host(
+        "system_discover",
+        json!({"detail": "full"}),
+        "/response_example_full",
+        &[],
+        DISCOVER_HOST_DEPENDENT,
+    )
+    .await;
     h.check("health", json!({}), "/response_example", &[]).await;
     h.check("policy_status", json!({}), "/response_example", &[])
         .await;
