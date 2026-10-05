@@ -52,18 +52,53 @@ result is ever silent or misleading.
 
 ## Recent improvements
 
-<!-- release-status -->Landed 2026-10-05, not yet in a tagged release.
+<!-- release-status -->Landed 2026-10-06, not yet in a tagged release.
 
 - **Linux/WSL shells survive the daemon autostart hook:** the hook sourced its
   start script into your shell, so once the daemon was up every login and
   interactive shell exited silently. It now runs the script as a separate
-  background process. `terminal-commander setup`, `update`, or
-  `setup daemon-autostart` replaces the old hook. See
+  background process, only in interactive shells. `terminal-commander setup`,
+  `update`, or `setup daemon-autostart` replaces the old hook. See
   [Doctor And Repair](#doctor-and-repair).
-- **Autostart never starts a second daemon:** the hook now fires only in
-  interactive shells, and the start script does nothing inside a Terminal
-  Commander process tree (`TC_DAEMON_CHILD`, `TC_SOCKET` or `TC_SESSION` set)
-  or when a live daemon's pidfile is already in its data directory.
+- **Autostart never starts a second daemon, and recovers from a dead one:** the
+  start script does nothing inside a Terminal Commander process tree
+  (`TC_DAEMON_CHILD`, `TC_SOCKET` or `TC_SESSION` set) or when a live daemon's
+  pidfile is present. A socket file left by a dead daemon no longer blocks the
+  start, and `doctor daemon` reports it as stale instead of running.
+- **Daemon children cannot reach back into the daemon:** commands, PTYs and
+  discovery probes no longer inherit `TC_SOCKET` or `TC_DATA` and carry
+  `TC_DAEMON_CHILD=1`; probes use non-login shells. A second daemon refuses a
+  data directory in use (`terminal-commanderd.data.lock`) and a socket another
+  daemon serves. See [Per-session daemons](#per-session-daemons-with-disciplined-lifecycles).
+- **Owner-only endpoint:** on unix the data directory is 0700 and the socket,
+  store and logs are 0600; on Windows the pipe grants the user only and rejects
+  remote clients. Both ends check that the peer is the same user. See
+  [Safety Posture](#safety-posture).
+- **Smaller `system_discover` answers:** it returns a summary by default;
+  `detail: "full"` adds every tool's description, the daemon method list and
+  every route. See [MCP Tool Surface](#mcp-tool-surface).
+- **Credential prompt fallback:** if the client accepts the URL elicitation but
+  shows the owner nothing, `credential_request` falls back to a native dialog
+  and then to `owner_action_required` with the exact
+  `terminal-commander credential provide <job_id> --socket <endpoint>` command.
+  The secret never reaches the model. See [MCP Tool Surface](#mcp-tool-surface).
+- **No secret-shaped names forwarded through `WSLENV`:** the daemon and every
+  command it starts get the ambient `WSLENV` minus those names. `self_check`
+  names them, and starting a command that mentions `wsl` reports them as
+  `wslenv_dropped`. See [Safety Posture](#safety-posture).
+- **Config that says what it ignores:** keys that gate nothing, and unknown
+  keys, are named in `config_warnings` (startup log, `self_check`,
+  `policy_status`). `limits.file_window_bytes` and `limits.bucket_read_limit`
+  are enforced. See [Local State](#local-state).
+- **Rules checked against their own examples:** `registry_test` reports each
+  example's result and `registry_upsert` rejects a rule that contradicts its
+  examples. Signal events carry the registry rule id. See
+  [Rule packs](#rule-packs-expert-signal-extraction-in-one-call).
+- **Honest status and snapshots:** a status served from this boot's receipt is
+  `observed` (only an earlier boot's receipt is `reconstructed`), and an
+  `environment` other than local is refused with a precise error.
+  `workspace_snapshot_apply` skips masked values and lists them in
+  `skipped_redacted` instead of exporting `<redacted>`.
 
 <!-- release-status -->Landed 2026-10-05, released in v0.3.11.
 
@@ -151,7 +186,9 @@ summary template. The agent reads events, not scrollback. Rules can be passed
 inline per command (minimal: `[{"pattern": "ERROR"}]` — everything else has a
 sane default), or persisted in a versioned **registry** and activated
 globally or scoped to one bucket/job/probe. Activating a new version of a rule
-supersedes the old one in that scope, so one line never fires twice.
+supersedes the old one in that scope, so one line never fires twice. Each
+signal event carries the registry rule id (`registry_id`) that
+`registry_get` and `registry_activate` take.
 
 ### Bounded receipts that never go silent
 
@@ -177,7 +214,11 @@ become a bare error — the job handle is preserved and the result arrives with
 `degraded: true`, the last observed state, and a `recover_hint` that tells the
 agent exactly how to re-attach (`command_status` with the returned `job_id`).
 Mutating RPCs are never auto-retried; idempotent ones may be. A daemon restart
-is detectable via `boot_id` on subscriptions.
+is detectable via `boot_id` on subscriptions. `outcome_trust` on every status
+says how the daemon knows it: `observed` (including a job this daemon ended
+and serves from its own receipt), `reconstructed` (a receipt written by an
+earlier boot), or `abandoned`. A job with no record is a `JobLost` error, never
+a status value.
 
 ### Evidence-backed environment beachheads
 
@@ -248,9 +289,17 @@ there, not a guarantee). Every adapter sends `system_discover` at startup, so
 this also removed a multi-second stall on the first tool call. Host discovery
 itself is bounded by one 3-second deadline with every probe running
 concurrently (a probe that has not finished is reported as timed out, not
-absent), its result is reused for 30 seconds, and the adapter's startup
+absent). The daemon warms discovery once it serves, and a result is served at
+once for up to ten minutes (refreshed in the background once it is 30 seconds
+old; `system_discover` reports `discovery_age_ms`). The adapter's startup
 version-skew check reads the daemon version from Health, so it completes even
 while discovery is still running.
+
+A daemon also protects its own endpoint. Commands, PTYs and discovery probes it
+starts do not inherit `TC_SOCKET` or `TC_DATA` and carry `TC_DAEMON_CHILD=1`;
+probes run non-login shells, so a shell profile cannot start a daemon on the
+running daemon's socket. A second daemon refuses a data directory in use
+(`terminal-commanderd.data.lock`) and a socket another daemon serves.
 
 ### Policy gate, audit trail, and the argv-only contract
 
@@ -275,7 +324,10 @@ tool runs without its pack, a command-start response can carry a
 For output whose format you do not know yet, `registry_suggest_from_samples`
 proposes DRAFT rules from raw samples (pure-Rust heuristics). It NEVER
 auto-activates: the loop is always suggest -> `registry_test` ->
-`registry_upsert` -> `registry_activate`.
+`registry_upsert` -> `registry_activate`. A rule's own examples are evaluated:
+`registry_test` reports each example's result, `registry_upsert` rejects a rule
+that contradicts its examples (`rule_invalid`, nothing persisted), and
+`registry_import_pack` refuses a built-in pack that does.
 
 > [!TIP]
 > Prefer **scoped** activation (`{"kind":"job", "job_id": …}`) or per-command
@@ -563,6 +615,10 @@ ranked `access_routes`; `beachhead` is the highest-ranked route and includes the
 exact argv template an LLM can follow. Unavailable or timed-out candidates stay
 truthful evidence, never inferred availability. Discovery also carries the
 honest `omni_status` capability matrix (see below).
+It returns a summary by default; `detail: "full"` adds every tool's description,
+the daemon method list, and every route. Start requests accept `environment`
+only as omitted or `local`: anything else is refused with an error that points
+at the `wsl_argv`/`wsl_shell` routes or a registered `target_id`.
 
 The model-facing text is kept small. The server instructions are 849 characters
 (a test caps them at 850) and state the routing: quick command ->
@@ -609,7 +665,9 @@ audit row. All other IPC requests bump the idle clock and audit normally.
 > the model calls `credential_request` and the owner is asked directly (a
 > one-time local page the MCP client links to, a native dialog, else
 > `terminal-commander credential provide <job_id> --socket <endpoint>` in the
-> owner's terminal, given verbatim in the response),
+> owner's terminal, given verbatim in the response; a client that declines the
+> link, or an accepted link not opened within 30 s, falls back to the native
+> dialog),
 > so the password never passes through the model. That holds when TC is the
 > model's only way to run programs: a harness that also hands the model a raw
 > shell can pipe `credential provide` itself, and the audit row then reads
@@ -620,7 +678,8 @@ audit row. All other IPC requests bump the idle clock and audit normally.
 > (`workspace_snapshot_*`) let an agent run multi-step work that shares
 > cwd/env. Availability requires all three gates: a reachable daemon, a UNIX
 > session runtime, and `allow_session` enabled (default off). On a non-unix
-> daemon they return `UnsupportedPlatform`. See
+> daemon they return `UnsupportedPlatform`. Applying a snapshot skips masked
+> values and names them in `skipped_redacted`. See
 > [`docs/runtime/SHELL_SESSION.md`](docs/runtime/SHELL_SESSION.md).
 
 ## Per-Harness Sessions
@@ -749,7 +808,7 @@ Admin CLI subcommands (`terminal-commander <cmd>`):
 | `setup daemon-autostart` | Install Linux/WSL daemon autostart (systemd/profile). |
 | `session list` | Enumerate sessions (default + seeded), columns: SESSION/PID/STATE/IDLE/ENDPOINT. |
 | `session reap [<token>] [--all] [--idle --idle-secs N]` | Graceful Shutdown-IPC; identity-gated force fallback. |
-| `credential provide <job_id>` | Type a password into a PTY job waiting at a prompt, echo off; the model never sees it. |
+| `credential provide <job_id> [--socket <endpoint>]` | Type a password into a PTY job waiting at a prompt, echo off; the model never sees it. |
 | `subscription-stream`, `subscription-pull` | Emit an open subscription's events as NDJSON (looping / one-shot) for a harness monitor or hook. |
 | `rules { list \| show <id> }`, `buckets { list \| show <id> }`, `jobs`, `probes`, `policy`, `audit [--limit N]` | Daemon-backed inspection (exit 69 when daemon unavailable; no fake data). |
 | `recipes import [--activate]`, `recipes activate <id> [--version N]`, `recipes deactivate <id> [--version N]`, `recipes tombstone <id>` | Operator recipe lifecycle. Global scope only. MCP activate/deactivate stay denied while `llm_can_activate_recipes` is false. |
@@ -769,8 +828,9 @@ terminal-commander session list
 ```
 
 `doctor harness` warns "shared daemon mode" when multiple harnesses are
-present and at least one is not yet configured. Repair is explicit — there is
-no hidden auto-repair during npm install:
+present and at least one is not yet configured. `doctor daemon` connects to the
+socket (on WSL it checks the pidfile), so a socket file left by a dead daemon is
+reported as stale, not as a running daemon. Repair is explicit:
 
 ```powershell
 terminal-commander setup harness --force
@@ -813,6 +873,7 @@ swapped (identity-gated) before tool calls proceed.
 | `TC_SURFACE` | MCP schema view: `compact` (six facades) or `full` (60 granular tools; default). |
 | `TC_USE_LEGACY_WSL_BRIDGE` | `1` opts into the legacy Windows→WSL bridge. |
 | `TC_WSL_DISTRO` | Selects the WSL distro for the legacy bridge. |
+| `TC_DAEMON_CHILD` | Set to `1` by the daemon in every command it starts (which also no longer inherit `TC_SOCKET` or `TC_DATA`); Linux/WSL autostart does nothing when it is set. |
 | `TC_SKIP_DAEMON_AUTOSTART` | `1` skips daemon autostart during `setup harness`. |
 
 ## Local State
@@ -827,6 +888,13 @@ Everything lives under the per-session state dir
 | `logs/terminal-commanderd.log` | Daemon log (bind, self-checks, idle-reap decisions). |
 | `terminal-commanderd.pid` | Pidfile: pid, version, endpoint (the probe cross-checks it). |
 | `terminal-commanderd.lock` | Bring-up single-flight lock. |
+| `terminal-commanderd.data.lock` | Held for the daemon's life; a second daemon on this directory refuses to start. |
+
+On unix the data directory is created 0700 and the socket, store and logs are
+0600. A config key that gates nothing, or is unknown, is named in
+`config_warnings` (startup log, `self_check`, `policy_status`) rather than
+ignored silently; `limits.file_window_bytes` and `limits.bucket_read_limit` are
+enforced.
 
 ## Safety Posture
 
@@ -860,6 +928,12 @@ Everything lives under the per-session state dir
   nothing (the daemon names it as a config warning): it is reserved for a
   PLAN-ONLY helper -- no privileged code ships (blocked on a threat review;
   see [`docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md`](docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md)).
+- The endpoint is owner-only: unix socket 0600 inside a 0700 directory, a
+  Windows pipe that grants the user only and rejects remote clients, and a
+  same-user peer check on the daemon and on the client (a request can carry an
+  owner's password).
+- A second daemon refuses a data directory in use and a socket another daemon
+  serves; commands the daemon starts never inherit its `TC_SOCKET`/`TC_DATA`.
 - Tool responses are bounded JSON, not raw stream dumps; credential-shaped
   argv values are redacted in audit metadata and probe rows.
 - `ensure_daemon` requires a real Health handshake — a connectable but
