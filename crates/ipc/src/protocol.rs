@@ -104,9 +104,15 @@ pub struct CommandReceipt {
     pub lines_suppressed: u64,
     /// Last N frame texts (oldest first), byte-capped.
     pub tail: Vec<String>,
-    /// True when the ring evicted earlier frames; the tail may omit
-    /// the start of output.
+    /// True when the retained window itself is lossy: the ring evicted
+    /// earlier frames or a tail line was byte-truncated. Independent of
+    /// `lines_omitted`, which counts lines merely not shown.
     pub tail_incomplete: bool,
+    /// Output lines the bounded `tail` does not show (`frames_total` minus
+    /// `tail.len()`); 0 when the tail is the whole output. Recover them
+    /// with `command_output_tail`.
+    #[serde(default)]
+    pub lines_omitted: u64,
 }
 
 /// How a reported outcome was established (spec 004 FR-006).
@@ -198,6 +204,16 @@ pub struct CommandStatusResponse {
     /// PTY only: the job is blocked on a password prompt. Omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_credential: Option<AwaitingCredential>,
+    /// Milliseconds since the job started, only while it is still running.
+    /// Omitted once terminal (`duration_ms` covers that).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    /// Milliseconds since the most recent captured output frame, only while
+    /// the job is running. Omitted when no output has been captured yet --
+    /// absent means "no output captured yet", NOT "hung". Not reported for
+    /// file watches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_age_ms: Option<u64>,
 }
 
 /// Params for `command_stop` (TC-3): force-kill a running combed

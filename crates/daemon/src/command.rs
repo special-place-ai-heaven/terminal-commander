@@ -1442,6 +1442,9 @@ impl CommandRuntime {
                 Some(CommandReceipt {
                     exit_code: receipt_exit_code,
                     lines_suppressed: final_metrics.frames_total,
+                    lines_omitted: final_metrics
+                        .frames_total
+                        .saturating_sub(tail.lines.len() as u64),
                     tail: tail.lines,
                     tail_incomplete: tail.evicted_frames > 0 || tail.truncated,
                 })
@@ -1949,6 +1952,7 @@ impl CommandRuntime {
             }
             None => return Err(CommandError::UnknownJob(job_id)),
         };
+        let elapsed_ms = running_elapsed_ms(&rec);
         Ok(CommandStatusResponse {
             job_id,
             bucket_id: rec.config.bucket_id,
@@ -1974,6 +1978,8 @@ impl CommandRuntime {
             outcome_trust: OutcomeTrust::Observed,
             pipeline_exit_masked,
             awaiting_credential: None,
+            elapsed_ms,
+            last_output_age_ms: elapsed_ms.and(metrics.last_frame_at).map(output_age_ms),
         })
     }
 
@@ -2079,6 +2085,9 @@ impl CommandRuntime {
             outcome_trust,
             pipeline_exit_masked: false,
             awaiting_credential: None,
+            // Reconstructed statuses are always terminal.
+            elapsed_ms: None,
+            last_output_age_ms: None,
         })
     }
 
@@ -2182,6 +2191,20 @@ async fn drive_to_exit(mut probe: ProcessProbe) -> (ProcessProbeMetrics, ProbeOu
         },
     };
     (probe.metrics(), outcome)
+}
+
+/// Milliseconds since `rec` started, only while it is still running; `None`
+/// once terminal (`duration_ms` covers that). Shared by every status lane.
+pub(crate) fn running_elapsed_ms(rec: &JobRecord) -> Option<u64> {
+    matches!(rec.state, JobState::Starting | JobState::Running).then(|| {
+        let elapsed = time::OffsetDateTime::now_utc() - rec.started_at;
+        u64::try_from(elapsed.whole_milliseconds().max(0)).unwrap_or(u64::MAX)
+    })
+}
+
+/// Milliseconds since an output frame was captured at `at`.
+pub(crate) fn output_age_ms(at: std::time::Instant) -> u64 {
+    u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Build the bounded evidence object persisted alongside a job receipt

@@ -251,6 +251,7 @@ fn no_rule_command_returns_exit_receipt() {
         assert_eq!(receipt.lines_suppressed, 2);
         assert_eq!(receipt.tail, vec!["hello".to_owned(), "world".to_owned()]);
         assert!(!receipt.tail_incomplete);
+        assert_eq!(receipt.lines_omitted, 0, "the tail shows every line");
 
         cleanup(&data);
     });
@@ -559,6 +560,210 @@ fn command_status_counters_survive_operator_cancel() {
             cancelled.bytes_total >= live.bytes_total,
             "terminal status lost captured bytes: live={live:?}, cancelled={cancelled:?}"
         );
+
+        cleanup(&data);
+    });
+}
+
+/// Child helpers for the `lines_omitted` receipt tests below, NOT tests.
+/// Each prints its lines and exits before libtest prints its result
+/// lines, so the captured output is the harness banner plus these lines.
+fn emit_lines_then_exit(n: usize) {
+    use std::io::Write as _;
+    let mut out = std::io::stdout();
+    for i in 0..n {
+        let _ = writeln!(out, "RECEIPT_CHILD_LINE_{i}");
+    }
+    let _ = out.flush();
+    std::process::exit(0);
+}
+
+#[test]
+#[ignore = "child-process helper for the receipt tests, not a test"]
+fn helper_child_emit_ten_lines() {
+    emit_lines_then_exit(10);
+}
+
+#[test]
+#[ignore = "child-process helper for the receipt tests, not a test"]
+fn helper_child_emit_one_line() {
+    emit_lines_then_exit(1);
+}
+
+/// Run a self-exec helper with no rules and return its no-silence receipt.
+async fn no_rule_receipt(helper: &str) -> terminal_commander_ipc::CommandReceipt {
+    let data = tmp_data_dir("receipt-omitted");
+    let cfg = DaemonConfig::defaults_in(&data);
+    let state = DaemonState::bootstrap(cfg).unwrap();
+    let exe = std::env::current_exe()
+        .expect("current test binary path")
+        .to_string_lossy()
+        .into_owned();
+    let resp = state
+        .command
+        .start_combed(CommandStartRequest {
+            argv: vec![
+                exe,
+                helper.to_owned(),
+                "--ignored".to_owned(),
+                "--exact".to_owned(),
+                "--nocapture".to_owned(),
+            ],
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            grace: None,
+            tag: None,
+            dedup_nonce: None,
+            strip_ansi: true,
+            peer_discriminator: None,
+        })
+        .expect("start ok");
+    for _ in 0..200 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if matches!(
+            state.command.job_record(resp.job_id).map(|r| r.state),
+            Some(JobState::Exited | JobState::Failed | JobState::Cancelled)
+        ) {
+            break;
+        }
+    }
+    let status = state.command.status(resp.job_id).expect("status ok");
+    cleanup(&data);
+    status
+        .receipt
+        .expect("zero-rule run must carry a no-silence receipt")
+}
+
+/// `lines_omitted` says how much output the 5-line tail does NOT show, so
+/// a quiet receipt cannot be misread as the whole output. Distinct from
+/// `tail_incomplete` (the ring itself lost frames), which stays false here.
+#[test]
+fn receipt_reports_lines_the_tail_omits() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let receipt = no_rule_receipt("helper_child_emit_ten_lines").await;
+        // The self-exec child also prints libtest's banner, so the frame
+        // count is 10 plus a few; the relation is what is pinned.
+        assert!(receipt.lines_suppressed >= 10, "{receipt:?}");
+        assert_eq!(receipt.tail.len(), 5, "{receipt:?}");
+        assert_eq!(
+            receipt.tail.last().map(String::as_str),
+            Some("RECEIPT_CHILD_LINE_9"),
+            "{receipt:?}"
+        );
+        assert_eq!(
+            receipt.lines_omitted,
+            receipt.lines_suppressed - 5,
+            "{receipt:?}"
+        );
+        assert!(!receipt.tail_incomplete, "{receipt:?}");
+
+        let short = no_rule_receipt("helper_child_emit_one_line").await;
+        assert!(short.lines_suppressed <= 5, "{short:?}");
+        assert_eq!(short.tail.len() as u64, short.lines_suppressed, "{short:?}");
+        assert_eq!(short.lines_omitted, 0, "{short:?}");
+    });
+}
+
+/// Liveness: a RUNNING job reports how long it has run and how long ago it
+/// last produced output, so a clockless poller can tell quiet-but-alive
+/// from stalled. Both drop out once terminal (`duration_ms` takes over).
+#[test]
+fn command_status_reports_liveness_while_running() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("liveness");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+        let resp = start_linger_child(&state);
+
+        let mut live = None;
+        for _ in 0..160 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let status = state.command.status(resp.job_id).expect("status ok");
+            if !matches!(status.state, JobState::Starting | JobState::Running) {
+                break;
+            }
+            if status.frames_total > 0 {
+                live = Some(status);
+                break;
+            }
+        }
+        let _ = state.command.stop(resp.job_id, "test-cleanup");
+        let done = state.command.status(resp.job_id).expect("status ok");
+        let live = live.expect("linger child must be observed running with output");
+
+        assert!(live.elapsed_ms.is_some(), "{live:?}");
+        assert!(live.last_output_age_ms.is_some(), "{live:?}");
+        assert!(done.elapsed_ms.is_none(), "{done:?}");
+        assert!(done.last_output_age_ms.is_none(), "{done:?}");
+        assert!(done.duration_ms.is_some(), "{done:?}");
+
+        cleanup(&data);
+    });
+}
+
+/// A running job that has printed nothing reports `elapsed_ms` but no
+/// `last_output_age_ms` -- absent means "no output captured yet".
+#[test]
+fn command_status_silent_running_job_has_no_output_age() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let data = tmp_data_dir("liveness-silent");
+        let cfg = DaemonConfig::defaults_in(&data);
+        let state = DaemonState::bootstrap(cfg).unwrap();
+        // Silent while waiting; both are stopped long before they time out.
+        #[cfg(unix)]
+        let argv = vec!["sleep".to_owned(), "30".to_owned()];
+        #[cfg(windows)]
+        let argv = vec![
+            "waitfor.exe".to_owned(),
+            "/t".to_owned(),
+            "30".to_owned(),
+            format!("TcSilentLinger{}", std::process::id()),
+        ];
+        let resp = state
+            .command
+            .start_combed(CommandStartRequest {
+                argv,
+                cwd: None,
+                env: vec![],
+                bucket_config: None,
+                rules: vec![],
+                grace: None,
+                tag: None,
+                dedup_nonce: None,
+                strip_ansi: true,
+                peer_discriminator: None,
+            })
+            .expect("start ok");
+
+        let mut running = None;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let status = state.command.status(resp.job_id).expect("status ok");
+            if status.state == JobState::Running {
+                running = Some(status);
+                break;
+            }
+        }
+        let _ = state.command.stop(resp.job_id, "test-cleanup");
+        let running = running.expect("silent child must be observed running");
+
+        assert!(running.elapsed_ms.is_some(), "{running:?}");
+        assert_eq!(running.frames_total, 0, "{running:?}");
+        assert!(running.last_output_age_ms.is_none(), "{running:?}");
 
         cleanup(&data);
     });

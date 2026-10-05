@@ -671,6 +671,9 @@ impl WatchRuntime {
             outcome_trust: OutcomeTrust::Observed,
             pipeline_exit_masked: false,
             awaiting_credential: None,
+            elapsed_ms: crate::command::running_elapsed_ms(&rec),
+            // File-probe metrics carry no last-frame time.
+            last_output_age_ms: None,
         })
     }
 

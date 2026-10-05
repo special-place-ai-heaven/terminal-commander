@@ -1321,7 +1321,7 @@ impl TerminalCommanderMcpServer {
     /// `command_start_combed` — start a non-PTY argv command on the
     /// daemon and return bounded metadata. Never returns raw output.
     #[tool(
-        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). A pipeline in a shell -c/-lc script may report only its last stage's exit code (unless the script sets pipefail); command_status then sets pipeline_exit_masked:true (not detected for cmd /C or pwsh -Command). On Windows, do not pass bare /home/... paths in argv — prefix with wsl or use Windows paths. Windows piped children may buffer stdout without a newline; use pty_command_start for live chatty capture. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
+        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail, lines_omitted) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. After starting, consume signals with bucket_wait and read the exit state with command_status; for a quick command prefer run_and_watch. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). A pipeline in a shell -c/-lc script may report only its last stage's exit code (unless the script sets pipefail); command_status then sets pipeline_exit_masked:true (not detected for cmd /C or pwsh -Command). On Windows, do not pass bare /home/... paths in argv — prefix with wsl or use Windows paths. Windows piped children may buffer stdout without a newline; use pty_command_start for live chatty capture. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
     )]
     async fn command_start_combed(
         &self,
@@ -1619,7 +1619,7 @@ impl TerminalCommanderMcpServer {
 
     /// `command_status` — lifecycle counters + exit info for a job.
     #[tool(
-        description = "Lookup bounded counters and exit info for a previously started job. `outcome_trust` tells you HOW the daemon knows: `observed` (witnessed live -- every counter is a real observation), `reconstructed` (read back from the durable receipt after a restart -- state/exit_code are truthful and the counters are the values captured when the job finished), `abandoned` (ended by daemon shutdown or replacement rather than by the job itself; reported as cancelled with no exit code, and is NOT a failure). A job the daemon recorded STARTING but never recorded finishing is not a status at all -- it is returned as a typed `JobLost` error, never as an `outcome_trust` value, and must NEVER be read as success. `restarted` is the older boolean alias for 'not observed live'; prefer `outcome_trust`. Never returns raw stream text, with one exception: when the command finished and ZERO rules matched, a bounded exit receipt (exit code, suppressed-line count, short tail) is included so a no-rule command is never silent. That receipt is memory-only and does NOT survive a daemon restart -- its absence after a restart does not mean the command produced no output. `pipeline_exit_masked: true` means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only the last stage (unless the script sets pipefail), so an earlier stage's failure can hide behind a 0. Not detected on reconstructed status, PTY jobs, cmd /C or pwsh -Command."
+        description = "Lookup bounded counters and exit info for a previously started job. `outcome_trust` tells you HOW the daemon knows: `observed` (witnessed live -- every counter is a real observation), `reconstructed` (read back from the durable receipt after a restart -- state/exit_code are truthful and the counters are the values captured when the job finished), `abandoned` (ended by daemon shutdown or replacement rather than by the job itself; reported as cancelled with no exit code, and is NOT a failure). A job the daemon recorded STARTING but never recorded finishing is not a status at all -- it is returned as a typed `JobLost` error, never as an `outcome_trust` value, and must NEVER be read as success. `restarted` is the older boolean alias for 'not observed live'; prefer `outcome_trust`. Never returns raw stream text, with one exception: when the command finished and ZERO rules matched, a bounded exit receipt (exit code, suppressed-line count, short tail, lines_omitted = lines the tail leaves out) is included so a no-rule command is never silent. That receipt is memory-only and does NOT survive a daemon restart -- its absence after a restart does not mean the command produced no output. While a job runs, elapsed_ms and last_output_age_ms (absent until output is captured) report liveness. `pipeline_exit_masked: true` means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only the last stage (unless the script sets pipefail), so an earlier stage's failure can hide behind a 0. Not detected on reconstructed status, PTY jobs, cmd /C or pwsh -Command."
     )]
     async fn command_status(
         &self,
@@ -3830,12 +3830,9 @@ impl ServerHandler for TerminalCommanderMcpServer {
             // the facade handler is registered on the same router, so filter
             // its name(s) OUT of `list_all()` -- the facade must not leak into
             // the full list.
-            crate::surface::Surface::Full => self
-                .tool_router
-                .list_all()
-                .into_iter()
-                .filter(|t| !crate::surface_list::COMPACT_TOOL_NAMES.contains(&t.name.as_ref()))
-                .collect(),
+            crate::surface::Surface::Full => {
+                crate::surface_list::full_surface_tools(self.tool_router.list_all())
+            }
         };
         // Hard-cut 2026-07-28: always emit SEP-2549 hints the rmcp
         // #[tool_handler] macro sets for this revision (ttlMs 0, public).
@@ -3915,7 +3912,7 @@ impl ServerHandler for TerminalCommanderMcpServer {
             ))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(
-                "Terminal Commander runs commands and returns STRUCTURED SIGNALS, not raw output: you define keyword/regex rules and get back only the matching events plus exit state, so you can run noisy or long-running commands without flooding your context. This saves you tokens and scrolling and lets you run commands too large to read. If no rule matches, command_status gives you a bounded receipt (exit code, suppressed-line count, short tail), never silence. Argv tools (run_and_watch, command_start_combed) are the primary path for ordinary commands, including tiny one-offs. shell_exec is only for when pipelines, compounds, or redirects are required (allow_shell, on by default). The default full_access profile inherits your harness's trust: nothing is denied unless the daemon config selects a hardened profile. The single exception is the OS-infrastructure removal safeguard, which applies in every profile and returns os_critical_path_protected. The adapter is a thin facade: each tool forwards 1:1 to a daemon IPC method (discovery, status, command/bucket/event, registry, file, PTY, runtime)."
+                "Terminal Commander runs commands and returns STRUCTURED SIGNALS, not raw output: your keyword/regex rules select the matching events, so noisy or long commands never flood your context. Routing: quick command -> run_and_watch (argv; start + bounded wait, one call). Long work -> command_start_combed, then bucket_wait in bounded slices and command_status for the exit state. No rule matched -> command_status returns a bounded receipt (exit code, suppressed-line count, last lines; lines_omitted counts what the tail leaves out). More output -> command_output_tail. Use shell_exec only for pipelines, compounds, or redirects. The default full_access profile inherits your harness's trust (nothing is denied unless a hardened profile is set); the one exception in every profile is the OS-infrastructure removal safeguard (os_critical_path_protected)."
                     .to_owned(),
             )
     }
@@ -4591,6 +4588,7 @@ fn parse_severity_filter(s: &str) -> Result<Severity, String> {
 /// not accepted: the explicit `{key,value}` shape is what the schema
 /// teaches so the first call from a naive client succeeds.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(description = "One {key,value} environment variable.")]
 pub struct EnvEntry {
     /// Variable name, e.g. `"PATH"`.
     pub key: String,
@@ -4886,6 +4884,9 @@ where
 /// `finalize` with a teaching error that names the legal set.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(
+    description = "Inline rule. Needs a matcher (`pattern` or `keywords`); every other field is optional with a sane default."
+)]
 pub struct RuleInput {
     /// Regex pattern. Presence (without `keywords`) infers `kind=regex`.
     #[serde(default)]
@@ -5801,6 +5802,13 @@ fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
     if let Some(awaiting) = s.awaiting_credential {
         v["awaiting_credential"] = serde_json::json!(awaiting);
     }
+    // Liveness for a running job; omitted once terminal.
+    if let Some(elapsed) = s.elapsed_ms {
+        v["elapsed_ms"] = serde_json::json!(elapsed);
+    }
+    if let Some(age) = s.last_output_age_ms {
+        v["last_output_age_ms"] = serde_json::json!(age);
+    }
     v
 }
 
@@ -6179,6 +6187,9 @@ pub struct McpRegistryDeactivateParams {
 /// - `{ "kind": "job", "job_id": "job_..." }`
 /// - `{ "kind": "probe", "probe_id": "prb_..." }`
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(
+    description = r#"Exactly one of: {"kind":"global"}, {"kind":"bucket","bucket_id":"bkt_..."}, {"kind":"job","job_id":"job_..."}, {"kind":"probe","probe_id":"prb_..."}."#
+)]
 pub struct McpActivationScope {
     /// Scope discriminant. One of: `global`, `bucket`, `job`, `probe`.
     /// `global` watches every command you start; the other three bind
@@ -7411,6 +7422,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn command_status_payload_surfaces_liveness_only_when_set() {
+        let mut status: CommandStatusResponse = serde_json::from_value(serde_json::json!({
+            "job_id": terminal_commander_core::JobId::new(),
+            "bucket_id": terminal_commander_core::BucketId::new(),
+            "probe_id": terminal_commander_core::ProbeId::new(),
+            "state": "running",
+            "frames_total": 0,
+            "frames_stdout": 0,
+            "frames_stderr": 0,
+            "bytes_total": 0,
+            "events_emitted": 0,
+            "exit_code": null,
+            "signal": null,
+            "duration_ms": null,
+            "receipt": null,
+        }))
+        .expect("status");
+        let v = command_status_payload(&status);
+        assert!(v.get("elapsed_ms").is_none());
+        assert!(v.get("last_output_age_ms").is_none());
+        status.elapsed_ms = Some(1500);
+        status.last_output_age_ms = Some(200);
+        let v = command_status_payload(&status);
+        assert_eq!(v["elapsed_ms"], serde_json::json!(1500));
+        assert_eq!(v["last_output_age_ms"], serde_json::json!(200));
+    }
+
     /// F1: the daemon's pipeline flag reaches the run_and_watch payload.
     #[test]
     fn run_and_watch_payload_carries_pipeline_exit_masked() {
@@ -7748,6 +7787,122 @@ mod tests {
                 "{} catalogue row description drifted from its #[tool] attribute",
                 entry.name
             );
+        }
+    }
+
+    /// Both advertised lists, exactly as `list_tools` builds them.
+    fn advertised_lists() -> Vec<(&'static str, Vec<rmcp::model::Tool>)> {
+        vec![
+            (
+                "full",
+                crate::surface_list::full_surface_tools(
+                    TerminalCommanderMcpServer::tool_router().list_all(),
+                ),
+            ),
+            ("compact", crate::surface_list::compact_surface_tools()),
+        ]
+    }
+
+    fn walk_schema(
+        v: &serde_json::Value,
+        f: &mut impl FnMut(&serde_json::Map<String, serde_json::Value>),
+    ) {
+        match v {
+            serde_json::Value::Object(m) => {
+                f(m);
+                m.values().for_each(|c| walk_schema(c, f));
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|c| walk_schema(c, f)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn advertised_schemas_are_slim_but_keep_bounds() {
+        use serde_json::Value;
+        let lists = advertised_lists();
+        for (surface, tools) in &lists {
+            let mut saw_min0 = false;
+            for tool in tools {
+                let v = Value::Object((*tool.input_schema).clone());
+                walk_schema(&v, &mut |m| {
+                    assert!(
+                        !m.contains_key("$schema"),
+                        "{surface}/{}: $schema",
+                        tool.name
+                    );
+                    assert!(
+                        m.get("default") != Some(&Value::Null),
+                        "{surface}/{}: default null",
+                        tool.name
+                    );
+                    if let Some(f) = m.get("format").and_then(Value::as_str) {
+                        assert!(
+                            !f.starts_with("uint"),
+                            "{surface}/{}: format {f}",
+                            tool.name
+                        );
+                    }
+                    saw_min0 |= m.get("minimum") == Some(&Value::from(0));
+                });
+            }
+            assert!(saw_min0, "{surface}: minimum 0 must survive");
+        }
+        let frw = lists[0]
+            .1
+            .iter()
+            .find(|t| t.name == "file_read_window")
+            .expect("file_read_window");
+        let v = Value::Object((*frw.input_schema).clone());
+        assert_eq!(
+            v.pointer("/properties/start_line/minimum"),
+            Some(&Value::from(1))
+        );
+    }
+
+    #[test]
+    fn shared_defs_carry_llm_facing_descriptions() {
+        use serde_json::Value;
+        let lists = advertised_lists();
+        let def_desc = |tool: &str, def: &str| {
+            let t = lists[0].1.iter().find(|t| t.name == tool).expect("tool");
+            Value::Object((*t.input_schema).clone())
+                .pointer(&format!("/$defs/{def}/description"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{tool}.{def} description"))
+                .to_owned()
+        };
+        assert_eq!(
+            def_desc("command_start_combed", "EnvEntry"),
+            "One {key,value} environment variable."
+        );
+        assert_eq!(
+            def_desc("command_start_combed", "RuleInput"),
+            "Inline rule. Needs a matcher (`pattern` or `keywords`); every other field is optional with a sane default."
+        );
+        assert_eq!(
+            def_desc("registry_activate", "McpActivationScope"),
+            r#"Exactly one of: {"kind":"global"}, {"kind":"bucket","bucket_id":"bkt_..."}, {"kind":"job","job_id":"job_..."}, {"kind":"probe","probe_id":"prb_..."}."#
+        );
+        // Scoped to the three shared defs: the `sample_lines` field doc (not a def)
+        // still mentions schemars and is out of scope for this change.
+        for (surface, tools) in &lists {
+            for t in tools {
+                let v = Value::Object((*t.input_schema).clone());
+                for def in ["EnvEntry", "RuleInput", "McpActivationScope"] {
+                    let Some(d) = v.pointer(&format!("/$defs/{def}")) else {
+                        continue;
+                    };
+                    let text = d.to_string();
+                    for banned in ["erg2", "finalize", "schemars", "into_ipc_scope"] {
+                        assert!(
+                            !text.contains(banned),
+                            "{surface}/{}.{def}: leaks `{banned}`",
+                            t.name
+                        );
+                    }
+                }
+            }
         }
     }
 

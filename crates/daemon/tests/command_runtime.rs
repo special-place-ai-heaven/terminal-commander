@@ -1037,6 +1037,8 @@ fn response_types_have_no_raw_stream_lane() {
         outcome_trust: terminal_commanderd::OutcomeTrust::Observed,
         pipeline_exit_masked: false,
         awaiting_credential: None,
+        elapsed_ms: None,
+        last_output_age_ms: None,
     };
     assert_small_response(&s);
 }

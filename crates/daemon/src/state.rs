@@ -213,6 +213,7 @@ impl DaemonState {
                     frames_suppressed: s.frames_suppressed,
                     frames_suppressed_progress: s.frames_suppressed_progress,
                     frames_suppressed_dedupe: s.frames_suppressed_dedupe,
+                    last_frame_at: None,
                 };
                 (
                     Some(crate::command::evidence_json(
