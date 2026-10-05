@@ -27,7 +27,10 @@ Per-provider walk-throughs:
 
 The adapter prefers **2026-07-28** and also accepts legacy `initialize`
 with **2025-11-25** or **2025-06-18**. Other revisions receive JSON-RPC
-`-32022` Unsupported protocol version.
+`-32022` Unsupported protocol version. A client that sends no handshake at
+all (for example a harness reconnecting after an adapter restart) is served
+as if it had initialized; stateless 2026-07-28 clients must send `_meta`
+on every request.
 
 - **Codex CLI** still sends `2025-06-18` until you opt in
   (`mcp_2026_07_28 = true` plus `CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"`).
@@ -133,7 +136,8 @@ That stanza alone is not enough on this tip. Codex still needs the
 
 A stdio MCP client works when it negotiates protocol **2026-07-28**. rmcp is
 the server implementation, not a promise that every older client handshake
-succeeds. Clients that initialize with `2025-06-18` are rejected; see
+succeeds. Clients that initialize with `2025-11-25` or `2025-06-18` are
+accepted; see
 [MCP protocol floor](#mcp-protocol-floor). Launch
 the binary as a child process; the server speaks MCP on stdout and reads
 requests on stdin.

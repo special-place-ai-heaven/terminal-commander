@@ -146,7 +146,7 @@ profile and the config key that changes it.
 
 | Symptom | Check |
 | --- | --- |
-| Handshake fails with `-32022` Unsupported protocol version (`requested` `2025-06-18`) | Legacy default. Set `[features] mcp_2026_07_28 = true` and `CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"`. Confirm Codex is `>= 0.147.0` (dogfood pin `0.157.1`). |
+| Handshake fails with `-32022` Unsupported protocol version | Old adapter build that predates legacy support (current builds accept the `2025-06-18` default). Update the adapter, or set `[features] mcp_2026_07_28 = true` and `CODEX_MCP_PROTOCOL_VERSION = "2026-07-28"`. Confirm Codex is `>= 0.147.0` (dogfood pin `0.157.1`). |
 | Codex reports the MCP server failed to start | Confirm `terminal-commander-mcp --help` works from the same user account. |
 | No tools listed | Restart Codex CLI or rename the server key to refresh the catalogue. |
 | Daemon unavailable | Run `terminal-commander doctor daemon`; the MCP adapter normally attempts daemon auto-start on connect. |
