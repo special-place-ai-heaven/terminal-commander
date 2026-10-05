@@ -1030,8 +1030,19 @@ mod tests {
             .as_object_mut()
             .expect("fixture is an object")
             .remove("_meta");
-        let def: RuleDefinition =
-            serde_json::from_value(value).expect("fixture must deserialize as RuleDefinition");
+        let def: RuleDefinition = serde_json::from_value(value.clone())
+            .expect("fixture must deserialize as RuleDefinition");
+        // Re-serializing the real type must produce exactly the fixture
+        // key set, so a wire-field drift in either direction fails here.
+        // (Values are not compared: the untagged RuleExampleExpect parses
+        // the `{"match": false}` example as `Match`, so it does not
+        // round-trip.)
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&serde_json::to_value(&def).unwrap()), keys(&value));
         def.validate().expect("fixture rule must validate");
         assert!(!def.event_kind.is_empty(), "event_kind must be present");
         assert_eq!(def.context_hint.before_lines, 3);

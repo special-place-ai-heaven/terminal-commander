@@ -9,6 +9,7 @@
   "id": "apt-missing-package",
   "version": 1,
   "kind": "regex",
+  "status": "draft",
   "severity": "high",
   "event_kind": "missing_package",
   "stream": "stderr",

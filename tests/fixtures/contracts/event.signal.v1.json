@@ -2,28 +2,30 @@
   "_meta": {
     "fixture_id": "contracts/event.signal.v1.json",
     "schema_anchor": "TC05/event-v1",
-    "status": "informative-until-TC06",
-    "required": ["event_id", "bucket_id", "seq", "timestamp", "severity", "kind", "summary", "source"],
-    "optional": ["captures", "rule", "pointer", "pointer_unavailable_reason", "tags"]
+    "status": "live-canonical",
+    "note": "Real wire example of terminal_commander_core::event::SignalEvent. The core test committed_signal_event_fixture_matches_live_wire_shape deserializes it and requires a byte-for-byte JSON round trip (minus _meta)."
   },
-  "event_id": "evt_01HXTC0001",
-  "bucket_id": "build_42",
+  "event_id": "evt_018f0000000000000000000000000002",
+  "bucket_id": "bkt_018f0000000000000000000000000001",
   "seq": 1842,
   "timestamp": "2026-05-20T20:11:34.218+02:00",
   "severity": "high",
   "kind": "missing_package",
   "summary": "APT could not locate package libssl-dev",
-  "captures": { "package": "libssl-dev" },
-  "rule": { "id": "apt-missing-package", "version": 1 },
+  "rule": { "id": "rul_018f0000000000000000000000000007", "version": 1 },
   "source": {
-    "probe_id": "probe_apt_7",
+    "probe_id": "prb_018f0000000000000000000000000001",
     "source_type": "process",
     "stream": "stderr",
-    "job_id": "job_install_1"
+    "job_id": "job_018f0000000000000000000000000001"
   },
+  "captures": { "package": "libssl-dev" },
   "pointer": {
-    "frame_id": 9821,
+    "frame_id": "frm_018f0000000000000000000000000042",
     "line": 318,
+    "byte_start": 17452,
+    "byte_end": 17492,
+    "stream": "stderr",
     "context_available": true
   },
   "tags": ["packaging", "apt"]

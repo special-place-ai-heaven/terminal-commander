@@ -176,9 +176,8 @@ pub struct ContextWindowRequest {
 /// `truncated_after`, `truncated_bytes`, `truncated_frames`) trip
 /// `clippy::struct_excessive_bools`. They are distinct, independent
 /// truncation signals required by the contract; collapsing them into
-/// a bitflag enum would obscure the wire shape that
-/// `tests/fixtures/contracts/event-context-response.v1.json`
-/// documents. Allowed locally.
+/// a bitflag enum would obscure the daemon-side window shape. Allowed
+/// locally.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextWindowResponse {
@@ -224,8 +223,8 @@ pub struct RingTail {
 
 /// A frame line, shaped for client consumption.
 ///
-/// Mirrors the contract fixture `event-context-response.v1.json`
-/// frame shape.
+/// The MCP `event_context` response frame is a separate wire type; see
+/// `tests/fixtures/contracts/mcp-tools/event_context.v1.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextLine {
     pub frame_id: FrameId,

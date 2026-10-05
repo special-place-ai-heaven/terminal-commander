@@ -339,4 +339,40 @@ mod tests {
         assert!(json.find("first").unwrap() < json.find("second").unwrap());
         assert!(json.find("second").unwrap() < json.find("third").unwrap());
     }
+
+    /// Read a contract fixture and strip the documentation-only keys,
+    /// leaving the production wire payload.
+    fn load_contract_fixture(name: &str) -> serde_json::Value {
+        let raw = std::fs::read_to_string(format!("../../tests/fixtures/contracts/{name}"))
+            .unwrap_or_else(|e| panic!("read fixture {name}: {e}"));
+        let mut value: serde_json::Value = serde_json::from_str(&raw).expect("fixture is JSON");
+        let obj = value.as_object_mut().expect("fixture is an object");
+        obj.remove("_meta");
+        obj.remove("FORBIDDEN_DO_NOT_PRODUCE");
+        value
+    }
+
+    #[test]
+    fn committed_signal_event_fixture_matches_live_wire_shape() {
+        // Deserialize into the real type, then re-serialize: the result
+        // must equal the fixture exactly, so any added, renamed or
+        // dropped wire field fails here.
+        let value = load_contract_fixture("event.signal.v1.json");
+        let ev: SignalEvent =
+            serde_json::from_value(value.clone()).expect("fixture must deserialize as SignalEvent");
+        ev.validate()
+            .expect("fixture event must satisfy the pointer invariant");
+        assert_eq!(serde_json::to_value(&ev).unwrap(), value);
+    }
+
+    #[test]
+    fn committed_forbidden_fixture_is_rejected_by_validate() {
+        let value = load_contract_fixture("forbidden/missing-pointer.v1.json");
+        let ev: SignalEvent = serde_json::from_value(value)
+            .expect("forbidden fixture is well-formed; only the invariant is violated");
+        assert!(matches!(
+            ev.validate().unwrap_err(),
+            CoreError::PointerInvariantViolation { .. }
+        ));
+    }
 }
