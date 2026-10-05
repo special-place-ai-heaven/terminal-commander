@@ -244,9 +244,8 @@ Out-of-WWS-chain (deferred):
 
 After WWS09 closes, the next operator-driven milestone is the
 first live npm publish via the existing NPM07 trusted-publishing
-workflow (no token, no PAT). `npm-bootstrap-publish.yml`
-remains the one-time bootstrap fallback per NPM10 and stays
-committed-but-undispatched.
+workflow (no token, no PAT). The one-time `npm-bootstrap-publish.yml`
+fallback from NPM10 was deleted on 2026-10-05.
 
 ## Omni completion chain (TC49-TC74)
 

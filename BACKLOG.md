@@ -394,8 +394,8 @@ version and fires the publish jobs.
 
 **Source:** NPM10 goal file +
 `docs/release/npm-bootstrap-first-publish.md` §5.3.
-**Evidence:** `.github/workflows/npm-bootstrap-publish.yml` is the
-ONE-TIME `NPM_TOKEN_TC` path; the intended standing capability is OIDC
+**Evidence:** `.github/workflows/npm-bootstrap-publish.yml` (now deleted)
+was the ONE-TIME `NPM_TOKEN_TC` path; the intended standing capability is OIDC
 trusted publishing via `release-please.yml`.
 **Status (2026-08-07): BLOCKED, not actionable — precondition unmet.**
 An earlier revision of this entry called it "ACTIONABLE, and now overdue"
@@ -419,11 +419,15 @@ since the standing workflow uses the same token.
 > `@terminal-commander` scope (it can deprecate versions but cannot publish
 > directly), publishing uses OIDC, and the weekly secret-health probe passes
 > again. So step 2 (rotate) is DONE; step 1 (disable or delete the
-> bootstrap workflow) is STILL OPEN, as are steps 3 and 4.
+> bootstrap workflow) was STILL OPEN at that time, as are steps 3 and 4.
+
+> Update 2026-10-05 (later): `.github/workflows/npm-bootstrap-publish.yml`
+> is deleted, so step 1 is DONE. `NPM_TOKEN_TC` is now read only by
+> `deprecate-version.yml`. Steps 3 and 4 remain open.
 
 **Proposed work (post-Task-23 OIDC cutover, in this order):**
-1. Delete `.github/workflows/npm-bootstrap-publish.yml` OR rename
-   it to `.disabled` so GitHub Actions stops indexing it.
+1. (DONE 2026-10-05) Delete `.github/workflows/npm-bootstrap-publish.yml`
+   OR rename it to `.disabled` so GitHub Actions stops indexing it.
 2. Rotate / invalidate `NPM_TOKEN_TC` on npmjs.com.
 3. Update `docs/release/` to record that `NPM_TOKEN_TC` is
    decommissioned and OIDC trusted publishing is the only
@@ -550,5 +554,5 @@ landed); they are post-publish enhancements.
 | WWS-B5 | Multi-distro interactive ask-once prompt | D-07 future enhancement. At WWS06 operators must pass `--distro <name>` or set `TC_WSL_DISTRO` when no default distro is available; the CLI emits `no_default_distro_ambiguous` with the candidate list. A future `--interactive` flag may add a prompt. |
 | WWS-B6 | Full WSL-side `pair accept` handshake | At WWS06 `pair create` persists `pair.json`; `pair accept` validates the 6-digit shape + persisted-code match → `pair_accepted` or `pair_deferred`. The WSL-side daemon session token exchange is deferred. |
 | WWS-B7 | Credential broker for `--install-wsl-runtime` permission failures (update 2026-10-05: a separate owner-only credential elicitation path now exists, MCP `credential_request` plus `crates/daemon/tests/credential_ipc.rs`; whether it covers the WSL install probe was not verified) | At WWS06 the install probe returns `install_permission_required` honestly when the inside-WSL npm install hits EACCES; Terminal Commander does NOT prompt for passwords or run sudo. Future work may add a safe broker that does NOT forward LLM-supplied credentials through MCP / chat / bucket / log / audit / env / Cursor config. |
-| WWS-B8 | `npm-bootstrap-publish.yml` disable / rotate after first publish | Inherited from NPM10 (BACKLOG P1.5b). The workflow exists but stays committed-but-undispatched. |
+| WWS-B8 | `npm-bootstrap-publish.yml` disable / rotate after first publish | Inherited from NPM10 (BACKLOG P1.5b). **DONE 2026-10-05:** the workflow is deleted and the token was rotated. |
 | WWS-B9 | CAP01 capability-registry contract (future doctrine) | Recorded as doctrine carry-forward through the WWS chain. The registry would formalize the "tentacle = programmable probe = policy-gated capability executor" model. NOT started; NOT scheduled. |
