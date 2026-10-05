@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.11](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.10...v0.3.11) (2026-10-05)
+
+
+### Features
+
+* **mcp,daemon:** optional receipt head, configurable tail, liveness on more lanes ([2b5e235](https://github.com/special-place-ai-heaven/terminal-commander/commit/2b5e235792cbd2e9efbe0c0a7e47429ada36cdd6))
+* **mcp,daemon:** quiet-receipt coverage, running-job liveness, leaner tool surface ([2b5e235](https://github.com/special-place-ai-heaven/terminal-commander/commit/2b5e235792cbd2e9efbe0c0a7e47429ada36cdd6))
+* responsive daemon, shapeable quiet receipt, job liveness, leaner tool surface ([c7a46dd](https://github.com/special-place-ai-heaven/terminal-commander/commit/c7a46dd0d80adc90bc6240daa5f13f1ef3aedb73))
+
+
+### Bug Fixes
+
+* **daemon,mcp:** reuse host discovery and check version skew via Health ([2b5e235](https://github.com/special-place-ai-heaven/terminal-commander/commit/2b5e235792cbd2e9efbe0c0a7e47429ada36cdd6))
+* **daemon:** bound host discovery by one deadline ([2b5e235](https://github.com/special-place-ai-heaven/terminal-commander/commit/2b5e235792cbd2e9efbe0c0a7e47429ada36cdd6))
+* **daemon:** run blocking IPC handlers off the async workers ([2b5e235](https://github.com/special-place-ai-heaven/terminal-commander/commit/2b5e235792cbd2e9efbe0c0a7e47429ada36cdd6))
+* **daemon:** run system_discover off the async workers ([2b5e235](https://github.com/special-place-ai-heaven/terminal-commander/commit/2b5e235792cbd2e9efbe0c0a7e47429ada36cdd6))
+* **mcp:** remove maintainer jargon from LLM-facing parameter descriptions ([2b5e235](https://github.com/special-place-ai-heaven/terminal-commander/commit/2b5e235792cbd2e9efbe0c0a7e47429ada36cdd6))
+* **npm:** remove a stale CLI copy from the stable bin directory ([5257ba3](https://github.com/special-place-ai-heaven/terminal-commander/commit/5257ba399d91c6f72a6531d8f174509cc61858d2))
+
 ## [0.3.10](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.9...v0.3.10) (2026-10-01)
 
 
