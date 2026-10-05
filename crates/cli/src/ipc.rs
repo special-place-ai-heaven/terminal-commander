@@ -131,9 +131,33 @@ pub(crate) async fn connect_or_unavailable_with_timeout(
     request: IpcRequest,
     timeout: Duration,
 ) -> Result<IpcResponse, CliIpcError> {
+    connect_at(correlation_id, request, timeout, &resolve_socket_path()).await
+}
+
+/// Like [`connect_or_unavailable`] but to an explicit endpoint
+/// (`credential provide --socket`), not the one this process resolves.
+pub(crate) async fn connect_or_unavailable_at(
+    correlation_id: u64,
+    request: IpcRequest,
+    endpoint_path: &std::path::Path,
+) -> Result<IpcResponse, CliIpcError> {
+    connect_at(
+        correlation_id,
+        request,
+        DEFAULT_REQUEST_TIMEOUT,
+        endpoint_path,
+    )
+    .await
+}
+
+async fn connect_at(
+    correlation_id: u64,
+    request: IpcRequest,
+    timeout: Duration,
+    endpoint_path: &std::path::Path,
+) -> Result<IpcResponse, CliIpcError> {
     let state_dir = resolve_state_dir();
-    let endpoint_path = resolve_socket_path();
-    let endpoint = endpoint_from_socket_path(&endpoint_path);
+    let endpoint = endpoint_from_socket_path(endpoint_path);
 
     // Probe-before-IPC: reach the daemon only via the existing health
     // handshake first. `allow_spawn: false` means we NEVER cold-start the

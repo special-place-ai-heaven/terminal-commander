@@ -195,7 +195,7 @@ async fn accept_loop(
         other => {
             // Fail closed: never fall back to the default named-pipe DACL.
             // That default grants broader access than the intended
-            // LocalSystem + Administrators + current-user restriction and
+            // current-user restriction and
             // would let a lower-privileged local process connect. The Unix
             // transport fails closed on peer-credential failure; on Windows
             // the pipe ACL is the equivalent (and only) access gate, so a

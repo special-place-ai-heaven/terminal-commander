@@ -76,6 +76,10 @@ pub struct CommandStartResponse {
     /// unrecognized or its pack is already active. Advisory only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<PackAvailableHint>,
+    /// Secret-shaped variable NAMES (never values) kept out of this
+    /// command's `WSLENV`; empty and omitted when none were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wslenv_dropped: Vec<String>,
 }
 
 /// No-silence exit receipt (TCE-ERG-1).
@@ -956,8 +960,6 @@ pub struct PolicyCapsView {
     pub allow_shell: bool,
     /// Gates the `shell_session_*` lane (TC50; not yet live).
     pub allow_session: bool,
-    /// Gates the Wave-4 privileged helper (not yet live).
-    pub allow_privileged: bool,
     /// Gates remote federation / `target_id` (Wave 5; not yet live).
     pub allow_remote: bool,
 }
@@ -985,6 +987,10 @@ pub struct PolicyStatusResponse {
     /// where an MCP caller is denied with `recipe_activate_requires_admin`.
     #[serde(default)]
     pub llm_can_activate_recipes: bool,
+    /// Config keys that have no effect (unknown, or accepted but not
+    /// enforced), one sentence each; omitted when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_warnings: Vec<String>,
 }
 
 /// `self_check` payload.
@@ -2405,6 +2411,9 @@ pub struct RecipeRunResponse {
     pub bucket_id: BucketId,
     pub probe_id: terminal_commander_core::ProbeId,
     pub cursor: u64,
+    /// As [`CommandStartResponse::wslenv_dropped`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wslenv_dropped: Vec<String>,
 }
 
 // =====================================================================
@@ -2770,6 +2779,9 @@ pub struct PtyCommandStartResponse {
     pub bucket_id: BucketId,
     pub probe_id: terminal_commander_core::ProbeId,
     pub cursor: u64,
+    /// As [`CommandStartResponse::wslenv_dropped`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wslenv_dropped: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3075,6 +3087,9 @@ pub enum CredentialUrlOp {
     /// The client could not show the elicitation: close the page so
     /// `credential_request` falls back to the native prompt.
     Abandon,
+    /// The client accepted: the owner has the link. A page nobody opens
+    /// soon after falls back to the native prompt by itself.
+    Accepted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3305,6 +3320,10 @@ pub struct WorkspaceSnapshotApplyResponse {
     pub applied: bool,
     pub session_id: SessionId,
     pub cwd: Option<String>,
+    /// Env keys NOT restored because the snapshot holds only their masked
+    /// value; empty and omitted when every key was restored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_redacted: Vec<String>,
 }
 
 // =====================================================================

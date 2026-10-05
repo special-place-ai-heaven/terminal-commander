@@ -121,10 +121,6 @@ pub(crate) fn policy(resp: &PolicyStatusResponse) {
         resp.caps.allow_session
     );
     println!(
-        "  caps.allow_privileged          : {}",
-        resp.caps.allow_privileged
-    );
-    println!(
         "  caps.allow_remote              : {}",
         resp.caps.allow_remote
     );
@@ -132,6 +128,9 @@ pub(crate) fn policy(resp: &PolicyStatusResponse) {
         "  llm_can_activate_recipes       : {}",
         resp.llm_can_activate_recipes
     );
+    for w in &resp.config_warnings {
+        println!("  config warning                 : {w}");
+    }
 }
 
 /// `buckets show <id>`: counters plus the per-severity histogram.

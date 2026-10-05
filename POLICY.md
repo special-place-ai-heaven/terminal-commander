@@ -16,7 +16,10 @@ $REPO_ROOT containment (file read/watch and command cwd outside the
 configured `repo_root` are denied). NOT YET SHIPPED: the `[limits]`
 checks of sections 2 and 4.2 (max active jobs, event and stream rates),
 the full declarative `[profile]` schema of section 4.2, and the
-`allow_override` mechanism of section 5. The implementation plan is `docs/specs/2026-05-29-tc22-policy-engine-
+`allow_override` mechanism of section 5. A config key the daemon does
+not act on (unknown, or listed as unused) is named as a warning at
+startup, in `self_check`, and in `policy_status.config_warnings`. The
+implementation plan is `docs/specs/2026-05-29-tc22-policy-engine-
 implementation.md`.
 
 Language: ASCII only.
@@ -232,7 +235,7 @@ A daemon instance loads exactly one profile at startup, named in
 [policy]
 profile = "full_access"  # the default; or developer_local, repo_only,
                          # read_only_observer, admin_debug (hardened)
-profile_version = "1"
+profile_version = "1"   # accepted but unused: named as a config warning
 ```
 
 When `--config` is supplied, that file is authoritative. Otherwise the daemon

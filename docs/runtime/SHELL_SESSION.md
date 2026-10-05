@@ -269,9 +269,11 @@ workspace_snapshot_create { session_id, name? }
 workspace_snapshot_apply { snapshot_id, session_id }
   -> fetch the snapshot row (FileNotFound if unknown)
   -> replay into the target LIVE session via shell_session_exec lines:
-       export K=V   for each bounded env entry (validated key)
+       export K=V   for each bounded env entry (validated key) whose
+                    value is not masked; a masked one (`<redacted>`) is
+                    skipped and named in skipped_redacted
        cd <cwd>     last, so a later cd is the final tracked state
-  -> { applied: true, cwd }
+  -> { applied: true, cwd, skipped_redacted? }
 ```
 
 Safety properties:

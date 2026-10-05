@@ -21,7 +21,8 @@ pub(in crate::ipc::server) fn handle_bucket_events_since(
     let limit = params
         .limit
         .unwrap_or(DEFAULT_BUCKET_READ_LIMIT)
-        .min(MAX_BUCKET_READ_LIMIT);
+        .min(MAX_BUCKET_READ_LIMIT)
+        .min(state.config.limits.bucket_read_limit);
     let req = BucketReadRequest {
         cursor: params.cursor,
         severity_min: params.severity_min,
@@ -50,7 +51,8 @@ pub(in crate::ipc::server) async fn handle_bucket_wait(
     let limit = params
         .limit
         .unwrap_or(DEFAULT_BUCKET_READ_LIMIT)
-        .min(MAX_BUCKET_READ_LIMIT);
+        .min(MAX_BUCKET_READ_LIMIT)
+        .min(state.config.limits.bucket_read_limit);
     let req = BucketWaitRequest {
         cursor: params.cursor,
         severity_min: params.severity_min,

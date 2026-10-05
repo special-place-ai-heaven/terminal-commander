@@ -15,9 +15,15 @@ use terminal_commander_ipc::{
     CredentialProvideParams, IpcRequest, IpcResponse, OwnerSecret, owner_prompt_text,
 };
 
-use crate::ipc::connect_or_unavailable;
+use crate::ipc::connect_or_unavailable_at;
 
-pub(crate) fn run_provide(job_id: &str) -> ExitCode {
+/// `socket`: the daemon named in `credential_request`'s command; the owner's
+/// terminal does not carry the harness's `TC_SESSION`.
+pub(crate) fn run_provide(job_id: &str, socket: Option<&std::path::Path>) -> ExitCode {
+    let endpoint = socket.map_or_else(
+        terminal_commander_supervisor::paths::resolve_socket_path,
+        std::path::Path::to_path_buf,
+    );
     let job_id = match terminal_commander_core::JobId::parse_wire(job_id) {
         Ok(id) => id,
         Err(e) => {
@@ -38,7 +44,11 @@ pub(crate) fn run_provide(job_id: &str) -> ExitCode {
 
     // Show WHICH job asks before reading anything: a job the model started
     // can print a fake prompt, and the owner decides whether to answer it.
-    let entries = match rt.block_on(connect_or_unavailable(1, IpcRequest::PtyCommandList)) {
+    let entries = match rt.block_on(connect_or_unavailable_at(
+        1,
+        IpcRequest::PtyCommandList,
+        &endpoint,
+    )) {
         Ok(IpcResponse::PtyCommandList(r)) => r.entries,
         Ok(_) => {
             eprintln!("terminal-commander: credential provide: unexpected daemon response");
@@ -88,7 +98,7 @@ pub(crate) fn run_provide(job_id: &str) -> ExitCode {
         from_mcp: false,
         interactive,
     });
-    match rt.block_on(connect_or_unavailable(2, request)) {
+    match rt.block_on(connect_or_unavailable_at(2, request, &endpoint)) {
         Ok(IpcResponse::CredentialProvide(_)) => {
             println!("provided");
             ExitCode::SUCCESS

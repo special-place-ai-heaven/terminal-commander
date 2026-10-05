@@ -52,6 +52,16 @@ pub fn resolve(stream: &tokio::net::UnixStream) -> Option<PeerCred> {
     })
 }
 
+/// `true` when `uid` is the user this daemon runs as. The daemon runs any
+/// command for whoever drives it, so only its own user may.
+#[cfg(unix)]
+#[must_use]
+#[allow(unsafe_code)]
+pub fn same_user(uid: u32) -> bool {
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    uid == unsafe { libc::geteuid() }
+}
+
 /// Longest parent chain [`descends_from`] walks before giving up.
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(crate) const MAX_ANCESTRY_DEPTH: usize = 64;

@@ -112,6 +112,9 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(code) => return code,
     };
+    for w in &cfg.warnings {
+        eprintln!("terminal-commanderd: config warning: {w}");
+    }
 
     match cli.cmd {
         Cmd::Check => match run_self_check(cfg) {
@@ -247,8 +250,21 @@ fn load_data_dir_config(
     }
 
     let mut config = DaemonConfig::load(config_path)?;
-    config.daemon.data_dir = data_dir.to_path_buf();
+    overridden_data_dir(&mut config, data_dir);
     Ok(config)
+}
+
+/// The selected data directory wins over the file's `data_dir` (F5); say so
+/// when they differ rather than ignoring the setting silently.
+fn overridden_data_dir(config: &mut DaemonConfig, data_dir: &std::path::Path) {
+    if config.daemon.data_dir != data_dir {
+        config.warnings.push(format!(
+            "`daemon.data_dir` ({}) has no effect: the daemon uses {}",
+            config.daemon.data_dir.display(),
+            data_dir.display()
+        ));
+    }
+    config.daemon.data_dir = data_dir.to_path_buf();
 }
 fn resolve_config(cli: &Cli) -> Result<DaemonConfig, ExitCode> {
     let mut cfg = if let Some(p) = cli.config.as_ref() {
@@ -257,7 +273,7 @@ fn resolve_config(cli: &Cli) -> Result<DaemonConfig, ExitCode> {
             ExitCode::from(1)
         })?;
         if let Some(dd) = cli.data_dir.as_ref() {
-            loaded.daemon.data_dir.clone_from(dd);
+            overridden_data_dir(&mut loaded, dd);
         }
         loaded
     } else {
@@ -283,7 +299,20 @@ fn apply_socket_env_override(cfg: &mut DaemonConfig) {
     if let Ok(socket) = std::env::var("TC_SOCKET")
         && !socket.is_empty()
     {
-        cfg.daemon.socket_path = Some(PathBuf::from(socket));
+        let socket = PathBuf::from(socket);
+        if let Some(set) = cfg
+            .daemon
+            .socket_path
+            .as_ref()
+            .filter(|set| **set != socket)
+        {
+            cfg.warnings.push(format!(
+                "`daemon.socket_path` ({}) has no effect: TC_SOCKET selects {}",
+                set.display(),
+                socket.display()
+            ));
+        }
+        cfg.daemon.socket_path = Some(socket);
     }
 }
 

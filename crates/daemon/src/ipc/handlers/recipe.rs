@@ -834,6 +834,7 @@ pub(in crate::ipc::server) fn handle_recipe_run(
         bucket_id: started.bucket_id,
         probe_id: started.probe_id,
         cursor: started.cursor,
+        wslenv_dropped: started.wslenv_dropped,
     }))
 }
 

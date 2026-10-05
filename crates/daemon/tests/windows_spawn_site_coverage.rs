@@ -48,6 +48,41 @@ fn wsl_linux_spawn_sites_rebuild_wslenv() {
     );
 }
 
+/// SECURITY gate: every daemon file that spawns a model-issued child through a
+/// probe must pass its env through `filter_wslenv_for_spawn`, so no spawn lane
+/// can forward a secret-shaped ambient `WSLENV` entry into WSL.
+#[test]
+fn every_probe_spawn_lane_filters_wslenv() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut lanes = 0;
+    for path in files {
+        let source = std::fs::read_to_string(&path).unwrap();
+        if source.contains("ProcessProbe::spawn(") || source.contains("PtyProbe::spawn(") {
+            lanes += 1;
+            assert!(
+                source.contains("filter_wslenv_for_spawn("),
+                "{} spawns a probe without filter_wslenv_for_spawn",
+                path.display()
+            );
+        }
+    }
+    assert!(lanes >= 2, "expected the command and pty spawn lanes");
+}
+
 #[test]
 fn process_probe_uses_as_std_mut_for_flags() {
     let source = std::fs::read_to_string(

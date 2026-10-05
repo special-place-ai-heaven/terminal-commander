@@ -125,6 +125,7 @@
     "cursor is present on EVERY result (normal, wait_exhausted, and degraded) and is authoritative for resuming the bucket via bucket_events_since/bucket_wait",
     "degraded=true (TC-1b) means an IPC error interrupted the wait AFTER a job_id was minted: the result is success-shaped (never a bare error), carries the real job_id/bucket_id/cursor, sets complete=false and wait_exhausted=true, and reports state as the last observed value or \"unknown\" -- never a silent \"running\"",
     "recover_hint is null on the normal path and, when degraded, instructs the agent to confirm daemon health THEN poll command_status with the job_id -- do not re-run the command",
-    "a degraded result carries receipt=null because the wait did not complete"
+    "a degraded result carries receipt=null because the wait did not complete",
+    "wslenv_dropped is optional: present only when the command mentions WSL (an argv element or the shell line contains `wsl`, any case) and the daemon's ambient WSLENV named secret-shaped variables; it lists those names (never values) under wslenv_dropped.names with a note. Every spawn is filtered either way; self_check names the variables regardless"
   ]
 }

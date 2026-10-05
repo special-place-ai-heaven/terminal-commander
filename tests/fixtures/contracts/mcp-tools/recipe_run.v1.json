@@ -84,6 +84,7 @@
   },
   "invariants": [
     "refuses recipes that are not activated",
-    "argv is explicit; the shell lane is never used"
+    "argv is explicit; the shell lane is never used",
+    "wslenv_dropped is optional: present only when the command mentions WSL (an argv element or the shell line contains `wsl`, any case) and the daemon's ambient WSLENV named secret-shaped variables; it lists those names (never values) under wslenv_dropped.names with a note. Every spawn is filtered either way; self_check names the variables regardless"
   ]
 }

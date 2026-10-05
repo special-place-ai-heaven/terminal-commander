@@ -65,8 +65,9 @@ The `WSL_SUDO_CREDENTIAL` env var + `WSLENV` forwarding + `sudo -S` approach is
 REJECTED. It is fragile (a long-lived daemon freezes its process env, so a
 freshly-set var needs a full client restart to take effect) and it leaks the
 password into the daemon's environment and any child's view of it. The
-env-forwarding allowlist (see the F6 daemon change: `WSLENV`, `TC_WSL_DISTRO`)
-is for non-secret operational vars ONLY, never a password.
+supervisor filters `WSLENV`: the daemon and every command it starts get the
+ambient value minus secret-shaped names (plus `TC_SESSION/u` when a session
+is set), so a password-named entry never crosses into WSL.
 
 ---
 

@@ -125,7 +125,12 @@ impl IpcServer {
         if self.socket_path.exists() {
             std::fs::remove_file(&self.socket_path)?;
         }
+        // Bound inside the owner-only data directory, so nobody else can
+        // reach the socket between bind and this chmod; owner-only after
+        // it, so a socket placed elsewhere (`TC_SOCKET`) is too. The peer
+        // uid check in `handle_connection` is the backstop either way.
         let listener = UnixListener::bind(&self.socket_path)?;
+        terminal_commander_supervisor::paths::restrict_file(&self.socket_path)?;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let socket_path = self.socket_path.clone();
         let state = Arc::clone(&self.state);
@@ -285,6 +290,32 @@ async fn handle_connection(
             let _ = write_envelope(&mut stream, &env).await;
             return;
         }
+    }
+
+    // Only the daemon's own user may drive it: the socket's mode says the
+    // same, this holds even for a socket a caller placed elsewhere.
+    if let Some(c) = peer_cred
+        && !peer::same_user(c.uid)
+    {
+        emit_audit(
+            &state,
+            "ipc_connect",
+            &identity_audit_subject(&identity),
+            "deny",
+            Some("peer is another user; connection refused".to_owned()),
+            &identity,
+        );
+        let env = ResponseEnvelope {
+            correlation_id: 0,
+            result: IpcResult::Err {
+                error: IpcError::new(
+                    IpcErrorCode::PeerCredentialFailure,
+                    "this daemon serves only the user it runs as; connection refused",
+                ),
+            },
+        };
+        let _ = write_envelope(&mut stream, &env).await;
+        return;
     }
 
     // Audit the connection itself once, before any request.
@@ -1074,10 +1105,10 @@ fn handle_policy_status(state: &Arc<DaemonState>) -> IpcResponse {
         caps: PolicyCapsView {
             allow_shell: caps.allow_shell,
             allow_session: caps.allow_session,
-            allow_privileged: caps.allow_privileged,
             allow_remote: caps.allow_remote,
         },
         llm_can_activate_recipes: state.policy.llm_can_activate_recipes(),
+        config_warnings: state.config.warnings.clone(),
     })
 }
 
@@ -1267,6 +1298,19 @@ async fn handle_self_check(state: &Arc<DaemonState>) -> IpcResponse {
     match state.store.audit_count() {
         Ok(n) => lines.push(format!("audit_count: {n}")),
         Err(e) => lines.push(format!("audit_count: error: {e}")),
+    }
+    for note in &state.tightened {
+        lines.push(format!("warning: {note}"));
+    }
+    for w in &state.config.warnings {
+        lines.push(format!("warning: config: {w}"));
+    }
+    #[cfg(windows)]
+    if let Some(line) = std::env::var("WSLENV")
+        .ok()
+        .and_then(|w| crate::command::wslenv_exposure_line(&w))
+    {
+        lines.push(line);
     }
 
     let mut failures = 0u32;
@@ -1774,7 +1818,6 @@ mod tests {
             PolicyCapsView {
                 allow_shell: true,
                 allow_session: true,
-                allow_privileged: true,
                 allow_remote: true,
             }
         );
@@ -1854,5 +1897,131 @@ mod tests {
             took < std::time::Duration::from_secs(2),
             "shell_exec waited {took:?}"
         );
+    }
+
+    /// `[limits]` caps the reads it names: a caller asking for more gets the
+    /// configured amount.
+    #[test]
+    fn configured_read_limits_cap_file_and_bucket_reads() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let mut config = crate::config::DaemonConfig::defaults_in(data.path());
+        config.limits.file_window_bytes = 8;
+        config.limits.bucket_read_limit = 3;
+        let state = Arc::new(DaemonState::bootstrap(config).expect("daemon bootstrap"));
+
+        let file = data.path().join("long.txt");
+        std::fs::write(&file, "0123456789".repeat(10)).unwrap();
+        let Ok(IpcResponse::FileReadWindow(read)) = handlers::file::handle_file_read_window(
+            &state,
+            &FileReadWindowParams {
+                path: file,
+                start_line: None,
+                max_lines: None,
+                max_bytes: Some(4096),
+            },
+        ) else {
+            panic!("file_read_window");
+        };
+        let bytes: usize = read.lines.iter().map(|l| l.text.len()).sum();
+        assert!(bytes <= 8 && read.truncated, "{bytes} bytes, {read:?}");
+
+        let bucket = BucketId::new();
+        state
+            .router
+            .bucket_create(bucket, terminal_commander_core::BucketConfig::default())
+            .unwrap();
+        for _ in 0..10 {
+            state
+                .router
+                .bucket_append(
+                    bucket,
+                    terminal_commander_core::EventDraft {
+                        bucket_id: bucket,
+                        timestamp: time::OffsetDateTime::now_utc(),
+                        severity: Severity::Info,
+                        kind: "k".to_owned(),
+                        summary: "s".to_owned(),
+                        rule: None,
+                        source: terminal_commander_core::EventSource {
+                            probe_id: ProbeId::new(),
+                            source_type: terminal_commander_core::SourceType::Process,
+                            stream: terminal_commander_core::SourceStream::Stdout,
+                            job_id: None,
+                        },
+                        captures: None,
+                        pointer: None,
+                        pointer_unavailable_reason: None,
+                        tags: None,
+                        frame_truncated_bytes: 0,
+                        count: 1,
+                        first_seen: None,
+                        last_seen: None,
+                        suppressed: false,
+                    },
+                )
+                .unwrap();
+        }
+        let Ok(IpcResponse::BucketEventsSince(page)) = handlers::bucket::handle_bucket_events_since(
+            &state,
+            &BucketEventsSinceParams {
+                bucket_id: bucket,
+                cursor: 0,
+                severity_min: None,
+                kind_filter: None,
+                limit: Some(50),
+            },
+        ) else {
+            panic!("bucket_events_since");
+        };
+        assert_eq!(page.events.len(), 3);
+    }
+
+    /// A config key that does nothing is named by `policy_status` and
+    /// `self_check`, never accepted silently.
+    #[test]
+    fn keys_that_do_nothing_are_named_by_policy_status() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let toml = format!(
+            "[daemon]
+data_dir = {:?}
+[policy]
+profile = \"full_access\"
+             [policy.caps]
+allow_privileged = false
+[limits]
+max_jobs = 16
+             file_window_bytes = 1024
+[audit]
+retention_days = 7
+",
+            data.path().display().to_string()
+        );
+        let config = crate::config::DaemonConfig::from_toml(&toml).unwrap();
+        let state = Arc::new(DaemonState::bootstrap(config).expect("daemon bootstrap"));
+        let IpcResponse::PolicyStatus(status) = handle_policy_status(&state) else {
+            panic!("policy_status response");
+        };
+        let all = status.config_warnings.join(
+            "
+",
+        );
+        assert!(
+            all.contains("`limits.max_jobs` is not a setting TC knows"),
+            "{all}"
+        );
+        assert!(
+            all.contains("`policy.caps.allow_privileged` is not enforced"),
+            "{all}"
+        );
+        assert!(
+            all.contains("`audit.retention_days` is not enforced"),
+            "{all}"
+        );
+        // Enforced keys are not flagged.
+        assert!(
+            !all.contains("file_window_bytes") && !all.contains("data_dir"),
+            "{all}"
+        );
+        assert_eq!(status.config_warnings.len(), 3, "{all}");
     }
 }

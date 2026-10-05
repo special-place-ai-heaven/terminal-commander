@@ -352,7 +352,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "credential_request",
             status: ToolStatus::Live,
-            description: "Ask the owner for the password a PTY job is waiting on: a one-time local page via URL elicitation when the client supports it, else a prompt the daemon opens, else the admin CLI. The daemon types the answer; returns only a status (provided, declined, timeout, owner_action_required with the CLI command, not_awaiting). Never returns or accepts the password.",
+            description: "Ask the owner for the password a PTY job is waiting on: a one-time local page via URL elicitation when the client accepts it, else a prompt the daemon opens, else the admin CLI. The daemon types the answer; returns only a status (provided, declined, timeout, owner_action_required with the CLI command, not_awaiting). Never returns or accepts the password.",
         },
         ToolCatalogueEntry {
             name: "shell_session_start",
@@ -1233,6 +1233,7 @@ impl TerminalCommanderMcpServer {
                 bucket_read_limit,
                 caps,
                 llm_can_activate_recipes,
+                config_warnings,
             })) => json_tool_result(&serde_json::json!({
                 "profile": profile,
                 "commands_deny_count": commands_deny_count,
@@ -1246,9 +1247,11 @@ impl TerminalCommanderMcpServer {
                 "caps": {
                     "allow_shell": caps.allow_shell,
                     "allow_session": caps.allow_session,
-                    "allow_privileged": caps.allow_privileged,
                     "allow_remote": caps.allow_remote,
                 },
+                // Settings in the config file that do nothing, so the model
+                // never assumes a protection that is not there.
+                "config_warnings": config_warnings,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -1349,6 +1352,7 @@ impl TerminalCommanderMcpServer {
                 probe_id,
                 cursor,
                 hint,
+                wslenv_dropped,
             })) => {
                 // US2 (FR-011): forward the optional pack-available hint
                 // verbatim. Omitted from the JSON when None.
@@ -1364,6 +1368,7 @@ impl TerminalCommanderMcpServer {
                 if let Some(h) = credential_hint {
                     body["credential_hint"] = serde_json::json!(h);
                 }
+                add_wslenv_dropped(&mut body, &wslenv_dropped);
                 json_tool_result(&body)
             }
             Ok(other) => Err(unexpected_variant(&other)),
@@ -1403,14 +1408,15 @@ impl TerminalCommanderMcpServer {
         let credential_hint = password_prompt_hint(&start_ipc.argv);
 
         // 1. Start.
-        let (job_id, bucket_id, mut cursor) =
+        let (job_id, bucket_id, mut cursor, wslenv_dropped) =
             match daemon.call(IpcRequest::CommandStartCombed(start_ipc)).await {
                 Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
                     job_id,
                     bucket_id,
                     cursor,
+                    wslenv_dropped,
                     ..
-                })) => (job_id, bucket_id, cursor),
+                })) => (job_id, bucket_id, cursor, wslenv_dropped),
                 Ok(other) => return Err(unexpected_variant(&other)),
                 Err(e) => {
                     return Err(into_mcp_error_for_tool(false, &e, Some("run_and_watch")));
@@ -1632,6 +1638,7 @@ impl TerminalCommanderMcpServer {
         if let Some(h) = credential_hint {
             body["credential_hint"] = serde_json::json!(h);
         }
+        add_wslenv_dropped(&mut body, &wslenv_dropped);
         json_tool_result(&body)
     }
 
@@ -2449,9 +2456,10 @@ impl TerminalCommanderMcpServer {
             bucket_id,
             probe_id,
             cursor,
+            wslenv_dropped,
         } = started;
         if !watched {
-            return json_tool_result(&serde_json::json!({
+            let mut body = serde_json::json!({
                 "recipe_id": recipe_id,
                 "version": version,
                 "argv": argv,
@@ -2469,7 +2477,9 @@ impl TerminalCommanderMcpServer {
                 "signal_count": 0,
                 "degraded": false,
                 "recover_hint": serde_json::Value::Null,
-            }));
+            });
+            add_wslenv_dropped(&mut body, &wslenv_dropped);
+            return json_tool_result(&body);
         }
         let RecipeWatch {
             state,
@@ -2519,6 +2529,7 @@ impl TerminalCommanderMcpServer {
         obj.insert("watched".to_owned(), serde_json::json!(watched));
         obj.insert("wait_ms".to_owned(), serde_json::json!(wait_ms));
         obj.insert("probe_id".to_owned(), serde_json::json!(probe_id));
+        add_wslenv_dropped(&mut value, &wslenv_dropped);
         json_tool_result(&value)
     }
 
@@ -2945,12 +2956,17 @@ impl TerminalCommanderMcpServer {
                 bucket_id,
                 probe_id,
                 cursor,
-            })) => json_tool_result(&serde_json::json!({
-                "job_id": job_id,
-                "bucket_id": bucket_id,
-                "probe_id": probe_id,
-                "cursor": cursor,
-            })),
+                wslenv_dropped,
+            })) => {
+                let mut body = serde_json::json!({
+                    "job_id": job_id,
+                    "bucket_id": bucket_id,
+                    "probe_id": probe_id,
+                    "cursor": cursor,
+                });
+                add_wslenv_dropped(&mut body, &wslenv_dropped);
+                json_tool_result(&body)
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
         }
@@ -3042,7 +3058,7 @@ impl TerminalCommanderMcpServer {
     /// CLI. The daemon owns every write. There is deliberately no MCP tool
     /// for `credential_provide`.
     #[tool(
-        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). No TC surface accepts a password from the model (this holds when TC is the model's only way to run programs; a harness that also gives the model a raw shell can defeat any owner-only channel): if your client supports URL elicitation it shows the owner a link to a one-time local page; otherwise the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop). The daemon types the answer into that job itself. Returns only {job_id, status}: provided | declined | pending (the owner has the link and has not answered yet; the page stays open 5 minutes: call credential_request again every few seconds to poll) | timeout (a dialog not answered within 60 s; it stays open, call again to keep waiting, and tell the owner a credential dialog is open: on Windows it may sit behind other windows with its taskbar entry flashing) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls poll, never re-ask. Never returns or accepts the password or the link."
+        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). No TC surface accepts a password from the model (this holds when TC is the model's only way to run programs; a harness that also gives the model a raw shell can defeat any owner-only channel): if your client supports URL elicitation it offers the owner a link to a one-time local page (the first call may take up to 30 s while it does); if the client does not take it, the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop). The daemon types the answer into that job itself. Returns only {job_id, status}: provided | declined | pending (the owner was shown a link to a one-time local page and has not answered yet: call credential_request again every few seconds; if the link is not opened within 30 s, TC switches to the credential dialog by itself; an opened page stays 5 minutes) | timeout (not answered in time: a credential dialog stays open, call again to keep waiting, and tell the owner it is open: on Windows it may sit behind other windows with its taskbar entry flashing; an expired link is offered again) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls poll, never re-ask. Never returns or accepts the password or the link."
     )]
     async fn credential_request(
         &self,
@@ -3052,19 +3068,23 @@ impl TerminalCommanderMcpServer {
         self.ensure_daemon_available().await?;
         use terminal_commander_core::ids::JobIdKind;
         let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
-        let on_page = url_elicitation_supported(ctx.client_capabilities().as_ref())
-            && self.elicit_owner_page(&ctx, job_id).await;
+        let caps = ctx.client_capabilities();
+        let on_page = if url_elicitation_supported(caps.as_ref()) {
+            self.elicit_owner_page(&ctx, job_id, elicitation_client(caps.as_ref()))
+                .await
+        } else {
+            eprintln!(
+                "{}",
+                elicitation_log_line(job_id, elicitation_client(caps.as_ref()), "not-offered")
+            );
+            false
+        };
         // With the owner's page open, answer `pending` within seconds and
         // let the model poll; otherwise the daemon asks through its native
         // prompt or the CLI and waits up to 60 s.
-        let mut resp = self
+        let resp = self
             .credential_status(job_id, on_page.then_some(PAGE_POLL_MS))
             .await?;
-        if on_page && resp.status == CredentialStatus::NotAwaiting {
-            // The client could not show the elicitation and the page was
-            // abandoned meanwhile: the daemon's own chain takes over.
-            resp = self.credential_status(job_id, None).await?;
-        }
         json_tool_result(&resp)
     }
 
@@ -3087,13 +3107,15 @@ impl TerminalCommanderMcpServer {
         }
     }
 
-    /// URL-mode elicitation for `job_id`'s prompt. True while the owner
-    /// page is live; false sends `credential_request` down the daemon's
-    /// native-prompt / CLI chain. Never errors: every failure falls back.
+    /// URL-mode elicitation for `job_id`'s prompt. True once the client
+    /// accepted (the owner has the link); false sends `credential_request`
+    /// down the daemon's native-prompt / CLI chain. Never errors: every
+    /// failure falls back.
     async fn elicit_owner_page(
         &self,
         ctx: &RequestContext<RoleServer>,
         job_id: terminal_commander_core::JobId,
+        client: &'static str,
     ) -> bool {
         use rmcp::model::{ElicitRequest, ElicitRequestParams, ServerRequest};
         let Ok(IpcResponse::CredentialUrl(opened)) = self
@@ -3129,28 +3151,34 @@ impl TerminalCommanderMcpServer {
                 elicitation_id: elicitation_id.clone(),
             },
         ));
-        // Sent inside this tool call (SEP-2260), followed outside it: the
-        // owner may take minutes, and the dialog must stay up as long as the
-        // page does, so the timeout is the page's TTL.
+        // Sent inside this tool call (SEP-2260), and answered inside it: a
+        // sent request is no proof the owner sees anything, so only the
+        // client's accept makes the page the channel. Unanswered after
+        // ELICIT_ACK_MS, rmcp cancels the request (notifications/cancelled).
         let sent = ctx
             .peer
             .send_request_with_option(
                 request,
                 rmcp::service::PeerRequestOptions::with_timeout(std::time::Duration::from_millis(
-                    terminal_commanderd::ipc::protocol::CREDENTIAL_URL_TTL_MS,
+                    ELICIT_ACK_MS,
                 )),
             )
             .await;
         if let Ok(handle) = sent {
+            // Its own task, so a cancelled tool call still settles the page.
+            let (accepted_tx, accepted) = tokio::sync::oneshot::channel();
             tokio::spawn(follow_elicitation(
                 self.daemon.clone(),
                 ctx.peer.clone(),
                 job_id,
                 elicitation_id,
                 handle,
+                accepted_tx,
+                client,
             ));
-            return true;
+            return accepted.await.unwrap_or(false);
         }
+        eprintln!("{}", elicitation_log_line(job_id, client, "error"));
         let _ = self
             .daemon
             .call(IpcRequest::CredentialUrl(CredentialUrlParams {
@@ -3378,11 +3406,21 @@ impl TerminalCommanderMcpServer {
                 applied,
                 session_id,
                 cwd,
-            })) => json_tool_result(&serde_json::json!({
-                "applied": applied,
-                "session_id": session_id,
-                "cwd": cwd,
-            })),
+                skipped_redacted,
+            })) => {
+                let mut body = serde_json::json!({
+                    "applied": applied,
+                    "session_id": session_id,
+                    "cwd": cwd,
+                });
+                if !skipped_redacted.is_empty() {
+                    body["skipped_redacted"] = serde_json::json!({
+                        "names": skipped_redacted,
+                        "note": "Not restored: the snapshot holds only a masked value for these. Set them again in the session if needed.",
+                    });
+                }
+                json_tool_result(&body)
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
         }
@@ -3989,6 +4027,7 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
         probe_id,
         cursor,
         hint: _,
+        wslenv_dropped,
     } = response;
     let mut payload = serde_json::json!({
         "job_id": job_id,
@@ -3996,6 +4035,7 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
         "probe_id": probe_id,
         "cursor": cursor,
     });
+    add_wslenv_dropped(&mut payload, wslenv_dropped);
 
     let lower = shell_line.to_ascii_lowercase();
     let mut detected = Vec::new();
@@ -4035,6 +4075,17 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
     }
 
     payload
+}
+
+/// Name (never the value of) each secret-shaped variable the daemon kept out
+/// of this launch's `WSLENV`, and how to forward one on purpose.
+fn add_wslenv_dropped(body: &mut serde_json::Value, names: &[String]) {
+    if !names.is_empty() {
+        body["wslenv_dropped"] = serde_json::json!({
+            "names": names,
+            "note": "Not forwarded into WSL because the names look secret. To forward one on purpose, pass WSLENV in this call's env; it is used as given.",
+        });
+    }
 }
 
 /// Map a daemon `IpcError` to an MCP `ErrorData`, honest about the mutability
@@ -6584,38 +6635,55 @@ pub struct McpPtyCommandStopParams {
 /// before answering `pending`.
 const PAGE_POLL_MS: u64 = 10_000;
 
-/// The owner's elicitation dialog, followed after the tool call answered.
-/// Decline or cancel is final for that prompt; a client error closes the
-/// page, so the next `credential_request` falls back to the daemon's native
-/// prompt. After accept, once the owner's answer lands,
-/// `notifications/elicitation/complete` closes the client's waiting state
-/// (rmcp 3.4.1 has no typed form of it).
+/// How long the client has to answer the URL elicitation before the owner
+/// is asked another way. The owner only has to agree to open the link.
+const ELICIT_ACK_MS: u64 = 30_000;
+
+/// The owner's elicitation dialog. Only accept keeps the page: decline,
+/// cancel, an error, or no answer within [`ELICIT_ACK_MS`] closes it, so the
+/// same `credential_request` falls back to the daemon's native prompt or
+/// the CLI. `accepted` reports which, after the page is settled. After
+/// accept, once the owner's answer lands, `notifications/elicitation/complete`
+/// closes the client's waiting state (rmcp 3.4.1 has no typed form of it).
 async fn follow_elicitation(
     daemon: crate::daemon_client::McpDaemonClient,
     peer: rmcp::service::Peer<RoleServer>,
     job_id: terminal_commander_core::JobId,
     elicitation_id: String,
     handle: rmcp::service::RequestHandle<RoleServer>,
+    accepted: tokio::sync::oneshot::Sender<bool>,
+    client: &'static str,
 ) {
     use rmcp::model::{ClientResult, ElicitationAction};
-    let op = match handle.await_response().await {
-        Ok(ClientResult::ElicitResult(r)) if r.action == ElicitationAction::Accept => None,
-        // Unanswered for the page's whole TTL: it expired with the dialog.
-        Err(rmcp::ServiceError::Timeout { .. }) => return,
-        Ok(ClientResult::ElicitResult(_)) => Some(CredentialUrlOp::Declined),
-        _ => Some(CredentialUrlOp::Abandon),
+    let outcome = match handle.await_response().await {
+        Ok(ClientResult::ElicitResult(r)) => match r.action {
+            ElicitationAction::Accept => "accepted",
+            ElicitationAction::Decline => "declined",
+            ElicitationAction::Cancel => "cancelled",
+            _ => "error",
+        },
+        Err(rmcp::ServiceError::Timeout { .. }) => "no-reply",
+        _ => "error",
     };
-    if let Some(op) = op {
-        let _ = daemon
-            .call(IpcRequest::CredentialUrl(CredentialUrlParams {
-                job_id,
-                op,
-            }))
-            .await;
+    eprintln!("{}", elicitation_log_line(job_id, client, outcome));
+    let op = if outcome == "accepted" {
+        // Arms the page's open deadline: unopened, it falls back by itself.
+        CredentialUrlOp::Accepted
+    } else {
+        CredentialUrlOp::Abandon
+    };
+    let _ = daemon
+        .call(IpcRequest::CredentialUrl(CredentialUrlParams {
+            job_id,
+            op,
+        }))
+        .await;
+    let _ = accepted.send(op == CredentialUrlOp::Accepted);
+    if op != CredentialUrlOp::Accepted {
         return;
     }
-    // Each call waits up to 60 s on the page's outcome; the page settles
-    // within its TTL (answered, declined, or expired).
+    // Each call waits up to 60 s on the outcome; the page settles within its
+    // TTL (answered, declined, expired, or handed to the native prompt).
     loop {
         let status = match daemon
             .call(IpcRequest::CredentialRequest(CredentialRequestParams {
@@ -6627,22 +6695,48 @@ async fn follow_elicitation(
             Ok(IpcResponse::CredentialRequest(r)) => r.status,
             _ => return,
         };
-        match status {
-            CredentialStatus::Pending => {}
-            CredentialStatus::Provided => {
-                let _ = peer
-                    .send_notification(rmcp::model::ServerNotification::CustomNotification(
-                        rmcp::model::CustomNotification::new(
-                            "notifications/elicitation/complete",
-                            Some(serde_json::json!({ "elicitationId": elicitation_id })),
-                        ),
-                    ))
-                    .await;
-                return;
-            }
-            _ => return,
+        if status != CredentialStatus::Pending {
+            // The link's interaction is over either way: close the client's
+            // waiting state.
+            let _ = peer
+                .send_notification(rmcp::model::ServerNotification::CustomNotification(
+                    rmcp::model::CustomNotification::new(
+                        "notifications/elicitation/complete",
+                        Some(serde_json::json!({ "elicitationId": elicitation_id })),
+                    ),
+                ))
+                .await;
+            return;
         }
     }
+}
+
+/// Which elicitation modes the client declared, for the log line.
+fn elicitation_client(caps: Option<&rmcp::model::ClientCapabilities>) -> &'static str {
+    match caps
+        .and_then(|c| c.elicitation.as_ref())
+        .map(|e| (e.form.is_some(), e.url.is_some()))
+    {
+        None => "none",
+        // A bare `elicitation: {}` is form mode (MCP spec).
+        Some((_, false)) => "form",
+        Some((true, true)) => "form+url",
+        Some((false, true)) => "url",
+    }
+}
+
+/// One stderr line per elicitation: job id, the client's declared modes and
+/// the outcome, so an owner who saw nothing can be diagnosed from the log.
+/// Never the link, token, elicitation id, or anything the owner typed.
+fn elicitation_log_line(
+    job_id: terminal_commander_core::JobId,
+    client: &str,
+    outcome: &str,
+) -> String {
+    format!(
+        "terminal-commander-mcp: credential elicitation job={} client={client} outcome={outcome}",
+        job_id.to_wire_string()
+    )
 }
 
 /// Channel 1 of `credential_request` needs a client that declared URL-mode
@@ -7024,7 +7118,26 @@ mod tests {
             probe_id: terminal_commander_core::ProbeId::new(),
             cursor: 0,
             hint: None,
+            wslenv_dropped: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_filtered_wslenv_names_the_variables_and_how_to_forward_one() {
+        let mut response = shell_start_response();
+        assert!(
+            shell_exec_payload(&response, "wsl -- id")
+                .get("wslenv_dropped")
+                .is_none()
+        );
+        response.wslenv_dropped = vec!["SUDO_PASSWORD".to_owned()];
+        let dropped = &shell_exec_payload(&response, "wsl -- id")["wslenv_dropped"];
+        assert_eq!(dropped["names"], serde_json::json!(["SUDO_PASSWORD"]));
+        assert!(
+            dropped["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("WSLENV"))
+        );
     }
 
     #[test]
@@ -7454,6 +7567,33 @@ mod tests {
     }
 
     // --- TC-1b: run_and_watch degraded / superset result builder ---
+
+    #[test]
+    fn the_elicitation_log_line_names_modes_and_outcome_only() {
+        let caps = |v: serde_json::Value| -> rmcp::model::ClientCapabilities {
+            serde_json::from_value(v).unwrap()
+        };
+        assert_eq!(elicitation_client(None), "none");
+        assert_eq!(
+            elicitation_client(Some(&caps(serde_json::json!({"elicitation": {}})))),
+            "form"
+        );
+        assert_eq!(
+            elicitation_client(Some(&caps(
+                serde_json::json!({"elicitation": {"form": {}, "url": {}}})
+            ))),
+            "form+url"
+        );
+        // The whole line, so nothing else (link, token, id) can ride along.
+        let job = terminal_commander_core::JobId::new();
+        assert_eq!(
+            elicitation_log_line(job, "form+url", "no-reply"),
+            format!(
+                "terminal-commander-mcp: credential elicitation job={} client=form+url outcome=no-reply",
+                job.to_wire_string()
+            )
+        );
+    }
 
     #[test]
     fn only_a_url_elicitation_client_gets_the_owner_page() {
