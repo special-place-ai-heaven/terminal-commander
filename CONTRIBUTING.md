@@ -93,12 +93,14 @@ in TC04. Summary:
 | `rustfmt` | format Rust source | required (gate) |
 | `clippy` | lint Rust source (warnings = errors) | required (gate) |
 | `cargo-nextest` 0.9+ | faster test runner | required (gate) |
-| `cargo-deny` 0.19+ | license / advisories / bans / sources policy | recommended (not yet in CI) |
+| `cargo-deny` 0.19+ | license / advisories / bans / sources policy | required (CI step) |
 | `cargo-machete` 0.9+ | detect unused dependencies | recommended (not yet in CI) |
 | `cargo-hack` 0.6+ | feature matrix + MSRV gate | recommended (not yet in CI) |
 
 `required (gate)` = enforced by the PR gate scripts that CI runs
 (`scripts/linux-gate.sh` / `scripts/windows-gate.ps1`; see section 6).
+`required (CI step)` = run by `npm-binary-build.yml` itself, outside the
+gate scripts (`cargo deny check` in `pre-build-gates (linux-x64)`).
 `recommended (not yet in CI)` = part of the aspirational baseline in
 `docs/research/tooling-baseline.md` but NOT wired into any workflow
 today; run them locally if you wish, but they do not gate merges.
@@ -133,22 +135,25 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace --profile default --no-fail-fast
 ```
 
-`cargo deny`, `cargo hack`, and `cargo machete` are NOT part of the PR
-gate (they are not wired into any workflow; see section 4). Run them
-locally only if you want the extra coverage.
+`cargo hack` and `cargo machete` are NOT part of the PR gate (they are not
+wired into any workflow; see section 4). Run them locally only if you want
+the extra coverage. `cargo deny check` is not in the gate scripts either;
+CI runs it as its own step, so run it locally after any dependency change.
 
 ## 6. CI sequence
 
 The PR gate CI actually runs is `scripts/linux-gate.sh` (linux) plus
-`scripts/windows-gate.ps1` (windows). Those scripts are the single
-source of truth: `npm-binary-build.yml`'s `pre-build-gates*` jobs invoke
-them, so the commands in the scripts ARE the gate. Read the scripts for
-the exact, current command list.
+`scripts/windows-gate.ps1` (windows), plus a `cargo deny check` step in
+`pre-build-gates (linux-x64)`. Those scripts are the single source of
+truth for their part: `npm-binary-build.yml`'s `pre-build-gates*` jobs
+invoke them, so the commands in the scripts ARE the gate. Read the scripts
+and the workflow for the exact, current command list.
 
 The seven-step pipeline below is the ASPIRATIONAL baseline recorded in
 `docs/research/tooling-baseline.md`. It is NOT the PR gate today: steps
-3, 4, 5, and 7 (`cargo deny` / `cargo hack` / `cargo machete`) are not
-wired into any workflow, and step 2's clippy here uses `--all-features`
+4, 5, and 7 (`cargo hack` / `cargo machete`) are not
+wired into any workflow (step 3, `cargo deny`, is: CI runs `cargo deny
+check`), and step 2's clippy here uses `--all-features`
 whereas the real gate (`scripts/linux-gate.sh`) runs clippy WITHOUT
 `--all-features`. Treat this block as the target state, not the
 authoritative gate:

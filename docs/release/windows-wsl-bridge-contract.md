@@ -613,8 +613,8 @@ the public-facing UX will be broken:
 - A second bootstrap dispatch with a corrected root package is
   possible only if every package is bumped to `0.1.0-beta.2`
   (because the bootstrap workflow refuses to re-publish names
-  that already exist; see `.github/workflows/npm-bootstrap-publish.yml`
-  pre-publish E404 check). Publishing a known-broken `beta.1`
+  that already exist; see the pre-publish E404 check in the bootstrap
+  workflow `npm-bootstrap-publish.yml`, deleted 2026-10-05). Publishing a known-broken `beta.1`
   burns one beta number.
 - The bootstrap workflow's `NPM_TOKEN_TC` is a one-time policy
   exception. Burning it on a publish that immediately needs a
@@ -624,7 +624,9 @@ Therefore: WWS01 RECOMMENDS that operator does NOT dispatch
 `npm-bootstrap-publish.yml` until the WWS chain reaches at least
 WWS08 (`Completed`). WWS09 reconfirms or amends this
 recommendation based on whatever real smoke evidence WWS07
-produces.
+produces. (Update 2026-10-05: that workflow was deleted and publishing
+goes through `release-please.yml` (OIDC trusted publishing), so this
+recommendation is moot.)
 
 ## 15. Open decisions resolved (binding answers)
 

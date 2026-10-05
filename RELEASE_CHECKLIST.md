@@ -65,7 +65,8 @@ Rationale:
       crates/mcp` returns only doc / negative-assertion matches
 - [ ] `rg "tokio::fs|std::fs|File::open|read_to_string|read_to_end"
       crates/mcp/src` returns no matches
-- [ ] `cargo deny check licenses` PASS (legacy gate, kept)
+- [ ] `cargo deny check` PASS (all four checks; CI also enforces it in
+      `pre-build-gates (linux-x64)`)
 
 ## Provider-harness gate (out of CI; operator-driven)
 
@@ -106,9 +107,9 @@ attached to a follow-up artifact, the beta posture stays
       `scripts/release/verify-optional-dependencies.js`.
 - [ ] `.github/.release-please-manifest.json` agrees with all six
       `package.json` version fields.
-- [ ] `npm-binary-build` workflow latest run on `main` is `success`
-      on both `ubuntu-24.04` (full smoke) and `ubuntu-24.04-arm`
-      (build + pack).
+- [ ] `npm-binary-build` workflow latest run on `main` is `success`:
+      both `pre-build-gates` jobs (linux-x64, windows-x64), all five
+      `build-*` legs, and `npm-pack`.
 - [ ] `release-please` workflow latest run on `main` is `success`
       and the publish jobs were correctly `skipped` if no
       release PR was merged on that push (gate
@@ -119,7 +120,7 @@ attached to a follow-up artifact, the beta posture stays
       `NPM_TOKEN_TC` / `CARGO_REGISTRY_TOKEN_TC` / `RELEASE_PLEASE_TOKEN_TC`
       anywhere" is obsolete: `RELEASE_PLEASE_TOKEN_TC` and
       `CARGO_REGISTRY_TOKEN_TC` are in use by design, and `NPM_TOKEN_TC` is
-      still read by `npm-bootstrap-publish.yml` and `deprecate-version.yml`;
+      still read by `deprecate-version.yml`;
       per the owner it is now a granular stage-only token that cannot publish
       directly.)
 - [ ] crates.io publishing happens only in the `release-please.yml`
@@ -162,23 +163,15 @@ one-time bootstrap exception** (see below) for the case where
 npmjs.com requires the package page to exist before the
 trusted-publisher UI can be configured.
 
-## NPM10 bootstrap exception (one-time NPM_TOKEN_TC path)
+## NPM10 bootstrap exception (one-time NPM_TOKEN_TC path; RETIRED)
 
-Use this path **only if** the operator determines that
-npmjs.com's trusted-publisher UI requires the package page to
-exist before configuration. Full policy:
+This exception covered the case where npmjs.com's trusted-publisher UI
+required the package page to exist before configuration. The first publish
+has landed, and the bootstrap workflow `npm-bootstrap-publish.yml`
+(`workflow_dispatch` only, `secrets.NPM_TOKEN_TC`, no provenance) was
+deleted on 2026-10-05. `release-please.yml` (OIDC trusted publishing) is the
+only publish path. Historical policy:
 [`docs/release/npm-bootstrap-first-publish.md`](docs/release/npm-bootstrap-first-publish.md).
-
-Workflow: `.github/workflows/npm-bootstrap-publish.yml`. Trigger:
-`workflow_dispatch` only. Two-gate confirm:
-
-- `dry_run` (boolean, default `true`)
-- `confirm_publish` (string, must equal
-  `publish-terminal-commander-beta` for real publish)
-
-Default execution is `npm publish --dry-run`. Real publish
-requires both gates flipped. Auth: `secrets.NPM_TOKEN_TC` via
-`NODE_AUTH_TOKEN`. **No provenance** on token publish (intentional).
 
 Post-NPM10-success operator steps (required before any further
 publish):
@@ -186,8 +179,8 @@ publish):
 - [x] Configure trusted publisher on every package page on
       npmjs.com (workflow filename `release-please.yml`); see the evidence
       above.
-- [ ] Disable or remove `.github/workflows/npm-bootstrap-publish.yml`:
-      STILL OPEN, the file is present and `workflow_dispatch`-able.
+- [x] Disable or remove `.github/workflows/npm-bootstrap-publish.yml`:
+      done 2026-10-05, the file is deleted.
 - [x] Rotate / invalidate `NPM_TOKEN_TC`: done 2026-10-05 per the owner (the
       old token was replaced with a granular, stage-only token scoped to
       `terminal-commander` and `@terminal-commander`; it can deprecate but
@@ -196,15 +189,13 @@ publish):
       (OIDC + provenance): the workflow has no npm token on publish jobs.
 
 (Update 2026-10-05: `NPM_TOKEN_TC` is still read by
-`npm-bootstrap-publish.yml` and `deprecate-version.yml` (the latter needs it
+`deprecate-version.yml` (it needs it
 to deprecate versions); it is now a granular stage-only token that cannot
 publish directly, and the weekly secret-health probe passes again, per the
 owner. See `BACKLOG.md` P1.5b.)
 
-Until ALL post-success steps complete, the chain is NOT considered
-to have closed the bootstrap exception cleanly. The OIDC contract
-remains the standing capability; `NPM_TOKEN_TC` is a single-use
-key.
+All post-success steps are complete. The OIDC contract is the standing
+capability.
 
 ## Versioning
 
@@ -229,15 +220,15 @@ chain (`scripts/release/publish-cargo-crate.js`); the primary install is
 `npm install -g terminal-commander@latest` (see `docs/install/README.md`).
 `cargo install --path crates/{daemon,mcp,cli}` still works from a checkout.
 
-## Cargo-deny gate (release-only stricter pass)
+## Cargo-deny gate
 
-For release tags, the cargo-deny gate runs with `--all-features`:
+CI runs `cargo deny check` on every PR and push to `main`
+(`pre-build-gates (linux-x64)` in `npm-binary-build.yml`); `deny.toml` sets
+`all-features = true`, so no extra flag is needed:
 
 ```bash
-cargo deny --all-features check
+cargo deny check
 ```
-
-The standard `cargo deny check licenses` is the MVP minimum.
 
 ## Beta limitations (current, recorded honestly)
 
@@ -360,9 +351,9 @@ Inherited / preserved from earlier chains (NOT modified by WWS08):
 
 - [x] First live npm publish: DONE 2026-07-17 (`BACKLOG.md` P1.5); current
       version 0.3.11.
-- [ ] `npm-bootstrap-publish.yml` disable / rotate after first
+- [x] `npm-bootstrap-publish.yml` disable / rotate after first
       publish (BACKLOG P1.5b, inherited from NPM10): rotate DONE
-      2026-10-05 per the owner; disabling the workflow STILL OPEN.
+      2026-10-05 per the owner; the workflow was deleted 2026-10-05.
 
 The WWS chain did NOT modify any of:
 

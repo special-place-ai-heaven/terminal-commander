@@ -103,6 +103,9 @@ jobs:
         working-directory: packages/terminal-commander
         run: npm test
       - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@cargo-deny
+      - name: supply-chain gate (cargo deny check)
+        run: cargo deny check
       - name: pre-build gates (scripts/linux-gate.sh)
         run: bash scripts/linux-gate.sh
 
