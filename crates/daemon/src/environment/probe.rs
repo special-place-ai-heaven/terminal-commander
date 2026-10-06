@@ -34,6 +34,12 @@ const DISCOVERY_MAX_AGE: Duration = Duration::from_mins(10);
 
 /// Host discovery results, shared by every caller in the daemon.
 static DISCOVERY: DiscoveryCache = DiscoveryCache::new();
+/// The file that keeps the last confirmed probe answers across daemons.
+const DISCOVERY_FILE: &str = "host-discovery.json";
+/// Answers older than this are not carried from the file.
+const DISCOVERY_FILE_MAX_AGE: Duration = Duration::from_hours(24);
+/// The file holds probes only; a larger one is not read or written.
+const DISCOVERY_FILE_MAX_BYTES: u64 = 64 * 1024;
 const MAX_VERSION_CHARS: usize = 160;
 const MAX_WSL_DISTROS: usize = 16;
 const SHELL_SENTINEL: &str = "terminal-commander-shell-probe";
@@ -84,6 +90,13 @@ pub fn cached_host_environment() -> HostEnvironment {
     DISCOVERY.get(discover)
 }
 
+/// Keep the last confirmed probe answers in `dir`, so a new daemon whose
+/// first discovery times out on a busy host reports them, marked stale.
+/// Set once at startup; without it nothing is read or written.
+pub fn persist_discovery_in(dir: &Path) {
+    let _ = DISCOVERY.file.set(dir.join(DISCOVERY_FILE));
+}
+
 /// Move the shared discovery cache's clock forward, as if `by` had passed.
 #[cfg(test)]
 pub(super) fn advance_discovery_clock(by: Duration) {
@@ -109,6 +122,8 @@ fn discover_for_tests() -> HostEnvironment {
 struct DiscoveryCache {
     state: std::sync::Mutex<CacheState>,
     refreshed: std::sync::Condvar,
+    /// Where confirmed answers persist across daemons; unset, nowhere.
+    file: std::sync::OnceLock<PathBuf>,
     /// Tests move this cache's clock forward instead of sleeping.
     #[cfg(test)]
     clock_offset_ms: std::sync::atomic::AtomicU64,
@@ -121,6 +136,119 @@ struct CacheState {
     refreshing: bool,
 }
 
+/// What `host-discovery.json` holds: the probes of the last discovery with
+/// confirmed answers, and where and when it ran.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DiscoveryFile {
+    os: String,
+    arch: String,
+    hostname: String,
+    /// When that discovery finished, in ms since the Unix epoch. A carried
+    /// probe's `stale_confirmed_age_ms` counts from this time.
+    confirmed_unix_ms: u64,
+    shells: Vec<ProgramProbe>,
+    tools: Vec<ProgramProbe>,
+    wsl: WslProbe,
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, millis)
+}
+
+fn hostname() -> Option<String> {
+    #[cfg(windows)]
+    let name = std::env::var("COMPUTERNAME").ok();
+    #[cfg(not(windows))]
+    let name = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok());
+    name.map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+}
+
+/// The confirmed answers in `path` and their age, as an environment to carry
+/// from. `None` for a missing, oversized, unparsable, foreign (other
+/// OS/arch/host), or too old file. A probe whose own age is past the limit
+/// is dropped.
+fn load_discovery_file(path: &Path) -> Option<(HostEnvironment, u64)> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(DISCOVERY_FILE_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > DISCOVERY_FILE_MAX_BYTES {
+        return None;
+    }
+    let file: DiscoveryFile = serde_json::from_slice(&bytes).ok()?;
+    let age = unix_ms().checked_sub(file.confirmed_unix_ms)?;
+    let limit = millis(DISCOVERY_FILE_MAX_AGE);
+    if file.os != std::env::consts::OS
+        || file.arch != std::env::consts::ARCH
+        || Some(file.hostname) != hostname()
+        || age > limit
+    {
+        return None;
+    }
+    let young = |probe: &ProgramProbe| probe.stale_confirmed_age_ms.unwrap_or(0) + age <= limit;
+    let mut wsl = file.wsl;
+    if wsl.stale_confirmed_age_ms.unwrap_or(0) + age > limit {
+        wsl = WslProbe::default();
+    }
+    let environment = HostEnvironment {
+        shells: file.shells.into_iter().filter(young).collect(),
+        tools: file.tools.into_iter().filter(young).collect(),
+        wsl,
+        ..HostEnvironment::default()
+    };
+    Some((environment, age))
+}
+
+/// Write `environment`'s probes to `path` when this discovery confirmed an
+/// answer itself (a carried one alone does not count). Owner-only, replaced
+/// atomically; a failure only costs the next daemon the carry.
+fn save_discovery_file(path: &Path, environment: &HostEnvironment) {
+    let confirmed = |probe: &ProgramProbe| {
+        probe.stale_confirmed_age_ms.is_none()
+            && (probe.version_status == "confirmed" || probe.execution_status == "confirmed")
+    };
+    let wsl_confirmed = environment.wsl.stale_confirmed_age_ms.is_none()
+        && environment.wsl.execution_status == "confirmed";
+    let Some(hostname) = hostname() else { return };
+    if !(environment.shells.iter().any(confirmed)
+        || environment.tools.iter().any(confirmed)
+        || wsl_confirmed)
+    {
+        return;
+    }
+    let file = DiscoveryFile {
+        os: std::env::consts::OS.to_owned(),
+        arch: std::env::consts::ARCH.to_owned(),
+        hostname,
+        confirmed_unix_ms: unix_ms(),
+        shells: environment.shells.clone(),
+        tools: environment.tools.clone(),
+        wsl: environment.wsl.clone(),
+    };
+    let Ok(bytes) = serde_json::to_vec(&file) else {
+        return;
+    };
+    if bytes.len() as u64 > DISCOVERY_FILE_MAX_BYTES {
+        return;
+    }
+    let partial = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let written = std::fs::write(&partial, bytes)
+        .and_then(|()| terminal_commander_supervisor::paths::restrict_file(&partial))
+        .and_then(|()| std::fs::rename(&partial, path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&partial);
+        tracing::debug!("host discovery not saved to {}: {e}", path.display());
+    }
+}
+
 impl DiscoveryCache {
     const fn new() -> Self {
         Self {
@@ -129,6 +257,7 @@ impl DiscoveryCache {
                 refreshing: false,
             }),
             refreshed: std::sync::Condvar::new(),
+            file: std::sync::OnceLock::new(),
             #[cfg(test)]
             clock_offset_ms: std::sync::atomic::AtomicU64::new(0),
         }
@@ -187,8 +316,19 @@ impl DiscoveryCache {
         state.refreshing = true;
         std::thread::spawn(move || {
             let fresh = std::panic::catch_unwind(discover).ok();
+            let file = self.file.get();
+            // Read only for a discovery that may need it, outside the lock.
+            let filed = file
+                .filter(|_| {
+                    fresh.as_ref().is_some_and(|fresh| {
+                        fresh.shells.iter().chain(&fresh.tools).any(timed_out)
+                            || fresh.wsl.execution_status == "timed_out"
+                    })
+                })
+                .and_then(|path| load_discovery_file(path));
             let mut state = self.lock();
             state.refreshing = false;
+            let mut accepted = None;
             if let Some(mut fresh) = fresh
                 && !state.last.as_ref().is_some_and(|(finished, previous)| {
                     self.now().saturating_duration_since(*finished) < DISCOVERY_MAX_AGE
@@ -198,10 +338,16 @@ impl DiscoveryCache {
                 if let Some((finished, previous)) = &state.last {
                     let previous_age = self.now().saturating_duration_since(*finished);
                     carry_confirmed(previous, &mut fresh, millis(previous_age));
+                } else if let Some((filed, age)) = &filed {
+                    carry_confirmed(filed, &mut fresh, *age);
                 }
+                accepted = file.map(|path| (path, fresh.clone()));
                 state.last = Some((self.now(), fresh));
             }
             drop(state);
+            if let Some((path, environment)) = accepted {
+                save_discovery_file(path, &environment);
+            }
             self.refreshed.notify_all();
         });
     }
@@ -1336,6 +1482,100 @@ mod tests {
     static FIRST_RUNS: AtomicU64 = AtomicU64::new(0);
     fn first_timed_out_discovery() -> HostEnvironment {
         pwsh_and_wsl(FIRST_RUNS.fetch_add(1, Ordering::SeqCst) + 1, false)
+    }
+
+    /// A cache that persists to `dir`.
+    fn cache_filed_in(dir: &Path) -> &'static DiscoveryCache {
+        let cache = leaked_cache();
+        cache.file.set(dir.join(DISCOVERY_FILE)).unwrap();
+        cache
+    }
+
+    /// Write a discovery file with confirmed pwsh and WSL answers.
+    fn write_discovery_file(dir: &Path, os: &str, hostname: String, age: Duration) {
+        let confirmed = pwsh_and_wsl(1, true);
+        let file = DiscoveryFile {
+            os: os.to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+            hostname,
+            confirmed_unix_ms: unix_ms() - millis(age),
+            shells: confirmed.shells,
+            tools: confirmed.tools,
+            wsl: confirmed.wsl,
+        };
+        std::fs::write(dir.join(DISCOVERY_FILE), serde_json::to_vec(&file).unwrap()).unwrap();
+    }
+
+    fn all_timed_out() -> HostEnvironment {
+        pwsh_and_wsl(1, false)
+    }
+
+    fn all_confirmed() -> HostEnvironment {
+        pwsh_and_wsl(1, true)
+    }
+
+    #[test]
+    fn a_new_daemon_carries_confirmed_answers_from_the_discovery_file() {
+        let Some(host) = hostname() else { return }; // no hostname: nothing persists
+        let dir = tempfile::tempdir().unwrap();
+        write_discovery_file(
+            dir.path(),
+            std::env::consts::OS,
+            host,
+            Duration::from_mins(1),
+        );
+
+        let first = cache_filed_in(dir.path()).get(all_timed_out);
+        let pwsh = &first.shells[0];
+        assert_eq!(
+            (pwsh.execution_status.as_str(), pwsh.evidence.as_str()),
+            ("confirmed", "path_confirmed+stale_confirmed"),
+            "a timed-out first discovery reports the file's confirmed answers"
+        );
+        assert!(pwsh.stale_confirmed_age_ms >= Some(millis(Duration::from_mins(1))));
+        assert_eq!(first.wsl.execution_status, "confirmed");
+        assert!(first.wsl.stale_confirmed_age_ms >= Some(millis(Duration::from_mins(1))));
+        assert_eq!(first.preferred_shell.as_deref(), Some("pwsh"));
+    }
+
+    #[test]
+    fn a_foreign_or_old_discovery_file_is_ignored() {
+        let Some(host) = hostname() else { return };
+        for (os, hostname, age) in [
+            ("plan9", host.clone(), Duration::from_mins(1)),
+            (
+                std::env::consts::OS,
+                format!("{host}-other"),
+                Duration::from_mins(1),
+            ),
+            (std::env::consts::OS, host, Duration::from_hours(25)),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            write_discovery_file(dir.path(), os, hostname.clone(), age);
+            let first = cache_filed_in(dir.path()).get(all_timed_out);
+            assert_eq!(
+                first.shells[0].execution_status, "timed_out",
+                "{os}/{hostname}/{age:?}"
+            );
+            assert_eq!(first.wsl.execution_status, "timed_out");
+        }
+    }
+
+    #[test]
+    fn a_corrupt_discovery_file_is_ignored_and_then_replaced() {
+        let Some(_) = hostname() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DISCOVERY_FILE);
+        std::fs::write(&path, br#"{"os":"windows","shells":[{"name":"pwsh""#).unwrap();
+
+        let first = cache_filed_in(dir.path()).get(all_timed_out);
+        assert_eq!(first.shells[0].execution_status, "timed_out");
+        assert!(load_discovery_file(&path).is_none());
+
+        let _ = cache_filed_in(dir.path()).get(all_confirmed);
+        let (filed, _) = load_discovery_file(&path).expect("a confirmed discovery rewrites it");
+        assert_eq!(filed.shells[0].execution_status, "confirmed");
+        assert_eq!(filed.shells[0].stale_confirmed_age_ms, None);
     }
 
     #[test]

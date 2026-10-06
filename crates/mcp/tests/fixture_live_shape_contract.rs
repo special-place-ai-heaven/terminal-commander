@@ -36,6 +36,8 @@ use terminal_commanderd::{DaemonConfig, DaemonState};
 /// load) running the test: the terminal name comes from `TERM`, the WSL block
 /// exists only on Windows, and a version string is absent when its bounded
 /// probe timed out or failed (`ProgramProbe.version` is `None` then).
+/// `stale_confirmed_age_ms` appears only when a probe timed out and an earlier
+/// discovery (in memory or `host-discovery.json`) had confirmed it.
 const DISCOVER_HOST_DEPENDENT: &[&str] = &[
     "daemon.environment.terminal.name",
     "daemon.environment.wsl.default_shell",
@@ -45,6 +47,9 @@ const DISCOVER_HOST_DEPENDENT: &[&str] = &[
     "daemon.environment.routes[].version",
     "daemon.environment.shells[].version",
     "daemon.environment.tools[].version",
+    "daemon.environment.shells[].stale_confirmed_age_ms",
+    "daemon.environment.tools[].stale_confirmed_age_ms",
+    "daemon.environment.wsl.stale_confirmed_age_ms",
 ];
 
 /// Tools deliberately not driven by this test. Each entry carries its reason.
