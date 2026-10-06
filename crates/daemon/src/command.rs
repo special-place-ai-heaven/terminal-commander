@@ -2168,6 +2168,7 @@ impl CommandRuntime {
             limits_applied: governor.limits_applied,
             peak_memory_bytes: governor.peak_memory_bytes,
             exit_reason: governor.exit_reason,
+            host_ceiling_joined: governor.host_ceiling_joined,
         })
     }
 
@@ -2294,6 +2295,7 @@ impl CommandRuntime {
             limits_applied: governor.limits_applied,
             peak_memory_bytes: governor.peak_memory_bytes,
             exit_reason: governor.exit_reason,
+            host_ceiling_joined: governor.host_ceiling_joined,
         })
     }
 

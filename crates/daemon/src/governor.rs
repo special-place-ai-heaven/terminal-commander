@@ -393,13 +393,25 @@ pub struct GovernorOutcome {
     /// The limits the job runs with (start response value), kept through
     /// exit, stop, and persistence so every status shows them.
     pub limits_applied: Option<LimitsApplied>,
+    /// `Some(false)` when a host ceiling is installed but the job failed to
+    /// join it; `None` otherwise (joined, no ceiling, or ungoverned).
+    pub host_ceiling_joined: Option<bool>,
 }
+
+/// `governor_unavailable` audit reason for a job that failed to join the
+/// installed host ceiling.
+pub const HOST_CEILING_JOIN_FAILED: &str = "host_ceiling_join_failed: the job did not join      the daemon-wide host ceiling; only its own limit bounds it";
 
 impl GovernorOutcome {
     /// Map a probe report. An ungoverned job (`mode == None`) maps to all
     /// `None`, so nothing is serialized.
     #[must_use]
     pub fn from_report(report: &GovernorReport) -> Self {
+        Self::map_report(report, probe_governor::host_ceiling().is_some())
+    }
+
+    /// [`Self::from_report`] with the host-ceiling install state passed in.
+    fn map_report(report: &GovernorReport, ceiling_installed: bool) -> Self {
         let Some(mode) = report.mode.as_ref() else {
             return Self::default();
         };
@@ -416,6 +428,8 @@ impl GovernorOutcome {
             },
             memory_limit_bytes: report.memory_limit_bytes,
             limits_applied: None,
+            host_ceiling_joined: (ceiling_installed && !report.host_ceiling_joined)
+                .then_some(false),
         }
     }
 
@@ -449,6 +463,9 @@ impl GovernorOutcome {
         match &self.governor {
             Some(GovernorModeWire::Unavailable(why)) => {
                 Some(format!("the job runs ungoverned: {why}"))
+            }
+            _ if self.host_ceiling_joined == Some(false) => {
+                Some(HOST_CEILING_JOIN_FAILED.to_owned())
             }
             _ => None,
         }
@@ -505,6 +522,9 @@ impl GovernorOutcome {
         if let Some(reason) = &self.exit_reason {
             let _ = write!(out, ",\"exit_reason\":\"{reason}\"");
         }
+        if self.host_ceiling_joined == Some(false) {
+            out.push_str(",\"host_ceiling_joined\":false");
+        }
         if let Some(limits) = &self.limits_applied {
             let _ = write!(
                 out,
@@ -536,6 +556,9 @@ impl GovernorOutcome {
             limits_applied: v
                 .get("limits_applied")
                 .and_then(|l| serde_json::from_value(l.clone()).ok()),
+            host_ceiling_joined: v
+                .get("host_ceiling_joined")
+                .and_then(serde_json::Value::as_bool),
         }
     }
 }
@@ -746,6 +769,9 @@ mod tests {
             mode: Some(GovernorMode::JobObject),
             peak_memory_bytes: Some(5),
             memory_limit_hit: true,
+            // Joined, so the result does not depend on whether this test
+            // process has a host ceiling installed.
+            host_ceiling_joined: true,
             ..GovernorReport::default()
         };
         let applied = Some(LimitsApplied {
@@ -790,6 +816,36 @@ mod tests {
         assert!(w[0].contains("governor.default_job_memory"));
         assert!(w[1].contains("governor.default_priority"));
         assert!(section_warnings(&GovernorSection::default()).is_empty());
+    }
+
+    #[test]
+    fn failed_host_join_is_surfaced_and_audited() {
+        let report = |host_ceiling_joined| GovernorReport {
+            mode: Some(GovernorMode::JobObject),
+            host_ceiling_joined,
+            ..GovernorReport::default()
+        };
+        let failed = GovernorOutcome::map_report(&report(false), true);
+        assert_eq!(failed.host_ceiling_joined, Some(false));
+        assert!(
+            failed
+                .unavailable_reason()
+                .unwrap()
+                .starts_with("host_ceiling_join_failed")
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&format!("{{\"a\":1{}}}", failed.evidence_fields())).unwrap();
+        assert_eq!(
+            GovernorOutcome::from_evidence(Some(&json)).host_ceiling_joined,
+            Some(false)
+        );
+        for (joined, installed) in [(true, true), (false, false), (true, false)] {
+            let o = GovernorOutcome::map_report(&report(joined), installed);
+            assert_eq!(o.host_ceiling_joined, None, "{joined} {installed}");
+            assert!(o.unavailable_reason().is_none());
+        }
+        let ungoverned = GovernorOutcome::map_report(&GovernorReport::default(), true);
+        assert_eq!(ungoverned.host_ceiling_joined, None);
     }
 
     #[test]

@@ -55,11 +55,12 @@ const DISCOVER_HOST_DEPENDENT: &[&str] = &[
 /// Governor keys whose presence depends on the host: `peak_memory_bytes`
 /// exists only where the enforcement mechanism can measure it (Job Object,
 /// cgroup `memory.peak`, not rlimit); the default memory limit is not applied
-/// under rlimit; an unavailable enforcer reports `{"unavailable": reason}`.
+/// under rlimit; `host_ceiling_joined` appears only when a job failed to join
+/// the installed host ceiling.
 const GOVERNOR_HOST_DEPENDENT: &[&str] = &[
     "peak_memory_bytes",
     "limits_applied.memory_bytes",
-    "governor.unavailable",
+    "host_ceiling_joined",
 ];
 
 /// Tools deliberately not driven by this test. Each entry carries its reason.
@@ -762,8 +763,7 @@ async fn status_tools(h: &mut Harness) {
     .await;
     h.check("health", json!({}), "/response_example", &[]).await;
     // The default memory and host ceiling resolve from host memory, so they
-    // can be absent; the ceiling is `{"unavailable": reason}` where the host
-    // has no aggregate primitive (rlimit).
+    // can be absent.
     h.check_host(
         "policy_status",
         json!({}),
@@ -774,7 +774,6 @@ async fn status_tools(h: &mut Harness) {
             "governor.note",
             "governor.host_ceiling_bytes",
             "governor.host_ceiling_mode",
-            "governor.host_ceiling_mode.unavailable",
         ],
     )
     .await;

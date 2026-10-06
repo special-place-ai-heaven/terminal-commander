@@ -1074,6 +1074,7 @@ fn response_types_have_no_raw_stream_lane() {
         elapsed_ms: None,
         last_output_age_ms: None,
         exit_reason: None,
+        host_ceiling_joined: None,
         governor: None,
         limits_applied: None,
         peak_memory_bytes: None,

@@ -670,12 +670,46 @@ fn running_status_shows_governor_and_a_stop_never_reports_the_ceiling() {
 /// a 150 MiB ceiling, each under its own limit, and the second's allocation
 /// fails while the first keeps running. Where the host has no aggregate
 /// primitive (rlimit), `policy_status` says so and nothing is faked.
+///
+/// The host ceiling is installed once per process, so whichever daemon boots
+/// first in a shared test process (plain `cargo test`) fixes it. The scenario
+/// therefore runs in a re-exec of this binary that owns a fresh process.
 #[test]
 fn host_ceiling_bounds_jobs_in_aggregate() {
+    const CHILD: &str = "TC_TEST_HOST_CEILING_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        host_ceiling_scenario();
+        return;
+    }
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "host_ceiling_bounds_jobs_in_aggregate",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    println!("{stdout}{stderr}");
+    assert!(
+        out.status.success(),
+        "host ceiling child failed: {}",
+        out.status
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "the child must run the scenario: {stdout}"
+    );
+}
+
+fn host_ceiling_scenario() {
     rt().block_on(async {
         let d = daemon(|c| {
-            c.governor.host_ceiling = "150MiB".to_owned();
-            c.governor.default_job_memory = "none".to_owned();
+            "150MiB".clone_into(&mut c.governor.host_ceiling);
+            "none".clone_into(&mut c.governor.default_job_memory);
         });
         let g = policy_governor(&d).await;
         println!(
@@ -755,8 +789,8 @@ fn a_job_runs_whatever_the_enforcer_and_status_says_how() {
         let unavailable = rows.iter().any(|(a, ..)| a == "governor_unavailable");
         assert_eq!(
             unavailable,
-            mode.get("unavailable").is_some(),
-            "governor_unavailable row iff the job ran ungoverned: {rows:?}"
+            mode.get("unavailable").is_some() || status["host_ceiling_joined"] == json!(false),
+            "governor_unavailable row iff the job ran ungoverned or outside the              host ceiling: {rows:?}"
         );
         if mode == json!("rlimit") {
             assert!(

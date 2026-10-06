@@ -57,7 +57,8 @@ result is ever silent or misleading.
 - **Per-job and host memory ceilings:** every command, shell, recipe and PTY
   start runs under a kernel-enforced memory ceiling (default 60% of the commit
   limit or total memory) and lower CPU priority, and all jobs together stay
-  under a daemon-wide host ceiling (default 97%). Both are enforced on Windows
+  under a daemon-wide host ceiling (default 97%). The host ceiling is per
+  daemon, so N session daemons can together commit N times it. Both are enforced on Windows
   and on Linux under systemd; elsewhere the fallback is honest (`RLIMIT_DATA`
   or `unavailable`). Pass `limits` (for example `{"memory": "50%"}`) to size a
   build; the start reports `governor`, `limits_applied` and `limits_clamped`,

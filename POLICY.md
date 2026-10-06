@@ -673,7 +673,8 @@ host_ceiling = "97%"                # daemon-wide ceiling all jobs share; same s
   Linux. `default_job_memory` is clamped to it, and a request above it is
   clamped to it and listed in `limits_clamped`. Where the host has no
   aggregate primitive (rlimit) `host_ceiling_mode` is `{"unavailable": reason}`;
-  nothing is faked. `"none"` installs no ceiling.
+  nothing is faked. `"none"` installs no ceiling. The ceiling is per daemon:
+  N session daemons on one host can together commit N times it.
 - **`llm_can_raise_limits`** defaults to true only under `full_access` and
   `admin_debug` (an allow-list: every other profile defaults to false). When
   false, a request that asks for more than the
@@ -708,9 +709,12 @@ host_ceiling = "97%"                # daemon-wide ceiling all jobs share; same s
   limit was not reached. Both are inferences, see the mechanisms below. A stop
   (`command_stop`, `pty_command_stop`) never carries `exit_reason`. A job that
   ran ungoverned reports `governor: {"unavailable": reason}` and is audited.
+  A governed job that failed to join an installed host ceiling reports
+  `host_ceiling_joined: false`; the field is omitted otherwise.
 - **Audit:** a clamped start writes `governor_clamp` with the requested and
   applied values; a job that runs ungoverned writes `governor_unavailable`
-  with the reason; a memory_ceiling exit writes `governor_memory_ceiling` and a
+  with the reason, and so does a job that failed to join the host ceiling
+  (reason `host_ceiling_join_failed`); a memory_ceiling exit writes `governor_memory_ceiling` and a
   host_ceiling exit writes `governor_host_ceiling`, each with limit and peak.
 
 Mechanisms and their limits:

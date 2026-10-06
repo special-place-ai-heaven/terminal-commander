@@ -332,6 +332,11 @@ pub struct CommandStatusResponse {
     /// memory limit. Omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_reason: Option<String>,
+    /// Governed jobs only: `false` when a host ceiling is installed but the
+    /// job failed to join it, so only its own limit bounds it. Omitted when
+    /// the job joined or no host ceiling is installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_ceiling_joined: Option<bool>,
 }
 
 /// Params for `command_stop` (TC-3): force-kill a running combed

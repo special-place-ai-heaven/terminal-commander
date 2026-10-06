@@ -6130,7 +6130,8 @@ fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
 
 /// Resource-governor fields of a status (`governor` and `limits_applied`
 /// while running and after exit, `peak_memory_bytes` and `exit_reason` after
-/// exit), each present only when the daemon reported it.
+/// exit, `host_ceiling_joined` on a failed host join), each present only when
+/// the daemon reported it.
 fn governor_status_fields(s: &CommandStatusResponse) -> serde_json::Map<String, serde_json::Value> {
     let mut m = serde_json::Map::new();
     if let Some(g) = &s.governor {
@@ -6144,6 +6145,9 @@ fn governor_status_fields(s: &CommandStatusResponse) -> serde_json::Map<String, 
     }
     if let Some(r) = &s.exit_reason {
         m.insert("exit_reason".to_owned(), serde_json::json!(r));
+    }
+    if let Some(j) = s.host_ceiling_joined {
+        m.insert("host_ceiling_joined".to_owned(), serde_json::json!(j));
     }
     m
 }
