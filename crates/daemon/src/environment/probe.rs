@@ -163,6 +163,9 @@ impl DiscoveryCache {
                 if age < DISCOVERY_MAX_AGE {
                     let mut environment = environment.clone();
                     environment.discovery_age_ms = millis(age);
+                    for stale in stale_ages(&mut environment) {
+                        *stale = stale.saturating_add(millis(age));
+                    }
                     if age >= DISCOVERY_TTL {
                         self.start_refresh(&mut state, discover);
                     }
@@ -186,12 +189,16 @@ impl DiscoveryCache {
             let fresh = std::panic::catch_unwind(discover).ok();
             let mut state = self.lock();
             state.refreshing = false;
-            if let Some(fresh) = fresh
+            if let Some(mut fresh) = fresh
                 && !state.last.as_ref().is_some_and(|(finished, previous)| {
                     self.now().saturating_duration_since(*finished) < DISCOVERY_MAX_AGE
                         && lost_answers(previous, &fresh)
                 })
             {
+                if let Some((finished, previous)) = &state.last {
+                    let previous_age = self.now().saturating_duration_since(*finished);
+                    carry_confirmed(previous, &mut fresh, millis(previous_age));
+                }
                 state.last = Some((self.now(), fresh));
             }
             drop(state);
@@ -205,9 +212,6 @@ impl DiscoveryCache {
 /// busy, not a change, so the previous result is kept and keeps reporting
 /// its real age.
 fn lost_answers(previous: &HostEnvironment, fresh: &HostEnvironment) -> bool {
-    let timed_out = |probe: &ProgramProbe| {
-        probe.version_status == "timed_out" || probe.execution_status == "timed_out"
-    };
     let lost = |before: &[ProgramProbe], now: &[ProgramProbe]| {
         now.iter().any(|probe| {
             timed_out(probe)
@@ -220,6 +224,58 @@ fn lost_answers(previous: &HostEnvironment, fresh: &HostEnvironment) -> bool {
         || lost(&previous.tools, &fresh.tools)
         || (fresh.wsl.execution_status == "timed_out"
             && previous.wsl.execution_status != "timed_out")
+}
+
+fn timed_out(probe: &ProgramProbe) -> bool {
+    probe.version_status == "timed_out" || probe.execution_status == "timed_out"
+}
+
+/// Rule: a shell, tool, or WSL probe that timed out in `fresh` but was
+/// confirmed in `previous` reports the previous answers, marked
+/// `stale_confirmed` with their age; with nothing confirmed before, the
+/// timeout stands. `previous_age_ms` is how old `previous` is now.
+fn carry_confirmed(previous: &HostEnvironment, fresh: &mut HostEnvironment, previous_age_ms: u64) {
+    let carry = |before: &[ProgramProbe], now: &mut [ProgramProbe]| {
+        for probe in now.iter_mut().filter(|probe| timed_out(probe)) {
+            if let Some(old) = before.iter().find(|old| {
+                old.name == probe.name
+                    && !timed_out(old)
+                    && (old.version_status == "confirmed" || old.execution_status == "confirmed")
+            }) {
+                *probe = old.clone();
+                "path_confirmed+stale_confirmed".clone_into(&mut probe.evidence);
+                probe.stale_confirmed_age_ms =
+                    Some(old.stale_confirmed_age_ms.unwrap_or(0) + previous_age_ms);
+            }
+        }
+    };
+    carry(&previous.shells, &mut fresh.shells);
+    carry(&previous.tools, &mut fresh.tools);
+    if fresh.wsl.execution_status == "timed_out" && previous.wsl.execution_status == "confirmed" {
+        fresh.wsl = previous.wsl.clone();
+        fresh.wsl.stale_confirmed_age_ms =
+            Some(previous.wsl.stale_confirmed_age_ms.unwrap_or(0) + previous_age_ms);
+    }
+    derive_routes(fresh);
+}
+
+/// The ages of every carried-over answer in `environment`.
+fn stale_ages(environment: &mut HostEnvironment) -> impl Iterator<Item = &mut u64> {
+    environment
+        .shells
+        .iter_mut()
+        .chain(environment.tools.iter_mut())
+        .filter_map(|probe| probe.stale_confirmed_age_ms.as_mut())
+        .chain(environment.wsl.stale_confirmed_age_ms.as_mut())
+}
+
+/// `+stale_confirmed` for a route built on a carried-over answer.
+const fn stale_suffix(age: Option<u64>) -> &'static str {
+    if age.is_some() {
+        "+stale_confirmed"
+    } else {
+        ""
+    }
 }
 
 fn millis(duration: Duration) -> u64 {
@@ -296,33 +352,37 @@ pub fn discover_host_environment() -> HostEnvironment {
         &tools,
         wsl_runs_done.unwrap_or(Some((ProbeRun::TimedOut, ProbeRun::TimedOut))),
     );
-    let mut access_routes = shell_access_routes(&shells);
-    if let Some(route) = wsl_access_route(&wsl, &tools, access_routes.len() + 1) {
-        access_routes.push(route);
-    }
-    access_routes.extend(direct_argv_routes(&tools, access_routes.len() + 1));
-    if let Some(route) = wsl_argv_access_route(&wsl, &tools, access_routes.len() + 1) {
-        access_routes.push(route);
-    }
-    let beachhead = access_routes.first().cloned();
-    let preferred_shell = access_routes
-        .iter()
-        .find(|route| route.kind == "shell")
-        .map(|route| route.executable.clone());
-
-    HostEnvironment {
+    let mut environment = HostEnvironment {
         os: std::env::consts::OS.to_owned(),
         arch: std::env::consts::ARCH.to_owned(),
         terminal: terminal_probe(),
         shells,
         tools,
         wsl,
-        access_routes,
-        beachhead,
-        preferred_shell,
         discovery_ms: millis(started.elapsed()),
-        discovery_age_ms: 0,
+        ..HostEnvironment::default()
+    };
+    derive_routes(&mut environment);
+    environment
+}
+
+/// Rebuild the access routes, beachhead, and preferred shell from the probes.
+fn derive_routes(environment: &mut HostEnvironment) {
+    let (shells, tools, wsl) = (&environment.shells, &environment.tools, &environment.wsl);
+    let mut access_routes = shell_access_routes(shells);
+    if let Some(route) = wsl_access_route(wsl, tools, access_routes.len() + 1) {
+        access_routes.push(route);
     }
+    access_routes.extend(direct_argv_routes(tools, access_routes.len() + 1));
+    if let Some(route) = wsl_argv_access_route(wsl, tools, access_routes.len() + 1) {
+        access_routes.push(route);
+    }
+    environment.beachhead = access_routes.first().cloned();
+    environment.preferred_shell = access_routes
+        .iter()
+        .find(|route| route.kind == "shell")
+        .map(|route| route.executable.clone());
+    environment.access_routes = access_routes;
 }
 
 /// Build argv for the actual interpreter family instead of assuming `-lc`.
@@ -459,14 +519,11 @@ fn shell_access_routes(shells: &[ProgramProbe]) -> Vec<AccessRoute> {
             executable: path.clone(),
             argv_template: shell_launch_argv(path, "{command}"),
             version: shell.version.clone(),
-            evidence: if shell.version_status == "confirmed" {
-                "path_confirmed+version_confirmed+execution_confirmed".to_owned()
-            } else {
-                format!(
-                    "path_confirmed+version_{}+execution_confirmed",
-                    shell.version_status
-                )
-            },
+            evidence: format!(
+                "path_confirmed+version_{}+execution_confirmed{}",
+                shell.version_status,
+                stale_suffix(shell.stale_confirmed_age_ms)
+            ),
         })
         .collect()
 }
@@ -491,7 +548,10 @@ fn wsl_access_route(wsl: &WslProbe, tools: &[ProgramProbe], rank: usize) -> Opti
         ],
         executable,
         version: wsl.version.clone(),
-        evidence: "path_confirmed+wsl_execution_confirmed".to_owned(),
+        evidence: format!(
+            "path_confirmed+wsl_execution_confirmed{}",
+            stale_suffix(wsl.stale_confirmed_age_ms)
+        ),
     })
 }
 
@@ -514,7 +574,10 @@ fn direct_argv_routes(tools: &[ProgramProbe], start_rank: usize) -> Vec<AccessRo
             argv_template: vec![executable.clone(), "{args...}".to_owned()],
             executable,
             version: program.version.clone(),
-            evidence: "path_confirmed+version_confirmed+direct_argv_structural".to_owned(),
+            evidence: format!(
+                "path_confirmed+version_confirmed+direct_argv_structural{}",
+                stale_suffix(program.stale_confirmed_age_ms)
+            ),
         })
         .collect()
 }
@@ -544,7 +607,10 @@ fn wsl_argv_access_route(
         ],
         executable,
         version: wsl.version.clone(),
-        evidence: "path_confirmed+wsl_execution_confirmed+direct_argv_structural".to_owned(),
+        evidence: format!(
+            "path_confirmed+wsl_execution_confirmed+direct_argv_structural{}",
+            stale_suffix(wsl.stale_confirmed_age_ms)
+        ),
     })
 }
 
@@ -607,6 +673,7 @@ fn probe_program(spec: ProbeSpec, path: &Path, deadline: Instant) -> ProgramProb
         evidence: "path_confirmed".to_owned(),
         version_status: version_status.to_owned(),
         execution_status: "not_probed".to_owned(),
+        stale_confirmed_age_ms: None,
     }
 }
 
@@ -654,6 +721,7 @@ fn probe_shell(spec: ProbeSpec, path: &Path, deadline: Instant) -> ProgramProbe 
         evidence: "path_confirmed".to_owned(),
         version_status: version_status.to_owned(),
         execution_status: execution_status.to_owned(),
+        stale_confirmed_age_ms: None,
     }
 }
 
@@ -667,6 +735,7 @@ fn timed_out_probe(spec: ProbeSpec, path: &Path, execution_status: &str) -> Prog
         evidence: "path_confirmed".to_owned(),
         version_status: "timed_out".to_owned(),
         execution_status: execution_status.to_owned(),
+        stale_confirmed_age_ms: None,
     }
 }
 
@@ -688,6 +757,7 @@ fn unavailable_probe(name: &str) -> ProgramProbe {
         evidence: "path_not_found".to_owned(),
         version_status: "unavailable".to_owned(),
         execution_status: "unavailable".to_owned(),
+        stale_confirmed_age_ms: None,
     }
 }
 
@@ -924,6 +994,7 @@ fn wsl_probe(tools: &[ProgramProbe], runs: Option<(ProbeRun, ProbeRun)>) -> WslP
         distributions: distributions.unwrap_or_default(),
         default_shell: (execution_status == "confirmed").then(|| "sh".to_owned()),
         execution_status: execution_status.to_owned(),
+        stale_confirmed_age_ms: None,
     }
 }
 
@@ -1026,6 +1097,7 @@ mod tests {
             evidence: "path_confirmed".to_owned(),
             version_status: "confirmed".to_owned(),
             execution_status: "not_probed".to_owned(),
+            stale_confirmed_age_ms: None,
         }];
         let list = ProbeRun::Complete(probe_output(true, &wsl_list_bytes(names)));
         wsl_probe(&tools, Some((list, ProbeRun::TimedOut))).distributions
@@ -1157,6 +1229,7 @@ mod tests {
                 evidence: "path_confirmed".to_owned(),
                 version_status: status.to_owned(),
                 execution_status: status.to_owned(),
+                stale_confirmed_age_ms: None,
             }],
             ..HostEnvironment::default()
         }
@@ -1177,5 +1250,100 @@ mod tests {
             kept.discovery_age_ms >= millis(DISCOVERY_TTL),
             "with its real age"
         );
+    }
+
+    /// Discovery number `run`: pwsh and WSL confirmed when `confirmed`,
+    /// timed out otherwise.
+    fn pwsh_and_wsl(run: u64, confirmed: bool) -> HostEnvironment {
+        let status = if confirmed { "confirmed" } else { "timed_out" };
+        HostEnvironment {
+            discovery_ms: run,
+            shells: vec![ProgramProbe {
+                name: "pwsh".to_owned(),
+                available: true,
+                path: Some("pwsh".to_owned()),
+                version: confirmed.then(|| "PowerShell 7.5".to_owned()),
+                evidence: "path_confirmed".to_owned(),
+                version_status: status.to_owned(),
+                execution_status: status.to_owned(),
+                stale_confirmed_age_ms: None,
+            }],
+            wsl: WslProbe {
+                available: true,
+                status: if confirmed {
+                    "confirmed"
+                } else {
+                    "probe_failed"
+                }
+                .to_owned(),
+                distributions: if confirmed {
+                    vec!["Ubuntu".to_owned()]
+                } else {
+                    Vec::new()
+                },
+                execution_status: status.to_owned(),
+                ..WslProbe::default()
+            },
+            ..HostEnvironment::default()
+        }
+    }
+
+    static IDLE_RUNS: AtomicU64 = AtomicU64::new(0);
+    /// The first discovery confirms pwsh and WSL; later ones time out.
+    fn idle_discovery() -> HostEnvironment {
+        let run = IDLE_RUNS.fetch_add(1, Ordering::SeqCst) + 1;
+        pwsh_and_wsl(run, run == 1)
+    }
+
+    #[test]
+    fn a_timed_out_refresh_reports_the_last_confirmed_answers_as_stale() {
+        let cache = leaked_cache();
+        assert_eq!(cache.get(idle_discovery).discovery_ms, 1);
+        cache.advance(DISCOVERY_MAX_AGE + Duration::from_secs(1));
+
+        let fresh = cache.get(idle_discovery);
+        assert_eq!(fresh.discovery_ms, 2, "past the max age, a fresh discovery");
+        let pwsh = &fresh.shells[0];
+        assert_eq!(
+            (pwsh.execution_status.as_str(), pwsh.evidence.as_str()),
+            ("confirmed", "path_confirmed+stale_confirmed"),
+            "a probe confirmed before keeps its answers, marked stale"
+        );
+        assert!(pwsh.stale_confirmed_age_ms >= Some(millis(DISCOVERY_MAX_AGE)));
+        assert_eq!(fresh.wsl.execution_status, "confirmed");
+        assert_eq!(fresh.wsl.distributions, ["Ubuntu"]);
+        assert!(fresh.wsl.stale_confirmed_age_ms >= Some(millis(DISCOVERY_MAX_AGE)));
+        assert_eq!(
+            fresh.preferred_shell.as_deref(),
+            Some("pwsh"),
+            "routes are rebuilt from the carried answers"
+        );
+        assert!(
+            fresh.access_routes[0]
+                .evidence
+                .ends_with("+stale_confirmed")
+        );
+
+        cache.advance(Duration::from_secs(5));
+        let later = cache.get(idle_discovery);
+        assert!(
+            later.shells[0].stale_confirmed_age_ms
+                >= Some(millis(DISCOVERY_MAX_AGE + Duration::from_secs(5))),
+            "the stale age keeps growing while served"
+        );
+    }
+
+    static FIRST_RUNS: AtomicU64 = AtomicU64::new(0);
+    fn first_timed_out_discovery() -> HostEnvironment {
+        pwsh_and_wsl(FIRST_RUNS.fetch_add(1, Ordering::SeqCst) + 1, false)
+    }
+
+    #[test]
+    fn a_first_discovery_that_timed_out_stays_timed_out() {
+        let first = leaked_cache().get(first_timed_out_discovery);
+        assert_eq!(first.shells[0].execution_status, "timed_out");
+        assert_eq!(first.shells[0].stale_confirmed_age_ms, None);
+        assert_eq!(first.wsl.execution_status, "timed_out");
+        assert_eq!(first.wsl.stale_confirmed_age_ms, None);
     }
 }

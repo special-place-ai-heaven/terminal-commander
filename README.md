@@ -291,7 +291,9 @@ itself is bounded by one 3-second deadline with every probe running
 concurrently (a probe that has not finished is reported as timed out, not
 absent). The daemon warms discovery once it serves, and a result is served at
 once for up to ten minutes (refreshed in the background once it is 30 seconds
-old; `system_discover` reports `discovery_age_ms`). The adapter's startup
+old; `system_discover` reports `discovery_age_ms`). A probe that times out
+after an earlier discovery confirmed it keeps that answer, marked
+`stale_confirmed` with `stale_confirmed_age_ms`. The adapter's startup
 version-skew check reads the daemon version from Health, so it completes even
 while discovery is still running.
 
