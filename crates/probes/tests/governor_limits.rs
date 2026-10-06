@@ -387,7 +387,7 @@ fn host_ceiling_scenario() {
     // The host dir lives for the daemon's life; this process is the daemon.
     #[cfg(target_os = "linux")]
     if let Some(parent) = test_parent_cgroup() {
-        let _ = std::fs::remove_dir(parent.join("tc-jobs"));
+        let _ = std::fs::remove_dir(parent.join(format!("tc-jobs-{}", std::process::id())));
     }
 }
 
@@ -573,8 +573,14 @@ fn priority_only_is_nice_without_cgroup_dir() {
         let argv = sh(r#"[ "$(nice)" = "$0" ] || exit 3; sleep 1"#, &want);
         let mut probe = ProcessProbe::spawn(&argv, &cfg, rings, sifter, sink).expect("spawn");
         if let Some(parent) = test_parent_cgroup() {
-            assert!(!parent.join(format!("tc-job-{id}")).exists());
-            assert!(!parent.join("tc-jobs").join(id.to_string()).exists());
+            let pid = std::process::id();
+            assert!(!parent.join(format!("tc-job-{pid}-{id}")).exists());
+            assert!(
+                !parent
+                    .join(format!("tc-jobs-{pid}"))
+                    .join(id.to_string())
+                    .exists()
+            );
         }
         let (ok, report) = finish(&mut probe).await;
         println!("nice-only: ok={ok} {report:?}");
@@ -609,7 +615,9 @@ fn outliving_grandchild_is_killed_and_dir_removed() {
     assert!(ok);
     assert_eq!(report.mode, Some(GovernorMode::Cgroup));
     assert!(
-        !parent.join(format!("tc-job-{id}")).exists(),
+        !parent
+            .join(format!("tc-job-{}-{id}", std::process::id()))
+            .exists(),
         "job cgroup dir must be removed"
     );
     let pid = std::fs::read_to_string(&pidfile).expect("pid file");
@@ -622,33 +630,39 @@ fn outliving_grandchild_is_killed_and_dir_removed() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Boot sweep removes empty dirs with our names only. Ignored by default: it
-/// rmdirs in the shared parent cgroup, which would race other tests' fresh
-/// job dirs. Run alone: `--run-ignored only -E 'test(sweep_)'`.
+/// Boot sweep removes empty dirs of DEAD daemons only; a live daemon's dirs
+/// (here: this process's) stay. Ignored by default: it rmdirs in the shared
+/// parent cgroup. Run alone: `--run-ignored only -E 'test(sweep_)'`.
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "mutates the shared parent cgroup; run alone"]
 fn sweep_removes_stale_dirs() {
+    use terminal_commander_core::ProbeId;
     if available_mode() != GovernorMode::Cgroup {
         println!("linux governor mode: rlimit; skipped");
         return;
     }
     let parent = test_parent_cgroup().expect("cgroup parent");
-    let stale = parent.join(format!(
-        "tc-job-{}",
-        terminal_commander_core::ProbeId::new()
-    ));
-    let host = parent.join("tc-jobs");
-    let _ = std::fs::create_dir(&host);
-    let stale_child = host.join(terminal_commander_core::ProbeId::new().to_string());
+    // A pid that really existed and is now dead.
+    let mut child = std::process::Command::new("true").spawn().expect("true");
+    let dead = child.id();
+    child.wait().expect("reap");
+    let live = std::process::id();
+    let stale = parent.join(format!("tc-job-{dead}-{}", ProbeId::new()));
+    let stale_host = parent.join(format!("tc-jobs-{dead}"));
+    let stale_child = stale_host.join(ProbeId::new().to_string());
+    let live_job = parent.join(format!("tc-job-{live}-{}", ProbeId::new()));
     std::fs::create_dir(&stale).expect("stale sibling");
-    std::fs::create_dir(&stale_child).expect("stale tc-jobs child");
+    std::fs::create_dir(&stale_host).expect("stale host dir");
+    std::fs::create_dir(&stale_child).expect("stale host child");
+    std::fs::create_dir(&live_job).expect("live job dir");
     let removed = terminal_commander_probes::governor::sweep_stale_job_dirs();
     println!("swept {removed}");
-    assert!(removed >= 2);
-    assert!(!stale.exists() && !stale_child.exists());
-    assert!(host.exists(), "tc-jobs itself is not swept");
-    let _ = std::fs::remove_dir(host);
+    let live_kept = live_job.exists();
+    let _ = std::fs::remove_dir(&live_job);
+    assert!(removed >= 3);
+    assert!(!stale.exists() && !stale_child.exists() && !stale_host.exists());
+    assert!(live_kept, "a live daemon's dir is never swept");
 }
 
 /// Windows PTY lane: the ConPTY child is governed by its own Job Object.

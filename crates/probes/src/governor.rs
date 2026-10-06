@@ -13,8 +13,9 @@
 //!   `JOB_OBJECT_LIMIT_PRIORITY_CLASS`). Peak = `PeakJobMemoryUsed`. The host
 //!   ceiling is a parent Job Object: a joining child is assigned to it FIRST,
 //!   then to its per-job job, which the kernel nests under the host job.
-//! * Linux: a SIBLING cgroup v2 `<daemon parent cgroup>/tc-job-<probe_id>`
-//!   (or `<parent>/tc-jobs/<probe_id>` when the job joins the host ceiling)
+//! * Linux: a SIBLING cgroup v2 `<daemon parent cgroup>/tc-job-<pid>-<probe_id>`
+//!   (or `<parent>/tc-jobs-<pid>/<probe_id>` when the job joins the host
+//!   ceiling; `<pid>` = the daemon's, so daemons sharing a parent never collide)
 //!   with `memory.max` and `memory.swap.max=0`. The child moves ITSELF into
 //!   the cgroup in `pre_exec` (writes `0` to `cgroup.procs`), so nothing it
 //!   forks can escape; the parent re-writes the pid after spawn as a checked
@@ -231,7 +232,7 @@ const NO_AGGREGATE: &str = "no aggregate primitive";
 /// * Windows: a parent Job Object (`KILL_ON_JOB_CLOSE | JOB_MEMORY`), held for
 ///   the process's life. Per-job jobs nest under it (Windows 8+), one level
 ///   deeper when the daemon itself already runs inside a job.
-/// * Linux cgroup mode: `<parent>/tc-jobs` with `memory.max = limit_bytes`,
+/// * Linux cgroup mode: `<parent>/tc-jobs-<pid>` with `memory.max = limit_bytes`,
 ///   `memory.swap.max = 0` and the memory controller enabled for its children;
 ///   per-job dirs are created under it, never processes directly in it.
 /// * Rlimit / no cgroup / other unix: `Err("no aggregate primitive")`.
@@ -292,9 +293,10 @@ pub const fn host_ceiling() -> Option<u64> {
 
 /// Boot-time cleanup of stale job cgroups; returns how many were removed.
 ///
-/// Removes empty `tc-job-*` and `tc-jobs/*` dirs a previous daemon left
-/// under our parent cgroup (only names this module creates; the kernel
-/// refuses to rmdir a populated cgroup).
+/// Removes the `tc-job-<pid>-*`, `tc-jobs-<pid>` (with its children) and
+/// `tc-probe-<pid>` dirs under our parent cgroup whose daemon pid is dead.
+/// A live daemon's dirs are never touched, and the kernel refuses to rmdir
+/// a populated cgroup, so only empty ones go.
 #[cfg(target_os = "linux")]
 pub fn sweep_stale_job_dirs() -> usize {
     cgroup::sweep()
@@ -690,14 +692,18 @@ mod cgroup {
     use super::{GovernorMode, JobLimits, NO_AGGREGATE, errno_reason};
 
     const ROOT: &str = "/sys/fs/cgroup";
-    /// Host-ceiling parent dir under the daemon's parent cgroup.
-    const HOST_DIR: &str = "tc-jobs";
-    /// Sibling per-job dir prefix (no host ceiling).
+    // Every dir name carries the creating daemon's pid: several daemons
+    // (test daemons, a second user session) can share one parent cgroup, and
+    // a shared name would let one daemon overwrite another's ceiling or sweep
+    // its freshly created job dirs.
+    /// Host-ceiling dir: `tc-jobs-<pid>`.
+    const HOST_PREFIX: &str = "tc-jobs-";
+    /// Sibling per-job dir (no host ceiling): `tc-job-<pid>-<probe_id>`.
     const JOB_PREFIX: &str = "tc-job-";
-    /// `usable()` probe dir prefix.
+    /// `usable()` probe dir: `tc-probe-<pid>`.
     const PROBE_PREFIX: &str = "tc-probe-";
 
-    /// The installed host ceiling: (`tc-jobs` dir, limit).
+    /// The installed host ceiling: (`tc-jobs-<pid>` dir, limit).
     pub(super) static HOST: OnceLock<(PathBuf, u64)> = OnceLock::new();
 
     enum Error {
@@ -762,7 +768,7 @@ mod cgroup {
             return (GovernorMode::Rlimit, None, false);
         }
         let target = host.map_or_else(
-            || parent_dir().map(|p| p.join(format!("{JOB_PREFIX}{id}"))),
+            || parent_dir().map(|p| p.join(format!("{JOB_PREFIX}{}-{id}", std::process::id()))),
             |host| Some(host.join(id)),
         );
         let Some(dir) = target else {
@@ -808,13 +814,13 @@ mod cgroup {
         Ok(())
     }
 
-    /// Create (or reuse) `<parent>/tc-jobs`, cap it, enable the memory
+    /// Create (or reuse) `<parent>/tc-jobs-<pid>`, cap it, enable the memory
     /// controller for its per-job children.
     pub(super) fn install_host(limit: u64) -> Result<(), String> {
         let Some(parent) = parent_dir() else {
             return Err(NO_AGGREGATE.to_owned());
         };
-        let dir = parent.join(HOST_DIR);
+        let dir = parent.join(format!("{HOST_PREFIX}{}", std::process::id()));
         match std::fs::create_dir(&dir) {
             Ok(()) => {}
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
@@ -896,51 +902,91 @@ mod cgroup {
         })
     }
 
-    /// Whether `name` is a dir this module creates directly under the parent.
-    fn is_ours(name: &str) -> bool {
-        name.strip_prefix(JOB_PREFIX).is_some_and(is_probe_id)
-            || name
-                .strip_prefix(PROBE_PREFIX)
-                .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+    /// What a dir directly under the parent is, if this module created it.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Owned {
+        Host(u32),
+        Job(u32),
+        Probe(u32),
     }
 
-    /// rmdir every matching dir; a populated one fails `EBUSY` and stays.
-    fn sweep_in(dir: &Path, matches: fn(&str) -> bool) -> usize {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return 0;
-        };
-        entries
+    fn parse_pid(digits: &str) -> Option<u32> {
+        (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| digits.parse().ok())
             .flatten()
-            .filter(|e| e.file_name().to_str().is_some_and(matches))
-            .filter(|e| std::fs::remove_dir(e.path()).is_ok())
-            .count()
     }
 
+    fn classify(name: &str) -> Option<Owned> {
+        if let Some(pid) = name.strip_prefix(HOST_PREFIX) {
+            return parse_pid(pid).map(Owned::Host);
+        }
+        if let Some(rest) = name.strip_prefix(JOB_PREFIX) {
+            let (pid, id) = rest.split_once('-')?;
+            return is_probe_id(id)
+                .then(|| parse_pid(pid))
+                .flatten()
+                .map(Owned::Job);
+        }
+        parse_pid(name.strip_prefix(PROBE_PREFIX)?).map(Owned::Probe)
+    }
+
+    /// rmdir every probe-id child of a host dir, then the dir itself.
+    fn remove_host_dir(dir: &Path) -> usize {
+        let children = std::fs::read_dir(dir).map_or(0, |entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_str().is_some_and(is_probe_id))
+                .filter(|e| std::fs::remove_dir(e.path()).is_ok())
+                .count()
+        });
+        children + usize::from(std::fs::remove_dir(dir).is_ok())
+    }
+
+    /// Remove our dirs whose creating daemon is gone (`/proc/<pid>` absent).
+    /// A live daemon's dirs, including our own, are never touched; a
+    /// populated cgroup fails rmdir with `EBUSY` and stays.
     pub(super) fn sweep() -> usize {
         let Some(parent) = parent_dir() else {
             return 0;
         };
-        sweep_in(parent, is_ours) + sweep_in(&parent.join(HOST_DIR), is_probe_id)
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            return 0;
+        };
+        let dead = |pid: u32| !Path::new(&format!("/proc/{pid}")).exists();
+        entries
+            .flatten()
+            .map(|e| match e.file_name().to_str().and_then(classify) {
+                Some(Owned::Host(pid)) if dead(pid) => remove_host_dir(&e.path()),
+                Some(Owned::Job(pid) | Owned::Probe(pid)) if dead(pid) => {
+                    usize::from(std::fs::remove_dir(e.path()).is_ok())
+                }
+                _ => 0,
+            })
+            .sum()
     }
 
     #[cfg(test)]
     mod tests {
         #[test]
         fn sweep_matches_only_our_names() {
+            use super::{Owned, classify};
             let id = "prb_0123456789abcdef0123456789abcdef";
-            assert!(super::is_ours(&format!("tc-job-{id}")));
-            assert!(super::is_ours("tc-probe-4242"));
-            assert!(super::is_probe_id(id));
+            assert_eq!(classify(&format!("tc-job-42-{id}")), Some(Owned::Job(42)));
+            assert_eq!(classify("tc-jobs-42"), Some(Owned::Host(42)));
+            assert_eq!(classify("tc-probe-4242"), Some(Owned::Probe(4242)));
             for other in [
                 "tc-job-",
-                "tc-job-prb_xyz",
+                &format!("tc-job-{id}"),
+                "tc-job-42-prb_xyz",
                 "tc-jobs",
+                "tc-jobs-",
+                "tc-jobs-4a",
                 "tc-probe-",
                 "tc-probe-12a",
                 "app.slice",
-                "prb_0123456789ABCDEF0123456789abcdef",
+                "tc-job-42-prb_0123456789ABCDEF0123456789abcdef",
             ] {
-                assert!(!super::is_ours(other), "{other}");
+                assert_eq!(classify(other), None, "{other}");
             }
         }
     }
