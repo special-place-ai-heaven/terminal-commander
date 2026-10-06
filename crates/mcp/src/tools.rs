@@ -5574,12 +5574,26 @@ const MAX_WAIT_SLICE_MS: u64 = 1_000;
 /// rather than busy-spinning. Matches the wait-slice cadence.
 const RUN_AND_WATCH_POLL_HINT_MS: u64 = 1_000;
 
-const RUN_AND_WATCH_WAIT_EXHAUSTED_HINT: &str = "Wait budget exhausted; command is still running. Continue signal collection with command.wait (full surface: bucket_wait) using bucket_id, cursor, and timeout_ms=poll_hint_ms; carry forward next_cursor. Check state/exit_code with command.status (full surface: command_status) using job_id. Do not re-run.";
+/// How to resume a `run_and_watch` that returned before the command ended;
+/// the one source for both hints below. Names full-surface tools only.
+macro_rules! run_and_watch_resume_hint {
+    () => {
+        "Continue signal collection with bucket_wait using bucket_id, cursor, and timeout_ms=poll_hint_ms; carry forward next_cursor. Check state/exit_code with command_status using job_id. Do not re-run."
+    };
+}
+
+const RUN_AND_WATCH_WAIT_EXHAUSTED_HINT: &str = concat!(
+    "Wait budget exhausted; command is still running. ",
+    run_and_watch_resume_hint!()
+);
 
 /// Recovery guidance attached to a degraded `run_and_watch` result (TC-1b).
 /// An IPC error interrupted the wait, but the job is still tracked by the
 /// daemon, so the agent should confirm liveness before polling -- not re-run.
-const RUN_AND_WATCH_RECOVER_HINT: &str = "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with status action=\"health\" (full surface: health). Then continue signal collection with command.wait (full surface: bucket_wait) using bucket_id, cursor, and timeout_ms=poll_hint_ms; carry forward next_cursor. Check state/exit_code with command.status (full surface: command_status) using job_id. Do not re-run.";
+const RUN_AND_WATCH_RECOVER_HINT: &str = concat!(
+    "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with health. Then: ",
+    run_and_watch_resume_hint!()
+);
 
 /// [`RUN_AND_WATCH_RECOVER_HINT`] with the underlying error appended. A
 /// daemon-returned code and a transport drop need different recovery, and a
@@ -9156,10 +9170,21 @@ mod tests {
         assert_eq!(v["wait_exhausted"], serde_json::json!(true));
         assert_eq!(
             v["recover_hint"],
-            serde_json::json!(
-                "Wait budget exhausted; command is still running. Continue signal collection with command.wait (full surface: bucket_wait) using bucket_id, cursor, and timeout_ms=poll_hint_ms; carry forward next_cursor. Check state/exit_code with command.status (full surface: command_status) using job_id. Do not re-run."
-            )
+            serde_json::json!(RUN_AND_WATCH_WAIT_EXHAUSTED_HINT)
         );
+        for hint in [
+            RUN_AND_WATCH_WAIT_EXHAUSTED_HINT,
+            RUN_AND_WATCH_RECOVER_HINT,
+        ] {
+            assert!(
+                hint.contains("bucket_wait") && hint.contains("command_status"),
+                "{hint}"
+            );
+            assert!(
+                !hint.contains("command.") && !hint.contains("full surface"),
+                "names full-surface tools only: {hint}"
+            );
+        }
         assert!(
             v["job_id"]
                 .as_str()
