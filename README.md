@@ -52,7 +52,7 @@ result is ever silent or misleading.
 
 ## Recent improvements
 
-<!-- release-status -->Landed 2026-10-06, not yet in a tagged release.
+<!-- release-status -->Landed 2026-10-06, released in v0.3.14.
 
 - **Per-job and host memory ceilings:** every command, shell, recipe and PTY
   start runs under a kernel-enforced memory ceiling (default 60% of the commit

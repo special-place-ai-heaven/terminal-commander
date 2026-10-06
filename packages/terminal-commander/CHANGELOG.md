@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.3.14](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.13...v0.3.14) (2026-10-06)
+
+
+### Features
+
+* **daemon:** exit_reason host_ceiling with audit row ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **daemon:** governor policy, limits on every start lane, ceiling receipts ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **daemon:** host ceiling, governor in start and running status, honest rlimit rule ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **mcp:** limits on the five start tools; governor in status and policy ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **probes:** expose governor::available_mode for policy_status ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **probes:** host ceiling, final mode at spawn, cgroup cleanup, honest modes ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **probes:** kernel limit messages decide ceiling hits; rlimit only from boot ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **probes:** kernel-enforced per-job memory and priority limits ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **probes:** report host_ceiling_hit with a bounded inference ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* resource governor - kernel-enforced per-job and host memory ceilings ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+
+
+### Bug Fixes
+
+* **daemon:** deterministic PTY governor report; Linux governor tests both modes ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **daemon:** host-ceiling test owns its process; failed host join is surfaced ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **daemon:** stopped governed jobs keep governor mode and peak ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **governor:** host uninstall retries EBUSY off-worker; tests release the ceiling ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **governor:** release the host ceiling on clean daemon shutdown ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **probes:** host baseline before join, periodic port drain, isolated test ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+* **probes:** per-daemon cgroup names so daemons do not share one ceiling ([4b0ea43](https://github.com/special-place-ai-heaven/terminal-commander/commit/4b0ea432c708c0a30f514c2265a8f6aa264a9b4c))
+
 ## [0.3.13](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.12...v0.3.13) (2026-10-06)
 
 
