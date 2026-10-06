@@ -299,13 +299,16 @@ them). To size one job, pass `limits` on `run_and_watch`, `command_start_combed`
   less parallelism (`cargo test -j 2`, `make -j2`) rather than a bigger limit.
 - `exit_reason: "host_ceiling"` means the daemon-wide ceiling shared by all
   jobs was hit while this job was under its own limit. Other jobs are using
-  the memory: wait for them or retry with lower `-j`. Both reasons are
-  inferences; a job that failed for another reason can be flagged while a
-  concurrent job sits at the host ceiling. A stop never carries one.
+  the memory: wait for them or retry with lower `-j`. On Windows both reasons
+  are kernel facts attributed to this exact job. On Linux `memory_ceiling` is
+  a fact but `host_ceiling` is an inference: a job that failed for another
+  reason can be flagged while a concurrent job sits at the host ceiling. A
+  stop never carries one.
 - `governor` names the mechanism (`job_object`, `cgroup`, `rlimit`) or says
   `unavailable` with a reason; in the last case the job ran with no ceiling.
-  On Windows a refused oversized allocation shows the limit and peak but no
-  `exit_reason`; compare `peak_memory_bytes` with `limits_applied.memory_bytes`.
+  `host_ceiling_joined: false` means the job could not join the installed
+  host ceiling (audited as `governor_unavailable`, reason
+  `host_ceiling_join_failed`).
 - Under `rlimit` (a daemon started from a plain `wsl.exe` shell, no systemd)
   the default memory is NOT applied, there is no peak and no `exit_reason`,
   and `policy_status` `host_ceiling_mode` is `unavailable`. Pass an explicit

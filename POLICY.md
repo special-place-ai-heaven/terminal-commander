@@ -706,7 +706,8 @@ host_ceiling = "97%"                # daemon-wide ceiling all jobs share; same s
   `peak_memory_bytes` when the mechanism can measure it, and
   `exit_reason`: `"memory_ceiling"` when the job's own ceiling stopped it, or
   `"host_ceiling"` when the daemon-wide host ceiling did while the job's own
-  limit was not reached. Both are inferences, see the mechanisms below. A stop
+  limit was not reached. How each is decided differs by platform, see the
+  mechanisms below. A stop
   (`command_stop`, `pty_command_stop`) never carries `exit_reason`. A job that
   ran ungoverned reports `governor: {"unavailable": reason}` and is audited.
   A governed job that failed to join an installed host ceiling reports
@@ -721,19 +722,26 @@ Mechanisms and their limits:
 
 - **Windows (`job_object`):** a Job Object memory limit on the whole process
   tree. The OS makes commits above the limit fail; it does not kill the job.
-  `exit_reason` is therefore inferred from `peak_memory_bytes` reaching the
-  limit together with an abnormal exit. One oversized allocation refused
-  outright is reported with the limit and the peak but without `exit_reason`.
-  The host ceiling is a parent Job Object the per-job Job Objects nest under.
-  `host_ceiling` is likewise inferred: a concurrent job sitting at the host
-  ceiling can flag a job that failed for another reason.
+  `exit_reason` is decided by the kernel's `JOB_OBJECT_MSG_JOB_MEMORY_LIMIT`
+  messages, delivered per job through one I/O completion port, together with
+  an abnormal exit. They are facts attributed to the exact job: a single
+  oversized allocation refused outright counts even though it never raised
+  the peak, and repeated host-ceiling rounds are all seen. The host ceiling
+  is a parent Job Object the per-job Job Objects nest under; its messages
+  decide `host_ceiling`. `peak_memory_bytes` is reported only.
 - **Linux `cgroup`:** the daemon creates a per-job cgroup v2 with `memory.max`
   (swap off) under the `tc-jobs` parent that carries the host ceiling, a
   sibling of its own cgroup, and moves the job into it, so the ceiling covers
   the whole tree,
-  and the kernel's OOM kill is what stops it. This needs the daemon inside a
+  and the kernel's OOM kill is what stops it. `memory_ceiling` is a fact:
+  the job cgroup's `memory.events.local` `oom` count is above zero and the
+  exit was not success. `host_ceiling` stays an inference: the host cgroup's
+  local `oom` count rose during this job and the job failed, so a concurrent
+  job at the ceiling can be the real cause. This needs the daemon inside a
   writable delegated cgroup, which the systemd user unit installed by
-  autostart provides. A daemon started from a plain `wsl.exe` shell sits in
+  autostart provides. The cgroup-or-rlimit choice is made once at daemon
+  boot; a later per-job cgroup failure is reported `unavailable`, never a
+  silent switch to rlimit. A daemon started from a plain `wsl.exe` shell sits in
   `/non-systemd` and gets `rlimit` instead. Peak comes from `memory.peak`
   (kernel 5.19 or later). Nothing needs installing per distro for memory
   governance.

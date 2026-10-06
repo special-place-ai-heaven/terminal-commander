@@ -63,7 +63,8 @@ result is ever silent or misleading.
   or `unavailable`). Pass `limits` (for example `{"memory": "50%"}`) to size a
   build; the start reports `governor`, `limits_applied` and `limits_clamped`,
   and a job stopped by a ceiling reports `exit_reason: "memory_ceiling"` or
-  `"host_ceiling"` (inferred) with `peak_memory_bytes`. It is a guardrail, not
+  `"host_ceiling"` with `peak_memory_bytes` (kernel facts on Windows and for
+  `memory_ceiling` on Linux; `host_ceiling` on Linux is an inference). It is a guardrail, not
   a security boundary. See `POLICY.md` section 4.3.
 
 <!-- release-status -->Landed 2026-10-06, released in v0.3.12.
