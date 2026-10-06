@@ -365,6 +365,7 @@ mod pty_core {
                 limits: JobLimits {
                     memory_bytes: None,
                     priority: None,
+                    join_host_ceiling: false,
                 },
             }
         }
@@ -1446,7 +1447,10 @@ mod runtime {
                 // rather than misclassified as a cancellation.
                 let wait_result = child.wait().await;
                 if let Some(gov) = unix_gov {
-                    gov.finish();
+                    gov.finish(!matches!(
+                        (&outcome, &wait_result),
+                        (Ok(()), Ok(st)) if st.success()
+                    ));
                 }
                 if outcome.is_ok() {
                     exit_outcome = match wait_result {
@@ -1945,8 +1949,8 @@ mod runtime_win {
         /// Resource governor report, finished by the waiter thread at exit.
         governor: crate::governor::SharedReport,
         /// Governor Job Object holding the ConPTY child (only when governed).
-        /// Held for the probe's lifetime like the command lane's job;
-        /// `KILL_ON_JOB_CLOSE` tears the tree down on drop.
+        /// The waiter thread releases it once the child exits;
+        /// `KILL_ON_JOB_CLOSE` then tears down any leftover tree.
         _gov_job: Arc<Mutex<Option<crate::process::JobHandle>>>,
     }
 
@@ -2230,11 +2234,7 @@ mod runtime_win {
             // (today's ungoverned ConPTY lane, no extra syscall).
             let limits = config.limits;
             let governed = limits != crate::governor::JobLimits::default();
-            let governor = if governed {
-                crate::governor::new_report(&limits)
-            } else {
-                Arc::new(Mutex::new(crate::governor::GovernorReport::default()))
-            };
+            let governor = Arc::new(Mutex::new(crate::governor::GovernorReport::default()));
             let gov_job: Arc<Mutex<Option<crate::process::JobHandle>>> = Arc::new(Mutex::new(None));
             let waiter_governor = Arc::clone(&governor);
             let waiter_gov_job = Arc::clone(&gov_job);
@@ -2468,20 +2468,14 @@ mod runtime_win {
                             // Job Object carrying the limits, exactly like the
                             // command lane (same post-spawn window). A failure
                             // is reported as Unavailable; the child still runs.
+                            // Mode is final before `spawn` returns (the killer
+                            // is sent below).
                             if governed {
-                                let job = c.as_raw_handle().map_or_else(
-                                    || Err("conpty child handle unavailable".to_owned()),
-                                    |h| crate::process::create_job_for_handle(h, &limits),
-                                );
-                                waiter_governor.lock().mode = Some(match job {
-                                    Ok(j) => {
-                                        *waiter_gov_job.lock() = Some(j);
-                                        crate::governor::GovernorMode::JobObject
-                                    }
-                                    Err(reason) => {
-                                        crate::governor::GovernorMode::Unavailable(reason)
-                                    }
-                                });
+                                let (job, report) =
+                                    crate::governor::govern_child(c.as_raw_handle(), &limits);
+                                *waiter_gov_job.lock() = job;
+                                let report = report.lock().clone();
+                                *waiter_governor.lock() = report;
                             }
                             // Hand the killer back so `spawn` returns Ok and
                             // cancel/Drop can terminate from any thread.
@@ -2590,6 +2584,9 @@ mod runtime_win {
                         waiter_gov_job.lock().as_ref(),
                         cancelled || exit_u32 != Some(0),
                     );
+                    // The child exited: release the governor job now (like
+                    // the command lane's lifecycle task), not at probe drop.
+                    drop(waiter_gov_job.lock().take());
                     let (outcome_for_completion, result) = if cancelled {
                         (PtyExitOutcome::Cancelled, Err(PtyProbeError::Cancelled))
                     } else {
