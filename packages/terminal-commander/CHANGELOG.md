@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.13](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.12...v0.3.13) (2026-10-06)
+
+
+### Features
+
+* **cli:** print the running daemon's executable in status ([9ed42e5](https://github.com/special-place-ai-heaven/terminal-commander/commit/9ed42e52d95b1cb4de2536929f84b8522f145985))
+* **daemon:** carry confirmed discovery answers to a new daemon ([9ed42e5](https://github.com/special-place-ai-heaven/terminal-commander/commit/9ed42e52d95b1cb4de2536929f84b8522f145985))
+* **npm:** doctor daemon shows the running daemon exe and flags a non-stable copy ([47cd245](https://github.com/special-place-ai-heaven/terminal-commander/commit/47cd2453fe6a202d2c83baa8132ef66fafdba138))
+
+
+### Bug Fixes
+
+* 0.3.13 - discovery staleness, running-exe doctor, install-path CI, changelog dedupe ([da2e93d](https://github.com/special-place-ai-heaven/terminal-commander/commit/da2e93df1576764351d36b09133368ec702c0d76))
+* **daemon:** report a timed-out probe with its last confirmed answers ([9ed42e5](https://github.com/special-place-ai-heaven/terminal-commander/commit/9ed42e52d95b1cb4de2536929f84b8522f145985))
+* **mcp:** name only full-surface tools in run_and_watch recover hints ([9ed42e5](https://github.com/special-place-ai-heaven/terminal-commander/commit/9ed42e52d95b1cb4de2536929f84b8522f145985))
+* **release:** stop listing root-package commits twice in the changelog ([9ed42e5](https://github.com/special-place-ai-heaven/terminal-commander/commit/9ed42e52d95b1cb4de2536929f84b8522f145985))
+
 ## [0.3.12](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.11...v0.3.12) (2026-10-06)
 
 
