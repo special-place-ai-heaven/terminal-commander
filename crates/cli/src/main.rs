@@ -813,6 +813,11 @@ fn print_status() -> std::process::ExitCode {
     println!("  endpoint      : {}", endpoint_path.display());
     println!("  daemon        : {daemon_text}");
     println!("  pid           : {pid_text}");
+    if daemon_text == "running"
+        && let Some(exe) = daemon_exe_text(&pid_text)
+    {
+        println!("  daemon_exe    : {exe}");
+    }
     if let Some(v) = version_text {
         println!("  daemon_version: {v}");
     }
@@ -820,6 +825,20 @@ fn print_status() -> std::process::ExitCode {
     println!("  state_dir     : {}", state_dir.display());
 
     exit_code
+}
+
+/// The running daemon's executable for the `daemon_exe` line, read from the
+/// OS by pid, or `unknown (<reason>)` when that fails. `None` (no line) only
+/// where the OS offers no lookup (macOS).
+fn daemon_exe_text(pid_text: &str) -> Option<String> {
+    let Ok(pid) = pid_text.parse::<u32>() else {
+        return Some("unknown (pid unknown)".to_owned());
+    };
+    match terminal_commander_supervisor::replace::pid_executable(pid) {
+        Ok(path) => Some(path.display().to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => None,
+        Err(e) => Some(format!("unknown ({e})")),
+    }
 }
 
 /// Resolve the pid (and optional daemon version) to display for a reachable

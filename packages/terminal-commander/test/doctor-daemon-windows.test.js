@@ -73,6 +73,38 @@ test("doctor daemon on Windows native mode reports a daemon that does not answer
   assert.match(r.output, /daemon_running: no/);
 });
 
+function withExeRow(row) {
+  return STATUS_RUNNING.replace("  pid           : 4242\n", `  pid           : 4242\n  daemon_exe    : ${row}\n`);
+}
+
+test("doctor daemon reports the running exe and flags it when it is not the stable copy", async () => {
+  const nested = "C:\\nm\\terminal-commander-win32-x64\\bin\\terminal-commanderd.exe";
+  const { opts } = nativeCase({ statusOut: withExeRow(nested), statusCode: 0 });
+  const r = await runDoctorDaemon(opts);
+  assert.ok(r.output.includes(`running_exe: ${nested}`), r.output);
+  assert.match(r.output, /note: the running daemon is not the installed stable copy/);
+});
+
+test("doctor daemon adds no note when the running exe is the stable copy", async () => {
+  const { opts, localAppData } = nativeCase({ statusOut: "", statusCode: 0 });
+  const exe = path.join(localAppData, "terminal-commander", "bin", "terminal-commanderd.exe");
+  const r = await runDoctorDaemon({
+    ...opts,
+    execFile: async () => ({ code: 0, out: withExeRow(exe.toUpperCase()) }),
+  });
+  assert.ok(r.output.includes(`running_exe: ${exe.toUpperCase()}`), r.output);
+  assert.doesNotMatch(r.output, /note:/);
+});
+
+test("doctor daemon omits running_exe when not running or unknown", async () => {
+  const down = STATUS_RUNNING.replace("daemon        : running", "daemon        : unavailable")
+    .replace("pid           : 4242", "pid           : -");
+  let r = await runDoctorDaemon(nativeCase({ statusOut: down, statusCode: 1 }).opts);
+  assert.doesNotMatch(r.output, /running_exe/);
+  r = await runDoctorDaemon(nativeCase({ statusOut: withExeRow("unknown (pid unknown)"), statusCode: 0 }).opts);
+  assert.doesNotMatch(r.output, /running_exe|note:/);
+});
+
 test("doctor daemon on Windows probes WSL only when the bridge mode is configured", async () => {
   const { opts, calls } = nativeCase({ statusOut: STATUS_RUNNING, statusCode: 0 });
   const r = await runDoctorDaemon({ ...opts, env: { ...opts.env, TC_WSL_DISTRO: "Ubuntu" } });

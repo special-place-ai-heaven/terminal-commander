@@ -157,3 +157,39 @@ grep -Fq 'fix(release): wait for the npm tarball before verify installs' <<<"$ou
   echo 'scripts/release fix was not attributed as release-bearing' >&2
   exit 1
 }
+
+# release-please lists a commit that changes the root package's own files by
+# itself; synthesizing it again duplicates it in CHANGELOG.md (v0.3.12).
+seed_repo "$tmp/root-overlap"
+printf 'changed\n' >> crates/demo/lib.rs
+printf 'changed\n' > packages/terminal-commander/autostart.js
+git add crates/demo/lib.rs packages/terminal-commander/autostart.js
+git commit -qm 'fix(daemon,npm): touch the crate and the root package'
+overlap_sha="$(git rev-parse HEAD)"
+printf 'crate only\n' >> crates/demo/lib.rs
+git add crates/demo/lib.rs
+git commit -qm 'fix(core): touch only the crate'
+output="$(DRY_RUN=1 bash "$repo_root/scripts/release/synthesize-crates-release-trigger.sh")"
+grep -Fq 'fix(core): touch only the crate' <<<"$output" || {
+  echo 'crate-only commit was not synthesized' >&2
+  exit 1
+}
+if grep -Fq 'fix(daemon,npm): touch the crate and the root package' <<<"$output"; then
+  echo 'commit release-please already attributes was synthesized again' >&2
+  exit 1
+fi
+grep -Fq "  - $overlap_sha" <<<"$output" || {
+  echo 'sentinel ledger omitted the root-attributed crate commit' >&2
+  exit 1
+}
+
+seed_repo "$tmp/root-overlap-only"
+printf 'changed\n' >> crates/demo/lib.rs
+printf 'changed\n' > packages/terminal-commander/autostart.js
+git add crates/demo/lib.rs packages/terminal-commander/autostart.js
+git commit -qm 'feat(daemon,npm): only a root-attributed crate change'
+output="$(DRY_RUN=1 bash "$repo_root/scripts/release/synthesize-crates-release-trigger.sh")"
+grep -Fq 'every unattributed crate commit also changes packages/terminal-commander/. Skipping.' <<<"$output" || {
+  echo 'a range of root-attributed crate commits did not skip' >&2
+  exit 1
+}

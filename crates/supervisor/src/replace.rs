@@ -218,6 +218,25 @@ pub fn pid_belongs_to_daemon(pid: u32, state_dir: &Path) -> bool {
     }
 }
 
+/// The executable `pid` is running, read from the OS: the image path on
+/// Windows (no process is spawned), `/proc/<pid>/exe` on Linux. Elsewhere
+/// the error kind is `Unsupported`.
+pub fn pid_executable(pid: u32) -> std::io::Result<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        windows_native::pid_image_path(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = pid;
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+}
+
 /// Whole-argument test that a process command line `args` identifies our
 /// daemon bound to `state_dir`: it must reference the daemon binary name and
 /// carry `state_dir` as a COMPLETE `--data-dir` path argument (see
@@ -504,11 +523,21 @@ pub(crate) mod windows_native {
     /// exited, the pid is invalid, or access was denied). A `None` result is
     /// treated by callers as "not our daemon" -- we never kill on uncertainty.
     fn pid_image_file_name(pid: u32) -> Option<String> {
+        pid_image_path(pid)
+            .ok()?
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_ascii_lowercase)
+    }
+
+    /// `pid`'s full image path, or the OS error that prevented reading it.
+    pub(super) fn pid_image_path(pid: u32) -> std::io::Result<std::path::PathBuf> {
         // SAFETY: OpenProcess takes a desired-access mask, an inherit BOOL,
         // and a pid; it returns a valid handle on success or an Err we map to
-        // None. PROCESS_QUERY_LIMITED_INFORMATION is the least privilege that
-        // permits QueryFullProcessImageNameW.
-        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
+        // an io::Error. PROCESS_QUERY_LIMITED_INFORMATION is the least
+        // privilege that permits QueryFullProcessImageNameW.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            .map_err(std::io::Error::from)?;
         let proc = OwnedHandle(handle);
 
         let mut buf = [0u16; 1024];
@@ -518,23 +547,19 @@ pub(crate) mod windows_native {
         // describe a properly sized, owned u16 buffer; the call writes at most
         // `len` code units and updates `len` to the count written. We check
         // the BOOL result and a non-zero length before reading the buffer.
-        let ok = unsafe {
+        unsafe {
             QueryFullProcessImageNameW(
                 proc.0,
                 PROCESS_NAME_FORMAT(0),
                 windows::core::PWSTR(buf.as_mut_ptr()),
                 &raw mut len,
             )
-            .is_ok()
-        };
-        if !ok || len == 0 {
-            return None;
         }
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-        std::path::Path::new(&path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(str::to_ascii_lowercase)
+        .map_err(std::io::Error::from)?;
+        if len == 0 {
+            return Err(std::io::Error::other("empty image path"));
+        }
+        Ok(String::from_utf16_lossy(&buf[..len as usize]).into())
     }
 
     /// True when `pid`'s image file name is the daemon executable. Defends

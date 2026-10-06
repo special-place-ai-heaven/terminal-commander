@@ -6,7 +6,8 @@
 mod probe;
 
 pub use probe::{
-    cached_host_environment, discover_host_environment, preferred_shell, shell_launch_argv,
+    cached_host_environment, discover_host_environment, persist_discovery_in, preferred_shell,
+    shell_launch_argv,
 };
 
 /// Move the shared discovery cache's clock forward, as if `by` had passed.

@@ -76,6 +76,20 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace
 ```
 
+`install-path-linux` (after `pre-build-gates (linux-x64)`) builds the
+three debug binaries and runs `bash scripts/ci/install-path-check.sh
+target/debug`. In a throwaway HOME, with no `TC_*`, `XDG_*` or CI
+variables and a fake failing `systemctl`, it packs the wrapper and the
+linux-x64 platform package, runs `npm install -g` into `~/.npm-global`
+(postinstall included), runs `terminal-commander setup daemon-autostart`,
+and checks the profile-hook autostart: no daemon from `bash -l -c` or
+`bash -c`, exactly one from a fast-closing interactive shell (`script`),
+recovery after `kill -9` with the stale socket reported by `doctor daemon`,
+the installed MCP adapter (`health` version, `TC_DAEMON_CHILD=1` and no
+`TC_SOCKET` / `TC_DATA` in a child's env), and a clean `session reap
+--all`. It needs `node` on the system PATH, `npm`, `python3` and
+util-linux `script`; run the same command by hand on Linux or WSL.
+
 ### Not enforced by CI today
 
 These tools are recommended, not wired into any workflow or gate script.

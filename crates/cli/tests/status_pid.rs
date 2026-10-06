@@ -57,10 +57,15 @@ fn tmp_data_dir(tag: &str) -> PathBuf {
 /// `terminal-commander status` stdout. Returns the trimmed value (e.g.
 /// `"1234"` or `"-"`), or `None` if the line is absent.
 fn parse_pid_line(stdout: &str) -> Option<String> {
+    parse_line(stdout, "pid")
+}
+
+/// The trimmed value after the `<label> ... : ` row, or `None` if absent.
+fn parse_line(stdout: &str, label: &str) -> Option<String> {
     stdout.lines().find_map(|line| {
         let trimmed = line.trim_start();
         trimmed
-            .strip_prefix("pid")
+            .strip_prefix(label)
             .map(str::trim_start)
             .and_then(|rest| rest.strip_prefix(':'))
             .map(|val| val.trim().to_string())
@@ -144,6 +149,16 @@ fn status_shows_real_pid_of_live_daemon() {
         "status pid must be the live daemon's real pid (from the pidfile), \
          not '-'; stdout={stdout}, stderr={stderr}"
     );
+    if cfg!(any(windows, target_os = "linux")) {
+        let exe_line = parse_line(&stdout, "daemon_exe")
+            .unwrap_or_else(|| panic!("status output missing a daemon_exe line; stdout={stdout}"));
+        assert_eq!(
+            std::fs::canonicalize(&exe_line).ok(),
+            std::fs::canonicalize(&daemon_bin).ok(),
+            "daemon_exe must name the daemon binary that was started ({}); stdout={stdout}",
+            daemon_bin.display()
+        );
+    }
 }
 
 #[test]
@@ -180,5 +195,10 @@ fn status_offline_shows_dash_and_nonzero_exit() {
     assert_eq!(
         pid_line, "-",
         "offline status must show pid '-', never a fabricated pid; stdout={stdout}"
+    );
+    assert_eq!(
+        parse_line(&stdout, "daemon_exe"),
+        None,
+        "no daemon_exe line when no daemon runs; stdout={stdout}"
     );
 }

@@ -859,6 +859,10 @@ pub struct ProgramProbe {
     pub version_status: String,
     #[serde(default)]
     pub execution_status: String,
+    /// Set when this probe timed out in the latest discovery and these are
+    /// the answers an earlier discovery confirmed, this many ms ago.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_confirmed_age_ms: Option<u64>,
 }
 
 /// Terminal/session markers inherited by the daemon process.
@@ -888,6 +892,10 @@ pub struct WslProbe {
     pub default_shell: Option<String>,
     #[serde(default)]
     pub execution_status: String,
+    /// Set when this probe timed out in the latest discovery and these are
+    /// the answers an earlier discovery confirmed, this many ms ago.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_confirmed_age_ms: Option<u64>,
 }
 
 /// A verified way to cross from the daemon host into a command interpreter.
@@ -923,7 +931,9 @@ pub struct HostEnvironment {
     pub discovery_ms: u64,
     /// How long ago that discovery finished. The daemon reuses a discovery
     /// and refreshes it in the background, so the facts can be this old
-    /// (up to ten minutes). Probes that timed out are reported as timed out.
+    /// (up to ten minutes). A probe that timed out is reported as timed out,
+    /// unless an earlier discovery confirmed it: then it carries those
+    /// answers and `stale_confirmed_age_ms`.
     #[serde(default)]
     pub discovery_age_ms: u64,
 }
