@@ -32,6 +32,8 @@ vte = "0.15.0"
 # is used. License: MIT. Pinned to 0.5.3 per the TC44 prep amendment.
 [target.'cfg(unix)'.dependencies]
 pty-process = { version = "=0.5.3", features = ["async"] }
+# Resource governor: RLIMIT_DATA + setpriority in pre_exec (governor.rs).
+libc = "0.2"
 
 # H2: file-rotation identity on Windows. The std `MetadataExt`
 # volume-serial / file-index accessors are unstable (`windows_by_handle`,
@@ -63,6 +65,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_Security",
     "Win32_System_JobObjects",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
 

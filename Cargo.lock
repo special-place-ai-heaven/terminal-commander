@@ -1274,6 +1274,7 @@ dependencies = [
 name = "terminal-commander-probes"
 version = "0.3.12"
 dependencies = [
+ "libc",
  "notify",
  "parking_lot",
  "portable-pty",

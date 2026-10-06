@@ -321,6 +321,7 @@ mod pty_core {
     };
     use terminal_commander_sifters::SifterRuntime;
 
+    use crate::governor::JobLimits;
     use crate::noise_pipeline::{SharedProbeNoisePipeline, password_prompt_draft};
     use crate::process::EventSink;
 
@@ -345,6 +346,9 @@ mod pty_core {
         pub rows: Option<u16>,
         /// PTY cols. Defaults applied when `None`.
         pub cols: Option<u16>,
+        /// Resource governor limits. `JobLimits::default()` = ungoverned, no
+        /// extra syscall (today's behaviour).
+        pub limits: JobLimits,
     }
 
     impl PtyProbeConfig {
@@ -358,6 +362,10 @@ mod pty_core {
                 grace: DEFAULT_PTY_GRACE,
                 rows: None,
                 cols: None,
+                limits: JobLimits {
+                    memory_bytes: None,
+                    priority: None,
+                },
             }
         }
     }
@@ -1068,6 +1076,8 @@ mod runtime {
         // job ledger WITHOUT locking the probe across an `.await` (the probe
         // mutex stays free for `write_stdin`). `None` once taken.
         completion_rx: Option<oneshot::Receiver<PtyExitOutcome>>,
+        /// Resource governor report, finished by the streaming task at exit.
+        governor: crate::governor::SharedReport,
     }
 
     impl std::fmt::Debug for PtyProbe {
@@ -1247,6 +1257,17 @@ mod runtime {
             for (k, v) in &config.env {
                 cmd = cmd.env(k, v);
             }
+            // Resource governor: mode decided BEFORE spawn so the rlimit and
+            // nice land in `pre_exec` (run after pty_process's setsid). `None`
+            // for default limits: no syscall.
+            let mut unix_gov = crate::governor::UnixGovernor::prepare(&config.limits, probe_id);
+            if let Some(gov) = &unix_gov {
+                // SAFETY: the hook only issues async-signal-safe syscalls
+                // (getrlimit/setrlimit/setpriority) on plain captured values;
+                // it allocates nothing and touches no lock between fork and
+                // exec.
+                cmd = unsafe { cmd.pre_exec(gov.pre_exec_hook()) };
+            }
             // Keep the spawn's io error typed so a missing program stays
             // `ErrorKind::NotFound` for the daemon's `program_not_found`.
             let mut child = cmd.spawn(pts).map_err(|e| match e {
@@ -1261,6 +1282,15 @@ mod runtime {
             // the same advisory field commands use.
             let child_pgid = child.id();
             let grace = config.grace;
+            // Resource governor: verify the child's `pre_exec` cgroup move
+            // (see governor.rs) and keep the report handle.
+            let governor = unix_gov.as_mut().map_or_else(
+                || Arc::new(Mutex::new(crate::governor::GovernorReport::default())),
+                |gov| {
+                    gov.attach(child_pgid);
+                    gov.report()
+                },
+            );
 
             let metrics = Arc::new(Mutex::new(PtyProbeMetrics::default()));
             // Shared secret-prompt gate. `counted_generation` tracks the
@@ -1415,6 +1445,9 @@ mod runtime {
                 // on the natural path is reported as an exit with no code
                 // rather than misclassified as a cancellation.
                 let wait_result = child.wait().await;
+                if let Some(gov) = unix_gov {
+                    gov.finish();
+                }
                 if outcome.is_ok() {
                     exit_outcome = match wait_result {
                         Ok(status) => exit_outcome_from_status(status),
@@ -1438,7 +1471,15 @@ mod runtime {
                 cancel_tx: Some(cancel_tx),
                 join: Some(join),
                 completion_rx: Some(completion_rx),
+                governor,
             })
+        }
+
+        /// Resource governor report. `mode == None` for default limits. Valid
+        /// after exit; before exit mode and limit are known, peak is `None`.
+        #[must_use]
+        pub fn governor_report(&self) -> crate::governor::GovernorReport {
+            self.governor.lock().clone()
         }
     }
 
@@ -1901,6 +1942,12 @@ mod runtime_win {
         completion_rx: Option<oneshot::Receiver<PtyExitOutcome>>,
         /// Set once `cancel` has run so the outcome is reported as cancelled.
         cancelled: Arc<std::sync::atomic::AtomicBool>,
+        /// Resource governor report, finished by the waiter thread at exit.
+        governor: crate::governor::SharedReport,
+        /// Governor Job Object holding the ConPTY child (only when governed).
+        /// Held for the probe's lifetime like the command lane's job;
+        /// `KILL_ON_JOB_CLOSE` tears the tree down on drop.
+        _gov_job: Arc<Mutex<Option<crate::process::JobHandle>>>,
     }
 
     impl std::fmt::Debug for PtyProbe {
@@ -2179,6 +2226,18 @@ mod runtime_win {
             let bucket_id = config.bucket_id;
             let noise_pipeline: SharedProbeNoisePipeline =
                 Arc::new(Mutex::new(ProbeNoisePipeline::with_default_policy()));
+            // Resource governor: default limits => no job, no report mode
+            // (today's ungoverned ConPTY lane, no extra syscall).
+            let limits = config.limits;
+            let governed = limits != crate::governor::JobLimits::default();
+            let governor = if governed {
+                crate::governor::new_report(&limits)
+            } else {
+                Arc::new(Mutex::new(crate::governor::GovernorReport::default()))
+            };
+            let gov_job: Arc<Mutex<Option<crate::process::JobHandle>>> = Arc::new(Mutex::new(None));
+            let waiter_governor = Arc::clone(&governor);
+            let waiter_gov_job = Arc::clone(&gov_job);
 
             // --- Reader thread (blocking, off tokio's pool). Owns the rings /
             //     sink / gate so the SAME `pty_core::process_line` secret gate
@@ -2405,6 +2464,25 @@ mod runtime_win {
                     // wait, so DLL-init cannot be tripped by handle migration.
                     let mut child = match slave.spawn_command(cmd) {
                         Ok(c) => {
+                            // Resource governor: assign the ConPTY child to a
+                            // Job Object carrying the limits, exactly like the
+                            // command lane (same post-spawn window). A failure
+                            // is reported as Unavailable; the child still runs.
+                            if governed {
+                                let job = c.as_raw_handle().map_or_else(
+                                    || Err("conpty child handle unavailable".to_owned()),
+                                    |h| crate::process::create_job_for_handle(h, &limits),
+                                );
+                                waiter_governor.lock().mode = Some(match job {
+                                    Ok(j) => {
+                                        *waiter_gov_job.lock() = Some(j);
+                                        crate::governor::GovernorMode::JobObject
+                                    }
+                                    Err(reason) => {
+                                        crate::governor::GovernorMode::Unavailable(reason)
+                                    }
+                                });
+                            }
                             // Hand the killer back so `spawn` returns Ok and
                             // cancel/Drop can terminate from any thread.
                             let killer: Box<dyn ChildKiller + Send + Sync> = c.clone_killer();
@@ -2507,6 +2585,11 @@ mod runtime_win {
                     }
 
                     let cancelled = waiter_cancelled.load(Ordering::Acquire);
+                    crate::governor::finish_job(
+                        &waiter_governor,
+                        waiter_gov_job.lock().as_ref(),
+                        cancelled || exit_u32 != Some(0),
+                    );
                     let (outcome_for_completion, result) = if cancelled {
                         (PtyExitOutcome::Cancelled, Err(PtyProbeError::Cancelled))
                     } else {
@@ -2565,7 +2648,16 @@ mod runtime_win {
                 done_rx: Some(done_rx),
                 completion_rx: Some(completion_rx),
                 cancelled,
+                governor,
+                _gov_job: gov_job,
             })
+        }
+
+        /// Resource governor report. `mode == None` for default limits. Valid
+        /// after exit; before exit mode and limit are known, peak is `None`.
+        #[must_use]
+        pub fn governor_report(&self) -> crate::governor::GovernorReport {
+            self.governor.lock().clone()
         }
     }
 
