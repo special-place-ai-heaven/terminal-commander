@@ -663,8 +663,10 @@ host_ceiling = "97%"                # daemon-wide ceiling all jobs share; same s
 ```
 
 - **Percent** resolves against the commit limit on Windows and against total
-  memory (`MemTotal`) on Linux. If host memory cannot be read, the percent
-  default resolves to no limit and `policy_status.governor.note` says so.
+  memory (`MemTotal`) on Linux. The Windows commit limit includes the page
+  file, so 60% of it can exceed physical RAM. If host memory cannot be read,
+  the percent default resolves to no limit and `policy_status.governor.note`
+  says so.
 - **`host_ceiling`** is installed once at daemon start and every governed job
   (every lane, shell sessions included) joins it, so jobs together can never
   exceed it: a parent Job Object on Windows, a parent `tc-jobs` cgroup on
@@ -701,12 +703,15 @@ host_ceiling = "97%"                # daemon-wide ceiling all jobs share; same s
   when no enforcement was possible and the job ran ungoverned) and
   `limits_applied`, while running and after exit; after exit also
   `peak_memory_bytes` when the mechanism can measure it, and
-  `exit_reason: "memory_ceiling"` when the ceiling stopped the job. A stop
-  (`command_stop`, `pty_command_stop`) never carries `exit_reason`.
+  `exit_reason`: `"memory_ceiling"` when the job's own ceiling stopped it, or
+  `"host_ceiling"` when the daemon-wide host ceiling did while the job's own
+  limit was not reached. Both are inferences, see the mechanisms below. A stop
+  (`command_stop`, `pty_command_stop`) never carries `exit_reason`. A job that
+  ran ungoverned reports `governor: {"unavailable": reason}` and is audited.
 - **Audit:** a clamped start writes `governor_clamp` with the requested and
   applied values; a job that runs ungoverned writes `governor_unavailable`
-  with the reason; a memory_ceiling exit writes `governor_memory_ceiling` with
-  limit and peak.
+  with the reason; a memory_ceiling exit writes `governor_memory_ceiling` and a
+  host_ceiling exit writes `governor_host_ceiling`, each with limit and peak.
 
 Mechanisms and their limits:
 
@@ -715,18 +720,35 @@ Mechanisms and their limits:
   `exit_reason` is therefore inferred from `peak_memory_bytes` reaching the
   limit together with an abnormal exit. One oversized allocation refused
   outright is reported with the limit and the peak but without `exit_reason`.
+  The host ceiling is a parent Job Object the per-job Job Objects nest under.
+  `host_ceiling` is likewise inferred: a concurrent job sitting at the host
+  ceiling can flag a job that failed for another reason.
 - **Linux `cgroup`:** the daemon creates a per-job cgroup v2 with `memory.max`
   (swap off) under the `tc-jobs` parent that carries the host ceiling, a
   sibling of its own cgroup, and moves the job into it, so the ceiling covers
   the whole tree,
   and the kernel's OOM kill is what stops it. This needs the daemon inside a
   writable delegated cgroup, which the systemd user unit installed by
-  autostart provides. Peak comes from `memory.peak` (kernel 5.19 or later).
+  autostart provides. A daemon started from a plain `wsl.exe` shell sits in
+  `/non-systemd` and gets `rlimit` instead. Peak comes from `memory.peak`
+  (kernel 5.19 or later). Nothing needs installing per distro for memory
+  governance.
 - **Linux `rlimit`:** when no writable cgroup is available (a shell-profile
   autostart, WSL without systemd), the job gets `RLIMIT_DATA`. It is per
   process, not summed across the tree, and there is no peak.
+- **macOS and other unix:** no memory primitive, so memory reports
+  `unavailable(reason)`; priority is still applied (nice).
+- **Windows PTY lane:** a governed ConPTY child runs in a
+  `KILL_ON_JOB_CLOSE` Job Object that is released when the child exits. A
+  child started with `CREATE_BREAKAWAY_FROM_JOB` fails inside it.
 - **CPU limits** are not in this version; `priority` only sets scheduling
-  priority (Windows priority class, Linux nice).
+  priority (Windows priority class, Linux nice; `normal` inherits). CPU caps
+  on Linux would need a root systemd `Delegate` drop-in.
+- **A guardrail, not a security boundary.** A job running as the same user
+  can lift its own cgroup ceiling or start work outside the Job Object (WMI,
+  `schtasks`, `wsl.exe`); the clamp governs the request, not a hostile job.
+  Work handed to `wsl.exe` or docker from Windows runs outside the Job
+  Object.
 
 ## 5. Default-deny override mechanism
 

@@ -294,13 +294,24 @@ them). To size one job, pass `limits` on `run_and_watch`, `command_start_combed`
   `"none"`. Read `limits_applied` in the reply: it is what the job really runs
   with. If `limits_clamped` is non-empty the daemon does not let you raise that
   axis above its default; do not retry with a bigger number.
-- `exit_reason: "memory_ceiling"` (with `peak_memory_bytes`) means the ceiling
-  stopped the job, so the failure is the limit, not your code. Retry with less
-  parallelism (`cargo test -j 2`, `make -j2`) rather than a bigger limit.
+- `exit_reason: "memory_ceiling"` (with `peak_memory_bytes`) means the job's own
+  ceiling stopped it, so the failure is the limit, not your code. Retry with
+  less parallelism (`cargo test -j 2`, `make -j2`) rather than a bigger limit.
+- `exit_reason: "host_ceiling"` means the daemon-wide ceiling shared by all
+  jobs was hit while this job was under its own limit. Other jobs are using
+  the memory: wait for them or retry with lower `-j`. Both reasons are
+  inferences; a job that failed for another reason can be flagged while a
+  concurrent job sits at the host ceiling. A stop never carries one.
 - `governor` names the mechanism (`job_object`, `cgroup`, `rlimit`) or says
   `unavailable` with a reason; in the last case the job ran with no ceiling.
   On Windows a refused oversized allocation shows the limit and peak but no
   `exit_reason`; compare `peak_memory_bytes` with `limits_applied.memory_bytes`.
+- Under `rlimit` (a daemon started from a plain `wsl.exe` shell, no systemd)
+  the default memory is NOT applied, there is no peak and no `exit_reason`,
+  and `policy_status` `host_ceiling_mode` is `unavailable`. Pass an explicit
+  `limits.memory` to opt in, or run the daemon from the systemd user unit.
+- This is a guardrail: work handed to `wsl.exe` or docker from Windows runs
+  outside the Job Object and is not capped.
 
 ## 6. Remote hosts: target_id
 
