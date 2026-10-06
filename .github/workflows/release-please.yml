@@ -155,7 +155,7 @@ jobs:
       # run; the pushed commit fires a fresh push:main run that handles it.
       - name: Checkout main (full history for crates trigger)
         if: github.event_name == 'push' && inputs.recovery_release_as == ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
@@ -241,7 +241,7 @@ jobs:
 
       - name: Checkout for Cargo.toml parity assertion
         if: steps.final.outputs.releases_created == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 1
@@ -276,7 +276,7 @@ jobs:
       version: ${{ steps.ensure.outputs.version }}
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           # Authenticate as the PAT so the split-manifest self-heal in
@@ -287,7 +287,7 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN_TC }}
 
       - name: Setup Node ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: "https://registry.npmjs.org"
@@ -319,7 +319,7 @@ jobs:
       publish: "true"
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Read manifest version
         id: manifest
@@ -348,7 +348,7 @@ jobs:
       source: ${{ steps.context.outputs.source }}
     steps:
       - name: Checkout released source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve canonical release context
         id: context
@@ -378,10 +378,10 @@ jobs:
       contents: read
     steps:
       - name: Checkout released source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -463,7 +463,7 @@ jobs:
       contents: read
     steps:
       - name: Download bin.tar artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tc-bin-linux-x64
           path: pkg/
@@ -518,16 +518,16 @@ jobs:
       id-token: write
     steps:
       - name: Checkout (released SHA on main)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Download bin.tar artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tc-bin-linux-x64
           path: packages/terminal-commander-linux-x64/
@@ -602,7 +602,7 @@ jobs:
       contents: read
     steps:
       - name: Download bin.tar artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tc-bin-linux-arm64
           path: pkg/
@@ -651,16 +651,16 @@ jobs:
       id-token: write
     steps:
       - name: Checkout (released SHA on main)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Download bin.tar artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tc-bin-linux-arm64
           path: packages/terminal-commander-linux-arm64/
@@ -736,16 +736,16 @@ jobs:
       id-token: write
     steps:
       - name: Checkout (released SHA on main)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Download bin.tar artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tc-bin-windows-x64
           path: packages/terminal-commander-windows-x64/
@@ -821,16 +821,16 @@ jobs:
       id-token: write
     steps:
       - name: Checkout (released SHA on main)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Download bin.tar artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tc-bin-mac-x64
           path: packages/terminal-commander-mac-x64/
@@ -906,16 +906,16 @@ jobs:
       id-token: write
     steps:
       - name: Checkout (released SHA on main)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
 
       - name: Download bin.tar artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tc-bin-mac-arm64
           path: packages/terminal-commander-mac-arm64/
@@ -1000,10 +1000,10 @@ jobs:
       id-token: write
     steps:
       - name: Checkout (released SHA on main)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node ${{ env.NODE_VERSION }} with npm registry
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_PUBLISH_VERSION }}
           registry-url: "https://registry.npmjs.org"
@@ -1089,7 +1089,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
@@ -1108,7 +1108,7 @@ jobs:
             exit 1
           fi
       - name: Setup Node for release state machine
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: cargo package and verify release archive
@@ -1133,7 +1133,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
@@ -1152,7 +1152,7 @@ jobs:
             exit 1
           fi
       - name: Setup Node for release state machine
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: cargo package and verify release archive
@@ -1177,7 +1177,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
@@ -1196,7 +1196,7 @@ jobs:
             exit 1
           fi
       - name: Setup Node for release state machine
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: cargo package and verify release archive
@@ -1221,7 +1221,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
@@ -1240,7 +1240,7 @@ jobs:
             exit 1
           fi
       - name: Setup Node for release state machine
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: cargo package and verify release archive
@@ -1265,7 +1265,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
@@ -1284,7 +1284,7 @@ jobs:
             exit 1
           fi
       - name: Setup Node for release state machine
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: cargo package and verify release archive
@@ -1318,7 +1318,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
@@ -1337,7 +1337,7 @@ jobs:
             exit 1
           fi
       - name: Setup Node for release state machine
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: cargo package and verify release archive
@@ -1362,7 +1362,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
@@ -1381,7 +1381,7 @@ jobs:
             exit 1
           fi
       - name: Setup Node for release state machine
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: cargo package and verify release archive
@@ -1406,7 +1406,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.97.1"
@@ -1425,7 +1425,7 @@ jobs:
             exit 1
           fi
       - name: Setup Node for release state machine
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: cargo package and verify release archive
@@ -1450,7 +1450,7 @@ jobs:
     timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
     permissions: { contents: read, issues: write }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Wait for npm registry propagation
         shell: bash
         env:
@@ -1487,7 +1487,7 @@ jobs:
     timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
     permissions: { contents: read, issues: write }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Wait for npm registry propagation
         shell: bash
         env:
@@ -1528,7 +1528,7 @@ jobs:
       # git error. windows-2022 already has Node on PATH (that run's
       # registry wait called npm before setup-node).
       # ponytail: fetch the one self-contained wait script at GITHUB_SHA.
-      # Ceiling: if it gains a repo-local dependency, checkout@v4 with
+      # Ceiling: if it gains a repo-local dependency, checkout@v7 with
       # persist-credentials: false, and still no setup-node.
       - name: Wait for npm registry propagation
         shell: bash
@@ -1638,13 +1638,13 @@ jobs:
     timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
     permissions: { contents: read, issues: write }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Wait for npm registry propagation
         shell: bash
         env:
           VER: ${{ needs.release-context.outputs.version }}
         run: bash scripts/release/wait-for-npm-registry.sh "terminal-commander@${VER}" "@terminal-commander/mac-x64@${VER}"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: "20" }     # 0.2.0 ships without --provenance; Node 20 is fine. Task 23 bumps to 22.14+.
       - env:
           VER: ${{ needs.release-context.outputs.version }}
@@ -1683,13 +1683,13 @@ jobs:
     timeout-minutes: 30 # registry wait can take 2 x 10 min; a hung step must not hold the release queue
     permissions: { contents: read, issues: write }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Wait for npm registry propagation
         shell: bash
         env:
           VER: ${{ needs.release-context.outputs.version }}
         run: bash scripts/release/wait-for-npm-registry.sh "terminal-commander@${VER}" "@terminal-commander/mac-arm64@${VER}"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: "20" }
       - env:
           VER: ${{ needs.release-context.outputs.version }}
@@ -1754,7 +1754,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout released source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Assert release completion
         env:
