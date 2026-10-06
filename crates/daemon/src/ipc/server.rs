@@ -1108,6 +1108,7 @@ fn handle_policy_status(state: &Arc<DaemonState>) -> IpcResponse {
             allow_remote: caps.allow_remote,
         },
         llm_can_activate_recipes: state.policy.llm_can_activate_recipes(),
+        governor: state.policy.governor_status(),
         config_warnings: state.config.warnings.clone(),
     })
 }
@@ -1208,6 +1209,7 @@ pub async fn selfcheck_spawn_probe(
         peer_discriminator: None,
         // TC-B1: default-on; self_check output is trivial but consistent.
         strip_ansi: true,
+        limits: None,
     };
 
     // 4. Spawn into the (reused-or-fresh) bucket.
@@ -1475,6 +1477,7 @@ mod tests {
                 dedup_nonce: None,
                 receipt_shape: None,
                 strip_ansi: true,
+                limits: None,
             }),
             IpcRequest::CommandStatus(CommandStatusParams {
                 job_id: JobId::new(),
@@ -1497,6 +1500,7 @@ mod tests {
                 bucket_config: None,
                 tag: None,
                 receipt_shape: None,
+                limits: None,
             }),
             IpcRequest::RegistrySearch(RegistrySearchParams {
                 query: "x".to_owned(),
@@ -1571,6 +1575,7 @@ mod tests {
                 version: None,
                 scope: Some(terminal_commander_core::ActivationScope::Global),
                 fills: std::collections::BTreeMap::new(),
+                limits: None,
             }),
             IpcRequest::RecipeListVersions(RecipeListVersionsParams {
                 recipe_id: "git.status".to_owned(),
@@ -1627,6 +1632,7 @@ mod tests {
                 rows: None,
                 cols: None,
                 tag: None,
+                limits: None,
             }),
             IpcRequest::PtyCommandWriteStdin(PtyCommandWriteStdinParams {
                 job_id: JobId::new(),

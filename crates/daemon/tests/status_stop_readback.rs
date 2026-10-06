@@ -186,6 +186,7 @@ async fn a_stopped_pty_job_reads_back_as_observed_by_the_daemon_that_stopped_it(
             rows: None,
             cols: None,
             tag: None,
+            limits: None,
         }),
     };
     let job_id = match terminal_commanderd::ipc::dispatch_envelope(

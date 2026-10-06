@@ -1234,6 +1234,8 @@ impl TerminalCommanderMcpServer {
                 caps,
                 llm_can_activate_recipes,
                 config_warnings,
+                // TODO(governor MCP surface): forward the governor block.
+                governor: _,
             })) => json_tool_result(&serde_json::json!({
                 "profile": profile,
                 "commands_deny_count": commands_deny_count,
@@ -1353,6 +1355,9 @@ impl TerminalCommanderMcpServer {
                 cursor,
                 hint,
                 wslenv_dropped,
+                // TODO(governor MCP surface): forward the applied limits.
+                limits_applied: _,
+                limits_clamped: _,
             })) => {
                 // US2 (FR-011): forward the optional pack-available hint
                 // verbatim. Omitted from the JSON when None.
@@ -2439,6 +2444,7 @@ impl TerminalCommanderMcpServer {
             version: params.version,
             scope: Some(params.scope.into_ipc_scope()?),
             fills: params.fills.unwrap_or_default(),
+            limits: None,
         };
         let started = match self.daemon.call(IpcRequest::RecipeRun(ipc)).await {
             Ok(IpcResponse::RecipeRun(body)) => body,
@@ -2457,6 +2463,9 @@ impl TerminalCommanderMcpServer {
             probe_id,
             cursor,
             wslenv_dropped,
+            // TODO(governor MCP surface): forward the applied limits.
+            limits_applied: _,
+            limits_clamped: _,
         } = started;
         if !watched {
             let mut body = serde_json::json!({
@@ -2949,6 +2958,7 @@ impl TerminalCommanderMcpServer {
             rows: params.rows,
             cols: params.cols,
             tag: params.tag,
+            limits: None,
         };
         match self.daemon.call(IpcRequest::PtyCommandStart(ipc)).await {
             Ok(IpcResponse::PtyCommandStart(PtyCommandStartResponse {
@@ -2957,6 +2967,9 @@ impl TerminalCommanderMcpServer {
                 probe_id,
                 cursor,
                 wslenv_dropped,
+                // TODO(governor MCP surface): forward the applied limits.
+                limits_applied: _,
+                limits_clamped: _,
             })) => {
                 let mut body = serde_json::json!({
                     "job_id": job_id,
@@ -4028,6 +4041,9 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
         cursor,
         hint: _,
         wslenv_dropped,
+        // TODO(governor MCP surface): forward the applied limits.
+        limits_applied: _,
+        limits_clamped: _,
     } = response;
     let mut payload = serde_json::json!({
         "job_id": job_id,
@@ -5367,6 +5383,7 @@ impl McpCommandStartParams {
             // value, which this adapter no longer does after Phase 1.
             dedup_nonce: Some(fresh_dedup_nonce()),
             receipt_shape: receipt_shape(self.receipt_head_lines, self.receipt_tail_lines),
+            limits: None,
         })
     }
 }
@@ -5507,6 +5524,7 @@ impl McpShellExecParams {
             bucket_config,
             tag: self.tag,
             receipt_shape: receipt_shape(self.receipt_head_lines, self.receipt_tail_lines),
+            limits: None,
         })
     }
 }
@@ -7133,6 +7151,8 @@ mod tests {
             cursor: 0,
             hint: None,
             wslenv_dropped: Vec::new(),
+            limits_applied: None,
+            limits_clamped: Vec::new(),
         }
     }
 

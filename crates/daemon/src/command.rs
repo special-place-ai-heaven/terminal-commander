@@ -53,6 +53,7 @@ use tokio::sync::oneshot;
 
 use crate::activation::ActivationRegistry;
 use crate::audit::AuditSink;
+use crate::governor::GovernorOutcome;
 use crate::policy::{PolicyAction, PolicyDecision, PolicyEngine, PolicyProfile};
 use crate::router::Router;
 use crate::store_actor::StoreClient;
@@ -363,6 +364,9 @@ pub enum CommandError {
     PosixPathOnWindows { index: usize, path: String },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// The request's `limits` could not be parsed or resolved.
+    #[error("invalid limits: {0}")]
+    InvalidLimits(String),
 }
 
 /// Which lane started this combed job, threaded through
@@ -433,6 +437,10 @@ pub struct CommandStartRequest {
     /// and receive its live `(job_id, bucket_id)`. `None` for callers without
     /// a resolvable peer (e.g. direct in-process tests).
     pub peer_discriminator: Option<u64>,
+    /// Requested resource limits (resource governor). Omitted axes take the
+    /// `[governor]` default; resolved and clamped in `start_combed_inner`.
+    #[serde(default)]
+    pub limits: Option<terminal_commander_ipc::JobLimitsSpec>,
 }
 
 // `CommandStartResponse`, `CommandReceipt`, and `CommandStatusResponse`
@@ -525,6 +533,9 @@ struct JobBinding {
     metrics_live: Arc<parking_lot::Mutex<terminal_commander_probes::ProcessProbeMetrics>>,
     /// F1: argv runs a shell `-c` script holding a pipeline.
     pipeline_exit_masked: bool,
+    /// Resource-governor outcome, published by the waiter at exit together
+    /// with the receipt. All `None` for an ungoverned job.
+    governor: GovernorOutcome,
 }
 
 /// Identity triple for a single live job.
@@ -919,6 +930,10 @@ impl CommandRuntime {
         mode: StartLane<'_>,
     ) -> Result<CommandStartResponse, CommandError> {
         Self::validate_argv(&req.argv)?;
+        let resolved_limits = self
+            .policy
+            .resolve_limits(req.limits.as_ref())
+            .map_err(CommandError::InvalidLimits)?;
 
         // F1: flag (never rewrite) a shell pipeline: its exit code may reflect
         // only the last stage. Covers the shell lane too (`[shell, "-lc", line]`).
@@ -949,6 +964,8 @@ impl CommandRuntime {
                         // original start, so we do not re-attach it.
                         hint: None,
                         wslenv_dropped: Vec::new(),
+                        limits_applied: None,
+                        limits_clamped: Vec::new(),
                     });
                 }
                 // Stale fallback entry the TTL backstop should have
@@ -1309,6 +1326,7 @@ impl CommandRuntime {
             // TC-B1: thread the strip flag into the probe; raw bytes still
             // land in the frame store regardless.
             strip_ansi: req.strip_ansi,
+            limits: resolved_limits.limits,
         };
 
         // TC-2: register the in-flight dedup entry NOW, BEFORE the spawn,
@@ -1450,6 +1468,7 @@ impl CommandRuntime {
                 // TC-3: shared handle to the probe's live metrics for `stop()`.
                 metrics_live,
                 pipeline_exit_masked,
+                governor: GovernorOutcome::default(),
             },
         );
         let mut audit_meta = format_argv_metadata_tagged(&argv_for_meta, wsl_audit_tag.as_ref());
@@ -1466,6 +1485,15 @@ impl CommandRuntime {
             tag_reason,
             Some(audit_meta),
         );
+        if !resolved_limits.clamped.is_empty() {
+            self.audit(
+                "governor_clamp",
+                &job_id.to_wire_string(),
+                "allow",
+                Some(crate::governor::clamp_reason(&resolved_limits.clamped)),
+                None,
+            );
+        }
 
         // Spawn the lifecycle waiter task. When the child exits we
         // emit a synthetic lifecycle event into the bucket and an
@@ -1474,6 +1502,7 @@ impl CommandRuntime {
         let waiter_router = Arc::clone(&self.router);
         let waiter_audit = Arc::clone(&self.audit);
         let waiter_profile = self.profile_label.clone();
+        let waiter_profile_ceiling = self.profile_label.clone();
         let waiter_live = Arc::clone(&self.live);
         let waiter_rings = Arc::clone(&self.rings);
         // TC-2: clone the dedup map into the waiter so the in-flight entry
@@ -1498,7 +1527,8 @@ impl CommandRuntime {
         // which every `start_combed` caller has (IPC handlers run on the
         // daemon runtime). The lock is held only for the enqueue.
         self.lifecycle_tasks.lock().spawn(async move {
-            let (mut final_metrics, outcome) = drive_to_exit(probe).await;
+            let (mut final_metrics, outcome, governor_report) = drive_to_exit(probe).await;
+            let governor = GovernorOutcome::from_report(&governor_report);
 
             // TCE-ERG-1: build the no-silence receipt while
             // `final_metrics.events_emitted` still reflects ONLY
@@ -1535,6 +1565,7 @@ impl CommandRuntime {
             // bump), so only the receipt is published here.
             if let Some(b) = waiter_live.write().get_mut(&job_id) {
                 b.receipt = receipt;
+                b.governor = governor.clone();
             }
 
             // TC-3: if `stop()` already finalized this job (set it terminal under the
@@ -1565,7 +1596,8 @@ impl CommandRuntime {
                 let stop_duration_ms = waiter_jobs
                     .get(job_id)
                     .and_then(|r| r.exit_info.as_ref().map(|e| e.duration_ms));
-                let stop_evidence = evidence_json(&final_metrics, stop_duration_ms, probe_id);
+                let stop_evidence =
+                    evidence_json(&final_metrics, stop_duration_ms, probe_id, &governor);
                 persist_job_receipt(
                     &waiter_store,
                     job_id,
@@ -1632,7 +1664,8 @@ impl CommandRuntime {
             let exit_duration_ms = waiter_jobs
                 .get(job_id)
                 .and_then(|r| r.exit_info.as_ref().map(|e| e.duration_ms));
-            let exit_evidence = evidence_json(&final_metrics, exit_duration_ms, probe_id);
+            let exit_evidence =
+                evidence_json(&final_metrics, exit_duration_ms, probe_id, &governor);
             persist_job_receipt(
                 &waiter_store,
                 job_id,
@@ -1671,6 +1704,13 @@ impl CommandRuntime {
             }
             entry = entry.with_metadata_json(format_argv_metadata(&argv_for_meta));
             let _ = waiter_audit.emit(&entry);
+            if let Some(ceiling) = governor.ceiling_audit(&job_id.to_wire_string()) {
+                let _ = waiter_audit.emit(
+                    &ceiling
+                        .with_actor("command_runtime")
+                        .with_profile(waiter_profile_ceiling),
+                );
+            }
 
             // Publish the terminal state last. `JobManager::finish` must run
             // earlier to build the authoritative lifecycle draft, so status
@@ -1689,6 +1729,8 @@ impl CommandRuntime {
             cursor: 0,
             hint: pack_hint,
             wslenv_dropped: wslenv_reported,
+            limits_applied: resolved_limits.applied,
+            limits_clamped: resolved_limits.clamped,
         })
     }
 
@@ -1999,7 +2041,12 @@ impl CommandRuntime {
             } else {
                 b.metrics_live.lock().clone()
             };
-            (m, b.receipt.clone(), b.pipeline_exit_masked)
+            (
+                m,
+                b.receipt.clone(),
+                b.pipeline_exit_masked,
+                b.governor.clone(),
+            )
         });
         // spec 004 review (composer MEDIUM, grok/kimi LOW): with no live
         // binding there is NO observation to report, so certifying
@@ -2016,11 +2063,14 @@ impl CommandRuntime {
         // Unreachable today because terminal bindings are never evicted
         // (BACKLOG TCD-8); this is the guard that keeps TCD-8's eventual fix
         // from silently reintroducing the defect.
-        let (metrics, receipt, pipeline_exit_masked) = match live_metrics {
+        let (metrics, receipt, pipeline_exit_masked, governor) = match live_metrics {
             Some(found) => found,
-            None if rec.state == terminal_commander_core::JobState::Starting => {
-                (ProcessProbeMetrics::default(), None, false)
-            }
+            None if rec.state == terminal_commander_core::JobState::Starting => (
+                ProcessProbeMetrics::default(),
+                None,
+                false,
+                GovernorOutcome::default(),
+            ),
             None => return Err(CommandError::UnknownJob(job_id)),
         };
         let elapsed_ms = running_elapsed_ms(&rec);
@@ -2051,6 +2101,9 @@ impl CommandRuntime {
             awaiting_credential: None,
             elapsed_ms,
             last_output_age_ms: elapsed_ms.and(metrics.last_frame_at).map(output_age_ms),
+            governor: governor.governor,
+            peak_memory_bytes: governor.peak_memory_bytes,
+            exit_reason: governor.exit_reason,
         })
     }
 
@@ -2118,6 +2171,8 @@ impl CommandRuntime {
             .and_then(|s| ProbeId::parse_wire(s).ok())
             .unwrap_or_default();
 
+        let governor = GovernorOutcome::from_evidence(evidence.as_ref());
+
         // spec 004 D1: abandonment rides the trust indicator. The terminal
         // state stays the truthful `Cancelled` and the exit code stays absent --
         // an abandoned job did not fail, and reporting it as a failure would be
@@ -2171,6 +2226,9 @@ impl CommandRuntime {
             // Reconstructed statuses are always terminal.
             elapsed_ms: None,
             last_output_age_ms: None,
+            governor: governor.governor,
+            peak_memory_bytes: governor.peak_memory_bytes,
+            exit_reason: governor.exit_reason,
         })
     }
 
@@ -2261,7 +2319,15 @@ fn argv_runs_shell_pipeline(argv: &[String]) -> bool {
     shell_script_arg(argv).is_some_and(shell_script_has_pipeline)
 }
 
-async fn drive_to_exit(mut probe: ProcessProbe) -> (ProcessProbeMetrics, ProbeOutcome) {
+/// What the lifecycle waiter learns at exit: final counters, the outcome, and
+/// the resource governor's report.
+type ProbeExit = (
+    ProcessProbeMetrics,
+    ProbeOutcome,
+    terminal_commander_probes::governor::GovernorReport,
+);
+
+async fn drive_to_exit(mut probe: ProcessProbe) -> ProbeExit {
     let outcome = match probe.wait().await {
         Ok(status) => ProbeOutcome::Exited {
             code: status.code(),
@@ -2273,7 +2339,7 @@ async fn drive_to_exit(mut probe: ProcessProbe) -> (ProcessProbeMetrics, ProbeOu
             signal: Some(format!("error:{e}")),
         },
     };
-    (probe.metrics(), outcome)
+    (probe.metrics(), outcome, probe.governor_report())
 }
 
 /// Raw-text byte budget shared by the receipt's `head` and `tail`
@@ -2375,13 +2441,14 @@ pub(crate) fn evidence_json(
     metrics: &ProcessProbeMetrics,
     duration_ms: Option<u64>,
     probe_id: ProbeId,
+    governor: &GovernorOutcome,
 ) -> String {
     let duration = duration_ms.map_or_else(|| "null".to_owned(), |d| d.to_string());
     format!(
         "{{\"frames_total\":{},\"frames_stdout\":{},\"frames_stderr\":{},\
          \"bytes_total\":{},\"frames_suppressed\":{},\
          \"frames_suppressed_progress\":{},\"frames_suppressed_dedupe\":{},\
-         \"duration_ms\":{},\"probe_id\":\"{}\"}}",
+         \"duration_ms\":{},\"probe_id\":\"{}\"{}}}",
         metrics.frames_total,
         metrics.frames_stdout,
         metrics.frames_stderr,
@@ -2391,6 +2458,7 @@ pub(crate) fn evidence_json(
         metrics.frames_suppressed_dedupe,
         duration,
         probe_id.to_wire_string(),
+        governor.evidence_fields(),
     )
 }
 

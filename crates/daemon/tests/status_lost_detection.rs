@@ -65,6 +65,7 @@ fn a_really_started_job_is_detected_via_the_production_audit_row() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("start ok");
 

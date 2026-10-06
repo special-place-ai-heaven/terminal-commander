@@ -680,6 +680,7 @@ mod tests {
                 dedup_nonce: None,
                 receipt_shape: None,
                 strip_ansi: true,
+                limits: None,
             },
         ))
         .expect("command_start_combed is a spawn ack");
@@ -694,6 +695,7 @@ mod tests {
                 rows: None,
                 cols: None,
                 tag: None,
+                limits: None,
             },
         ))
         .expect("pty_command_start is a spawn ack");
@@ -716,6 +718,7 @@ mod tests {
                 bucket_config: None,
                 tag: None,
                 receipt_shape: None,
+                limits: None,
             },
         ))
         .expect("shell_exec is a spawn ack");

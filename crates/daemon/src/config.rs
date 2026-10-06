@@ -188,6 +188,58 @@ fn default_sifters() -> SiftersSection {
     SiftersSection::default()
 }
 
+/// `[governor]` section: per-job memory ceiling and CPU priority.
+///
+/// Values are strings so a malformed one becomes a `config_warnings` entry
+/// and the built-in default, never a daemon that refuses to boot. Resolved
+/// in [`crate::governor`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernorSection {
+    /// `false`: no limits are applied and no governor field is serialized.
+    #[serde(default = "default_governor_enabled")]
+    pub enabled: bool,
+    /// `"<n>%"` of host memory (the commit limit on Windows), a size such
+    /// as `"24GiB"` / `"512MiB"` / a byte count, or `"none"`.
+    #[serde(default = "default_job_memory")]
+    pub default_job_memory: String,
+    /// `idle` | `below_normal` | `normal`.
+    #[serde(default = "default_job_priority")]
+    pub default_priority: String,
+    /// Tri-state: omitted inherits the profile default (true under
+    /// `full_access` and `admin_debug`, false on the hardened profiles).
+    /// False clamps a request above the defaults down to them.
+    #[serde(default)]
+    pub llm_can_raise_limits: Option<bool>,
+}
+
+/// Built-in `[governor] default_job_memory`.
+pub const DEFAULT_JOB_MEMORY: &str = "60%";
+/// Built-in `[governor] default_priority`.
+pub const DEFAULT_JOB_PRIORITY: &str = "below_normal";
+
+const fn default_governor_enabled() -> bool {
+    true
+}
+
+fn default_job_memory() -> String {
+    DEFAULT_JOB_MEMORY.to_owned()
+}
+
+fn default_job_priority() -> String {
+    DEFAULT_JOB_PRIORITY.to_owned()
+}
+
+impl Default for GovernorSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_job_memory: default_job_memory(),
+            default_priority: default_job_priority(),
+            llm_can_raise_limits: None,
+        }
+    }
+}
+
 /// `[policy]` section (declarative profile schema, POLICY.md section 4).
 ///
 /// The `profile` + `profile_version` keys are TC36-era; the `repo_root`,
@@ -376,6 +428,8 @@ pub struct DaemonConfig {
     pub shell_session: ShellSessionSection,
     #[serde(default = "default_sifters")]
     pub sifters: SiftersSection,
+    #[serde(default)]
+    pub governor: GovernorSection,
     /// In-process tests set this so an unknown peer with explicit
     /// `from_mcp: false` can drive recipe admin IPC. Not a TOML key and
     /// not an IPC field. Production stays false.
@@ -480,6 +534,7 @@ impl DaemonConfig {
             limits: default_limits(),
             shell_session: default_shell_session(),
             sifters: default_sifters(),
+            governor: GovernorSection::default(),
             recipe_admin_test_seam: false,
             credential_prompter_test_seam: None,
             credential_url_ttl_test_seam: None,
@@ -505,6 +560,8 @@ impl DaemonConfig {
         let given: toml::Table =
             toml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
         cfg.warnings = cfg.ineffective_keys(&given);
+        cfg.warnings
+            .extend(crate::governor::section_warnings(&cfg.governor));
         Ok(cfg)
     }
 

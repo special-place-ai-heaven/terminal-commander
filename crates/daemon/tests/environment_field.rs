@@ -59,6 +59,7 @@ const fn combed(environment: Option<EnvironmentSpec>, argv: Vec<String>) -> IpcR
         strip_ansi: true,
         dedup_nonce: None,
         receipt_shape: None,
+        limits: None,
     })
 }
 
@@ -73,6 +74,7 @@ const fn pty(environment: Option<EnvironmentSpec>, argv: Vec<String>) -> IpcRequ
         rows: None,
         cols: None,
         tag: None,
+        limits: None,
     })
 }
 

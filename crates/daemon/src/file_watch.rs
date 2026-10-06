@@ -676,6 +676,9 @@ impl WatchRuntime {
             last_output_age_ms: elapsed_ms
                 .and(metrics.last_frame_at)
                 .map(crate::command::output_age_ms),
+            exit_reason: None,
+            governor: None,
+            peak_memory_bytes: None,
         })
     }
 

@@ -97,6 +97,8 @@ pub struct ShellExecRequest {
     pub tag: Option<String>,
     /// Shape of the no-silence receipt; `None` = the default.
     pub receipt_shape: Option<crate::command::ReceiptShape>,
+    /// Requested resource limits; see [`CommandStartRequest::limits`].
+    pub limits: Option<terminal_commander_ipc::JobLimitsSpec>,
 }
 
 impl ShellExecRequest {
@@ -114,6 +116,7 @@ impl ShellExecRequest {
             bucket_config: None,
             tag: None,
             receipt_shape: None,
+            limits: None,
         }
     }
 }
@@ -189,6 +192,7 @@ impl ShellRuntime {
             // so anchored rules match and summaries stay clean. Raw bytes
             // remain in the frame store.
             strip_ansi: true,
+            limits: req.limits,
         };
 
         self.command

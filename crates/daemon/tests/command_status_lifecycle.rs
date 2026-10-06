@@ -57,6 +57,7 @@ fn command_status_counts_lifecycle_event_when_no_rules_match() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("start ok");
 
@@ -139,6 +140,7 @@ fn lifecycle_waiter_is_drained_before_store_close() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("start ok");
 
@@ -468,6 +470,7 @@ fn start_linger_child(state: &DaemonState) -> terminal_commander_ipc::CommandSta
             receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
+            limits: None,
         })
         .expect("start linger child")
 }
@@ -626,6 +629,7 @@ async fn no_rule_receipt(helper: &str) -> terminal_commander_ipc::CommandReceipt
             receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
+            limits: None,
         })
         .expect("start ok");
     for _ in 0..200 {
@@ -729,6 +733,7 @@ async fn shaped_receipt(
             receipt_shape: Some(shape),
             strip_ansi: true,
             peer_discriminator: None,
+            limits: None,
         })
         .expect("start ok");
     for _ in 0..200 {
@@ -1018,6 +1023,7 @@ fn command_status_silent_running_job_has_no_output_age() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("start ok");
 

@@ -223,6 +223,7 @@ impl DaemonState {
                         &metrics,
                         s.duration_ms,
                         s.probe_id,
+                        &crate::governor::GovernorOutcome::default(),
                     )),
                     s.events_emitted,
                 )
@@ -350,7 +351,11 @@ impl DaemonState {
         )
         .with_probe_kinds(&probes.allow_kinds, &probes.deny_kinds)
         .with_llm_can_activate_recipes(config.policy.llm_can_activate_recipes)
-        .with_shell_withheld_by_allow_roots(config.shell_withheld_by_allow_roots());
+        .with_shell_withheld_by_allow_roots(config.shell_withheld_by_allow_roots())
+        .with_governor(crate::governor::Governor::from_section(
+            &config.governor,
+            config.policy.profile,
+        ));
 
         // Restore active rule definitions from the persistent
         // registry. The in-memory ActivationRegistry is the runtime

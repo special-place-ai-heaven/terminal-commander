@@ -307,6 +307,7 @@ impl ShellSessionRuntime {
             rows: None,
             cols: None,
             tag: req.tag,
+            limits: None,
         };
 
         // Audit subject redaction: `peer_subject` is the redacted identity

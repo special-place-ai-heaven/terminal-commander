@@ -28,6 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         dedup_nonce: None,
         receipt_shape: None,
         peer_discriminator: None,
+        limits: None,
     })?;
 
     tokio::time::sleep(Duration::from_millis(250)).await;

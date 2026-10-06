@@ -147,6 +147,7 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
         rows: params.rows,
         cols: params.cols,
         tag: params.tag.clone(),
+        limits: params.limits.clone(),
     };
     let started = match state.pty.start(req) {
         Ok(r) => Ok(IpcResponse::PtyCommandStart(PtyCommandStartResponse {
@@ -155,6 +156,8 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
             probe_id: r.probe_id,
             cursor: 0,
             wslenv_dropped: r.wslenv_dropped,
+            limits_applied: r.limits_applied,
+            limits_clamped: r.limits_clamped,
         })),
         Err(crate::pty_command::PtyRuntimeError::PolicyDenied(reason)) => {
             // Same failsafe typed-code mapping as the argv lane
@@ -552,6 +555,7 @@ mod tests {
                 rows: None,
                 cols: None,
                 tag: None,
+                limits: None,
             },
         )
         .expect_err("missing program");
