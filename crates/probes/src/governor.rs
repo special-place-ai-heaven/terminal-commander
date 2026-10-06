@@ -252,15 +252,14 @@ pub fn install_host_ceiling(limit_bytes: u64) -> Result<GovernorMode, String> {
         memory_bytes: Some(limit_bytes),
         ..JobLimits::default()
     })?;
-    if windows_host::HOST.get().is_some() {
+    let mut host = windows_host::HOST.lock();
+    if host.is_some() {
         return Err("host ceiling already installed".to_owned());
     }
     // Enforcement stands without the port; only `host_ceiling_hit` would be
     // unknowable (reported `false`).
     let watched = limit_messages::associate(&job, limit_messages::HOST_KEY);
-    windows_host::HOST
-        .set((job, limit_bytes, watched))
-        .map_err(|_| "host ceiling already installed".to_owned())?;
+    *host = Some((job, limit_bytes, watched));
     Ok(GovernorMode::JobObject)
 }
 
@@ -287,14 +286,17 @@ pub fn install_host_ceiling(limit_bytes: u64) -> Result<GovernorMode, String> {
 #[cfg(windows)]
 #[must_use]
 pub fn host_ceiling() -> Option<u64> {
-    windows_host::HOST.get().map(|(_, limit, _)| *limit)
+    windows_host::HOST
+        .lock()
+        .as_ref()
+        .map(|(_, limit, _)| *limit)
 }
 
 /// The installed host ceiling in bytes, if any.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn host_ceiling() -> Option<u64> {
-    cgroup::HOST.get().map(|(_, limit)| *limit)
+    cgroup::HOST.lock().as_ref().map(|(_, limit)| *limit)
 }
 
 /// The installed host ceiling in bytes, if any.
@@ -302,6 +304,45 @@ pub fn host_ceiling() -> Option<u64> {
 #[must_use]
 pub const fn host_ceiling() -> Option<u64> {
     None
+}
+
+/// Release the host ceiling at clean daemon shutdown.
+///
+/// Idempotent; a no-op when none is installed (rlimit, unavailable, other
+/// unix). Afterwards [`host_ceiling`] is `None`, a joining job no longer
+/// joins, and a new [`install_host_ceiling`] is allowed.
+///
+/// * Windows: closes the host Job Object handle; its `KILL_ON_JOB_CLOSE`
+///   kills any surviving member (what daemon exit already did).
+/// * Linux cgroup: writes `1` to `tc-jobs-<pid>/cgroup.kill` (defensive),
+///   rmdirs remaining per-job children, then the host dir. An already
+///   removed dir is success.
+///
+/// # Errors
+/// Linux: a path-free reason when the host dir could not be removed (e.g.
+/// `EBUSY`); the boot sweep of a later daemon removes it once empty.
+#[cfg(windows)]
+pub fn uninstall_host_ceiling() -> Result<(), String> {
+    drop(windows_host::HOST.lock().take());
+    Ok(())
+}
+
+/// See the Windows variant.
+///
+/// # Errors
+/// A path-free reason when the host dir could not be removed.
+#[cfg(target_os = "linux")]
+pub fn uninstall_host_ceiling() -> Result<(), String> {
+    cgroup::uninstall_host()
+}
+
+/// See the Windows variant.
+///
+/// # Errors
+/// Never: no host ceiling exists on this platform.
+#[cfg(not(any(windows, target_os = "linux")))]
+pub const fn uninstall_host_ceiling() -> Result<(), String> {
+    Ok(())
 }
 
 /// Boot-time cleanup of stale job cgroups; returns how many were removed.
@@ -325,12 +366,13 @@ pub const fn sweep_stale_job_dirs() -> usize {
 
 #[cfg(windows)]
 mod windows_host {
-    use std::sync::OnceLock;
+    use parking_lot::Mutex;
 
     /// The host-ceiling Job Object, its limit, and whether it reports to the
-    /// completion port. Never dropped: the job (and its `KILL_ON_JOB_CLOSE`)
-    /// lives as long as the daemon.
-    pub(super) static HOST: OnceLock<(crate::process::JobHandle, u64, bool)> = OnceLock::new();
+    /// completion port. Held until [`super::uninstall_host_ceiling`] or
+    /// process exit; dropping it fires its `KILL_ON_JOB_CLOSE`.
+    pub(super) static HOST: Mutex<Option<(crate::process::JobHandle, u64, bool)>> =
+        parking_lot::const_mutex(None);
 }
 
 /// Kernel memory-limit messages, the Windows limit-hit signal.
@@ -553,14 +595,16 @@ pub(crate) fn govern_child(
     // count as this job's crossing, not as the baseline. A failed host
     // assignment leaves `host_ceiling_joined` false; the per-job job below is
     // still created and its mode reported on its own.
-    let host = windows_host::HOST
-        .get()
-        .filter(|_| limits.join_host_ceiling);
+    // Held across the baseline and the assignment so an uninstall cannot
+    // close the host job in between.
+    let host_guard = windows_host::HOST.lock();
+    let host = host_guard.as_ref().filter(|_| limits.join_host_ceiling);
     let baseline = host
         .filter(|(_, _, watched)| *watched)
         .map(|_| limit_messages::count(limit_messages::HOST_KEY));
     let host_joined = host.is_some_and(|(host, _, _)| assign_to_job(host, child).is_ok());
     let host_at_spawn = baseline.filter(|_| host_joined);
+    drop(host_guard);
     // Associate before assigning, so no limit message predates the port.
     let job_with = |l: &JobLimits, watch: bool| -> Result<(JobHandle, Option<usize>), String> {
         let job = create_job(l)?;
@@ -877,6 +921,8 @@ mod cgroup {
     use std::path::{Component, Path, PathBuf};
     use std::sync::OnceLock;
 
+    use parking_lot::Mutex;
+
     use super::{GovernorMode, JobLimits, NO_AGGREGATE, errno_reason};
 
     const ROOT: &str = "/sys/fs/cgroup";
@@ -892,7 +938,12 @@ mod cgroup {
     const PROBE_PREFIX: &str = "tc-probe-";
 
     /// The installed host ceiling: (`tc-jobs-<pid>` dir, limit).
-    pub(super) static HOST: OnceLock<(PathBuf, u64)> = OnceLock::new();
+    pub(super) static HOST: Mutex<Option<(PathBuf, u64)>> = parking_lot::const_mutex(None);
+
+    /// The installed host dir, if any.
+    fn host_dir() -> Option<PathBuf> {
+        HOST.lock().as_ref().map(|(dir, _)| dir.clone())
+    }
 
     /// The daemon's PARENT cgroup dir, resolved once from `/proc/self/cgroup`.
     /// `None` when not on cgroup v2, the daemon sits in the root cgroup, or
@@ -947,10 +998,8 @@ mod cgroup {
     /// `RLIMIT_DATA` at run time would apply a limit the daemon decided not
     /// to apply under rlimit.
     pub(super) fn decide(limits: &JobLimits, id: &str) -> (GovernorMode, Option<PathBuf>, bool) {
-        let host = limits
-            .join_host_ceiling
-            .then(|| HOST.get().map(|(dir, _)| dir.as_path()))
-            .flatten();
+        let host = limits.join_host_ceiling.then(host_dir).flatten();
+        let host = host.as_deref();
         // Priority only, nothing to join: nice in pre_exec, no cgroup dir.
         if limits.memory_bytes.is_none() && host.is_none() {
             return (GovernorMode::Rlimit, None, false);
@@ -1004,6 +1053,10 @@ mod cgroup {
         let Some(parent) = parent_dir() else {
             return Err(NO_AGGREGATE.to_owned());
         };
+        let mut host = HOST.lock();
+        if host.is_some() {
+            return Err("host ceiling already installed".to_owned());
+        }
         let dir = parent.join(format!("{HOST_PREFIX}{}", std::process::id()));
         match std::fs::create_dir(&dir) {
             Ok(()) => {}
@@ -1032,15 +1085,29 @@ mod cgroup {
             return Err(reason);
         }
         let _ = std::fs::write(dir.join("memory.swap.max"), "0");
-        HOST.set((dir, limit))
-            .map_err(|_| "host ceiling already installed".to_owned())
+        *host = Some((dir, limit));
+        Ok(())
+    }
+
+    /// Kill what is left in the host dir, rmdir its per-job children, then
+    /// the dir itself. `ENOENT` counts as removed.
+    pub(super) fn uninstall_host() -> Result<(), String> {
+        let Some((dir, _)) = HOST.lock().take() else {
+            return Ok(());
+        };
+        let _ = std::fs::write(dir.join("cgroup.kill"), "1");
+        remove_host_dir(&dir);
+        match std::fs::remove_dir(&dir) {
+            Err(e) if e.kind() != ErrorKind::NotFound => Err(errno_reason("host cgroup rmdir", &e)),
+            _ => Ok(()),
+        }
     }
 
     /// The host dir's `memory.events.local` `oom` count: times the host
     /// ceiling itself was reached. The hierarchical `memory.events` would
     /// also count per-job limit hits in its children.
     pub(super) fn host_oom_count() -> Option<u64> {
-        let (dir, _) = HOST.get()?;
+        let dir = host_dir()?;
         std::fs::read_to_string(dir.join("memory.events.local"))
             .ok()?
             .lines()

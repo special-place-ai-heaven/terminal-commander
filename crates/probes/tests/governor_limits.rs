@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use terminal_commander_core::{BucketId, ContextRingManager};
 use terminal_commander_probes::governor::{
     GovernorMode, GovernorReport, JobLimits, JobPriority, available_mode, host_ceiling,
-    host_memory, install_host_ceiling,
+    host_memory, install_host_ceiling, uninstall_host_ceiling,
 };
 use terminal_commander_probes::{EventSink, InMemorySink, ProcessProbe, ProcessProbeConfig};
 use terminal_commander_sifters::SifterRuntime;
@@ -43,6 +43,7 @@ const OOM_VICTIM_ENV: &str = "TC_TEST_OOM_VICTIM";
 const EXPECT_PRIORITY_ENV: &str = "TC_TEST_EXPECT_PRIORITY";
 const NESTED_ENV: &str = "TC_TEST_NESTED";
 const ONESHOT_ENV: &str = "TC_TEST_ALLOC_ONESHOT";
+const UNINSTALL_ENV: &str = "TC_TEST_UNINSTALL_HOST";
 #[cfg(target_os = "linux")]
 const REMOVED_HOST_ENV: &str = "TC_TEST_REMOVED_HOST";
 const MIB: u64 = 1024 * 1024;
@@ -442,6 +443,75 @@ fn host_ceiling_round(joined: JobLimits) {
 #[test]
 fn host_ceiling_caps_jobs_together() {
     host_ceiling_scenario();
+}
+
+/// Clean-shutdown release of the host ceiling, in a re-exec of this binary
+/// (it installs and removes the process-wide ceiling).
+#[test]
+fn uninstall_releases_host_ceiling() {
+    let argv = self_argv("uninstall_helper");
+    let out = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .env(UNINSTALL_ENV, "1")
+        .output()
+        .expect("re-exec test binary");
+    println!("{}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "uninstall scenario failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Inner half of `uninstall_releases_host_ceiling`: idle unless
+/// `TC_TEST_UNINSTALL_HOST` is set.
+#[test]
+fn uninstall_helper() {
+    if std::env::var_os(UNINSTALL_ENV).is_none() {
+        return;
+    }
+    assert_eq!(uninstall_host_ceiling(), Ok(()), "nothing installed: no-op");
+    let installed = install_host_ceiling(HOST_LIMIT);
+    println!(
+        "uninstall: mode {:?} install {installed:?}",
+        available_mode()
+    );
+    #[cfg(target_os = "linux")]
+    if available_mode() == GovernorMode::Rlimit {
+        assert!(installed.is_err());
+        assert_eq!(uninstall_host_ceiling(), Ok(()), "rlimit: no-op");
+        return;
+    }
+    installed.expect("host ceiling installs");
+    #[cfg(target_os = "linux")]
+    let dir = test_parent_cgroup()
+        .expect("cgroup parent")
+        .join(format!("tc-jobs-{}", std::process::id()));
+    #[cfg(target_os = "linux")]
+    assert!(dir.exists(), "host dir created");
+    let joined = JobLimits {
+        join_host_ceiling: true,
+        ..governed()
+    };
+    let (ok, before) = run(&helper_argv(), joined, "1");
+    println!("uninstall: joined job ok={ok} {before:?}");
+    assert!(ok && before.host_ceiling_joined);
+    assert_eq!(uninstall_host_ceiling(), Ok(()));
+    assert_eq!(host_ceiling(), None);
+    #[cfg(target_os = "linux")]
+    assert!(!dir.exists(), "host dir removed on uninstall");
+    assert_eq!(uninstall_host_ceiling(), Ok(()), "idempotent");
+    let (ok, after) = run(&helper_argv(), joined, "1");
+    println!("uninstall: after release ok={ok} {after:?}");
+    assert!(ok && !after.host_ceiling_joined);
+    assert!(
+        !matches!(after.mode, Some(GovernorMode::Unavailable(_))),
+        "per-job limit still governs: {after:?}"
+    );
+    install_host_ceiling(HOST_LIMIT).expect("re-install after release");
+    assert_eq!(uninstall_host_ceiling(), Ok(()));
+    #[cfg(target_os = "linux")]
+    assert!(!dir.exists());
 }
 
 /// Inner half of the nested-job test: idle unless `TC_TEST_NESTED` is set.
