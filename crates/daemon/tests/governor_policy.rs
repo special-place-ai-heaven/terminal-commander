@@ -719,6 +719,16 @@ fn host_ceiling_bounds_jobs_in_aggregate() {
             json!(0),
             "second allocation must fail: {s2}"
         );
+        // Its own 130 MiB limit was not reached, so the host ceiling is the
+        // reported reason, and it is audited with the ceiling and the peak.
+        assert_eq!(s2["exit_reason"], json!("host_ceiling"), "{s2}");
+        let rows = audit_actions(&d, second["job_id"].as_str().unwrap());
+        let row = rows
+            .iter()
+            .find(|(a, ..)| a == "governor_host_ceiling")
+            .unwrap_or_else(|| panic!("no governor_host_ceiling audit row: {rows:?}"));
+        let meta: Value = serde_json::from_str(row.2.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["memory_limit_bytes"], json!(150 * MIB), "{meta}");
         let s1 = serde_json::to_value(status_typed(&d, &first["job_id"]).await).unwrap();
         assert_eq!(s1["state"], json!("running"), "first job survives: {s1}");
         stop(&d, "command_stop", &first["job_id"]).await;

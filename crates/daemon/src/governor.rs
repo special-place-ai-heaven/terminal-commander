@@ -12,8 +12,8 @@
 use std::fmt::Write as _;
 
 use terminal_commander_ipc::{
-    EXIT_REASON_HOST_CEILING, EXIT_REASON_MEMORY_CEILING, GovernorModeWire, GovernorStatus, JobLimitsSpec, JobPriority,
-    LimitsApplied,
+    EXIT_REASON_HOST_CEILING, EXIT_REASON_MEMORY_CEILING, GovernorModeWire, GovernorStatus,
+    JobLimitsSpec, JobPriority, LimitsApplied,
 };
 use terminal_commander_probes::governor::{
     self as probe_governor, GovernorMode, GovernorReport, HostMemory, JobLimits,
@@ -454,7 +454,7 @@ impl GovernorOutcome {
         }
     }
 
-    /// True when the job was stopped by its memory ceiling.
+    /// True when the job was stopped by its own limit or the host ceiling.
     #[must_use]
     pub const fn hit_ceiling(&self) -> bool {
         self.exit_reason.is_some()
@@ -790,6 +790,33 @@ mod tests {
         assert!(w[0].contains("governor.default_job_memory"));
         assert!(w[1].contains("governor.default_priority"));
         assert!(section_warnings(&GovernorSection::default()).is_empty());
+    }
+
+    #[test]
+    fn own_limit_takes_precedence_over_the_host_ceiling() {
+        let base = GovernorReport {
+            mode: Some(GovernorMode::JobObject),
+            ..GovernorReport::default()
+        };
+        let reason = |memory_limit_hit, host_ceiling_hit| {
+            GovernorOutcome::from_report(&GovernorReport {
+                memory_limit_hit,
+                host_ceiling_hit,
+                ..base.clone()
+            })
+            .exit_reason
+        };
+        assert_eq!(reason(true, true).as_deref(), Some("memory_ceiling"));
+        assert_eq!(reason(false, true).as_deref(), Some("host_ceiling"));
+        assert_eq!(reason(false, false), None);
+        let o = GovernorOutcome::from_report(&GovernorReport {
+            host_ceiling_hit: true,
+            ..base
+        });
+        assert_eq!(
+            o.ceiling_audit("job").unwrap().action,
+            "governor_host_ceiling"
+        );
     }
 
     #[test]
