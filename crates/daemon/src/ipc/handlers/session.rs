@@ -338,7 +338,7 @@ pub(in crate::ipc::server) async fn handle_workspace_snapshot_apply(
             format!("workspace snapshot '{}' is not known", params.snapshot_id),
         ));
     };
-    let applied_cwd = state
+    let (applied_cwd, skipped_redacted) = state
         .sessions
         .apply_workspace(params.session_id, row.cwd.clone(), row.env)
         .await
@@ -348,6 +348,7 @@ pub(in crate::ipc::server) async fn handle_workspace_snapshot_apply(
             applied: true,
             session_id: params.session_id,
             cwd: applied_cwd,
+            skipped_redacted,
         },
     ))
 }

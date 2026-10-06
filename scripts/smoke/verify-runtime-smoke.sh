@@ -287,7 +287,9 @@ def ok(msg):
 
 # server/discover
 sv = r.get("discover", {}).get("result", {}).get("supportedVersions")
-if sv != ["2026-07-28"]:
+# Preferred version first, then the legacy `initialize` versions the adapter
+# still accepts (docs/integrations/README.md).
+if sv != ["2026-07-28", "2025-11-25", "2025-06-18"]:
     fail(f"server/discover supportedVersions (got: {sv})")
 ok("server/discover supportedVersions")
 
@@ -358,9 +360,12 @@ for kind in ["system_discover", "health", "command_start", "bucket_wait", "comma
             # embeds the argv literally in its `summary` string so
             # operators can trace which command exited (no stdout
             # content; argv is a bounded operator input). Allow it
-            # in argv-bearing or summary fields only.
+            # in argv-bearing or summary fields only. A quiet command's
+            # receipt carries a bounded `head` / `tail` of its last lines by
+            # contract (CommandReceipt), so the needle may appear there.
             if needle in node and parent_key not in (
-                "argv", "argv0", "subject", "summary", "summary_template", "reason"
+                "argv", "argv0", "subject", "summary", "summary_template", "reason",
+                "head", "tail"
             ):
                 found_leak = True
     walk(inner)

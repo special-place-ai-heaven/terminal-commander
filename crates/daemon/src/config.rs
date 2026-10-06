@@ -49,7 +49,8 @@ pub const DEFAULT_BUCKET_TTL_SECONDS: u64 = 86_400;
 pub const DEFAULT_FILE_WINDOW_BYTES: usize = HARD_MAX_FILE_WINDOW_BYTES;
 
 /// Default bucket read response cap (operator may lower; never above hard cap).
-pub const DEFAULT_READ_LIMIT: usize = 200;
+/// The hard cap, so an unset `bucket_read_limit` changes nothing.
+pub const DEFAULT_READ_LIMIT: usize = HARD_MAX_READ_LIMIT;
 
 /// Default audit retention (days). Advisory at MVP; the daemon does
 /// not yet evict old audit rows.
@@ -390,7 +391,46 @@ pub struct DaemonConfig {
     /// `CREDENTIAL_URL_TTL`, 300 s). Not a TOML key.
     #[serde(skip, default)]
     pub credential_url_ttl_test_seam: Option<std::time::Duration>,
+    /// In-process tests shorten how long an accepted page may go unopened
+    /// (default `CREDENTIAL_PAGE_OPEN_WITHIN`, 30 s). Not a TOML key.
+    #[serde(skip, default)]
+    pub credential_page_open_test_seam: Option<std::time::Duration>,
+    /// Keys the loaded file set that have no effect (unknown, or accepted
+    /// but not enforced), one sentence each. Logged at startup and shown by
+    /// `self_check` and `policy_status`, so a setting that protects nothing
+    /// is never silent.
+    #[serde(skip, default)]
+    pub warnings: Vec<String>,
 }
+
+/// Keys the schema still accepts (configs in the field set them) that the
+/// daemon does not act on, with what is true instead.
+const NOT_ENFORCED: &[(&str, &str)] = &[
+    (
+        "daemon.runtime_mode",
+        "the mode comes from `terminal-commanderd start --mode`",
+    ),
+    (
+        "policy.profile_version",
+        "only `profile` selects the profile",
+    ),
+    (
+        "policy.caps.allow_privileged",
+        "no privileged helper ships, so nothing is gated by it",
+    ),
+    (
+        "retention.max_events",
+        "buckets keep the built-in limit unless a call passes bucket_config",
+    ),
+    (
+        "retention.ttl_seconds",
+        "buckets keep the built-in limit unless a call passes bucket_config",
+    ),
+    (
+        "audit.retention_days",
+        "audit rows are never pruned by the daemon",
+    ),
+];
 
 const fn default_retention() -> RetentionSection {
     RetentionSection {
@@ -443,6 +483,8 @@ impl DaemonConfig {
             recipe_admin_test_seam: false,
             credential_prompter_test_seam: None,
             credential_url_ttl_test_seam: None,
+            credential_page_open_test_seam: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -453,16 +495,50 @@ impl DaemonConfig {
             path: p.to_path_buf(),
             source,
         })?;
-        let mut cfg: Self = toml::from_str(&raw).map_err(|e| ConfigError::Parse(e.to_string()))?;
-        cfg.validate_and_clamp()?;
-        Ok(cfg)
+        Self::from_toml(&raw)
     }
 
-    /// Parse a config from an in-memory string. Used by tests.
+    /// Parse a config from an in-memory string.
     pub fn from_toml(s: &str) -> Result<Self> {
         let mut cfg: Self = toml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
         cfg.validate_and_clamp()?;
+        let given: toml::Table =
+            toml::from_str(s).map_err(|e| ConfigError::Parse(e.to_string()))?;
+        cfg.warnings = cfg.ineffective_keys(&given);
         Ok(cfg)
+    }
+
+    /// One warning per key in `given` that does nothing: not part of the
+    /// schema (serde ignores unknown keys silently), or in [`NOT_ENFORCED`].
+    fn ineffective_keys(&self, given: &toml::Table) -> Vec<String> {
+        fn walk(given: &toml::Table, known: &toml::Table, at: &str, out: &mut Vec<String>) {
+            for (key, value) in given {
+                let path = if at.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{at}.{key}")
+                };
+                match known.get(key) {
+                    None => out.push(format!(
+                        "`{path}` is not a setting TC knows; it has no effect"
+                    )),
+                    Some(toml::Value::Table(inner)) => {
+                        if let toml::Value::Table(sub) = value {
+                            walk(sub, inner, &path, out);
+                        }
+                    }
+                    Some(_) => {
+                        if let Some((_, why)) = NOT_ENFORCED.iter().find(|(k, _)| *k == path) {
+                            out.push(format!("`{path}` is not enforced and has no effect: {why}"));
+                        }
+                    }
+                }
+            }
+        }
+        let known = toml::Table::try_from(self).unwrap_or_default();
+        let mut out = Vec::new();
+        walk(given, &known, "", &mut out);
+        out
     }
 
     /// `full_access` and `developer_local` grant `allow_shell` by default, but

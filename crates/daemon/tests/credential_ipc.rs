@@ -32,11 +32,11 @@ type ServerHandle = terminal_commanderd::ServerHandle;
 #[cfg(windows)]
 type ServerHandle = terminal_commanderd::PipeServerHandle;
 
-/// The in-process transport: a unix socket, or a named pipe on Windows.
-fn serve(state: &Arc<DaemonState>, tag: &str) -> (PathBuf, ServerHandle) {
+/// The in-process transport: a unix socket, or a named pipe on Windows,
+/// bound where the daemon's config says, as the runtime does.
+fn serve(state: &Arc<DaemonState>) -> (PathBuf, ServerHandle) {
     #[cfg(unix)]
     {
-        let _ = tag;
         let handle =
             terminal_commanderd::IpcServer::new(Arc::clone(state), state.config.socket_path())
                 .spawn()
@@ -45,13 +45,7 @@ fn serve(state: &Arc<DaemonState>, tag: &str) -> (PathBuf, ServerHandle) {
     }
     #[cfg(windows)]
     {
-        let name = format!(
-            r"\\.\pipe\tc-test-cred-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        );
+        let name = state.config.pipe_name();
         let handle = terminal_commanderd::PipeServer::new(Arc::clone(state), name.clone())
             .spawn()
             .unwrap();
@@ -101,6 +95,7 @@ fn tmp_data_dir(tag: &str) -> PathBuf {
 
 struct Harness {
     data: PathBuf,
+    endpoint: PathBuf,
     _state: Arc<DaemonState>,
     _handle: ServerHandle,
     client: DaemonClient,
@@ -111,22 +106,39 @@ struct Harness {
 
 impl Harness {
     fn new(tag: &str, prompter: &str) -> Self {
-        Self::with(tag, Some(prompter), None)
+        Self::with(tag, Some(prompter), None, None)
     }
 
     /// `prompter: None` leaves the real native prompt in place, so such a
     /// harness must never reach `credential_request`.
-    fn with(tag: &str, prompter: Option<&str>, url_ttl: Option<Duration>) -> Self {
+    fn with(
+        tag: &str,
+        prompter: Option<&str>,
+        url_ttl: Option<Duration>,
+        open_within: Option<Duration>,
+    ) -> Self {
         let data = tmp_data_dir(tag);
         let mut cfg = DaemonConfig::defaults_in(&data);
         cfg.credential_prompter_test_seam = prompter.map(str::to_owned);
         cfg.credential_url_ttl_test_seam = url_ttl;
+        cfg.credential_page_open_test_seam = open_within;
         cfg.recipe_admin_test_seam = true;
+        #[cfg(windows)]
+        {
+            cfg.daemon.socket_path = Some(PathBuf::from(format!(
+                r"\\.\pipe\tc-test-cred-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            )));
+        }
         let state = Arc::new(DaemonState::bootstrap(cfg).unwrap());
-        let (endpoint, handle) = serve(&state, tag);
-        let client = DaemonClient::new(endpoint).with_timeout(Duration::from_secs(90));
+        let (endpoint, handle) = serve(&state);
+        let client = DaemonClient::new(endpoint.clone()).with_timeout(Duration::from_secs(90));
         Self {
             data,
+            endpoint,
             _state: state,
             _handle: handle,
             client,
@@ -275,8 +287,7 @@ impl Harness {
             body.len()
         );
         stream.write_all(request.as_bytes()).await?;
-        let mut raw = String::new();
-        stream.read_to_string(&mut raw).await?;
+        let raw = read_response(&mut stream).await?;
         let status = raw
             .split(' ')
             .nth(1)
@@ -655,7 +666,12 @@ fn credential_url_page_expires_and_a_declined_elicitation_is_final() {
         return;
     };
     rt().block_on(async {
-        let mut h = Harness::with("url-ttl", Some("none"), Some(Duration::from_millis(800)));
+        let mut h = Harness::with(
+            "url-ttl",
+            Some("none"),
+            Some(Duration::from_millis(800)),
+            None,
+        );
         let job_id = h.start_child(&python).await;
         h.wait_awaiting(job_id).await;
 
@@ -702,12 +718,42 @@ fn credential_url_abandon_falls_back_to_the_native_prompt() {
     });
 }
 
+/// A client that accepted but whose owner never opened the link: after the
+/// open deadline the page is closed and the native prompt answers, and the
+/// audit row names the channel that did.
+#[test]
+fn an_accepted_page_nobody_opens_hands_over_to_the_native_prompt() {
+    let Some(python) = python() else {
+        eprintln!("skipping: python not on PATH");
+        return;
+    };
+    rt().block_on(async {
+        let mut h = Harness::with(
+            "url-unopened",
+            Some(&format!("test:{SECRET}")),
+            None,
+            Some(Duration::from_millis(300)),
+        );
+        let job_id = h.start_child(&python).await;
+        h.wait_awaiting(job_id).await;
+        let url = h.url(job_id, CredentialUrlOp::Open).await.url.unwrap();
+        h.url(job_id, CredentialUrlOp::Accepted).await;
+        assert_eq!(h.request(job_id).await.0, CredentialStatus::Provided);
+        assert!(page_is_closed(&url).await, "the unopened page must close");
+        assert_eq!(h.wait_exit_code(job_id).await, Some(0));
+        let rows = h.credential_audit_rows().await;
+        let meta: serde_json::Value = serde_json::from_str(&rows[0].1).unwrap();
+        assert_eq!(meta["source"], "native");
+        h.assert_secret_never_surfaced(job_id).await;
+    });
+}
+
 #[test]
 fn credential_url_is_denied_to_peers_other_than_the_mcp_adapter() {
     rt().block_on(async {
         // No seams: the in-process client is an unknown image, like a
         // script the model wrote to talk to the socket.
-        let mut h = Harness::with("url-gate", None, None);
+        let mut h = Harness::with("url-gate", None, None, None);
         let denied = h
             .call(IpcRequest::CredentialUrl(CredentialUrlParams {
                 job_id: JobId::new(),
@@ -729,9 +775,12 @@ fn credential_request_without_a_native_prompt_names_the_owner_cli_command() {
         let mut h = Harness::new("cli", "none");
         let job_id = h.start_child(&python).await;
         h.wait_awaiting(job_id).await;
+        // The owner's terminal has no TC_SESSION: the command must name the
+        // endpoint this daemon is actually serving.
         let expected = format!(
-            "terminal-commander credential provide {}",
-            job_id.to_wire_string()
+            "terminal-commander credential provide {} --socket {}",
+            job_id.to_wire_string(),
+            h.endpoint.display()
         );
         assert_eq!(
             h.request(job_id).await,
@@ -865,4 +914,30 @@ fn credential_request_for_a_job_without_a_prompt_is_not_awaiting() {
             .expect_err("unknown job");
         assert_eq!(unknown.code, IpcErrorCode::UnknownJob);
     });
+}
+
+/// Read one response the way a browser does: the head, then
+/// `Content-Length` bytes, or to EOF when a proxy in the path dropped that
+/// header. The page leaves closing to the client.
+async fn read_response(stream: &mut tokio::net::TcpStream) -> std::io::Result<String> {
+    let mut got = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        if let Some(i) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&got[..i]).to_ascii_lowercase();
+            let len: Option<usize> = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse().ok());
+            if len.is_some_and(|len| got.len() >= i + 4 + len) {
+                break;
+            }
+        }
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&chunk[..n]);
+    }
+    Ok(String::from_utf8_lossy(&got).into_owned())
 }

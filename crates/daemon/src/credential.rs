@@ -34,10 +34,24 @@ pub const CREDENTIAL_WAIT: Duration =
     Duration::from_millis(terminal_commander_ipc::protocol::CREDENTIAL_REQUEST_WAIT_MS);
 
 /// The command the owner runs when no native prompt is available.
+///
+/// It names this daemon's `endpoint`: the owner's terminal does not carry the
+/// harness's `TC_SESSION`, so without it the CLI reaches the per-user
+/// default daemon, which does not know the job.
 #[must_use]
-pub fn provide_command(job_id: JobId) -> String {
+pub fn provide_command(job_id: JobId, endpoint: &str) -> String {
+    // Quoted only when needed: a bare `\\.\pipe\...` works in PowerShell
+    // and cmd, a bare unix path in any POSIX shell.
+    let safe = endpoint
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "._-/\\:".contains(c));
+    let endpoint = if safe {
+        endpoint.to_owned()
+    } else {
+        format!("\"{endpoint}\"")
+    };
     format!(
-        "terminal-commander credential provide {}",
+        "terminal-commander credential provide {} --socket {endpoint}",
         job_id.to_wire_string()
     )
 }
@@ -45,6 +59,14 @@ pub fn provide_command(job_id: JobId) -> String {
 /// How long the owner's loopback page stays open.
 pub const CREDENTIAL_URL_TTL: Duration =
     Duration::from_millis(terminal_commander_ipc::protocol::CREDENTIAL_URL_TTL_MS);
+
+/// How long a page may go unopened after the client accepted.
+///
+/// After that the owner is asked through the native prompt. A client that accepted
+/// opens the link at once (MCP URL mode); 30 s also covers a cold browser
+/// start or an owner clicking a link the client printed. Unopened means the
+/// owner saw nothing, so waiting out the 5-minute page helps nobody.
+pub const CREDENTIAL_PAGE_OPEN_WITHIN: Duration = Duration::from_secs(30);
 
 type Outcome = Arc<watch::Sender<Option<CredentialStatus>>>;
 
@@ -61,6 +83,8 @@ struct Ask {
 struct Page {
     url: String,
     elicitation_id: String,
+    /// Signalled by `CredentialUrlOp::Accepted`; arms the open deadline.
+    accepted: Arc<tokio::sync::Notify>,
 }
 
 /// One owner prompt per PTY prompt generation. A repeat request replays or
@@ -70,6 +94,10 @@ pub struct CredentialBroker {
     prompter: Option<String>,
     /// Owner page lifetime ([`CREDENTIAL_URL_TTL`] outside tests).
     url_ttl: Duration,
+    /// [`CREDENTIAL_PAGE_OPEN_WITHIN`] outside tests.
+    open_within: Duration,
+    /// The IPC endpoint this daemon binds, for [`provide_command`].
+    endpoint: String,
     asked: parking_lot::Mutex<HashMap<JobId, Ask>>,
 }
 
@@ -81,10 +109,17 @@ impl std::fmt::Debug for CredentialBroker {
 
 impl CredentialBroker {
     #[must_use]
-    pub fn new(prompter: Option<String>, url_ttl: Duration) -> Self {
+    pub fn new(
+        prompter: Option<String>,
+        url_ttl: Duration,
+        open_within: Duration,
+        endpoint: String,
+    ) -> Self {
         Self {
             prompter,
             url_ttl,
+            open_within,
+            endpoint,
             asked: parking_lot::Mutex::new(HashMap::new()),
         }
     }
@@ -109,7 +144,7 @@ impl CredentialBroker {
                 }
                 _ => {
                     let Some(awaiting) = prompt.awaiting else {
-                        return Ok(response(job_id, CredentialStatus::NotAwaiting));
+                        return Ok(response(job_id, CredentialStatus::NotAwaiting, ""));
                     };
                     let outcome: Outcome = Arc::new(watch::channel(None).0);
                     asked.insert(
@@ -146,7 +181,7 @@ impl CredentialBroker {
                 Ok(Ok(done)) => done.unwrap_or(unanswered),
                 _ => unanswered,
             };
-        Ok(response(job_id, status))
+        Ok(response(job_id, status, &self.endpoint))
     }
 
     /// Record an answer that arrived through the admin CLI, so a pending or
@@ -223,6 +258,7 @@ impl CredentialBroker {
                 let page = Page {
                     url: format!("http://{addr}/{token}"),
                     elicitation_id: uuid::Uuid::new_v4().simple().to_string(),
+                    accepted: Arc::new(tokio::sync::Notify::new()),
                 };
                 let outcome: Outcome = Arc::new(watch::channel(None).0);
                 asked.insert(
@@ -244,6 +280,9 @@ impl CredentialBroker {
                         token,
                         text: PromptText::new(job_id, awaiting.kind, &prompt),
                         ttl: self.url_ttl,
+                        open_within: self.open_within,
+                        accepted: Arc::clone(&page.accepted),
+                        opened: std::sync::atomic::AtomicBool::new(false),
                     },
                     listener,
                     outcome,
@@ -257,6 +296,11 @@ impl CredentialBroker {
                     settle(&ask.outcome, CredentialStatus::Declined);
                 }
             }
+            CredentialUrlOp::Accepted => {
+                if let Some(page) = current.and_then(|ask| ask.page.as_ref()) {
+                    page.accepted.notify_one();
+                }
+            }
             CredentialUrlOp::Abandon => {
                 if current.is_some_and(|ask| ask.page.is_some() && ask.outcome.borrow().is_none())
                     && let Some(ask) = asked.remove(&job_id)
@@ -268,6 +312,32 @@ impl CredentialBroker {
             }
         }
         Ok(resp)
+    }
+
+    /// An accepted page nobody opened: ask through the native prompt for the
+    /// same prompt and outcome, so a waiting `request` sees its answer.
+    fn fall_back_to_native(&self, pty: &Arc<PtyRuntime>, job: &PageJob, outcome: &Outcome) {
+        {
+            let mut asked = self.asked.lock();
+            let Some(ask) = asked
+                .get_mut(&job.job_id)
+                .filter(|ask| Arc::ptr_eq(&ask.outcome, outcome))
+            else {
+                return;
+            };
+            if outcome.borrow().is_some() {
+                return;
+            }
+            ask.page = None;
+        }
+        spawn_owner_prompt(
+            Arc::clone(pty),
+            self.prompter.clone(),
+            job.job_id,
+            job.generation,
+            job.text.clone(),
+            Arc::clone(outcome),
+        );
     }
 
     /// An expired page: forget it so the next `Open` starts a fresh one.
@@ -300,11 +370,12 @@ fn settle(outcome: &Outcome, status: CredentialStatus) {
     });
 }
 
-fn response(job_id: JobId, status: CredentialStatus) -> CredentialRequestResponse {
+fn response(job_id: JobId, status: CredentialStatus, endpoint: &str) -> CredentialRequestResponse {
     CredentialRequestResponse {
         job_id,
         status,
-        command: (status == CredentialStatus::OwnerActionRequired).then(|| provide_command(job_id)),
+        command: (status == CredentialStatus::OwnerActionRequired)
+            .then(|| provide_command(job_id, endpoint)),
     }
 }
 
@@ -381,6 +452,11 @@ struct PageJob {
     token: String,
     text: PromptText,
     ttl: Duration,
+    /// Unopened this long after the client accepted: native prompt instead.
+    open_within: Duration,
+    accepted: Arc<tokio::sync::Notify>,
+    /// Set by the first request carrying the right Host and token.
+    opened: std::sync::atomic::AtomicBool,
 }
 
 async fn serve_page(
@@ -390,9 +466,14 @@ async fn serve_page(
     listener: TcpListener,
     outcome: Outcome,
 ) {
+    use std::sync::atomic::Ordering;
     let mut settled = outcome.subscribe();
     let expiry = tokio::time::sleep(job.ttl);
     tokio::pin!(expiry);
+    // Armed by the client's accept; the first valid request disarms it.
+    let unopened = tokio::time::sleep(job.ttl);
+    tokio::pin!(unopened);
+    let mut armed = false;
     loop {
         let mut stream = tokio::select! {
             () = &mut expiry => {
@@ -402,6 +483,14 @@ async fn serve_page(
             }
             // Declined, abandoned, or answered through another channel.
             _ = settled.wait_for(Option::is_some) => return,
+            () = job.accepted.notified(), if !armed => {
+                armed = true;
+                unopened
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + job.open_within);
+                continue;
+            }
+            () = &mut unopened, if armed && !job.opened.load(Ordering::Relaxed) => break,
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => stream,
                 Err(_) => continue,
@@ -437,6 +526,14 @@ async fn serve_page(
         // Single use: the listener closes when this task returns.
         return;
     }
+    // The client accepted but nobody opened the link: the owner saw nothing.
+    // Close the page first, so the two are never both answerable.
+    drop(listener);
+    tracing::info!(
+        job_id = %job.job_id.to_wire_string(),
+        "credential page not opened after the client accepted; asking through the native prompt"
+    );
+    broker.fall_back_to_native(&pty, &job, &outcome);
 }
 
 /// Serve one request. Returns the typed password for a valid POST; answers
@@ -477,6 +574,7 @@ async fn read_answer(stream: &mut TcpStream, job: &PageJob) -> Option<SecretBuf>
         let _ = reply(stream, "404 Not Found", "Not found.").await;
         return None;
     }
+    job.opened.store(true, std::sync::atomic::Ordering::Relaxed);
     match method {
         "GET" => {
             let _ = reply_page(stream, &job.text, job.ttl).await;
@@ -586,15 +684,17 @@ async fn write_response(stream: &mut TcpStream, status: &str, body: &str) -> std
     );
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body.as_bytes()).await?;
-    stream.shutdown().await?;
-    // Lingering close: wait for the client's FIN so closing with unread
-    // request bytes does not reset the connection before it reads this.
+    // Let the client close first (a browser does once it has
+    // Content-Length bytes), draining whatever it still sends; close
+    // ourselves only after this bound. An HTTP filter that proxies loopback
+    // (AdGuard on Windows) reset about 1 in 300 connections, the reply
+    // lost, when our FIN followed the reply at once.
     let mut sink = [0_u8; 512];
     let _ = tokio::time::timeout(Duration::from_secs(1), async {
         while matches!(stream.read(&mut sink).await, Ok(n) if n > 0) {}
     })
     .await;
-    Ok(())
+    stream.shutdown().await
 }
 
 pub(crate) fn wipe(buf: &mut [u8]) {
@@ -740,6 +840,8 @@ mod native {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
+    use terminal_commander_core::as_daemon_child;
+
     use super::{Asked, PromptText, SecretBuf, wipe};
 
     /// First available of `$SSH_ASKPASS`, then (on a desktop) `ssh-askpass`,
@@ -752,18 +854,18 @@ mod native {
         let mut helpers = Vec::new();
         if let Some(askpass) = std::env::var_os("SSH_ASKPASS").filter(|v| !v.is_empty()) {
             let mut c = Command::new(askpass);
-            c.arg(&label);
+            as_daemon_child(&mut c).arg(&label);
             helpers.push(c);
         }
         if desktop {
             let mut c = Command::new("ssh-askpass");
-            c.arg(&label);
+            as_daemon_child(&mut c).arg(&label);
             helpers.push(c);
             let mut c = Command::new("zenity");
-            c.args(["--password", "--title", &text.title]);
+            as_daemon_child(&mut c).args(["--password", "--title", &text.title]);
             helpers.push(c);
             let mut c = Command::new("kdialog");
-            c.args(["--title", &text.title, "--password", &text.message]);
+            as_daemon_child(&mut c).args(["--title", &text.title, "--password", &text.message]);
             helpers.push(c);
         }
         for helper in helpers {
@@ -798,7 +900,7 @@ mod native {
 
     /// Minimal Assuan exchange: `D <pin>` answers, a cancel `ERR` declines.
     fn pinentry(text: &PromptText) -> Option<Asked> {
-        let mut child = Command::new("pinentry")
+        let mut child = as_daemon_child(&mut Command::new("pinentry"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -922,9 +1024,35 @@ mod tests {
     #[test]
     fn only_owner_action_required_carries_the_cli_command() {
         let job = JobId::new();
-        let r = response(job, CredentialStatus::OwnerActionRequired);
-        assert_eq!(r.command.as_deref(), Some(provide_command(job).as_str()));
-        assert!(response(job, CredentialStatus::Declined).command.is_none());
+        let r = response(job, CredentialStatus::OwnerActionRequired, "/s/tc.sock");
+        assert_eq!(
+            r.command.as_deref(),
+            Some(
+                format!(
+                    "terminal-commander credential provide {} --socket /s/tc.sock",
+                    job.to_wire_string()
+                )
+                .as_str()
+            )
+        );
+        assert!(
+            response(job, CredentialStatus::Declined, "/s/tc.sock")
+                .command
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_cli_command_names_this_daemon_and_quotes_only_when_needed() {
+        let job = JobId::new();
+        assert!(
+            provide_command(job, r"\\.\pipe\terminal-commander-agent-1")
+                .ends_with(r" --socket \\.\pipe\terminal-commander-agent-1")
+        );
+        assert!(
+            provide_command(job, r"\\.\pipe\terminal-commander-Jo Smith")
+                .ends_with(r#" --socket "\\.\pipe\terminal-commander-Jo Smith""#)
+        );
     }
 
     #[cfg(windows)]
@@ -940,5 +1068,89 @@ mod tests {
         assert_eq!(w.last(), Some(&0));
         assert!(native::FLAGS.contains(CREDUI_FLAGS_DO_NOT_PERSIST));
         assert!(native::FLAGS.contains(CREDUI_FLAGS_GENERIC_CREDENTIALS));
+    }
+
+    /// Read one response the way a browser does: the head, then
+    /// `Content-Length` bytes, or to EOF when a proxy in the path dropped
+    /// that header; the caller then closes.
+    async fn read_response(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+        let mut got = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            if let Some(i) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&got[..i]).to_ascii_lowercase();
+                let len: Option<usize> = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok());
+                if len.is_some_and(|len| got.len() >= i + 4 + len) {
+                    return Ok(got);
+                }
+            }
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Ok(got);
+            }
+            got.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    /// A refused request is answered, never reset: the page leaves closing
+    /// to the client. Through a loopback HTTP proxy (AdGuard on Windows) an
+    /// early FIN reset about 1 in 300 such connections before the client
+    /// read a byte; stress-run this test to see it.
+    #[test]
+    fn a_refused_request_is_answered_not_reset() {
+        const RUNS: usize = 100;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut failures = Vec::new();
+            for i in 0..RUNS {
+                let listener = bind_loopback().unwrap();
+                let addr = listener.local_addr().unwrap();
+                let job = PageJob {
+                    job_id: JobId::new(),
+                    generation: 1,
+                    host: addr.to_string(),
+                    token: "t".repeat(64),
+                    text: PromptText {
+                        title: String::new(),
+                        message: String::new(),
+                    },
+                    ttl: Duration::from_mins(1),
+                    open_within: Duration::from_mins(1),
+                    accepted: Arc::new(tokio::sync::Notify::new()),
+                    opened: std::sync::atomic::AtomicBool::new(false),
+                };
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let _ = read_answer(&mut stream, &job).await;
+                });
+                let mut client = TcpStream::connect(addr).await.unwrap();
+                let body = "password=x";
+                let request = format!(
+                    "POST /{} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {}\r\n\r\n{body}",
+                    "0".repeat(64),
+                    body.len()
+                );
+                client.write_all(request.as_bytes()).await.unwrap();
+                match read_response(&mut client).await {
+                    Ok(raw) if raw.starts_with(b"HTTP/1.1 404") => {}
+                    Ok(raw) => failures.push(format!("run {i}: {}", String::from_utf8_lossy(&raw))),
+                    Err(e) => failures.push(format!("run {i}: {e}")),
+                }
+                drop(client);
+                server.await.unwrap();
+            }
+            assert!(
+                failures.is_empty(),
+                "{} of {RUNS}: {failures:?}",
+                failures.len()
+            );
+        });
     }
 }

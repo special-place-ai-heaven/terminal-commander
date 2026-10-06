@@ -137,6 +137,10 @@ enum CredentialOp {
     Provide {
         /// PTY job id from `credential_request` or `pty_command_list`.
         job_id: String,
+        /// Daemon endpoint to answer (as named by `credential_request`);
+        /// default: the one this terminal resolves.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
     },
 }
 
@@ -258,8 +262,8 @@ fn run(cli: Cli) -> std::process::ExitCode {
             } => run_session_reap(token.as_deref(), all, idle, idle_secs),
         },
         Command::Credential {
-            op: CredentialOp::Provide { job_id },
-        } => credential::run_provide(&job_id),
+            op: CredentialOp::Provide { job_id, socket },
+        } => credential::run_provide(&job_id, socket.as_deref()),
         Command::UpdateLocks { scope_dir } => {
             let result = update_locks::stop_installed_processes(&scope_dir);
             for line in &result.lines {

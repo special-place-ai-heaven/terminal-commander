@@ -1,5 +1,9 @@
 # WWS01 — Windows + WSL install UX contract for Terminal Commander
 
+> HISTORICAL / partly superseded as of 2026-10-05 (`lib/` and `bin/` paths below are under `packages/terminal-commander/`): written 2026-05-23 when Windows ran the
+> runtime only through WSL. Native Windows (`@terminal-commander/windows-x64`) is now the
+> default and the WSL bridge is opt-in (`TC_USE_LEGACY_WSL_BRIDGE=1`). Current: `../install/README.md`.
+
 Status: WWS01 deliverable.
 Branch: `main`.
 Date: 2026-05-23.
@@ -219,8 +223,8 @@ setup-time hosting). Bridge visibility is load-bearing EDR legitimacy — the
 operator sees `wsl.exe` start the MCP session.
 
 **Daemon runtime** children (`command_start_combed` via `ProcessProbe::spawn` in
-`crates/probes/src/process.rs`, and the one-shot `wsl.exe` bootstrap in
-`wsl_username` in `crates/daemon/src/environment/wsl.rs`) **must** use
+`crates/probes/src/process.rs`, and the `wsl.exe` discovery probes in
+`crates/daemon/src/environment/probe.rs`) **must** use
 `CREATE_NO_WINDOW` (`0x08000000`) through the shared `windows_silent()` helper
 in `crates/core/src/platform.rs`. Those processes are LLM payload children with
 no operator console expectation; allocating a visible console is outward-filter
@@ -609,8 +613,8 @@ the public-facing UX will be broken:
 - A second bootstrap dispatch with a corrected root package is
   possible only if every package is bumped to `0.1.0-beta.2`
   (because the bootstrap workflow refuses to re-publish names
-  that already exist; see `.github/workflows/npm-bootstrap-publish.yml`
-  pre-publish E404 check). Publishing a known-broken `beta.1`
+  that already exist; see the pre-publish E404 check in the bootstrap
+  workflow `npm-bootstrap-publish.yml`, deleted 2026-10-05). Publishing a known-broken `beta.1`
   burns one beta number.
 - The bootstrap workflow's `NPM_TOKEN_TC` is a one-time policy
   exception. Burning it on a publish that immediately needs a
@@ -620,7 +624,9 @@ Therefore: WWS01 RECOMMENDS that operator does NOT dispatch
 `npm-bootstrap-publish.yml` until the WWS chain reaches at least
 WWS08 (`Completed`). WWS09 reconfirms or amends this
 recommendation based on whatever real smoke evidence WWS07
-produces.
+produces. (Update 2026-10-05: that workflow was deleted and publishing
+goes through `release-please.yml` (OIDC trusted publishing), so this
+recommendation is moot.)
 
 ## 15. Open decisions resolved (binding answers)
 

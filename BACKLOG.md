@@ -12,6 +12,15 @@ Language: ASCII only.
 
 ## Omni completion program (as_of 2026-06-16; on review branches, NOT merged)
 
+> Update 2026-10-05: MERGED. No `feature/omni-*` ref exists any more and
+> the slice code is on `main` (e.g. `crates/daemon/tests/shell_session_ipc.rs`,
+> the `portable-pty` / `notify` dependencies in `crates/probes`, 25 packs in
+> `crates/store/rules/`; omni PRs such as #99 and #182). The live MCP
+> catalogue is now 60 tools (`docs/mcp/TOOL_CONTROL_SURFACE.md`), not 49.
+> The text below is the 2026-06-16 snapshot and its "open before 1.0.0" list
+> is otherwise unchanged (O-07/O-08/O-09/O-10/O-14 and the P4 threat review
+> were not re-verified).
+
 The omni-completion program (`specs/001-omni-completion/`) landed on stacked
 per-slice review branches (paused before merge/push for human review):
 
@@ -37,6 +46,20 @@ per-slice review branches (paused before merge/push for human review):
 Open before a 1.0.0: merge the review branches (human-gated); close O-07
 (ConPTY child-output on a real Windows desktop/CI), O-08 (macOS host), O-09/O-10
 (SSH/container), O-14 (provider trust smokes); complete the P4 threat review.
+
+Update 2026-10-05, status of each gate from code/CI (a CI run result itself is
+not visible from the repo):
+O-07 DONE in CI wiring: `scripts/windows-gate.ps1` runs the live ConPTY
+child-output e2e with `TC_CONPTY_E2E=1` on GitHub Actions and refuses a
+vacuous pass; local hosts without ConPTY still need the opt-in.
+O-08 STILL OPEN: `omni-o-runner.py` only runs it on macOS and no workflow runs
+`verify-omni-macos.sh` (the `verify-mac-*` release jobs only smoke the published
+package). O-09/O-10 STILL OPEN: the runner skips both ("needs-ssh-remote-host",
+"needs-container-runtime"); `remote_federation_e2e.rs` covers a second local
+socket only. O-14 NOT DETERMINABLE from the repo: a human must run a real
+provider session (`docs/integrations/omni-harness-smoke.md`). P4 threat review
+STILL OPEN: `docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md` is
+BLOCKED-ON-REVIEW, and `system_discover` reports `threat_review_pending`.
 
 ## P0 — Beta blockers (none active)
 
@@ -95,7 +118,12 @@ surface; only PTY had `pty_command_stop`.
 forced-kill-only, returning final bounded counters and never raw
 output. The tool count moved 37->38 with the atomic count-anchor set.
 
-### P1.0c — TC-4: anonymous runtime_state probe rows + run_and_watch tag:None
+### P1.0c — TC-4: anonymous runtime_state probe rows + run_and_watch tag:None (RESOLVED)
+
+> Update 2026-10-05: RESOLVED by commit `3b7e719` (`ProbeListEntry` carries
+> `tag` + a redacted `argv_head`; `collect_probes` in
+> `crates/daemon/src/ipc/handlers/runtime.rs` fills both). The
+> evidence and proposal below are the original, pre-fix text.
 
 **Source:** TC trust-defects campaign, Phase 4
 (`.planning/tc-bugfix-campaign/PLAN-TC4-probe-identity.md`).
@@ -122,7 +150,12 @@ secret-shaped flags); lift tag in `collect_probes`; fix
 `crates/mcp/src/tools.rs`, `crates/cli/src/render.rs`,
 `tests/fixtures/contracts/mcp-tools/runtime_state.v1.json`.
 
-### P1.0d — TC-5: self_check is false-green (never spawns a command)
+### P1.0d — TC-5: self_check is false-green (never spawns a command) (RESOLVED)
+
+> Update 2026-10-05: RESOLVED by commit `d136e95` (`handle_self_check` is
+> async and runs a real round-trip via the hidden `selfcheck-noop`
+> subcommand; test `crates/daemon/tests/selfcheck_noop_subcommand.rs`).
+> The text below is the original, pre-fix text.
 
 **Source:** TC trust-defects campaign, Phase 5
 (`.planning/tc-bugfix-campaign/PLAN-TC5-selfcheck-spawn.md`).
@@ -146,7 +179,11 @@ exits-0 test.
 `crates/daemon/src/state.rs`, `crates/daemon/src/main.rs`,
 `crates/ipc/src/protocol.rs`.
 
-### P1.0e — TC-6: run_and_watch wait_ms cap self-violation
+### P1.0e — TC-6: run_and_watch wait_ms cap self-violation (RESOLVED)
+
+> Update 2026-10-05: RESOLVED by commit `cca9f06` (wall-clock `Instant`
+> deadline in the `run_and_watch` wait loop, `crates/mcp/src/tools.rs`).
+> The text below is the original, pre-fix text.
 
 **Source:** TC trust-defects campaign, Phase 3
 (`.planning/tc-bugfix-campaign/PLAN-TC1b-TC6-waitloop.md`).
@@ -167,7 +204,7 @@ deadline-exit. Co-implemented with TC-1b.
 **Scope:** `crates/mcp/src/tools.rs`,
 `tests/fixtures/contracts/mcp-tools/run_and_watch.v1.json`.
 
-### P1.0f — adapter transport misclassifies load-induced failures
+### P1.0f — adapter transport misclassifies load-induced failures (RESOLVED, commit `f61411d`)
 
 **Source:** dogfood round 2026-07-02
 (`docs/dogfood/2026-07-02-tc-0.1.70-dogfood-findings.md`, bug 5).
@@ -248,7 +285,12 @@ Evidence: `specs/002-dogfood-remediation/evidence-wave1.md`,
 
 ## P1 — Pre-existing high priority follow-ups
 
-### P1.1 — Explicit daemon-side `frames_suppressed` counter
+### P1.1 — Explicit daemon-side `frames_suppressed` counter (RESOLVED)
+
+> Update 2026-10-05: RESOLVED. `frames_suppressed`,
+> `frames_suppressed_progress` and `frames_suppressed_dedupe` exist in the
+> command metrics (`crates/daemon/src/command.rs`; introduced with the TC11
+> noise wiring, commit `590addf`). The text below is the TC47-era text.
 
 **Source:** TC47 final report.
 **Evidence:** `crates/probes/src/process.rs`, `crates/probes/src/file.rs`,
@@ -266,7 +308,7 @@ rejects a frame via `Dedupe` or `NoisePolicy`, and surface it in
 `runtime_state` / `probe_list` / `probe_status` `ProbeListEntry`.
 **Scope:** narrow product-code change touching
 `crates/probes/src/*.rs` + `crates/sifters/src/*.rs` +
-`crates/daemon/src/ipc/protocol.rs` re-export.
+`crates/daemon/src/ipc/mod.rs` re-export.
 
 ### P1.2 — Codex CLI provider-harness live smoke
 
@@ -305,7 +347,7 @@ copy-pasteable configs ship at `docs/integrations/cursor.md` and
 `examples/provider-harness/cursor/`.
 **Impact:** Beta cannot be called fully provider-validated against
 Cursor until an operator opens Cursor with one of the example
-configs, confirms the 29-tool catalogue in `Settings -> MCP`, and
+configs, confirms the tool catalogue (60 tools at 2026-10-05) in `Settings -> MCP`, and
 captures a real tool-call transcript or screenshot.
 **Proposed work:** Operator copies one of
 `examples/provider-harness/cursor/mcp.global.native-linux.json`,
@@ -335,6 +377,14 @@ WRONG and is retracted. `release-please.yml` publishes with
 names". #163 therefore published by TOKEN. Trusted publishing remains
 unconfigured and Task 23 still owns the cutover.
 
+> Update 2026-10-05: the Task 23 cutover LANDED (commit `23a407a`,
+> 2026-08-07). `release-please.yml` now publishes npm packages with OIDC
+> trusted publishing and `npm publish --provenance`, requests `id-token:
+> write` on the publish jobs, and has no `NODE_AUTH_TOKEN` on them (its
+> header says `NPM_TOKEN_TC` was removed at Task 23; crates.io still uses
+> `CARGO_REGISTRY_TOKEN_TC`). The paragraph above describes the state on
+> 2026-08-07 before that cutover. Current version is 0.3.11.
+
 Publishing is a normal two-gate flow, NOT automatic on a feature merge:
 merging a Conventional-Commits `feat:`/`fix:` PR to `main` makes
 release-please open/update a release PR; merging THAT release PR bumps the
@@ -344,8 +394,8 @@ version and fires the publish jobs.
 
 **Source:** NPM10 goal file +
 `docs/release/npm-bootstrap-first-publish.md` §5.3.
-**Evidence:** `.github/workflows/npm-bootstrap-publish.yml` is the
-ONE-TIME `NPM_TOKEN_TC` path; the intended standing capability is OIDC
+**Evidence:** `.github/workflows/npm-bootstrap-publish.yml` (now deleted)
+was the ONE-TIME `NPM_TOKEN_TC` path; the intended standing capability is OIDC
 trusted publishing via `release-please.yml`.
 **Status (2026-08-07): BLOCKED, not actionable — precondition unmet.**
 An earlier revision of this entry called it "ACTIONABLE, and now overdue"
@@ -359,9 +409,25 @@ What is still true, at lower severity than previously recorded: the
 bootstrap workflow remains `workflow_dispatch`-able and is a redundant
 second manual publish route. It does NOT expose a new credential class,
 since the standing workflow uses the same token.
+> Update 2026-10-05: the stated precondition (Task 23 OIDC cutover) is now
+> MET (commit `23a407a`; `release-please.yml` no longer uses `NPM_TOKEN_TC`).
+> `.github/workflows/npm-bootstrap-publish.yml` is still present and still
+> reads `secrets.NPM_TOKEN_TC`; so does `.github/workflows/deprecate-version.yml`
+> (its `npm deprecate` step). Owner-reported facts, 2026-10-05 (not
+> checkable from the repo): `NPM_TOKEN_TC` was replaced that day with a
+> granular, stage-only token scoped to `terminal-commander` and the
+> `@terminal-commander` scope (it can deprecate versions but cannot publish
+> directly), publishing uses OIDC, and the weekly secret-health probe passes
+> again. So step 2 (rotate) is DONE; step 1 (disable or delete the
+> bootstrap workflow) was STILL OPEN at that time, as are steps 3 and 4.
+
+> Update 2026-10-05 (later): `.github/workflows/npm-bootstrap-publish.yml`
+> is deleted, so step 1 is DONE. `NPM_TOKEN_TC` is now read only by
+> `deprecate-version.yml`. Steps 3 and 4 remain open.
+
 **Proposed work (post-Task-23 OIDC cutover, in this order):**
-1. Delete `.github/workflows/npm-bootstrap-publish.yml` OR rename
-   it to `.disabled` so GitHub Actions stops indexing it.
+1. (DONE 2026-10-05) Delete `.github/workflows/npm-bootstrap-publish.yml`
+   OR rename it to `.disabled` so GitHub Actions stops indexing it.
 2. Rotate / invalidate `NPM_TOKEN_TC` on npmjs.com.
 3. Update `docs/release/` to record that `NPM_TOKEN_TC` is
    decommissioned and OIDC trusted publishing is the only
@@ -381,7 +447,8 @@ NOT Terminal Commander's signal pipeline.
 **Impact:** A dedicated load test would primarily measure the
 polling boundary. Useful only after the polling backend is replaced
 with native notify/inotify (currently out of scope per the TC43
-prep amendment).
+prep amendment; update 2026-10-05: a `notify` backend has since shipped in
+omni P3, with the poll fallback kept for WSL `/mnt/c`).
 **Proposed work:** Either (a) accept the polling boundary and skip
 the dedicated test, or (b) land native notify/inotify under a new
 goal, then add the load test.
@@ -428,8 +495,9 @@ shell-driven repeatability might earn its keep.
 
 ### P3.3 — Provider config templates for additional MCP clients
 
-Today: Codex CLI + Claude Code. Adding templates for additional
-MCP-capable clients (Continue, Cursor, Cline, etc.) is opportunistic.
+Today (2026-10-05): Codex CLI, Claude Code, Cursor, Gemini, Kimi and OMP
+have pages under `docs/integrations/`. Adding templates for further
+MCP-capable clients (Continue, Cline, etc.) is opportunistic.
 
 ## DEFERRED — TC trust-defects campaign (tracked, not dropped)
 
@@ -442,7 +510,7 @@ is not lost.
 |----|------|--------------|----------------------|
 | TCD-1 | Server-honored idempotency key on `RequestEnvelope` (F1-b) | With the blind retry removed (P0.1) and the in-flight dedup landed (P1.0a), both the automatic and realistic manual double-spawn windows close without a wire/protocol change. The full key protocol has unresolved design (client-id vs argv/cwd/window fingerprint, TTL, persistence). Tracked in RISK_REGISTER R-07. | `crates/ipc/src/protocol.rs` (RequestEnvelope has no key); `crates/daemon/src/command.rs:572-581` (start_combed) |
 | TCD-2 | Pre-spawn async ack handshake (F1-c) | Rewrites the spawn-failure contract (`command.rs:548-560` must flip an already-acked Starting job to Failed) and exposes a new Starting liveness at the wire boundary; research confirms it STILL double-spawns under blind retry unless paired with a dedup guard, so it is redundant once P0.1 + P1.0a exist. Highest-blast-radius machinery. Tracked in R-07. | `crates/daemon/src/command.rs:548-560` (spawn-failure early return) |
-| TCD-3 | `command_stop` graceful grace window (F4) | `ProcessProbeConfig.grace` exists but is "advisory; cancellation in MVP is forced kill only"; wiring a SIGTERM-then-SIGKILL window is net-new probe work, not tool exposure. `command_stop` ships forced-kill-only (parity with `PtyRuntime::stop`). | `crates/probes/src/process.rs:47` (grace advisory) |
+| TCD-3 | `command_stop` graceful grace window (F4) (update 2026-10-05: omni P3 TC58 added a SIGTERM->SIGKILL terminate ladder shared by command/PTY/session stop per ROADMAP.md; not re-verified for `command_stop` here) | `ProcessProbeConfig.grace` exists but is "advisory; cancellation in MVP is forced kill only"; wiring a SIGTERM-then-SIGKILL window is net-new probe work, not tool exposure. `command_stop` ships forced-kill-only (parity with `PtyRuntime::stop`). | `crates/probes/src/process.rs:47` (grace advisory) |
 | TCD-4 | Change the numeric JSON-RPC code of `transport_unavailable_error` away from -32603 | Phase 1 fixes the BEHAVIOR (no retry of mutating ops) and the misleading remedy text; whether to also change the wire numeric code for clients keying off -32603 is a separate decision with client-compat implications. Tracked in R-07. | `crates/mcp/src/tools.rs:1808` (`McpError::internal_error`) |
 | TCD-5 | Retrofit policy-gating onto the ungated `pty_command_stop` | Out of TC-1..TC-6 scope. `command_stop` is gated correctly via the dormant `CommandSignal`; PTY symmetry is a separate conformance item. | `crates/daemon/src/pty_command.rs:526-571` (`PtyRuntime::stop` ungated) |
 | TCD-6 | A real `drop_bucket` seam (`BucketManager` + `BucketSourceTable.remove`) | TC-5 reuses ONE cached immortal self-check bucket instead, honoring the existing immortal-bucket invariant. A reclamation seam is larger blast radius and not required. | `crates/.../source.rs:12-17` (immortal-bucket invariant; no remove) |
@@ -455,7 +523,7 @@ is not lost.
 |-------------------------|-------------|-------|
 | persistent audit writes | TC35        | `PersistentAudit` is the production audit path; the IPC server writes one audit row per accepted request. |
 | local UDS IPC           | TC37        | `IpcServer` binds `<data_dir>/terminal-commanderd.sock`; PeerCred records uid/gid/pid on connect; no network listener. |
-| rmcp stdio adapter      | TC40        | `terminal-commander-mcp` serves an rmcp 1.7.0 stdio adapter that forwards every tool call through the daemon UDS. |
+| rmcp stdio adapter      | TC40        | `terminal-commander-mcp` serves an rmcp 1.7.0 stdio adapter (now `rmcp =3.4.1`, workspace `Cargo.toml`) that forwards every tool call through the daemon UDS. |
 | PTY spawn               | TC44        | `pty-process = "=0.5.3"` drives the POSIX PTY spawn; secret-prompt boundary enforced via `IpcErrorCode::SecretInputDenied`. |
 | MCP command + bucket    | TC41        | `command_start_combed`, `bucket_events_since`, `bucket_wait`, `bucket_summary`, `command_status` all live through MCP. |
 | File read/search/watch  | TC43        | `file_read_window`, `file_search`, `file_watch_start/stop/list` all live and bounded. |
@@ -485,6 +553,6 @@ landed); they are post-publish enhancements.
 | WWS-B4 | `terminal-commander setup cursor-wsl --uninstall` | D-14 rollback (partial at WWS06). The WWS05 writer already produces `<mcp.json>.bak`; the uninstall flow restores it. NOT implemented at WWS06. |
 | WWS-B5 | Multi-distro interactive ask-once prompt | D-07 future enhancement. At WWS06 operators must pass `--distro <name>` or set `TC_WSL_DISTRO` when no default distro is available; the CLI emits `no_default_distro_ambiguous` with the candidate list. A future `--interactive` flag may add a prompt. |
 | WWS-B6 | Full WSL-side `pair accept` handshake | At WWS06 `pair create` persists `pair.json`; `pair accept` validates the 6-digit shape + persisted-code match → `pair_accepted` or `pair_deferred`. The WSL-side daemon session token exchange is deferred. |
-| WWS-B7 | Credential broker for `--install-wsl-runtime` permission failures | At WWS06 the install probe returns `install_permission_required` honestly when the inside-WSL npm install hits EACCES; Terminal Commander does NOT prompt for passwords or run sudo. Future work may add a safe broker that does NOT forward LLM-supplied credentials through MCP / chat / bucket / log / audit / env / Cursor config. |
-| WWS-B8 | `npm-bootstrap-publish.yml` disable / rotate after first publish | Inherited from NPM10 (BACKLOG P1.5b). The workflow exists but stays committed-but-undispatched. |
+| WWS-B7 | Credential broker for `--install-wsl-runtime` permission failures (update 2026-10-05: a separate owner-only credential elicitation path now exists, MCP `credential_request` plus `crates/daemon/tests/credential_ipc.rs`; whether it covers the WSL install probe was not verified) | At WWS06 the install probe returns `install_permission_required` honestly when the inside-WSL npm install hits EACCES; Terminal Commander does NOT prompt for passwords or run sudo. Future work may add a safe broker that does NOT forward LLM-supplied credentials through MCP / chat / bucket / log / audit / env / Cursor config. |
+| WWS-B8 | `npm-bootstrap-publish.yml` disable / rotate after first publish | Inherited from NPM10 (BACKLOG P1.5b). **DONE 2026-10-05:** the workflow is deleted and the token was rotated. |
 | WWS-B9 | CAP01 capability-registry contract (future doctrine) | Recorded as doctrine carry-forward through the WWS chain. The registry would formalize the "tentacle = programmable probe = policy-gated capability executor" model. NOT started; NOT scheduled. |

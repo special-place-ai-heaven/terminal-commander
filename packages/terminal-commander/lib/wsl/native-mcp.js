@@ -15,10 +15,13 @@ function isWindowsMountedShimPath(filePath) {
   return process.platform === "linux" && norm.startsWith("/mnt/");
 }
 
+// No startup files (non-login, stdin ignored): PATH is set explicitly, and a
+// startup file that exits early would make the runtime look missing.
 function findNativeLinuxMcp() {
-  const r = spawnSync("bash", ["-lc", `${LINUX_PATH_PREFIX}command -v terminal-commander-mcp`], {
+  const r = spawnSync("bash", ["-c", `${LINUX_PATH_PREFIX}command -v terminal-commander-mcp`], {
     encoding: "utf8",
     shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
   });
   if (r.status !== 0) return null;
   const line = (r.stdout || "").trim().split(/\r?\n/)[0];

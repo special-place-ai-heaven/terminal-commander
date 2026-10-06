@@ -34,10 +34,10 @@ TC is a two-process system (per `docs/research/_USER_DECISIONS.md`):
         |                             |
         v                             v
   terminal-commander-mcp        terminal-commanderd
-  (rmcp 1.8.0 stdio,            (long-running daemon,
+  (rmcp 3.4.1 stdio,            (long-running daemon,
    spawned per-MCP-session)      single instance per user)
         |                             |
-        |    local IPC (TC21)         |
+        |    local IPC (UDS / pipe)   |
         +----------------------------->
 ```
 
@@ -72,15 +72,16 @@ It does NOT:
 - write to the audit log directly (the daemon writes audit; the MCP
   server is itself audited as an actor).
 
-This separation is structural, not merely conventional. The MCP
-binary contains no `std::process::Command::spawn`, no
-`tokio::fs::File::open` outside its own config, and no privileged
-APIs. TC22 verification (and TC29) MUST include a grep-test on the
-`terminal-commander-mcp` crate confirming this.
+This separation is structural, not merely conventional. `crates/mcp/src`
+contains no `Command::new`/`Command::spawn`, no `TcpListener`/`UdpSocket`
+(MCP guard 1) and no direct filesystem access: `tokio::fs`, `std::fs`,
+`File::open`, `read_to_string` (MCP guard 2). Both guards are grep checks
+in `scripts/linux-gate.sh`, run by CI. (Daemon bring-up is done by the
+`crates/supervisor` library the adapter links, not by adapter source.)
 
 ## 4. The local transport
 
-The MCP transport for MVP is rmcp 1.8.0 stdio (per
+The MCP transport is rmcp 3.4.1 stdio (per
 `docs/research/mcp-transport-pattern.md` and the locked decision in
 `_USER_DECISIONS.md`). Implications:
 
@@ -92,13 +93,13 @@ The MCP transport for MVP is rmcp 1.8.0 stdio (per
   owner's one-shot password page to `127.0.0.1` (random port, single-use
   token, 300 s) for URL-mode elicitation.
 - Each MCP session has a fresh `terminal-commander-mcp` process.
-- The daemon transport (MCP <-> daemon IPC) is TC21-deferred.
-  Candidate transports MUST be local-only: Unix domain socket with
-  `0600` perms, or anonymous pipe, or Windows named pipe under WSL.
-  No `127.0.0.1:PORT` TCP listener.
+- The daemon transport (MCP <-> daemon IPC) is a local-only endpoint:
+  a Unix domain socket on Unix and a named pipe on Windows. There is no
+  `127.0.0.1:PORT` TCP listener for IPC. The code sets no explicit file
+  mode on the socket (no permission call exists in `crates/daemon/src`);
+  it sits in the per-user state directory.
 
-This deferral is recorded in `ASSUMPTIONS.md` and as the open
-question logged in `RISK_REGISTER.md`.
+TC21 settled the transport; see `ARCHITECTURE.md` section 2.3.
 
 ## 5. The privileged-helper question (deferred)
 
@@ -158,13 +159,15 @@ The planned shape (each element gated by the review):
   approval token bound to the exact op + params, single-use and
   short-lived, authorizes execution. The LLM can request and retry but
   can never approve.
-- **`allow_privileged` capability.** Gated by `[policy.caps]
-  allow_privileged` (default false; POLICY.md section 4.1), evaluated by
-  the same policy engine as every other action. Per-call authorization,
-  not per-session. Off-list ops are refused regardless of approval.
+- **`allow_privileged` capability.** Planned gate: `[policy.caps]
+  allow_privileged`, evaluated by the same policy engine as every other
+  action, per call, not per session; off-list ops refused regardless of
+  approval. Today no helper exists, nothing reads the key, and the daemon
+  names it as a config warning (POLICY.md section 4.1).
 - **Audit before exec.** Every privileged op emits a high-severity audit
   record (redacted subject) BEFORE execution. The audit log stays
-  daemon-owned, `0600`, and NEVER LLM-readable (section 8).
+  daemon-owned; LLM access is the read-only `audit_since` tool only
+  (section 8).
 
 The full attack-surface analysis, the closed-allow-list rationale, the
 approval-token threat model, and the "why no generic sudo / no shell
@@ -185,8 +188,8 @@ profile does not apply it:
 
 The daemon's policy engine refuses to spawn them even if the LLM
 client requests them, and refuses to spawn ANY argv whose `argv[0]`
-basename matches. The audit record reads
-`decision=deny reason=command_denied`.
+basename matches. The audit record reads `decision=deny` with a reason
+starting `command '<name>' is in the closed deny set`.
 
 Under a hardened profile there is no path through the MCP boundary that
 bypasses this.
@@ -212,14 +215,17 @@ Per `docs/research/wsl-boundary.md`:
 `audit_log` is owned by `terminal-commanderd`. Access:
 
 - The daemon writes records (append-only from its perspective).
-- The operator reads records via `admin_cli` (TC25). The admin CLI
-  talks to the daemon over the same local IPC the MCP server uses,
-  but is restricted to the `admin_debug` profile (see `POLICY.md`
-  section 2.4).
-- The MCP client (LLM) NEVER reads the audit log.
-- File-system permissions: audit log file is `0600`, owned by the
-  daemon's uid. Operator may copy it under their own user once the
-  daemon flushes.
+- The operator reads records via `admin_cli` (`terminal-commander
+  audit`). The admin CLI talks to the daemon over the same local IPC the
+  MCP server uses; no profile restriction on it is implemented.
+- The MCP client (LLM) can read the audit log through the read-only,
+  bounded `audit_since` tool (cursor plus limit; rows carry redacted
+  subjects). This is deliberate: added in commit 9a335c2, pinned by
+  `tests/fixtures/contracts/mcp-tools/audit_since.v1.json` and the
+  `mcp_live_daemon` / `mcp_stdio` tests.
+- Storage: audit rows are in the daemon's SQLite database
+  (`audit_records`, `docs/storage/AUDIT_LOG.md`). The code sets no
+  explicit `0600` mode on it.
 
 Audit tamper-resistance (hash chains, off-host shipping) is OUT OF
 MVP scope and documented as post-MVP in `SECURITY.md` section 9.
@@ -232,28 +238,29 @@ Quick reference: which component is allowed to do what, BY DESIGN.
 |---|---|---|---|---|---|
 | Issue MCP tool calls | yes | (receives them) | (services them) | no | no |
 | Spawn command | no | NO | yes (policy-gated) | no (probes are spawned BY the daemon) | yes (operator, gated) |
-| Open file | no | only its own config | yes (policy-gated, cap-std) | only what it inherited as Dir handles | yes (operator, gated) |
+| Open file | no | NO (guard 2) | yes (policy-gated) | inherited handles only | yes (operator, gated) |
 | Write registry | no (proposal yes, activate no) | (forwards) | yes (policy-gated) | no | yes (operator) |
-| Read audit log | NO | no | (writes it) | no | yes (operator, admin_debug only) |
-| Open network socket | no | NO | no (MVP) | no | no |
-| Sudo / pkexec | no | NO | NO | NO | NO |
+| Read audit log | yes (`audit_since`, read-only) | forwards | (writes it) | no | yes (operator) |
+| Open network socket | no | NO (no TCP/UDP listener) | only the loopback credential page (single-use, 300 s) | no | no |
+| Sudo / pkexec | no | NO | hardened profiles: NO; default `full_access`: runs it as an audited argv | follows the daemon | NO |
 | Modify profile at runtime | no | no | no (MVP: restart only) | no | no |
 
-`NO` in caps marks rules that are STRUCTURAL in MVP (the code path
-does not exist), not merely policy-denied.
+`NO` in caps marks rules that are STRUCTURAL (the code path does not
+exist in that component), not merely policy-denied. The daemon's sudo
+cell is policy, not structure.
 
 ## 10. Verification expectations
 
 TC29 (security hardening + fuzz-like tests) MUST verify, at minimum:
 
-1. `terminal-commander-mcp` contains no `Command::spawn` or
-   equivalent process-spawn API call (grep test).
-2. `terminal-commander-mcp` contains no `bind`, `connect`, or TCP/UDP
-   listener (grep test on `tokio::net` and `std::net`).
+1. `terminal-commander-mcp` contains no `Command::new`/`Command::spawn`
+   (MCP guard 1 in `scripts/linux-gate.sh`).
+2. `terminal-commander-mcp` contains no `TcpListener`/`UdpSocket` (guard
+   1) and no direct filesystem call (guard 2). Local IPC client use is
+   allowed.
 3. Every hardened profile parses with `sudo`, `doas`, `su`, `pkexec`,
    `kexec` in `commands.deny` (the default `full_access` applies none).
-4. The audit log is `0600` and owned by the daemon uid (filesystem
-   test).
+4. (Not implemented: no test or code sets a mode on the audit store.)
 5. Under a hardened profile, attempting to spawn `sudo` via the MCP tool surface results in a
    `deny` audit record AND a policy error to the caller, and no
    process is created.

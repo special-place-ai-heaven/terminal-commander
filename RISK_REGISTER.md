@@ -1,6 +1,8 @@
 # Terminal Commander - Risk Register
 
-Status: TC48 beta gate snapshot.
+Status: TC48 beta gate snapshot. Reviewed against the code on 2026-10-05:
+R-02, R-04, R-07, R-08 and R-09 are resolved (H-10 to H-14 below), and
+R-03 and R-05 are corrected in place. R-01 is not re-verified.
 
 Tracks open risks against the runtime chain (TC33-TC47) as it
 stands on `main` today. Each row carries: ID, area, description,
@@ -37,7 +39,9 @@ recommendation is `Conditional Go` because of this risk.
 where the test owns both input volume and matching rule; real
 beta operators inspecting `runtime_state` / `bucket_summary`
 cannot see suppression counts directly.
-**Status:** Open.
+**Status:** Resolved (H-10): `ProbeListEntry` now carries
+`frames_suppressed`, `frames_suppressed_progress` and
+`frames_suppressed_dedupe` (`crates/ipc/src/protocol.rs`).
 **Mitigation:** TC47 documented this in its final report and
 filed BACKLOG P1.1. The existing counters (`frames_total`,
 `events_emitted`, `bytes_total`) plus `BucketSummary.dropped_count`
@@ -45,12 +49,15 @@ expose enough state to detect aggregate noise even without the
 explicit suppression counter.
 **Follow-up:** BACKLOG P1.1.
 
-### R-03 — File-watch backend is poll-based at 120 ms
+### R-03 — File-watch backend is poll-based on WSL 9p mounts (250 ms)
 
 **Area:** Realtime latency / TC43.
-**Description:** `crates/probes/src/file.rs` polls. Sustained
-megabyte-per-second append rates are bounded by the polling
-interval, not Terminal Commander's pipeline.
+**Description:** Native filesystems use an event-driven `notify`
+backend (US3b, commit 2e636b5); `crates/probes/src/file.rs` still
+polls (`DEFAULT_POLL_INTERVAL` = 250 ms) on WSL `/mnt/c` (9p/drvfs),
+where inotify does not work. There, sustained megabyte-per-second
+append rates are bounded by the polling interval, not Terminal
+Commander's pipeline.
 **Status:** Accepted for beta.
 **Mitigation:** Documented in the TC43 prep amendment. Bounded
 caps still hold; nothing leaks. A native notify/inotify backend
@@ -62,7 +69,11 @@ is out of scope and would be its own goal.
 **Area:** Platform support / TC44.
 **Description:** `pty-process = "=0.5.3"` is `cfg(unix)`. The
 PTY runtime is gated; the MCP adapter on Windows refuses to start.
-**Status:** Accepted for beta.
+**Status:** Resolved for `pty_command_*` (H-11): the PTY runtime is
+now dual-backend (unix PTY plus Windows ConPTY; `collect_probes` in
+`crates/daemon/src/ipc/handlers/runtime.rs` lists PTYs under
+`cfg(any(unix, windows))`). `shell_session_*` stays unix-only
+(`docs/runtime/SHELL_SESSION.md`). Original status: Accepted for beta.
 **Mitigation:** Documented across TC40 / TC44 docs. WSL2 is the
 supported Windows path. Non-Unix builds return
 `IpcErrorCode::UnsupportedPlatform`.
@@ -79,7 +90,8 @@ evolve.
 **Status:** Open.
 **Mitigation:** Both docs link the upstream documentation. The
 adapter binary (`terminal-commander-mcp`) is stdio-only and
-spec-stable per MCP 2024-11-05; changes are likely to be in the
+tracks MCP revision 2026-07-28 (it also accepts 2025-11-25 and
+2025-06-18; `SUPPORTED_PROTOCOL_VERSIONS` in `crates/mcp/src/tools.rs`); changes are likely to be in the
 provider-side wrapper config, not the adapter.
 **Follow-up:** Operator-driven refresh when providers publish a
 schema update.
@@ -116,7 +128,12 @@ internal_error (-32603)". There is also no daemon-side dedup guard
 (`crates/daemon/src/command.rs` `start_combed` has no pre-spawn
 lookup; `RequestEnvelope` has no key), so a manual/LLM re-call of a
 timed-out start also double-spawns.
-**Status:** Open.
+**Status:** Resolved for Phases 1 and 2 (H-12): the retry path now
+re-sends only never-sent or `IpcRequest::is_idempotent()` requests
+(`crates/mcp/src/daemon_client.rs`, `crates/ipc/src/protocol.rs`), and
+`CommandStartParams` carries an in-flight `dedup_nonce`
+(`crates/daemon/src/command.rs`). TCD-1, TCD-2 and TCD-4 below were
+not re-verified.
 **Mitigation:** Phase 1 (BACKLOG P0.1) gates the retry on a new
 `IpcRequest::is_idempotent()` so mutating RPCs are not auto-retried,
 splits self-heal from re-send, and replaces the "retry the tool"
@@ -144,7 +161,9 @@ campaign.
 during a real outage (e.g. the TC-1/TC-6 window) receives a false
 GREEN — the health probe does not exercise the spawn path it
 implicitly attests.
-**Status:** Open.
+**Status:** Resolved (H-13): `handle_self_check` now runs a real
+spawn probe (`selfcheck_spawn_probe`,
+`crates/daemon/src/ipc/server.rs`).
 **Mitigation:** Phase 5 (BACKLOG P1.0d) makes `handle_self_check`
 async and adds a profile-gated bounded real round-trip that spawns
 `current_exe()` as a hidden clap subcommand
@@ -168,7 +187,9 @@ wall vs the 60000ms advertised. Separately, a mid-wait IPC error
 after a job_id is known discards the live job handle
 (`tools.rs:665`, `:703`) instead of returning a recoverable
 result.
-**Status:** Open.
+**Status:** Resolved (H-14): the `run_and_watch` wait loop uses a
+wall-clock `Instant` deadline (`crates/mcp/src/tools.rs`, "TC-6"
+comment).
 **Mitigation:** Phase 3 (BACKLOG P0.2 + P1.0e) rewrites the wait
 loop once (shared body `tools.rs:650-709`) with a wall-clock
 `Instant` deadline so the advertised cap is honest, keeping
@@ -229,6 +250,11 @@ length.
 | H-07 | Bucket retention loss invisible | TC07 / TC47 | `BucketSummary.dropped_count` surfaces eviction count. |
 | H-08 | Probe cross-talk | TC42c / TC47 | Cross-talk impossible: probe_id + bucket_id assertions in TC47 stress test pass. |
 | H-09 | Bucket-wait busy-poll risk | TC07 / TC47 | Notify-based; TC47 asserts >=700 ms block for 800 ms timeout. |
+| H-10 | `frames_suppressed` counter absent (R-02) | suppression counters (2026-10-05 review) | `frames_suppressed*` fields on `ProbeListEntry`. |
+| H-11 | PTY spawn Unix-only (R-04) | ConPTY backend (2026-10-05 review) | `pty_command_*` dual-backend; sessions stay unix-only. |
+| H-12 | Ghost job / double spawn on retry (R-07, Phases 1-2) | `is_idempotent` retry gate + `dedup_nonce` (2026-10-05 review) | TCD-1/2/4 not re-verified. |
+| H-13 | `self_check` false-green (R-08) | TC-5 real spawn probe (2026-10-05 review) | `selfcheck_spawn_probe`. |
+| H-14 | `run_and_watch` wait cap not honored (R-09) | TC-6 wall-clock deadline (2026-10-05 review) | `tools.rs` deadline loop. |
 
 Risk policy:
 
@@ -257,4 +283,4 @@ guide post-publish hardening.
 | R-WWS-07 | `--install-wsl-runtime` becomes a privilege-escalation hole | Locked to ONE constant `npm install -g terminal-commander` invocation; no sudo, no `sudo -S`, no password prompt, no env credential, no LLM-supplied secret; EACCES → `install_permission_required` honestly (no retry under sudo); E404 → `npm_package_unpublished` honestly | **mitigated** at WWS06 |
 | R-WWS-08 | Pair code mistaken for a security secret | Documented as operator confirmation only; `pair.json` stores `{ schema_version, pair_id, code, created_at, accepted_at, distro }` — no token, no env, no credentials; the code is never used in any cryptographic decision | **accepted** at WWS06 |
 | R-WWS-09 | Cursor live smoke from a Windows host still requires GUI steps (no headless MCP entry point) | WWS07 PowerShell smoke records the GUI smoke status honestly; `Not Run` if unattainable; no promotion to PASS without operator transcript | **accepted** at WWS07 |
-| R-WWS-10 | `npm-bootstrap-publish.yml` accidental dispatch | Workflow committed but NOT dispatched; remains the one-time bootstrap fallback per NPM10; BACKLOG WWS-B8 records the disable/rotate follow-up after first publish | **mitigated** by operator discipline |
+| R-WWS-10 | `npm-bootstrap-publish.yml` accidental dispatch | Workflow deleted 2026-10-05, so the dispatch path no longer exists (BACKLOG WWS-B8) | **closed** |

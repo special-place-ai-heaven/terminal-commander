@@ -265,7 +265,7 @@ COMMANDS
   doctor                              Print Windows host diagnostics.
   doctor wsl                          Run the read-only WSL discovery probe.
   doctor harness                      List detected vs configured MCP harnesses.
-  doctor daemon                       Daemon socket + autostart status (WSL probe on Windows).
+  doctor daemon                       Daemon status (native on Windows; WSL with --distro / TC_WSL_DISTRO).
   setup                               Bootstrap all detected harnesses (default).
   setup daemon-autostart              Install systemd user unit or profile autostart in WSL/Linux.
   setup harness                       Same as setup (explicit).

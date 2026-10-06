@@ -21,6 +21,9 @@ use terminal_commander_supervisor::pidfile::{
     RunningDaemon, pidfile_path, read_pidfile_raw, write_pidfile,
 };
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 /// Cross-package binary discovery: `CARGO_BIN_EXE_<name>` is only available
 /// for binaries in the same package. For the sibling `terminal-commanderd`
 /// crate we derive the path from the test binary's location at
@@ -70,7 +73,7 @@ fn session_reap_token_shuts_down_the_daemon() {
         daemon_bin.exists(),
         "daemon binary not found at {daemon_bin:?}; cargo dev-dep should have built it"
     );
-    let mut daemon = Command::new(&daemon_bin)
+    let mut daemon = isolated_env::isolate(&mut Command::new(&daemon_bin), &base)
         .args(["start", "--mode", "ipc-server"])
         .env("TC_DATA", &base)
         .env("TC_SESSION", token)
@@ -98,13 +101,16 @@ fn session_reap_token_shuts_down_the_daemon() {
     }
 
     // Reap.
-    let out = Command::new(env!("CARGO_BIN_EXE_terminal-commander"))
-        .args(["session", "reap", token])
-        .env("TC_DATA", &base)
-        .env_remove("TC_SOCKET")
-        .env_remove("TC_SESSION")
-        .output()
-        .expect("run session reap");
+    let out = isolated_env::isolate(
+        &mut Command::new(env!("CARGO_BIN_EXE_terminal-commander")),
+        &base,
+    )
+    .args(["session", "reap", token])
+    .env("TC_DATA", &base)
+    .env_remove("TC_SOCKET")
+    .env_remove("TC_SESSION")
+    .output()
+    .expect("run session reap");
     let cli_stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let cli_stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_eq!(
@@ -151,13 +157,16 @@ fn session_reap_token_cleans_stale_pidfile() {
     )
     .expect("write stale pidfile");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_terminal-commander"))
-        .args(["session", "reap", token])
-        .env("TC_DATA", &base)
-        .env_remove("TC_SOCKET")
-        .env_remove("TC_SESSION")
-        .output()
-        .expect("run session reap");
+    let out = isolated_env::isolate(
+        &mut Command::new(env!("CARGO_BIN_EXE_terminal-commander")),
+        &base,
+    )
+    .args(["session", "reap", token])
+    .env("TC_DATA", &base)
+    .env_remove("TC_SOCKET")
+    .env_remove("TC_SESSION")
+    .output()
+    .expect("run session reap");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(

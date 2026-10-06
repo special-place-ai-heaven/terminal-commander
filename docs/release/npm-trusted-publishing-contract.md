@@ -1,5 +1,9 @@
 # NPM07 — npm trusted publishing contract
 
+> HISTORICAL as of 2026-10-05: the NPM07 contract as written on 2026-05-23 (three packages).
+> The OIDC cutover it describes was completed by commit `23a407a` (2026-08-07) for six
+> packages. Current rules: `release-pipeline-invariants.md` and `.github/workflows/release-please.yml`.
+
 Status: NPM07 deliverable.
 Branch: `main`.
 Date: 2026-05-23.

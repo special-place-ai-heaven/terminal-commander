@@ -1,12 +1,18 @@
 # Security Doctrine - Terminal Commander
 
 Status: Baseline (TC02 wave 0 deliverable).
-Scope: doctrine only. No policy code, no privileged helper, no command
-executor exists yet. This document defines the threat model, trust
-boundaries, sensitive operations, denied paths, and audit expectations
-that all later goals MUST honor.
+Scope: doctrine. The policy engine (`crates/daemon/src/policy.rs`), the
+persistent audit log and the command executor are shipped; no privileged
+helper ships (plan-only, see `docs/security/PRIVILEGE_HELPER_THREAT_REVIEW.md`).
+This document defines the threat model, trust boundaries, sensitive
+operations, denied paths, and audit expectations that all later goals
+MUST honor.
 
 Language: ASCII only. No smart quotes, no em-dashes.
+Note (2026-10-05): the `README.md:294-297` citation below points at the
+README as of the TC01 baseline; the list in section 5 is the authority and
+matches `DEFAULT_DENY_PATH_SUFFIXES` and the tree/prefix lists in
+`crates/daemon/src/policy.rs`.
 
 ## 1. Purpose and audience
 
@@ -32,7 +38,7 @@ This document tells:
 | The local operator (human running TC) | Trusted | Owns the host; can read TC's audit log, edit config, restart the daemon. |
 | The LLM client over MCP | Semi-trusted | Authoring intent is unverified. May try (accidentally or via prompt injection) to run dangerous commands, read secrets, or exfiltrate output. `credential_request` keeps a password out of every TC surface on the assumption that TC is the model's only way to run programs; a harness that also gives the model a raw shell can pipe `terminal-commander credential provide`, which the audit row records as `cli-stdin` (a typed answer is `cli-tty`). |
 | A compromised probe child process | Untrusted | A process spawned by TC can be malicious or buggy. Its output is data, not commands. |
-| A remote network attacker | Out of scope | TC has no network-reachable listener. The MCP transport is local stdio (rmcp 1.8.0). The one TCP socket is the owner's password page for `credential_request`: bound to 127.0.0.1 only while a PTY password prompt is pending, single-use token, 300 s. The daemon overwrites its copy of the password best-effort (OS and browser copies are not wiped). A local HTTP-inspecting proxy or filter on 127.0.0.1 (for example AdGuard) can observe the loopback POST: that is the accepted trade-off of the URL channel; `terminal-commander credential provide` avoids it. |
+| A remote network attacker | Out of scope | TC has no network-reachable listener. The MCP transport is local stdio (rmcp 3.4.1). The one TCP socket is the owner's password page for `credential_request`: bound to 127.0.0.1 only while a PTY password prompt is pending, single-use token, 300 s. The daemon overwrites its copy of the password best-effort (OS and browser copies are not wiped). A local HTTP-inspecting proxy or filter on 127.0.0.1 (for example AdGuard) can observe the loopback POST: that is the accepted trade-off of the URL channel; `terminal-commander credential provide` avoids it. |
 | A privileged co-tenant on the host | Out of scope | TC does not defend against root or kernel attackers on the same host. |
 
 ### 2.2 Threats considered
@@ -51,8 +57,9 @@ The MVP threat model centers on three threat classes:
 
 3. **Operator misconfiguration.** An operator activates an over-broad
    policy profile or installs a rule with a runaway regex. Mitigation:
-   advisory-mode default profile, rule validation, regex safety
-   checks (TC10/TC29), audit trail.
+   opt-in hardened profiles (the default `full_access` inherits the
+   harness's trust, see `POLICY.md` section 2.5), rule validation, regex
+   safety checks (TC10/TC29), audit trail.
 
 The MVP threat model does NOT center on:
 
@@ -63,7 +70,7 @@ The MVP threat model does NOT center on:
   roadmap, not an MVP guarantee.
 - Side-channel or timing attacks against the daemon.
 - Supply-chain compromise of upstream crates. Mitigated separately by
-  `cargo-deny`, `cargo-machete`, and the pinned `rmcp = 1.7.0`.
+  `cargo-deny`, `cargo-machete`, and the pinned `rmcp = "=3.4.1"`.
 
 ## 3. Trust boundaries
 
@@ -73,11 +80,11 @@ goal that adds behavior touching them.
 ```text
 +-------------------+      MCP stdio      +-------------------------+
 |  LLM client       | <-----------------> |  terminal-commander-mcp |
-| (Claude Code,     |  rmcp 1.8.0         |  thin adapter           |
+| (Claude Code,     |  rmcp 3.4.1         |  thin adapter           |
 |  Codex, Cline...) |                     |                         |
 +-------------------+                     +-------------------------+
                                                      |
-                                          local IPC (TC21-deferred)
+                                          local IPC (UDS / named pipe)
                                                      v
                                           +-------------------------+
                                           |   terminal-commanderd    |
@@ -112,14 +119,18 @@ Boundary list (each is a hard contract):
 The following operations MUST be policy-gated and audit-logged for
 their entire lifecycle (start, success, failure, cancellation):
 
-1. **Command execution** (`command_start_combed`, `command_write_stdin`,
-   `command_send_signal`). See TC15-TC16, TC19, TC22.
-2. **File read or watch** (`file_read_window`, `file_search`,
-   `file_watch`). See TC18, TC20, TC22.
-3. **Probe creation and binding** (`probe_create`, `probe_bind_rules`).
-   See TC21, TC22.
-4. **Registry mutation** (`registry_create`, `registry_activate`,
-   `registry_deactivate`). See TC13-TC14, TC22.
+1. **Command execution** (`command_start_combed`, `shell_exec`,
+   `pty_command_start`, `pty_command_write_stdin`, `command_stop`,
+   `shell_session_*`, `recipe_run`). See TC15-TC16, TC19, TC22.
+2. **File read, write or watch** (`file_read_window`, `file_search`,
+   `file_write`, `file_watch_start`). See TC18, TC20, TC22.
+3. **Probe creation** (there is no standalone `probe_create`; the
+   probe-creating operations are `command_start_combed`,
+   `pty_command_start` / `shell_session_start` and `file_watch_start`,
+   see `POLICY.md` section 4.2). See TC21, TC22.
+4. **Registry and recipe mutation** (`registry_upsert`,
+   `registry_activate`, `registry_deactivate`, `recipe_upsert`,
+   `recipe_activate`, `recipe_deactivate`). See TC13-TC14, TC22.
 5. **Bucket export or summary** that returns raw substrings beyond
    structured event fields. See TC07, TC17, TC23.
 6. **Policy or profile change at runtime** (out of MVP scope; flagged
@@ -220,17 +231,25 @@ derive from it.
 
 Every gated action (section 4) MUST emit a record with at minimum:
 
-- `audit_id` (monotonic, prefix `aud_`),
-- `timestamp` (ISO-8601, source-clock and monotonic both recorded),
+- `audit_id` (monotonic integer),
+- `timestamp`,
 - `actor` (mcp client id or operator),
-- `action` (one of: `command_start`, `command_stdin`, `command_signal`,
-  `file_read`, `file_watch`, `probe_create`, `probe_bind`,
-  `registry_create`, `registry_activate`, `policy_decision`, etc.),
-- `subject` (command argv, file path, probe id, rule id),
-- `policy_profile` (name and version),
-- `decision` (one of: `allow`, `deny`, `allow_with_audit`, `error`),
+- `action` (for example `command_start`, `command_shell_start`,
+  `pty_command_start`, `pty_command_write_stdin`, `file_read_window`,
+  `file_write`, `file_watch_start`, `registry_upsert`,
+  `registry_activate`, `shell_session_start`, `credential_provided`;
+  rejections use `command_rejected` / `command_shell_rejected`),
+- `subject` (redacted command argv or shell-line preview, file path,
+  probe id, rule id),
+- `profile` (name),
+- `decision` (one of: `allow`, `deny`, `allow_with_audit`, `error`,
+  `info`),
 - `reason` (human-readable; references rule id when denied),
-- `result` (success/failure of the action that followed an `allow`).
+- `metadata_json` (bounded, redacted; for example the `nested_shell` tag).
+
+Follow-up rows record outcomes where a lifecycle exists (for example
+`command_exit`, `pty_command_exit`; `file_watch_exit` is written as an
+`error` row when a watch terminates unexpectedly).
 
 The audit log MUST be:
 
@@ -238,8 +257,11 @@ The audit log MUST be:
 - persisted on disk (TC12 storage backend);
 - emitted BEFORE the gated action succeeds (so deny-then-act is the
   hard failure mode, not act-then-deny);
-- exposed to the operator via `admin_cli` (TC25) and never to the
-  MCP client.
+- exposed to the operator via `admin_cli` (TC25) and, read-only and
+  bounded (cursor plus limit), to the MCP client through the
+  `audit_since` tool (`crates/mcp/src/tools.rs`; added in commit
+  9a335c2, pinned by `tests/fixtures/contracts/mcp-tools/audit_since.v1.json`).
+  Subjects and metadata are redacted before they are written.
 
 ## 8. Data retention
 
@@ -248,8 +270,8 @@ MVP defaults:
 | Data | Retention | Notes |
 |---|---|---|
 | Audit log | 30 days, rolling | Operator-tunable in `terminal-commander.toml`. Older records archived or deleted. |
-| Signal events (buckets) | Per-job + 24h after job exit | Caller can extend via `bucket_pin`. Default chosen for finite memory. |
-| Context spool (raw frames) | 1h after last access | Bounded ring per probe. Eviction is FIFO. Operator-tunable. |
+| Signal events (buckets) | `[retention]` `ttl_seconds` (default 86400, 24h) and `max_events` (default 100000) per bucket | Operator-tunable in `terminal-commander.toml`. There is no `bucket_pin` tool. |
+| Context spool (raw frames) | In-memory ring per probe, no time-based expiry | Default 4096 frames / 1 MiB (`DEFAULT_RING_FRAMES`, `DEFAULT_RING_BYTES` in `crates/core/src/context.rs`). Head eviction (FIFO) on overflow. |
 | Registry rules | Indefinite | User assets. Deletion is explicit (TC13). |
 | MCP tool-call trace | Disabled by default | Opt-in for debugging. When enabled, scrubbed of file contents and command arguments matching the default-deny list. |
 
@@ -262,7 +284,9 @@ goal that adds them MUST first amend this document:
 
 - Multi-user host policy (each Unix user is its own TC instance).
 - Network-exposed MCP (rmcp HTTP/SSE transport, etc.).
-- Privileged operations as a routine path (`sudo`, `doas`, polkit).
+- A TC-provided privileged helper (plan-only). Under the default
+  `full_access` profile `sudo`/`su` run as ordinary audited argv
+  commands; hardened profiles deny them (`POLICY.md` section 2.5).
 - Cross-host policy distribution.
 - Encrypted audit log (defer to filesystem ACLs + disk encryption).
 - Sandboxed probe execution (Landlock/seccomp/bubblewrap/firejail).

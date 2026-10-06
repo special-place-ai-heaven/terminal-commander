@@ -202,43 +202,43 @@
     },
     {
       "name": "recipe_search",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/recipe_search.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "recipe_get",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/recipe_get.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "recipe_upsert",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/recipe_upsert.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "recipe_test",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/recipe_test.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "recipe_activate",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/recipe_activate.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "recipe_deactivate",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/recipe_deactivate.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "recipe_list_active",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/recipe_list_active.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "recipe_run",
-      "fixture": null,
-      "status": "missing_fixture"
+      "fixture": "mcp-tools/recipe_run.v1.json",
+      "status": "covered_live"
     },
     {
       "name": "file_read_window",
@@ -384,9 +384,9 @@
   "obsolete_fixtures": [],
   "counts": {
     "live_tools": 60,
-    "covered_live": 52,
+    "covered_live": 60,
     "placeholder_for_live_tool": 0,
-    "missing_fixture": 8,
+    "missing_fixture": 0,
     "obsolete_fixture_present": 0
   }
 }

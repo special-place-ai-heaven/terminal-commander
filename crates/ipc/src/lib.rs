@@ -31,6 +31,11 @@ pub mod client;
 #[cfg(windows)]
 pub mod pipe_client;
 
+#[cfg(any(unix, windows))]
+mod server_identity;
+#[cfg(unix)]
+pub use server_identity::uid_label;
+
 pub use protocol::MCP_SPEC_REVISION;
 pub use protocol::{
     AccessRoute, AuditRowWire, AuditSinceParams, AuditSinceResponse, AwaitingCredential,
@@ -72,9 +77,9 @@ pub use protocol::{
     RecipeTombstoneParams, RecipeTombstoneResponse, RecipeUpsertParams, RecipeUpsertResponse,
     RecipeVersionEntry, RegistryActivateParams, RegistryActivateResponse, RegistryActiveEntry,
     RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse, RegistryDeactivateParams,
-    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportFailure,
-    RegistryImportPackParams, RegistryImportPackResponse, RegistryListActiveResponse,
-    RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
+    RegistryDeactivateResponse, RegistryExampleResult, RegistryGetParams, RegistryGetResponse,
+    RegistryImportFailure, RegistryImportPackParams, RegistryImportPackResponse,
+    RegistryListActiveResponse, RegistrySearchHit, RegistrySearchParams, RegistrySearchResponse,
     RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse, RegistryTestMatch,
     RegistryTestParams, RegistryTestResponse, RegistryTestSample, RegistryUpsertParams,
     RegistryUpsertResponse, RequestEnvelope, ResponseEnvelope, RuntimeActiveRule,

@@ -40,19 +40,8 @@ docs/contracts/
 tests/fixtures/
   contracts/                           # versioned wire-shape examples
     event.signal.v1.json
-    bucket-read-response.v1.json
-    bucket-summary.v1.json
     rule-definition.v1.json
-    probe-descriptor.v1.json
-    job-status.v1.json
-    source-pointer.v1.json
-    event-context-request.v1.json
-    event-context-response.v1.json
-    policy-decision.v1.json
-    audit-record.v1.json
-    registry-search-result.v1.json
     forbidden/                         # negative examples
-      raw-stream-as-events.v1.json
       missing-pointer.v1.json
     mcp-tool-fixture-map.v1.json       # live/obsolete MCP fixture catalogue
     mcp-tools/                         # one file per live MCP tool fixture
@@ -86,6 +75,9 @@ tests/fixtures/
       probe_list.v1.json
       probe_status.v1.json
 ```
+
+The `mcp-tools/` list above is the TC05 set; the directory now holds one
+file per live tool (`mcp-tool-fixture-map.v1.json` is the inventory).
 
 Each fixture starts with a `_meta` field describing it (fixture id,
 schema anchor, status). The `_meta` field is part of the FIXTURE
@@ -155,10 +147,6 @@ exist to drive negative tests in TC23/TC29.
 
 Current entries:
 
-- `raw-stream-as-events.v1.json`: a bucket-read response whose
-  events carry raw multi-line stream content instead of a structured
-  summary. Forbidden per `SECURITY.md` section 3 B5 and the prime
-  directive (no raw-output leakage as a success path).
 - `missing-pointer.v1.json`: an event with `severity >= medium` that
   has neither a `pointer` field nor a `pointer_unavailable_reason`
   explanation. Forbidden per the TC02 invariant (every signal event
@@ -171,10 +159,11 @@ Per the contract requirements in TC05 the following enums are
 canonical. Each domain is reserved at MVP-draft status; concrete
 behavior lands in the goal noted.
 
-### 6.1 Severity (5 values)
+### 6.1 Severity (7 values)
 
-`trace`, `low`, `medium`, `high`, `critical`. Documented in
-`enums/severity.md`. Concrete `Severity` enum lands in TC06.
+`trace`, `debug`, `info`, `low`, `medium`, `high`, `critical`. Documented
+in `enums/severity.md`; the `Severity` enum is in
+`crates/core/src/severity.rs`.
 
 ### 6.2 Sifter type (11 discriminators)
 
@@ -206,19 +195,24 @@ errors.
 
 ### 6.4 Probe kind
 
-`process`, `terminal`, `file`, `directory`, `journal`, `artifact`.
-Per `SPEC.md` and `POLICY.md`. Concrete probes land in TC15, TC18,
-TC19, TC20.
+`process`, `terminal`, `file`, `directory`, `journal`, `artifact` are the
+values of an event's `source.source_type` (`SourceType` in
+`crates/core/src/source.rs`). The runtime probe kinds listed by
+`probe_list` and used by `[policy.probes]` are different: `command`,
+`file_watch`, `pty` (`ProbeKind` in `crates/ipc/src/protocol.rs`). No
+directory, journal or artifact probe ships.
 
 ### 6.5 Policy decision
 
-`allow`, `deny`, `allow_with_audit`, `error`. Per `POLICY.md`
-section 6. Implementation in TC22.
+`allow`, `deny`, `allow_with_audit`, `error` (`PolicyDecision` in
+`crates/daemon/src/policy.rs`). Audit rows additionally accept `info`
+(`ALLOWED_AUDIT_DECISIONS` in `crates/store/src/audit.rs`).
 
 ### 6.6 Audit action
 
-Listed in `enums/audit-action.md`. Closed set; producers may NOT
-invent new audit actions without amending the doctrine.
+Listed in `enums/audit-action.md`. The store enforces a closed set only
+for the decision string; action strings are free text, and the daemon
+emits more than that file lists (see its status note).
 
 ## 7. MCP tool fixtures
 
@@ -254,21 +248,52 @@ mini-spec:
 - When `heartbeat = true`, the `events` array MUST be empty and
   `next_cursor` MUST equal the input cursor (no progress beyond
   what was already known).
-- Raw stdout/stderr text is NEVER a `bucket_wait` success shape.
-  The forbidden example `forbidden/raw-stream-as-events.v1.json`
-  shows what MUST NOT be returned.
+- Raw stdout/stderr text is NEVER a `bucket_wait` success shape. The
+  response type carries `Vec<SignalEvent>`, not text; no fixture
+  rejects a raw-text payload.
 
 ## 9. Source-status
 
 | Fixture set | Status until consumed |
 |---|---|
-| event/bucket/rule/probe/job/source-pointer/context | informative-until-TC06 |
-| policy-decision/audit-record | informative-until-TC22 |
+| event.signal, rule-definition | live shape (match `SignalEvent`, `RuleDefinition`) |
 | mcp-tool-fixture-map.v1.json | live authoritative live/obsolete inventory |
 | mcp-tools/* classified by the map as `covered_live` | current per-tool contract |
 | map entries with `placeholder_for_live_tool` or `missing_fixture` | live-tool coverage debt, blocker before use |
 | mcp-tools/* classified by the map as `obsolete_fixture_present` | obsolete debt, not supported tools |
-| forbidden/* | live (negative-test oracle from now on) |
+| forbidden/missing-pointer | live (negative-test oracle for the pointer-or-reason invariant) |
+
+## 9a. Where the live response shapes are pinned (checked 2026-10-05)
+
+The old top-level drafts for bucket reads, bucket summary, source pointer,
+event context, job status, probe descriptor, registry search, policy
+decision and audit record were deleted: nothing consumed them and they had
+drifted from the code. The shapes are pinned by the per-tool fixtures in
+`tests/fixtures/contracts/mcp-tools/`:
+
+| Shape | Fixture | Rust type |
+|---|---|---|
+| bucket read | `bucket_events_since.v1.json`, `bucket_wait.v1.json` | `BucketEventsSinceResponse`, `BucketWaitResponse` |
+| bucket summary | `bucket_summary.v1.json` | `BucketSummaryResponse` (7 severity counters) |
+| event context | `event_context.v1.json` | `EventContextResponse` (`anchor_missing`, `unavailable_reason`, `frames`) |
+| job status | `command_status.v1.json` | `CommandStatusResponse` |
+| probe listing | `probe_list.v1.json`, `probe_status.v1.json` | `ProbeListEntry` (`kind`: `command`, `file_watch`, `pty`) |
+| registry search | `registry_search.v1.json` | `RegistrySearchResponse { hits }` |
+| audit rows | `audit_since.v1.json` | `AuditRow` fields (`audit_id` integer, `profile`, `metadata_json`) |
+
+All Rust types are in `crates/ipc/src/protocol.rs`. A source pointer is
+`SourcePointer` in `crates/core/src/pointer.rs`. There is no policy-decision
+wire type. The two kept top-level fixtures match the code:
+`event.signal.v1.json` (`SignalEvent`, `crates/core/src/event.rs`, which
+adds optional `count`, `first_seen`, `last_seen`, `suppressed`) and
+`rule-definition.v1.json` (`RuleDefinition`, `crates/core/src/rule.rs`).
+`SignalEvent::validate` enforces the pointer-or-reason invariant that
+`tests/fixtures/contracts/forbidden/missing-pointer.v1.json` illustrates.
+
+`CommandStatusResponse`, `CommandReceipt` and the discovery payloads are
+being extended in the working tree (receipt `head`/`lines_omitted`,
+`elapsed_ms`, `last_output_age_ms`); the per-tool fixtures are the
+reference for them.
 
 ## 10. Verification
 

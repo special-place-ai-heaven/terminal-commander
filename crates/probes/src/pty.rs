@@ -1227,6 +1227,11 @@ mod runtime {
             // pty_process::Command's builder methods consume `self`,
             // so chain them through a single binding.
             let mut cmd = pty_process::Command::new(&argv[0]);
+            // `core::as_daemon_child`, spelled out: this is not a std Command.
+            for key in terminal_commander_core::DAEMON_ENDPOINT_ENV {
+                cmd = cmd.env_remove(key);
+            }
+            cmd = cmd.env(terminal_commander_core::DAEMON_CHILD_ENV, "1");
             cmd = cmd.args(&argv[1..]);
             if let Some(cwd) = &config.cwd {
                 cmd = cmd.current_dir(cwd);
@@ -1237,7 +1242,8 @@ mod runtime {
             // clearing it stripped OS-essential vars (e.g. `SystemRoot`, `PATH`
             // on Windows) and crashed Windows children at startup whenever a
             // non-empty env was supplied. An empty `config.env` leaves the
-            // loop a no-op, which is exactly "inherit the parent env".
+            // loop a no-op, which is exactly "inherit the parent env" -- as a
+            // daemon child (above).
             for (k, v) in &config.env {
                 cmd = cmd.env(k, v);
             }
@@ -2088,8 +2094,14 @@ mod runtime_win {
 
             // OVERLAY semantics matching the unix lane: `CommandBuilder::new`
             // seeds the env from the parent process (`get_base_env`), and each
-            // supplied `(key, value)` is ADDED/overrides. No `env_clear`.
+            // supplied `(key, value)` is ADDED/overrides. No `env_clear`; the
+            // child starts as a daemon child (`core::as_daemon_child`, spelled
+            // out: this is not a std Command).
             let mut cmd = CommandBuilder::new(&argv[0]);
+            for key in terminal_commander_core::DAEMON_ENDPOINT_ENV {
+                cmd.env_remove(key);
+            }
+            cmd.env(terminal_commander_core::DAEMON_CHILD_ENV, "1");
             cmd.args(&argv[1..]);
             if let Some(cwd) = &config.cwd {
                 cmd.cwd(cwd);

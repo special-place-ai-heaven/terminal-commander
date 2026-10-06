@@ -85,7 +85,8 @@ pub(in crate::ipc::server) fn handle_file_read_window(
     let max_bytes = params
         .max_bytes
         .unwrap_or(DEFAULT_FILE_READ_BYTES)
-        .min(MAX_FILE_READ_BYTES);
+        .min(MAX_FILE_READ_BYTES)
+        .min(state.config.limits.file_window_bytes);
 
     let f = std::fs::File::open(&resolved)
         .map_err(|e| IpcError::new(IpcErrorCode::Internal, format!("open: {e}")))?;

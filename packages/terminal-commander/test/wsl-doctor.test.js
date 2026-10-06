@@ -11,6 +11,7 @@ const assert = require("node:assert/strict");
 
 const { wslDoctor, DOCTOR_STATUSES, RUNTIME_PROBE_CMD } = require("../lib/wsl/doctor.js");
 const { DETECT_REASONS } = require("../lib/wsl/detect.js");
+const { SHELL_RAN_SENTINEL, withShellRanSentinel } = require("../lib/bootstrap/constants.js");
 
 function okDetect(distros, defaultName) {
   return {
@@ -51,6 +52,7 @@ test("DOCTOR_STATUSES exposes the full status enum", () => {
       "runtime_present",
       "doctor_not_run",
       "check_timeout",
+      "shell_exited_early",
     ]),
   );
 });
@@ -175,7 +177,7 @@ test("runtime_present when probeRuntime=true and probe exits 0 with non-empty st
     return {
       status: 0,
       signal: null,
-      stdout: Buffer.from("/usr/local/bin/terminal-commander-mcp\n", "utf8"),
+      stdout: Buffer.from(`${SHELL_RAN_SENTINEL}\n/usr/local/bin/terminal-commander-mcp\n`, "utf8"),
       stderr: Buffer.alloc(0),
       error: null,
     };
@@ -195,11 +197,11 @@ test("runtime_present when probeRuntime=true and probe exits 0 with non-empty st
     "--",
     "bash",
     "-lc",
-    "command -v terminal-commander-mcp",
+    `echo ${SHELL_RAN_SENTINEL}; command -v terminal-commander-mcp`,
   ]);
   // No operator string concatenation: argv[5] is the constant
-  // RUNTIME_PROBE_CMD, byte-for-byte.
-  assert.equal(captured.argv[5], RUNTIME_PROBE_CMD);
+  // RUNTIME_PROBE_CMD behind the constant shell-ran sentinel, byte-for-byte.
+  assert.equal(captured.argv[5], withShellRanSentinel(RUNTIME_PROBE_CMD));
 });
 
 test("runtime_missing when probeRuntime=true and probe exits non-zero or empty stdout", async () => {
@@ -220,9 +222,28 @@ test("runtime_missing when probeRuntime=true and probe exits non-zero or empty s
   assert.equal(r.status, "runtime_missing");
   assert.equal(r.runtime_present, false);
 
-  // Zero exit, empty stdout (shouldn't happen with `command -v` but
-  // belt-and-braces).
+  // Zero exit, the shell ran but `command -v` printed nothing (shouldn't
+  // happen with `command -v` but belt-and-braces).
   r = await wslDoctor({
+    distro: "Ubuntu",
+    platform: "win32",
+    probeRuntime: true,
+    exec: async () => ({
+      status: 0,
+      signal: null,
+      stdout: Buffer.from(`${SHELL_RAN_SENTINEL}\n`, "utf8"),
+      stderr: Buffer.alloc(0),
+      error: null,
+    }),
+    detectResult: okDetect(["Ubuntu"], "Ubuntu"),
+  });
+  assert.equal(r.status, "runtime_missing");
+});
+
+test("shell_exited_early when the login shell exits 0 before the probe runs", async () => {
+  // A startup file calling `exit` ends `bash -lc` with status 0 and no
+  // output. That is neither "present" nor "missing": name the real cause.
+  const r = await wslDoctor({
     distro: "Ubuntu",
     platform: "win32",
     probeRuntime: true,
@@ -235,7 +256,10 @@ test("runtime_missing when probeRuntime=true and probe exits non-zero or empty s
     }),
     detectResult: okDetect(["Ubuntu"], "Ubuntu"),
   });
-  assert.equal(r.status, "runtime_missing");
+  assert.equal(r.status, "shell_exited_early");
+  assert.equal(r.runtime_present, false);
+  assert.match(r.hint, /startup file/);
+  assert.match(r.hint, /~\/\.profile/);
 });
 
 test("check_timeout when probeRuntime=true and probe returns a timeout error", async () => {

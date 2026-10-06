@@ -29,6 +29,9 @@ use terminal_commander_supervisor::ensure::{
 };
 use terminal_commander_supervisor::pidfile;
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 fn fresh_state_dir(tag: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
     p.push(format!(
@@ -187,7 +190,7 @@ async fn second_daemon_does_not_orphan_first() {
 
     let bin = env!("CARGO_BIN_EXE_terminal-commanderd");
     let spawn_daemon = || {
-        std::process::Command::new(bin)
+        isolated_env::isolate(&mut std::process::Command::new(bin), &state_dir)
             .arg("--data-dir")
             .arg(&state_dir)
             .arg("start")
@@ -265,4 +268,203 @@ async fn second_daemon_does_not_orphan_first() {
     let _ = second.kill();
     let _ = second.wait();
     teardown(&state_dir).await;
+}
+
+/// Start a daemon directly (no supervisor) on `state_dir` and `endpoint`,
+/// keeping its stderr.
+fn raw_daemon(state_dir: &Path, endpoint: &Endpoint) -> std::process::Child {
+    let socket: std::ffi::OsString = match endpoint {
+        Endpoint::UnixSocket { path } => path.into(),
+        Endpoint::WindowsPipe { name } => name.into(),
+    };
+    let bin = env!("CARGO_BIN_EXE_terminal-commanderd");
+    isolated_env::isolate(&mut std::process::Command::new(bin), state_dir)
+        .arg("--data-dir")
+        .arg(state_dir)
+        .arg("start")
+        .arg("--mode")
+        .arg("ipc-server")
+        .env("TC_SOCKET", socket)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn daemon")
+}
+
+/// Wait for `child` to exit on its own; kill it if it does not. Returns its
+/// exit success and stderr, or `None` when it had to be killed.
+async fn exit_of(mut child: std::process::Child) -> Option<(bool, String)> {
+    let exited = poll_until(Instant::now() + Duration::from_secs(10), || {
+        matches!(child.try_wait(), Ok(Some(_)))
+    })
+    .await;
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    let out = child.wait_with_output().expect("collect daemon output");
+    Some((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    ))
+}
+
+/// A second daemon on a data directory another daemon is using must refuse to
+/// start -- also on a different endpoint, which the bring-up guard lets
+/// through -- and leave the first daemon's pidfile alone. Before the data-dir
+/// lock it bound its own endpoint and ran on the same database.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_daemon_refuses_a_data_dir_in_use() {
+    let state_dir = fresh_state_dir("dirlock");
+    let (endpoint, _) = endpoint_for(&state_dir);
+    #[cfg(unix)]
+    let other = Endpoint::UnixSocket {
+        path: state_dir.join("other.sock"),
+    };
+    #[cfg(windows)]
+    let other = Endpoint::WindowsPipe {
+        name: format!(
+            r"\\.\pipe\terminal-commander-sf-other-{}",
+            state_dir.file_name().unwrap().to_string_lossy()
+        ),
+    };
+
+    let mut first = raw_daemon(&state_dir, &endpoint);
+    let first_pid = first.id();
+    let first_up = poll_until(Instant::now() + Duration::from_secs(10), || {
+        pidfile::read_pidfile(&state_dir).is_some_and(|r| r.pid == first_pid)
+    })
+    .await;
+    assert!(
+        first_up,
+        "first daemon did not write its pidfile within 10s"
+    );
+    let recorded = pidfile::read_pidfile(&state_dir).unwrap().endpoint;
+
+    let second = exit_of(raw_daemon(&state_dir, &other)).await;
+    let rec = pidfile::read_pidfile(&state_dir).expect("pidfile still present");
+    let other_served = endpoint_answers_health(&state_dir, &other).await;
+    let _ = first.kill();
+    let _ = first.wait();
+    teardown(&state_dir).await;
+
+    let (success, stderr) = second.expect("the second daemon kept running on a data dir in use");
+    assert!(
+        !success,
+        "refusing to start must exit non-zero; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("is in use by another terminal-commanderd")
+            && stderr.contains(&format!("pid {first_pid}")),
+        "the refusal must say why and name the owner: {stderr}"
+    );
+    assert_eq!(
+        (rec.pid, rec.endpoint),
+        (first_pid, recorded),
+        "the pidfile must still record the first daemon"
+    );
+    assert!(
+        !other_served,
+        "the second daemon must not have served anything"
+    );
+}
+
+/// What the Linux autostart did when a login shell under a daemon inherited
+/// that daemon's `TC_SOCKET`: started a daemon on ANOTHER data directory but
+/// the same socket, which unlinked the live socket and took its clients. A
+/// daemon must refuse a socket another daemon is serving.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_daemon_refuses_a_socket_another_daemon_serves() {
+    use std::os::unix::fs::MetadataExt;
+
+    let first_dir = fresh_state_dir("sock-first");
+    let second_dir = fresh_state_dir("sock-second");
+    let (endpoint, sock) = endpoint_for(&first_dir);
+
+    let mut first = raw_daemon(&first_dir, &endpoint);
+    let first_pid = first.id();
+    let first_up = poll_until(Instant::now() + Duration::from_secs(10), || {
+        pidfile::read_pidfile(&first_dir).is_some_and(|r| r.pid == first_pid)
+    })
+    .await;
+    assert!(
+        first_up,
+        "first daemon did not write its pidfile within 10s"
+    );
+    let ino_before = std::fs::metadata(&sock).unwrap().ino();
+
+    let second = exit_of(raw_daemon(&second_dir, &endpoint)).await;
+    let ino_after = std::fs::metadata(&sock).map(|m| m.ino()).ok();
+    let first_serves = endpoint_answers_health(&first_dir, &endpoint).await;
+    let _ = first.kill();
+    let _ = first.wait();
+    teardown(&first_dir).await;
+    teardown(&second_dir).await;
+
+    let (success, stderr) = second.expect("the second daemon kept running on a served socket");
+    assert!(!success, "refusing must exit non-zero; stderr: {stderr}");
+    assert!(
+        stderr.contains("refusing to take over its socket"),
+        "the refusal must say why: {stderr}"
+    );
+    assert_eq!(
+        ino_after,
+        Some(ino_before),
+        "the socket was replaced -- the first daemon lost its clients"
+    );
+    assert!(first_serves, "the first daemon must still answer");
+}
+
+/// A daemon started from a terminal (the Linux profile hook runs in an
+/// interactive shell) gets SIGHUP when that terminal closes. A server has no
+/// use for it: the daemon keeps serving, and SIGTERM still stops it cleanly.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_daemon_keeps_serving_after_sighup() {
+    let state_dir = fresh_state_dir("sighup");
+    let (endpoint, _) = endpoint_for(&state_dir);
+    let mut daemon = raw_daemon(&state_dir, &endpoint);
+    let pid = daemon.id();
+    let up = poll_until(Instant::now() + Duration::from_secs(10), || {
+        pidfile::read_pidfile(&state_dir).is_some_and(|r| r.pid == pid)
+    })
+    .await;
+    assert!(up, "daemon did not write its pidfile within 10s");
+
+    let signal = |name: &str| {
+        std::process::Command::new("kill")
+            .args(["-s", name, &pid.to_string()])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    assert!(signal("HUP"), "kill -s HUP failed");
+    let mut status = None;
+    let died = poll_until(Instant::now() + Duration::from_secs(1), || {
+        status = daemon.try_wait().ok().flatten();
+        status.is_some()
+    })
+    .await;
+    let answers = !died && endpoint_answers_health(&state_dir, &endpoint).await;
+
+    let stopped = !died && signal("TERM") && {
+        poll_until(Instant::now() + Duration::from_secs(10), || {
+            status = daemon.try_wait().ok().flatten();
+            status.is_some()
+        })
+        .await
+    };
+    if !stopped {
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+    }
+    teardown(&state_dir).await;
+
+    assert!(!died, "SIGHUP ended the daemon: {status:?}");
+    assert!(answers, "the daemon must still answer Health after SIGHUP");
+    assert!(
+        stopped && status.is_some_and(|s| s.success()),
+        "SIGTERM must still shut it down cleanly: {status:?}"
+    );
 }

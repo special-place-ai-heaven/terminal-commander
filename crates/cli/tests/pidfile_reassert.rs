@@ -27,6 +27,9 @@ use std::time::{Duration, Instant};
 
 use terminal_commander_supervisor::pidfile::{pid_alive, pidfile_path, read_pidfile_raw};
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 /// Cross-package binary discovery (same approach as replace_no_pidfile.rs): the
 /// daemon is a sibling crate, so derive its path from this test binary's
 /// location: `target/<profile>/deps/<test>` -> `target/<profile>/<name>`.
@@ -68,7 +71,7 @@ async fn live_daemon_reasserts_a_removed_pidfile() {
     );
 
     // Spawn a REAL daemon bound to an isolated socket.
-    let mut daemon = Command::new(&daemon_bin)
+    let mut daemon = isolated_env::isolate(&mut Command::new(&daemon_bin), &data)
         .args(["--data-dir"])
         .arg(&data)
         .args(["start", "--mode", "ipc-server"])

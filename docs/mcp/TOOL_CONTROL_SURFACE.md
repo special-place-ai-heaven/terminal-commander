@@ -146,8 +146,8 @@ PTY password prompts (owner credential path):
   up as long as the page); the model polls `credential_request`, which never
   re-elicits for the same prompt. Plain HTTP is
   acceptable there because loopback traffic never leaves the host, and the
-  listener exists only while that prompt is pending. This is constitution
-  Principle IV's one stated exception to the local-socket-only rule.
+  listener exists only while that prompt is pending. This is the one
+  stated exception to the local-socket-only rule.
   Otherwise the daemon
   opens a native prompt: Windows CredUI; on a unix desktop the first
   of `$SSH_ASKPASS`, `ssh-askpass`, `zenity`, `kdialog`, `pinentry`. The
@@ -251,9 +251,10 @@ omitted matches so a later `wait` from that cursor recovers every capped signal.
 { heartbeat: false, events: [...non-empty], next_cursor: <max(seq)> }
 ```
 
-A response with raw stream text in `events` is invalid. The forbidden
-fixture `tests/fixtures/contracts/forbidden/raw-stream-as-events.v1.json`
-is the structural test oracle.
+A response with raw stream text in `events` is invalid: `events` is
+`Vec<SignalEvent>`, and the shapes are pinned by
+`tests/fixtures/contracts/mcp-tools/bucket_wait.v1.json` and
+`bucket_events_since.v1.json`.
 
 ## 5. Policy and audit
 

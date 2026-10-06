@@ -40,7 +40,16 @@
         }
       }
     ],
-    "truncated_bytes": 0
+    "truncated_bytes": 0,
+    "examples_evaluated": 2,
+    "example_results": [
+      { "index": 0, "passed": true },
+      {
+        "index": 1,
+        "passed": false,
+        "reason": "expected no match for \"error[E0432]: unresolved import\", but the rule matched (kind 'compile_error')"
+      }
+    ]
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -66,6 +75,8 @@
   "invariants": [
     "rule_id and samples are required",
     "sample stream is optional and limited to stdout, stderr, or meta",
-    "dry run does not persist registry changes"
+    "dry run does not persist registry changes",
+    "the rule's own stored examples are evaluated by the same matcher: examples_evaluated counts them (0 when the rule has none) and example_results lists each one's pass/fail with the reason",
+    "samples may be an empty list when only the rule's examples are of interest"
   ]
 }

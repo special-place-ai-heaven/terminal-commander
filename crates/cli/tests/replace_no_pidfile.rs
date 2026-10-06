@@ -32,6 +32,9 @@ use terminal_commander_supervisor::ensure::{Endpoint, EnsureDaemonOptions};
 use terminal_commander_supervisor::pidfile::{pid_alive, pidfile_path};
 use terminal_commander_supervisor::replace::{ReplaceOutcome, replace_if_stale};
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 /// Cross-package binary discovery (same approach as session_reap.rs): the
 /// daemon is a sibling crate, so derive its path from this test binary's
 /// location: `target/<profile>/deps/<test>` -> `target/<profile>/<name>`.
@@ -75,7 +78,7 @@ async fn reachable_current_daemon_with_missing_pidfile_is_not_killed() {
     );
 
     // Spawn a REAL current-version daemon bound to an isolated socket.
-    let mut daemon = Command::new(&daemon_bin)
+    let mut daemon = isolated_env::isolate(&mut Command::new(&daemon_bin), &data)
         .args(["--data-dir"])
         .arg(&data)
         .args(["start", "--mode", "ipc-server"])

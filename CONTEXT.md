@@ -17,7 +17,7 @@ The operator-facing snapshot from `pty_command_list` showing only non-terminal P
 _Avoid_: unified view, probe list
 
 **Unified-view contract**:
-After starting a live PTY, the unified runtime view must include that PTY as a `ProbeKind::Pty` row and increment `pty_jobs`; lingering terminal PTYs may remain visible after exit.
+After starting a live PTY, the unified runtime view must include that PTY as a `ProbeKind::Pty` row and increment `pty_jobs`; terminal (exited) PTYs are excluded, as are terminal command jobs (`collect_probes` keeps only `Starting`/`Running` liveness).
 _Avoid_: view parity with `pty_command_list`
 
 **View parity**:
@@ -33,7 +33,7 @@ _Avoid_: unified-view contract (these are different goals)
 ## Example dialogue
 
 > **Dev:** "T1 should make Windows match `pty_command_list`, right?"
-> **Domain expert:** "No — match the **unified-view contract**. Same PTY accessor, not **view parity**. A exited PTY can appear in `runtime_state` but not in `pty_command_list`; that's intentional."
+> **Domain expert:** "No — match the **unified-view contract**. Same PTY accessor, not **view parity**. Both views now list live PTYs only; the contract is that a live PTY is present in `runtime_state`."
 
 ## Flagged ambiguities
 
@@ -59,7 +59,7 @@ A source-level test scoped to `collect_probes` that asserts the PTY enumeration 
 _Avoid_: exact byte-string match, line-number anchors, deleting as "nonsense grep"
 
 **Live unified-view test**:
-IPC path `PtyCommandStart` → `RuntimeState` on fresh isolated daemon; assert `pty_jobs == 1` and matching `ProbeKind::Pty` `probe_id`. Child: `ping -n 60 127.0.0.1` (native; `cmd` is ShellInterpreterDenied). Skip loudly on ConPTY DLL-init / `UnsupportedPlatform` (mirror `conpty_e2e`).
+IPC path `PtyCommandStart` → `RuntimeState` on fresh isolated daemon; assert `pty_jobs == 1` and matching `ProbeKind::Pty` `probe_id`. Child: `ping -n 60 127.0.0.1` (native; `cmd` is ShellInterpreterDenied when `allow_shell` is off). Skip loudly on ConPTY DLL-init / `UnsupportedPlatform` (mirror `conpty_e2e`).
 _Avoid_: view parity with `pty_command_list`, Node dependency, silent skip
 
 **Merge gate wiring**:

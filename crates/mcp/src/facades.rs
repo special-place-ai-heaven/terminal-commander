@@ -147,8 +147,9 @@ pub enum StatusFacadeCall {
     RuntimeState(McpListLimitParams),
     ProbeList(McpListLimitParams),
     ProbeStatus(McpProbeStatusParams),
-    /// Adapter metadata + tool catalogue. No additional fields required.
-    SystemDiscover,
+    /// Adapter metadata + execution environment. Optional `detail`:
+    /// `summary` (default) or `full`.
+    SystemDiscover(crate::discover_summary::McpSystemDiscoverParams),
     /// List registered remote targets. No additional fields required.
     TargetList,
     TargetProbe(McpTargetProbeParams),

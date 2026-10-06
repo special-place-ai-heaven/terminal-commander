@@ -10,9 +10,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const { runRestart, DAEMON_RESTART_CMD } = require("../lib/cli/restart.js");
+const { SHELL_RAN_SENTINEL } = require("../lib/bootstrap/constants.js");
 const { DETECT_REASONS } = require("../lib/wsl/detect.js");
 const {
   detectRuntimeEnvironment,
@@ -86,7 +88,8 @@ test("restart on Windows dispatches daemon update --force through WSL", async ()
     detect: async () => okDetect("Ubuntu-24.04"),
     exec: ({ file, argv }) => {
       seenArgv = { file, argv };
-      return fakeChild(0, "terminal-commanderd: replaced 0.1.17 -> 0.1.18");
+      // A shell that reached the command prints the shell-ran sentinel first.
+      return fakeChild(0, `${SHELL_RAN_SENTINEL}\nterminal-commanderd: replaced 0.1.17 -> 0.1.18`);
     },
   });
   assert.equal(r.status, "ok");
@@ -97,6 +100,24 @@ test("restart on Windows dispatches daemon update --force through WSL", async ()
   const payload = seenArgv.argv[seenArgv.argv.length - 1];
   assert.match(payload, /terminal-commanderd update --force/);
   assert.match(r.output, /restarted in 'Ubuntu-24\.04'/);
+  assert.match(r.output, /replaced 0\.1\.17 -> 0\.1\.18/);
+  assert.doesNotMatch(r.output, new RegExp(SHELL_RAN_SENTINEL));
+});
+
+test("restart on Windows reports a WSL login shell that exited before the update ran", async () => {
+  // exit 0 with no sentinel = a shell startup file ended the shell; the old
+  // code reported "daemon restarted" here with nothing done.
+  const r = await runRestart({
+    platform: "win32",
+    env: { TC_WSL_DISTRO: "Ubuntu-24.04" },
+    flags: {},
+    detect: async () => okDetect("Ubuntu-24.04"),
+    exec: () => fakeChild(0, ""),
+  });
+  assert.equal(r.status, "shell_exited_early");
+  assert.notEqual(r.exit_code, 0);
+  assert.match(r.output, /did not run/);
+  assert.match(r.output, /startup file/);
 });
 
 test("restart on Windows neutralizes ambient WSLENV (no credential crosses into WSL)", async () => {
@@ -265,7 +286,6 @@ test("Windows update planning is hermetic when the package helper exists", () =>
       assert.equal(arch, "x64");
       return { reason: "ok", binaryPath: helperPath };
     },
-    stableBinPath: () => assert.fail("stable helper lookup must not run"),
   });
 
   assert.equal(plan.status, "ready");
@@ -279,24 +299,6 @@ test("Windows update planning is hermetic when the package helper exists", () =>
   );
 });
 
-test("Windows update planning uses an explicitly resolved stable helper", () => {
-  const stableHelper = path.join("tmp", "stable", "terminal-commander.exe");
-  const plan = planUpdatePreflight({
-    platform: "win32",
-    env: { LOCALAPPDATA: path.join("tmp", "local-app-data") },
-    packageRoot: path.join("tmp", "npm", "node_modules", "terminal-commander"),
-    resolveBinary: () => ({ reason: "missing_platform_package" }),
-    formatResolveError: () => "terminal-commander: platform package missing",
-    stableBinPath: () => stableHelper,
-    existsSync: (candidate) => candidate === stableHelper,
-  });
-
-  assert.equal(plan.status, "ready");
-  assert.equal(plan.commands.length, 2);
-  assert.ok(plan.commands.every((command) => command.file === stableHelper));
-  assert.match(plan.diagnostics.join(""), /using stable update helper/);
-});
-
 test("Windows update planning degrades to npm repair when no helper exists", () => {
   const plan = planUpdatePreflight({
     platform: "win32",
@@ -304,17 +306,39 @@ test("Windows update planning degrades to npm repair when no helper exists", () 
     packageRoot: path.join("tmp", "npm", "node_modules", "terminal-commander"),
     resolveBinary: () => ({ reason: "missing_platform_package" }),
     formatResolveError: () => "terminal-commander: platform package missing",
-    stableBinPath: () => path.join("tmp", "stable", "terminal-commander.exe"),
-    existsSync: () => false,
   });
 
   assert.equal(plan.status, "degraded_repair");
   assert.equal(plan.exitCode, 0);
   assert.deepEqual(plan.commands, []);
-  assert.match(plan.diagnostics.join(""), /continuing with npm repair/);
+  assert.match(plan.diagnostics.join(""), /platform package missing; no update helper is available, continuing with npm repair/);
 });
 
-test("Windows update planning survives resolver and stable lookup exceptions", () => {
+test("Windows update planning never runs a CLI copy left in the stable bin dir", () => {
+  // Nothing mirrors the CLI into the stable dir (ensureStableBinaries deletes
+  // one as stale), so a file there is an out-of-band leftover: never a helper.
+  const localAppData = fs.mkdtempSync(path.join(os.tmpdir(), "tc-preflight-"));
+  const stableDir = path.join(localAppData, "terminal-commander", "bin");
+  fs.mkdirSync(stableDir, { recursive: true });
+  fs.writeFileSync(path.join(stableDir, "terminal-commander.exe"), "stale");
+  try {
+    const plan = planUpdatePreflight({
+      platform: "win32",
+      env: { LOCALAPPDATA: localAppData },
+      packageRoot: path.join("tmp", "npm", "node_modules", "terminal-commander"),
+      resolveBinary: () => ({ reason: "missing_platform_package" }),
+      formatResolveError: () => "terminal-commander: platform package missing",
+    });
+
+    assert.equal(plan.status, "degraded_repair");
+    assert.deepEqual(plan.commands, []);
+    assert.doesNotMatch(plan.diagnostics.join(""), /stable/);
+  } finally {
+    fs.rmSync(localAppData, { recursive: true, force: true });
+  }
+});
+
+test("Windows update planning survives resolver exceptions", () => {
   const plan = planUpdatePreflight({
     platform: "win32",
     env: {},
@@ -322,14 +346,11 @@ test("Windows update planning survives resolver and stable lookup exceptions", (
     resolveBinary: () => {
       throw new Error("resolver exploded");
     },
-    stableBinPath: () => {
-      throw new Error("LOCALAPPDATA missing");
-    },
   });
 
   assert.equal(plan.status, "degraded_repair");
   assert.equal(plan.exitCode, 0);
-  assert.match(plan.diagnostics.join(""), /stable update helper lookup failed/);
+  assert.deepEqual(plan.commands, []);
   assert.match(plan.diagnostics.join(""), /binary resolver failed: resolver exploded/);
 });
 

@@ -88,6 +88,7 @@ fn ev(bucket: BucketId, severity: Severity, kind: &str) -> SignalEvent {
         rule: Some(RuleRef {
             id: RuleId::new(),
             version: 1,
+            registry_id: None,
         }),
         source: EventSource {
             probe_id: ProbeId::new(),

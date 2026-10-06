@@ -540,6 +540,10 @@ impl ShellSessionRuntime {
     /// `export K=V`. Lines run through [`Self::exec`] so the
     /// terminal-state + secret guards apply. Updates the tracked cwd/env.
     ///
+    /// A value the capture masked (F-003) carries the redaction marker, not
+    /// the real value, so it is skipped rather than exported; its key is
+    /// returned so the caller can say it was not restored.
+    ///
     /// # Errors
     /// Propagates [`Self::exec`] errors (terminal-state guard, oversized,
     /// secret prompt).
@@ -548,9 +552,14 @@ impl ShellSessionRuntime {
         session_id: SessionId,
         cwd: Option<String>,
         env: Vec<(String, String)>,
-    ) -> Result<Option<String>, SessionError> {
+    ) -> Result<(Option<String>, Vec<String>), SessionError> {
+        let (env, skipped): (Vec<_>, Vec<_>) = env
+            .into_iter()
+            .take(MAX_SESSION_ENV_ITEMS)
+            .partition(|(_, v)| !v.contains(crate::command::ARGV_HEAD_REDACTED));
+        let skipped: Vec<String> = skipped.into_iter().map(|(k, _)| k).collect();
         // env first, then cd, so a later cd is the final tracked state.
-        for (k, v) in env.iter().take(MAX_SESSION_ENV_ITEMS) {
+        for (k, v) in &env {
             if is_safe_env_key(k) {
                 let line = format!("export {k}={}", shell_single_quote(v));
                 self.exec(session_id, &line).await?;
@@ -570,7 +579,7 @@ impl ShellSessionRuntime {
                 entry.cwd = Some(dir);
             }
         }
-        Ok(cwd)
+        Ok((cwd, skipped))
     }
 
     /// Stop a session: terminate the shell (graceful-then-forced via the

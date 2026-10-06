@@ -8,7 +8,8 @@ without restarting the daemon.
 1. LLM observes a recurring noise pattern in the bucket (e.g. an
    app emitting "DEBUG flushed 1024 bytes" twice per second).
 
-2. LLM tool call: `registry_create(rule)` with:
+2. LLM tool call: `registry_upsert(definition_json)` where
+   `definition_json` is the JSON-encoded string of:
    ```json
    {
      "id": "myapp.debug-flush",
@@ -23,13 +24,14 @@ without restarting the daemon.
      "tags": ["myapp", "noise"]
    }
    ```
-   Response: `{"version": 1}` (or `{"version": 2}` on edit).
+   The store assigns the version (latest + 1); the response returns it.
 
-3. LLM tool call: `registry_test(rule, input="DEBUG flushed 2048 bytes")`
-   to verify the regex matches. Validation already happened at
-   `registry_create` time (TC09 + TC14).
+3. LLM tool call: `registry_test(rule_id, samples=[{"text": "DEBUG flushed
+   2048 bytes"}])` to verify the regex matches. Validation already
+   happened at `registry_upsert` time.
 
-4. LLM tool call: `registry_activate(rule_id, version)` — server
+4. LLM tool call: `registry_activate(rule_id, version, scope={"kind":
+   "global"})` (`scope` is required) — server
    evaluates a `PolicyAction::RegistryActivate`. Under
    `developer_local` the verdict is `AllowWithAudit`; activation
    record is written.
@@ -42,4 +44,6 @@ without restarting the daemon.
 
 Bypassing the registry by inlining a regex into a one-shot tool
 call: this loses dedupe, retention, and operator-visible activation
-history. Every persistent sifter rule MUST live in the registry.
+history. Every persistent sifter rule MUST live in the registry. (One-off inline
+`rules` on `run_and_watch` / `command_start_combed` are a supported
+per-job shortcut, but they are not persisted or activated.)

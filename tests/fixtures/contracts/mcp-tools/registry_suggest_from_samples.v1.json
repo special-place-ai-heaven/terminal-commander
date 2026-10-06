@@ -44,7 +44,8 @@
         "tags": ["suggested"],
         "rate_limit_per_min": 30,
         "redact": [],
-        "context_hint": { "before_lines": 0, "after_lines": 2 }
+        "context_hint": { "before_lines": 0, "after_lines": 2 },
+        "examples": []
       }
     ],
     "confidence": "heuristic",

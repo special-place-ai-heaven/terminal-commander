@@ -27,10 +27,10 @@
     "caps": {
       "allow_shell": true,
       "allow_session": true,
-      "allow_privileged": true,
       "allow_remote": true
     },
-    "llm_can_activate_recipes": true
+    "llm_can_activate_recipes": true,
+    "config_warnings": []
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",

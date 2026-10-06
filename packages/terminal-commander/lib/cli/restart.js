@@ -22,7 +22,12 @@
 
 const { resolveDistro } = require("./setup_cursor_wsl.js");
 const { detectWsl } = require("../wsl/detect.js");
-const { LINUX_PATH_PREFIX } = require("../bootstrap/constants.js");
+const {
+  LINUX_PATH_PREFIX,
+  withShellRanSentinel,
+  takeShellRanSentinel,
+  shellExitedEarlyHint,
+} = require("../bootstrap/constants.js");
 const { buildFilteredEnv } = require("../wsl/filtered_env.js");
 const { ensureSessionInWslEnv } = require("../wsl/spawn.js");
 const { resolveBinary, formatResolveError } = require("../resolve-binary.js");
@@ -101,7 +106,7 @@ async function runRestart(opts) {
       "--",
       "bash",
       "-lc",
-      `${LINUX_PATH_PREFIX}${DAEMON_RESTART_CMD}`,
+      withShellRanSentinel(`${LINUX_PATH_PREFIX}${DAEMON_RESTART_CMD}`),
     ];
     // Apply the same WSLENV defense the bridge spawn uses: reduce
     // WSLENV to a TC-only allowlist (or drop it) so wsl.exe cannot
@@ -115,8 +120,17 @@ async function runRestart(opts) {
       argv,
       env: ensureSessionInWslEnv(buildFilteredEnv(env)),
     });
-    const { code, out, err } = await collectChild(child);
+    const { code, out: rawOut, err } = await collectChild(child);
+    const shell = takeShellRanSentinel(rawOut);
+    const out = shell.stdout;
     const tail = `${out}${err}`.trim();
+    if (code === 0 && !shell.ran) {
+      return {
+        status: "shell_exited_early",
+        exit_code: 64,
+        output: `terminal-commander: daemon restart did not run: ${shellExitedEarlyHint(resolved.distro)}\n`,
+      };
+    }
     return {
       status: code === 0 ? "ok" : "restart_failed",
       exit_code: code,

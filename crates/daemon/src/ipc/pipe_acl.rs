@@ -2,7 +2,7 @@
 // Copyright 2026 The Terminal Commander Authors
 //
 // Build a security descriptor string (SDDL) that restricts a Windows
-// named pipe to LocalSystem, Administrators, and the current user.
+// named pipe to the current user.
 
 #![cfg(windows)]
 #![allow(unsafe_code)]
@@ -14,9 +14,12 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 pub fn build_sddl_for_current_user() -> std::io::Result<String> {
     let user_sid = current_user_sid()?;
-    // Owner: current user. DACL: LocalSystem full, Admins full,
-    // current user full. Everyone denied implicitly (no allow entry).
-    let sddl = format!("O:{user_sid}D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{user_sid})");
+    // Owner and only allowed principal: the current user; everyone else is
+    // denied implicitly. No TC component connects as another principal (an
+    // elevated client keeps the same user SID), and the daemon runs any
+    // command for whoever connects, so LocalSystem and Administrators get
+    // no entry: they would only widen who can drive it.
+    let sddl = format!("O:{user_sid}D:(A;;GA;;;{user_sid})");
     Ok(sddl)
 }
 
@@ -81,7 +84,8 @@ pub fn create_named_pipe_with_sddl(
         FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
     };
     use windows::Win32::System::Pipes::{
-        CreateNamedPipeW, NAMED_PIPE_MODE, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+        CreateNamedPipeW, NAMED_PIPE_MODE, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_TYPE_BYTE, PIPE_WAIT,
     };
     use windows::core::PCWSTR;
 
@@ -122,8 +126,13 @@ pub fn create_named_pipe_with_sddl(
             open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
         }
 
-        // PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT as NAMED_PIPE_MODE.
-        let pipe_mode = NAMED_PIPE_MODE(PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0);
+        // PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, and
+        // PIPE_REJECT_REMOTE_CLIENTS: the endpoint is local only (an SMB
+        // client of the same user is refused too). tokio's own builder sets
+        // it by default; this raw path must say it.
+        let pipe_mode = NAMED_PIPE_MODE(
+            PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0 | PIPE_REJECT_REMOTE_CLIENTS.0,
+        );
 
         let handle = CreateNamedPipeW(
             PCWSTR(wide_name.as_ptr()),

@@ -25,6 +25,9 @@
       "file_watches": 0,
       "bucket_count": 0,
       "active_rules_count": 0,
+      "probes_truncated": false,
+      "buckets_truncated": false,
+      "active_rules_truncated": false,
       "probes": [],
       "buckets": [],
       "active_rules": []
@@ -35,6 +38,9 @@
       "file_watches": 1,
       "bucket_count": 3,
       "active_rules_count": 1,
+      "probes_truncated": false,
+      "buckets_truncated": false,
+      "active_rules_truncated": false,
       "probes": [
         {
           "kind": "command",
@@ -43,9 +49,13 @@
           "probe_id": "prb_018f0000000000000000000000000001",
           "frames_total": 4,
           "events_emitted": 1,
+          "frames_suppressed": 0,
+          "frames_suppressed_progress": 0,
+          "frames_suppressed_dedupe": 0,
           "secret_prompts_total": 0,
           "secret_prompt_active": false,
           "path": null,
+          "liveness": { "state": "running" },
           "tag": "build",
           "argv_head": ["cargo", "build", "--release"]
         },
@@ -56,9 +66,13 @@
           "probe_id": "prb_018f0000000000000000000000000002",
           "frames_total": 0,
           "events_emitted": 0,
+          "frames_suppressed": 0,
+          "frames_suppressed_progress": 0,
+          "frames_suppressed_dedupe": 0,
           "secret_prompts_total": 0,
           "secret_prompt_active": false,
           "path": "C:\\work\\app\\build.log",
+          "liveness": { "state": "running" },
           "tag": null,
           "argv_head": ["file_watch:C:\\work\\app\\build.log"]
         },
@@ -69,9 +83,13 @@
           "probe_id": "prb_018f0000000000000000000000000003",
           "frames_total": 2,
           "events_emitted": 0,
+          "frames_suppressed": 0,
+          "frames_suppressed_progress": 0,
+          "frames_suppressed_dedupe": 0,
           "secret_prompts_total": 1,
           "secret_prompt_active": true,
           "path": null,
+          "liveness": { "state": "running" },
           "tag": "db",
           "argv_head": ["psql", "postgres://u:<redacted>@db/app"]
         }

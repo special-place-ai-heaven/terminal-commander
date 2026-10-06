@@ -9,7 +9,7 @@ Language: ASCII only.
 
 ## 1. Lock summary
 
-- Backend: shared with TC12 (rusqlite 0.39 bundled, FTS5, WAL, NORMAL
+- Backend: shared with TC12 (rusqlite 0.40 bundled, FTS5, WAL, NORMAL
   sync, busy_timeout 5s).
 - Migrations: manual runner (matches TC12). Migration V0002 introduces
   the registry tables.
@@ -77,6 +77,8 @@ CREATE TABLE rule_activations (
     PRIMARY KEY (rule_id, version, activated_at)
 );
 
+-- Later migrations: V0004 adds rule_activations.scope_kind (default
+-- 'global') and scope_value; V0009 adds the parallel recipe tables.
 -- FTS5 over rule_versions.summary_template + tags (concatenated).
 CREATE VIRTUAL TABLE rule_search USING fts5(
     rule_id, event_kind, summary_template, tags_text,
@@ -100,8 +102,9 @@ created_at)` pairs in ascending order.
 Default `LIMIT=50`, max `LIMIT=500`; out-of-range requests clamp.
 
 `RegistryStore::record_activation(rule_id, version, profile, actor)`
-— inserts an activation row. Advisory only at MVP; the runtime is
-not bound here (TC14 / TC21).
+— inserts an activation row. The store itself does not bind the
+runtime; the daemon rebinds running probes on activation (`*_sifter_rebind`
+in `command.rs`, `pty_command.rs`, `file_watch.rs`).
 
 `RegistryStore::tombstone(rule_id)` — sets `tombstoned=1` on the
 parent row. Versions remain queryable; new versions cannot be added
@@ -114,8 +117,8 @@ while tombstoned.
 | create_version (regex + keyword) | live (TC13) |
 | get_latest / get_version / list_versions | live |
 | search (FTS5) | live |
-| record_activation | live (advisory only) |
+| record_activation | live (store row only; the daemon rebinds live probes) |
 | tombstone | live |
-| seed import from rule packs | reserved for TC14 |
-| MCP `registry_*` tools | reserved for TC24 |
+| seed import from rule packs | live (`registry_import_pack`, 25 packs) |
+| MCP `registry_*` tools | live (`registry_search/get/upsert/test/activate/import_pack/deactivate/list_active/suggest_from_samples`) |
 | kernel-level enforcement (Landlock, seccomp) | post-MVP |

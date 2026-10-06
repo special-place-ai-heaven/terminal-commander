@@ -31,8 +31,16 @@ Installs three commands on PATH:
 
 - Does NOT run a postinstall downloader.
 - Does NOT compile Rust during `npm install`.
-- Does NOT run lifecycle bootstrap, write harness config, install into WSL,
-  or start daemons during `npm install`.
+- Does NOT spawn a daemon from `postinstall.js` itself. (Update 2026-10-05: the
+  root package DOES have a guarded, fail-soft `postinstall`
+  (`terminal-commander/scripts/postinstall.js`) that auto-registers the MCP
+  entry in detected harnesses; it is a no-op under CI or
+  `TC_NO_AUTO_SETUP=1` / `TC_SKIP_BOOTSTRAP=1`. Pinned by
+  `terminal-commander/test/av-safe-install-runtime.test.js`; added in commit
+  `393f89c`. On Linux/WSL the bootstrap it runs also installs daemon autostart
+  and starts the daemon (`packages/terminal-commander/lib/daemon/autostart.js`; opt out with
+  `TC_SKIP_DAEMON_AUTOSTART=1`). There is still no `preinstall` / `install`
+  script.)
 - The runtime shims are bounded to direct `child_process.spawn` with
   `shell: false` and `stdio: 'inherit'`.
 

@@ -1,7 +1,7 @@
 # Shell Runtime (TC49)
 
-Status: Live (TC49). One-shot `shell_exec` only. Sessions
-(`shell_session_*`) and the cwd sentinel are DEFERRED to TC50.
+Status: Live (TC49). One-shot `shell_exec`. Persistent sessions
+(`shell_session_*`) shipped later as TC50; see `docs/runtime/SHELL_SESSION.md`.
 
 Crate paths:
 - `crates/daemon/src/shell.rs` -- `ShellRuntime` facade + DTOs.
@@ -49,12 +49,11 @@ gate, so the default surface stays exactly as safe as before.
   harness cannot send a `shell_line` field, and only normalized into
   the SAME `CommandShellStart` verdict ("one lock"). v1 ships ONE shell
   shape: `shell_exec`.
-- **TC50 sessions.** `shell_session_start` / `shell_session_exec`
-  (daemon-owned `{cwd, env}` state, one fresh `[shell,"-lc",line]` per
-  call) are DEFERRED to TC50.
+- **TC50 sessions.** Out of scope for TC49; since shipped (unix-only) as
+  `shell_session_*`, see `docs/runtime/SHELL_SESSION.md`.
 - **The cwd sentinel.** The RS-framed `\036<marker>:<pwd>\036` cwd
   capture that persists `cd` across session lines (Decisions 4/6) is
-  part of TC50, NOT TC49. A one-shot `shell_exec` has no session cwd to
+  part of the session lane (TC50), NOT TC49. A one-shot `shell_exec` has no session cwd to
   persist.
 - **Privilege.** No setuid / polkit / sudo path. Privilege stays a
   separate closed helper (Wave 4, `allow_privileged`). See section 7.
@@ -226,7 +225,8 @@ the shell lane stays a trusted-profile, on-by-default capability
 
 ## 9. MCP surface
 
-`shell_exec` is the 39th live MCP tool (catalogue group `command`).
+`shell_exec` is one of the 60 live MCP tools (`tool_catalogue()` in
+`crates/mcp/src/tools.rs`).
 It is a thin facade: it forwards 1:1 to `IpcRequest::ShellExec`, holds
 NO guard literals, and on success returns the same bounded start
 metadata as `command_start_combed`:
@@ -256,8 +256,8 @@ Layering (same fields, three layers):
   -> distinct `job_id`s (dedup).
 - `crates/daemon/tests/command_runtime.rs` -- the argv-lane regression
   lock: `argv[0] = "sh"` is still `ShellInterpreterDenied`.
-- `crates/mcp/tests/mcp_live_daemon.rs` -- the 39-tool count + the
-  sorted catalogue including `shell_exec`.
+- `crates/mcp/tests/mcp_live_daemon.rs` -- the live catalogue check
+  including `shell_exec`.
 - `crates/mcp/tests/shell_live_e2e.rs` -- O-01 pipeline e2e (combed,
   not raw) under `full_access`; deny e2e under `developer_local`
   hardened with `allow_shell = false`.

@@ -29,46 +29,66 @@
     "bucket_id": "bkt_018f0000000000000000000000000001",
     "state": "exited",
     "exit_code": 0,
+    "pipeline_exit_masked": false,
     "signals": [],
     "signal_count": 0,
+    "signals_capped": false,
+    "compact": false,
     "receipt": {
       "exit_code": 0,
-      "frames_suppressed": 0,
-      "tail": []
+      "lines_suppressed": 1,
+      "lines_omitted": 0,
+      "tail_incomplete": false,
+      "tail": ["quiet"]
     },
     "complete": true,
     "wait_exhausted": false,
+    "wait_cap_ms": 60000,
+    "poll_hint_ms": null,
     "cursor": 12,
     "degraded": false,
-    "recover_hint": null
+    "recover_hint": null,
+    "outcome_trust": "observed"
   },
   "response_example_wait_exhausted": {
     "job_id": "job_018f0000000000000000000000000001",
     "bucket_id": "bkt_018f0000000000000000000000000001",
     "state": "running",
     "exit_code": null,
+    "pipeline_exit_masked": false,
     "signals": [],
     "signal_count": 0,
+    "signals_capped": false,
+    "compact": false,
     "receipt": null,
     "complete": false,
     "wait_exhausted": true,
+    "wait_cap_ms": 60000,
+    "poll_hint_ms": 1000,
     "cursor": 12,
     "degraded": false,
-    "recover_hint": null
+    "recover_hint": null,
+    "outcome_trust": "observed"
   },
   "response_example_degraded": {
     "job_id": "job_018f0000000000000000000000000001",
     "bucket_id": "bkt_018f0000000000000000000000000001",
     "state": "unknown",
     "exit_code": null,
+    "pipeline_exit_masked": false,
     "signals": [],
     "signal_count": 0,
+    "signals_capped": false,
+    "compact": false,
     "receipt": null,
     "complete": false,
     "wait_exhausted": true,
+    "wait_cap_ms": 60000,
+    "poll_hint_ms": null,
     "cursor": 12,
     "degraded": true,
-    "recover_hint": "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with the `health` tool, then poll command_status with this job_id for the final state and signals. Do not re-run the command."
+    "recover_hint": "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with the `health` tool, then poll command_status with this job_id for the final state and signals. Do not re-run the command.",
+    "outcome_trust": null
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
@@ -105,6 +125,7 @@
     "cursor is present on EVERY result (normal, wait_exhausted, and degraded) and is authoritative for resuming the bucket via bucket_events_since/bucket_wait",
     "degraded=true (TC-1b) means an IPC error interrupted the wait AFTER a job_id was minted: the result is success-shaped (never a bare error), carries the real job_id/bucket_id/cursor, sets complete=false and wait_exhausted=true, and reports state as the last observed value or \"unknown\" -- never a silent \"running\"",
     "recover_hint is null on the normal path and, when degraded, instructs the agent to confirm daemon health THEN poll command_status with the job_id -- do not re-run the command",
-    "a degraded result carries receipt=null because the wait did not complete"
+    "a degraded result carries receipt=null because the wait did not complete",
+    "wslenv_dropped is optional: present only when the command mentions WSL (an argv element or the shell line contains `wsl`, any case) and the daemon's ambient WSLENV named secret-shaped variables; it lists those names (never values) under wslenv_dropped.names with a note. Every spawn is filtered either way; self_check names the variables regardless"
   ]
 }

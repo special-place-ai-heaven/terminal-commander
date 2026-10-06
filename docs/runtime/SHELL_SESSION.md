@@ -1,7 +1,7 @@
 # Shell Session Runtime (Omni P1 / TC50)
 
 Status: Live (omni program P1, US1). UNIX-ONLY. Gated by the
-`allow_session` capability (default deny). Windows session support is a
+`allow_session` capability (on under the default `full_access`, off on the hardened profiles). Windows session support is a
 separate, not-yet-shipped slice.
 
 This document supersedes the "sessions deferred to TC50" note in
@@ -50,7 +50,7 @@ from the session bucket. The LLM never sees raw stdout/stderr.
   `workspace_snapshot_apply`.
 - Daemon-owned `{cwd, env}` stickiness via the persistent interactive
   shell process (NOT a re-implemented environment model).
-- The `allow_session` capability gate (`[policy.caps]`, default false;
+- The `allow_session` capability gate (`[policy.caps]`, default true under `full_access`, false otherwise;
   see `POLICY.md` section 4.1) via `PolicyAction::SessionStart`.
 - A bounded `max_sessions` cap enforced BEFORE spawn, and a per-session
   idle-TTL reaper.
@@ -207,7 +207,7 @@ NOT drive policy, containment, or any automated decision off
 
 The `[shell_session]` section sizes the runtime once sessions are
 permitted. It does NOT grant the capability -- that is `[policy.caps]
-allow_session` (default false; see `POLICY.md` section 4.1).
+allow_session` (on under `full_access`, off otherwise; see `POLICY.md` section 4.1).
 
 ```toml
 [shell_session]
@@ -269,9 +269,11 @@ workspace_snapshot_create { session_id, name? }
 workspace_snapshot_apply { snapshot_id, session_id }
   -> fetch the snapshot row (FileNotFound if unknown)
   -> replay into the target LIVE session via shell_session_exec lines:
-       export K=V   for each bounded env entry (validated key)
+       export K=V   for each bounded env entry (validated key) whose
+                    value is not masked; a masked one (`<redacted>`) is
+                    skipped and named in skipped_redacted
        cd <cwd>     last, so a later cd is the final tracked state
-  -> { applied: true, cwd }
+  -> { applied: true, cwd, skipped_redacted? }
 ```
 
 Safety properties:

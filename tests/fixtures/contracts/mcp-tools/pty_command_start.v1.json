@@ -77,6 +77,7 @@
     "a non-array argv is rejected with a field-prefixed teaching error naming the array-of-strings shape with an example (TB-11)",
     "MCP request does not expose the daemon-only environment field, but does accept optional bucket_config_json and rules_json that map to daemon IPC without a prior registry_activate",
     "success payload contains only job_id, bucket_id, probe_id, and cursor",
-    "shell interpreters are denied only while a hardened profile turns allow_shell off (ShellInterpreterDenied); with allow_shell on (the default) they start and the audit row is tagged nested_shell"
+    "shell interpreters are denied only while a hardened profile turns allow_shell off (ShellInterpreterDenied); with allow_shell on (the default) they start and the audit row is tagged nested_shell",
+    "wslenv_dropped is optional: present only when the command mentions WSL (an argv element or the shell line contains `wsl`, any case) and the daemon's ambient WSLENV named secret-shaped variables; it lists those names (never values) under wslenv_dropped.names with a note. Every spawn is filtered either way; self_check names the variables regardless"
   ]
 }

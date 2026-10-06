@@ -297,9 +297,11 @@ wrong. A dishonest "success" or "done" is worse than an honest failure.
 
 ## Development Workflow & Quality Gates
 
-- The canonical CI pipeline is the seven steps in `TESTING.md` section 2 (fmt,
-  clippy, cargo-deny, feature-matrix, MSRV, nextest+doctests, cargo-machete).
-  Steps 1, 2, and 6 (default profile) are the pre-commit subset.
+- The CI pipeline is what `TESTING.md` section 2 describes: `cargo deny check`,
+  `scripts/linux-gate.sh` (fmt, clippy, nextest, load gate, `crates/mcp`
+  grep guards) and `scripts/windows-gate.ps1`. Feature-matrix, MSRV, doctests
+  and cargo-machete are not enforced by CI. fmt, clippy, and nextest (default
+  profile) are the pre-commit subset.
 - Work is phased. A single change set touches a bounded, declared file set;
   multi-file refactors are split into phases that each verify before the next.
   Cleanup, refactor, and feature work are not mixed in one commit unless a spec

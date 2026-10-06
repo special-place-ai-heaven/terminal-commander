@@ -21,16 +21,19 @@ const DISCOVERY_DEADLINE: Duration = Duration::from_secs(3);
 /// report. A probe still waiting to create its process is reported as timed
 /// out; its thread kills the process as soon as it exists.
 const DEADLINE_GRACE: Duration = Duration::from_millis(250);
-/// How long a discovery result is reused. Shells and tools rarely change
-/// while the daemon runs, but WSL can: a distro starts, or one is installed,
-/// and a probe that timed out on a busy host can succeed later. Reusing a
-/// result this briefly keeps such a change, or a timed-out probe, from
-/// being reported for long.
+/// Past this age a call still gets the last result at once, and a refresh
+/// starts in the background. Shells and tools rarely change while the daemon
+/// runs, but WSL can: a distro starts, or one is installed, and a probe that
+/// timed out on a busy host can succeed later.
 const DISCOVERY_TTL: Duration = Duration::from_secs(30);
+/// Past this age the last result is not served: the call waits for a fresh
+/// discovery, bounded like the first one. Ten minutes covers an agent that
+/// works in bursts a few minutes apart, so it never waits, while a daemon
+/// left idle for hours does not report hours-old WSL state.
+const DISCOVERY_MAX_AGE: Duration = Duration::from_mins(10);
 
-/// The last discovery result and when it finished.
-static DISCOVERY_CACHE: std::sync::Mutex<Option<(Instant, HostEnvironment)>> =
-    std::sync::Mutex::new(None);
+/// Host discovery results, shared by every caller in the daemon.
+static DISCOVERY: DiscoveryCache = DiscoveryCache::new();
 const MAX_VERSION_CHARS: usize = 160;
 const MAX_WSL_DISTROS: usize = 16;
 const SHELL_SENTINEL: &str = "terminal-commander-shell-probe";
@@ -46,7 +49,11 @@ struct ProbeSpec {
 
 struct ProbeOutput {
     success: bool,
+    /// The output as one bounded line, for version strings and sentinels.
     text: String,
+    /// The output's non-empty lines, each bounded on its own, for output
+    /// that is a list (`wsl --list`).
+    lines: Vec<String>,
 }
 
 enum ProbeRun {
@@ -62,23 +69,161 @@ enum Probed {
     Wsl(Option<(ProbeRun, ProbeRun)>),
 }
 
-/// The host environment, reusing a discovery for `DISCOVERY_TTL`.
+/// The host environment from the last discovery, with `discovery_age_ms` set.
 ///
-/// Otherwise this discovers now. Concurrent callers share one discovery, so
-/// a call waits at most `DISCOVERY_DEADLINE` + `DEADLINE_GRACE`.
+/// A result older than `DISCOVERY_TTL` is still returned at once and refreshed
+/// in the background. A call waits only when there is no result yet or the
+/// last one is older than `DISCOVERY_MAX_AGE`, and then at most
+/// `DISCOVERY_DEADLINE` + `DEADLINE_GRACE`.
 #[must_use]
 pub fn cached_host_environment() -> HostEnvironment {
-    let mut cache = DISCOVERY_CACHE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((finished, environment)) = cache.as_ref()
-        && finished.elapsed() < DISCOVERY_TTL
-    {
-        return environment.clone();
+    #[cfg(not(test))]
+    let discover = discover_host_environment;
+    #[cfg(test)]
+    let discover = discover_for_tests;
+    DISCOVERY.get(discover)
+}
+
+/// Move the shared discovery cache's clock forward, as if `by` had passed.
+#[cfg(test)]
+pub(super) fn advance_discovery_clock(by: Duration) {
+    DISCOVERY
+        .clock_offset_ms
+        .fetch_add(millis(by), std::sync::atomic::Ordering::SeqCst);
+}
+
+/// While set, a discovery through the shared cache takes five seconds longer,
+/// so a test can tell a call that waited for it from one that did not.
+#[cfg(test)]
+pub(super) static SLOW_DISCOVERY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+fn discover_for_tests() -> HostEnvironment {
+    if SLOW_DISCOVERY.load(std::sync::atomic::Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_secs(5));
     }
-    let environment = discover_host_environment();
-    *cache = Some((Instant::now(), environment.clone()));
-    environment
+    discover_host_environment()
+}
+
+struct DiscoveryCache {
+    state: std::sync::Mutex<CacheState>,
+    refreshed: std::sync::Condvar,
+    /// Tests move this cache's clock forward instead of sleeping.
+    #[cfg(test)]
+    clock_offset_ms: std::sync::atomic::AtomicU64,
+}
+
+struct CacheState {
+    /// The last accepted result and when its discovery finished.
+    last: Option<(Instant, HostEnvironment)>,
+    /// A discovery is running; at most one runs at a time.
+    refreshing: bool,
+}
+
+impl DiscoveryCache {
+    const fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(CacheState {
+                last: None,
+                refreshing: false,
+            }),
+            refreshed: std::sync::Condvar::new(),
+            #[cfg(test)]
+            clock_offset_ms: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    #[cfg(not(test))]
+    #[allow(clippy::unused_self)] // the test build reads this cache's clock offset
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    #[cfg(test)]
+    fn now(&self) -> Instant {
+        Instant::now()
+            + Duration::from_millis(
+                self.clock_offset_ms
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            )
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CacheState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn get(&'static self, discover: fn() -> HostEnvironment) -> HostEnvironment {
+        let mut state = self.lock();
+        loop {
+            if let Some((finished, environment)) = &state.last {
+                let age = self.now().saturating_duration_since(*finished);
+                if age < DISCOVERY_MAX_AGE {
+                    let mut environment = environment.clone();
+                    environment.discovery_age_ms = millis(age);
+                    if age >= DISCOVERY_TTL {
+                        self.start_refresh(&mut state, discover);
+                    }
+                    return environment;
+                }
+            }
+            self.start_refresh(&mut state, discover);
+            state = self
+                .refreshed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn start_refresh(&'static self, state: &mut CacheState, discover: fn() -> HostEnvironment) {
+        if state.refreshing {
+            return;
+        }
+        state.refreshing = true;
+        std::thread::spawn(move || {
+            let fresh = std::panic::catch_unwind(discover).ok();
+            let mut state = self.lock();
+            state.refreshing = false;
+            if let Some(fresh) = fresh
+                && !state.last.as_ref().is_some_and(|(finished, previous)| {
+                    self.now().saturating_duration_since(*finished) < DISCOVERY_MAX_AGE
+                        && lost_answers(previous, &fresh)
+                })
+            {
+                state.last = Some((self.now(), fresh));
+            }
+            drop(state);
+            self.refreshed.notify_all();
+        });
+    }
+}
+
+/// Whether a refresh lost an answer the previous result had: a shell, tool,
+/// or WSL probe that completed before timed out now. That is the host being
+/// busy, not a change, so the previous result is kept and keeps reporting
+/// its real age.
+fn lost_answers(previous: &HostEnvironment, fresh: &HostEnvironment) -> bool {
+    let timed_out = |probe: &ProgramProbe| {
+        probe.version_status == "timed_out" || probe.execution_status == "timed_out"
+    };
+    let lost = |before: &[ProgramProbe], now: &[ProgramProbe]| {
+        now.iter().any(|probe| {
+            timed_out(probe)
+                && before
+                    .iter()
+                    .any(|old| old.name == probe.name && !timed_out(old))
+        })
+    };
+    lost(&previous.shells, &fresh.shells)
+        || lost(&previous.tools, &fresh.tools)
+        || (fresh.wsl.execution_status == "timed_out"
+            && previous.wsl.execution_status != "timed_out")
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Discover the current daemon host with a fixed, bounded probe set.
@@ -175,7 +320,8 @@ pub fn discover_host_environment() -> HostEnvironment {
         access_routes,
         beachhead,
         preferred_shell,
-        discovery_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        discovery_ms: millis(started.elapsed()),
+        discovery_age_ms: 0,
     }
 }
 
@@ -466,7 +612,14 @@ fn probe_program(spec: ProbeSpec, path: &Path, deadline: Instant) -> ProgramProb
 
 fn probe_shell(spec: ProbeSpec, path: &Path, deadline: Instant) -> ProgramProbe {
     let path_text = path.to_string_lossy().into_owned();
-    let command_argv = shell_launch_argv(&path_text, shell_probe_line(&path_text));
+    let line = shell_probe_line(&path_text);
+    // Not a login shell: that sources the user's startup files, which can be
+    // slow, can exit early, and on Linux run the installed autostart, which
+    // starts a daemon. The probe only confirms the interpreter runs a line.
+    let command_argv = match shell_family(&path_text) {
+        "posix" => vec![path_text.clone(), "-c".to_owned(), line.to_owned()],
+        _ => shell_launch_argv(&path_text, line),
+    };
     let interpreter_args = command_argv
         .iter()
         .skip(1)
@@ -553,8 +706,17 @@ fn run_bounded(program: &Path, args: &[&str], deadline: Instant) -> ProbeRun {
         return ProbeRun::TimedOut;
     }
     let mut command = Command::new(program);
+    terminal_commander_core::as_daemon_child(&mut command);
     #[cfg(windows)]
-    windows_silent(&mut command);
+    {
+        windows_silent(&mut command);
+        // SECURITY: the WSL execution probe runs `wsl.exe -e sh -c`, which
+        // launches a Linux process, and wsl.exe forwards every Windows variable
+        // NAMED in WSLENV into it. Rebuild WSLENV to the TC-only allowlist so an
+        // ambient `WSLENV=SOME_SECRET/u` cannot leak across the boundary.
+        let tc_session = std::env::var("TC_SESSION").ok();
+        terminal_commander_core::sanitize_wslenv(&mut command, tc_session.as_deref());
+    }
     command
         .args(args)
         .stdin(Stdio::null())
@@ -575,10 +737,7 @@ fn run_bounded(program: &Path, args: &[&str], deadline: Instant) -> ProbeRun {
                 } else {
                     output.stdout
                 };
-                return ProbeRun::Complete(ProbeOutput {
-                    success: status.success(),
-                    text: bounded_text(&bytes),
-                });
+                return ProbeRun::Complete(probe_output(status.success(), &bytes));
             }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
@@ -701,10 +860,11 @@ fn wsl_runs(deadline: Instant) -> Option<(ProbeRun, ProbeRun)> {
     let path = path.as_path();
     Some(std::thread::scope(|scope| {
         let list_job = scope.spawn(|| run_bounded(path, &["--list", "--quiet"], deadline));
+        // `sh -c`, not a login shell, for the reason given in `probe_shell`.
         let execution_job = scope.spawn(|| {
             run_bounded(
                 path,
-                &["-e", "sh", "-lc", &format!("printf {WSL_SENTINEL}")],
+                &["-e", "sh", "-c", &format!("printf {WSL_SENTINEL}")],
                 deadline,
             )
         });
@@ -744,16 +904,7 @@ fn wsl_probe(tools: &[ProgramProbe], runs: Option<(ProbeRun, ProbeRun)>) -> WslP
         };
     };
     let distributions = match list_run {
-        ProbeRun::Complete(output) if output.success => Some(
-            output
-                .text
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .take(MAX_WSL_DISTROS)
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-        ),
+        ProbeRun::Complete(output) if output.success => Some(output.lines),
         _ => None,
     };
     let execution_status = match execution_run {
@@ -780,16 +931,26 @@ fn nonempty(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn bounded_text(bytes: &[u8]) -> String {
+fn probe_output(success: bool, bytes: &[u8]) -> ProbeOutput {
     let decoded = String::from_utf8_lossy(bytes).replace('\0', "");
-    let joined = decoded
+    let lines = decoded
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .take(MAX_WSL_DISTROS)
-        .collect::<Vec<_>>()
-        .join("\n");
-    crate::command::redact_shell_line(&joined)
+        .collect::<Vec<_>>();
+    ProbeOutput {
+        success,
+        text: bounded_line(&lines.join("\n")),
+        // Each line is bounded on its own: `redact_shell_line` splits on all
+        // whitespace and rejoins with spaces, so bounding the joined text
+        // turned `wsl --list` output into a single distribution name.
+        lines: lines.iter().map(|line| bounded_line(line)).collect(),
+    }
+}
+
+fn bounded_line(text: &str) -> String {
+    crate::command::redact_shell_line(text)
         .chars()
         .filter(|ch| !ch.is_control() || *ch == '\n')
         .take(MAX_VERSION_CHARS)
@@ -843,5 +1004,178 @@ mod tests {
                 "confirmed programs must establish at least one direct argv beachhead"
             );
         }
+    }
+
+    /// `wsl --list --quiet` writes one name per line as UTF-16LE with CRLF.
+    #[cfg(windows)]
+    fn wsl_list_bytes(names: &[String]) -> Vec<u8> {
+        names
+            .iter()
+            .flat_map(|name| format!("{name}\r\n").encode_utf16().collect::<Vec<_>>())
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+
+    #[cfg(windows)]
+    fn distributions_from(names: &[String]) -> Vec<String> {
+        let tools = [ProgramProbe {
+            name: "wsl".to_owned(),
+            available: true,
+            path: Some(r"C:\Windows\System32\wsl.exe".to_owned()),
+            version: None,
+            evidence: "path_confirmed".to_owned(),
+            version_status: "confirmed".to_owned(),
+            execution_status: "not_probed".to_owned(),
+        }];
+        let list = ProbeRun::Complete(probe_output(true, &wsl_list_bytes(names)));
+        wsl_probe(&tools, Some((list, ProbeRun::TimedOut))).distributions
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_list_output_yields_one_distribution_per_line() {
+        let two = vec!["Ubuntu-24.04".to_owned(), "docker-desktop".to_owned()];
+        assert_eq!(distributions_from(&two), two);
+
+        let many = (0..MAX_WSL_DISTROS + 4)
+            .map(|i| format!("distro-with-a-long-name-{i:02}"))
+            .collect::<Vec<_>>();
+        assert_eq!(distributions_from(&many), many[..MAX_WSL_DISTROS]);
+    }
+
+    /// Version text stays one bounded line, as before.
+    #[test]
+    fn probe_version_text_stays_one_line() {
+        let output = probe_output(true, b"GNU bash, version 5.2\nCopyright (C) 2022\n");
+        assert_eq!(output.text, "GNU bash, version 5.2 Copyright (C) 2022");
+        assert_eq!(
+            output.lines,
+            ["GNU bash, version 5.2", "Copyright (C) 2022"]
+        );
+    }
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    impl DiscoveryCache {
+        fn advance(&self, by: Duration) {
+            self.clock_offset_ms.fetch_add(millis(by), Ordering::SeqCst);
+        }
+
+        /// Wait until no refresh is running.
+        fn settle(&self) {
+            let mut state = self.lock();
+            while state.refreshing {
+                state = self.refreshed.wait(state).unwrap();
+            }
+        }
+    }
+
+    fn leaked_cache() -> &'static DiscoveryCache {
+        Box::leak(Box::new(DiscoveryCache::new()))
+    }
+
+    /// A discovery that takes half a second and numbers its results in
+    /// `discovery_ms`.
+    fn slow_discovery(runs: &AtomicU64) -> HostEnvironment {
+        std::thread::sleep(Duration::from_millis(500));
+        HostEnvironment {
+            discovery_ms: runs.fetch_add(1, Ordering::SeqCst) + 1,
+            ..HostEnvironment::default()
+        }
+    }
+
+    static STALE_RUNS: AtomicU64 = AtomicU64::new(0);
+    fn stale_discovery() -> HostEnvironment {
+        slow_discovery(&STALE_RUNS)
+    }
+
+    #[test]
+    fn a_stale_result_is_served_at_once_and_refreshed_once() {
+        let cache = leaked_cache();
+        assert_eq!(cache.get(stale_discovery).discovery_ms, 1);
+        cache.advance(DISCOVERY_TTL + Duration::from_secs(1));
+
+        let callers = (0..8)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    let started = Instant::now();
+                    (cache.get(stale_discovery), started.elapsed())
+                })
+            })
+            .collect::<Vec<_>>();
+        for caller in callers {
+            let (environment, took) = caller.join().unwrap();
+            assert!(
+                took < Duration::from_millis(200),
+                "a caller waited {took:?}"
+            );
+            assert_eq!(environment.discovery_ms, 1, "the previous result is served");
+            assert!(environment.discovery_age_ms >= millis(DISCOVERY_TTL));
+        }
+
+        cache.settle();
+        assert_eq!(
+            STALE_RUNS.load(Ordering::SeqCst),
+            2,
+            "one background refresh"
+        );
+        let refreshed = cache.get(stale_discovery);
+        assert_eq!(refreshed.discovery_ms, 2);
+        assert!(refreshed.discovery_age_ms < 1_000);
+    }
+
+    static OLD_RUNS: AtomicU64 = AtomicU64::new(0);
+    fn old_discovery() -> HostEnvironment {
+        slow_discovery(&OLD_RUNS)
+    }
+
+    #[test]
+    fn a_result_past_the_max_age_is_not_served() {
+        let cache = leaked_cache();
+        assert_eq!(cache.get(old_discovery).discovery_ms, 1);
+        cache.advance(DISCOVERY_MAX_AGE + Duration::from_secs(1));
+        let fresh = cache.get(old_discovery);
+        assert_eq!(
+            fresh.discovery_ms, 2,
+            "the call waits for a fresh discovery"
+        );
+        assert!(fresh.discovery_age_ms < 1_000);
+    }
+
+    static BUSY_RUNS: AtomicU64 = AtomicU64::new(0);
+    /// The first discovery confirms pwsh; later ones time out on it.
+    fn busy_discovery() -> HostEnvironment {
+        let run = BUSY_RUNS.fetch_add(1, Ordering::SeqCst) + 1;
+        let status = if run == 1 { "confirmed" } else { "timed_out" };
+        HostEnvironment {
+            discovery_ms: run,
+            shells: vec![ProgramProbe {
+                name: "pwsh".to_owned(),
+                available: true,
+                path: Some("pwsh".to_owned()),
+                version: None,
+                evidence: "path_confirmed".to_owned(),
+                version_status: status.to_owned(),
+                execution_status: status.to_owned(),
+            }],
+            ..HostEnvironment::default()
+        }
+    }
+
+    #[test]
+    fn a_refresh_that_lost_answers_keeps_the_previous_result() {
+        let cache = leaked_cache();
+        assert_eq!(cache.get(busy_discovery).discovery_ms, 1);
+        cache.advance(DISCOVERY_TTL + Duration::from_secs(1));
+        let _ = cache.get(busy_discovery);
+        cache.settle();
+        assert_eq!(BUSY_RUNS.load(Ordering::SeqCst), 2);
+
+        let kept = cache.get(busy_discovery);
+        assert_eq!(kept.discovery_ms, 1, "the timed-out refresh is not used");
+        assert!(
+            kept.discovery_age_ms >= millis(DISCOVERY_TTL),
+            "with its real age"
+        );
     }
 }

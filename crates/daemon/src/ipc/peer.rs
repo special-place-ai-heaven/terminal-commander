@@ -52,6 +52,37 @@ pub fn resolve(stream: &tokio::net::UnixStream) -> Option<PeerCred> {
     })
 }
 
+/// `true` when `uid` is the user this daemon runs as. The daemon runs any
+/// command for whoever drives it, so only its own user may.
+#[cfg(unix)]
+#[must_use]
+#[allow(unsafe_code)]
+pub fn same_user(uid: u32) -> bool {
+    uid == own_uid()
+}
+
+/// The uid this daemon runs as.
+#[cfg(unix)]
+#[must_use]
+#[allow(unsafe_code)]
+pub fn own_uid() -> u32 {
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// The refusal a peer of another user gets: both identities and the fix.
+#[cfg(unix)]
+#[must_use]
+pub fn foreign_peer_message(peer_uid: u32) -> String {
+    format!(
+        "connection refused: this daemon runs as {} and serves only that user; this client \
+         runs as {}. Run the client as the user that owns the daemon, or start your own \
+         daemon.",
+        terminal_commander_ipc::uid_label(own_uid()),
+        terminal_commander_ipc::uid_label(peer_uid)
+    )
+}
+
 /// Longest parent chain [`descends_from`] walks before giving up.
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(crate) const MAX_ANCESTRY_DEPTH: usize = 64;

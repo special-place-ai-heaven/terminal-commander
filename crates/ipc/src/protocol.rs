@@ -76,6 +76,10 @@ pub struct CommandStartResponse {
     /// unrecognized or its pack is already active. Advisory only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<PackAvailableHint>,
+    /// Secret-shaped variable NAMES (never values) kept out of this
+    /// command's `WSLENV`; empty and omitted when none were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wslenv_dropped: Vec<String>,
 }
 
 /// No-silence exit receipt (TCE-ERG-1).
@@ -142,14 +146,17 @@ pub struct CommandReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutcomeTrust {
-    /// The daemon witnessed this outcome live. Every counter is a real
-    /// observation.
+    /// The daemon answering witnessed this outcome live. Every counter is a
+    /// real observation. A job whose lane has released it (a stopped file
+    /// watch or PTY job) is served from the receipt this same daemon wrote when
+    /// it ended, so its counters are the values captured at that moment.
     #[default]
     Observed,
-    /// Read back from the durable receipt after the in-memory job was gone.
-    /// `state` and `exit_code` are truthful; the counters are the values
-    /// captured when the job finished. Receipts written before the evidence
-    /// migration carry no counters, and that absence is reported honestly.
+    /// Read back from the durable receipt written by an EARLIER daemon boot
+    /// (the daemon restarted since the job ended). `state` and `exit_code` are
+    /// truthful; the counters are the values captured when the job finished.
+    /// Receipts written before the evidence migration carry no counters, and
+    /// that absence is reported honestly.
     Reconstructed,
     /// Ended by daemon shutdown or stale replacement rather than reaching its
     /// own conclusion. Reported with lifecycle state `Cancelled` and no exit
@@ -183,14 +190,15 @@ pub struct CommandStatusResponse {
     /// with zero rule-driven events. See [`CommandReceipt`].
     pub receipt: Option<CommandReceipt>,
     /// TC-B3 (FR-027): `true` when this status was reconstructed from a
-    /// PERSISTED job receipt because the in-memory job was gone (a daemon
+    /// PERSISTED job receipt written by an earlier daemon boot (a daemon
     /// restart happened since the job ran).
     ///
     /// Retained as the backward-compatible alias for "this outcome was NOT
     /// observed live", i.e. `outcome_trust != OutcomeTrust::Observed`. It is
-    /// therefore `true` for both `Reconstructed` and `Abandoned`, both of which
-    /// are read back from the durable receipt. Derive it from `outcome_trust`
-    /// rather than setting the two independently, so they cannot drift.
+    /// therefore `true` for both `Reconstructed` and `Abandoned`, and `false`
+    /// for a receipt the answering daemon wrote itself. Derive it from
+    /// `outcome_trust` rather than setting the two independently, so they
+    /// cannot drift.
     ///
     /// NOTE: an earlier version of this comment said the live counters are
     /// "zero because the in-memory probe metrics did not survive". That is no
@@ -911,7 +919,13 @@ pub struct HostEnvironment {
     pub beachhead: Option<AccessRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_shell: Option<String>,
+    /// How long the discovery that produced these facts took.
     pub discovery_ms: u64,
+    /// How long ago that discovery finished. The daemon reuses a discovery
+    /// and refreshes it in the background, so the facts can be this old
+    /// (up to ten minutes). Probes that timed out are reported as timed out.
+    #[serde(default)]
+    pub discovery_age_ms: u64,
 }
 
 /// MCP revision advertised on [`DiscoverResponse::mcp_spec`].
@@ -946,8 +960,6 @@ pub struct PolicyCapsView {
     pub allow_shell: bool,
     /// Gates the `shell_session_*` lane (TC50; not yet live).
     pub allow_session: bool,
-    /// Gates the Wave-4 privileged helper (not yet live).
-    pub allow_privileged: bool,
     /// Gates remote federation / `target_id` (Wave 5; not yet live).
     pub allow_remote: bool,
 }
@@ -975,6 +987,10 @@ pub struct PolicyStatusResponse {
     /// where an MCP caller is denied with `recipe_activate_requires_admin`.
     #[serde(default)]
     pub llm_can_activate_recipes: bool,
+    /// Config keys that have no effect (unknown, or accepted but not
+    /// enforced), one sentence each; omitted when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_warnings: Vec<String>,
 }
 
 /// `self_check` payload.
@@ -1890,6 +1906,25 @@ pub struct RegistryTestResponse {
     /// clients keep the historical shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stream_mismatches: Vec<usize>,
+    /// How many of the rule's own stored `examples` were evaluated (0 when
+    /// the rule has none). Always present; additive for older clients.
+    #[serde(default)]
+    pub examples_evaluated: u32,
+    /// One entry per evaluated example, in order. Omitted when the rule has
+    /// no examples. Bounded by the per-rule example cap.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub example_results: Vec<RegistryExampleResult>,
+}
+
+/// Outcome of one of a rule's own `examples` evaluated by `registry_test`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryExampleResult {
+    /// 0-based position in the rule's `examples` list.
+    pub index: usize,
+    pub passed: bool,
+    /// Why the example failed (expected vs actual); absent when it passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// `registry_suggest_from_samples` parameters (US2 / FR-007).
@@ -2376,6 +2411,9 @@ pub struct RecipeRunResponse {
     pub bucket_id: BucketId,
     pub probe_id: terminal_commander_core::ProbeId,
     pub cursor: u64,
+    /// As [`CommandStartResponse::wslenv_dropped`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wslenv_dropped: Vec<String>,
 }
 
 // =====================================================================
@@ -2741,6 +2779,9 @@ pub struct PtyCommandStartResponse {
     pub bucket_id: BucketId,
     pub probe_id: terminal_commander_core::ProbeId,
     pub cursor: u64,
+    /// As [`CommandStartResponse::wslenv_dropped`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wslenv_dropped: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3046,6 +3087,9 @@ pub enum CredentialUrlOp {
     /// The client could not show the elicitation: close the page so
     /// `credential_request` falls back to the native prompt.
     Abandon,
+    /// The client accepted: the owner has the link. A page nobody opens
+    /// soon after falls back to the native prompt by itself.
+    Accepted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3276,6 +3320,10 @@ pub struct WorkspaceSnapshotApplyResponse {
     pub applied: bool,
     pub session_id: SessionId,
     pub cwd: Option<String>,
+    /// Env keys NOT restored because the snapshot holds only their masked
+    /// value; empty and omitted when every key was restored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_redacted: Vec<String>,
 }
 
 // =====================================================================

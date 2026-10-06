@@ -4,6 +4,10 @@ Status: Baseline (TC01 wave 0 deliverable).
 Scope: structural design, not implementation. Implementation details land in
 TC04 through TC32 mini-specs.
 Language: ASCII only.
+Note (2026-10-05): `README.md:NNN` line citations in this document point at
+the README as of the TC01 baseline; the README has since been rewritten and
+those line numbers no longer match. Sections 2, 3, 5-8, 10 and 11 were
+corrected against the code on that date.
 
 This document is the architect's contract for the MVP. It locks the process
 model, the component boundaries, the data flow, the platform notes, the
@@ -22,10 +26,10 @@ document under `docs/research/` or a README line range.
                                  v
 +----------------------------------------------------------------------+
 |   terminal-commander-mcp   (thin, per-session, unprivileged)         |
-|   - rmcp 1.8.0 server, stdio transport                               |
+|   - rmcp 3.4.1 server, stdio transport                               |
 |   - translates MCP tool calls to daemon IPC calls                    |
 +--------------------------------|-------------------------------------+
-                                 |  local IPC (transport: deferred to TC21)
+                                 |  local IPC (UDS on Unix, named pipe on Windows)
                                  v
 +----------------------------------------------------------------------+
 |   terminal-commanderd       (persistent, per-user)                   |
@@ -43,8 +47,9 @@ document under `docs/research/` or a README line range.
 |  +------------+  +--------+   +--------------+  +--------------+     |
 |  | Context    |  | Policy |   | Audit Log    |  | Store        |     |
 |  | Spool/Ring |  | Engine |   | (append-only)|  | (rusqlite +  |     |
-|  | (bounded)  |  | (advis.|   |              |  |  refinery +  |     |
-|  +------------+  +--------+   +--------------+  |  FTS5, WAL)  |     |
+|  | (bounded)  |  | (advis.|   |              |  |  manual      |     |
+|  +------------+  +--------+   +--------------+  |  migrations, |     |
+|                                                 |  FTS5, WAL)  |     |
 |                                                 +--------------+     |
 +----------------------------------------------------------------------+
                                  |
@@ -58,7 +63,11 @@ architecture at `README.md:213-239`.
 
 ## 2. Process model
 
-The product runs as two processes per user.
+The product runs as two processes per user. A trusted host application
+may instead embed the `terminal-commanderd` library in its own process
+and use the same engine without MCP or IPC (`docs/EMBEDDING.md`); both
+shapes end at the same policy, probe, sifter, bucket and audit authority
+(`crates/daemon/src/lib.rs`, `DaemonState::bootstrap`).
 
 ### 2.1 `terminal-commander-mcp` (MCP server)
 
@@ -88,29 +97,30 @@ The product runs as two processes per user.
 - Privilege posture: unprivileged by default. A future privileged
   helper mode is documented in TC02 but is not the default.
 
-Platform notes: Linux x64 uses Unix-domain socket IPC under
-`$XDG_RUNTIME_DIR/terminal-commander/daemon.sock` (fallback
-`~/.local/share/terminal-commander/run/daemon.sock`). Windows x64
-uses named-pipe IPC at `\\.\pipe\terminal-commander\<USER>\daemon`
-with a security descriptor restricted to LocalSystem, Administrators,
-and the current user SID. WSL Ubuntu runs the Linux x64 binary; no
-bridge is required. macOS targets are tier-3 build-only per
-`docs/adr/ADR-native-tier1-runtime.md`.
+Platform notes: Linux x64 uses Unix-domain socket IPC at
+`<state_dir>/terminal-commanderd.sock`, where the state directory is
+`$TC_DATA`, else `$HOME/.local/share/terminal-commanderd`
+(`crates/supervisor/src/paths.rs`; `XDG_STATE_HOME` is not consulted).
+Windows x64 uses named-pipe IPC at `\\.\pipe\terminal-commander-<USERNAME>`
+(or a `TC_SESSION` / `TC_SOCKET` override) with a security descriptor
+restricted to LocalSystem, Administrators, and the current user
+(`crates/daemon/src/ipc/pipe_acl.rs`); its state directory is
+`%LOCALAPPDATA%\terminal-commanderd\state`. WSL Ubuntu runs the Linux
+x64 binary; no bridge is required. macOS targets are tier-3 build-only
+per `docs/adr/ADR-native-tier1-runtime.md`.
 
-### 2.3 Two-process is locked, IPC is deferred
+### 2.3 Two-process is locked, IPC transport is a local socket
 
 The two-process split is user-provided per
 `docs/research/_R2-delta-summary.md` finding F2, citing
 `README.md:213-239` and `README.md:354-360`. Downstream goals must
 not collapse to a single process without a user decision update.
 
-The IPC transport between MCP server and daemon is deliberately
-deferred to TC21 (daemon local API and router).
-`docs/research/mcp-transport-pattern.md` recommends a local socket
-via `interprocess` v2 (Unix domain socket on POSIX, named pipe on
-Windows-native if/when added), with JSON-RPC 2.0 as the wire
-protocol. TC21 takes that recommendation as input and locks the
-final choice.
+The IPC transport between MCP server and daemon was deferred to TC21
+and is now settled: a local-only endpoint, a Unix domain socket on
+Unix and a named pipe on Windows, with no TCP listener
+(the request and
+response types live in `crates/ipc/src/protocol.rs`).
 
 ## 3. Components
 
@@ -149,10 +159,14 @@ outputs, ownership crate, and current source-status.
 - Outputs: typed `Frame` stream into the sifter runtime; raw frames
   into the context spool.
 - Crate: `terminal-commander-probes`.
-- External deps: `pty-process` 0.5.3 (`async`), `notify` 8.2,
-  `notify-debouncer-full` 0.7, `tokio` 1.x.
-- Source-status: `live` (process, file, PTY), `partial` (directory,
-  artifact - seeds in TC20), `deferred` (journal).
+- External deps: `pty-process` 0.5.3 (`async`, unix PTY),
+  `portable-pty` 0.9 (Windows ConPTY), `notify` 8.2, `tokio` 1.x
+  (`notify-debouncer-full` is not used: the file probe coalesces
+  with its own re-stat loop).
+- Source-status: `live` (process, file, PTY: the three `ProbeKind`
+  values `command`, `file_watch`, `pty`). Directory listing is the
+  `file_list_dir` operation, not a probe kind; no artifact or journal
+  probe ships.
 
 ### 3.4 Sifter runtime
 
@@ -207,8 +221,9 @@ outputs, ownership crate, and current source-status.
   audit log (decisions); reads from MCP tools.
 - Outputs: query results, cursor pages, audit-log scans.
 - Crate: `terminal-commander-store`.
-- Backend: rusqlite 0.39 `bundled` (FTS5 included) + refinery 0.9 +
-  WAL. See `docs/research/sqlite-fts5.md`.
+- Backend: rusqlite 0.40 `bundled` (FTS5 included) + a manual
+  `execute_batch` migration runner (refinery is not linked) + WAL.
+  See `docs/research/sqlite-fts5.md`.
 
 ### 3.9 Policy engine
 
@@ -232,7 +247,7 @@ outputs, ownership crate, and current source-status.
 - Inputs: emission from policy engine, command-execution paths,
   registry CRUD, probe creation, file access decisions.
 - Outputs: stored audit rows; readable via CLI (`audit` subcommand)
-  and via MCP only through policy-gated paths.
+  and via the read-only, bounded MCP tool `audit_since`.
 - Crate: `terminal-commander-store` (persistence) +
   `terminal-commanderd` (emitter).
 
@@ -320,8 +335,9 @@ appears live but probes never fire. Microsoft tracks this as
 `microsoft/WSL#4739`; the issue is open since 2019.
 
 The daemon MUST detect 9P mounts at probe-construction time via
-`/proc/self/mountinfo` and force `PollWatcher` (notify's polling
-backend) for those paths. The detection is a one-time check at
+`/proc/self/mountinfo` and use the polling (re-stat) backend instead
+of `notify` for those paths (`select_backend_for_path` in
+`crates/probes/src/file.rs`). The detection is a one-time check at
 probe creation, not a runtime back-off after observed silence.
 Per `docs/research/wsl-boundary.md` sections 2.2 and 2.3.
 
@@ -330,11 +346,12 @@ TC18 takes this as a hard acceptance criterion per
 
 ### 5.4 macOS / Windows-native
 
-Deferred per `docs/research/_USER_DECISIONS.md`. Goal files in this
-chain must not introduce macOS-only or Windows-native code paths
-unless an explicit goal scopes them. The codebase should keep PTY
-selection (`pty-process` vs `portable-pty`) behind a feature flag
-so a Windows port becomes a goal, not a rewrite.
+Windows-x64 native is a tier-1 target (named-pipe IPC, ConPTY PTY
+backend), and macOS is a tier-3 build-only target, per
+`docs/adr/ADR-native-tier1-runtime.md`, which supersedes the earlier
+deferral in `docs/research/_USER_DECISIONS.md`. Persistent shell
+sessions (`shell_session_*`) remain unix-only
+(`docs/runtime/SHELL_SESSION.md`).
 
 ## 6. Lifecycle
 
@@ -342,13 +359,16 @@ so a Windows port becomes a goal, not a rewrite.
 
 - Primary mode: foreground supervised process. Logs to stderr or to
   a configured file. Shuts down on SIGTERM/SIGINT.
-- PID file: `${XDG_RUNTIME_DIR}/terminal-commander/daemon.pid` if
-  set, else `${HOME}/.local/state/terminal-commander/daemon.pid`.
-  Atomic write via temp-file + rename.
-- Liveness check on start: refuses to start if PID file points at a
-  live process running the same binary.
-- Optional systemd USER unit shipped under `dist/` or equivalent.
-  Per `docs/research/daemon-lifecycle.md`. **Not a system unit.**
+- PID file: `<state_dir>/terminal-commanderd.pid` (state directory as
+  in section 2.2), holding pid, version and endpoint. The daemon
+  re-asserts it every 15 s, and `terminal-commanderd update` and the
+  supervisor use it for version-aware replacement of a stale daemon
+  (`crates/supervisor/src/pidfile.rs`, `crates/daemon/src/runtime.rs`).
+  A sibling `terminal-commanderd.lock` single-flights daemon launch.
+- Optional systemd USER unit example at
+  `config/terminal-commanderd.service.example`; it does not install
+  itself. Per `docs/research/daemon-lifecycle.md`. **Not a system
+  unit.**
 - Does not assume systemd is available. WSL2 systemd is opt-in
   per `docs/research/daemon-lifecycle.md` and must be detected
   rather than assumed.
@@ -356,8 +376,12 @@ so a Windows port becomes a goal, not a rewrite.
 ### 6.2 MCP server lifecycle
 
 - Spawned per session by the LLM harness as a stdio child.
-- Connects to the daemon at start; refuses to operate if the daemon
-  is not reachable (returns explicit `daemon_unavailable` MCP error).
+- At start, calls the supervisor (`crates/supervisor`), which starts
+  the daemon if none is running (unless `TC_SUPERVISOR_ALLOW_SPAWN=0`)
+  and replaces a daemon older than the adapter. Daemon-backed tools
+  refuse to operate if the daemon is not reachable (explicit
+  `daemon_unavailable` MCP error) or is version-skewed
+  (`daemon_version_skew`).
 - Exits when the harness closes stdin.
 
 ### 6.3 CLI lifecycle
@@ -368,20 +392,25 @@ so a Windows port becomes a goal, not a rewrite.
 ## 7. Storage layout
 
 One SQLite database per daemon, opened with WAL mode and configured
-via refinery migrations. Per `docs/research/sqlite-fts5.md`.
+via the manual migration runner in `crates/store/src/lib.rs` (SQL in
+`crates/store/migrations/`, V0001 to V0009). Per
+`docs/research/sqlite-fts5.md`.
 
-Logical schemas (final DDL lives in TC12, TC13, TC22):
+Logical schemas (DDL lives in `crates/store/migrations/`):
 
 - `events` - one row per signal event. Indexed by `(bucket_id, seq)`
-  for cursor reads. FTS5 mirror on `summary` and `captures_text`
-  for the search lane.
-- `buckets` - one row per bucket: id, label, created_at,
-  binding metadata, retention policy.
-- `registry_rules` - one row per rule version: id, name, kind,
-  pattern, capture map, summary template, severity, active flag,
-  metadata. FTS5 mirror on rule text fields.
-- `audit_log` - append-only decisions, command executions, registry
-  edits, probe creations. Strictly chronological insert order.
+  for cursor reads. The FTS5 mirror (`events_fts`) was dropped in
+  V0005.
+- `buckets` - one row per bucket: id, created_at, max_events and
+  ttl_secs.
+- `rules`, `rule_versions`, `rule_tags`, `rule_activations` - the rule
+  registry, with an FTS5 index `rule_search`. The recipe registry
+  mirrors it (`recipes`, `recipe_versions`, `recipe_tags`,
+  `recipe_activations`, `recipe_search`).
+- `audit_records` - append-only decisions, command executions, registry
+  edits. Strictly chronological insert order.
+- `workspace_snapshots` and `job_receipts` - session snapshots and
+  per-job end receipts.
 
 Context spool path strategy: the context ring is in-memory per
 probe (size and eviction in TC08). Persistent spill is deferred;
@@ -390,10 +419,13 @@ if introduced later, it spills to a per-probe file under
 
 Database path defaults:
 
-- Linux: `${XDG_DATA_HOME}/terminal-commander/data.db` if set, else
-  `${HOME}/.local/share/terminal-commander/data.db`.
+- `<data_dir>/terminal-commander.db` (`DaemonConfig::db_path`), where
+  the data directory is the state directory of section 2.2:
+  `$TC_DATA`, else `$HOME/.local/share/terminal-commanderd` on Linux
+  and `%LOCALAPPDATA%\terminal-commanderd\state` on Windows.
 - WSL2: same as Linux. Database lives inside the WSL filesystem,
-  never on `/mnt/c`.
+  never on `/mnt/c` (a `daemon.data_dir` under `/mnt/c` is rejected at
+  config load).
 
 Backup, retention, and rotation policies are defined in TC22.
 
@@ -411,10 +443,17 @@ Per `docs/research/_USER_DECISIONS.md` and
   > advisory enforcement in the daemon; kernel enforcement is a
   > documented future hardening goal.
 
-- Policy profiles (locked by TC02): `developer_local`, `repo_only`,
-  `read_only_observer`, `admin_debug`.
-- Default-deny paths: private keys, password files, credential
-  stores, token caches. Per `README.md:294-297`.
+- Policy profiles: `developer_local`, `repo_only`,
+  `read_only_observer`, `admin_debug` (locked by TC02, opt-in
+  hardening) and `full_access`, the default since 2026-09-28: TC
+  inherits the harness's trust (see `POLICY.md` section 2.5 and
+  `crates/daemon/src/policy.rs`, `PolicyProfile`).
+- Default-deny paths under the hardened profiles: private keys,
+  password files, credential stores, token caches (`SECURITY.md`
+  section 5). The default `full_access` profile applies none.
+- In every profile, including `full_access`, deletion of OS-critical
+  infrastructure is refused (`OsCriticalPathProtected`; `POLICY.md`
+  section 2).
 - The MCP server itself does NOT enforce policy. The MCP server
   forwards. The daemon decides. This preserves the
   privilege-separation invariant.
@@ -436,9 +475,10 @@ later goals add them):
 - **Daemon**: unprivileged by default. May be configured to run
   with elevated privileges only when a future explicit goal scopes
   privileged operations. Per `README.md:290`.
-- **Default-deny**: sensitive paths (`README.md:294-297`) are denied
-  by default in every policy profile; explicit allow rules are
-  required.
+- **Default-deny**: sensitive paths (`SECURITY.md` section 5) are
+  denied by default in every hardened policy profile; explicit allow
+  rules are required. The default `full_access` profile inherits the
+  harness's trust and applies no such deny.
 - **No unbounded raw output**: invariant from TC01's mini-spec and
   from `README.md:8-12`. Frames are not first-class outputs of any
   MCP tool. The only path from raw stream to LLM is via
@@ -458,12 +498,12 @@ the deciding goal.
 
 | Decision | Owner | Default behavior until decided |
 |---|---|---|
-| IPC transport between MCP server and daemon | TC21 | Plan-of-record: `interprocess` v2 local socket + JSON-RPC 2.0 (per `docs/research/mcp-transport-pattern.md`). Not locked. |
+| IPC transport between MCP server and daemon | TC21 | RESOLVED: local UDS (Unix) / named pipe (Windows), no TCP (section 2.3). |
 | Daemonize flag (`--daemonize` via `fork` crate) | TC25 or skip | Skip. Foreground only is acceptable for MVP per `docs/research/daemon-lifecycle.md`. |
 | Per-user vs per-machine daemon | TC26 | Per-user. |
 | Encryption at rest (sqlcipher) | post-MVP | Off. |
 | Kernel-enforced policy (Landlock / seccomp) | post-MVP | Advisory only. |
-| macOS / Windows-native port | post-MVP | Not built. PTY abstraction kept feature-flagged. |
+| macOS / Windows-native port | post-MVP | RESOLVED for Windows-x64: tier-1 native (ADR-native-tier1-runtime); macOS is tier-3 build-only. |
 
 ## 11. Runtime contract anchor (TC34)
 
@@ -477,17 +517,19 @@ and tool-surface lock for that chain are:
 The TC33 reality audit (`docs/audits/runtime-gap-audit.md`,
 `runtime-source-map.md`, `runtime-tool-surface-gap.md`) records the
 gap between this architecture and `main` as of commit `a667010`.
-Notable scaffold-only or deferred surfaces:
+That audit listed these as scaffold-only or deferred; all have since
+landed and are live:
 
 - `terminal-commanderd` binary entry point (`crates/daemon/src/main.rs`).
 - `terminal-commander-mcp` binary entry point (`crates/mcp/src/main.rs`).
-- rmcp 1.7.0 stdio adapter (deferred — lands in TC40).
-- Daemon UDS / named-pipe IPC (deferred — lands in TC37).
-- Persistent audit log (`AuditPlaceholder` in memory — replaced by
-  TC35 / V0003 migration).
-- POSIX PTY spawn (`crates/probes/src/pty.rs` is normalizer-only —
-  spawn lands in TC44).
+- rmcp stdio adapter (TC40; now rmcp 3.4.1).
+- Daemon UDS / named-pipe IPC (TC37).
+- Persistent audit log (TC35 / V0003 migration).
+- PTY spawn (TC44; `crates/probes/src/pty.rs`, plus the Windows ConPTY
+  backend).
 
-The runtime chain brings these to live status without changing the
+The runtime chain brought these to live status without changing the
 process topology, privilege boundary, or invariants set out in
-sections 1-10.
+sections 1-10, except where this document now notes otherwise
+(the `full_access` default profile, section 8; Windows-native, section
+5.4).

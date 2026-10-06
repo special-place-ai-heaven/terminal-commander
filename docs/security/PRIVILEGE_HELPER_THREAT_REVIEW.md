@@ -49,11 +49,11 @@ an attack surface.
 | Element | Surface | Primary concern |
 |---|---|---|
 | `terminal-commander-privileged` binary | Runs at elevated privilege (setuid root OR polkit -- the mechanism is itself a review decision). | A bug here runs as root. The binary must be tiny, single-purpose, and parse nothing it does not have to. |
-| Helper IPC transport | Local socket the daemon dials to request an op. | Anyone who can reach the socket can request privileged ops. Socket must be `0600`, owned by the operator uid, in a per-user runtime dir. |
+| Helper IPC transport | Local socket the daemon dials to request an op. | Anyone who can reach the socket can request privileged ops. Socket should be mode `0600`, owned by the operator uid, in a per-user runtime dir (a requirement for the future helper; the existing daemon socket sets no explicit mode). |
 | Op dispatch | Maps an op id + params to a concrete privileged action. | An off-list op, or param injection into an on-list op, escalates. Closed allow-list + strict per-op param validation (section 3). |
 | Approval token | The handle that authorizes a pending op. | A forgeable, replayable, or long-lived token defeats the human gate (section 4). |
-| Daemon bridge + `privileged_*` tools | The path from the LLM to the helper. | The LLM must never be able to widen the op set, skip approval, or read the audit log. |
-| Audit log | The record of what was requested and run. | Must be written BEFORE execution and never be LLM-readable (section 5). |
+| Daemon bridge + `privileged_*` tools | The path from the LLM to the helper. | The LLM must never be able to widen the op set or skip approval. (It can already read audit rows through the read-only `audit_since` tool.) |
+| Audit log | The record of what was requested and run. | Must be written BEFORE execution; subjects are redacted because the LLM can read rows via `audit_since` (section 5). |
 
 The threat actor of record is the LLM agent itself: assume it may be
 adversarial, jailbroken, or driven by a poisoned input. The design must
@@ -92,8 +92,9 @@ Why a CLOSED allow-list and not capabilities-as-config:
   agent cannot smuggle `; rm -rf /` because there is nowhere to put it.
 - **No generic `sudo`.** The default privilege path is never "run an
   arbitrary command with elevation." Compare POLICY.md section 4.1: the
-  `COMMANDS_DENY` set (`sudo`/`doas`/`su`/`pkexec`/`kexec`) stays denied
-  on the argv lane, and `shell_exec` deliberately is not the privilege
+  `COMMANDS_DENY` set (`sudo`/`doas`/`su`/`pkexec`/`kexec`, plus the two
+  polkit helpers) stays denied on the argv lane of the hardened profiles
+  (the default `full_access` applies none), and `shell_exec` deliberately is not the privilege
   path. Privilege is a SEPARATE, single-purpose, closed helper.
 - **Per-op param validation.** Each op validates its own params against
   a strict shape (package-name charset, single unit name, bounded
@@ -161,8 +162,9 @@ an audit record before the gated action runs").
   values redacted), the actor, the approval state, and the decision.
 - A denied request (off-list op, cap off, missing/expired/mismatched
   token) is audited as a deny BEFORE returning the refusal.
-- The audit log is owned by the daemon, is `0600`, and is NEVER readable
-  by the LLM (PRIVILEGE_MODEL.md section 8). The operator reviews it via
+- The audit log is owned by the daemon. The LLM can read rows through the
+  read-only, bounded `audit_since` tool, so the redacted subject is the
+  protection (PRIVILEGE_MODEL.md section 8). The operator reviews it via
   `terminal-commander audit`.
 
 ## 6. Why NO generic sudo / NO shell line
@@ -191,7 +193,7 @@ Status of each element as of this document:
 | Privilege mechanism (setuid vs polkit) | UNDECIDED. A required review decision. |
 | Helper IPC protocol | NOT WRITTEN. |
 | `privileged_exec` / `privileged_list_ops` / `privileged_approve` | NOT WRITTEN. No such MCP/CLI surface ships. |
-| `allow_privileged` capability | Wired as a config switch (default false); gates nothing runnable. |
+| `allow_privileged` capability | Accepted in config but read by nothing; the daemon names it as a config warning and `policy_status` does not report it. |
 | `omni_status.privileged_helper` | Hard-coded `available: false`, `reason: "threat_review_pending"`. |
 
 No privileged code is written until this review is completed, reviewed

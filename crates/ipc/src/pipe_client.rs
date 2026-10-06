@@ -33,6 +33,11 @@ const ERROR_FILE_NOT_FOUND_OS: i32 = windows::Win32::Foundation::ERROR_FILE_NOT_
     .0
     .cast_signed();
 
+/// Win32 ERROR_ACCESS_DENIED (5): the pipe's DACL does not admit this account.
+const ERROR_ACCESS_DENIED_OS: i32 = windows::Win32::Foundation::ERROR_ACCESS_DENIED
+    .0
+    .cast_signed();
+
 /// Delay between retries when the named pipe is busy.
 const PIPE_BUSY_DELAY_MS: u64 = 20;
 
@@ -136,7 +141,26 @@ impl DaemonClient {
         // absent before the caller's promised timeout elapsed.
         loop {
             match ClientOptions::new().open(&pipe_name) {
-                Ok(p) => return Ok(p),
+                Ok(p) => {
+                    return match crate::server_identity::check_server_user(&p) {
+                        Ok(()) => Ok(p),
+                        Err((server, client)) => Err(crate::server_identity::foreign_server(
+                            &format!("pipe {pipe_name}"),
+                            &server,
+                            &client,
+                        )),
+                    };
+                }
+                // The daemon's pipe admits only the account that started it.
+                Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED_OS) => {
+                    return Err(IpcError::transport_not_connected(format!(
+                        "pipe {pipe_name} refused {}: the daemon serves only the Windows \
+                         account that started it; nothing was sent. Run the client as that \
+                         account, or point it at your own daemon (unset TC_SOCKET, drop \
+                         --socket).",
+                        crate::server_identity::own_account()
+                    )));
+                }
                 // Both errors are the transient accept/recreate gap of a
                 // single-pending-instance server: BUSY = instances exist
                 // but none listening; FILE_NOT_FOUND = the consumed

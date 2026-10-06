@@ -274,7 +274,11 @@ async fn all_daemon_backed_tools_return_daemon_unavailable() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn system_discover_succeeds_when_daemon_unavailable() {
     let (_server, client) = paired_service_unavailable().await;
-    let params = CallToolRequestParams::new("system_discover");
+    // The catalogue checked below is in the full reply; the default summary
+    // lists only the unavailable tools.
+    let arguments: rmcp::model::JsonObject =
+        serde_json::from_value(serde_json::json!({"detail": "full"})).expect("arguments");
+    let params = CallToolRequestParams::new("system_discover").with_arguments(arguments);
     let result = client
         .call_tool(params)
         .await

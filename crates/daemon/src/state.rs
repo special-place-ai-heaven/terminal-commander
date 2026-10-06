@@ -57,6 +57,9 @@ pub type Result<T> = core::result::Result<T, BootstrapError>;
 pub struct DaemonState {
     /// Original config (kept so callers can inspect / re-render).
     pub config: DaemonConfig,
+    /// Paths bootstrap found group- or world-accessible and tightened, with
+    /// the mode they had (names and modes only), for `self_check`.
+    pub tightened: Vec<String>,
     /// Per-boot identifier minted once at [`DaemonState::bootstrap`].
     /// Stable for the life of this daemon process; a fresh value on a
     /// restart. Surfaced on `subscription_open` so a looping agent can
@@ -286,7 +289,8 @@ impl DaemonState {
     // reducing complexity, so the line cap is waived here.
     #[allow(clippy::too_many_lines)]
     pub fn bootstrap(config: DaemonConfig) -> Result<Self> {
-        ensure_dir(&config.daemon.data_dir)?;
+        let mut tightened = Vec::new();
+        ensure_dir(&config.daemon.data_dir, &mut tightened)?;
         let db_path = config.db_path();
         let store = StoreClient::open_writer(&db_path)?;
         let audit = Arc::new(PersistentAudit::new(store.clone()));
@@ -448,14 +452,31 @@ impl DaemonState {
             config
                 .credential_url_ttl_test_seam
                 .unwrap_or(crate::credential::CREDENTIAL_URL_TTL),
+            config
+                .credential_page_open_test_seam
+                .unwrap_or(crate::credential::CREDENTIAL_PAGE_OPEN_WITHIN),
+            // The endpoint the runtime binds (see `run_ipc_server`).
+            #[cfg(windows)]
+            config.pipe_name(),
+            #[cfg(unix)]
+            config.socket_path().display().to_string(),
         ));
 
         // Mint a fresh per-boot identity. A restart produces a new value;
         // surfaced on `subscription_open` as the restart signal (MUST-ADD #6).
         let boot_id = uuid::Uuid::new_v4();
 
+        // The store holds command output: owner-only. SQLite gives its WAL
+        // and shared-memory files the database file's mode.
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = db_path.clone().into_os_string();
+            path.push(suffix);
+            let _ = terminal_commander_supervisor::paths::restrict_file(Path::new(&path));
+        }
+
         Ok(Self {
             config,
+            tightened,
             boot_id,
             store,
             last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
@@ -602,14 +623,25 @@ impl DaemonState {
     }
 }
 
-fn ensure_dir(p: &Path) -> Result<()> {
-    if p.exists() {
-        return Ok(());
+/// The data directory, owner-only (see `ensure_private_dir`). A directory
+/// that had group or other access is tightened, logged, and noted.
+fn ensure_dir(p: &Path, tightened: &mut Vec<String>) -> Result<()> {
+    let was = terminal_commander_supervisor::paths::ensure_private_dir(p).map_err(|source| {
+        BootstrapError::CreateDataDir {
+            path: p.to_path_buf(),
+            source,
+        }
+    })?;
+    if let Some(mode) = was {
+        let note = format!(
+            "tightened {} from mode {mode:o} to {:o}",
+            p.display(),
+            mode & 0o700
+        );
+        tracing::warn!("{note}");
+        tightened.push(note);
     }
-    std::fs::create_dir_all(p).map_err(|source| BootstrapError::CreateDataDir {
-        path: p.to_path_buf(),
-        source,
-    })
+    Ok(())
 }
 
 #[cfg(test)]

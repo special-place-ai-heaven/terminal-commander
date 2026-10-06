@@ -28,9 +28,15 @@
 //! required) and pin both guarantees.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use terminal_commander_core::{BucketConfig, JobState};
-use terminal_commanderd::{DaemonConfig, DaemonState};
+use terminal_commander_core::{BucketConfig, JobId, JobState};
+use terminal_commander_supervisor::identity::PeerIdentity;
+use terminal_commanderd::{
+    CommandStatusParams, CommandStatusResponse, DaemonConfig, DaemonState, IpcErrorCode,
+    IpcRequest, IpcResponse, IpcResult, OutcomeTrust, PtyCommandStartParams, RequestEnvelope,
+};
 
 fn tmp_data_dir(tag: &str) -> PathBuf {
     static TC_DD_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -94,6 +100,156 @@ async fn a_stopped_watch_stays_readable_instead_of_reporting_lost() {
          false-green this feature removes"
     );
 
+    cleanup(&data);
+}
+
+/// `command_status` through the real IPC handler, as an agent reads it.
+async fn command_status(state: &Arc<DaemonState>, job_id: JobId) -> CommandStatusResponse {
+    let envelope = RequestEnvelope {
+        correlation_id: 1,
+        request: IpcRequest::CommandStatus(CommandStatusParams { job_id }),
+    };
+    match terminal_commanderd::ipc::dispatch_envelope(
+        state,
+        Instant::now(),
+        &envelope,
+        &PeerIdentity::unknown(),
+    )
+    .await
+    .result
+    {
+        IpcResult::Ok {
+            response: IpcResponse::CommandStatus(status),
+        } => status,
+        other => panic!("expected a CommandStatus reply, got {other:?}"),
+    }
+}
+
+/// The daemon that stopped a watch saw the stop happen. Serving the outcome
+/// from the receipt (because the live binding is gone) does not make it a
+/// read-back after a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_watch_reads_back_as_observed_by_the_daemon_that_stopped_it() {
+    let data = tmp_data_dir("stop-observed");
+    let state = Arc::new(DaemonState::bootstrap(DaemonConfig::defaults_in(&data)).unwrap());
+
+    // Follow from the beginning so the seed line gives real counters.
+    let watched = data.join("watched.log");
+    std::fs::write(&watched, b"seed\n").expect("seed watched file");
+    let canonical = std::fs::canonicalize(&watched).expect("canonicalize");
+    let (watch_id, _bucket, _probe) = state
+        .watch
+        .start(canonical, BucketConfig::default(), vec![], true, None)
+        .expect("watch start");
+    for _ in 0..100 {
+        if state.watch.status(watch_id).expect("live").frames_total > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (_bucket, stopped) = state.watch.stop(watch_id).expect("stop");
+    assert!(
+        stopped.frames_total > 0,
+        "the watch must capture the seed line"
+    );
+
+    let status = command_status(&state, watch_id).await;
+    assert_eq!(status.outcome_trust, OutcomeTrust::Observed, "{status:?}");
+    assert!(!status.restarted, "no restart happened: {status:?}");
+    assert_eq!(status.state, JobState::Cancelled);
+    assert_eq!(status.exit_code, None);
+    assert_eq!(status.frames_total, stopped.frames_total);
+    assert_eq!(status.bytes_total, stopped.bytes_total);
+
+    cleanup(&data);
+}
+
+/// Same rule for the PTY lane, whose stop also drops the live binding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_pty_job_reads_back_as_observed_by_the_daemon_that_stopped_it() {
+    let data = tmp_data_dir("pty-stop-observed");
+    let state = Arc::new(DaemonState::bootstrap(DaemonConfig::defaults_in(&data)).unwrap());
+
+    #[cfg(windows)]
+    let argv = ["ping", "-n", "30", "127.0.0.1"];
+    #[cfg(not(windows))]
+    let argv = ["sleep", "30"];
+    let start = RequestEnvelope {
+        correlation_id: 1,
+        request: IpcRequest::PtyCommandStart(PtyCommandStartParams {
+            environment: None,
+            argv: argv.iter().map(|&a| a.to_owned()).collect(),
+            cwd: None,
+            env: vec![],
+            bucket_config: None,
+            rules: vec![],
+            rows: None,
+            cols: None,
+            tag: None,
+        }),
+    };
+    let job_id = match terminal_commanderd::ipc::dispatch_envelope(
+        &state,
+        Instant::now(),
+        &start,
+        &PeerIdentity::unknown(),
+    )
+    .await
+    .result
+    {
+        IpcResult::Ok {
+            response: IpcResponse::PtyCommandStart(started),
+        } => started.job_id,
+        // Headless hosts cannot always open a pseudo-terminal (the same skip
+        // `pty_windows.rs` uses); there is nothing to stop then.
+        IpcResult::Err { error }
+            if matches!(
+                error.code,
+                IpcErrorCode::UnsupportedPlatform | IpcErrorCode::Internal
+            ) =>
+        {
+            eprintln!("skip: no PTY on this host: {error:?}");
+            cleanup(&data);
+            return;
+        }
+        other => panic!("unexpected PtyCommandStart reply: {other:?}"),
+    };
+    let (_bucket, stopped) = state.pty.stop(job_id).expect("stop");
+
+    let status = command_status(&state, job_id).await;
+    assert_eq!(status.outcome_trust, OutcomeTrust::Observed, "{status:?}");
+    assert!(!status.restarted, "no restart happened: {status:?}");
+    assert_eq!(status.state, JobState::Cancelled);
+    assert_eq!(status.exit_code, None);
+    assert_eq!(status.frames_total, stopped.frames_total);
+
+    cleanup(&data);
+}
+
+/// A receipt written by an EARLIER daemon boot is still a reconstruction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_recorded_by_a_previous_boot_reads_back_as_reconstructed() {
+    let data = tmp_data_dir("stop-previous-boot");
+    let config = DaemonConfig::defaults_in(&data);
+
+    let first = DaemonState::bootstrap(config.clone()).unwrap();
+    let watch_id = start_watch(&first, &data);
+    first.watch.stop(watch_id).expect("stop");
+    first.store.shutdown().expect("shutdown store actor");
+    drop(first);
+
+    let second = Arc::new(DaemonState::bootstrap(config).unwrap());
+    let status = command_status(&second, watch_id).await;
+    assert_eq!(
+        status.outcome_trust,
+        OutcomeTrust::Reconstructed,
+        "{status:?}"
+    );
+    assert!(status.restarted, "{status:?}");
+    assert_eq!(status.state, JobState::Cancelled);
+    assert_eq!(status.exit_code, None);
+
+    second.store.shutdown().expect("shutdown store actor");
     cleanup(&data);
 }
 

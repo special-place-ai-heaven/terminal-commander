@@ -35,7 +35,7 @@ pub mod shell_deny;
 pub mod source;
 
 pub use activation::ActivationScope;
-pub use environment::EnvironmentSpec;
+pub use environment::{DAEMON_CHILD_ENV, DAEMON_ENDPOINT_ENV, EnvironmentSpec, as_daemon_child};
 pub use job::{DEFAULT_JOB_GRACE, JobConfig, JobExitInfo, JobManager, JobRecord, JobState};
 #[cfg(windows)]
 pub use platform::{sanitize_wslenv, windows_silent, wslenv_overlay_value};

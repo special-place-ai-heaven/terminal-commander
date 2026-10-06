@@ -251,6 +251,7 @@ impl ProcessProbe {
             .create_ring_default(probe_id)
             .map_err(|e| ProcessProbeError::Io(std::io::Error::other(e.to_string())))?;
         let mut cmd = Command::new(&argv[0]);
+        terminal_commander_core::as_daemon_child(cmd.as_std_mut());
         cmd.args(&argv[1..]);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -264,7 +265,8 @@ impl ProcessProbe {
         // clearing it stripped OS-essential vars (e.g. `SystemRoot`, `PATH`
         // on Windows) and crashed Windows children at startup whenever a
         // non-empty env was supplied. An empty `config.env` leaves the
-        // loop a no-op, which is exactly "inherit the parent env".
+        // loop a no-op, which is exactly "inherit the parent env" -- as a
+        // daemon child (`as_daemon_child` above).
         for (k, v) in &config.env {
             cmd.env(k, v);
         }
@@ -475,7 +477,7 @@ pub(crate) async fn terminate_process_tree_graceful(
         // SIGKILL path's stdio silencing and ignored status. If `kill` is
         // absent the child simply never gets the graceful signal and the
         // escalation below still reaps it via `start_kill`.
-        let _ = std::process::Command::new("kill")
+        let _ = terminal_commander_core::as_daemon_child(&mut std::process::Command::new("kill"))
             .args(["-s", "TERM", "--", &format!("-{pgid}")])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -550,7 +552,7 @@ fn kill_process_tree(
         // Best-effort like the supervisor's hard kill: stdio is silenced and
         // the exit status is ignored. If `kill` is somehow absent (Err), the
         // `start_kill` below still reaps the leader.
-        let _ = std::process::Command::new("kill")
+        let _ = terminal_commander_core::as_daemon_child(&mut std::process::Command::new("kill"))
             .args(["-s", "KILL", "--", &format!("-{pgid}")])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

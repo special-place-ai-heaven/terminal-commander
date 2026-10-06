@@ -5,11 +5,9 @@
 //
 //   - lib/cli/** MUST NOT call sudo / sudo -S / forward passwords /
 //     read token-shaped env vars / reference credential broker.
-//   - lib/cli/** MUST NOT directly require child_process. Every
-//     wsl.exe spawn flows through lib/wsl/spawn.js (WWS04) or the
-//     setup install probe (which uses child_process.spawn explicitly
-//     in setup_cursor_wsl.js but only with the locked constant argv
-//     shape and no shell).
+//   - The guarded lib/cli/** files below MUST NOT spawn and MUST NOT
+//     name wsl.exe. (The old setup_cursor_wsl.js install probe that was
+//     the one exception had no production caller and was removed.)
 //   - lib/cli/** MUST NOT use TCP / UDP / HTTP / fetch APIs.
 //   - lib/cli/** MUST NOT reference npm publish or workflow_dispatch.
 //   - terminal-commanderd.js + terminal-commander-mcp.js BYTE-IDENTICAL
@@ -81,8 +79,8 @@ function stripCommentsAndStrings(src) {
 
 test("lib/cli/** never INVOKES sudo / sudo -S / password env vars / credential broker / npm publish / workflow_dispatch", () => {
   // The CLI may DETECT the word "sudo" inside captured install output
-  // (setup_cursor_wsl.js maps the appearance of "sudo" in install
-  // stderr to install_permission_required, then refuses to retry).
+  // (a classifier can map "sudo" in install stderr to
+  // install_permission_required, then refuse to retry).
   // We therefore strip comments + STRING LITERALS first (regex
   // patterns are string literals in JS source), and grep only the
   // executable-code residue for the dangerous PATTERNS (invocations,
@@ -183,34 +181,17 @@ test("lib/cli/** never opens TCP/UDP/HTTP/fetch network APIs", () => {
   }
 });
 
-test("lib/cli/** spawn discipline: only setup_cursor_wsl.js may spawn() and only wsl.exe", () => {
+test("lib/cli/** spawn discipline: the guarded CLI files never spawn()", () => {
   for (const file of CLI_FILES) {
-    const src = readSrc(file);
-    const code = stripCommentsAndStrings(src);
-    const spawnCalls = [...code.matchAll(/\bspawn\s*\(\s*([^,\s)]+)/g)];
-    if (file === "setup_cursor_wsl.js") {
-      // The install probe spawns wsl.exe with the locked argv shape.
-      assert.ok(spawnCalls.length > 0, `${file} should have at least one spawn() call`);
-      for (const m of spawnCalls) {
-        const first = m[1];
-        assert.ok(
-          first === "wp" || first === "wslPath" || first === "'wsl.exe'" || first === '"wsl.exe"',
-          `${file} spawn() first arg must be the wsl-path identifier, got ${first}`,
-        );
-      }
-    } else {
-      assert.equal(spawnCalls.length, 0, `${file} must not call spawn(); only setup_cursor_wsl.js may spawn wsl.exe`);
-    }
+    const code = stripCommentsAndStrings(readSrc(file));
+    const spawnCalls = [...code.matchAll(/\bspawn\s*\(/g)];
+    assert.equal(spawnCalls.length, 0, `${file} must not call spawn()`);
   }
 });
 
-test("lib/cli/** never references wsl.exe in executable code except via the lib/wsl/spawn.js helper or the install-probe argv constants", () => {
-  // The install probe DOES name "wsl.exe" as the default wslPath. Only
-  // setup_cursor_wsl.js is allowed to do so.
+test("lib/cli/** never references wsl.exe in executable code", () => {
   for (const file of CLI_FILES) {
-    if (file === "setup_cursor_wsl.js") continue;
-    const src = readSrc(file);
-    const code = stripCommentsAndStrings(src);
+    const code = stripCommentsAndStrings(readSrc(file));
     assert.equal(
       /wsl\.exe/i.test(code),
       false,

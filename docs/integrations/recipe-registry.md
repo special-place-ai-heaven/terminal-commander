@@ -24,7 +24,7 @@ Lane selection for everything else:
 Do not send recipe actions to the `registry` facade. Compact `recipe`
 actions are `search`, `get`, `upsert`, `test`, `activate`, `deactivate`,
 `list_active`, and `run`. The harness provider registry
-(`lib/harness/registry.js`) is a different name and is not this product.
+(`packages/terminal-commander/lib/harness/registry.js`) is a different name and is not this product.
 
 CAP01 (capability registry / tentacles) is out of this surface. Recipe
 definitions carry no secrets and no secret env values. `argv[0]` is a

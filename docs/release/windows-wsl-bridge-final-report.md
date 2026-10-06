@@ -1,5 +1,8 @@
 # Windows + WSL Bridge — Final Report (WWS09 Closure)
 
+> HISTORICAL as of 2026-10-05 (`lib/` and `bin/` paths below are under `packages/terminal-commander/`): the WWS09 closure report (2026-05-23); its recommendation and
+> bridge-as-default assumptions are superseded. Current: `../install/README.md`, `../../RELEASE_CHECKLIST.md`.
+
 **Chain**: `terminal-commander-windows-wsl-bridge`
 **Goals**: WWS01..WWS09 (all closed at this commit)
 **Branch**: `main`

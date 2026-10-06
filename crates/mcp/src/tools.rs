@@ -142,7 +142,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "system_discover",
             status: ToolStatus::Live,
-            description: "Return adapter/daemon metadata, tool catalogue, and bounded host-environment probes with ranked access routes and an exact beachhead argv template.",
+            description: "Return adapter/daemon metadata and bounded host-environment probes with ranked access routes and an exact beachhead argv template. Summary by default; detail:\"full\" adds every tool's description and the daemon method list.",
         },
         ToolCatalogueEntry {
             name: "health",
@@ -227,12 +227,12 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "registry_upsert",
             status: ToolStatus::Live,
-            description: "Insert a new immutable (rule_id, version+1) row from a JSON definition.",
+            description: "Insert a new immutable (rule_id, version+1) row from a JSON definition; rejects a rule that contradicts its own examples.",
         },
         ToolCatalogueEntry {
             name: "registry_test",
             status: ToolStatus::Live,
-            description: "Dry-run a rule against bounded samples; never persists, no raw stream lane.",
+            description: "Dry-run a rule against bounded samples and its own examples; never persists, no raw stream lane.",
         },
         ToolCatalogueEntry {
             name: "registry_activate",
@@ -352,7 +352,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "credential_request",
             status: ToolStatus::Live,
-            description: "Ask the owner for the password a PTY job is waiting on: a one-time local page via URL elicitation when the client supports it, else a prompt the daemon opens, else the admin CLI. The daemon types the answer; returns only a status (provided, declined, timeout, owner_action_required with the CLI command, not_awaiting). Never returns or accepts the password.",
+            description: "Ask the owner for the password a PTY job is waiting on: a one-time local page via URL elicitation when the client accepts it, else a prompt the daemon opens, else the admin CLI. The daemon types the answer; returns only a status (provided, declined, timeout, owner_action_required with the CLI command, not_awaiting). Never returns or accepts the password.",
         },
         ToolCatalogueEntry {
             name: "shell_session_start",
@@ -597,7 +597,7 @@ fn tool_policy_block_reason(name: &str, caps: PolicyCapsView) -> Option<&'static
 }
 
 #[must_use]
-fn discovered_tools(
+pub(crate) fn discovered_tools(
     daemon_available: bool,
     caps: Option<PolicyCapsView>,
 ) -> Vec<DiscoveredToolEntry> {
@@ -1060,9 +1060,12 @@ impl TerminalCommanderMcpServer {
     /// the daemon is unreachable the response still carries the
     /// adapter-side catalogue with the daemon error surfaced.
     #[tool(
-        description = "Discover adapter/daemon metadata and the execution environment. Returns bounded OS, terminal, shell/PowerShell, WSL, and tool probes plus capability-filtered ranked access_routes and an exact beachhead argv template; call this before choosing an interpreter. Use direct_argv/wsl_argv with argv actions; shell routes appear only when exec is enabled. Normal path and command policy checks still apply at execution time."
+        description = "Discover adapter/daemon metadata and the execution environment; call this before choosing an interpreter. The default summary has OS, terminal, shell/PowerShell, WSL, and tool probes, the ranked shell and WSL routes, the tools runnable as argv, an exact beachhead argv template, and every tool that is unavailable now. Pass detail:\"full\" for every tool's description, the daemon method list, and every route. Shell routes appear only when exec is enabled; normal policy checks still apply at execution time."
     )]
-    async fn system_discover(&self) -> Result<CallToolResult, McpError> {
+    async fn system_discover(
+        &self,
+        Parameters(params): Parameters<crate::discover_summary::McpSystemDiscoverParams>,
+    ) -> Result<CallToolResult, McpError> {
         let (daemon, daemon_error) = match self
             .daemon
             .call_with_timeout(IpcRequest::SystemDiscover, SYSTEM_DISCOVER_CLIENT_TIMEOUT)
@@ -1108,7 +1111,12 @@ impl TerminalCommanderMcpServer {
             tools: discovered_tools(daemon_available, caps),
             omni_status,
         };
-        json_tool_result(&payload)
+        match params.detail {
+            crate::discover_summary::DiscoverDetail::Full => json_tool_result(&payload),
+            crate::discover_summary::DiscoverDetail::Summary => {
+                json_tool_result(&crate::discover_summary::summarize(&payload))
+            }
+        }
     }
 
     /// Assemble the US6/T056 omni capability matrix HONESTLY from live state.
@@ -1225,6 +1233,7 @@ impl TerminalCommanderMcpServer {
                 bucket_read_limit,
                 caps,
                 llm_can_activate_recipes,
+                config_warnings,
             })) => json_tool_result(&serde_json::json!({
                 "profile": profile,
                 "commands_deny_count": commands_deny_count,
@@ -1238,9 +1247,11 @@ impl TerminalCommanderMcpServer {
                 "caps": {
                     "allow_shell": caps.allow_shell,
                     "allow_session": caps.allow_session,
-                    "allow_privileged": caps.allow_privileged,
                     "allow_remote": caps.allow_remote,
                 },
+                // Settings in the config file that do nothing, so the model
+                // never assumes a protection that is not there.
+                "config_warnings": config_warnings,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -1341,6 +1352,7 @@ impl TerminalCommanderMcpServer {
                 probe_id,
                 cursor,
                 hint,
+                wslenv_dropped,
             })) => {
                 // US2 (FR-011): forward the optional pack-available hint
                 // verbatim. Omitted from the JSON when None.
@@ -1356,6 +1368,7 @@ impl TerminalCommanderMcpServer {
                 if let Some(h) = credential_hint {
                     body["credential_hint"] = serde_json::json!(h);
                 }
+                add_wslenv_dropped(&mut body, &wslenv_dropped);
                 json_tool_result(&body)
             }
             Ok(other) => Err(unexpected_variant(&other)),
@@ -1368,7 +1381,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | lost | abandoned) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING (elapsed_ms/last_output_age_ms show liveness); continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | abandoned; a job whose end was never recorded comes back as a typed `JobLost` error instead) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING (elapsed_ms/last_output_age_ms show liveness); continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
     )]
     async fn run_and_watch(
         &self,
@@ -1395,14 +1408,15 @@ impl TerminalCommanderMcpServer {
         let credential_hint = password_prompt_hint(&start_ipc.argv);
 
         // 1. Start.
-        let (job_id, bucket_id, mut cursor) =
+        let (job_id, bucket_id, mut cursor, wslenv_dropped) =
             match daemon.call(IpcRequest::CommandStartCombed(start_ipc)).await {
                 Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
                     job_id,
                     bucket_id,
                     cursor,
+                    wslenv_dropped,
                     ..
-                })) => (job_id, bucket_id, cursor),
+                })) => (job_id, bucket_id, cursor, wslenv_dropped),
                 Ok(other) => return Err(unexpected_variant(&other)),
                 Err(e) => {
                     return Err(into_mcp_error_for_tool(false, &e, Some("run_and_watch")));
@@ -1624,6 +1638,7 @@ impl TerminalCommanderMcpServer {
         if let Some(h) = credential_hint {
             body["credential_hint"] = serde_json::json!(h);
         }
+        add_wslenv_dropped(&mut body, &wslenv_dropped);
         json_tool_result(&body)
     }
 
@@ -1865,7 +1880,7 @@ impl TerminalCommanderMcpServer {
     /// `registry_upsert` — create a new immutable version from a JSON
     /// rule definition.
     #[tool(
-        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword; kind=keyword also accepts a singular `pattern`, normalized into a one-keyword list). NOTE: `version` is ASSIGNED by the store (monotonic, latest+1); any value you send is ignored and overwritten, and the assigned version (returned in the response) is the one registry_activate/registry_deactivate operate on. `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords; existing versions are never mutated."
+        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword; kind=keyword also accepts a singular `pattern`, normalized into a one-keyword list). NOTE: `version` is ASSIGNED by the store (monotonic, latest+1); any value you send is ignored and overwritten, and the assigned version (returned in the response) is the one registry_activate/registry_deactivate operate on. `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords and rejects a rule that contradicts its own `examples` (each failing example is named by index with the reason); existing versions are never mutated."
     )]
     async fn registry_upsert(
         &self,
@@ -1892,7 +1907,7 @@ impl TerminalCommanderMcpServer {
 
     /// `registry_test` — dry-run a rule against bounded sample texts.
     #[tool(
-        description = "Evaluate a rule against bounded sample texts. Returns matches with severity/kind/summary/captures; never persists; never echoes the input back as raw stream output."
+        description = "Evaluate a rule against bounded sample texts. Returns matches with severity/kind/summary/captures; never persists; never echoes the input back as raw stream output. Also checks the rule's own stored examples: examples_evaluated counts them and example_results gives each one's pass or fail with the reason."
     )]
     async fn registry_test(
         &self,
@@ -1920,9 +1935,15 @@ impl TerminalCommanderMcpServer {
                 matches,
                 truncated_bytes,
                 stream_mismatches,
+                examples_evaluated,
+                example_results,
             })) => json_tool_result(&serde_json::json!({
                 "matches": matches,
                 "truncated_bytes": truncated_bytes,
+                // How many of the rule's own stored examples were evaluated,
+                // and each one's pass/fail with the reason.
+                "examples_evaluated": examples_evaluated,
+                "example_results": example_results,
                 // F8b (trust): sample indices whose regex matched but whose
                 // stream the rule's `stream` filter excluded -- surfaced so
                 // the operator sees WHY an apparent match did not fire.
@@ -2435,9 +2456,10 @@ impl TerminalCommanderMcpServer {
             bucket_id,
             probe_id,
             cursor,
+            wslenv_dropped,
         } = started;
         if !watched {
-            return json_tool_result(&serde_json::json!({
+            let mut body = serde_json::json!({
                 "recipe_id": recipe_id,
                 "version": version,
                 "argv": argv,
@@ -2455,7 +2477,9 @@ impl TerminalCommanderMcpServer {
                 "signal_count": 0,
                 "degraded": false,
                 "recover_hint": serde_json::Value::Null,
-            }));
+            });
+            add_wslenv_dropped(&mut body, &wslenv_dropped);
+            return json_tool_result(&body);
         }
         let RecipeWatch {
             state,
@@ -2505,6 +2529,7 @@ impl TerminalCommanderMcpServer {
         obj.insert("watched".to_owned(), serde_json::json!(watched));
         obj.insert("wait_ms".to_owned(), serde_json::json!(wait_ms));
         obj.insert("probe_id".to_owned(), serde_json::json!(probe_id));
+        add_wslenv_dropped(&mut value, &wslenv_dropped);
         json_tool_result(&value)
     }
 
@@ -2931,12 +2956,17 @@ impl TerminalCommanderMcpServer {
                 bucket_id,
                 probe_id,
                 cursor,
-            })) => json_tool_result(&serde_json::json!({
-                "job_id": job_id,
-                "bucket_id": bucket_id,
-                "probe_id": probe_id,
-                "cursor": cursor,
-            })),
+                wslenv_dropped,
+            })) => {
+                let mut body = serde_json::json!({
+                    "job_id": job_id,
+                    "bucket_id": bucket_id,
+                    "probe_id": probe_id,
+                    "cursor": cursor,
+                });
+                add_wslenv_dropped(&mut body, &wslenv_dropped);
+                json_tool_result(&body)
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
         }
@@ -3028,7 +3058,7 @@ impl TerminalCommanderMcpServer {
     /// CLI. The daemon owns every write. There is deliberately no MCP tool
     /// for `credential_provide`.
     #[tool(
-        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). No TC surface accepts a password from the model (this holds when TC is the model's only way to run programs; a harness that also gives the model a raw shell can defeat any owner-only channel): if your client supports URL elicitation it shows the owner a link to a one-time local page; otherwise the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop). The daemon types the answer into that job itself. Returns only {job_id, status}: provided | declined | pending (the owner has the link and has not answered yet; the page stays open 5 minutes: call credential_request again every few seconds to poll) | timeout (a dialog not answered within 60 s; it stays open, call again to keep waiting, and tell the owner a credential dialog is open: on Windows it may sit behind other windows with its taskbar entry flashing) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls poll, never re-ask. Never returns or accepts the password or the link."
+        description = "Ask the OWNER for the password a PTY job is waiting on (its status or pty_command_list entry shows awaiting_credential). No TC surface accepts a password from the model (this holds when TC is the model's only way to run programs; a harness that also gives the model a raw shell can defeat any owner-only channel): if your client supports URL elicitation it offers the owner a link to a one-time local page (the first call may take up to 30 s while it does); if the client does not take it, the daemon opens a prompt the owner answers directly (a Windows credential dialog; an askpass, zenity, kdialog, or pinentry dialog on a unix desktop). The daemon types the answer into that job itself. Returns only {job_id, status}: provided | declined | pending (the owner was shown a link to a one-time local page and has not answered yet: call credential_request again every few seconds; if the link is not opened within 30 s, TC switches to the credential dialog by itself; an opened page stays 5 minutes) | timeout (not answered in time: a credential dialog stays open, call again to keep waiting, and tell the owner it is open: on Windows it may sit behind other windows with its taskbar entry flashing; an expired link is offered again) | owner_action_required (no dialog available: ask the owner to run `command` in their own terminal, then poll command_status) | not_awaiting. One owner prompt per password prompt; repeat calls poll, never re-ask. Never returns or accepts the password or the link."
     )]
     async fn credential_request(
         &self,
@@ -3038,19 +3068,23 @@ impl TerminalCommanderMcpServer {
         self.ensure_daemon_available().await?;
         use terminal_commander_core::ids::JobIdKind;
         let job_id = parse_id::<JobIdKind>("job_id", &params.job_id).map_err(invalid_params)?;
-        let on_page = url_elicitation_supported(ctx.client_capabilities().as_ref())
-            && self.elicit_owner_page(&ctx, job_id).await;
+        let caps = ctx.client_capabilities();
+        let on_page = if url_elicitation_supported(caps.as_ref()) {
+            self.elicit_owner_page(&ctx, job_id, elicitation_client(caps.as_ref()))
+                .await
+        } else {
+            eprintln!(
+                "{}",
+                elicitation_log_line(job_id, elicitation_client(caps.as_ref()), "not-offered")
+            );
+            false
+        };
         // With the owner's page open, answer `pending` within seconds and
         // let the model poll; otherwise the daemon asks through its native
         // prompt or the CLI and waits up to 60 s.
-        let mut resp = self
+        let resp = self
             .credential_status(job_id, on_page.then_some(PAGE_POLL_MS))
             .await?;
-        if on_page && resp.status == CredentialStatus::NotAwaiting {
-            // The client could not show the elicitation and the page was
-            // abandoned meanwhile: the daemon's own chain takes over.
-            resp = self.credential_status(job_id, None).await?;
-        }
         json_tool_result(&resp)
     }
 
@@ -3073,13 +3107,15 @@ impl TerminalCommanderMcpServer {
         }
     }
 
-    /// URL-mode elicitation for `job_id`'s prompt. True while the owner
-    /// page is live; false sends `credential_request` down the daemon's
-    /// native-prompt / CLI chain. Never errors: every failure falls back.
+    /// URL-mode elicitation for `job_id`'s prompt. True once the client
+    /// accepted (the owner has the link); false sends `credential_request`
+    /// down the daemon's native-prompt / CLI chain. Never errors: every
+    /// failure falls back.
     async fn elicit_owner_page(
         &self,
         ctx: &RequestContext<RoleServer>,
         job_id: terminal_commander_core::JobId,
+        client: &'static str,
     ) -> bool {
         use rmcp::model::{ElicitRequest, ElicitRequestParams, ServerRequest};
         let Ok(IpcResponse::CredentialUrl(opened)) = self
@@ -3115,28 +3151,34 @@ impl TerminalCommanderMcpServer {
                 elicitation_id: elicitation_id.clone(),
             },
         ));
-        // Sent inside this tool call (SEP-2260), followed outside it: the
-        // owner may take minutes, and the dialog must stay up as long as the
-        // page does, so the timeout is the page's TTL.
+        // Sent inside this tool call (SEP-2260), and answered inside it: a
+        // sent request is no proof the owner sees anything, so only the
+        // client's accept makes the page the channel. Unanswered after
+        // ELICIT_ACK_MS, rmcp cancels the request (notifications/cancelled).
         let sent = ctx
             .peer
             .send_request_with_option(
                 request,
                 rmcp::service::PeerRequestOptions::with_timeout(std::time::Duration::from_millis(
-                    terminal_commanderd::ipc::protocol::CREDENTIAL_URL_TTL_MS,
+                    ELICIT_ACK_MS,
                 )),
             )
             .await;
         if let Ok(handle) = sent {
+            // Its own task, so a cancelled tool call still settles the page.
+            let (accepted_tx, accepted) = tokio::sync::oneshot::channel();
             tokio::spawn(follow_elicitation(
                 self.daemon.clone(),
                 ctx.peer.clone(),
                 job_id,
                 elicitation_id,
                 handle,
+                accepted_tx,
+                client,
             ));
-            return true;
+            return accepted.await.unwrap_or(false);
         }
+        eprintln!("{}", elicitation_log_line(job_id, client, "error"));
         let _ = self
             .daemon
             .call(IpcRequest::CredentialUrl(CredentialUrlParams {
@@ -3364,11 +3406,21 @@ impl TerminalCommanderMcpServer {
                 applied,
                 session_id,
                 cwd,
-            })) => json_tool_result(&serde_json::json!({
-                "applied": applied,
-                "session_id": session_id,
-                "cwd": cwd,
-            })),
+                skipped_redacted,
+            })) => {
+                let mut body = serde_json::json!({
+                    "applied": applied,
+                    "session_id": session_id,
+                    "cwd": cwd,
+                });
+                if !skipped_redacted.is_empty() {
+                    body["skipped_redacted"] = serde_json::json!({
+                        "names": skipped_redacted,
+                        "note": "Not restored: the snapshot holds only a masked value for these. Set them again in the session if needed.",
+                    });
+                }
+                json_tool_result(&body)
+            }
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error_for(false, &e)),
         }
@@ -3825,7 +3877,7 @@ and their argv_template. Use a native shell route with exec, shell=route.executa
             St::RuntimeState(p) => self.runtime_state(Parameters(p)).await,
             St::ProbeList(p) => self.probe_list(Parameters(p)).await,
             St::ProbeStatus(p) => self.probe_status(Parameters(p)).await,
-            St::SystemDiscover => self.system_discover().await,
+            St::SystemDiscover(p) => self.system_discover(Parameters(p)).await,
             St::TargetList => self.target_list().await,
             St::TargetProbe(p) => self.target_probe(Parameters(p)).await,
         }
@@ -3975,6 +4027,7 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
         probe_id,
         cursor,
         hint: _,
+        wslenv_dropped,
     } = response;
     let mut payload = serde_json::json!({
         "job_id": job_id,
@@ -3982,6 +4035,7 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
         "probe_id": probe_id,
         "cursor": cursor,
     });
+    add_wslenv_dropped(&mut payload, wslenv_dropped);
 
     let lower = shell_line.to_ascii_lowercase();
     let mut detected = Vec::new();
@@ -4021,6 +4075,17 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
     }
 
     payload
+}
+
+/// Name (never the value of) each secret-shaped variable the daemon kept out
+/// of this launch's `WSLENV`, and how to forward one on purpose.
+fn add_wslenv_dropped(body: &mut serde_json::Value, names: &[String]) {
+    if !names.is_empty() {
+        body["wslenv_dropped"] = serde_json::json!({
+            "names": names,
+            "note": "Not forwarded into WSL because the names look secret. To forward one on purpose, pass WSLENV in this call's env; it is used as given.",
+        });
+    }
 }
 
 /// Map a daemon `IpcError` to an MCP `ErrorData`, honest about the mutability
@@ -6570,38 +6635,55 @@ pub struct McpPtyCommandStopParams {
 /// before answering `pending`.
 const PAGE_POLL_MS: u64 = 10_000;
 
-/// The owner's elicitation dialog, followed after the tool call answered.
-/// Decline or cancel is final for that prompt; a client error closes the
-/// page, so the next `credential_request` falls back to the daemon's native
-/// prompt. After accept, once the owner's answer lands,
-/// `notifications/elicitation/complete` closes the client's waiting state
-/// (rmcp 3.4.1 has no typed form of it).
+/// How long the client has to answer the URL elicitation before the owner
+/// is asked another way. The owner only has to agree to open the link.
+const ELICIT_ACK_MS: u64 = 30_000;
+
+/// The owner's elicitation dialog. Only accept keeps the page: decline,
+/// cancel, an error, or no answer within [`ELICIT_ACK_MS`] closes it, so the
+/// same `credential_request` falls back to the daemon's native prompt or
+/// the CLI. `accepted` reports which, after the page is settled. After
+/// accept, once the owner's answer lands, `notifications/elicitation/complete`
+/// closes the client's waiting state (rmcp 3.4.1 has no typed form of it).
 async fn follow_elicitation(
     daemon: crate::daemon_client::McpDaemonClient,
     peer: rmcp::service::Peer<RoleServer>,
     job_id: terminal_commander_core::JobId,
     elicitation_id: String,
     handle: rmcp::service::RequestHandle<RoleServer>,
+    accepted: tokio::sync::oneshot::Sender<bool>,
+    client: &'static str,
 ) {
     use rmcp::model::{ClientResult, ElicitationAction};
-    let op = match handle.await_response().await {
-        Ok(ClientResult::ElicitResult(r)) if r.action == ElicitationAction::Accept => None,
-        // Unanswered for the page's whole TTL: it expired with the dialog.
-        Err(rmcp::ServiceError::Timeout { .. }) => return,
-        Ok(ClientResult::ElicitResult(_)) => Some(CredentialUrlOp::Declined),
-        _ => Some(CredentialUrlOp::Abandon),
+    let outcome = match handle.await_response().await {
+        Ok(ClientResult::ElicitResult(r)) => match r.action {
+            ElicitationAction::Accept => "accepted",
+            ElicitationAction::Decline => "declined",
+            ElicitationAction::Cancel => "cancelled",
+            _ => "error",
+        },
+        Err(rmcp::ServiceError::Timeout { .. }) => "no-reply",
+        _ => "error",
     };
-    if let Some(op) = op {
-        let _ = daemon
-            .call(IpcRequest::CredentialUrl(CredentialUrlParams {
-                job_id,
-                op,
-            }))
-            .await;
+    eprintln!("{}", elicitation_log_line(job_id, client, outcome));
+    let op = if outcome == "accepted" {
+        // Arms the page's open deadline: unopened, it falls back by itself.
+        CredentialUrlOp::Accepted
+    } else {
+        CredentialUrlOp::Abandon
+    };
+    let _ = daemon
+        .call(IpcRequest::CredentialUrl(CredentialUrlParams {
+            job_id,
+            op,
+        }))
+        .await;
+    let _ = accepted.send(op == CredentialUrlOp::Accepted);
+    if op != CredentialUrlOp::Accepted {
         return;
     }
-    // Each call waits up to 60 s on the page's outcome; the page settles
-    // within its TTL (answered, declined, or expired).
+    // Each call waits up to 60 s on the outcome; the page settles within its
+    // TTL (answered, declined, expired, or handed to the native prompt).
     loop {
         let status = match daemon
             .call(IpcRequest::CredentialRequest(CredentialRequestParams {
@@ -6613,22 +6695,48 @@ async fn follow_elicitation(
             Ok(IpcResponse::CredentialRequest(r)) => r.status,
             _ => return,
         };
-        match status {
-            CredentialStatus::Pending => {}
-            CredentialStatus::Provided => {
-                let _ = peer
-                    .send_notification(rmcp::model::ServerNotification::CustomNotification(
-                        rmcp::model::CustomNotification::new(
-                            "notifications/elicitation/complete",
-                            Some(serde_json::json!({ "elicitationId": elicitation_id })),
-                        ),
-                    ))
-                    .await;
-                return;
-            }
-            _ => return,
+        if status != CredentialStatus::Pending {
+            // The link's interaction is over either way: close the client's
+            // waiting state.
+            let _ = peer
+                .send_notification(rmcp::model::ServerNotification::CustomNotification(
+                    rmcp::model::CustomNotification::new(
+                        "notifications/elicitation/complete",
+                        Some(serde_json::json!({ "elicitationId": elicitation_id })),
+                    ),
+                ))
+                .await;
+            return;
         }
     }
+}
+
+/// Which elicitation modes the client declared, for the log line.
+fn elicitation_client(caps: Option<&rmcp::model::ClientCapabilities>) -> &'static str {
+    match caps
+        .and_then(|c| c.elicitation.as_ref())
+        .map(|e| (e.form.is_some(), e.url.is_some()))
+    {
+        None => "none",
+        // A bare `elicitation: {}` is form mode (MCP spec).
+        Some((_, false)) => "form",
+        Some((true, true)) => "form+url",
+        Some((false, true)) => "url",
+    }
+}
+
+/// One stderr line per elicitation: job id, the client's declared modes and
+/// the outcome, so an owner who saw nothing can be diagnosed from the log.
+/// Never the link, token, elicitation id, or anything the owner typed.
+fn elicitation_log_line(
+    job_id: terminal_commander_core::JobId,
+    client: &str,
+    outcome: &str,
+) -> String {
+    format!(
+        "terminal-commander-mcp: credential elicitation job={} client={client} outcome={outcome}",
+        job_id.to_wire_string()
+    )
 }
 
 /// Channel 1 of `credential_request` needs a client that declared URL-mode
@@ -7010,7 +7118,26 @@ mod tests {
             probe_id: terminal_commander_core::ProbeId::new(),
             cursor: 0,
             hint: None,
+            wslenv_dropped: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_filtered_wslenv_names_the_variables_and_how_to_forward_one() {
+        let mut response = shell_start_response();
+        assert!(
+            shell_exec_payload(&response, "wsl -- id")
+                .get("wslenv_dropped")
+                .is_none()
+        );
+        response.wslenv_dropped = vec!["SUDO_PASSWORD".to_owned()];
+        let dropped = &shell_exec_payload(&response, "wsl -- id")["wslenv_dropped"];
+        assert_eq!(dropped["names"], serde_json::json!(["SUDO_PASSWORD"]));
+        assert!(
+            dropped["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("WSLENV"))
+        );
     }
 
     #[test]
@@ -7440,6 +7567,33 @@ mod tests {
     }
 
     // --- TC-1b: run_and_watch degraded / superset result builder ---
+
+    #[test]
+    fn the_elicitation_log_line_names_modes_and_outcome_only() {
+        let caps = |v: serde_json::Value| -> rmcp::model::ClientCapabilities {
+            serde_json::from_value(v).unwrap()
+        };
+        assert_eq!(elicitation_client(None), "none");
+        assert_eq!(
+            elicitation_client(Some(&caps(serde_json::json!({"elicitation": {}})))),
+            "form"
+        );
+        assert_eq!(
+            elicitation_client(Some(&caps(
+                serde_json::json!({"elicitation": {"form": {}, "url": {}}})
+            ))),
+            "form+url"
+        );
+        // The whole line, so nothing else (link, token, id) can ride along.
+        let job = terminal_commander_core::JobId::new();
+        assert_eq!(
+            elicitation_log_line(job, "form+url", "no-reply"),
+            format!(
+                "terminal-commander-mcp: credential elicitation job={} client=form+url outcome=no-reply",
+                job.to_wire_string()
+            )
+        );
+    }
 
     #[test]
     fn only_a_url_elicitation_client_gets_the_owner_page() {
@@ -8935,7 +9089,9 @@ mod tests {
         // Exemption: system_discover returns its catalogue (daemon_error in the
         // payload), never a skew gate error.
         server
-            .system_discover()
+            .system_discover(Parameters(
+                crate::discover_summary::McpSystemDiscoverParams::default(),
+            ))
             .await
             .expect("system_discover must not be blocked by the skew gate");
 

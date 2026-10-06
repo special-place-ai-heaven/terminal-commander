@@ -1,5 +1,11 @@
 # NPM10 — npm bootstrap first-publish policy exception
 
+> HISTORICAL as of 2026-10-05: the one-time first-publish policy exception (NPM10, 2026-05-23).
+> The first publish landed 2026-07-17; standing publishing is OIDC via `release-please.yml`
+> (`release-pipeline-invariants.md`). The bootstrap workflow this runbook describes
+> (`npm-bootstrap-publish.yml`) was deleted on 2026-10-05; do not follow it as a procedure.
+> See `../../BACKLOG.md` P1.5b.
+
 Status: NPM10 deliverable.
 Branch: `main`.
 Date: 2026-05-23.

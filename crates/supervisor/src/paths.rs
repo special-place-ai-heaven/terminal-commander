@@ -190,11 +190,80 @@ pub fn resolve_log_path_with(env: &impl EnvSource) -> PathBuf {
         .join("terminal-commanderd.log")
 }
 
+/// Create `dir` (and missing parents) owner-only, whatever the umask.
+///
+/// The daemon runs commands for whoever can reach its socket, and its store
+/// and logs hold their output, so every directory TC keeps state in is
+/// `0700` on unix: created that way (the mode is applied at `mkdir`, so
+/// there is no window), and an existing one with group or other bits is
+/// tightened. Returns the previous mode when it tightened one, so the
+/// caller can say so. Elsewhere the directory inherits its parent's ACL
+/// (the user profile by default) and this only creates it.
+pub fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<Option<u32>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        let mode = std::fs::metadata(dir)?.permissions().mode() & 0o777;
+        if mode & 0o077 == 0 {
+            return Ok(None);
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode & 0o700))?;
+        Ok(Some(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)?;
+        Ok(None)
+    }
+}
+
+/// Make an existing file owner-only (`0600`) on unix; a no-op elsewhere.
+pub fn restrict_file(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_dirs_are_created_owner_only_and_loose_ones_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let root = tempfile::tempdir().unwrap();
+        let fresh = root.path().join("a").join("b");
+        assert_eq!(ensure_private_dir(&fresh).unwrap(), None);
+        assert_eq!(mode(&fresh), 0o700);
+        assert_eq!(mode(&root.path().join("a")), 0o700);
+
+        let loose = root.path().join("loose");
+        std::fs::create_dir(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert_eq!(ensure_private_dir(&loose).unwrap(), Some(0o775));
+        assert_eq!(mode(&loose), 0o700);
+
+        let file = root.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        restrict_file(&file).unwrap();
+        assert_eq!(mode(&file), 0o600);
+    }
 
     /// In-memory [`EnvSource`] for tests. No process-global state, so tests
     /// run race-free under any `--test-threads` value.

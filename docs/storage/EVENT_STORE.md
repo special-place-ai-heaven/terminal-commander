@@ -1,9 +1,10 @@
 # Event Store - Terminal Commander
 
-Status: TC12 baseline.
+Status: TC12 baseline; storage facts updated 2026-10-05 (rusqlite 0.40,
+manual migrations, FTS5 mirror of `events` dropped in V0005).
 
-This document captures the locked design of the persistent event
-store backed by SQLite + FTS5 + refinery migrations.
+This document captures the design of the persistent event store backed
+by SQLite and a manual migration runner.
 
 Language: ASCII only.
 
@@ -12,10 +13,10 @@ Language: ASCII only.
 Per `docs/research/sqlite-fts5.md` and the locked decision in
 `docs/research/_USER_DECISIONS.md`:
 
-- `rusqlite = 0.39` with the `bundled` feature (no system libsqlite
+- `rusqlite = 0.40` with the `bundled` feature (no system libsqlite
   dependency; ships SQLite with FTS5 enabled).
-- `refinery = 0.9` for forward-only migrations (`rusqlite-bundled`
-  feature).
+- Forward-only migrations run by a manual `execute_batch` runner in
+  `crates/store/src/lib.rs` (refinery is not linked).
 - `journal_mode = WAL`, `synchronous = NORMAL`, `busy_timeout = 5000`
   (ms). Set as `PRAGMA`s on every connection.
 
@@ -85,13 +86,9 @@ CREATE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
 CREATE INDEX IF NOT EXISTS idx_events_bucket_timestamp
     ON events(bucket_id, timestamp);
 
--- FTS5 external-content table over (summary, kind, captures_text)
-CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
-    summary, kind, captures_text,
-    content='events',
-    content_rowid='rowid',
-    tokenize='unicode61 remove_diacritics 2'
-);
+-- V0001 also created an FTS5 table `events_fts` over (summary, kind,
+-- captures_text); V0005 dropped it (and its triggers) as unused write
+-- amplification. There is no FTS5 index over events today.
 ```
 
 No BLOB columns. A schema test asserts this invariant; new
@@ -157,9 +154,8 @@ if the bound is somehow crossed.
 | Component | Status |
 |---|---|
 | Append + cursor reads | live (TC12) |
-| FTS5 index (auto-maintained via triggers) | live (TC12) |
-| Search APIs over FTS5 | reserved-for-TC13 (registry search) |
-| Audit log table | deferred to TC22 |
-| Registry table | deferred to TC13 |
+| FTS5 index over events | removed (V0005); FTS5 now only backs `rule_search` and `recipe_search` |
+| Audit log table | live (V0003, `docs/storage/AUDIT_LOG.md`) |
+| Registry tables | live (V0002, `docs/storage/REGISTRY_STORE.md`) |
 | Backup/VACUUM INTO | live (TC12) |
 | Retention eviction | live (TC12) |

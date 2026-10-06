@@ -1,5 +1,9 @@
 # Persistent Audit Log
 
+Note (2026-10-05): the action set is now far larger than the TC35 list below
+(IPC method names, `command_shell_start`, `shell_session_start`,
+`credential_provided`, and so on); `action` stays an open string.
+
 Status: Live (TC35).
 Migration: V0003 (`crates/store/migrations/V0003__audit.sql`).
 Storage crate module: `crates/store/src/audit.rs`.
@@ -89,7 +93,7 @@ ship:
 
 | Implementation | When used |
 |---|---|
-| `PersistentAudit` over `Arc<Mutex<EventStore>>` | Production / daemon runtime. Use `Router::with_sink`. |
+| `PersistentAudit` over a `StoreClient` (the store actor, `crates/daemon/src/store_actor.rs`) | Production / daemon runtime. Use `Router::with_sink`. |
 | `InMemoryAudit` | Tests, library smoke, and the default `Router::new` constructor when no `EventStore` is configured. |
 
 `PersistentAudit::ensure_migration` exists to push the V0003 migration
@@ -113,7 +117,7 @@ production callers should monitor the underlying `EventStore` health.
 | `InMemoryAudit` sink | live (TC35; library + test only) |
 | `Router::with_sink` constructor | live (TC35) |
 | `Router::new` default sink | live (TC35; uses `InMemoryAudit`) |
-| MCP-side audit read tools | not implemented (operator CLI reads only) |
+| MCP-side audit read tool | live: `audit_since` (read-only, bounded; commit 9a335c2), plus the operator CLI `terminal-commander audit` |
 | Hash chain / tamper evidence | deferred (BACKLOG P1) |
 
 ## Recorded contract tension

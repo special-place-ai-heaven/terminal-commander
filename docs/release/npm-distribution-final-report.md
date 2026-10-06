@@ -1,5 +1,8 @@
 # NPM09 — terminal-commander-npm-distribution chain final report
 
+> HISTORICAL as of 2026-10-05 (`lib/` and `bin/` paths below are under `packages/terminal-commander/`): the NPM09 chain-close report (2026-05-23); its
+> `Conditional Go` and unpublished-package statements are superseded. Current state: `../../RELEASE_CHECKLIST.md`.
+
 Status: NPM09 deliverable, terminal goal of the chain.
 Branch: `main`.
 Date: 2026-05-23.

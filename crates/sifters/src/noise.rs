@@ -371,6 +371,7 @@ mod tests {
             rule: Some(RuleRef {
                 id: rule_id,
                 version: 1,
+                registry_id: None,
             }),
             source: EventSource {
                 probe_id: ProbeId::new(),

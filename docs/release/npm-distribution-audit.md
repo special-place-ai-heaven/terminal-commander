@@ -1,5 +1,8 @@
 # NPM01 — Symforge release pipeline audit + Terminal Commander recommendations
 
+> HISTORICAL as of 2026-10-05: a dated NPM01 audit (2026-05-23); not maintained.
+> Current rules: `release-pipeline-invariants.md`.
+
 Status: NPM01 deliverable.
 Branch: `main`.
 Date: 2026-05-23.

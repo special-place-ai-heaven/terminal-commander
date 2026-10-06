@@ -76,6 +76,7 @@
     "success payload contains job_id, bucket_id, probe_id, and cursor only",
     "output is combed signals plus a bounded receipt; raw stdout/stderr are never returned here, only through bucket/event tools",
     "env is an ARRAY of {key,value} objects, not a map; empty/omitted inherits the daemon environment, a non-empty list is OVERLAID onto (merged with) the inherited environment",
-    "the argv lane (command_start_combed) keeps shell interpreters hard-denied and is unchanged by this lane"
+    "the argv lane (command_start_combed) keeps shell interpreters hard-denied and is unchanged by this lane",
+    "wslenv_dropped is optional: present only when the command mentions WSL (an argv element or the shell line contains `wsl`, any case) and the daemon's ambient WSLENV named secret-shaped variables; it lists those names (never values) under wslenv_dropped.names with a note. Every spawn is filtered either way; self_check names the variables regardless"
   ]
 }

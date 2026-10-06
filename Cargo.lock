@@ -1240,6 +1240,7 @@ dependencies = [
 name = "terminal-commander-ipc"
 version = "0.3.11"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "terminal-commander-core",

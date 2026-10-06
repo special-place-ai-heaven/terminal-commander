@@ -427,6 +427,16 @@ test("isSecretEnvKey matches explicit + pattern-shaped keys", () => {
   for (const key of ["PATH", "HOME", "USERPROFILE", "NORMAL", "FOO", "PATHTOKEN_X"]) {
     assert.equal(isSecretEnvKey(key), false, `${key} must NOT be classified secret`);
   }
+  // buildFilteredEnv REMOVES what this matches from a child's real env, so
+  // the line stays narrow: config names that merely contain a secret-ish
+  // word keep reaching the child. (WSLENV needs no classifier here:
+  // ensureSessionInWslEnv drops the ambient value whole.)
+  for (const key of ["GITHUB_TOKEN", "DB_PASSWORD", "STRIPE_API_KEY", "SUDO_PASS"]) {
+    assert.equal(isSecretEnvKey(key), true, `${key} must be classified secret`);
+  }
+  for (const key of ["TOKENIZERS_PARALLELISM", "SSH_AUTH_SOCK", "SORT_KEY", "SUDO_ASKPASS"]) {
+    assert.equal(isSecretEnvKey(key), false, `${key} must NOT be classified secret`);
+  }
 });
 
 test("resolveBridgeDistro priority chain matches the locked contract", () => {

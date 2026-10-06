@@ -15,7 +15,8 @@
 //! reconstruction carries real numbers.
 //!
 //! The reconstruction is compared against the LIVE status of the same job in
-//! the same process. That is deterministic -- no daemon restart to race -- and
+//! the same process, then read again by a second boot on the same data dir.
+//! That is deterministic -- the receipt is written before either read -- and
 //! it pins the exact equality that matters. Process-restart reconstruction is
 //! separately covered by `crates/mcp/tests/ledger_compact_wait_restart.rs`.
 
@@ -121,12 +122,10 @@ fn reconstructed_status_carries_the_same_evidence_as_the_live_status() {
              as the live count does (natural-exit path)"
         );
 
-        // Provenance is explicit and derived.
-        assert_eq!(recon.outcome_trust, OutcomeTrust::Reconstructed);
-        assert!(
-            recon.restarted,
-            "`restarted` is the compat alias for 'not observed live'"
-        );
+        // Provenance is explicit and derived. The daemon reading its own
+        // receipt saw the job finish, so that read is an observation too.
+        assert_eq!(recon.outcome_trust, OutcomeTrust::Observed);
+        assert!(!recon.restarted);
         assert_eq!(
             live.outcome_trust,
             OutcomeTrust::Observed,
@@ -135,6 +134,26 @@ fn reconstructed_status_carries_the_same_evidence_as_the_live_status() {
 
         // A truthful exit code is preserved, never forced to null (FR-008).
         assert_eq!(recon.exit_code, live.exit_code);
+
+        // The next boot reads the same receipt as a reconstruction, with the
+        // same evidence.
+        state.store.shutdown().expect("shutdown store actor");
+        drop(state);
+        let next_boot = DaemonState::bootstrap(DaemonConfig::defaults_in(&data)).unwrap();
+        let after_restart = next_boot
+            .command
+            .reconstructed_status(started.job_id)
+            .expect("the receipt must survive the restart");
+        assert_eq!(after_restart.outcome_trust, OutcomeTrust::Reconstructed);
+        assert!(
+            after_restart.restarted,
+            "`restarted` is the compat alias for 'not observed live'"
+        );
+        assert_eq!(after_restart.frames_total, live.frames_total);
+        assert_eq!(after_restart.bytes_total, live.bytes_total);
+        assert_eq!(after_restart.events_emitted, live.events_emitted);
+        assert_eq!(after_restart.exit_code, live.exit_code);
+        next_boot.store.shutdown().expect("shutdown store actor");
 
         cleanup(&data);
     });

@@ -28,6 +28,7 @@
 //! [`crate::audit::PersistentAudit`], IPC registry handlers, and
 //! [`crate::runtime::run_ipc_server`] shutdown (WAL checkpoint).
 
+use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -977,7 +978,12 @@ where
         Ok(reply) => reply,
         Err(panic) => {
             let detail = panic_message(&*panic);
-            eprintln!("terminal-commanderd: store op panicked, store actor survived: {detail}");
+            // Not `eprintln!`: it panics when stderr is gone (a closed
+            // terminal), which would end the actor this arm just saved.
+            let _ = writeln!(
+                std::io::stderr(),
+                "terminal-commanderd: store op panicked, store actor survived: {detail}"
+            );
             Err(EventStoreError::Unavailable(format!(
                 "store operation panicked: {detail}"
             )))

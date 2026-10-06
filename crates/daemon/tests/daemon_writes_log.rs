@@ -6,6 +6,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_writes_startup_line_to_log() {
     let data_dir: PathBuf = {
@@ -26,7 +29,7 @@ async fn daemon_writes_startup_line_to_log() {
     let log_path = log_dir.join("terminal-commanderd.log");
 
     let daemon_bin = env!("CARGO_BIN_EXE_terminal-commanderd");
-    let mut child = std::process::Command::new(daemon_bin)
+    let mut child = isolated_env::isolate(&mut std::process::Command::new(daemon_bin), &data_dir)
         .arg("--data-dir")
         .arg(&data_dir)
         .arg("start")

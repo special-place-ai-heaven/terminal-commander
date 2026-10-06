@@ -68,7 +68,8 @@ Need to run or observe something?
 |
 +-- Multi-step work that shares cwd/env (cd build; cmake ..; make)?
 |     -> shell_session_start  then  shell_session_exec (one line per step)
-|        (needs allow_session; default off; UNIX-ONLY)
+|        (needs allow_session; on under the default full_access, off on
+|         the hardened profiles; UNIX-ONLY)
 |        save/restore with workspace_snapshot_create / _apply
 |        Not a substitute for a denied shell_exec.
 |
@@ -79,7 +80,8 @@ Need to run or observe something?
 |        (suggest NEVER auto-activates; you drive the loop)
 |
 +-- Run any of the above on a REMOTE host?
-|     -> add target_id=<id> to the tool call  (needs allow_remote; default off;
+|     -> add target_id=<id> to the command tools (needs allow_remote; on under
+|        the default full_access, off on the hardened profiles;
 |        reached only via an operator-established ssh -L forward, no public TCP)
 |
 +-- A privileged system op (install a package, restart a service)?
@@ -137,7 +139,8 @@ remedy when a call is denied.
 shell_exec { shell_line: "grep -r TODO src | wc -l" }
 ```
 
-- On the default profile this returns `PolicyDenied` (see below).
+- With `allow_shell` off (a hardened profile, or `[policy.caps]
+  allow_shell = false`) this returns `PolicyDenied` (see below).
 - Output is combed exactly like the argv lane -- never raw.
 - Details and the residual-risk discussion: `docs/runtime/SHELL_RUNTIME.md`
   and `POLICY.md` section 4.1.
@@ -200,7 +203,8 @@ workspace_snapshot_apply  { snapshot_id, session_id }
 shell_session_stop  { session_id }
 ```
 
-- Gated by `allow_session` (default OFF) and UNIX-ONLY: on a non-unix
+- Gated by `allow_session` (on under the default `full_access`, OFF on
+  the hardened profiles) and UNIX-ONLY: on a non-unix
   daemon the session tools return `UnsupportedPlatform`.
 - `cd` state persists because the shell process is persistent.
 - `status.cwd` is BEST-EFFORT (it tracks plain `cd <single-arg>` only).
@@ -230,7 +234,8 @@ pty_command_stop { job_id }
   owns the probe. This is also the only surface that reports a FINISHED PTY
   job's exit code, because `pty_command_list` filters terminal jobs out.
   Every status response carries `outcome_trust` (`observed` | `reconstructed` |
-  `lost` | `abandoned`) saying how the daemon knows.
+  `abandoned`) saying how the daemon knows. A job the daemon has no record of
+  is the `job_lost` error, not a trust value.
 - Honest host caveat: live Windows ConPTY child-output end-to-end is
   gated behind `TC_CONPTY_E2E=1` and not yet fully closed on every dev
   host; check `system_discover` before relying on it on native Windows.
@@ -281,7 +286,8 @@ target_probe { target_id }                      -> { reachable, daemon_version? 
 run_and_watch argv=[...] rules=[...] target_id="build-box"
 ```
 
-- Gated by `allow_remote` (default OFF).
+- Gated by `allow_remote` (on under the default `full_access`, OFF on the
+  hardened profiles).
 - Transport is an operator-established `ssh -L` forward to the REMOTE
   daemon's LOCAL socket. There is NO public TCP listener, and the
   adapter never spawns ssh -- the operator sets up the tunnel.

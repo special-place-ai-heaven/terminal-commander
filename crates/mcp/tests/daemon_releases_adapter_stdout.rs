@@ -13,6 +13,9 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+#[path = "../../test_support/isolated_env.rs"]
+mod isolated_env;
+
 fn target_bin(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
     let profile_dir = exe.parent().and_then(|p| p.parent()).expect("profile dir");
@@ -49,7 +52,7 @@ fn adapter_stdout_reaches_eof_after_it_starts_a_daemon_and_exits() {
     #[cfg(windows)]
     let socket = format!(r"\\.\pipe\tc-test-stdout-eof-{}", std::process::id());
 
-    let mut mcp = Command::new(&mcp_bin)
+    let mut mcp = isolated_env::isolate(&mut Command::new(&mcp_bin), dir.path())
         .arg("--state-dir")
         .arg(&state_dir)
         .env("TC_SOCKET", &socket)

@@ -41,8 +41,11 @@ use crate::state::{BootstrapError, DaemonState};
 /// in integration tests) does not cause a panic.
 fn init_file_logging(data_dir: &std::path::Path) -> tracing_appender::non_blocking::WorkerGuard {
     let log_dir = data_dir.join("logs");
-    let _ = std::fs::create_dir_all(&log_dir);
+    let _ = terminal_commander_supervisor::paths::ensure_private_dir(&log_dir);
     let file_appender = tracing_appender::rolling::never(&log_dir, "terminal-commanderd.log");
+    let _ = terminal_commander_supervisor::paths::restrict_file(
+        &log_dir.join("terminal-commanderd.log"),
+    );
     let (nb, guard) = tracing_appender::non_blocking(file_appender);
     let _ = tracing_subscriber::fmt()
         .with_writer(nb)
@@ -61,6 +64,9 @@ pub enum RuntimeError {
     SelfCheck(String),
     #[error("shutdown signal handler error: {0}")]
     Signal(String),
+    /// Another daemon owns the data directory or the endpoint.
+    #[error("{0}")]
+    InUse(String),
 }
 
 /// Self-check report. Stored as plain text so logs and operator
@@ -294,6 +300,60 @@ fn acquire_bringup_guard(state_dir: &std::path::Path, endpoint: &str) -> BringUp
     }
 }
 
+/// How long a daemon waits for a previous owner of its data directory to
+/// finish exiting before it refuses to start.
+const DATA_DIR_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Hold `<data_dir>/terminal-commanderd.data.lock` for the daemon's life, taken
+/// before the store opens, so a second daemon never shares this data
+/// directory's database or pidfile. The bring-up lock cannot do this: the
+/// supervisor holds it while its child starts, so a supervisor-started daemon
+/// never holds it once running. A lock that cannot be opened at all is logged
+/// and skipped, like the bring-up lock.
+async fn claim_data_dir(
+    data_dir: &std::path::Path,
+) -> Result<Option<terminal_commander_supervisor::proc_lock::ProcessLock>, RuntimeError> {
+    use terminal_commander_supervisor::proc_lock::{self, TryLockResult};
+
+    let _ = std::fs::create_dir_all(data_dir);
+    let path = data_dir.join("terminal-commanderd.data.lock");
+    let deadline = std::time::Instant::now() + DATA_DIR_LOCK_WAIT;
+    loop {
+        match proc_lock::try_acquire(&path) {
+            Ok(TryLockResult::Acquired(lock)) => return Ok(Some(lock)),
+            Ok(TryLockResult::Contended) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Ok(TryLockResult::Contended) => {
+                let owner = terminal_commander_supervisor::pidfile::read_pidfile(data_dir)
+                    .map_or_else(String::new, |rec| format!(" (pid {})", rec.pid));
+                return Err(RuntimeError::InUse(format!(
+                    "data directory {} is in use by another terminal-commanderd{owner}; \
+                     refusing to start a second daemon on it. Stop that daemon, or pass a \
+                     different --data-dir",
+                    data_dir.display()
+                )));
+            }
+            Err(e) => {
+                tracing::warn!("data-dir lock unavailable ({e}); starting without it");
+                return Ok(None);
+            }
+        }
+    }
+}
+
+/// True when something answers on `socket_path`. Binding there would unlink
+/// that listener's socket and take its clients -- what a daemon started with an
+/// inherited `TC_SOCKET` but another data directory used to do.
+#[cfg(unix)]
+async fn socket_is_served(socket_path: &std::path::Path) -> bool {
+    match tokio::net::UnixStream::connect(socket_path).await {
+        Ok(_) => true,
+        // A full accept backlog still means a listener.
+        Err(e) => e.kind() == std::io::ErrorKind::WouldBlock,
+    }
+}
+
 /// Bootstrap + bind the UDS IPC listener + wait for shutdown signal.
 ///
 /// On non-Unix targets this returns immediately with an unsupported-
@@ -306,13 +366,21 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     use crate::ipc::IpcServer;
 
     let _log_guard = init_file_logging(&config.daemon.data_dir);
+    ignore_sighup()?;
     let state_dir = config.daemon.data_dir.clone();
+    let _data_dir_lock = claim_data_dir(&state_dir).await?;
 
     let (state, rep) = run_self_check(config)?;
     tracing::info!("{}", rep.render());
 
     let socket_path = state.config.socket_path();
     let endpoint = socket_path.display().to_string();
+    if socket_is_served(&socket_path).await {
+        return Err(RuntimeError::InUse(format!(
+            "another daemon is serving {endpoint}; refusing to take over its socket. \
+             Stop that daemon, or start this one with a different TC_SOCKET"
+        )));
+    }
     tracing::info!("binding UDS at {endpoint}");
     // Keep an Arc handle to the state so we can await the internal
     // shutdown trigger (flipped by the `Shutdown` IPC dispatch arm)
@@ -359,7 +427,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     // Re-assert the pidfile if it goes missing (the daemon writes it once at
     // bind above and never used to recover a lost one). Closes the
     // pidfile-less window the version-aware replace path mis-reads as stale.
-    spawn_pidfile_reasserter(state_dir.clone(), endpoint.clone());
+    let reasserter = spawn_pidfile_reasserter(state_dir.clone(), endpoint.clone());
 
     // Two shutdown sources: an OS signal (SIGINT/SIGTERM) or an
     // internal `Shutdown` IPC request that flipped the state trigger.
@@ -383,7 +451,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     // BY this shutdown. Record it while the store is still writable.
     state.record_abandoned_jobs();
     shutdown_store(&state);
-    terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
+    release_pidfile(reasserter, &state_dir).await;
     tracing::info!("IPC server exited cleanly.");
     Ok(())
 }
@@ -397,6 +465,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
 
     let _log_guard = init_file_logging(&config.daemon.data_dir);
     let state_dir = config.daemon.data_dir.clone();
+    let _data_dir_lock = claim_data_dir(&state_dir).await?;
 
     let (state, rep) = run_self_check(config)?;
     tracing::info!("{}", rep.render());
@@ -435,7 +504,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     spawn_discovery_prewarm();
     // Re-assert the pidfile if it goes missing (cross-platform; see the Unix
     // arm). Closes the pidfile-less window mis-read as stale by the replace path.
-    spawn_pidfile_reasserter(state_dir.clone(), pipe_name.clone());
+    let reasserter = spawn_pidfile_reasserter(state_dir.clone(), pipe_name.clone());
     // Same-user shutdown event at medium integrity. A normal update can signal
     // it when TerminateProcess is denied; it does not expose the command pipe.
     crate::shutdown_event::spawn_waiter(Arc::clone(&state));
@@ -464,7 +533,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     state.command.drain_lifecycle_tasks().await;
     state.record_abandoned_jobs();
     shutdown_store(state.as_ref());
-    terminal_commander_supervisor::pidfile::remove_pidfile(&state_dir);
+    release_pidfile(reasserter, &state_dir).await;
     tracing::info!("IPC server exited cleanly.");
     Ok(())
 }
@@ -713,8 +782,11 @@ fn reassert_pidfile_once(state_dir: &std::path::Path, endpoint: &str, at_bind: b
 /// (or records a dead pid, or records ours with a drifted endpoint), so the
 /// pidfile-less window the version-aware replace path mis-reads as "stale" never
 /// persists. The pidfile is cross-platform, so this runs on every target. The
-/// task shares the process lifetime — the IPC server's shutdown drops it.
-fn spawn_pidfile_reasserter(state_dir: std::path::PathBuf, endpoint: String) {
+/// task runs until [`release_pidfile`] stops it at shutdown.
+fn spawn_pidfile_reasserter(
+    state_dir: std::path::PathBuf,
+    endpoint: String,
+) -> tokio::task::JoinHandle<()> {
     tracing::info!(
         "pidfile self-heal enabled: tick={PIDFILE_REASSERT_TICK_SECS}s endpoint={endpoint}"
     );
@@ -726,7 +798,18 @@ fn spawn_pidfile_reasserter(state_dir: std::path::PathBuf, endpoint: String) {
             iv.tick().await;
             reassert_pidfile_once(&state_dir, &endpoint, false);
         }
-    });
+    })
+}
+
+/// Stop the pidfile self-heal, then remove the pidfile. In the other order a
+/// self-heal pass that runs after the removal (its first tick fires at once, so
+/// a daemon stopped right after binding hits this) writes the pidfile back, and
+/// the exited daemon leaves a pidfile naming a dead pid.
+async fn release_pidfile(reasserter: tokio::task::JoinHandle<()>, state_dir: &std::path::Path) {
+    reasserter.abort();
+    // Waits out a pass already running on another worker.
+    let _ = reasserter.await;
+    terminal_commander_supervisor::pidfile::remove_pidfile(state_dir);
 }
 
 #[cfg(windows)]
@@ -735,6 +818,25 @@ async fn wait_for_shutdown_signal_windows() -> Result<(), RuntimeError> {
     tokio::signal::ctrl_c()
         .await
         .map_err(|e| RuntimeError::Signal(format!("ctrl-c listen: {e}")))?;
+    Ok(())
+}
+
+/// A server has no use for SIGHUP, but a daemon started from a terminal (the
+/// Linux profile hook, the npm shim) still gets it when that terminal closes,
+/// and its default action ends the process.
+///
+/// Handled rather than set to `SIG_IGN`, so the commands the daemon starts
+/// get the default disposition back at exec.
+#[cfg(unix)]
+fn ignore_sighup() -> Result<(), RuntimeError> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut hangup = signal(SignalKind::hangup())
+        .map_err(|e| RuntimeError::Signal(format!("SIGHUP listen: {e}")))?;
+    tokio::spawn(async move {
+        while hangup.recv().await.is_some() {
+            tracing::info!("SIGHUP ignored; send SIGINT or SIGTERM to shut down");
+        }
+    });
     Ok(())
 }
 
@@ -943,6 +1045,34 @@ mod tests {
         let got = pidfile::read_pidfile_raw(&data).expect("pidfile claimed at bind");
         assert_eq!(got.pid, std::process::id());
         assert_eq!(got.endpoint, endpoint);
+        cleanup(&data);
+    }
+
+    // Regression: a daemon told to shut down right after binding removed its
+    // pidfile, and then the self-heal task got its first poll -- whose first
+    // tick fires at once -- found the pidfile missing and wrote it back. The
+    // process exited leaving a pidfile that named a dead pid (seen 4 times in
+    // 800 loaded runs of `session_reap_token_shuts_down_the_daemon`).
+    // `current_thread` keeps the self-heal unpolled until the test yields,
+    // which is exactly the late first poll.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_released_pidfile_stays_removed_when_the_self_heal_runs_late() {
+        use terminal_commander_supervisor::pidfile;
+        let data = temp_data_dir("release-pidfile");
+        std::fs::create_dir_all(&data).unwrap();
+        let endpoint = data.join("tc.sock").display().to_string();
+        reassert_pidfile_once(&data, &endpoint, true);
+
+        let reasserter = spawn_pidfile_reasserter(data.clone(), endpoint);
+        release_pidfile(reasserter, &data).await;
+        // Park the runtime so the timer driver turns and a surviving
+        // self-heal gets its first, immediate tick.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            pidfile::read_pidfile_raw(&data).is_none(),
+            "a released pidfile must not be written back by the self-heal"
+        );
         cleanup(&data);
     }
 

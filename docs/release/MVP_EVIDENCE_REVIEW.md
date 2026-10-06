@@ -1,5 +1,9 @@
 # MVP evidence review
 
+> HISTORICAL as of 2026-10-05: a 2026-05-28 reconciliation record (e.g. its
+> TC11 "not wired" status was fixed by commit `590addf`). Current state lives in
+> `BACKLOG.md`, `ROADMAP.md` and `RELEASE_CHECKLIST.md`.
+
 Reconciled: 2026-05-28 · Issue: [ROB-4](mention://issue/1d99ebb1-c568-48dd-85e5-a0f70e0dfe69) · Parent audit: [ROB-1](mention://issue/56940df9-7e91-44ca-9670-9e511328ebcd)
 
 ## Canonical sources
