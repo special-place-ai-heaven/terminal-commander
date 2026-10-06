@@ -1091,16 +1091,30 @@ mod cgroup {
 
     /// Kill what is left in the host dir, rmdir its per-job children, then
     /// the dir itself. `ENOENT` counts as removed.
+    ///
+    /// A just-killed member or a per-job dir whose own removal is still
+    /// retrying keeps the host dir busy for a moment: on `EBUSY` the whole
+    /// removal is retried like [`remove`] (off the async worker, up to 1 s)
+    /// and `Ok` is returned; a dir still busy after that is the boot sweep's.
     pub(super) fn uninstall_host() -> Result<(), String> {
         let Some((dir, _)) = HOST.lock().take() else {
             return Ok(());
         };
         let _ = std::fs::write(dir.join("cgroup.kill"), "1");
-        remove_host_dir(&dir);
-        match std::fs::remove_dir(&dir) {
-            Err(e) if e.kind() != ErrorKind::NotFound => Err(errno_reason("host cgroup rmdir", &e)),
-            _ => Ok(()),
+        let attempt = |dir: &Path| {
+            remove_host_dir(dir);
+            match std::fs::remove_dir(dir) {
+                Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+                other => other,
+            }
+        };
+        match attempt(&dir) {
+            Err(e) if is_busy(&e) => {}
+            Err(e) => return Err(errno_reason("host cgroup rmdir", &e)),
+            Ok(()) => return Ok(()),
         }
+        retry_off_worker(move || attempt(&dir));
+        Ok(())
     }
 
     /// The host dir's `memory.events.local` `oom` count: times the host
@@ -1135,18 +1149,29 @@ mod cgroup {
     /// tokio runtime it runs on the blocking pool; outside one (a plain
     /// thread) it runs inline. Anything left over is the boot sweep's.
     pub(super) fn remove(dir: &Path) {
-        let busy =
-            |r: std::io::Result<()>| matches!(r, Err(e) if e.raw_os_error() == Some(libc::EBUSY));
-        if !busy(std::fs::remove_dir(dir)) {
-            return;
+        match std::fs::remove_dir(dir) {
+            Err(e) if is_busy(&e) => {}
+            _ => return,
         }
         let _ = std::fs::write(dir.join("cgroup.kill"), "1");
         let dir = dir.to_owned();
+        retry_off_worker(move || std::fs::remove_dir(&dir));
+    }
+
+    fn is_busy(e: &std::io::Error) -> bool {
+        e.raw_os_error() == Some(libc::EBUSY)
+    }
+
+    /// Re-run `attempt` every 10 ms for up to 1 s while it fails with
+    /// `EBUSY`. Inside a tokio runtime on the blocking pool (never sleeping
+    /// on an async worker; runtime shutdown waits for it), else inline.
+    fn retry_off_worker(attempt: impl Fn() -> std::io::Result<()> + Send + 'static) {
         let retry = move || {
             for _ in 0..100 {
                 std::thread::sleep(std::time::Duration::from_millis(10));
-                if !busy(std::fs::remove_dir(&dir)) {
-                    return;
+                match attempt() {
+                    Err(e) if is_busy(&e) => {}
+                    _ => return,
                 }
             }
         };

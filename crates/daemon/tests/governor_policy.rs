@@ -80,6 +80,15 @@ struct Daemon {
     _data: tempfile::TempDir,
 }
 
+/// The test daemon never runs the runtime's shutdown path, so release the
+/// host ceiling here (Linux: the `tc-jobs-<pid>` cgroup dir) instead of
+/// leaving it to a later boot sweep. Idempotent; a no-op when none exists.
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = terminal_commander_probes::governor::uninstall_host_ceiling();
+    }
+}
+
 fn serve(state: &Arc<DaemonState>) -> (PathBuf, ServerHandle) {
     #[cfg(unix)]
     {
