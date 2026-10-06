@@ -223,6 +223,26 @@ async fn a_stopped_pty_job_reads_back_as_observed_by_the_daemon_that_stopped_it(
     assert_eq!(status.state, JobState::Cancelled);
     assert_eq!(status.exit_code, None);
     assert_eq!(status.frames_total, stopped.frames_total);
+    // The default governor governs this job. A stop reports the mode (known
+    // from spawn) and never an exit_reason; the peak follows once the probe
+    // has ended (Windows measures it; rlimit cannot).
+    assert!(
+        status.governor.is_some(),
+        "stopped job lost its governor: {status:?}"
+    );
+    assert_eq!(status.exit_reason, None, "{status:?}");
+    if cfg!(windows) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut status = status;
+        while status.peak_memory_bytes.is_none() {
+            assert!(Instant::now() < deadline, "peak never arrived: {status:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            status = command_status(&state, job_id).await;
+        }
+        assert!(status.governor.is_some(), "{status:?}");
+        assert_eq!(status.exit_reason, None, "{status:?}");
+        assert_eq!(status.state, JobState::Cancelled);
+    }
 
     cleanup(&data);
 }

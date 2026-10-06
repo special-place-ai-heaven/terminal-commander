@@ -672,8 +672,12 @@ mod runtime {
             // snapshot alone would record events_emitted with zeroed frames and
             // bytes -- an evidence-stripped receipt, which is precisely the
             // defect this work removes.
+            // Resource governor: mode and limit are known once the spawn
+            // returns, so a stop can report them without the probe. The
+            // waiter replaces this with the final report (peak included).
+            let spawn_governor = GovernorOutcome::from_report(&probe.governor_report());
             let probe_cell = Arc::new(tokio::sync::Mutex::new(Some(probe)));
-            let governor = Arc::new(parking_lot::Mutex::new(GovernorOutcome::default()));
+            let governor = Arc::new(parking_lot::Mutex::new(spawn_governor));
 
             let job_cfg = JobConfig {
                 job_id,
@@ -711,6 +715,19 @@ mod runtime {
                     let outcome = completion_rx
                         .await
                         .unwrap_or(terminal_commander_probes::PtyExitOutcome::Cancelled);
+                    // Resource governor: both probe backends finish the report
+                    // BEFORE sending the completion awaited above, so it is final
+                    // now. Await the probe cell rather than `try_lock` it: a
+                    // momentarily busy probe (`write_stdin` mid-write) must not
+                    // drop the enforcer's own report. The guard is released at
+                    // the end of this statement, never held across an await.
+                    let (report, probe_metrics) = {
+                        let guard = waiter_probe.lock().await;
+                        (
+                            guard.as_ref().map(PtyProbe::governor_report),
+                            guard.as_ref().map(PtyProbe::metrics),
+                        )
+                    };
                     // `stop()` finalizes the ledger synchronously (so
                     // `pty_command_list` is immediately consistent) and removes
                     // the binding. If it already ran, the job is terminal: skip
@@ -724,22 +741,42 @@ mod runtime {
                                 | terminal_commander_core::JobState::Cancelled
                         )
                     }) {
+                        // `stop()` persisted the receipt with the spawn-time mode
+                        // and limit; the peak exists only now that the probe has
+                        // ended, so re-persist the same cancelled receipt with
+                        // it. Under the governor lock, which `stop()` also holds
+                        // while persisting: whichever write lands last carries
+                        // the final report. A stop never reports an exit_reason.
+                        if let Some(report) = report {
+                            let mut g = waiter_governor.lock();
+                            *g = GovernorOutcome::from_report(&report);
+                            g.exit_reason = None;
+                            if g.governor.is_some() {
+                                let pm = probe_metrics.unwrap_or_default();
+                                let final_metrics =
+                                    combine_pty_metrics(&pm, &waiter_metrics.lock().clone());
+                                let duration_ms = waiter_jobs
+                                    .get(job_id)
+                                    .and_then(|r| r.exit_info.as_ref().map(|e| e.duration_ms));
+                                let evidence =
+                                    pty_evidence_json(&final_metrics, duration_ms, probe_id, &g);
+                                crate::command::persist_job_receipt(
+                                    &waiter_store,
+                                    job_id,
+                                    bucket_id,
+                                    terminal_commander_core::JobState::Cancelled,
+                                    None,
+                                    final_metrics.events_emitted,
+                                    Some(&evidence),
+                                    None,
+                                );
+                            }
+                        }
                         return;
                     }
-                    // Resource governor: both probe backends finish the report
-                    // BEFORE sending the completion awaited above, so it is final
-                    // now. Await the probe cell rather than `try_lock` it: a
-                    // momentarily busy probe (`write_stdin` mid-write) must not
-                    // drop the enforcer's own report. The guard is released at
-                    // the end of this statement, never held across an await.
                     // Published BEFORE `finish()` below so a status read that
                     // sees the terminal state also sees the governor fields
                     // (same rule as the combed receipt, status_stop_readback).
-                    let report = waiter_probe
-                        .lock()
-                        .await
-                        .as_ref()
-                        .map(PtyProbe::governor_report);
                     if let Some(report) = report {
                         *waiter_governor.lock() = GovernorOutcome::from_report(&report);
                     }
@@ -1105,7 +1142,12 @@ mod runtime {
                 .jobs
                 .get(job_id)
                 .and_then(|r| r.exit_info.as_ref().map(|e| e.duration_ms));
-            let evidence = pty_evidence_json(&metrics, duration_ms, b.probe_id, &b.governor.lock());
+            // Held across the persist so this write and the waiter's
+            // final-report re-persist cannot interleave (see the waiter).
+            let governor_guard = b.governor.lock();
+            let mut governor = governor_guard.clone();
+            governor.exit_reason = None;
+            let evidence = pty_evidence_json(&metrics, duration_ms, b.probe_id, &governor);
             crate::command::persist_job_receipt(
                 &self.store,
                 job_id,
@@ -1117,6 +1159,7 @@ mod runtime {
                 Some(&evidence),
                 None,
             );
+            drop(governor_guard);
 
             self.audit(
                 "pty_command_stop",
@@ -1216,6 +1259,11 @@ mod runtime {
             };
             let rec = self.jobs.get(job_id)?;
             let elapsed_ms = crate::command::running_elapsed_ms(&rec);
+            let governor = if elapsed_ms.is_some() {
+                GovernorOutcome::default()
+            } else {
+                governor
+            };
             Some(terminal_commander_ipc::protocol::CommandStatusResponse {
                 job_id,
                 bucket_id,

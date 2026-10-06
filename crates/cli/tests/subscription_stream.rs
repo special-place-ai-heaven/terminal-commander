@@ -268,6 +268,7 @@ mod unix_live {
             dedup_nonce: None,
             receipt_shape: None,
             strip_ansi: true,
+            limits: None,
         }
     }
 
