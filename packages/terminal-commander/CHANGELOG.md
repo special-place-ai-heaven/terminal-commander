@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.3.12](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.11...v0.3.12) (2026-10-06)
+
+
+### Features
+
+* **mcp:** system_discover takes a `detail` level and returns a summary by default ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **registry:** evaluate a rule's own examples in registry_test, registry_upsert and pack import ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+
+
+### Bug Fixes
+
+* 0.3.12 - autostart, daemon isolation, WSLENV, owner-only endpoint, honest config and status ([91a01f0](https://github.com/special-place-ai-heaven/terminal-commander/commit/91a01f0cbdf0aa874543d4b241cda9be2ff3561c))
+* **core,sifters,store:** carry the registry rule id on signal events ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **core:** deserialize {"match": false} rule example expectations as NoMatch ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon,ipc:** make the daemon endpoint, store and logs owner-only ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon,npm:** give every daemon child the child environment and start over a stale socket ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon,npm:** give every daemon child the child environment and start over a stale socket ([2331a66](https://github.com/special-place-ai-heaven/terminal-commander/commit/2331a66f9260e5170d0d89aad55766a695773303))
+* **daemon,npm:** keep the autostarted daemon alive when its terminal closes ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon,npm:** keep the autostarted daemon alive when its terminal closes ([07e8aad](https://github.com/special-place-ai-heaven/terminal-commander/commit/07e8aad95a8ac16ccc1453e7ce62cf0c528f6ca9))
+* **daemon,supervisor:** filter WSLENV for every spawn and for the daemon itself ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon,supervisor:** filter WSLENV for every spawn and for the daemon itself ([02ef1f9](https://github.com/special-place-ai-heaven/terminal-commander/commit/02ef1f9d0df5c221f0498f8c4df941dd31633c0b))
+* **daemon:** fall back when an accepted credential link is never opened ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon:** keep secret-shaped WSLENV entries out of model-issued WSL launches ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon:** keep secret-shaped WSLENV entries out of model-issued WSL launches ([3bf0476](https://github.com/special-place-ai-heaven/terminal-commander/commit/3bf04767bc07df83a03653818ea136e70181acd9))
+* **daemon:** let the browser close the credential page connection first ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon:** never accept a config key that does nothing ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon:** never export a masked snapshot value into a live shell ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon:** report a status served from this boot's receipt as observed ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon:** serve an expired host-discovery result at once and refresh it in the background ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **daemon:** stop a child login shell from starting a second daemon on this daemon's socket ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **ipc,daemon:** name both identities when refusing another user ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **mcp:** fall back when the client does not take the credential elicitation ([032d325](https://github.com/special-place-ai-heaven/terminal-commander/commit/032d325e9055544130edc4fbcb92d0d7b5b7eaec))
+* **npm:** doctor daemon diagnoses the native daemon on Windows ([00f2d6e](https://github.com/special-place-ai-heaven/terminal-commander/commit/00f2d6e92b9501e0067c8e70ab81d7667e822bc9))
+* **npm:** doctor no longer reports a stale socket file as a running daemon ([f30ff4b](https://github.com/special-place-ai-heaven/terminal-commander/commit/f30ff4be094c877116a25e8c15d19f4662a926a2))
+* **npm:** keep the autostart launcher alive through an immediate terminal hangup ([8fb8107](https://github.com/special-place-ai-heaven/terminal-commander/commit/8fb81072ef5bd07423db4d3708c43a0bc6b64544))
+* **npm:** never autostart a second daemon inside a Terminal Commander process tree ([9c2da2b](https://github.com/special-place-ai-heaven/terminal-commander/commit/9c2da2b4f95599fd46c7d22b874fe4d4e91a6d10))
+* **npm:** stop the Linux/WSL autostart from killing the user's shells ([463d815](https://github.com/special-place-ai-heaven/terminal-commander/commit/463d8154ceb69ee3f7fcd5caf7a26680bf53ed3d))
+
 ## [0.3.11](https://github.com/special-place-ai-heaven/terminal-commander/compare/v0.3.10...v0.3.11) (2026-10-05)
 
 

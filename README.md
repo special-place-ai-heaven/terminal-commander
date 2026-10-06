@@ -52,7 +52,7 @@ result is ever silent or misleading.
 
 ## Recent improvements
 
-<!-- release-status -->Landed 2026-10-06, not yet in a tagged release.
+<!-- release-status -->Landed 2026-10-06, released in v0.3.12.
 
 - **Linux/WSL shells survive the daemon autostart hook:** the hook sourced its
   start script into your shell, so once the daemon was up every login and
