@@ -293,7 +293,9 @@ absent). The daemon warms discovery once it serves, and a result is served at
 once for up to ten minutes (refreshed in the background once it is 30 seconds
 old; `system_discover` reports `discovery_age_ms`). A probe that times out
 after an earlier discovery confirmed it keeps that answer, marked
-`stale_confirmed` with `stale_confirmed_age_ms`. The adapter's startup
+`stale_confirmed` with `stale_confirmed_age_ms`. Confirmed answers also
+persist for 24 hours in `host-discovery.json` in the shared state directory, so
+a new per-session daemon on a busy host starts from them. The adapter's startup
 version-skew check reads the daemon version from Health, so it completes even
 while discovery is still running.
 
