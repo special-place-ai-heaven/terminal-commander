@@ -177,6 +177,37 @@ jobs:
       - name: install-path check (scripts/ci/install-path-check.sh)
         run: bash scripts/ci/install-path-check.sh target/debug
 
+  # The resource governor's Linux cgroup paths (per-job cgroup, host ceiling,
+  # outliving-grandchild kill, boot sweep). On a stock runner the test process
+  # sits in a cgroup whose parent it cannot write, so every governor test in
+  # the gates takes the rlimit lane and prints a skip. The script puts the
+  # process in a leaf cgroup under a delegated, user-owned parent (the systemd
+  # app.slice layout) and fails unless the tests report cgroup mode.
+  governor-cgroup-linux:
+    name: governor-cgroup-linux
+    needs: pre-build-gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RUST_TOOLCHAIN: "1.97.1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-unknown-linux-gnu
+      # Read-only reuse of the pre-build-gates cache (same toolchain and
+      # lockfile); never saved from here.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: npm-binary-build-pre-gates
+          save-if: false
+      - uses: taiki-e/install-action@nextest
+      - name: governor cgroup check (scripts/ci/governor-cgroup-check.sh)
+        run: bash scripts/ci/governor-cgroup-check.sh
+
   build-linux-x64:
     needs: pre-build-gates
     uses: ./.github/workflows/_build-platform-binary.yml
