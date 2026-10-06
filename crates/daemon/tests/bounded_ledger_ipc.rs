@@ -74,6 +74,7 @@ fn sleeper_params() -> CommandStartParams {
         dedup_nonce: Some(format!("ledger-test-{n}")),
         receipt_shape: None,
         strip_ansi: true,
+        limits: None,
     }
 }
 

@@ -726,6 +726,23 @@ mod runtime {
                     }) {
                         return;
                     }
+                    // Resource governor: both probe backends finish the report
+                    // BEFORE sending the completion awaited above, so it is final
+                    // now. Await the probe cell rather than `try_lock` it: a
+                    // momentarily busy probe (`write_stdin` mid-write) must not
+                    // drop the enforcer's own report. The guard is released at
+                    // the end of this statement, never held across an await.
+                    // Published BEFORE `finish()` below so a status read that
+                    // sees the terminal state also sees the governor fields
+                    // (same rule as the combed receipt, status_stop_readback).
+                    let report = waiter_probe
+                        .lock()
+                        .await
+                        .as_ref()
+                        .map(PtyProbe::governor_report);
+                    if let Some(report) = report {
+                        *waiter_governor.lock() = GovernorOutcome::from_report(&report);
+                    }
                     // Capture the exit code before `outcome` is moved into the
                     // draft match below. A cancelled PTY job has no exit code.
                     let receipt_exit_code = match &outcome {
@@ -769,9 +786,6 @@ mod runtime {
                         let pm = guard
                             .as_ref()
                             .map_or_else(PtyProbeMetrics::default, PtyProbe::metrics);
-                        if let Some(report) = guard.as_ref().map(PtyProbe::governor_report) {
-                            *waiter_governor.lock() = GovernorOutcome::from_report(&report);
-                        }
                         let snap = waiter_metrics.lock().clone();
                         combine_pty_metrics(&pm, &snap)
                     } else {

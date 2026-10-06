@@ -76,6 +76,7 @@ impl Session {
                     bucket_config: None,
                     tag: None,
                     receipt_shape: None,
+                    limits: None,
                 }),
             )
             .await
@@ -126,6 +127,7 @@ impl Session {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -354,6 +356,7 @@ fn two_runnable_scopes_fall_back_to_argv() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await

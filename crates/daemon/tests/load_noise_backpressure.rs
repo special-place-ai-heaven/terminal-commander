@@ -225,6 +225,7 @@ fn megabyte_scale_noisy_stdout_emits_signal_without_raw_leak() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -368,6 +369,7 @@ fn bucket_wait_heartbeat_respects_timeout_without_busy_poll() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -468,6 +470,7 @@ fn bucket_events_since_limit_clamps_to_max() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -596,6 +599,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -619,6 +623,7 @@ fn concurrent_probes_buckets_do_not_cross_talk() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -774,6 +779,7 @@ fn runtime_state_stays_bounded_under_live_load() {
                         dedup_nonce: Some(format!("rt-load-{i}")),
                         receipt_shape: None,
                         strip_ansi: true,
+                        limits: None,
                     }),
                 )
                 .await
@@ -880,6 +886,7 @@ fn event_context_window_stays_bounded() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -1011,6 +1018,7 @@ fn bucket_dropped_count_visible_when_retention_evicts() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -1135,6 +1143,7 @@ for i in range(120):
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await

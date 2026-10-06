@@ -93,6 +93,7 @@ fn progress_only_stdout_suppresses_before_evaluate() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("start ok");
 
@@ -153,6 +154,7 @@ fn dedupe_collapses_repeated_matches_within_window() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("start ok");
 

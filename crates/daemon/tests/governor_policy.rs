@@ -418,8 +418,20 @@ fn governed_allocation_over_the_ceiling_is_stopped() {
                     .any(|row| row.action == "governor_memory_ceiling"),
                 "no governor_memory_ceiling audit row"
             );
+        } else if mode == json!("cgroup") {
+            // The cgroup is the whole tree's ceiling: the kernel OOM-kills
+            // the job and memory.events records it.
+            println!("unix governor mode: cgroup (ceiling asserted)");
+            assert_eq!(status["exit_reason"], json!("memory_ceiling"), "{status}");
+            if let Some(peak) = status["peak_memory_bytes"].as_u64() {
+                assert!(peak >= 100 * MIB, "{status}");
+            } else {
+                // memory.peak needs kernel 5.19+.
+                println!("memory.peak not available on this kernel");
+            }
         } else {
-            println!("linux governor mode: {mode}");
+            // rlimit: per-process RLIMIT_DATA; a hit is not observable.
+            println!("unix governor mode: {mode} (failure asserted, ceiling not observable)");
         }
 
         // The durable receipt keeps the governor fields, so a status
@@ -436,6 +448,50 @@ fn governed_allocation_over_the_ceiling_is_stopped() {
         };
         for k in GOVERNOR_STATUS_KEYS {
             assert_eq!(rebuilt.get(k), status.get(k), "{k}: {rebuilt}");
+        }
+    });
+}
+
+/// The PTY lane reads the governor report deterministically: a governed
+/// ConPTY job over its ceiling carries `governor` and `exit_reason` on every
+/// run, never a silently missing report.
+#[cfg(windows)]
+#[test]
+fn governed_conpty_over_the_ceiling_always_reports() {
+    rt().block_on(async {
+        let d = daemon(|_| {});
+        for run in 1..=5 {
+            let params = json!({
+                "argv": helper_argv(),
+                "env": [["TC_TEST_ALLOC_MIB", "300"]],
+                "limits": { "memory": "100MiB" },
+            });
+            let IpcResponse::PtyCommandStart(r) = d
+                .client
+                .call(run, request("pty_command_start", &params))
+                .await
+                .unwrap()
+            else {
+                panic!("unexpected pty start reply");
+            };
+            let r = serde_json::to_value(r).unwrap();
+            assert_eq!(r["limits_applied"]["memory_bytes"], json!(100 * MIB), "{r}");
+            let status = wait_terminal(&d, &r["job_id"]).await;
+            println!("run {run}: {status}");
+            assert_eq!(
+                status["governor"],
+                json!("job_object"),
+                "run {run}: {status}"
+            );
+            assert_eq!(
+                status["exit_reason"],
+                json!("memory_ceiling"),
+                "run {run}: {status}"
+            );
+            assert!(
+                status["peak_memory_bytes"].as_u64().unwrap() >= 100 * MIB,
+                "run {run}: {status}"
+            );
         }
     });
 }

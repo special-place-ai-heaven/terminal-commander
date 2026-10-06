@@ -243,6 +243,7 @@ fn no_rule_command_returns_exit_receipt() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("start ok");
 
@@ -293,6 +294,7 @@ fn command_output_tail_returns_bounded_lines_without_a_rule() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("start ok");
 
@@ -344,6 +346,7 @@ fn command_output_tail_clamps_to_200_lines() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("start ok");
 
@@ -407,6 +410,7 @@ fn rule_match_command_has_no_receipt() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("start ok");
 

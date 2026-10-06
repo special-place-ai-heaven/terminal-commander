@@ -510,6 +510,7 @@ fn recipe_tombstone_deactivate_and_dead_scope_are_not_runnable() {
                     version: None,
                     scope: Some(scope),
                     fills: std::collections::BTreeMap::new(),
+                    limits: None,
                 }),
             )
             .await
@@ -579,6 +580,7 @@ fn recipe_tombstone_deactivate_and_dead_scope_are_not_runnable() {
                     version: None,
                     scope: Some(job_scope),
                     fills: std::collections::BTreeMap::new(),
+                    limits: None,
                 }),
             )
             .await

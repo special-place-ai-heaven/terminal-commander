@@ -153,6 +153,7 @@ fn draft_inline_rule_is_skipped_not_fatal_to_command_start() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -275,6 +276,7 @@ fn tc_signal_cost_is_orders_of_magnitude_below_raw_shell_cost() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await

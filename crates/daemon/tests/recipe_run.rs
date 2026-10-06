@@ -161,6 +161,7 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
                     version: None,
                     scope: Some(scope),
                     fills: BTreeMap::new(),
+                    limits: None,
                 }),
             )
             .await
@@ -189,6 +190,7 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
                     version: None,
                     scope: Some(scope),
                     fills: BTreeMap::new(),
+                    limits: None,
                 }),
             )
             .await
@@ -231,6 +233,7 @@ fn recipe_run_denies_mcp_activate_and_stays_on_argv() {
                     version: None,
                     scope: Some(scope),
                     fills,
+                    limits: None,
                 }),
             )
             .await
@@ -410,6 +413,7 @@ fn recipe_lane_follows_allow_shell() {
                         version: None,
                         scope: Some(scope),
                         fills: BTreeMap::from([("bin".to_owned(), "bash".to_owned())]),
+                        limits: None,
                     }),
                 )
                 .await;
