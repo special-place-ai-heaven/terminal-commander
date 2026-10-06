@@ -95,6 +95,8 @@ pub struct ToolProbeSummary<'a> {
     pub version: Option<Cow<'a, str>>,
     pub version_status: &'a str,
     pub evidence: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_confirmed_age_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -184,6 +186,7 @@ fn tool_summary(probe: &ProgramProbe) -> ToolProbeSummary<'_> {
         version: probe.version.as_deref().map(short_version),
         version_status: &probe.version_status,
         evidence: &probe.evidence,
+        stale_confirmed_age_ms: probe.stale_confirmed_age_ms,
     }
 }
 

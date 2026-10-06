@@ -1880,7 +1880,7 @@ impl TerminalCommanderMcpServer {
     /// `registry_upsert` — create a new immutable version from a JSON
     /// rule definition.
     #[tool(
-        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword; kind=keyword also accepts a singular `pattern`, normalized into a one-keyword list). NOTE: `version` is ASSIGNED by the store (monotonic, latest+1); any value you send is ignored and overwritten, and the assigned version (returned in the response) is the one registry_activate/registry_deactivate operate on. `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords and rejects a rule that contradicts its own `examples` (each failing example is named by index with the reason); existing versions are never mutated."
+        description = "Create a new immutable (rule_id, version+1) row from a JSON RuleDefinition string passed as `definition_json`. REQUIRED fields: id, version, kind, severity, event_kind, summary_template (+ pattern when kind=regex, or keywords when kind=keyword; kind=keyword also accepts a singular `pattern`, normalized into a one-keyword list). NOTE: `version` is ASSIGNED by the store (monotonic, latest+1); any value you send is ignored and overwritten, and the assigned version (returned in the response) is the one registry_activate/registry_deactivate operate on. `event_kind` is the event label emitted on match (a short string, e.g. \"compile_error\"). `kind` is one of keyword|regex|prompt|exit_code|stream_marker|progress_collapse|dedupe|threshold|sequence|anchor|custom (only keyword and regex are live at MVP). `severity` is one of trace|debug|info|low|medium|high|critical. New rules default to status=Draft (test-only); set \"status\":\"active\" in the definition to make the rule eligible for registry_activate. Complete kind:regex example (this exact shape succeeds on the first try): definition_json = '{\"id\":\"rust-compile-error\",\"version\":1,\"kind\":\"regex\",\"status\":\"active\",\"severity\":\"high\",\"event_kind\":\"compile_error\",\"pattern\":\"error\\\\[E[0-9]+\\\\]\",\"summary_template\":\"${line}\"}'. Call registry_get to see the canonical full shape of any stored rule. Validates regex/keywords and rejects a rule that contradicts its own `examples` (each failing example is named by index with the reason); existing versions are never mutated. Each `examples` entry is {\"input\":\"<line>\",\"expect\":{\"match\":false}} (must not match) or {\"input\":\"<line>\",\"expect\":{\"kind\":\"<event_kind>\",\"captures\":{\"<name>\":\"<value>\"}}} (must match; kind and captures are optional)."
     )]
     async fn registry_upsert(
         &self,
@@ -5574,12 +5574,26 @@ const MAX_WAIT_SLICE_MS: u64 = 1_000;
 /// rather than busy-spinning. Matches the wait-slice cadence.
 const RUN_AND_WATCH_POLL_HINT_MS: u64 = 1_000;
 
-const RUN_AND_WATCH_WAIT_EXHAUSTED_HINT: &str = "Wait budget exhausted; command is still running. Continue signal collection with command.wait (full surface: bucket_wait) using bucket_id, cursor, and timeout_ms=poll_hint_ms; carry forward next_cursor. Check state/exit_code with command.status (full surface: command_status) using job_id. Do not re-run.";
+/// How to resume a `run_and_watch` that returned before the command ended;
+/// the one source for both hints below. Names full-surface tools only.
+macro_rules! run_and_watch_resume_hint {
+    () => {
+        "Continue signal collection with bucket_wait using bucket_id, cursor, and timeout_ms=poll_hint_ms; carry forward next_cursor. Check state/exit_code with command_status using job_id. Do not re-run."
+    };
+}
+
+const RUN_AND_WATCH_WAIT_EXHAUSTED_HINT: &str = concat!(
+    "Wait budget exhausted; command is still running. ",
+    run_and_watch_resume_hint!()
+);
 
 /// Recovery guidance attached to a degraded `run_and_watch` result (TC-1b).
 /// An IPC error interrupted the wait, but the job is still tracked by the
 /// daemon, so the agent should confirm liveness before polling -- not re-run.
-const RUN_AND_WATCH_RECOVER_HINT: &str = "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with status action=\"health\" (full surface: health). Then continue signal collection with command.wait (full surface: bucket_wait) using bucket_id, cursor, and timeout_ms=poll_hint_ms; carry forward next_cursor. Check state/exit_code with command.status (full surface: command_status) using job_id. Do not re-run.";
+const RUN_AND_WATCH_RECOVER_HINT: &str = concat!(
+    "IPC error interrupted the wait, but the job is still tracked. First confirm daemon liveness with health. Then: ",
+    run_and_watch_resume_hint!()
+);
 
 /// [`RUN_AND_WATCH_RECOVER_HINT`] with the underlying error appended. A
 /// daemon-returned code and a transport drop need different recovery, and a
@@ -8919,6 +8933,17 @@ mod tests {
             tool_desc.contains("event_kind"),
             "registry_upsert tool description must list event_kind in its REQUIRED set; got: {tool_desc}"
         );
+        for example in [
+            r#"{"input":"<line>","expect":{"match":false}}"#,
+            r#"{"input":"<line>","expect":{"kind":"<event_kind>","captures":{"<name>":"<value>"}}}"#,
+        ] {
+            assert!(
+                tool_desc.contains(example),
+                "registry_upsert must document the examples shape {example}; got: {tool_desc}"
+            );
+            serde_json::from_str::<terminal_commander_core::RuleExample>(example)
+                .unwrap_or_else(|e| panic!("documented example shape {example} must parse: {e}"));
+        }
 
         // 2. schemars-derived definition_json param doc (the schema surface).
         let schema = schemars::schema_for!(McpRegistryUpsertParams);
@@ -9156,10 +9181,21 @@ mod tests {
         assert_eq!(v["wait_exhausted"], serde_json::json!(true));
         assert_eq!(
             v["recover_hint"],
-            serde_json::json!(
-                "Wait budget exhausted; command is still running. Continue signal collection with command.wait (full surface: bucket_wait) using bucket_id, cursor, and timeout_ms=poll_hint_ms; carry forward next_cursor. Check state/exit_code with command.status (full surface: command_status) using job_id. Do not re-run."
-            )
+            serde_json::json!(RUN_AND_WATCH_WAIT_EXHAUSTED_HINT)
         );
+        for hint in [
+            RUN_AND_WATCH_WAIT_EXHAUSTED_HINT,
+            RUN_AND_WATCH_RECOVER_HINT,
+        ] {
+            assert!(
+                hint.contains("bucket_wait") && hint.contains("command_status"),
+                "{hint}"
+            );
+            assert!(
+                !hint.contains("command.") && !hint.contains("full surface"),
+                "names full-surface tools only: {hint}"
+            );
+        }
         assert!(
             v["job_id"]
                 .as_str()
