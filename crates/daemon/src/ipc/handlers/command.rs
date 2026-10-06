@@ -56,6 +56,7 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
         // nonce-less fingerprint window only collapses a SAME-peer retry,
         // never a sibling client guessing another peer's command.
         peer_discriminator: Some(peer_discriminator(peer)),
+        limits: params.limits.clone(),
     };
     let resp = state.command.start_combed(req).map_err(|e| {
         let err = enrich_shell_teach(&state.policy, "command_start_combed", map_command_error(e));
@@ -105,6 +106,7 @@ pub(in crate::ipc::server) fn handle_shell_exec(
         bucket_config: params.bucket_config.clone(),
         tag: params.tag.clone(),
         receipt_shape: params.receipt_shape,
+        limits: params.limits.clone(),
     };
     let resp = state.shell.exec(req).map_err(|e| {
         let err = enrich_shell_teach(&state.policy, "shell_exec", map_command_error(e));

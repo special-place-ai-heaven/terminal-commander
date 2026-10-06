@@ -82,6 +82,7 @@ fn small_start_params(argv: &[&str]) -> terminal_commanderd::CommandStartParams 
         dedup_nonce: None,
         receipt_shape: None,
         strip_ansi: true,
+        limits: None,
     }
 }
 

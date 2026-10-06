@@ -90,6 +90,7 @@ fn sleeper(
         dedup_nonce: Some(format!("scoped-sleeper-{correlation}")),
         receipt_shape: None,
         strip_ansi: true,
+        limits: None,
     });
     async move { client.call(correlation, req).await.expect("start") }
 }

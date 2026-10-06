@@ -646,6 +646,132 @@ writes; leaving `write_allow` empty there is an open write surface.
   verbatim prefixes, alternate-data-stream suffixes, and trailing
   dot/space aliases are normalized before matching.
 
+### 4.3 `[governor]` (resource governor)
+
+A job started through Terminal Commander (argv, shell, recipe or PTY lane)
+runs under a per-job memory ceiling and a CPU priority, enforced by the
+kernel. The thing that enforces is the thing that reports: a start never
+silently drops a limit, it reports the mechanism or says why there is none.
+
+```toml
+[governor]
+enabled = true                      # false: no limits, responses as before
+default_job_memory = "60%"          # "<n>%", "24GiB", "512MiB", bytes, or "none"
+default_priority = "below_normal"   # idle | below_normal | normal
+llm_can_raise_limits = true         # omitted: profile default (below)
+host_ceiling = "97%"                # daemon-wide ceiling all jobs share; same syntax
+```
+
+- **Percent** resolves against the commit limit on Windows and against total
+  memory (`MemTotal`) on Linux. The Windows commit limit includes the page
+  file, so 60% of it can exceed physical RAM. If host memory cannot be read,
+  the percent default resolves to no limit and `policy_status.governor.note`
+  says so.
+- **`host_ceiling`** is installed once at daemon start and every governed job
+  (every lane, shell sessions included) joins it, so jobs together can never
+  exceed it: a parent Job Object on Windows, a parent `tc-jobs` cgroup on
+  Linux. `default_job_memory` is clamped to it, and a request above it is
+  clamped to it and listed in `limits_clamped`. Where the host has no
+  aggregate primitive (rlimit) `host_ceiling_mode` is `{"unavailable": reason}`;
+  nothing is faked. `"none"` installs no ceiling. The ceiling is per daemon:
+  N session daemons on one host can together commit N times it.
+- **`llm_can_raise_limits`** defaults to true only under `full_access` and
+  `admin_debug` (an allow-list: every other profile defaults to false). When
+  false, a request that asks for more than the
+  default (a larger memory ceiling, a higher priority) is clamped to the
+  default and the start response lists the clamped axes in `limits_clamped`.
+  A request at or below the default is always honoured.
+- **Under rlimit** the profile default memory is not applied (`RLIMIT_DATA`
+  breaks sanitizers and large reservations and cannot be raised back); an
+  explicit `limits.memory` is applied, the default priority still is, and
+  `policy_status.governor.note` says so.
+- **Requests** carry an optional `limits` object on `command_start_combed`,
+  `run_and_watch`, `shell_exec`, `recipe_run` and `pty_command_start`:
+  `{"memory": "24GiB" | "40%" | "none", "priority": "idle" | "below_normal" | "normal"}`.
+  An omitted axis takes the default. A start response reports what the job
+  runs with as `limits_applied` (`memory_bytes`, `priority`) and the enforcing
+  mechanism as `governor`, read from the probe right after spawn; a start
+  collapsed onto an in-flight duplicate reports the same values (the limits
+  are part of the duplicate fingerprint). With `enabled = false` neither
+  `limits_applied` nor any governor field appears, and no kernel mechanism is
+  probed.
+- **`policy_status.governor`** reports `enabled`, `mode_available` (what this
+  host can enforce, detected at daemon start), `default_job_memory_bytes`,
+  `default_priority`, `llm_can_raise_limits`, `host_ceiling_bytes`,
+  `host_ceiling_mode` and an optional `note`.
+- **Status and run_and_watch results** of a governed job report `governor`
+  (the mechanism: `job_object`, `cgroup`, `rlimit`, or `{"unavailable": reason}`
+  when no enforcement was possible and the job ran ungoverned) and
+  `limits_applied`, while running and after exit; after exit also
+  `peak_memory_bytes` when the mechanism can measure it, and
+  `exit_reason`: `"memory_ceiling"` when the job's own ceiling stopped it, or
+  `"host_ceiling"` when the daemon-wide host ceiling did while the job's own
+  limit was not reached. How each is decided differs by platform, see the
+  mechanisms below. A stop
+  (`command_stop`, `pty_command_stop`) never carries `exit_reason`. A job that
+  ran ungoverned reports `governor: {"unavailable": reason}` and is audited.
+  A governed job that failed to join an installed host ceiling reports
+  `host_ceiling_joined: false`; the field is omitted otherwise.
+- **Audit:** a clamped start writes `governor_clamp` with the requested and
+  applied values; a job that runs ungoverned writes `governor_unavailable`
+  with the reason, and so does a job that failed to join the host ceiling
+  (reason `host_ceiling_join_failed`); a memory_ceiling exit writes `governor_memory_ceiling` and a
+  host_ceiling exit writes `governor_host_ceiling`, each with limit and peak.
+
+Mechanisms and their limits:
+
+- **Windows (`job_object`):** a Job Object memory limit on the whole process
+  tree. The OS makes commits above the limit fail; it does not kill the job.
+  `exit_reason` is decided by the kernel's `JOB_OBJECT_MSG_JOB_MEMORY_LIMIT`
+  messages, delivered per job through one I/O completion port, together with
+  an abnormal exit. They are facts attributed to the exact job: a single
+  oversized allocation refused outright counts, and repeated host-ceiling
+  rounds are all seen. The host ceiling is a parent Job Object the per-job
+  Job Objects nest under; its messages decide `host_ceiling`, and under a
+  shared ceiling the job whose commit was refused is the one that fails.
+  `peak_memory_bytes` is `PeakJobMemoryUsed`, reported only, and it counts a
+  refused commit: one 1 GiB allocation refused under a 100 MiB limit reports
+  a peak of about 1.1 GB with `exit_reason: "memory_ceiling"`, so the peak
+  can exceed the limit. For a stopped job the cancelled status is published
+  at once and `peak_memory_bytes` is filled when the tree has been reaped,
+  typically within about two seconds.
+- **Linux `cgroup`:** the daemon creates a per-job cgroup v2 with `memory.max`
+  (swap off) under the `tc-jobs` parent that carries the host ceiling, a
+  sibling of its own cgroup, and moves the job into it, so the ceiling covers
+  the whole tree,
+  and the kernel's OOM kill is what stops it. `memory_ceiling` is a fact:
+  the job cgroup's `memory.events.local` `oom` count is above zero and the
+  exit was not success. `host_ceiling` stays an inference: the host cgroup's
+  local `oom` count rose during this job and the job failed, so a concurrent
+  job at the ceiling can be the real cause. Under a shared host ceiling the
+  kernel's OOM killer picks the victim inside the parent cgroup, usually the
+  largest job, so the job that was holding memory can be the one reported
+  `host_ceiling` while a newcomer finishes. This needs the daemon inside a
+  writable delegated cgroup, which the systemd user unit installed by
+  autostart provides. The cgroup-or-rlimit choice is made once at daemon
+  boot; a later per-job cgroup failure is reported `unavailable`, never a
+  silent switch to rlimit. A daemon started from a plain `wsl.exe` shell sits in
+  `/non-systemd` and gets `rlimit` instead. Peak comes from `memory.peak`
+  (kernel 5.19 or later) and stays at or below the limit; a stopped job has
+  it at once. Nothing needs installing per distro for memory
+  governance.
+- **Linux `rlimit`:** when no writable cgroup is available (a shell-profile
+  autostart, WSL without systemd), the job gets `RLIMIT_DATA`. It is per
+  process, not summed across the tree, and there is no peak.
+- **macOS and other unix:** no memory primitive, so memory reports
+  `unavailable(reason)`; priority is still applied (nice).
+- **Windows PTY lane:** a governed ConPTY child runs in a
+  `KILL_ON_JOB_CLOSE` Job Object that is released when the child exits. A
+  child started with `CREATE_BREAKAWAY_FROM_JOB` fails inside it.
+- **CPU limits** are not in this version; `priority` only sets scheduling
+  priority (Windows priority class, Linux nice; `normal` inherits). CPU caps
+  on Linux would need a root systemd `Delegate` drop-in.
+- **A guardrail, not a security boundary.** A job running as the same user
+  can lift its own cgroup ceiling or start work outside the Job Object (WMI,
+  `schtasks`, `wsl.exe`); the clamp governs the request, not a hostile job.
+  Work handed to `wsl.exe` or docker from Windows runs outside the Job
+  Object.
+
 ## 5. Default-deny override mechanism
 
 None. Default-denied paths (see `SECURITY.md` section 5) cannot be

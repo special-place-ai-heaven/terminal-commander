@@ -122,6 +122,7 @@ fn combed_status_still_answers_for_its_own_lane() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("combed start ok");
 

@@ -25,6 +25,7 @@
 
 pub mod ansi;
 pub mod file;
+pub mod governor;
 pub mod noise_pipeline;
 pub mod process;
 pub mod pty;

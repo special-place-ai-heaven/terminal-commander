@@ -52,6 +52,21 @@ result is ever silent or misleading.
 
 ## Recent improvements
 
+<!-- release-status -->Landed 2026-10-06, not yet in a tagged release.
+
+- **Per-job and host memory ceilings:** every command, shell, recipe and PTY
+  start runs under a kernel-enforced memory ceiling (default 60% of the commit
+  limit or total memory) and lower CPU priority, and all jobs together stay
+  under a daemon-wide host ceiling (default 97%). The host ceiling is per
+  daemon, so N session daemons can together commit N times it. Both are enforced on Windows
+  and on Linux under systemd; elsewhere the fallback is honest (`RLIMIT_DATA`
+  or `unavailable`). Pass `limits` (for example `{"memory": "50%"}`) to size a
+  build; the start reports `governor`, `limits_applied` and `limits_clamped`,
+  and a job stopped by a ceiling reports `exit_reason: "memory_ceiling"` or
+  `"host_ceiling"` with `peak_memory_bytes` (kernel facts on Windows and for
+  `memory_ceiling` on Linux; `host_ceiling` on Linux is an inference). It is a guardrail, not
+  a security boundary. See `POLICY.md` section 4.3.
+
 <!-- release-status -->Landed 2026-10-06, released in v0.3.12.
 
 - **Linux/WSL shells survive the daemon autostart hook:** the hook sourced its

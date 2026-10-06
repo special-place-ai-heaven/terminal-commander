@@ -190,6 +190,7 @@ fn credential_provide_reads_stdin_and_the_job_receives_it() {
             rows: None,
             cols: None,
             tag: None,
+            limits: None,
         }),
     )) {
         IpcResponse::PtyCommandStart(s) => s.job_id,

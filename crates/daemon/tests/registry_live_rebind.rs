@@ -177,6 +177,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
                     dedup_nonce: Some("rebind-job-1".to_owned()),
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -200,6 +201,7 @@ fn rebind_all_jobs_after_activate_emits_audit_row_for_each_running_job() {
                     dedup_nonce: Some("rebind-job-2".to_owned()),
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await

@@ -67,6 +67,7 @@ fn windows_argv_lane_denies_shell_before_spawn() {
                     receipt_shape: None,
                     strip_ansi: true,
                     peer_discriminator: None,
+                    limits: None,
                 })
                 .unwrap_err();
             match err {
@@ -119,6 +120,7 @@ fn windows_argv_lane_runs_shell_under_allow_shell_true() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("allow_shell=true must run the interpreter");
 

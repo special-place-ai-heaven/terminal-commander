@@ -41,6 +41,7 @@ mod runtime {
     use crate::activation::ActivationRegistry;
     use crate::audit::AuditSink;
     use crate::command::{WslArgvClass, classify_wsl_nested_shell, wsl_carrier_label};
+    use crate::governor::GovernorOutcome;
     use crate::policy::{PolicyAction, PolicyDecision, PolicyEngine, PolicyProfile};
     use crate::router::Router;
 
@@ -103,6 +104,9 @@ mod runtime {
         inline_rules: Vec<RuleDefinition>,
         probe: Arc<tokio::sync::Mutex<Option<PtyProbe>>>,
         metrics_snapshot: Arc<parking_lot::Mutex<PtyProbeMetrics>>,
+        /// Resource-governor outcome, written by the lifecycle waiter at
+        /// exit. All `None` for an ungoverned job.
+        governor: Arc<parking_lot::Mutex<GovernorOutcome>>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +130,12 @@ mod runtime {
         pub probe_id: ProbeId,
         /// See [`crate::command::filter_wslenv_for_spawn`].
         pub wslenv_dropped: Vec<String>,
+        /// As [`terminal_commander_ipc::CommandStartResponse::limits_applied`].
+        pub limits_applied: Option<terminal_commander_ipc::LimitsApplied>,
+        /// As [`terminal_commander_ipc::CommandStartResponse::limits_clamped`].
+        pub limits_clamped: Vec<String>,
+        /// As [`terminal_commander_ipc::CommandStartResponse::governor`].
+        pub governor: Option<terminal_commander_ipc::GovernorModeWire>,
     }
 
     /// What `credential_request` needs to know about a PTY job's prompt.
@@ -206,6 +216,9 @@ mod runtime {
         pub cols: Option<u16>,
         /// Optional per-bucket tag for subscription routing (Phase 3).
         pub tag: Option<String>,
+        /// Requested resource limits; omitted axes take the `[governor]`
+        /// default.
+        pub limits: Option<terminal_commander_ipc::JobLimitsSpec>,
     }
 
     pub struct PtyRuntime {
@@ -585,6 +598,10 @@ mod runtime {
             shell_tag: Option<(&'static str, String)>,
             audit_action: &'static str,
         ) -> Result<PtyStartResponse, PtyRuntimeError> {
+            let resolved_limits = self
+                .policy
+                .resolve_limits(req.limits.as_ref())
+                .map_err(|e| PtyRuntimeError::ArgvInvalid(format!("invalid limits: {e}")))?;
             let bucket_id = BucketId::new();
             let probe_id = ProbeId::new();
             let job_id = JobId::new();
@@ -628,6 +645,7 @@ mod runtime {
             let wslenv_dropped = crate::command::filter_wslenv_for_spawn(&mut cfg.env);
             cfg.rows = req.rows;
             cfg.cols = req.cols;
+            cfg.limits = resolved_limits.limits;
 
             let mut probe = PtyProbe::spawn(
                 spawn_argv,
@@ -656,7 +674,13 @@ mod runtime {
             // snapshot alone would record events_emitted with zeroed frames and
             // bytes -- an evidence-stripped receipt, which is precisely the
             // defect this work removes.
+            // Resource governor: mode and limit are known once the spawn
+            // returns, so a stop can report them without the probe. The
+            // waiter replaces this with the final report (peak included).
+            let spawn_governor =
+                GovernorOutcome::at_spawn(&probe.governor_report(), resolved_limits.applied);
             let probe_cell = Arc::new(tokio::sync::Mutex::new(Some(probe)));
+            let governor = Arc::new(parking_lot::Mutex::new(spawn_governor.clone()));
 
             let job_cfg = JobConfig {
                 job_id,
@@ -681,10 +705,12 @@ mod runtime {
                 let waiter_router = Arc::clone(&self.router);
                 let waiter_audit = Arc::clone(&self.audit);
                 let waiter_profile = self.profile_label.clone();
+                let waiter_profile_ceiling = self.profile_label.clone();
                 let argv0 = req.argv[0].clone();
                 let waiter_store = self.store.clone();
                 let waiter_probe = Arc::clone(&probe_cell);
                 let waiter_metrics = Arc::clone(&metrics);
+                let waiter_governor = Arc::clone(&governor);
                 tokio::spawn(async move {
                     // A dropped sender (probe dropped before it could send)
                     // is treated as a cancellation: the job did not exit
@@ -692,6 +718,19 @@ mod runtime {
                     let outcome = completion_rx
                         .await
                         .unwrap_or(terminal_commander_probes::PtyExitOutcome::Cancelled);
+                    // Resource governor: both probe backends finish the report
+                    // BEFORE sending the completion awaited above, so it is final
+                    // now. Await the probe cell rather than `try_lock` it: a
+                    // momentarily busy probe (`write_stdin` mid-write) must not
+                    // drop the enforcer's own report. The guard is released at
+                    // the end of this statement, never held across an await.
+                    let (report, probe_metrics) = {
+                        let guard = waiter_probe.lock().await;
+                        (
+                            guard.as_ref().map(PtyProbe::governor_report),
+                            guard.as_ref().map(PtyProbe::metrics),
+                        )
+                    };
                     // `stop()` finalizes the ledger synchronously (so
                     // `pty_command_list` is immediately consistent) and removes
                     // the binding. If it already ran, the job is terminal: skip
@@ -705,7 +744,52 @@ mod runtime {
                                 | terminal_commander_core::JobState::Cancelled
                         )
                     }) {
+                        // `stop()` persisted the receipt with the spawn-time mode
+                        // and limit; the peak exists only now that the probe has
+                        // ended, so re-persist the same cancelled receipt with
+                        // it. Under the governor lock, which `stop()` also holds
+                        // while persisting: whichever write lands last carries
+                        // the final report. A stop never reports an exit_reason.
+                        if let Some(report) = report {
+                            let mut g = waiter_governor.lock();
+                            g.finish(&report);
+                            g.exit_reason = None;
+                            if g.governor.is_some() {
+                                let pm = probe_metrics.unwrap_or_default();
+                                let final_metrics =
+                                    combine_pty_metrics(&pm, &waiter_metrics.lock().clone());
+                                let duration_ms = waiter_jobs
+                                    .get(job_id)
+                                    .and_then(|r| r.exit_info.as_ref().map(|e| e.duration_ms));
+                                let evidence =
+                                    pty_evidence_json(&final_metrics, duration_ms, probe_id, &g);
+                                crate::command::persist_job_receipt(
+                                    &waiter_store,
+                                    job_id,
+                                    bucket_id,
+                                    terminal_commander_core::JobState::Cancelled,
+                                    None,
+                                    final_metrics.events_emitted,
+                                    Some(&evidence),
+                                    None,
+                                );
+                            }
+                        }
                         return;
+                    }
+                    // Published BEFORE `finish()` below so a status read that
+                    // sees the terminal state also sees the governor fields
+                    // (same rule as the combed receipt, status_stop_readback).
+                    if let Some(report) = report {
+                        let mut g = waiter_governor.lock();
+                        g.finish(&report);
+                        // A probe-side cancel is not the ceiling.
+                        if matches!(
+                            outcome,
+                            terminal_commander_probes::PtyExitOutcome::Cancelled
+                        ) {
+                            g.exit_reason = None;
+                        }
                     }
                     // Capture the exit code before `outcome` is moved into the
                     // draft match below. A cancelled PTY job has no exit code.
@@ -755,6 +839,7 @@ mod runtime {
                     } else {
                         waiter_metrics.lock().clone()
                     };
+                    let governor = waiter_governor.lock().clone();
                     let rec = waiter_jobs.get(job_id);
                     let terminal_state = rec
                         .as_ref()
@@ -762,7 +847,8 @@ mod runtime {
                     let duration_ms = rec
                         .as_ref()
                         .and_then(|r| r.exit_info.as_ref().map(|e| e.duration_ms));
-                    let evidence = pty_evidence_json(&final_metrics, duration_ms, probe_id);
+                    let evidence =
+                        pty_evidence_json(&final_metrics, duration_ms, probe_id, &governor);
                     crate::command::persist_job_receipt(
                         &waiter_store,
                         job_id,
@@ -784,6 +870,13 @@ mod runtime {
                         entry = entry.with_reason(r);
                     }
                     let _ = waiter_audit.emit(&entry);
+                    if let Some(ceiling) = governor.ceiling_audit(&job_id.to_wire_string()) {
+                        let _ = waiter_audit.emit(
+                            &ceiling
+                                .with_actor("pty_runtime")
+                                .with_profile(waiter_profile_ceiling),
+                        );
+                    }
                 });
             }
 
@@ -799,8 +892,22 @@ mod runtime {
                     inline_rules: req.rules,
                     probe: probe_cell,
                     metrics_snapshot: metrics,
+                    governor,
                 },
             );
+            let subject = job_id.to_wire_string();
+            if let Some((reason, meta)) = resolved_limits.clamp_audit(req.limits.as_ref()) {
+                self.audit(
+                    "governor_clamp",
+                    &subject,
+                    "allow",
+                    Some(reason),
+                    Some(meta),
+                );
+            }
+            if let Some(reason) = spawn_governor.unavailable_reason() {
+                self.audit("governor_unavailable", &subject, "info", Some(reason), None);
+            }
 
             let mut metadata = serde_json::json!({
                 "argv0": req.argv[0],
@@ -835,6 +942,9 @@ mod runtime {
                 bucket_id,
                 probe_id,
                 wslenv_dropped: crate::command::wslenv_dropped_to_report(&req.argv, wslenv_dropped),
+                limits_applied: resolved_limits.applied,
+                limits_clamped: resolved_limits.clamped,
+                governor: spawn_governor.governor,
             })
         }
 
@@ -1048,7 +1158,12 @@ mod runtime {
                 .jobs
                 .get(job_id)
                 .and_then(|r| r.exit_info.as_ref().map(|e| e.duration_ms));
-            let evidence = pty_evidence_json(&metrics, duration_ms, b.probe_id);
+            // Held across the persist so this write and the waiter's
+            // final-report re-persist cannot interleave (see the waiter).
+            let governor_guard = b.governor.lock();
+            let mut governor = governor_guard.clone();
+            governor.exit_reason = None;
+            let evidence = pty_evidence_json(&metrics, duration_ms, b.probe_id, &governor);
             crate::command::persist_job_receipt(
                 &self.store,
                 job_id,
@@ -1060,6 +1175,7 @@ mod runtime {
                 Some(&evidence),
                 None,
             );
+            drop(governor_guard);
 
             self.audit(
                 "pty_command_stop",
@@ -1131,7 +1247,7 @@ mod runtime {
         ) -> Option<terminal_commander_ipc::protocol::CommandStatusResponse> {
             use terminal_commander_ipc::protocol::OutcomeTrust;
 
-            let (bucket_id, probe_id, metrics, awaiting_credential) = {
+            let (bucket_id, probe_id, metrics, awaiting_credential, mut governor) = {
                 let g = self.live.read();
                 let b = g.get(&job_id)?;
                 // Same read shape as `list()`: prefer the probe's live counters,
@@ -1149,10 +1265,22 @@ mod runtime {
                 } else {
                     (b.metrics_snapshot.lock().clone(), None)
                 };
-                (b.bucket_id, b.probe_id, metrics, awaiting)
+                (
+                    b.bucket_id,
+                    b.probe_id,
+                    metrics,
+                    awaiting,
+                    b.governor.lock().clone(),
+                )
             };
             let rec = self.jobs.get(job_id)?;
             let elapsed_ms = crate::command::running_elapsed_ms(&rec);
+            // Running: the mode and limits show, the peak and exit reason
+            // exist only after exit.
+            if elapsed_ms.is_some() {
+                governor.peak_memory_bytes = None;
+                governor.exit_reason = None;
+            }
             Some(terminal_commander_ipc::protocol::CommandStatusResponse {
                 job_id,
                 bucket_id,
@@ -1183,6 +1311,11 @@ mod runtime {
                 last_output_age_ms: elapsed_ms
                     .and(metrics.last_frame_at)
                     .map(crate::command::output_age_ms),
+                governor: governor.governor,
+                limits_applied: governor.limits_applied,
+                peak_memory_bytes: governor.peak_memory_bytes,
+                exit_reason: governor.exit_reason,
+                host_ceiling_joined: governor.host_ceiling_joined,
             })
         }
 
@@ -1419,13 +1552,14 @@ mod runtime {
         metrics: &PtyProbeMetrics,
         duration_ms: Option<u64>,
         probe_id: ProbeId,
+        governor: &GovernorOutcome,
     ) -> String {
         let duration = duration_ms.map_or_else(|| "null".to_owned(), |d| d.to_string());
         format!(
             "{{\"frames_total\":{},\"frames_stdout\":{},\"frames_stderr\":0,\
              \"bytes_total\":{},\"frames_suppressed\":{},\
              \"frames_suppressed_progress\":{},\"frames_suppressed_dedupe\":{},\
-             \"duration_ms\":{},\"probe_id\":\"{}\"}}",
+             \"duration_ms\":{},\"probe_id\":\"{}\"{}}}",
             metrics.frames_total,
             metrics.frames_total,
             metrics.bytes_total,
@@ -1434,6 +1568,7 @@ mod runtime {
             metrics.frames_suppressed_dedupe,
             duration,
             probe_id.to_wire_string(),
+            governor.evidence_fields(),
         )
     }
 

@@ -565,6 +565,9 @@ pub struct PolicyEngine {
     /// `developer_local` default. Selects the shell deny text. Set by
     /// [`Self::with_shell_withheld_by_allow_roots`].
     shell_withheld_by_allow_roots: bool,
+    /// Resolved `[governor]`. `None` (an engine built without a config) is
+    /// a disabled governor. Set by [`Self::with_governor`].
+    governor: Option<crate::governor::Governor>,
 }
 
 impl PolicyEngine {
@@ -610,6 +613,7 @@ impl PolicyEngine {
             probe_deny_kinds: Vec::new(),
             llm_can_activate_recipes: None,
             shell_withheld_by_allow_roots: false,
+            governor: None,
         }
     }
 
@@ -634,6 +638,7 @@ impl PolicyEngine {
             probe_deny_kinds: Vec::new(),
             llm_can_activate_recipes: None,
             shell_withheld_by_allow_roots: false,
+            governor: None,
         }
     }
 
@@ -670,6 +675,7 @@ impl PolicyEngine {
             probe_deny_kinds: Vec::new(),
             llm_can_activate_recipes: None,
             shell_withheld_by_allow_roots: false,
+            governor: None,
         }
     }
 
@@ -753,6 +759,35 @@ impl PolicyEngine {
     pub const fn with_shell_withheld_by_allow_roots(mut self, withheld: bool) -> Self {
         self.shell_withheld_by_allow_roots = withheld;
         self
+    }
+
+    /// Record the resolved `[governor]` policy.
+    #[must_use]
+    pub fn with_governor(mut self, governor: crate::governor::Governor) -> Self {
+        self.governor = Some(governor);
+        self
+    }
+
+    /// Effective resource limits for one start (see
+    /// [`crate::governor::Governor::resolve`]). Disabled when no governor was
+    /// configured.
+    pub fn resolve_limits(
+        &self,
+        request: Option<&terminal_commander_ipc::JobLimitsSpec>,
+    ) -> Result<crate::governor::ResolvedLimits, String> {
+        self.governor.as_ref().map_or_else(
+            || Ok(crate::governor::ResolvedLimits::default()),
+            |g| g.resolve(request),
+        )
+    }
+
+    /// The `policy_status` governor block; `None` when no governor was
+    /// configured.
+    #[must_use]
+    pub fn governor_status(&self) -> Option<terminal_commander_ipc::GovernorStatus> {
+        self.governor
+            .as_ref()
+            .map(crate::governor::Governor::status)
     }
 
     /// Whether `allow_roots` withheld the profile's shell default.

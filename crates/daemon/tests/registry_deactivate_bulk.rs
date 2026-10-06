@@ -327,6 +327,7 @@ fn deactivate_bulk_rebinds_live_jobs_once() {
                     dedup_nonce: Some("bulk-rebind-once".to_owned()),
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await

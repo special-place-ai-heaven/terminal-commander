@@ -146,6 +146,7 @@ print("pty bye", flush=True)
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await
@@ -223,6 +224,7 @@ fn pty_os_guard_refuses_protected_payload_and_allows_control() {
                 rows: None,
                 cols: None,
                 tag: None,
+                limits: None,
             })
         };
 
@@ -279,6 +281,7 @@ fn pty_command_rejects_shell_interpreter() {
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await
@@ -320,6 +323,7 @@ fn pty_wsl_nested_shell_denied_like_argv_lane() {
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await
@@ -375,6 +379,7 @@ fn sh_start_params() -> IpcRequest {
         rows: None,
         cols: None,
         tag: None,
+        limits: None,
     })
 }
 
@@ -422,6 +427,7 @@ fn pty_env_split_string_quoted_assignment_is_denied() {
                         rows: None,
                         cols: None,
                         tag: None,
+                        limits: None,
                     }),
                 )
                 .await
@@ -506,6 +512,7 @@ fn pty_wsl_nested_shell_starts_and_audit_tagged_under_allow_shell_true() {
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await
@@ -560,6 +567,7 @@ fn pty_command_rejects_empty_argv() {
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await
@@ -600,6 +608,7 @@ fn pty_write_stdin_oversized_is_rejected() {
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await
@@ -702,6 +711,7 @@ time.sleep(2)
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await
@@ -820,6 +830,7 @@ fn pty_command_list_reflects_live_then_stopped_state() {
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await
@@ -925,6 +936,7 @@ fn pty_stdin_wait_ms_returns_combed_signals_with_cursor() {
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await
@@ -1008,6 +1020,7 @@ fn pty_stdin_without_wait_is_byte_identical_to_today() {
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await
@@ -1111,6 +1124,7 @@ time.sleep(2)
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await

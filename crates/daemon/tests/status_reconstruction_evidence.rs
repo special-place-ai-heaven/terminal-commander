@@ -72,6 +72,7 @@ fn reconstructed_status_carries_the_same_evidence_as_the_live_status() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .expect("start ok");
 

@@ -121,6 +121,7 @@ fn noisy_start_params() -> CommandStartParams {
         dedup_nonce: None,
         receipt_shape: None,
         strip_ansi: true,
+        limits: None,
     }
 }
 

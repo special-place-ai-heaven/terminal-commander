@@ -122,6 +122,7 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -165,6 +166,7 @@ fn runtime_state_aggregates_command_pty_and_filewatch() {
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await
@@ -295,6 +297,7 @@ fn exited_command_is_excluded_from_live_runtime_views() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -396,6 +399,7 @@ fn runtime_state_command_probe_carries_tag_and_redacted_argv_head() {
                     dedup_nonce: None,
                     receipt_shape: None,
                     strip_ansi: true,
+                    limits: None,
                 }),
             )
             .await
@@ -503,6 +507,7 @@ fn exited_pty_is_excluded_from_live_runtime_views() {
                     rows: None,
                     cols: None,
                     tag: None,
+                    limits: None,
                 }),
             )
             .await

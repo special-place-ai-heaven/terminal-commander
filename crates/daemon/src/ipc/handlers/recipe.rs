@@ -813,6 +813,7 @@ pub(in crate::ipc::server) fn handle_recipe_run(
         dedup_nonce: None,
         receipt_shape: None,
         strip_ansi: true,
+        limits: params.limits.clone(),
     };
     let started = match super::command::handle_command_start_combed(state, &start, peer)? {
         IpcResponse::CommandStartCombed(body) => body,
@@ -835,6 +836,9 @@ pub(in crate::ipc::server) fn handle_recipe_run(
         probe_id: started.probe_id,
         cursor: started.cursor,
         wslenv_dropped: started.wslenv_dropped,
+        limits_applied: started.limits_applied,
+        limits_clamped: started.limits_clamped,
+        governor: started.governor,
     }))
 }
 
@@ -944,6 +948,7 @@ mod tests {
             version: Some(3),
             scope: Some(ActivationScope::Global),
             fills: std::collections::BTreeMap::new(),
+            limits: None,
         });
         let result = IpcResult::Err {
             error: IpcError::new(IpcErrorCode::RecipeNotActive, "not active"),

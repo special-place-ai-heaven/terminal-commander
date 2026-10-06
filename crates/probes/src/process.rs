@@ -20,6 +20,7 @@ use terminal_commander_core::{
 };
 use terminal_commander_sifters::SifterRuntime;
 
+use crate::governor::{GovernorReport, JobLimits, SharedReport};
 use crate::noise_pipeline::{ProbeNoisePipeline, SharedProbeNoisePipeline};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -52,6 +53,9 @@ pub struct ProcessProbeConfig {
     /// Defaults to `true` so anchored rules and summaries are not
     /// silently defeated by color codes.
     pub strip_ansi: bool,
+    /// Resource governor limits. `JobLimits::default()` = ungoverned, no
+    /// extra syscall (today's behaviour).
+    pub limits: JobLimits,
 }
 
 impl ProcessProbeConfig {
@@ -67,6 +71,11 @@ impl ProcessProbeConfig {
             // TC-B1: strip ANSI by default; raw bytes still land in the
             // frame store. A caller opts out with `strip_ansi = false`.
             strip_ansi: true,
+            limits: JobLimits {
+                memory_bytes: None,
+                priority: None,
+                join_host_ceiling: false,
+            },
         }
     }
 }
@@ -177,7 +186,7 @@ impl EventSink for InMemorySink {
 /// once, on the last `Arc`.
 #[cfg(windows)]
 #[derive(Debug)]
-pub(crate) struct JobHandle(isize);
+pub(crate) struct JobHandle(pub(crate) isize);
 
 #[cfg(windows)]
 impl Drop for JobHandle {
@@ -212,6 +221,8 @@ pub struct ProcessProbe {
     /// single-process kill).
     #[cfg(windows)]
     _job: Option<Arc<JobHandle>>,
+    /// Resource governor report, finished by the lifecycle task at exit.
+    governor: SharedReport,
 }
 
 impl ProcessProbe {
@@ -282,6 +293,19 @@ impl ProcessProbe {
         {
             terminal_commander_core::windows_silent(cmd.as_std_mut());
         }
+        // Resource governor (unix): mode decided BEFORE spawn so the rlimit
+        // and nice land in `pre_exec`. `None` for default limits: no syscall.
+        #[cfg(unix)]
+        let mut unix_gov = crate::governor::UnixGovernor::prepare(&config.limits, probe_id);
+        #[cfg(unix)]
+        if let Some(gov) = &unix_gov {
+            // SAFETY: the hook only issues async-signal-safe syscalls
+            // (getrlimit/setrlimit/setpriority) on plain captured values; it
+            // allocates nothing and touches no lock between fork and exec.
+            unsafe {
+                cmd.pre_exec(gov.pre_exec_hook());
+            }
+        }
         let mut child = cmd.spawn()?;
         #[cfg(windows)]
         let child_pid = child
@@ -299,7 +323,23 @@ impl ProcessProbe {
         // the job could not be created/assigned -- the cancel path then falls
         // back to a single-process kill (`start_kill`).
         #[cfg(windows)]
-        let job: Option<Arc<JobHandle>> = create_job_for_child(&child).map(Arc::new);
+        let (job, governor, limit_watch) = {
+            let (job, report, watch) =
+                crate::governor::govern_child(child.raw_handle(), &config.limits);
+            (job.map(Arc::new), report, watch)
+        };
+        // Unix: verify the cgroup move the child made in `pre_exec` (see
+        // governor.rs) and keep the report handle.
+        #[cfg(unix)]
+        let governor = unix_gov.as_mut().map_or_else(
+            || Arc::new(Mutex::new(GovernorReport::default())),
+            |gov| {
+                gov.attach(Some(child_pid));
+                gov.report()
+            },
+        );
+        #[cfg(windows)]
+        let governor_for_task = Arc::clone(&governor);
 
         let stdout = child.stdout.take().expect("piped stdout configured above");
         let stderr = child.stderr.take().expect("piped stderr configured above");
@@ -353,7 +393,7 @@ impl ProcessProbe {
                 let _ = tokio::join!(stdout_task, stderr_task);
             };
 
-            tokio::select! {
+            let result = tokio::select! {
                 () = drain => child.wait().await.map_err(ProcessProbeError::Io),
                 _ = &mut cancel_rx => {
                     // Grace ladder (T042/FR-015): SIGTERM the tree, wait up to
@@ -369,7 +409,20 @@ impl ProcessProbe {
                     .await;
                     Err(ProcessProbeError::Cancelled)
                 }
+            };
+            // Resource governor: peak + limit-hit from the enforcing object.
+            #[cfg(windows)]
+            crate::governor::finish_job(
+                &governor_for_task,
+                job_for_task.as_deref(),
+                limit_watch,
+                !matches!(&result, Ok(st) if st.success()),
+            );
+            #[cfg(unix)]
+            if let Some(gov) = unix_gov {
+                gov.finish(!matches!(&result, Ok(st) if st.success()));
             }
+            result
         });
 
         Ok(Self {
@@ -381,7 +434,15 @@ impl ProcessProbe {
             child_pid,
             #[cfg(windows)]
             _job: job,
+            governor,
         })
+    }
+
+    /// Resource governor report. `mode == None` for default limits. Valid
+    /// after exit; before exit mode and limit are known, peak is `None`.
+    #[must_use]
+    pub fn governor_report(&self) -> GovernorReport {
+        self.governor.lock().clone()
     }
 
     /// Windows child PID for AttachConsole regression tests.
@@ -586,80 +647,84 @@ fn kill_process_tree(
     }
 }
 
-/// Create a Win32 Job Object and assign `child` to it so the OS tears down the
-/// whole descendant tree on `TerminateJobObject` / handle close.
+/// Create a Win32 Job Object carrying `limits`, so the OS tears down the whole
+/// descendant tree on `TerminateJobObject` / handle close.
 ///
 /// Configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` so closing the handle
 /// (the `JobHandle` `Drop`) also kills the tree -- defense in depth if the
-/// probe is dropped without an explicit cancel. Returns `None` on any failure
-/// (null job handle, `SetInformationJobObject` / `AssignProcessToJobObject`
-/// failure, or no child handle); the caller then falls back to a
-/// single-process kill on cancel.
+/// probe is dropped without an explicit cancel. The resource governor's
+/// `limits` are set on the same job (nothing extra for default limits).
+/// Returns `Err(reason)` (fixed text plus the Win32 code) on a null job handle
+/// or a `SetInformationJobObject` failure; the handle is closed on error.
 #[cfg(windows)]
-fn create_job_for_child(child: &tokio::process::Child) -> Option<JobHandle> {
-    use std::os::windows::io::RawHandle;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+pub(crate) fn create_job(limits: &JobLimits) -> Result<JobHandle, String> {
+    use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject,
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
     };
-
-    // The child's raw OS handle; `None` if it already exited (race-tight: we
-    // call this immediately after spawn, before draining).
-    let child_handle: RawHandle = child.raw_handle()?;
 
     // SAFETY: `CreateJobObjectW` with two null pointers (default security
     // attributes, unnamed job) returns a new Job Object handle or null on
     // failure. We check for null before using it.
-    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-    if job.is_null() {
-        return None;
+    let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if raw.is_null() {
+        // SAFETY: GetLastError reads thread-local state only.
+        let err = unsafe { GetLastError() };
+        return Err(format!("CreateJobObjectW failed: {err}"));
     }
+    // Owned from here: an early return closes the handle exactly once.
+    let job = JobHandle(raw as isize);
 
     // Configure kill-on-close as defense in depth: closing the handle kills the
     // whole tree even if the explicit `TerminateJobObject` never runs.
     // SAFETY: `info` is a fully owned, zeroed `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`
     // (a `#[repr(C)]` POD). `SetInformationJobObject` reads exactly
     // `size_of::<...>()` bytes from `&info` into the kernel for the
-    // `JobObjectExtendedLimitInformation` class. We close `job` and bail on
-    // failure so a half-configured handle never leaks.
+    // `JobObjectExtendedLimitInformation` class.
     let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
     info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // Resource governor: memory + priority limits on the same job. A default
+    // `limits` adds nothing.
+    crate::governor::apply_job_limits(&mut info, limits);
     let info_size = u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
         .expect("JOBOBJECT_EXTENDED_LIMIT_INFORMATION size fits in u32");
     let set_ok = unsafe {
         SetInformationJobObject(
-            job,
+            raw,
             JobObjectExtendedLimitInformation,
             std::ptr::from_ref(&info).cast(),
             info_size,
         )
     };
     if set_ok == 0 {
-        // SAFETY: `job` is the handle we just created and have not closed yet;
-        // close it once before returning so it does not leak.
-        unsafe {
-            let _ = CloseHandle(job);
-        }
-        return None;
+        // SAFETY: GetLastError reads thread-local state only.
+        let err = unsafe { GetLastError() };
+        return Err(format!("SetInformationJobObject failed: {err}"));
     }
+    Ok(job)
+}
 
-    // Assign the child to the job; from here on, any process the child spawns
-    // is also in the job (jobs are inherited by descendants by default).
-    // SAFETY: `job` is our live Job Object handle and `child_handle` is the
-    // child's live OS process handle (owned by `child`, borrowed here). The
-    // BOOL result is checked; on failure we close `job` and return `None`.
-    let assign_ok = unsafe { AssignProcessToJobObject(job, child_handle as HANDLE) };
-    if assign_ok == 0 {
-        // SAFETY: same as above -- close the unassigned job handle exactly once.
-        unsafe {
-            let _ = CloseHandle(job);
-        }
-        return None;
+/// Assign `child` to `job`; from then on every process the child spawns is in
+/// the job too. A child already in another job nests that job's hierarchy
+/// (Windows 8+). `Err(reason)` carries the Win32 code.
+#[cfg(windows)]
+pub(crate) fn assign_to_job(
+    job: &JobHandle,
+    child_handle: std::os::windows::io::RawHandle,
+) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
+    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+    // SAFETY: `job.0` is our live Job Object handle and `child_handle` is the
+    // child's live OS process handle (owned by the caller's child, borrowed
+    // here). The BOOL result is checked.
+    let ok = unsafe { AssignProcessToJobObject(job.0 as HANDLE, child_handle as HANDLE) };
+    if ok == 0 {
+        // SAFETY: GetLastError reads thread-local state only.
+        let err = unsafe { GetLastError() };
+        return Err(format!("AssignProcessToJobObject failed: {err}"));
     }
-
-    Some(JobHandle(job as isize))
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

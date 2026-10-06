@@ -93,6 +93,7 @@ fn small_start_params(argv: &[&str]) -> CommandStartParams {
         dedup_nonce: None,
         receipt_shape: None,
         strip_ansi: true,
+        limits: None,
     }
 }
 
@@ -153,6 +154,7 @@ fn os_critical_deletion_denied_in_full_access_on_both_lanes() {
                     bucket_config: None,
                     tag: None,
                     receipt_shape: None,
+                    limits: None,
                 }),
             )
             .await
@@ -203,6 +205,7 @@ fn os_guard_reads_payloads_and_shell_grammar() {
                 bucket_config: None,
                 tag: None,
                 receipt_shape: None,
+                limits: None,
             })
         };
 
@@ -603,6 +606,7 @@ fn shell_exec_denied_under_allow_shell_false_maps_to_policy_denied() {
                     bucket_config: None,
                     tag: None,
                     receipt_shape: None,
+                    limits: None,
                 }),
             )
             .await
@@ -682,6 +686,7 @@ fn wsl_nested_shell_allowed_and_audit_tagged_under_allow_shell_true() {
             receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
+            limits: None,
         };
         let res = state.command.start_combed(req);
         assert!(
@@ -760,6 +765,7 @@ fn wsl_nested_shell_is_denied_when_repo_only_forbids_shell_profile() {
             receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
+            limits: None,
         });
 
         assert!(

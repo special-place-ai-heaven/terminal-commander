@@ -181,6 +181,7 @@ impl Harness {
                 rows: None,
                 cols: None,
                 tag: None,
+                limits: None,
             }))
             .await
             .expect("pty start");
@@ -885,6 +886,7 @@ fn credential_request_for_a_job_without_a_prompt_is_not_awaiting() {
                 rows: None,
                 cols: None,
                 tag: None,
+                limits: None,
             }))
             .await
             .expect("start");

@@ -65,29 +65,29 @@ use terminal_commanderd::ipc::protocol::{
     DiscoverResponse, EventContextParams, EventContextResponse, FileListDirParams,
     FileListDirResponse, FileReadWindowParams, FileReadWindowResponse, FileSearchParams,
     FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
-    FileWatchStopResponse, FileWriteParams, FileWriteResponse, IpcContextFrame, IpcError,
-    IpcErrorCode, IpcRequest, IpcResponse, ListLimitParams, PolicyCapsView, PolicyStatusResponse,
-    ProbeListResponse, ProbeStatusParams, ProbeStatusResponse, PtyCommandListResponse,
-    PtyCommandStartParams, PtyCommandStartResponse, PtyCommandStopParams, PtyCommandStopResponse,
-    PtyCommandWriteStdinParams, ReceiptShape, RecipeActivateParams, RecipeActivateResponse,
-    RecipeDeactivateParams, RecipeDeactivateResponse, RecipeGetParams, RecipeGetResponse,
-    RecipeListActiveResponse, RecipeRunParams, RecipeRunResponse, RecipeSearchParams,
-    RecipeSearchResponse, RecipeTestParams, RecipeUpsertParams, RecipeUpsertResponse,
-    RegistryActivateParams, RegistryActivateResponse, RegistryDeactivateBulkParams,
-    RegistryDeactivateBulkResponse, RegistryDeactivateParams, RegistryDeactivateResponse,
-    RegistryGetParams, RegistryGetResponse, RegistryImportPackParams, RegistryImportPackResponse,
-    RegistryListActiveResponse, RegistrySearchParams, RegistrySearchResponse,
-    RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse, RegistryTestParams,
-    RegistryTestResponse, RegistryTestSample, RegistryUpsertParams, RegistryUpsertResponse,
-    SelfCheckResponse, ShellExecParams, ShellSessionExecParams, ShellSessionExecResponse,
-    ShellSessionListResponse, ShellSessionStartParams, ShellSessionStartResponse,
-    ShellSessionStatusParams, ShellSessionStatusResponse, ShellSessionStopParams,
-    ShellSessionStopResponse, SubscriptionCloseParams, SubscriptionCloseResponse,
-    SubscriptionListParams, SubscriptionListResponse, SubscriptionOpenParams,
-    SubscriptionOpenResponse, SubscriptionPredicate, SubscriptionPullParams,
-    SubscriptionPullResponse, SubscriptionSeekParams, SubscriptionSeekResponse,
-    SubscriptionSourceSel, WorkspaceSnapshotApplyParams, WorkspaceSnapshotApplyResponse,
-    WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
+    FileWatchStopResponse, FileWriteParams, FileWriteResponse, GovernorModeWire, IpcContextFrame,
+    IpcError, IpcErrorCode, IpcRequest, IpcResponse, JobLimitsSpec, JobPriority, LimitsApplied,
+    ListLimitParams, PolicyCapsView, PolicyStatusResponse, ProbeListResponse, ProbeStatusParams,
+    ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
+    PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams, ReceiptShape,
+    RecipeActivateParams, RecipeActivateResponse, RecipeDeactivateParams, RecipeDeactivateResponse,
+    RecipeGetParams, RecipeGetResponse, RecipeListActiveResponse, RecipeRunParams,
+    RecipeRunResponse, RecipeSearchParams, RecipeSearchResponse, RecipeTestParams,
+    RecipeUpsertParams, RecipeUpsertResponse, RegistryActivateParams, RegistryActivateResponse,
+    RegistryDeactivateBulkParams, RegistryDeactivateBulkResponse, RegistryDeactivateParams,
+    RegistryDeactivateResponse, RegistryGetParams, RegistryGetResponse, RegistryImportPackParams,
+    RegistryImportPackResponse, RegistryListActiveResponse, RegistrySearchParams,
+    RegistrySearchResponse, RegistrySuggestFromSamplesParams, RegistrySuggestFromSamplesResponse,
+    RegistryTestParams, RegistryTestResponse, RegistryTestSample, RegistryUpsertParams,
+    RegistryUpsertResponse, SelfCheckResponse, ShellExecParams, ShellSessionExecParams,
+    ShellSessionExecResponse, ShellSessionListResponse, ShellSessionStartParams,
+    ShellSessionStartResponse, ShellSessionStatusParams, ShellSessionStatusResponse,
+    ShellSessionStopParams, ShellSessionStopResponse, SubscriptionCloseParams,
+    SubscriptionCloseResponse, SubscriptionListParams, SubscriptionListResponse,
+    SubscriptionOpenParams, SubscriptionOpenResponse, SubscriptionPredicate,
+    SubscriptionPullParams, SubscriptionPullResponse, SubscriptionSeekParams,
+    SubscriptionSeekResponse, SubscriptionSourceSel, WorkspaceSnapshotApplyParams,
+    WorkspaceSnapshotApplyResponse, WorkspaceSnapshotCreateParams, WorkspaceSnapshotCreateResponse,
 };
 
 use crate::daemon_client::McpDaemonClient;
@@ -167,12 +167,12 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "command_start_combed",
             status: ToolStatus::Live,
-            description: "Start a non-PTY argv command; bounded metadata response. No raw stdout/stderr. Example: {\"argv\":[\"git\",\"status\"]}.",
+            description: "Start a non-PTY argv command; bounded metadata response. No raw stdout/stderr. Example: {\"argv\":[\"git\",\"status\"]}. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied.",
         },
         ToolCatalogueEntry {
             name: "run_and_watch",
             status: ToolStatus::Live,
-            description: "One-shot: start a command, wait (bounded) for its rule signals + exit, return both. Quiet command returns a receipt, not an error. Example: {\"argv\":[\"git\",\"status\"]}.",
+            description: "One-shot: start a command, wait (bounded) for its rule signals + exit, return both. Quiet command returns a receipt, not an error. Example: {\"argv\":[\"git\",\"status\"]}. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied.",
         },
         ToolCatalogueEntry {
             name: "command_status",
@@ -187,7 +187,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "shell_exec",
             status: ToolStatus::Live,
-            description: "Run ONE shell line (pipelines/compounds/redirects) through the comb pipeline; requires allow_shell; combed, never raw.",
+            description: "Run ONE shell line (pipelines/compounds/redirects) through the comb pipeline; requires allow_shell; combed, never raw. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied.",
         },
         ToolCatalogueEntry {
             name: "command_output_tail",
@@ -297,7 +297,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "recipe_run",
             status: ToolStatus::Live,
-            description: "Run an activated argv recipe on the argv lane. Never uses shell_exec. When the recipe has timeout_ms or rule_pack_ids, the response is watched: it returns signals, a resume cursor, and degraded/recover_hint the same way run_and_watch does. rule_pack_ids only select that watched response; they do not load packs. Combing uses registry rules already active on the job. Refuses recipes that are not activated.",
+            description: "Run an activated argv recipe on the argv lane. Never uses shell_exec. When the recipe has timeout_ms or rule_pack_ids, the response is watched: it returns signals, a resume cursor, and degraded/recover_hint the same way run_and_watch does. rule_pack_ids only select that watched response; they do not load packs. Combing uses registry rules already active on the job. Refuses recipes that are not activated. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied.",
         },
         ToolCatalogueEntry {
             name: "file_read_window",
@@ -332,7 +332,7 @@ pub const fn tool_catalogue() -> &'static [ToolCatalogueEntry] {
         ToolCatalogueEntry {
             name: "pty_command_start",
             status: ToolStatus::Live,
-            description: "Start an interactive argv command attached to a PTY; shell interpreters follow allow_shell. Bounded metadata only.",
+            description: "Start an interactive argv command attached to a PTY; shell interpreters follow allow_shell. Bounded metadata only. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied.",
         },
         ToolCatalogueEntry {
             name: "pty_command_write_stdin",
@@ -1234,6 +1234,7 @@ impl TerminalCommanderMcpServer {
                 caps,
                 llm_can_activate_recipes,
                 config_warnings,
+                governor,
             })) => json_tool_result(&serde_json::json!({
                 "profile": profile,
                 "commands_deny_count": commands_deny_count,
@@ -1252,6 +1253,8 @@ impl TerminalCommanderMcpServer {
                 // Settings in the config file that do nothing, so the model
                 // never assumes a protection that is not there.
                 "config_warnings": config_warnings,
+                // Resource governor: what this host can enforce and the defaults.
+                "governor": governor,
             })),
             Ok(other) => Err(unexpected_variant(&other)),
             Err(e) => Err(into_mcp_error(&e)),
@@ -1332,7 +1335,7 @@ impl TerminalCommanderMcpServer {
     /// `command_start_combed` — start a non-PTY argv command on the
     /// daemon and return bounded metadata. Never returns raw output.
     #[tool(
-        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail, lines_omitted) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. After starting, consume signals with bucket_wait and read the exit state with command_status; for a quick command prefer run_and_watch. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). A pipeline in a shell -c/-lc script may report only its last stage's exit code (unless the script sets pipefail); command_status then sets pipeline_exit_masked:true (not detected for cmd /C or pwsh -Command). On Windows, do not pass bare /home/... paths in argv — prefix with wsl or use Windows paths. Windows piped children may buffer stdout without a newline; use pty_command_start for live chatty capture. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
+        description = "Run a command and get back ONLY the lines your rules match, not the whole stream. You read the matching signal plus exit code instead of scrolling thousands of lines, which lets you run commands whose output is too big to fit in your context. If zero rules match, command_status still returns a bounded exit receipt (exit code, suppressed-line count, short tail, lines_omitted) so a quiet command never looks broken. Returns job_id, bucket_id, probe_id, initial cursor; no other stdout/stderr text is returned. After starting, consume signals with bucket_wait and read the exit state with command_status; for a quick command prefer run_and_watch. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). A pipeline in a shell -c/-lc script may report only its last stage's exit code (unless the script sets pipefail); command_status then sets pipeline_exit_masked:true (not detected for cmd /C or pwsh -Command). On Windows, do not pass bare /home/... paths in argv — prefix with wsl or use Windows paths. Windows piped children may buffer stdout without a newline; use pty_command_start for live chatty capture. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied."
     )]
     async fn command_start_combed(
         &self,
@@ -1353,6 +1356,9 @@ impl TerminalCommanderMcpServer {
                 cursor,
                 hint,
                 wslenv_dropped,
+                limits_applied,
+                limits_clamped,
+                governor,
             })) => {
                 // US2 (FR-011): forward the optional pack-available hint
                 // verbatim. Omitted from the JSON when None.
@@ -1369,6 +1375,12 @@ impl TerminalCommanderMcpServer {
                     body["credential_hint"] = serde_json::json!(h);
                 }
                 add_wslenv_dropped(&mut body, &wslenv_dropped);
+                add_limits(
+                    &mut body,
+                    limits_applied.as_ref(),
+                    &limits_clamped,
+                    governor.as_ref(),
+                );
                 json_tool_result(&body)
             }
             Ok(other) => Err(unexpected_variant(&other)),
@@ -1381,7 +1393,7 @@ impl TerminalCommanderMcpServer {
     /// bucket_wait (bounded) -> command_status so the agent needs ONE
     /// call instead of four.
     #[tool(
-        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | abandoned; a job whose end was never recorded comes back as a typed `JobLost` error instead) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING (elapsed_ms/last_output_age_ms show liveness); continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
+        description = "Run a command and get its matching signals AND exit code in ONE call. Composes start + bounded wait + status so you don't poll. Pass inline `rules` (minimal: [{\"pattern\": \"ERROR\"}]) to comb the output; returns {signals, exit_code, state, receipt, complete, wait_exhausted, cursor, degraded, recover_hint, outcome_trust}. `outcome_trust` reports how the daemon knows the returned state/exit_code (observed | reconstructed | abandoned; a job whose end was never recorded comes back as a typed `JobLost` error instead) and, like degraded/recover_hint, is present on EVERY payload rather than only the unusual ones; see command_status for the full meaning of each value. A quiet command (no rule matches) returns a bounded receipt instead of an error — TC never bounces you to the shell for running a small command. Bounded: waits up to wait_ms (default 5000, max 60000) as a WALL-CLOCK budget (honored within one ~1s slice plus a round-trip) and returns up to max_signals (default 50). If `complete` is false (wait_exhausted), the command is STILL RUNNING (elapsed_ms/last_output_age_ms show liveness); continue signals with bucket_wait using the returned bucket_id/cursor/timeout_ms, and poll command_status with job_id for final state/exit_code. command_status does not return signals. If `degraded` is true, an IPC error interrupted the wait but the job is still tracked: confirm daemon health, then follow recover_hint — once a job_id exists this call returns a degraded, job-identified result, never a bare error. Argv only; shell interpreters are denied only when a hardened profile turns allow_shell off. Example: {\"argv\":[\"git\",\"status\"]} (optional cwd and rules). Argv is the primary path for ordinary commands, including tiny one-offs. Use shell_exec only when shell syntax is required (allow_shell is on in the default full_access profile). pipeline_exit_masked:true means a pipeline was detected in the shell -c/-lc script: exit_code may reflect only its last stage (unless the script sets pipefail). On Windows, piped children may show zero frames while still running (stdout buffering); pty_command_start avoids this. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied."
     )]
     async fn run_and_watch(
         &self,
@@ -1408,20 +1420,38 @@ impl TerminalCommanderMcpServer {
         let credential_hint = password_prompt_hint(&start_ipc.argv);
 
         // 1. Start.
-        let (job_id, bucket_id, mut cursor, wslenv_dropped) =
-            match daemon.call(IpcRequest::CommandStartCombed(start_ipc)).await {
-                Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
-                    job_id,
-                    bucket_id,
-                    cursor,
-                    wslenv_dropped,
-                    ..
-                })) => (job_id, bucket_id, cursor, wslenv_dropped),
-                Ok(other) => return Err(unexpected_variant(&other)),
-                Err(e) => {
-                    return Err(into_mcp_error_for_tool(false, &e, Some("run_and_watch")));
-                }
-            };
+        let (
+            job_id,
+            bucket_id,
+            mut cursor,
+            wslenv_dropped,
+            limits_applied,
+            limits_clamped,
+            governor,
+        ) = match daemon.call(IpcRequest::CommandStartCombed(start_ipc)).await {
+            Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
+                job_id,
+                bucket_id,
+                cursor,
+                wslenv_dropped,
+                limits_applied,
+                limits_clamped,
+                governor,
+                ..
+            })) => (
+                job_id,
+                bucket_id,
+                cursor,
+                wslenv_dropped,
+                limits_applied,
+                limits_clamped,
+                governor,
+            ),
+            Ok(other) => return Err(unexpected_variant(&other)),
+            Err(e) => {
+                return Err(into_mcp_error_for_tool(false, &e, Some("run_and_watch")));
+            }
+        };
 
         // 2. Wait loop: drain signals until the job is terminal, the
         //    signal cap is hit, or the wall-clock wait budget is spent.
@@ -1458,6 +1488,7 @@ impl TerminalCommanderMcpServer {
         // degraded arms pass `None` (a degraded result carries no receipt), so a
         // `= None` here would be a dead store under -D unused-assignments.
         let mut receipt: Option<serde_json::Value>;
+        let mut governor_fields: serde_json::Map<String, serde_json::Value>;
 
         // do-while: always poll at least once (mirrors the old `.max(1)`), so
         // even wait_ms=0 returns a real observed state.
@@ -1504,6 +1535,7 @@ impl TerminalCommanderMcpServer {
             elapsed_ms = status.elapsed_ms;
             last_output_age_ms = status.last_output_age_ms;
             receipt = status.receipt.as_ref().map(|r| serde_json::json!(r));
+            governor_fields = governor_status_fields(&status);
 
             let terminal = matches!(
                 status.state,
@@ -1639,6 +1671,13 @@ impl TerminalCommanderMcpServer {
             body["credential_hint"] = serde_json::json!(h);
         }
         add_wslenv_dropped(&mut body, &wslenv_dropped);
+        add_limits(
+            &mut body,
+            limits_applied.as_ref(),
+            &limits_clamped,
+            governor.as_ref(),
+        );
+        obj_extend(&mut body, governor_fields);
         json_tool_result(&body)
     }
 
@@ -1710,7 +1749,7 @@ impl TerminalCommanderMcpServer {
     /// MCP carries `shell_line` ONLY — capabilities are config/TOML, never an
     /// MCP-flippable flag.
     #[tool(
-        description = "Run ONE shell line (pipelines/compounds/redirects via [shell,-lc,line]) and get back ONLY the lines your rules match plus exit state, never the raw stream. Requires the allow_shell capability (config/TOML; on in the default full_access profile, [policy.caps] allow_shell = false hardens); a denied daemon returns a policy error. Returns job_id, bucket_id, probe_id, initial cursor. Use run_and_watch or command_start_combed when you do not need shell syntax; shell_exec only when pipelines, compounds, or redirects are required and allow_shell is on. A pipeline's exit code may reflect only its last stage (unless the line sets pipefail; TC runs it as-is, adding none); command_status/run_and_watch report pipeline_exit_masked:true for it. Not detected for cmd /C or pwsh -Command shells. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
+        description = "Run ONE shell line (pipelines/compounds/redirects via [shell,-lc,line]) and get back ONLY the lines your rules match plus exit state, never the raw stream. Requires the allow_shell capability (config/TOML; on in the default full_access profile, [policy.caps] allow_shell = false hardens); a denied daemon returns a policy error. Returns job_id, bucket_id, probe_id, initial cursor. Use run_and_watch or command_start_combed when you do not need shell syntax; shell_exec only when pipelines, compounds, or redirects are required and allow_shell is on. A pipeline's exit code may reflect only its last stage (unless the line sets pipefail; TC runs it as-is, adding none); command_status/run_and_watch report pipeline_exit_masked:true for it. Not detected for cmd /C or pwsh -Command shells. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied."
     )]
     async fn shell_exec(
         &self,
@@ -2427,7 +2466,7 @@ impl TerminalCommanderMcpServer {
 
     /// `recipe_run` — activated recipe, argv lane only.
     #[tool(
-        description = "Run an activated argv recipe on the argv lane. Never uses shell_exec. When the recipe has timeout_ms or rule_pack_ids, the response is watched: it returns signals, a resume cursor, and degraded/recover_hint the same way run_and_watch does. rule_pack_ids only select that watched response; they do not load packs. Combing uses registry rules already active on the job. Refuses recipes that are not activated."
+        description = "Run an activated argv recipe on the argv lane. Never uses shell_exec. When the recipe has timeout_ms or rule_pack_ids, the response is watched: it returns signals, a resume cursor, and degraded/recover_hint the same way run_and_watch does. rule_pack_ids only select that watched response; they do not load packs. Combing uses registry rules already active on the job. Refuses recipes that are not activated. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied."
     )]
     async fn recipe_run(
         &self,
@@ -2439,6 +2478,7 @@ impl TerminalCommanderMcpServer {
             version: params.version,
             scope: Some(params.scope.into_ipc_scope()?),
             fills: params.fills.unwrap_or_default(),
+            limits: params.limits.map(McpJobLimits::into_ipc),
         };
         let started = match self.daemon.call(IpcRequest::RecipeRun(ipc)).await {
             Ok(IpcResponse::RecipeRun(body)) => body,
@@ -2457,6 +2497,9 @@ impl TerminalCommanderMcpServer {
             probe_id,
             cursor,
             wslenv_dropped,
+            limits_applied,
+            limits_clamped,
+            governor,
         } = started;
         if !watched {
             let mut body = serde_json::json!({
@@ -2479,6 +2522,12 @@ impl TerminalCommanderMcpServer {
                 "recover_hint": serde_json::Value::Null,
             });
             add_wslenv_dropped(&mut body, &wslenv_dropped);
+            add_limits(
+                &mut body,
+                limits_applied.as_ref(),
+                &limits_clamped,
+                governor.as_ref(),
+            );
             return json_tool_result(&body);
         }
         let RecipeWatch {
@@ -2494,6 +2543,7 @@ impl TerminalCommanderMcpServer {
             degraded,
             recover_hint,
             signals_capped,
+            governor_fields,
             ..
         } = self
             .watch_recipe_job(job_id, bucket_id, cursor, wait_ms)
@@ -2530,6 +2580,13 @@ impl TerminalCommanderMcpServer {
         obj.insert("wait_ms".to_owned(), serde_json::json!(wait_ms));
         obj.insert("probe_id".to_owned(), serde_json::json!(probe_id));
         add_wslenv_dropped(&mut value, &wslenv_dropped);
+        add_limits(
+            &mut value,
+            limits_applied.as_ref(),
+            &limits_clamped,
+            governor.as_ref(),
+        );
+        obj_extend(&mut value, governor_fields);
         json_tool_result(&value)
     }
 
@@ -2563,6 +2620,7 @@ impl TerminalCommanderMcpServer {
         // final Ok(..) below reads it; the early-return degraded arms never
         // read it (mirrors run_and_watch's same pattern).
         let mut receipt: Option<serde_json::Value>;
+        let mut governor_fields: serde_json::Map<String, serde_json::Value>;
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
         loop {
             let status = match self
@@ -2595,6 +2653,7 @@ impl TerminalCommanderMcpServer {
             elapsed_ms = status.elapsed_ms;
             last_output_age_ms = status.last_output_age_ms;
             receipt = status.receipt.as_ref().map(|r| serde_json::json!(r));
+            governor_fields = governor_status_fields(&status);
             let terminal = matches!(
                 status.state,
                 JobState::Exited | JobState::Cancelled | JobState::Failed
@@ -2683,6 +2742,7 @@ impl TerminalCommanderMcpServer {
             degraded: false,
             recover_hint: None,
             signals_capped,
+            governor_fields,
         })
     }
 
@@ -2929,7 +2989,7 @@ impl TerminalCommanderMcpServer {
 
     /// `pty_command_start` — interactive PTY argv command.
     #[tool(
-        description = "Start an interactive argv command attached to a PTY. Bounded metadata response only; never returns raw screen buffer. Shell interpreters are denied only when a hardened profile turns allow_shell off (it is on by default). On Windows, PTY mode avoids the non-TTY stdout buffering that piped command_start_combed can exhibit for chatty children. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected."
+        description = "Start an interactive argv command attached to a PTY. Bounded metadata response only; never returns raw screen buffer. Shell interpreters are denied only when a hardened profile turns allow_shell off (it is on by default). On Windows, PTY mode avoids the non-TTY stdout buffering that piped command_start_combed can exhibit for chatty children. The OS-infrastructure removal safeguard applies in every profile and returns os_critical_path_protected. Optional `limits` ({memory: \"24GiB\" or \"40%\", priority}) caps the job's memory; the reply reports limits_applied."
     )]
     async fn pty_command_start(
         &self,
@@ -2949,6 +3009,7 @@ impl TerminalCommanderMcpServer {
             rows: params.rows,
             cols: params.cols,
             tag: params.tag,
+            limits: params.limits.map(McpJobLimits::into_ipc),
         };
         match self.daemon.call(IpcRequest::PtyCommandStart(ipc)).await {
             Ok(IpcResponse::PtyCommandStart(PtyCommandStartResponse {
@@ -2957,6 +3018,9 @@ impl TerminalCommanderMcpServer {
                 probe_id,
                 cursor,
                 wslenv_dropped,
+                limits_applied,
+                limits_clamped,
+                governor,
             })) => {
                 let mut body = serde_json::json!({
                     "job_id": job_id,
@@ -2965,6 +3029,12 @@ impl TerminalCommanderMcpServer {
                     "cursor": cursor,
                 });
                 add_wslenv_dropped(&mut body, &wslenv_dropped);
+                add_limits(
+                    &mut body,
+                    limits_applied.as_ref(),
+                    &limits_clamped,
+                    governor.as_ref(),
+                );
                 json_tool_result(&body)
             }
             Ok(other) => Err(unexpected_variant(&other)),
@@ -4028,6 +4098,9 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
         cursor,
         hint: _,
         wslenv_dropped,
+        limits_applied,
+        limits_clamped,
+        governor,
     } = response;
     let mut payload = serde_json::json!({
         "job_id": job_id,
@@ -4036,6 +4109,12 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
         "cursor": cursor,
     });
     add_wslenv_dropped(&mut payload, wslenv_dropped);
+    add_limits(
+        &mut payload,
+        limits_applied.as_ref(),
+        limits_clamped,
+        governor.as_ref(),
+    );
 
     let lower = shell_line.to_ascii_lowercase();
     let mut detected = Vec::new();
@@ -5337,6 +5416,11 @@ pub struct McpCommandStartParams {
     /// Combing + bounded output are identical local vs remote.
     #[serde(default)]
     pub target_id: Option<String>,
+    /// Optional resource limits for this job: `{"memory": "24GiB" | "512MiB" | "40%" | "none",
+    /// "priority": "idle" | "below_normal" | "normal"}`. Omitted axes take the daemon's
+    /// `[governor]` defaults; a value above the default may be clamped (see `limits_clamped`).
+    #[serde(default)]
+    pub limits: Option<McpJobLimits>,
 }
 
 impl McpCommandStartParams {
@@ -5367,7 +5451,43 @@ impl McpCommandStartParams {
             // value, which this adapter no longer does after Phase 1.
             dedup_nonce: Some(fresh_dedup_nonce()),
             receipt_shape: receipt_shape(self.receipt_head_lines, self.receipt_tail_lines),
+            limits: self.limits.map(McpJobLimits::into_ipc),
         })
+    }
+}
+
+/// MCP-facing resource limits (resource governor). Mirrors the wire
+/// `JobLimitsSpec`; priority is a closed enum so the schema lists the values.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct McpJobLimits {
+    /// Memory ceiling for the whole job tree: `"24GiB"`, `"512MiB"`, a byte
+    /// count, `"40%"` of host memory, or `"none"`.
+    #[serde(default)]
+    pub memory: Option<String>,
+    /// CPU scheduling priority: `idle`, `below_normal` or `normal`.
+    #[serde(default)]
+    pub priority: Option<McpJobPriority>,
+}
+
+/// Closed set of priorities for [`McpJobLimits`].
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpJobPriority {
+    Idle,
+    BelowNormal,
+    Normal,
+}
+
+impl McpJobLimits {
+    fn into_ipc(self) -> JobLimitsSpec {
+        JobLimitsSpec {
+            memory: self.memory,
+            priority: self.priority.map(|p| match p {
+                McpJobPriority::Idle => JobPriority::Idle,
+                McpJobPriority::BelowNormal => JobPriority::BelowNormal,
+                McpJobPriority::Normal => JobPriority::Normal,
+            }),
+        }
     }
 }
 
@@ -5484,6 +5604,11 @@ pub struct McpShellExecParams {
     #[serde(default, deserialize_with = "de_opt_u64_lenient")]
     #[schemars(with = "u64")]
     pub wait_ms: Option<u64>,
+    /// Optional resource limits for this job: `{"memory": "24GiB" | "512MiB" | "40%" | "none",
+    /// "priority": "idle" | "below_normal" | "normal"}`. Omitted axes take the daemon's
+    /// `[governor]` defaults; a value above the default may be clamped (see `limits_clamped`).
+    #[serde(default)]
+    pub limits: Option<McpJobLimits>,
 }
 
 impl McpShellExecParams {
@@ -5507,6 +5632,7 @@ impl McpShellExecParams {
             bucket_config,
             tag: self.tag,
             receipt_shape: receipt_shape(self.receipt_head_lines, self.receipt_tail_lines),
+            limits: self.limits.map(McpJobLimits::into_ipc),
         })
     }
 }
@@ -5524,6 +5650,8 @@ struct RecipeWatch {
     degraded: bool,
     recover_hint: Option<String>,
     signals_capped: bool,
+    /// `governor`, `peak_memory_bytes`, `exit_reason` from the last status.
+    governor_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 fn degraded_recipe_watch(
@@ -5551,6 +5679,7 @@ fn degraded_recipe_watch(
         degraded: true,
         recover_hint: Some(degraded_wait_hint(err)),
         signals_capped: false,
+        governor_fields: serde_json::Map::new(),
     }
 }
 
@@ -5710,6 +5839,11 @@ pub struct McpRunAndWatchParams {
     /// daemon. Requires `allow_remote`; an unknown id is rejected.
     #[serde(default)]
     pub target_id: Option<String>,
+    /// Optional resource limits for this job: `{"memory": "24GiB" | "512MiB" | "40%" | "none",
+    /// "priority": "idle" | "below_normal" | "normal"}`. Omitted axes take the daemon's
+    /// `[governor]` defaults; a value above the default may be clamped (see `limits_clamped`).
+    #[serde(default)]
+    pub limits: Option<McpJobLimits>,
 }
 
 impl McpRunAndWatchParams {
@@ -5749,6 +5883,7 @@ impl McpRunAndWatchParams {
             // P5: carry the target_id onto the start params so run_and_watch
             // resolves the same daemon client for the whole one-shot.
             target_id: self.target_id,
+            limits: self.limits,
         };
         (
             start,
@@ -5989,7 +6124,57 @@ fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
     if let Some(age) = s.last_output_age_ms {
         v["last_output_age_ms"] = serde_json::json!(age);
     }
+    obj_extend(&mut v, governor_status_fields(s));
     v
+}
+
+/// Resource-governor fields of a status (`governor` and `limits_applied`
+/// while running and after exit, `peak_memory_bytes` and `exit_reason` after
+/// exit, `host_ceiling_joined` on a failed host join), each present only when
+/// the daemon reported it.
+fn governor_status_fields(s: &CommandStatusResponse) -> serde_json::Map<String, serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    if let Some(g) = &s.governor {
+        m.insert("governor".to_owned(), serde_json::json!(g));
+    }
+    if let Some(a) = &s.limits_applied {
+        m.insert("limits_applied".to_owned(), serde_json::json!(a));
+    }
+    if let Some(p) = s.peak_memory_bytes {
+        m.insert("peak_memory_bytes".to_owned(), serde_json::json!(p));
+    }
+    if let Some(r) = &s.exit_reason {
+        m.insert("exit_reason".to_owned(), serde_json::json!(r));
+    }
+    if let Some(j) = s.host_ceiling_joined {
+        m.insert("host_ceiling_joined".to_owned(), serde_json::json!(j));
+    }
+    m
+}
+
+fn obj_extend(v: &mut serde_json::Value, fields: serde_json::Map<String, serde_json::Value>) {
+    if let Some(o) = v.as_object_mut() {
+        o.extend(fields);
+    }
+}
+
+/// Add `limits_applied` / `limits_clamped` / `governor` to a start payload;
+/// each is omitted when the daemon reported nothing (governor disabled).
+fn add_limits(
+    body: &mut serde_json::Value,
+    applied: Option<&LimitsApplied>,
+    clamped: &[String],
+    governor: Option<&GovernorModeWire>,
+) {
+    if let Some(a) = applied {
+        body["limits_applied"] = serde_json::json!(a);
+    }
+    if let Some(g) = governor {
+        body["governor"] = serde_json::json!(g);
+    }
+    if !clamped.is_empty() {
+        body["limits_clamped"] = serde_json::json!(clamped);
+    }
 }
 
 /// Argv-lane teach for programs that may stop at a password prompt, which
@@ -6614,6 +6799,11 @@ pub struct McpPtyCommandStartParams {
     /// opened with a matching `tag` predicate routes to it. Omit for none.
     #[serde(default)]
     pub tag: Option<String>,
+    /// Optional resource limits for this job: `{"memory": "24GiB" | "512MiB" | "40%" | "none",
+    /// "priority": "idle" | "below_normal" | "normal"}`. Omitted axes take the daemon's
+    /// `[governor]` defaults; a value above the default may be clamped (see `limits_clamped`).
+    #[serde(default)]
+    pub limits: Option<McpJobLimits>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -6965,6 +7155,11 @@ pub struct McpRecipeRunParams {
     pub scope: McpActivationScope,
     #[serde(default)]
     pub fills: Option<std::collections::BTreeMap<String, String>>,
+    /// Optional resource limits for this job: `{"memory": "24GiB" | "512MiB" | "40%" | "none",
+    /// "priority": "idle" | "below_normal" | "normal"}`. Omitted axes take the daemon's
+    /// `[governor]` defaults; a value above the default may be clamped (see `limits_clamped`).
+    #[serde(default)]
+    pub limits: Option<McpJobLimits>,
 }
 
 /// Shared `limit` param for the bounded list snapshots (`runtime_state`,
@@ -7133,6 +7328,9 @@ mod tests {
             cursor: 0,
             hint: None,
             wslenv_dropped: Vec::new(),
+            limits_applied: None,
+            limits_clamped: Vec::new(),
+            governor: None,
         }
     }
 
@@ -9948,6 +10146,7 @@ mod tests {
             compact: false,
             wait_until: None,
             target_id: None,
+            limits: None,
         };
         let (start, _controls) = params.into_parts();
         assert_eq!(start.tag, Some("X".to_string()));
@@ -9970,6 +10169,7 @@ mod tests {
             compact: false,
             wait_until: None,
             target_id: None,
+            limits: None,
         };
         let (start, _controls) = untagged.into_parts();
         assert_eq!(start.tag, None);

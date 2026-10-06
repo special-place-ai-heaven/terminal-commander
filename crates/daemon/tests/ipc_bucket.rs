@@ -121,6 +121,7 @@ fn bucket_events_since_returns_structured_events_no_raw_text() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .unwrap();
 
@@ -370,6 +371,7 @@ fn event_context_returns_bounded_window_around_event_pointer() {
                 receipt_shape: None,
                 strip_ansi: true,
                 peer_discriminator: None,
+                limits: None,
             })
             .unwrap();
 
@@ -604,6 +606,7 @@ async fn boom_event(
             receipt_shape: None,
             strip_ansi: true,
             peer_discriminator: None,
+            limits: None,
         })
         .unwrap();
     for _ in 0..50 {

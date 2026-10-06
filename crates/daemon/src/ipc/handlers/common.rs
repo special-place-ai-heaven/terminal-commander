@@ -285,6 +285,9 @@ pub(in crate::ipc::server) fn map_command_error(e: CommandError) -> IpcError {
                  [\"wsl\",\"python3\",\"/home/user/script.py\"]) or use a Windows path"
             ),
         ),
+        CommandError::InvalidLimits(msg) => {
+            IpcError::new(IpcErrorCode::ArgvInvalid, format!("invalid limits: {msg}"))
+        }
         CommandError::UnknownJob(id) => {
             IpcError::new(IpcErrorCode::UnknownJob, format!("unknown job: {id}"))
         }

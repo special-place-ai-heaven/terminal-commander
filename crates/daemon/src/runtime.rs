@@ -451,6 +451,11 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     // BY this shutdown. Record it while the store is still writable.
     state.record_abandoned_jobs();
     shutdown_store(&state);
+    // Clean shutdown releases the host ceiling (Linux: the empty
+    // tc-jobs-<pid> cgroup dir) instead of leaving it to the next boot sweep.
+    if let Err(reason) = terminal_commander_probes::governor::uninstall_host_ceiling() {
+        tracing::warn!("host ceiling release failed (non-fatal): {reason}");
+    }
     release_pidfile(reasserter, &state_dir).await;
     tracing::info!("IPC server exited cleanly.");
     Ok(())
@@ -533,6 +538,11 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     state.command.drain_lifecycle_tasks().await;
     state.record_abandoned_jobs();
     shutdown_store(state.as_ref());
+    // Clean shutdown releases the host ceiling (Linux: the empty
+    // tc-jobs-<pid> cgroup dir) instead of leaving it to the next boot sweep.
+    if let Err(reason) = terminal_commander_probes::governor::uninstall_host_ceiling() {
+        tracing::warn!("host ceiling release failed (non-fatal): {reason}");
+    }
     release_pidfile(reasserter, &state_dir).await;
     tracing::info!("IPC server exited cleanly.");
     Ok(())

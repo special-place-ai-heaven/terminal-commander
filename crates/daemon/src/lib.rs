@@ -22,6 +22,7 @@ pub mod config;
 pub mod credential;
 pub mod environment;
 pub mod file_watch;
+pub mod governor;
 pub mod ipc;
 pub mod liveness;
 pub mod policy;
@@ -46,9 +47,10 @@ pub use command::{
     SHELL_INTERPRETERS_DENY,
 };
 pub use config::{
-    ConfigError, DaemonConfig, DaemonSection, LimitsSection, PolicyCapsSection, PolicyPathsSection,
-    PolicyProbesSection, PolicySection, RemoteTarget, RemoteTransport, RetentionSection,
-    RuntimeMode, ShellSessionSection, TargetsConfig, default_targets_config_path, load_targets,
+    ConfigError, DaemonConfig, DaemonSection, GovernorSection, LimitsSection, PolicyCapsSection,
+    PolicyPathsSection, PolicyProbesSection, PolicySection, RemoteTarget, RemoteTransport,
+    RetentionSection, RuntimeMode, ShellSessionSection, TargetsConfig, default_targets_config_path,
+    load_targets,
 };
 pub use environment::{discover_host_environment, preferred_shell, shell_launch_argv};
 pub use file_watch::{LiveWatchIdentity, WatchError, WatchRebindReport, WatchRuntime};

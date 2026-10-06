@@ -276,6 +276,56 @@ universals are NOT merged alongside it. So enabling the flag does not
 sprinkle baseline LOW signal onto pack-covered commands; it only covers
 the otherwise-uncovered ones. This conservative behavior is by design.
 
+## 5b. Size a build with `limits`
+
+Every start is governed: a memory ceiling for the whole job tree and a lower
+CPU priority, from the daemon's `[governor]` defaults (`policy_status` shows
+them). To size one job, pass `limits` on `run_and_watch`, `command_start_combed`,
+`shell_exec`, `recipe_run` or `pty_command_start`:
+
+```json
+{"argv": ["cargo", "test", "--workspace"],
+ "limits": {"memory": "50%", "priority": "below_normal"},
+ "rules": [{"pattern": "^error|FAILED|test result"}],
+ "wait_until": "exit"}
+```
+
+- `memory` is `"24GiB"`, `"512MiB"`, bytes, `"40%"` of host memory, or
+  `"none"`. Read `limits_applied` in the reply: it is what the job really runs
+  with. If `limits_clamped` is non-empty the daemon does not let you raise that
+  axis above its default; do not retry with a bigger number.
+- `exit_reason: "memory_ceiling"` (with `peak_memory_bytes`) means the job's own
+  ceiling stopped it, so the failure is the limit, not your code. Retry with
+  less parallelism (`cargo test -j 2`, `make -j2`) rather than a bigger limit.
+- `exit_reason: "host_ceiling"` means the daemon's jobs together exceeded the
+  shared ceiling while this job was under its own limit. Check which jobs were
+  running, then lower their limits or `-j`; do not assume the newest job was
+  the victim. On Linux the kernel's OOM killer picks the victim inside the
+  shared cgroup, usually the largest job, so the job holding memory can be the
+  one flagged while a newcomer finishes. On Windows the job whose commit was
+  refused is the one that fails. On Windows both reasons are kernel facts
+  attributed to this exact job. On Linux `memory_ceiling` is a fact but
+  `host_ceiling` is an inference: a job that failed for another reason can be
+  flagged while a concurrent job sits at the host ceiling. A stop never
+  carries one.
+- `peak_memory_bytes` on Windows counts a refused commit: one 1 GiB allocation
+  refused under a 100 MiB limit reports about 1.1 GB with `memory_ceiling`, so
+  the peak can exceed the limit. On Linux cgroup it is `memory.peak` and stays
+  at or below the limit. After a stop, Windows shows `cancelled` at once and
+  fills the peak when the tree is reaped, typically within about two seconds;
+  Linux has it at once.
+- `governor` names the mechanism (`job_object`, `cgroup`, `rlimit`) or says
+  `unavailable` with a reason; in the last case the job ran with no ceiling.
+  `host_ceiling_joined: false` means the job could not join the installed
+  host ceiling (audited as `governor_unavailable`, reason
+  `host_ceiling_join_failed`).
+- Under `rlimit` (a daemon started from a plain `wsl.exe` shell, no systemd)
+  the default memory is NOT applied, there is no peak and no `exit_reason`,
+  and `policy_status` `host_ceiling_mode` is `unavailable`. Pass an explicit
+  `limits.memory` to opt in, or run the daemon from the systemd user unit.
+- This is a guardrail: work handed to `wsl.exe` or docker from Windows runs
+  outside the Job Object and is not capped.
+
 ## 6. Remote hosts: target_id
 
 To run a daemon-backed tool against a remote host, add `target_id`:

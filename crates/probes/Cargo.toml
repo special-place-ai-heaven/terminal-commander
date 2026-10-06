@@ -32,6 +32,8 @@ vte = "0.15.0"
 # is used. License: MIT. Pinned to 0.5.3 per the TC44 prep amendment.
 [target.'cfg(unix)'.dependencies]
 pty-process = { version = "=0.5.3", features = ["async"] }
+# Resource governor: RLIMIT_DATA + setpriority in pre_exec (governor.rs).
+libc = "0.2"
 
 # H2: file-rotation identity on Windows. The std `MetadataExt`
 # volume-serial / file-index accessors are unstable (`windows_by_handle`,
@@ -48,6 +50,10 @@ pty-process = { version = "=0.5.3", features = ["async"] }
 #   * Win32_Security           — CreateJobObjectW's signature references
 #                                SECURITY_ATTRIBUTES, gated behind this feature
 #                                (we pass a null pointer for it).
+#   * Win32_System_IO          — the resource governor's completion port
+#                                (CreateIoCompletionPort /
+#                                GetQueuedCompletionStatus) that receives the
+#                                Job Objects' memory-limit messages.
 # US3a (TC53): Windows ConPTY spawn behind the same abstract `PtyProbe`
 # surface the unix `pty-process` path exports. `portable-pty` wraps the
 # Win32 ConPTY API (`CreatePseudoConsole`/`ClosePseudoConsole`), which
@@ -62,7 +68,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_Security",
+    "Win32_System_IO",
     "Win32_System_JobObjects",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
 
@@ -70,6 +78,7 @@ windows-sys = { version = "0.61", features = [
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",
+    "Win32_System_Threading",
 ] }
 
 # Replicate workspace lints rather than using `workspace = true` so we
