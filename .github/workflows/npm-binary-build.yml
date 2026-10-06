@@ -22,6 +22,9 @@ name: npm-binary-build
 #   build-linux-x64 / build-linux-x64, build-linux-arm64 / build-linux-arm64,
 #   build-windows-x64 / build-windows-x64, build-mac-x64 / build-mac-x64,
 #   build-mac-arm64 / build-mac-arm64, npm-pack (after all builds).
+# `install-path-linux` (the packed npm install-path check) is meant to be
+# required too; it gates only once it is added to that ruleset (a repository
+# setting, not this file). Until then a red run is visible but not blocking.
 #
 # GitHub's "required check + path filter" interaction: if a PR touches ONLY
 # paths that the `pull_request.paths` filter excludes (e.g. a workflow-only
@@ -135,6 +138,44 @@ jobs:
       - name: pre-build gates (scripts/windows-gate.ps1)
         shell: pwsh
         run: ./scripts/windows-gate.ps1
+
+  # The npm wrapper's REAL Linux install path: packed tarballs, `npm install -g`
+  # into an isolated HOME, the postinstall bootstrap, the profile-hook
+  # autostart under login / non-interactive / fast-closing interactive shells,
+  # stale-socket recovery and the installed MCP adapter. Unit tests, the gates
+  # and the runtime smoke all run binaries from the build tree and missed two
+  # user-facing v0.3.12 defects that only this path showed.
+  install-path-linux:
+    name: install-path-linux
+    needs: pre-build-gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RUST_TOOLCHAIN: "1.97.1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-unknown-linux-gnu
+      # Read-only reuse of the pre-build-gates cache (same toolchain and
+      # lockfile); never saved from here, so this narrower build cannot
+      # replace the gates' cache.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: npm-binary-build-pre-gates
+          save-if: false
+      - name: cargo build (debug, the three shipped binaries)
+        run: cargo build -p terminal-commanderd -p terminal-commander-mcp -p terminal-commander-cli
+      - name: ensure script(1) is present
+        run: command -v script || { sudo apt-get update && sudo apt-get install -y bsdutils; }
+      # No setup-node on purpose: autostart.sh runs the npm shims with a fixed
+      # system PATH, so the check uses the image's system node like a user
+      # whose npm prefix is ~/.npm-global (the script refuses otherwise).
+      - name: install-path check (scripts/ci/install-path-check.sh)
+        run: bash scripts/ci/install-path-check.sh target/debug
 
   build-linux-x64:
     needs: pre-build-gates

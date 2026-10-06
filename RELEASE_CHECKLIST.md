@@ -108,8 +108,8 @@ attached to a follow-up artifact, the beta posture stays
 - [ ] `.github/.release-please-manifest.json` agrees with all six
       `package.json` version fields.
 - [ ] `npm-binary-build` workflow latest run on `main` is `success`:
-      both `pre-build-gates` jobs (linux-x64, windows-x64), all five
-      `build-*` legs, and `npm-pack`.
+      both `pre-build-gates` jobs (linux-x64, windows-x64),
+      `install-path-linux`, all five `build-*` legs, and `npm-pack`.
 - [ ] `release-please` workflow latest run on `main` is `success`
       and the publish jobs were correctly `skipped` if no
       release PR was merged on that push (gate
