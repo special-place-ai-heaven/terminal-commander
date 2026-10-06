@@ -297,13 +297,23 @@ them). To size one job, pass `limits` on `run_and_watch`, `command_start_combed`
 - `exit_reason: "memory_ceiling"` (with `peak_memory_bytes`) means the job's own
   ceiling stopped it, so the failure is the limit, not your code. Retry with
   less parallelism (`cargo test -j 2`, `make -j2`) rather than a bigger limit.
-- `exit_reason: "host_ceiling"` means the daemon-wide ceiling shared by all
-  jobs was hit while this job was under its own limit. Other jobs are using
-  the memory: wait for them or retry with lower `-j`. On Windows both reasons
-  are kernel facts attributed to this exact job. On Linux `memory_ceiling` is
-  a fact but `host_ceiling` is an inference: a job that failed for another
-  reason can be flagged while a concurrent job sits at the host ceiling. A
-  stop never carries one.
+- `exit_reason: "host_ceiling"` means the daemon's jobs together exceeded the
+  shared ceiling while this job was under its own limit. Check which jobs were
+  running, then lower their limits or `-j`; do not assume the newest job was
+  the victim. On Linux the kernel's OOM killer picks the victim inside the
+  shared cgroup, usually the largest job, so the job holding memory can be the
+  one flagged while a newcomer finishes. On Windows the job whose commit was
+  refused is the one that fails. On Windows both reasons are kernel facts
+  attributed to this exact job. On Linux `memory_ceiling` is a fact but
+  `host_ceiling` is an inference: a job that failed for another reason can be
+  flagged while a concurrent job sits at the host ceiling. A stop never
+  carries one.
+- `peak_memory_bytes` on Windows counts a refused commit: one 1 GiB allocation
+  refused under a 100 MiB limit reports about 1.1 GB with `memory_ceiling`, so
+  the peak can exceed the limit. On Linux cgroup it is `memory.peak` and stays
+  at or below the limit. After a stop, Windows shows `cancelled` at once and
+  fills the peak when the tree is reaped, typically within about two seconds;
+  Linux has it at once.
 - `governor` names the mechanism (`job_object`, `cgroup`, `rlimit`) or says
   `unavailable` with a reason; in the last case the job ran with no ceiling.
   `host_ceiling_joined: false` means the job could not join the installed
