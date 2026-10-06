@@ -18,8 +18,8 @@
 //!   with `memory.max` and `memory.swap.max=0`. The child moves ITSELF into
 //!   the cgroup in `pre_exec` (writes `0` to `cgroup.procs`), so nothing it
 //!   forks can escape; the parent re-writes the pid after spawn as a checked
-//!   fallback. Peak = `memory.peak`, hit =
-//!   `memory.events` `oom_kill > 0` with a non-success exit. When the parent
+//!   fallback. Peak = `memory.peak`, hit = `memory.events.local` `oom > 0`
+//!   with a non-success exit. When the parent
 //!   cgroup is not writable (WSL `/non-systemd`, no systemd) the fallback is
 //!   `RLIMIT_DATA` set in `pre_exec` (inherited, per-process, not tree-summed;
 //!   peak and hit are unknowable). Never `RLIMIT_AS`, never `systemd-run`.
@@ -92,10 +92,25 @@ pub struct GovernorReport {
     /// kernels < 5.19); rlimit: None.
     pub peak_memory_bytes: Option<u64>,
     /// Requires a non-success exit everywhere. Windows: peak >= limit;
-    /// cgroup: `oom_kill > 0`; rlimit: false (unknowable).
+    /// cgroup: the job dir's local `oom` count > 0; rlimit: false
+    /// (unknowable).
     pub memory_limit_hit: bool,
     /// The child joined the installed host ceiling.
     pub host_ceiling_joined: bool,
+    /// The host ceiling was reached while this job ran and the job exited
+    /// non-success (filled at exit). An inference, never a guess: unknown is
+    /// reported as `false`.
+    /// * Windows: the host job's `PeakJobMemoryUsed` was below the host limit
+    ///   at this job's spawn and is at or above it at exit. If the host peak
+    ///   was already at the limit when the job started (the peak never
+    ///   resets), the answer is unknowable and reported `false`.
+    /// * Linux cgroup: the host dir's `memory.events.local` `oom` count rose
+    ///   between spawn and exit.
+    /// * Rlimit / no host ceiling joined: `false`.
+    ///
+    /// Either way a concurrent job reaching the ceiling during this job's
+    /// life can flag a job that failed for another reason.
+    pub host_ceiling_hit: bool,
 }
 
 /// Host memory totals for percent resolution.
@@ -337,13 +352,14 @@ pub(crate) fn apply_job_limits(
 /// its tree-kill, and the limit is reported `Unavailable(reason)`. Default
 /// limits: only the pre-existing kill-only job, report mode `None`.
 ///
-/// Returns the per-job job (for tree-kill and the peak query) and the report,
-/// whose mode and `host_ceiling_joined` are final here.
+/// Returns the per-job job (for tree-kill and the peak query), the report
+/// (mode and `host_ceiling_joined` final here), and the host job's peak at
+/// spawn for [`finish_job`]'s host-ceiling inference.
 #[cfg(windows)]
 pub(crate) fn govern_child(
     child: Option<std::os::windows::io::RawHandle>,
     limits: &JobLimits,
-) -> (Option<crate::process::JobHandle>, SharedReport) {
+) -> (Option<crate::process::JobHandle>, SharedReport, Option<u64>) {
     use crate::process::{JobHandle, assign_to_job, create_job};
     let governed = *limits != JobLimits::default();
     let report = if governed {
@@ -357,12 +373,14 @@ pub(crate) fn govern_child(
                 "child handle unavailable".to_owned(),
             ));
         }
-        return (None, report);
+        return (None, report, None);
     };
-    let host_joined = limits.join_host_ceiling
-        && windows_host::HOST
-            .get()
-            .is_some_and(|(host, _)| assign_to_job(host, child).is_ok());
+    let host = windows_host::HOST
+        .get()
+        .filter(|_| limits.join_host_ceiling)
+        .filter(|(host, _)| assign_to_job(host, child).is_ok());
+    let host_joined = host.is_some();
+    let host_peak_at_spawn = host.and_then(|(host, _)| job_peak(host));
     let job_with = |l: &JobLimits| -> Result<JobHandle, String> {
         let job = create_job(l)?;
         assign_to_job(&job, child)?;
@@ -380,34 +398,55 @@ pub(crate) fn govern_child(
         r.mode = Some(mode);
         r.host_ceiling_joined = host_joined;
     }
-    (job, report)
+    (job, report, host_peak_at_spawn)
 }
 
-/// Fill peak and limit-hit from the job after the child exited.
+/// Fill peak, limit-hit and host-ceiling-hit after the child exited.
 #[cfg(windows)]
 pub(crate) fn finish_job(
     report: &SharedReport,
     job: Option<&crate::process::JobHandle>,
+    host_peak_at_spawn: Option<u64>,
     abnormal_exit: bool,
 ) {
+    let (governed, joined) = {
+        let r = report.lock();
+        (
+            r.mode == Some(GovernorMode::JobObject),
+            r.host_ceiling_joined,
+        )
+    };
+    // Ungoverned (default limits) or Unavailable (a kill-only job carries no
+    // limit to report against): no per-job query.
+    if let Some(peak) = job.filter(|_| governed).and_then(job_peak) {
+        let mut r = report.lock();
+        r.peak_memory_bytes = Some(peak);
+        r.memory_limit_hit = abnormal_exit && r.memory_limit_bytes.is_some_and(|l| peak >= l);
+    }
+    if joined && abnormal_exit {
+        // Only a crossing seen during this job's life counts; a host peak
+        // already at the limit at spawn makes the answer unknowable.
+        let hit = windows_host::HOST.get().is_some_and(|(host, limit)| {
+            host_peak_at_spawn.is_some_and(|before| before < *limit)
+                && job_peak(host).is_some_and(|peak| peak >= *limit)
+        });
+        report.lock().host_ceiling_hit = hit;
+    }
+}
+
+/// `PeakJobMemoryUsed` of `job`, `None` if the query fails.
+#[cfg(windows)]
+fn job_peak(job: &crate::process::JobHandle) -> Option<u64> {
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::System::JobObjects::{
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         QueryInformationJobObject,
     };
-    // Ungoverned (default limits) or Unavailable (a kill-only job carries no
-    // limit to report against): no query.
-    let Some(job) = job.filter(|_| report.lock().mode == Some(GovernorMode::JobObject)) else {
-        return;
-    };
+    let size = u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).ok()?;
     // SAFETY: `info` is a zeroed `#[repr(C)]` POD of exactly the size passed;
     // `job.0` is a live Job Object handle owned by `JobHandle` for this borrow.
     // The BOOL result is checked before `info` is read.
     let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-    let Ok(size) = u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
-    else {
-        return;
-    };
     let ok = unsafe {
         QueryInformationJobObject(
             job.0 as HANDLE,
@@ -417,13 +456,7 @@ pub(crate) fn finish_job(
             std::ptr::null_mut(),
         )
     };
-    if ok == 0 {
-        return;
-    }
-    let peak = info.PeakJobMemoryUsed as u64;
-    let mut r = report.lock();
-    r.peak_memory_bytes = Some(peak);
-    r.memory_limit_hit = abnormal_exit && r.memory_limit_bytes.is_some_and(|l| peak >= l);
+    (ok != 0).then_some(info.PeakJobMemoryUsed as u64)
 }
 
 // ------------------------------------------------------------------- unix --
@@ -441,6 +474,8 @@ pub(crate) struct UnixGovernor {
     cgroup_procs: Option<std::ffi::CString>,
     rlimit_data: Option<u64>,
     nice: Option<i32>,
+    /// Host dir's local `oom` count at spawn (host-ceiling jobs only).
+    host_oom_at_spawn: Option<u64>,
 }
 
 #[cfg(unix)]
@@ -485,12 +520,17 @@ impl UnixGovernor {
             use std::os::unix::ffi::OsStrExt;
             std::ffi::CString::new(dir.join("cgroup.procs").as_os_str().as_bytes()).ok()
         });
+        #[cfg(target_os = "linux")]
+        let host_oom_at_spawn = host_joined.then(cgroup::host_oom_count).flatten();
+        #[cfg(not(target_os = "linux"))]
+        let host_oom_at_spawn = None;
         Some(Self {
             report,
             cgroup,
             cgroup_procs,
             rlimit_data,
             nice,
+            host_oom_at_spawn,
         })
     }
 
@@ -580,7 +620,7 @@ impl UnixGovernor {
         r.host_ceiling_joined = false;
     }
 
-    /// After exit: read peak and `oom_kill`, then remove the cgroup. A
+    /// After exit: read peak and the limit counters, then remove the cgroup. A
     /// descendant that outlived the child keeps it populated (`EBUSY`): the
     /// whole cgroup is then killed (`cgroup.kill`) and the rmdir retried.
     /// This also covers cancel, which reaches here after the process-group
@@ -592,19 +632,32 @@ impl UnixGovernor {
         let peak = std::fs::read_to_string(dir.join("memory.peak"))
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok());
-        let oom_kill = std::fs::read_to_string(dir.join("memory.events"))
-            .ok()
-            .and_then(|s| {
+        let counter = |file: &str, key: &str| {
+            std::fs::read_to_string(dir.join(file)).ok().and_then(|s| {
                 s.lines()
-                    .find_map(|l| l.strip_prefix("oom_kill "))
+                    .find_map(|l| l.strip_prefix(key))
                     .and_then(|v| v.trim().parse::<u64>().ok())
             })
+        };
+        // This job's OWN limit was reached: the local `oom` count. `oom_kill`
+        // also counts kills caused by the host ceiling above it, so it is
+        // only the fallback for kernels without `memory.events.local` (< 5.7).
+        let own_limit_hits = counter("memory.events.local", "oom ")
+            .or_else(|| counter("memory.events", "oom_kill "))
             .unwrap_or(0);
         #[cfg(target_os = "linux")]
         cgroup::remove(&dir);
+        #[cfg(target_os = "linux")]
+        let host_hit = self
+            .host_oom_at_spawn
+            .zip(cgroup::host_oom_count())
+            .is_some_and(|(before, now)| now > before);
+        #[cfg(not(target_os = "linux"))]
+        let host_hit = false;
         let mut r = self.report.lock();
         r.peak_memory_bytes = peak;
-        r.memory_limit_hit = abnormal_exit && oom_kill > 0;
+        r.memory_limit_hit = abnormal_exit && own_limit_hits > 0;
+        r.host_ceiling_hit = abnormal_exit && r.host_ceiling_joined && host_hit;
     }
 }
 
@@ -786,6 +839,20 @@ mod cgroup {
         let _ = std::fs::write(dir.join("memory.swap.max"), "0");
         HOST.set((dir, limit))
             .map_err(|_| "host ceiling already installed".to_owned())
+    }
+
+    /// The host dir's `memory.events.local` `oom` count: times the host
+    /// ceiling itself was reached. The hierarchical `memory.events` would
+    /// also count per-job limit hits in its children.
+    pub(super) fn host_oom_count() -> Option<u64> {
+        let (dir, _) = HOST.get()?;
+        std::fs::read_to_string(dir.join("memory.events.local"))
+            .ok()?
+            .lines()
+            .find_map(|l| l.strip_prefix("oom "))?
+            .trim()
+            .parse()
+            .ok()
     }
 
     /// Whether `/proc/<pid>/cgroup` places `pid` in `dir`.

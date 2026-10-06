@@ -370,6 +370,18 @@ fn host_ceiling_scenario() {
         );
         assert!(holder_report.host_ceiling_joined);
         assert!(pusher_report.host_ceiling_joined);
+        assert!(
+            pusher_report.host_ceiling_hit,
+            "the failing job names the host ceiling"
+        );
+        assert!(
+            !holder_report.host_ceiling_hit,
+            "a successful job is never flagged"
+        );
+        assert!(
+            !pusher_report.memory_limit_hit,
+            "its own 100 MiB limit was not the one reached"
+        );
     });
     let _ = std::fs::remove_dir_all(dir);
     // The host dir lives for the daemon's life; this process is the daemon.

@@ -323,9 +323,10 @@ impl ProcessProbe {
         // the job could not be created/assigned -- the cancel path then falls
         // back to a single-process kill (`start_kill`).
         #[cfg(windows)]
-        let (job, governor) = {
-            let (job, report) = crate::governor::govern_child(child.raw_handle(), &config.limits);
-            (job.map(Arc::new), report)
+        let (job, governor, host_peak_at_spawn) = {
+            let (job, report, host_peak) =
+                crate::governor::govern_child(child.raw_handle(), &config.limits);
+            (job.map(Arc::new), report, host_peak)
         };
         // Unix: verify the cgroup move the child made in `pre_exec` (see
         // governor.rs) and keep the report handle.
@@ -414,6 +415,7 @@ impl ProcessProbe {
             crate::governor::finish_job(
                 &governor_for_task,
                 job_for_task.as_deref(),
+                host_peak_at_spawn,
                 !matches!(&result, Ok(st) if st.success()),
             );
             #[cfg(unix)]
