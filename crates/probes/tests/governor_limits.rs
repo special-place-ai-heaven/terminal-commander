@@ -43,6 +43,8 @@ const OOM_VICTIM_ENV: &str = "TC_TEST_OOM_VICTIM";
 const EXPECT_PRIORITY_ENV: &str = "TC_TEST_EXPECT_PRIORITY";
 const NESTED_ENV: &str = "TC_TEST_NESTED";
 const ONESHOT_ENV: &str = "TC_TEST_ALLOC_ONESHOT";
+#[cfg(target_os = "linux")]
+const REMOVED_HOST_ENV: &str = "TC_TEST_REMOVED_HOST";
 const MIB: u64 = 1024 * 1024;
 const LIMIT: u64 = 100 * MIB;
 const HOST_LIMIT: u64 = 150 * MIB;
@@ -678,12 +680,36 @@ fn outliving_grandchild_is_killed_and_dir_removed() {
 
 /// After boot found cgroups usable, a per-job create failure (here: the
 /// host dir removed under the daemon) is `Unavailable`, never a run-time
-/// switch to the rlimit lane; the job still runs.
+/// switch to the rlimit lane; the job still runs. Runs in a re-exec of this
+/// binary: it installs the process-wide host ceiling, which a shared-process
+/// `cargo test` run has already installed for `host_ceiling_caps_jobs_together`.
 #[cfg(target_os = "linux")]
 #[test]
 fn removed_host_dir_is_unavailable_not_rlimit() {
     if available_mode() != GovernorMode::Cgroup {
         println!("linux governor mode: rlimit (no cgroup lane); skipped");
+        return;
+    }
+    let argv = self_argv("removed_host_dir_helper");
+    let out = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .env(REMOVED_HOST_ENV, "1")
+        .output()
+        .expect("re-exec test binary");
+    println!("{}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        out.status.success(),
+        "removed-host-dir scenario failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Inner half of `removed_host_dir_is_unavailable_not_rlimit`: idle unless
+/// `TC_TEST_REMOVED_HOST` is set.
+#[cfg(target_os = "linux")]
+#[test]
+fn removed_host_dir_helper() {
+    if std::env::var_os(REMOVED_HOST_ENV).is_none() {
         return;
     }
     install_host_ceiling(HOST_LIMIT).expect("host ceiling installs");

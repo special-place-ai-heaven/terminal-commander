@@ -400,7 +400,8 @@ pub struct GovernorOutcome {
 
 /// `governor_unavailable` audit reason for a job that failed to join the
 /// installed host ceiling.
-pub const HOST_CEILING_JOIN_FAILED: &str = "host_ceiling_join_failed: the job did not join      the daemon-wide host ceiling; only its own limit bounds it";
+pub const HOST_CEILING_JOIN_FAILED: &str = "host_ceiling_join_failed: the job did not join \
+     the daemon-wide host ceiling; only its own limit bounds it";
 
 impl GovernorOutcome {
     /// Map a probe report. An ungoverned job (`mode == None`) maps to all

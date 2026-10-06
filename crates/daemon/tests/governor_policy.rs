@@ -790,7 +790,8 @@ fn a_job_runs_whatever_the_enforcer_and_status_says_how() {
         assert_eq!(
             unavailable,
             mode.get("unavailable").is_some() || status["host_ceiling_joined"] == json!(false),
-            "governor_unavailable row iff the job ran ungoverned or outside the              host ceiling: {rows:?}"
+            "governor_unavailable row iff the job ran ungoverned or outside the \
+             host ceiling: {rows:?}"
         );
         if mode == json!("rlimit") {
             assert!(

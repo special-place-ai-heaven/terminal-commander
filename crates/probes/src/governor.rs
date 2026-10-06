@@ -379,7 +379,11 @@ mod limit_messages {
             // a new port tied to no file; the result is checked for null.
             let h =
                 unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, std::ptr::null_mut(), 0, 1) };
-            (!h.is_null()).then_some(h as isize)
+            let port = (!h.is_null()).then_some(h as isize);
+            if port.is_some() {
+                start_periodic_drain();
+            }
+            port
         });
         raw.map(|h| h as HANDLE)
     }
@@ -418,10 +422,25 @@ mod limit_messages {
         ok != 0
     }
 
+    /// Drain the port every 250 ms for the process's life, so a long
+    /// fork-heavy job cannot pile NEW/EXIT packets up in nonpaged pool. The
+    /// same non-blocking drain under the same lock: a thread blocked in
+    /// `GetQueuedCompletionStatus` could hold a dequeued packet outside the
+    /// lock and break "a reader sees everything posted before its read".
+    fn start_periodic_drain() {
+        let spawned = std::thread::Builder::new()
+            .name("tc-governor-drain".to_owned())
+            .spawn(|| {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    drain(&mut COUNTS.lock());
+                }
+            });
+        // No thread: spawn/finish still drain; only the packet backlog grows.
+        drop(spawned);
+    }
+
     /// Pull every queued packet without blocking; count the limit messages.
-    // ponytail: drained only when a governed job spawns or finishes, so a
-    // long job spawning many processes queues NEW/EXIT packets in kernel
-    // memory until then. Upgrade: a drain thread blocking on the port.
     fn drain(counts: &mut BTreeMap<usize, u64>) {
         let Some(port) = port() else { return };
         loop {
@@ -529,16 +548,19 @@ pub(crate) fn govern_child(
         }
         return (None, report, LimitWatch::default());
     };
-    // A failed host assignment leaves `host_ceiling_joined` false; the
-    // per-job job below is still created and its mode reported on its own.
+    // The host baseline is read BEFORE the assignment: once assigned, the
+    // running child's own commits can post host limit messages, which must
+    // count as this job's crossing, not as the baseline. A failed host
+    // assignment leaves `host_ceiling_joined` false; the per-job job below is
+    // still created and its mode reported on its own.
     let host = windows_host::HOST
         .get()
-        .filter(|_| limits.join_host_ceiling)
-        .filter(|(host, _, _)| assign_to_job(host, child).is_ok());
-    let host_joined = host.is_some();
-    let host_at_spawn = host
+        .filter(|_| limits.join_host_ceiling);
+    let baseline = host
         .filter(|(_, _, watched)| *watched)
         .map(|_| limit_messages::count(limit_messages::HOST_KEY));
+    let host_joined = host.is_some_and(|(host, _, _)| assign_to_job(host, child).is_ok());
+    let host_at_spawn = baseline.filter(|_| host_joined);
     // Associate before assigning, so no limit message predates the port.
     let job_with = |l: &JobLimits, watch: bool| -> Result<(JobHandle, Option<usize>), String> {
         let job = create_job(l)?;
