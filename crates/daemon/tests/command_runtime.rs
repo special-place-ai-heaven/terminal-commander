@@ -1047,6 +1047,7 @@ fn response_types_have_no_raw_stream_lane() {
         wslenv_dropped: Vec::new(),
         limits_applied: None,
         limits_clamped: Vec::new(),
+        governor: None,
     };
     assert_small_response(&r);
     let s = CommandStatusResponse {
@@ -1074,6 +1075,7 @@ fn response_types_have_no_raw_stream_lane() {
         last_output_age_ms: None,
         exit_reason: None,
         governor: None,
+        limits_applied: None,
         peak_memory_bytes: None,
     };
     assert_small_response(&s);

@@ -134,6 +134,8 @@ mod runtime {
         pub limits_applied: Option<terminal_commander_ipc::LimitsApplied>,
         /// As [`terminal_commander_ipc::CommandStartResponse::limits_clamped`].
         pub limits_clamped: Vec<String>,
+        /// As [`terminal_commander_ipc::CommandStartResponse::governor`].
+        pub governor: Option<terminal_commander_ipc::GovernorModeWire>,
     }
 
     /// What `credential_request` needs to know about a PTY job's prompt.
@@ -675,9 +677,10 @@ mod runtime {
             // Resource governor: mode and limit are known once the spawn
             // returns, so a stop can report them without the probe. The
             // waiter replaces this with the final report (peak included).
-            let spawn_governor = GovernorOutcome::from_report(&probe.governor_report());
+            let spawn_governor =
+                GovernorOutcome::at_spawn(&probe.governor_report(), resolved_limits.applied);
             let probe_cell = Arc::new(tokio::sync::Mutex::new(Some(probe)));
-            let governor = Arc::new(parking_lot::Mutex::new(spawn_governor));
+            let governor = Arc::new(parking_lot::Mutex::new(spawn_governor.clone()));
 
             let job_cfg = JobConfig {
                 job_id,
@@ -749,7 +752,7 @@ mod runtime {
                         // the final report. A stop never reports an exit_reason.
                         if let Some(report) = report {
                             let mut g = waiter_governor.lock();
-                            *g = GovernorOutcome::from_report(&report);
+                            g.finish(&report);
                             g.exit_reason = None;
                             if g.governor.is_some() {
                                 let pm = probe_metrics.unwrap_or_default();
@@ -778,7 +781,15 @@ mod runtime {
                     // sees the terminal state also sees the governor fields
                     // (same rule as the combed receipt, status_stop_readback).
                     if let Some(report) = report {
-                        *waiter_governor.lock() = GovernorOutcome::from_report(&report);
+                        let mut g = waiter_governor.lock();
+                        g.finish(&report);
+                        // A probe-side cancel is not the ceiling.
+                        if matches!(
+                            outcome,
+                            terminal_commander_probes::PtyExitOutcome::Cancelled
+                        ) {
+                            g.exit_reason = None;
+                        }
                     }
                     // Capture the exit code before `outcome` is moved into the
                     // draft match below. A cancelled PTY job has no exit code.
@@ -884,14 +895,18 @@ mod runtime {
                     governor,
                 },
             );
-            if !resolved_limits.clamped.is_empty() {
+            let subject = job_id.to_wire_string();
+            if let Some((reason, meta)) = resolved_limits.clamp_audit(req.limits.as_ref()) {
                 self.audit(
                     "governor_clamp",
-                    &job_id.to_wire_string(),
+                    &subject,
                     "allow",
-                    Some(crate::governor::clamp_reason(&resolved_limits.clamped)),
-                    None,
+                    Some(reason),
+                    Some(meta),
                 );
+            }
+            if let Some(reason) = spawn_governor.unavailable_reason() {
+                self.audit("governor_unavailable", &subject, "info", Some(reason), None);
             }
 
             let mut metadata = serde_json::json!({
@@ -929,6 +944,7 @@ mod runtime {
                 wslenv_dropped: crate::command::wslenv_dropped_to_report(&req.argv, wslenv_dropped),
                 limits_applied: resolved_limits.applied,
                 limits_clamped: resolved_limits.clamped,
+                governor: spawn_governor.governor,
             })
         }
 
@@ -1231,7 +1247,7 @@ mod runtime {
         ) -> Option<terminal_commander_ipc::protocol::CommandStatusResponse> {
             use terminal_commander_ipc::protocol::OutcomeTrust;
 
-            let (bucket_id, probe_id, metrics, awaiting_credential, governor) = {
+            let (bucket_id, probe_id, metrics, awaiting_credential, mut governor) = {
                 let g = self.live.read();
                 let b = g.get(&job_id)?;
                 // Same read shape as `list()`: prefer the probe's live counters,
@@ -1259,11 +1275,12 @@ mod runtime {
             };
             let rec = self.jobs.get(job_id)?;
             let elapsed_ms = crate::command::running_elapsed_ms(&rec);
-            let governor = if elapsed_ms.is_some() {
-                GovernorOutcome::default()
-            } else {
-                governor
-            };
+            // Running: the mode and limits show, the peak and exit reason
+            // exist only after exit.
+            if elapsed_ms.is_some() {
+                governor.peak_memory_bytes = None;
+                governor.exit_reason = None;
+            }
             Some(terminal_commander_ipc::protocol::CommandStatusResponse {
                 job_id,
                 bucket_id,
@@ -1295,6 +1312,7 @@ mod runtime {
                     .and(metrics.last_frame_at)
                     .map(crate::command::output_age_ms),
                 governor: governor.governor,
+                limits_applied: governor.limits_applied,
                 peak_memory_bytes: governor.peak_memory_bytes,
                 exit_reason: governor.exit_reason,
             })

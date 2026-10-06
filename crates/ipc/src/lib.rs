@@ -50,7 +50,7 @@ pub use protocol::{
     DEFAULT_BUCKET_READ_LIMIT, DEFAULT_BUCKET_WAIT_MS, DEFAULT_CONTEXT_AFTER,
     DEFAULT_CONTEXT_BEFORE, DEFAULT_FILE_READ_BYTES, DEFAULT_FILE_READ_LINES,
     DEFAULT_FILE_SEARCH_MATCHES, DEFAULT_FILE_SEARCH_SNIPPET_BYTES, DEFAULT_PULL_TIMEOUT_MS,
-    DEFAULT_REGISTRY_SEARCH_LIMIT, DiscoverResponse, EXIT_REASON_MEMORY_CEILING,
+    DEFAULT_REGISTRY_SEARCH_LIMIT, DiscoverResponse, EXIT_REASON_HOST_CEILING, EXIT_REASON_MEMORY_CEILING,
     EventContextParams, EventContextResponse, FileLine, FileReadWindowParams,
     FileReadWindowResponse, FileSearchMatch, FileSearchParams, FileSearchResponse,
     FileWatchListEntry, FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse,

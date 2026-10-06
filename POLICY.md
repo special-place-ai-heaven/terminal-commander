@@ -659,32 +659,54 @@ enabled = true                      # false: no limits, responses as before
 default_job_memory = "60%"          # "<n>%", "24GiB", "512MiB", bytes, or "none"
 default_priority = "below_normal"   # idle | below_normal | normal
 llm_can_raise_limits = true         # omitted: profile default (below)
+host_ceiling = "97%"                # daemon-wide ceiling all jobs share; same syntax
 ```
 
 - **Percent** resolves against the commit limit on Windows and against total
   memory (`MemTotal`) on Linux. If host memory cannot be read, the percent
   default resolves to no limit and `policy_status.governor.note` says so.
-- **`llm_can_raise_limits`** defaults to true under `full_access` and
-  `admin_debug`, false under `developer_local`, `repo_only` and
-  `read_only_observer`. When false, a request that asks for more than the
+- **`host_ceiling`** is installed once at daemon start and every governed job
+  (every lane, shell sessions included) joins it, so jobs together can never
+  exceed it: a parent Job Object on Windows, a parent `tc-jobs` cgroup on
+  Linux. `default_job_memory` is clamped to it, and a request above it is
+  clamped to it and listed in `limits_clamped`. Where the host has no
+  aggregate primitive (rlimit) `host_ceiling_mode` is `{"unavailable": reason}`;
+  nothing is faked. `"none"` installs no ceiling.
+- **`llm_can_raise_limits`** defaults to true only under `full_access` and
+  `admin_debug` (an allow-list: every other profile defaults to false). When
+  false, a request that asks for more than the
   default (a larger memory ceiling, a higher priority) is clamped to the
   default and the start response lists the clamped axes in `limits_clamped`.
   A request at or below the default is always honoured.
+- **Under rlimit** the profile default memory is not applied (`RLIMIT_DATA`
+  breaks sanitizers and large reservations and cannot be raised back); an
+  explicit `limits.memory` is applied, the default priority still is, and
+  `policy_status.governor.note` says so.
 - **Requests** carry an optional `limits` object on `command_start_combed`,
   `run_and_watch`, `shell_exec`, `recipe_run` and `pty_command_start`:
   `{"memory": "24GiB" | "40%" | "none", "priority": "idle" | "below_normal" | "normal"}`.
   An omitted axis takes the default. A start response reports what the job
-  runs with as `limits_applied` (`memory_bytes`, `priority`). With
-  `enabled = false` neither `limits_applied` nor any governor field appears.
+  runs with as `limits_applied` (`memory_bytes`, `priority`) and the enforcing
+  mechanism as `governor`, read from the probe right after spawn; a start
+  collapsed onto an in-flight duplicate reports the same values (the limits
+  are part of the duplicate fingerprint). With `enabled = false` neither
+  `limits_applied` nor any governor field appears, and no kernel mechanism is
+  probed.
 - **`policy_status.governor`** reports `enabled`, `mode_available` (what this
   host can enforce, detected at daemon start), `default_job_memory_bytes`,
-  `default_priority`, `llm_can_raise_limits` and an optional `note`.
+  `default_priority`, `llm_can_raise_limits`, `host_ceiling_bytes`,
+  `host_ceiling_mode` and an optional `note`.
 - **Status and run_and_watch results** of a governed job report `governor`
   (the mechanism: `job_object`, `cgroup`, `rlimit`, or `{"unavailable": reason}`
-  when no enforcement was possible and the job ran ungoverned),
+  when no enforcement was possible and the job ran ungoverned) and
+  `limits_applied`, while running and after exit; after exit also
   `peak_memory_bytes` when the mechanism can measure it, and
-  `exit_reason: "memory_ceiling"` when the ceiling stopped the job. A clamped
-  start and a memory_ceiling exit are audited, the latter with limit and peak.
+  `exit_reason: "memory_ceiling"` when the ceiling stopped the job. A stop
+  (`command_stop`, `pty_command_stop`) never carries `exit_reason`.
+- **Audit:** a clamped start writes `governor_clamp` with the requested and
+  applied values; a job that runs ungoverned writes `governor_unavailable`
+  with the reason; a memory_ceiling exit writes `governor_memory_ceiling` with
+  limit and peak.
 
 Mechanisms and their limits:
 
@@ -693,8 +715,10 @@ Mechanisms and their limits:
   `exit_reason` is therefore inferred from `peak_memory_bytes` reaching the
   limit together with an abnormal exit. One oversized allocation refused
   outright is reported with the limit and the peak but without `exit_reason`.
-- **Linux `cgroup`:** the daemon creates a sibling cgroup v2 with `memory.max`
-  (swap off) and moves the job into it, so the ceiling covers the whole tree,
+- **Linux `cgroup`:** the daemon creates a per-job cgroup v2 with `memory.max`
+  (swap off) under the `tc-jobs` parent that carries the host ceiling, a
+  sibling of its own cgroup, and moves the job into it, so the ceiling covers
+  the whole tree,
   and the kernel's OOM kill is what stops it. This needs the daemon inside a
   writable delegated cgroup, which the systemd user unit installed by
   autostart provides. Peak comes from `memory.peak` (kernel 5.19 or later).

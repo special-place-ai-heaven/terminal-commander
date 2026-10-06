@@ -39,7 +39,8 @@
     "limits_applied": {
       "memory_bytes": 8589934592,
       "priority": "below_normal"
-    }
+    },
+    "governor": "job_object"
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",

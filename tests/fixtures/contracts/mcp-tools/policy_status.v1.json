@@ -36,7 +36,9 @@
       "mode_available": "job_object",
       "default_job_memory_bytes": 8589934592,
       "default_priority": "below_normal",
-      "llm_can_raise_limits": true
+      "llm_can_raise_limits": true,
+      "host_ceiling_bytes": 13958643712,
+      "host_ceiling_mode": "job_object"
     }
   },
   "unavailable_error_example": {

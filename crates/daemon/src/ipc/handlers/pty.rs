@@ -158,6 +158,7 @@ pub(in crate::ipc::server) fn handle_pty_command_start(
             wslenv_dropped: r.wslenv_dropped,
             limits_applied: r.limits_applied,
             limits_clamped: r.limits_clamped,
+            governor: r.governor,
         })),
         Err(crate::pty_command::PtyRuntimeError::PolicyDenied(reason)) => {
             // Same failsafe typed-code mapping as the argv lane

@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 
 use terminal_commander_ipc::{
-    EXIT_REASON_MEMORY_CEILING, GovernorModeWire, GovernorStatus, JobLimitsSpec, JobPriority,
+    EXIT_REASON_HOST_CEILING, EXIT_REASON_MEMORY_CEILING, GovernorModeWire, GovernorStatus, JobLimitsSpec, JobPriority,
     LimitsApplied,
 };
 use terminal_commander_probes::governor::{
@@ -21,7 +21,9 @@ use terminal_commander_probes::governor::{
 
 use terminal_commander_store::AuditEntry;
 
-use crate::config::{DEFAULT_JOB_MEMORY, DEFAULT_JOB_PRIORITY, GovernorSection};
+use crate::config::{
+    DEFAULT_HOST_CEILING, DEFAULT_JOB_MEMORY, DEFAULT_JOB_PRIORITY, GovernorSection,
+};
 use crate::policy::PolicyProfile;
 
 /// A parsed memory value before host resolution.
@@ -114,6 +116,12 @@ pub fn section_warnings(section: &GovernorSection) -> Vec<String> {
              {DEFAULT_JOB_MEMORY} applies"
         ));
     }
+    if let Err(why) = parse_memory(&section.host_ceiling) {
+        out.push(format!(
+            "`governor.host_ceiling` has no effect ({why}); the built-in \
+             {DEFAULT_HOST_CEILING} applies"
+        ));
+    }
     if let Err(why) = parse_priority(&section.default_priority) {
         out.push(format!(
             "`governor.default_priority` has no effect ({why}); the built-in \
@@ -127,10 +135,15 @@ pub fn section_warnings(section: &GovernorSection) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Governor {
     pub enabled: bool,
+    /// The configured default ceiling, clamped to the host ceiling.
     pub default_memory_bytes: Option<u64>,
     pub default_priority: JobPriority,
     pub llm_can_raise_limits: bool,
     pub mode_available: GovernorModeWire,
+    /// Resolved `host_ceiling`; `None` for `"none"` or an unresolvable percent.
+    pub host_ceiling_bytes: Option<u64>,
+    /// Set by [`Self::install_host_ceiling`]; `None` until then.
+    pub host_ceiling_mode: Option<GovernorModeWire>,
     host: Option<HostMemory>,
     note: Option<String>,
 }
@@ -142,37 +155,85 @@ pub struct ResolvedLimits {
     pub limits: JobLimits,
     /// `None` when disabled, so the response field is omitted.
     pub applied: Option<LimitsApplied>,
-    /// Axes clamped to the default.
+    /// Axes clamped to the default or the host ceiling.
     pub clamped: Vec<String>,
+    /// One sentence per clamped axis: what was asked and why it was cut.
+    clamp_reasons: Vec<String>,
 }
 
+impl ResolvedLimits {
+    /// Audit reason and metadata (`requested` and `applied` values) for a
+    /// start whose request was clamped; `None` when nothing was.
+    #[must_use]
+    pub fn clamp_audit(&self, request: Option<&JobLimitsSpec>) -> Option<(String, String)> {
+        if self.clamped.is_empty() {
+            return None;
+        }
+        let meta = serde_json::json!({
+            "axes": self.clamped,
+            "requested": request,
+            "applied": self.applied,
+        });
+        Some((self.clamp_reasons.join("; "), meta.to_string()))
+    }
+}
+
+/// Status note when the host can only enforce per-process `RLIMIT_DATA`.
+pub const RLIMIT_DEFAULT_NOTE: &str =
+    "default memory limit not applied under rlimit; pass limits.memory to opt in";
+
 impl Governor {
-    /// Resolve `section` for `profile` against this host.
+    /// Resolve `section` for `profile` against this host. Pure: installs
+    /// nothing (see [`Self::install_host_ceiling`]) and, when the section is
+    /// disabled, probes no kernel mechanism.
     #[must_use]
     pub fn from_section(section: &GovernorSection, profile: PolicyProfile) -> Self {
-        Self::resolve_section(section, profile, probe_governor::host_memory())
+        let mode = if section.enabled {
+            mode_wire(&probe_governor::available_mode())
+        } else {
+            GovernorModeWire::Unavailable("governor disabled".to_owned())
+        };
+        Self::resolve_section(section, profile, probe_governor::host_memory(), mode)
     }
 
     fn resolve_section(
         section: &GovernorSection,
         profile: PolicyProfile,
         host: Option<HostMemory>,
+        mode_available: GovernorModeWire,
     ) -> Self {
-        let spec = parse_memory(&section.default_job_memory)
-            .or_else(|_| parse_memory(DEFAULT_JOB_MEMORY))
-            .unwrap_or(MemorySpec::Unlimited);
-        let (default_memory_bytes, note) = match resolve_memory(spec, host) {
-            Ok(bytes) => (bytes, None),
-            Err(why) => (
-                None,
-                Some(format!("{why}; jobs get no default memory limit")),
-            ),
+        let mut notes = Vec::new();
+        let mut resolve_or_note = |raw: &str, builtin: &str, what: &str| {
+            let spec = parse_memory(raw)
+                .or_else(|_| parse_memory(builtin))
+                .unwrap_or(MemorySpec::Unlimited);
+            resolve_memory(spec, host).unwrap_or_else(|why| {
+                notes.push(format!("{why}; {what}"));
+                None
+            })
         };
-        let llm_can_raise_limits = section.llm_can_raise_limits.unwrap_or(!matches!(
+        let default_memory = resolve_or_note(
+            &section.default_job_memory,
+            DEFAULT_JOB_MEMORY,
+            "jobs get no default memory limit",
+        );
+        let host_ceiling_bytes = resolve_or_note(
+            &section.host_ceiling,
+            DEFAULT_HOST_CEILING,
+            "no host ceiling is installed",
+        );
+        // The default never exceeds the ceiling every job also joins.
+        let default_memory_bytes = match (default_memory, host_ceiling_bytes) {
+            (Some(d), Some(c)) => Some(d.min(c)),
+            (d, _) => d,
+        };
+        if section.enabled && mode_available == GovernorModeWire::Rlimit {
+            notes.push(RLIMIT_DEFAULT_NOTE.to_owned());
+        }
+        // Allow-list: only the two trust-inheriting profiles may raise.
+        let llm_can_raise_limits = section.llm_can_raise_limits.unwrap_or(matches!(
             profile,
-            PolicyProfile::DeveloperLocal
-                | PolicyProfile::RepoOnly
-                | PolicyProfile::ReadOnlyObserver
+            PolicyProfile::FullAccess | PolicyProfile::AdminDebug
         ));
         Self {
             enabled: section.enabled,
@@ -180,10 +241,39 @@ impl Governor {
             default_priority: parse_priority(&section.default_priority)
                 .unwrap_or(JobPriority::BelowNormal),
             llm_can_raise_limits,
-            mode_available: mode_wire(&probe_governor::available_mode()),
+            mode_available,
+            host_ceiling_bytes,
+            host_ceiling_mode: None,
             host,
-            note,
+            note: (!notes.is_empty()).then(|| notes.join("; ")),
         }
+    }
+
+    /// Daemon boot: sweep cgroup dirs a previous daemon left behind, then
+    /// install the host ceiling (once per process) and record how it is
+    /// enforced. No-op when disabled; no install when no ceiling is set.
+    pub fn install_host_ceiling(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        probe_governor::sweep_stale_job_dirs();
+        let Some(limit) = self.host_ceiling_bytes else {
+            return;
+        };
+        self.host_ceiling_mode = Some(match probe_governor::install_host_ceiling(limit) {
+            Ok(mode) => mode_wire(&mode),
+            // A second daemon state in one process (an embedder, a test)
+            // shares the ceiling the first installed when the limit matches.
+            Err(_) if probe_governor::host_ceiling() == Some(limit) => self.mode_available.clone(),
+            Err(why) => GovernorModeWire::Unavailable(why),
+        });
+    }
+
+    /// True when the profile default memory applies: never under `rlimit`,
+    /// whose per-process `RLIMIT_DATA` breaks sanitizers and large
+    /// reservations and cannot be raised back by the job.
+    fn default_memory_applies(&self) -> bool {
+        self.mode_available != GovernorModeWire::Rlimit
     }
 
     /// Effective limits for one start: the request's value per axis, else the
@@ -195,7 +285,10 @@ impl Governor {
             return Ok(ResolvedLimits::default());
         }
         let mut clamped = Vec::new();
-        let mut memory = self.default_memory_bytes;
+        let mut clamp_reasons = Vec::new();
+        let mut memory = self
+            .default_memory_bytes
+            .filter(|_| self.default_memory_applies());
         let mut priority = self.default_priority;
         if let Some(req) = request {
             if let Some(raw) = req.memory.as_deref() {
@@ -207,6 +300,19 @@ impl Governor {
                 };
                 if above && !self.llm_can_raise_limits {
                     clamped.push("memory".to_owned());
+                    clamp_reasons.push(format!(
+                        "memory `{raw}` is above the [governor] default and \
+                         llm_can_raise_limits is false"
+                    ));
+                    memory = self.default_memory_bytes;
+                } else if let (Some(a), Some(c)) = (asked, self.host_ceiling_bytes)
+                    && a > c
+                {
+                    clamped.push("memory".to_owned());
+                    clamp_reasons.push(format!(
+                        "memory `{raw}` is above the host ceiling of {c} bytes"
+                    ));
+                    memory = Some(c);
                 } else {
                     memory = asked;
                 }
@@ -214,6 +320,11 @@ impl Governor {
             if let Some(asked) = req.priority {
                 if asked > self.default_priority && !self.llm_can_raise_limits {
                     clamped.push("priority".to_owned());
+                    clamp_reasons.push(
+                        "priority is above the [governor] default and \
+                         llm_can_raise_limits is false"
+                            .to_owned(),
+                    );
                 } else {
                     priority = asked;
                 }
@@ -223,12 +334,14 @@ impl Governor {
             limits: JobLimits {
                 memory_bytes: memory,
                 priority: Some(priority_probe(priority)),
+                join_host_ceiling: true,
             },
             applied: Some(LimitsApplied {
                 memory_bytes: memory,
                 priority: Some(priority),
             }),
             clamped,
+            clamp_reasons,
         })
     }
 
@@ -241,6 +354,8 @@ impl Governor {
             default_job_memory_bytes: self.default_memory_bytes,
             default_priority: self.default_priority,
             llm_can_raise_limits: self.llm_can_raise_limits,
+            host_ceiling_bytes: self.host_ceiling_mode.as_ref().and(self.host_ceiling_bytes),
+            host_ceiling_mode: self.host_ceiling_mode.clone(),
             note: self.note.clone(),
         }
     }
@@ -263,16 +378,6 @@ fn mode_wire(mode: &GovernorMode) -> GovernorModeWire {
     }
 }
 
-/// Audit reason for a start whose request was clamped to the defaults.
-#[must_use]
-pub fn clamp_reason(axes: &[String]) -> String {
-    format!(
-        "requested limits above the [governor] defaults were clamped ({}): \
-         llm_can_raise_limits is false",
-        axes.join(", ")
-    )
-}
-
 fn json_u64(v: Option<u64>) -> String {
     v.map_or_else(|| "null".to_owned(), |n| n.to_string())
 }
@@ -285,6 +390,9 @@ pub struct GovernorOutcome {
     pub exit_reason: Option<String>,
     /// The ceiling the job ran under; audit and persistence only.
     pub memory_limit_bytes: Option<u64>,
+    /// The limits the job runs with (start response value), kept through
+    /// exit, stop, and persistence so every status shows them.
+    pub limits_applied: Option<LimitsApplied>,
 }
 
 impl GovernorOutcome {
@@ -298,10 +406,51 @@ impl GovernorOutcome {
         Self {
             governor: Some(mode_wire(mode)),
             peak_memory_bytes: report.peak_memory_bytes,
-            exit_reason: report
-                .memory_limit_hit
-                .then(|| EXIT_REASON_MEMORY_CEILING.to_owned()),
+            // The job's own limit takes precedence over the host ceiling.
+            exit_reason: if report.memory_limit_hit {
+                Some(EXIT_REASON_MEMORY_CEILING.to_owned())
+            } else {
+                report
+                    .host_ceiling_hit
+                    .then(|| EXIT_REASON_HOST_CEILING.to_owned())
+            },
             memory_limit_bytes: report.memory_limit_bytes,
+            limits_applied: None,
+        }
+    }
+
+    /// The spawn-time view: mode, limit and applied limits only. Peak and
+    /// exit reason exist only after exit, so a running status never shows
+    /// them. Ungoverned (`mode == None`) stays all `None`.
+    #[must_use]
+    pub fn at_spawn(report: &GovernorReport, limits_applied: Option<LimitsApplied>) -> Self {
+        let base = Self::from_report(report);
+        Self {
+            peak_memory_bytes: None,
+            exit_reason: None,
+            limits_applied: base.governor.as_ref().and(limits_applied),
+            ..base
+        }
+    }
+
+    /// Replace the spawn-time view with the final report, keeping the
+    /// applied limits.
+    pub fn finish(&mut self, report: &GovernorReport) {
+        *self = Self {
+            limits_applied: self.limits_applied,
+            ..Self::from_report(report)
+        };
+    }
+
+    /// Audit reason for a governed start the enforcer could not govern
+    /// (`governor_unavailable` row); `None` when it is enforced.
+    #[must_use]
+    pub fn unavailable_reason(&self) -> Option<String> {
+        match &self.governor {
+            Some(GovernorModeWire::Unavailable(why)) => {
+                Some(format!("the job runs ungoverned: {why}"))
+            }
+            _ => None,
         }
     }
 
@@ -315,15 +464,27 @@ impl GovernorOutcome {
     /// carrying the limit and the peak. `None` otherwise.
     #[must_use]
     pub fn ceiling_audit(&self, job: &str) -> Option<AuditEntry> {
-        self.hit_ceiling().then(|| {
-            AuditEntry::new("governor_memory_ceiling", job, "info")
-                .with_reason("the job was stopped by its memory ceiling")
+        let (action, reason, limit) = match self.exit_reason.as_deref()? {
+            EXIT_REASON_HOST_CEILING => (
+                "governor_host_ceiling",
+                "the job was stopped by the daemon-wide host ceiling",
+                probe_governor::host_ceiling(),
+            ),
+            _ => (
+                "governor_memory_ceiling",
+                "the job was stopped by its memory ceiling",
+                self.memory_limit_bytes,
+            ),
+        };
+        Some(
+            AuditEntry::new(action, job, "info")
+                .with_reason(reason)
                 .with_metadata_json(format!(
                     "{{\"memory_limit_bytes\":{},\"peak_memory_bytes\":{}}}",
-                    json_u64(self.memory_limit_bytes),
+                    json_u64(limit),
                     json_u64(self.peak_memory_bytes)
-                ))
-        })
+                )),
+        )
     }
 
     /// Fields appended to the persisted evidence object (numbers, a fixed
@@ -343,6 +504,13 @@ impl GovernorOutcome {
         }
         if let Some(reason) = &self.exit_reason {
             let _ = write!(out, ",\"exit_reason\":\"{reason}\"");
+        }
+        if let Some(limits) = &self.limits_applied {
+            let _ = write!(
+                out,
+                ",\"limits_applied\":{}",
+                serde_json::to_string(limits).unwrap_or_else(|_| "null".to_owned())
+            );
         }
         out
     }
@@ -365,6 +533,9 @@ impl GovernorOutcome {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
             memory_limit_bytes: None,
+            limits_applied: v
+                .get("limits_applied")
+                .and_then(|l| serde_json::from_value(l.clone()).ok()),
         }
     }
 }
@@ -374,6 +545,7 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+    const JO: GovernorModeWire = GovernorModeWire::JobObject;
 
     #[test]
     fn parse_memory_table() {
@@ -432,8 +604,12 @@ mod tests {
 
     #[test]
     fn percent_default_without_host_memory_is_no_limit_with_note() {
-        let g =
-            Governor::resolve_section(&GovernorSection::default(), PolicyProfile::FullAccess, None);
+        let g = Governor::resolve_section(
+            &GovernorSection::default(),
+            PolicyProfile::FullAccess,
+            None,
+            JO,
+        );
         assert_eq!(g.default_memory_bytes, None);
         assert!(g.status().note.is_some());
     }
@@ -448,12 +624,12 @@ mod tests {
             memory: Some("2GiB".to_owned()),
             priority: Some(JobPriority::Normal),
         };
-        let open = Governor::resolve_section(&section, PolicyProfile::FullAccess, None);
+        let open = Governor::resolve_section(&section, PolicyProfile::FullAccess, None, JO);
         let r = open.resolve(Some(&req)).unwrap();
         assert!(r.clamped.is_empty());
         assert_eq!(r.limits.memory_bytes, Some(2 * GIB));
 
-        let hardened = Governor::resolve_section(&section, PolicyProfile::DeveloperLocal, None);
+        let hardened = Governor::resolve_section(&section, PolicyProfile::DeveloperLocal, None, JO);
         let r = hardened.resolve(Some(&req)).unwrap();
         assert_eq!(r.clamped, ["memory", "priority"]);
         assert_eq!(r.limits.memory_bytes, Some(GIB));
@@ -475,12 +651,127 @@ mod tests {
     }
 
     #[test]
+    fn host_ceiling_caps_the_default_and_a_request() {
+        let section = GovernorSection {
+            default_job_memory: "2GiB".to_owned(),
+            host_ceiling: "1GiB".to_owned(),
+            ..GovernorSection::default()
+        };
+        let g = Governor::resolve_section(&section, PolicyProfile::FullAccess, None, JO);
+        assert_eq!(
+            g.default_memory_bytes,
+            Some(GIB),
+            "default clamped to ceiling"
+        );
+        let r = g.resolve(None).unwrap();
+        assert!(r.limits.join_host_ceiling);
+        assert_eq!(r.limits.memory_bytes, Some(GIB));
+        let big = JobLimitsSpec {
+            memory: Some("4GiB".to_owned()),
+            priority: None,
+        };
+        let r = g.resolve(Some(&big)).unwrap();
+        assert_eq!(r.clamped, ["memory"]);
+        assert_eq!(r.limits.memory_bytes, Some(GIB));
+        let (reason, meta) = r.clamp_audit(Some(&big)).unwrap();
+        assert!(reason.contains("host ceiling"), "{reason}");
+        let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+        assert_eq!(meta["requested"]["memory"], "4GiB");
+        assert_eq!(meta["applied"]["memory_bytes"], GIB);
+        // `none` keeps no per-job limit; the job still joins the ceiling.
+        let none = JobLimitsSpec {
+            memory: Some("none".to_owned()),
+            priority: None,
+        };
+        let r = g.resolve(Some(&none)).unwrap();
+        assert!(r.clamped.is_empty());
+        assert_eq!(r.limits.memory_bytes, None);
+        assert!(r.limits.join_host_ceiling);
+        assert!(g.resolve(None).unwrap().clamp_audit(None).is_none());
+    }
+
+    #[test]
+    fn rlimit_skips_the_default_but_honours_an_explicit_request() {
+        let section = GovernorSection {
+            default_job_memory: "1GiB".to_owned(),
+            ..GovernorSection::default()
+        };
+        let g = Governor::resolve_section(
+            &section,
+            PolicyProfile::FullAccess,
+            None,
+            GovernorModeWire::Rlimit,
+        );
+        let r = g.resolve(None).unwrap();
+        assert_eq!(r.limits.memory_bytes, None);
+        assert_eq!(r.applied.unwrap().priority, Some(JobPriority::BelowNormal));
+        assert!(g.status().note.unwrap().contains(RLIMIT_DEFAULT_NOTE));
+        let ask = JobLimitsSpec {
+            memory: Some("512MiB".to_owned()),
+            priority: None,
+        };
+        assert_eq!(
+            g.resolve(Some(&ask)).unwrap().limits.memory_bytes,
+            Some(512 << 20)
+        );
+    }
+
+    #[test]
+    fn llm_can_raise_limits_is_an_allow_list() {
+        for (profile, want) in [
+            (PolicyProfile::FullAccess, true),
+            (PolicyProfile::AdminDebug, true),
+            (PolicyProfile::DeveloperLocal, false),
+            (PolicyProfile::RepoOnly, false),
+            (PolicyProfile::ReadOnlyObserver, false),
+        ] {
+            let g = Governor::resolve_section(&GovernorSection::default(), profile, None, JO);
+            assert_eq!(g.llm_can_raise_limits, want, "{profile:?}");
+        }
+    }
+
+    #[test]
+    fn unavailable_outcome_names_the_reason() {
+        let report = GovernorReport {
+            mode: Some(GovernorMode::Unavailable("no kernel primitive".to_owned())),
+            ..GovernorReport::default()
+        };
+        let o = GovernorOutcome::at_spawn(&report, None);
+        assert!(
+            o.unavailable_reason()
+                .unwrap()
+                .contains("no kernel primitive")
+        );
+        let ok = GovernorReport {
+            mode: Some(GovernorMode::JobObject),
+            peak_memory_bytes: Some(5),
+            memory_limit_hit: true,
+            ..GovernorReport::default()
+        };
+        let applied = Some(LimitsApplied {
+            memory_bytes: Some(7),
+            priority: None,
+        });
+        let mut o = GovernorOutcome::at_spawn(&ok, applied);
+        assert!(o.unavailable_reason().is_none());
+        assert_eq!((o.peak_memory_bytes, &o.exit_reason), (None, &None));
+        o.finish(&ok);
+        assert_eq!(o.peak_memory_bytes, Some(5));
+        assert_eq!(o.limits_applied, applied, "limits survive the final report");
+        assert_eq!(
+            GovernorOutcome::at_spawn(&GovernorReport::default(), applied),
+            GovernorOutcome::default(),
+            "ungoverned stays empty"
+        );
+    }
+
+    #[test]
     fn disabled_resolves_to_no_limits() {
         let section = GovernorSection {
             enabled: false,
             ..GovernorSection::default()
         };
-        let g = Governor::resolve_section(&section, PolicyProfile::FullAccess, None);
+        let g = Governor::resolve_section(&section, PolicyProfile::FullAccess, None, JO);
         assert_eq!(
             g.resolve(Some(&JobLimitsSpec::default())).unwrap(),
             ResolvedLimits::default()
@@ -508,14 +799,20 @@ mod tests {
             memory_limit_bytes: Some(10),
             peak_memory_bytes: Some(12),
             memory_limit_hit: true,
+            ..GovernorReport::default()
         };
-        let o = GovernorOutcome::from_report(&report);
+        let mut o = GovernorOutcome::from_report(&report);
+        o.limits_applied = Some(LimitsApplied {
+            memory_bytes: Some(10),
+            priority: Some(JobPriority::Idle),
+        });
         let json: serde_json::Value =
             serde_json::from_str(&format!("{{\"a\":1{}}}", o.evidence_fields())).unwrap();
         let back = GovernorOutcome::from_evidence(Some(&json));
         assert_eq!(back.governor, o.governor);
         assert_eq!(back.peak_memory_bytes, Some(12));
         assert_eq!(back.exit_reason.as_deref(), Some("memory_ceiling"));
+        assert_eq!(back.limits_applied, o.limits_applied);
         assert_eq!(
             GovernorOutcome::from_report(&GovernorReport::default()).evidence_fields(),
             ""

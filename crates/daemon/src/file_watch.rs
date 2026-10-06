@@ -678,6 +678,7 @@ impl WatchRuntime {
                 .map(crate::command::output_age_ms),
             exit_reason: None,
             governor: None,
+            limits_applied: None,
             peak_memory_bytes: None,
         })
     }

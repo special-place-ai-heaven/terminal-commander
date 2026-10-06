@@ -40,7 +40,8 @@
     "restarted": false,
     "signal": null,
     "state": "exited",
-    "governor": "job_object"
+    "governor": "job_object",
+    "limits_applied": { "memory_bytes": 8589934592, "priority": "below_normal" }
   },
   "response_example_no_rule_receipt": {
     "bucket_id": "bkt_018f0000000000000000000000000002",
@@ -77,7 +78,8 @@
     "restarted": false,
     "signal": null,
     "state": "exited",
-    "governor": "job_object"
+    "governor": "job_object",
+    "limits_applied": { "memory_bytes": 8589934592, "priority": "below_normal" }
   },
   "response_example_running": {
     "bucket_id": "bkt_018f0000000000000000000000000003",
@@ -100,7 +102,9 @@
     "receipt": null,
     "restarted": false,
     "signal": null,
-    "state": "running"
+    "state": "running",
+    "governor": "job_object",
+    "limits_applied": { "memory_bytes": 8589934592, "priority": "below_normal" }
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",

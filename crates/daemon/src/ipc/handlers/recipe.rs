@@ -838,6 +838,7 @@ pub(in crate::ipc::server) fn handle_recipe_run(
         wslenv_dropped: started.wslenv_dropped,
         limits_applied: started.limits_applied,
         limits_clamped: started.limits_clamped,
+        governor: started.governor,
     }))
 }
 

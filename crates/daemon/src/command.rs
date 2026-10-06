@@ -533,8 +533,9 @@ struct JobBinding {
     metrics_live: Arc<parking_lot::Mutex<terminal_commander_probes::ProcessProbeMetrics>>,
     /// F1: argv runs a shell `-c` script holding a pipeline.
     pipeline_exit_masked: bool,
-    /// Resource-governor outcome, published by the waiter at exit together
-    /// with the receipt. All `None` for an ungoverned job.
+    /// Resource-governor outcome: the spawn-time mode and limit, replaced by
+    /// the waiter at exit (peak included) together with the receipt. All
+    /// `None` for an ungoverned job.
     governor: GovernorOutcome,
 }
 
@@ -578,12 +579,17 @@ type RebindWork = (
 /// returns these ids verbatim (no fake success -- the live job they name
 /// is the one already spawned). Evicted on EVERY completion path; the TTL
 /// is only the backstop for a leaked entry.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct DedupEntry {
     job_id: JobId,
     bucket_id: BucketId,
     probe_id: ProbeId,
     inserted: std::time::Instant,
+    /// The original start's governor fields, so a collapsed duplicate
+    /// reports the same limits. `governor` is filled right after spawn.
+    limits_applied: Option<terminal_commander_ipc::LimitsApplied>,
+    limits_clamped: Vec<String>,
+    governor: Option<terminal_commander_ipc::GovernorModeWire>,
 }
 
 /// How long a nonce-less / fallback in-flight fingerprint stays live
@@ -934,6 +940,7 @@ impl CommandRuntime {
             .policy
             .resolve_limits(req.limits.as_ref())
             .map_err(CommandError::InvalidLimits)?;
+        let req_limits = req.limits.clone();
 
         // F1: flag (never rewrite) a shell pipeline: its exit code may reflect
         // only the last stage. Covers the shell lane too (`[shell, "-lc", line]`).
@@ -951,7 +958,7 @@ impl CommandRuntime {
         let (dedup_k, fallback_gated) = dedup_key(&req);
         {
             let mut map = self.dedup.lock();
-            if let Some(entry) = map.get(&dedup_k).copied() {
+            if let Some(entry) = map.get(&dedup_k).cloned() {
                 let fresh = !fallback_gated || entry.inserted.elapsed() < DEDUP_TTL;
                 if fresh {
                     return Ok(CommandStartResponse {
@@ -964,8 +971,9 @@ impl CommandRuntime {
                         // original start, so we do not re-attach it.
                         hint: None,
                         wslenv_dropped: Vec::new(),
-                        limits_applied: None,
-                        limits_clamped: Vec::new(),
+                        limits_applied: entry.limits_applied,
+                        limits_clamped: entry.limits_clamped,
+                        governor: entry.governor,
                     });
                 }
                 // Stale fallback entry the TTL backstop should have
@@ -1343,6 +1351,9 @@ impl CommandRuntime {
                 bucket_id,
                 probe_id,
                 inserted: std::time::Instant::now(),
+                limits_applied: resolved_limits.applied,
+                limits_clamped: resolved_limits.clamped.clone(),
+                governor: None,
             },
         );
 
@@ -1424,6 +1435,16 @@ impl CommandRuntime {
         // is moved into the lifecycle closure, so `stop()` can snapshot the
         // real frame/byte/event counts of a job it kills.
         let metrics_live = probe.metrics_handle();
+        // Resource governor: the mode is final right after spawn, so the
+        // start response, a collapsed duplicate, and a running status all
+        // report it. Peak and exit reason come from the waiter at exit.
+        let spawn_governor =
+            GovernorOutcome::at_spawn(&probe.governor_report(), resolved_limits.applied);
+        if let Some(entry) = self.dedup.lock().get_mut(&dedup_k)
+            && entry.job_id == job_id
+        {
+            entry.governor.clone_from(&spawn_governor.governor);
+        }
 
         // Register the job and audit the allow decision. Consume
         // req.argv exactly once here; downstream code uses
@@ -1468,7 +1489,7 @@ impl CommandRuntime {
                 // TC-3: shared handle to the probe's live metrics for `stop()`.
                 metrics_live,
                 pipeline_exit_masked,
-                governor: GovernorOutcome::default(),
+                governor: spawn_governor.clone(),
             },
         );
         let mut audit_meta = format_argv_metadata_tagged(&argv_for_meta, wsl_audit_tag.as_ref());
@@ -1485,15 +1506,12 @@ impl CommandRuntime {
             tag_reason,
             Some(audit_meta),
         );
-        if !resolved_limits.clamped.is_empty() {
-            self.audit(
-                "governor_clamp",
-                &job_id.to_wire_string(),
-                "allow",
-                Some(crate::governor::clamp_reason(&resolved_limits.clamped)),
-                None,
-            );
-        }
+        self.audit_governor_start(
+            job_id,
+            &resolved_limits,
+            req_limits.as_ref(),
+            &spawn_governor,
+        );
 
         // Spawn the lifecycle waiter task. When the child exits we
         // emit a synthetic lifecycle event into the bucket and an
@@ -1511,6 +1529,7 @@ impl CommandRuntime {
         // `dedup_k` (a Copy `u64`) is moved in. Eviction-on-completion is
         // the PRIMARY release; the TTL is only the backstop for a leak.
         let waiter_dedup = Arc::clone(&self.dedup);
+        let waiter_spawn_governor = spawn_governor.clone();
         // TC-B3: clone the store actor handle into the waiter so the
         // terminal transition persists a compact job receipt. Cheap
         // (an Arc/sender clone); a write failure is logged-and-dropped.
@@ -1528,7 +1547,12 @@ impl CommandRuntime {
         // daemon runtime). The lock is held only for the enqueue.
         self.lifecycle_tasks.lock().spawn(async move {
             let (mut final_metrics, outcome, governor_report) = drive_to_exit(probe).await;
-            let governor = GovernorOutcome::from_report(&governor_report);
+            let mut governor = waiter_spawn_governor;
+            governor.finish(&governor_report);
+            // A probe-side cancel is not the ceiling, whatever the peak says.
+            if matches!(outcome, ProbeOutcome::Cancelled) {
+                governor.exit_reason = None;
+            }
 
             // TCE-ERG-1: build the no-silence receipt while
             // `final_metrics.events_emitted` still reflects ONLY
@@ -1564,6 +1588,19 @@ impl CommandRuntime {
             // lifecycle append below (they depend on its `events_emitted`
             // bump), so only the receipt is published here.
             if let Some(b) = waiter_live.write().get_mut(&job_id) {
+                // `stop()` sets the job terminal under this same lock, so a
+                // terminal state here means the kill was a stop: a stop never
+                // carries the ceiling's exit_reason.
+                if waiter_jobs.get(job_id).is_some_and(|r| {
+                    matches!(
+                        r.state,
+                        terminal_commander_core::JobState::Exited
+                            | terminal_commander_core::JobState::Failed
+                            | terminal_commander_core::JobState::Cancelled
+                    )
+                }) {
+                    governor.exit_reason = None;
+                }
                 b.receipt = receipt;
                 b.governor = governor.clone();
             }
@@ -1731,7 +1768,33 @@ impl CommandRuntime {
             wslenv_dropped: wslenv_reported,
             limits_applied: resolved_limits.applied,
             limits_clamped: resolved_limits.clamped,
+            governor: spawn_governor.governor,
         })
+    }
+
+    /// Audit a governed start: a `governor_clamp` row (requested and applied
+    /// values) when the request was clamped, and a `governor_unavailable` row
+    /// when the enforcer could not govern the job, which still runs.
+    fn audit_governor_start(
+        &self,
+        job_id: JobId,
+        resolved: &crate::governor::ResolvedLimits,
+        request: Option<&terminal_commander_ipc::JobLimitsSpec>,
+        spawn_governor: &GovernorOutcome,
+    ) {
+        let subject = job_id.to_wire_string();
+        if let Some((reason, meta)) = resolved.clamp_audit(request) {
+            self.audit(
+                "governor_clamp",
+                &subject,
+                "allow",
+                Some(reason),
+                Some(meta),
+            );
+        }
+        if let Some(reason) = spawn_governor.unavailable_reason() {
+            self.audit("governor_unavailable", &subject, "info", Some(reason), None);
+        }
     }
 
     /// Force-kill a running combed command by `job_id` (TC-3).
@@ -2102,6 +2165,7 @@ impl CommandRuntime {
             elapsed_ms,
             last_output_age_ms: elapsed_ms.and(metrics.last_frame_at).map(output_age_ms),
             governor: governor.governor,
+            limits_applied: governor.limits_applied,
             peak_memory_bytes: governor.peak_memory_bytes,
             exit_reason: governor.exit_reason,
         })
@@ -2227,6 +2291,7 @@ impl CommandRuntime {
             elapsed_ms: None,
             last_output_age_ms: None,
             governor: governor.governor,
+            limits_applied: governor.limits_applied,
             peak_memory_bytes: governor.peak_memory_bytes,
             exit_reason: governor.exit_reason,
         })
@@ -2850,6 +2915,8 @@ fn dedup_key(req: &CommandStartRequest) -> (u64, bool) {
             req.argv.hash(&mut h);
             req.cwd.hash(&mut h);
             req.tag.hash(&mut h);
+            // Same argv with different limits is a different job.
+            req.limits.hash(&mut h);
             (h.finish(), true)
         }
     }

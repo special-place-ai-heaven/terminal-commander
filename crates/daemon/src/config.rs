@@ -205,15 +205,22 @@ pub struct GovernorSection {
     /// `idle` | `below_normal` | `normal`.
     #[serde(default = "default_job_priority")]
     pub default_priority: String,
-    /// Tri-state: omitted inherits the profile default (true under
-    /// `full_access` and `admin_debug`, false on the hardened profiles).
+    /// Tri-state: omitted inherits the profile default (true only under
+    /// `full_access` and `admin_debug`; false on every other profile).
     /// False clamps a request above the defaults down to them.
     #[serde(default)]
     pub llm_can_raise_limits: Option<bool>,
+    /// Daemon-wide ceiling every governed job joins, enforced in aggregate
+    /// (a parent Job Object on Windows, a parent cgroup on Linux). Same
+    /// syntax as `default_job_memory`; `"none"` installs no ceiling.
+    #[serde(default = "default_host_ceiling")]
+    pub host_ceiling: String,
 }
 
 /// Built-in `[governor] default_job_memory`.
 pub const DEFAULT_JOB_MEMORY: &str = "60%";
+/// Built-in `[governor] host_ceiling`.
+pub const DEFAULT_HOST_CEILING: &str = "97%";
 /// Built-in `[governor] default_priority`.
 pub const DEFAULT_JOB_PRIORITY: &str = "below_normal";
 
@@ -229,6 +236,10 @@ fn default_job_priority() -> String {
     DEFAULT_JOB_PRIORITY.to_owned()
 }
 
+fn default_host_ceiling() -> String {
+    DEFAULT_HOST_CEILING.to_owned()
+}
+
 impl Default for GovernorSection {
     fn default() -> Self {
         Self {
@@ -236,6 +247,7 @@ impl Default for GovernorSection {
             default_job_memory: default_job_memory(),
             default_priority: default_job_priority(),
             llm_can_raise_limits: None,
+            host_ceiling: default_host_ceiling(),
         }
     }
 }

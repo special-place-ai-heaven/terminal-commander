@@ -85,14 +85,19 @@ pub struct CommandStartResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits_applied: Option<LimitsApplied>,
     /// Axes (`"memory"`, `"priority"`) whose requested value exceeded the
-    /// default and was clamped because `llm_can_raise_limits` is false.
+    /// default and was clamped because `llm_can_raise_limits` is false, or
+    /// exceeded the daemon's host ceiling.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limits_clamped: Vec<String>,
+    /// The mechanism enforcing this job's limits, read from the probe right
+    /// after spawn. Omitted when the governor is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governor: Option<GovernorModeWire>,
 }
 
 /// Scheduling priority of a governed job (resource governor). Declared
 /// lowest first, so `Ord` reads "less CPU priority < more".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobPriority {
     Idle,
@@ -102,7 +107,7 @@ pub enum JobPriority {
 
 /// Per-start resource request. Each axis left `None` takes the daemon's
 /// `[governor]` default.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct JobLimitsSpec {
     /// Memory ceiling for the whole job tree: `"24GiB"`, `"512MiB"`, a byte
     /// count, `"40%"` of host memory, or `"none"`.
@@ -135,6 +140,10 @@ pub enum GovernorModeWire {
 /// `exit_reason` value for a job stopped by its memory ceiling.
 pub const EXIT_REASON_MEMORY_CEILING: &str = "memory_ceiling";
 
+/// `exit_reason` value for a job stopped by the daemon-wide host ceiling
+/// (its own limit was not reached; `memory_ceiling` takes precedence).
+pub const EXIT_REASON_HOST_CEILING: &str = "host_ceiling";
+
 /// `[governor]` view in `policy_status`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GovernorStatus {
@@ -146,6 +155,14 @@ pub struct GovernorStatus {
     pub default_job_memory_bytes: Option<u64>,
     pub default_priority: JobPriority,
     pub llm_can_raise_limits: bool,
+    /// Daemon-wide memory ceiling every governed job joins; `None` = no
+    /// ceiling configured (`host_ceiling = "none"`) or unresolvable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_ceiling_bytes: Option<u64>,
+    /// How the host ceiling is enforced (`job_object`, `cgroup`, or
+    /// `unavailable` with the reason). Omitted when no ceiling is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_ceiling_mode: Option<GovernorModeWire>,
     /// Why the default resolved the way it did when that is not obvious
     /// (for example a percent default with host memory unknown).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -299,10 +316,14 @@ pub struct CommandStatusResponse {
     /// absent means "no output captured yet", NOT "hung".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_age_ms: Option<u64>,
-    /// Terminal governed jobs only: the mechanism that enforced the job's
-    /// limits. Omitted for an ungoverned job.
+    /// Governed jobs, running or terminal: the mechanism enforcing the
+    /// job's limits. Omitted for an ungoverned job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governor: Option<GovernorModeWire>,
+    /// Governed jobs, running or terminal: the limits the job runs with.
+    /// Omitted for an ungoverned job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits_applied: Option<LimitsApplied>,
     /// Terminal only: peak memory of the whole job tree, when the
     /// mechanism can measure it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2527,6 +2548,9 @@ pub struct RecipeRunResponse {
     /// As [`CommandStartResponse::limits_clamped`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limits_clamped: Vec<String>,
+    /// As [`CommandStartResponse::governor`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governor: Option<GovernorModeWire>,
 }
 
 // =====================================================================
@@ -2905,6 +2929,9 @@ pub struct PtyCommandStartResponse {
     /// As [`CommandStartResponse::limits_clamped`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limits_clamped: Vec<String>,
+    /// As [`CommandStartResponse::governor`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governor: Option<GovernorModeWire>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

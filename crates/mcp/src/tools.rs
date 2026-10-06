@@ -65,8 +65,8 @@ use terminal_commanderd::ipc::protocol::{
     DiscoverResponse, EventContextParams, EventContextResponse, FileListDirParams,
     FileListDirResponse, FileReadWindowParams, FileReadWindowResponse, FileSearchParams,
     FileWatchListResponse, FileWatchStartParams, FileWatchStartResponse, FileWatchStopParams,
-    FileWatchStopResponse, FileWriteParams, FileWriteResponse, IpcContextFrame, IpcError,
-    IpcErrorCode, IpcRequest, IpcResponse, JobLimitsSpec, JobPriority, LimitsApplied,
+    FileWatchStopResponse, FileWriteParams, FileWriteResponse, GovernorModeWire, IpcContextFrame,
+    IpcError, IpcErrorCode, IpcRequest, IpcResponse, JobLimitsSpec, JobPriority, LimitsApplied,
     ListLimitParams, PolicyCapsView, PolicyStatusResponse, ProbeListResponse, ProbeStatusParams,
     ProbeStatusResponse, PtyCommandListResponse, PtyCommandStartParams, PtyCommandStartResponse,
     PtyCommandStopParams, PtyCommandStopResponse, PtyCommandWriteStdinParams, ReceiptShape,
@@ -1358,6 +1358,7 @@ impl TerminalCommanderMcpServer {
                 wslenv_dropped,
                 limits_applied,
                 limits_clamped,
+                governor,
             })) => {
                 // US2 (FR-011): forward the optional pack-available hint
                 // verbatim. Omitted from the JSON when None.
@@ -1374,7 +1375,12 @@ impl TerminalCommanderMcpServer {
                     body["credential_hint"] = serde_json::json!(h);
                 }
                 add_wslenv_dropped(&mut body, &wslenv_dropped);
-                add_limits(&mut body, limits_applied.as_ref(), &limits_clamped);
+                add_limits(
+                    &mut body,
+                    limits_applied.as_ref(),
+                    &limits_clamped,
+                    governor.as_ref(),
+                );
                 json_tool_result(&body)
             }
             Ok(other) => Err(unexpected_variant(&other)),
@@ -1414,29 +1420,38 @@ impl TerminalCommanderMcpServer {
         let credential_hint = password_prompt_hint(&start_ipc.argv);
 
         // 1. Start.
-        let (job_id, bucket_id, mut cursor, wslenv_dropped, limits_applied, limits_clamped) =
-            match daemon.call(IpcRequest::CommandStartCombed(start_ipc)).await {
-                Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
-                    job_id,
-                    bucket_id,
-                    cursor,
-                    wslenv_dropped,
-                    limits_applied,
-                    limits_clamped,
-                    ..
-                })) => (
-                    job_id,
-                    bucket_id,
-                    cursor,
-                    wslenv_dropped,
-                    limits_applied,
-                    limits_clamped,
-                ),
-                Ok(other) => return Err(unexpected_variant(&other)),
-                Err(e) => {
-                    return Err(into_mcp_error_for_tool(false, &e, Some("run_and_watch")));
-                }
-            };
+        let (
+            job_id,
+            bucket_id,
+            mut cursor,
+            wslenv_dropped,
+            limits_applied,
+            limits_clamped,
+            governor,
+        ) = match daemon.call(IpcRequest::CommandStartCombed(start_ipc)).await {
+            Ok(IpcResponse::CommandStartCombed(CommandStartResponse {
+                job_id,
+                bucket_id,
+                cursor,
+                wslenv_dropped,
+                limits_applied,
+                limits_clamped,
+                governor,
+                ..
+            })) => (
+                job_id,
+                bucket_id,
+                cursor,
+                wslenv_dropped,
+                limits_applied,
+                limits_clamped,
+                governor,
+            ),
+            Ok(other) => return Err(unexpected_variant(&other)),
+            Err(e) => {
+                return Err(into_mcp_error_for_tool(false, &e, Some("run_and_watch")));
+            }
+        };
 
         // 2. Wait loop: drain signals until the job is terminal, the
         //    signal cap is hit, or the wall-clock wait budget is spent.
@@ -1656,7 +1671,12 @@ impl TerminalCommanderMcpServer {
             body["credential_hint"] = serde_json::json!(h);
         }
         add_wslenv_dropped(&mut body, &wslenv_dropped);
-        add_limits(&mut body, limits_applied.as_ref(), &limits_clamped);
+        add_limits(
+            &mut body,
+            limits_applied.as_ref(),
+            &limits_clamped,
+            governor.as_ref(),
+        );
         obj_extend(&mut body, governor_fields);
         json_tool_result(&body)
     }
@@ -2479,6 +2499,7 @@ impl TerminalCommanderMcpServer {
             wslenv_dropped,
             limits_applied,
             limits_clamped,
+            governor,
         } = started;
         if !watched {
             let mut body = serde_json::json!({
@@ -2501,7 +2522,12 @@ impl TerminalCommanderMcpServer {
                 "recover_hint": serde_json::Value::Null,
             });
             add_wslenv_dropped(&mut body, &wslenv_dropped);
-            add_limits(&mut body, limits_applied.as_ref(), &limits_clamped);
+            add_limits(
+                &mut body,
+                limits_applied.as_ref(),
+                &limits_clamped,
+                governor.as_ref(),
+            );
             return json_tool_result(&body);
         }
         let RecipeWatch {
@@ -2554,7 +2580,12 @@ impl TerminalCommanderMcpServer {
         obj.insert("wait_ms".to_owned(), serde_json::json!(wait_ms));
         obj.insert("probe_id".to_owned(), serde_json::json!(probe_id));
         add_wslenv_dropped(&mut value, &wslenv_dropped);
-        add_limits(&mut value, limits_applied.as_ref(), &limits_clamped);
+        add_limits(
+            &mut value,
+            limits_applied.as_ref(),
+            &limits_clamped,
+            governor.as_ref(),
+        );
         obj_extend(&mut value, governor_fields);
         json_tool_result(&value)
     }
@@ -2989,6 +3020,7 @@ impl TerminalCommanderMcpServer {
                 wslenv_dropped,
                 limits_applied,
                 limits_clamped,
+                governor,
             })) => {
                 let mut body = serde_json::json!({
                     "job_id": job_id,
@@ -2997,7 +3029,12 @@ impl TerminalCommanderMcpServer {
                     "cursor": cursor,
                 });
                 add_wslenv_dropped(&mut body, &wslenv_dropped);
-                add_limits(&mut body, limits_applied.as_ref(), &limits_clamped);
+                add_limits(
+                    &mut body,
+                    limits_applied.as_ref(),
+                    &limits_clamped,
+                    governor.as_ref(),
+                );
                 json_tool_result(&body)
             }
             Ok(other) => Err(unexpected_variant(&other)),
@@ -4063,6 +4100,7 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
         wslenv_dropped,
         limits_applied,
         limits_clamped,
+        governor,
     } = response;
     let mut payload = serde_json::json!({
         "job_id": job_id,
@@ -4071,7 +4109,12 @@ fn shell_exec_payload(response: &CommandStartResponse, shell_line: &str) -> serd
         "cursor": cursor,
     });
     add_wslenv_dropped(&mut payload, wslenv_dropped);
-    add_limits(&mut payload, limits_applied.as_ref(), limits_clamped);
+    add_limits(
+        &mut payload,
+        limits_applied.as_ref(),
+        limits_clamped,
+        governor.as_ref(),
+    );
 
     let lower = shell_line.to_ascii_lowercase();
     let mut detected = Vec::new();
@@ -6085,12 +6128,16 @@ fn command_status_payload(s: &CommandStatusResponse) -> serde_json::Value {
     v
 }
 
-/// Resource-governor fields of a status (`governor`, `peak_memory_bytes`,
-/// `exit_reason`), each present only when the daemon reported it.
+/// Resource-governor fields of a status (`governor` and `limits_applied`
+/// while running and after exit, `peak_memory_bytes` and `exit_reason` after
+/// exit), each present only when the daemon reported it.
 fn governor_status_fields(s: &CommandStatusResponse) -> serde_json::Map<String, serde_json::Value> {
     let mut m = serde_json::Map::new();
     if let Some(g) = &s.governor {
         m.insert("governor".to_owned(), serde_json::json!(g));
+    }
+    if let Some(a) = &s.limits_applied {
+        m.insert("limits_applied".to_owned(), serde_json::json!(a));
     }
     if let Some(p) = s.peak_memory_bytes {
         m.insert("peak_memory_bytes".to_owned(), serde_json::json!(p));
@@ -6107,11 +6154,19 @@ fn obj_extend(v: &mut serde_json::Value, fields: serde_json::Map<String, serde_j
     }
 }
 
-/// Add `limits_applied` / `limits_clamped` to a start payload; both are
-/// omitted when the daemon reported nothing (governor disabled).
-fn add_limits(body: &mut serde_json::Value, applied: Option<&LimitsApplied>, clamped: &[String]) {
+/// Add `limits_applied` / `limits_clamped` / `governor` to a start payload;
+/// each is omitted when the daemon reported nothing (governor disabled).
+fn add_limits(
+    body: &mut serde_json::Value,
+    applied: Option<&LimitsApplied>,
+    clamped: &[String],
+    governor: Option<&GovernorModeWire>,
+) {
     if let Some(a) = applied {
         body["limits_applied"] = serde_json::json!(a);
+    }
+    if let Some(g) = governor {
+        body["governor"] = serde_json::json!(g);
     }
     if !clamped.is_empty() {
         body["limits_clamped"] = serde_json::json!(clamped);
@@ -7271,6 +7326,7 @@ mod tests {
             wslenv_dropped: Vec::new(),
             limits_applied: None,
             limits_clamped: Vec::new(),
+            governor: None,
         }
     }
 

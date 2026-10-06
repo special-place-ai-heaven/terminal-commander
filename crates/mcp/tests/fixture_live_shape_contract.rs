@@ -54,8 +54,13 @@ const DISCOVER_HOST_DEPENDENT: &[&str] = &[
 
 /// Governor keys whose presence depends on the host: `peak_memory_bytes`
 /// exists only where the enforcement mechanism can measure it (Job Object,
-/// cgroup `memory.peak`, not rlimit).
-const GOVERNOR_HOST_DEPENDENT: &[&str] = &["peak_memory_bytes"];
+/// cgroup `memory.peak`, not rlimit); the default memory limit is not applied
+/// under rlimit; an unavailable enforcer reports `{"unavailable": reason}`.
+const GOVERNOR_HOST_DEPENDENT: &[&str] = &[
+    "peak_memory_bytes",
+    "limits_applied.memory_bytes",
+    "governor.unavailable",
+];
 
 /// Tools deliberately not driven by this test. Each entry carries its reason.
 fn skipped() -> Vec<(&'static str, &'static str)> {
@@ -524,11 +529,12 @@ async fn command_chain(h: &mut Harness) -> String {
     )
     .await;
 
-    h.check(
+    h.check_host(
         "shell_exec",
         json!({"shell_line": "echo hi"}),
         "/response_example",
         &[],
+        GOVERNOR_HOST_DEPENDENT,
     )
     .await;
     bucket
@@ -537,11 +543,12 @@ async fn command_chain(h: &mut Harness) -> String {
 async fn long_lived_command(h: &mut Harness) {
     // A long-lived command to stop.
     let sleeper = h
-        .check(
+        .check_host(
             "command_start_combed",
             json!({"argv": sleeper_argv()}),
             "/response_example",
             &[],
+            GOVERNOR_HOST_DEPENDENT,
         )
         .await;
     // command_status on a still-running job carries live liveness fields;
@@ -557,11 +564,12 @@ async fn long_lived_command(h: &mut Harness) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    h.check(
+    h.check_host(
         "command_status",
         json!({"job_id": s(&sleeper, "job_id")}),
         "/response_example_running",
         &[],
+        GOVERNOR_HOST_DEPENDENT,
     )
     .await;
     h.check(
@@ -658,11 +666,12 @@ async fn shell_tools(h: &mut Harness, work_s: &str) {
 async fn pty_and_file_tools(h: &mut Harness, work_s: &str, work: &Path) {
     // --- PTY ---------------------------------------------------------------
     let pty = h
-        .check(
+        .check_host(
             "pty_command_start",
             json!({"argv": pty_argv(), "cwd": work_s}),
             "/response_example",
             &[],
+            GOVERNOR_HOST_DEPENDENT,
         )
         .await;
     let pjob = s(&pty, "job_id");
@@ -752,13 +761,21 @@ async fn status_tools(h: &mut Harness) {
     )
     .await;
     h.check("health", json!({}), "/response_example", &[]).await;
-    // The default memory resolves from host memory, so it can be absent.
+    // The default memory and host ceiling resolve from host memory, so they
+    // can be absent; the ceiling is `{"unavailable": reason}` where the host
+    // has no aggregate primitive (rlimit).
     h.check_host(
         "policy_status",
         json!({}),
         "/response_example",
         &[],
-        &["governor.default_job_memory_bytes", "governor.note"],
+        &[
+            "governor.default_job_memory_bytes",
+            "governor.note",
+            "governor.host_ceiling_bytes",
+            "governor.host_ceiling_mode",
+            "governor.host_ceiling_mode.unavailable",
+        ],
     )
     .await;
     h.check("self_check", json!({}), "/response_example", &[])
