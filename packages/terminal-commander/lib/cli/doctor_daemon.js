@@ -4,6 +4,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const path = require("node:path");
 const {
   doctorDaemonAutostart,
   renderDaemonAliveTest,
@@ -64,6 +65,15 @@ async function doctorNativeWindows(o, env, environment) {
   const pid = field("pid");
   lines.push(`  endpoint: ${field("endpoint")}`, `  daemon_running: ${daemon === "running" ? "yes" : "no"}`);
   if (daemon === "running" && pid && pid !== "-") lines.push(`  pid: ${pid}`);
+  // The CLI reads the running pid's image path; `unknown (...)` or no row means it could not.
+  const running = daemon === "running" ? field("daemon_exe") : null;
+  if (running && !running.startsWith("unknown")) {
+    lines.push(`  running_exe: ${running}`);
+    // Windows paths are case-insensitive.
+    if (exe && path.resolve(running).toLowerCase() !== path.resolve(exe).toLowerCase()) {
+      lines.push("  note: the running daemon is not the installed stable copy");
+    }
+  }
   lines.push(`  data_dir: ${field("state_dir")}`);
   return { status: "ok", exit_code: 0, output: `${lines.join("\n")}\n` };
 }
