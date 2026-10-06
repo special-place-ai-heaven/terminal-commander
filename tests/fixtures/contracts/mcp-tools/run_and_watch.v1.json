@@ -48,7 +48,9 @@
     "cursor": 12,
     "degraded": false,
     "recover_hint": null,
-    "outcome_trust": "observed"
+    "outcome_trust": "observed",
+    "limits_applied": { "memory_bytes": 8589934592, "priority": "below_normal" },
+    "governor": "job_object"
   },
   "response_example_wait_exhausted": {
     "job_id": "job_018f0000000000000000000000000001",

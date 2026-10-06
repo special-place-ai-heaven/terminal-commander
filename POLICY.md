@@ -646,6 +646,64 @@ writes; leaving `write_allow` empty there is an open write surface.
   verbatim prefixes, alternate-data-stream suffixes, and trailing
   dot/space aliases are normalized before matching.
 
+### 4.3 `[governor]` (resource governor)
+
+A job started through Terminal Commander (argv, shell, recipe or PTY lane)
+runs under a per-job memory ceiling and a CPU priority, enforced by the
+kernel. The thing that enforces is the thing that reports: a start never
+silently drops a limit, it reports the mechanism or says why there is none.
+
+```toml
+[governor]
+enabled = true                      # false: no limits, responses as before
+default_job_memory = "60%"          # "<n>%", "24GiB", "512MiB", bytes, or "none"
+default_priority = "below_normal"   # idle | below_normal | normal
+llm_can_raise_limits = true         # omitted: profile default (below)
+```
+
+- **Percent** resolves against the commit limit on Windows and against total
+  memory (`MemTotal`) on Linux. If host memory cannot be read, the percent
+  default resolves to no limit and `policy_status.governor.note` says so.
+- **`llm_can_raise_limits`** defaults to true under `full_access` and
+  `admin_debug`, false under `developer_local`, `repo_only` and
+  `read_only_observer`. When false, a request that asks for more than the
+  default (a larger memory ceiling, a higher priority) is clamped to the
+  default and the start response lists the clamped axes in `limits_clamped`.
+  A request at or below the default is always honoured.
+- **Requests** carry an optional `limits` object on `command_start_combed`,
+  `run_and_watch`, `shell_exec`, `recipe_run` and `pty_command_start`:
+  `{"memory": "24GiB" | "40%" | "none", "priority": "idle" | "below_normal" | "normal"}`.
+  An omitted axis takes the default. A start response reports what the job
+  runs with as `limits_applied` (`memory_bytes`, `priority`). With
+  `enabled = false` neither `limits_applied` nor any governor field appears.
+- **`policy_status.governor`** reports `enabled`, `mode_available` (what this
+  host can enforce, detected at daemon start), `default_job_memory_bytes`,
+  `default_priority`, `llm_can_raise_limits` and an optional `note`.
+- **Status and run_and_watch results** of a governed job report `governor`
+  (the mechanism: `job_object`, `cgroup`, `rlimit`, or `{"unavailable": reason}`
+  when no enforcement was possible and the job ran ungoverned),
+  `peak_memory_bytes` when the mechanism can measure it, and
+  `exit_reason: "memory_ceiling"` when the ceiling stopped the job. A clamped
+  start and a memory_ceiling exit are audited, the latter with limit and peak.
+
+Mechanisms and their limits:
+
+- **Windows (`job_object`):** a Job Object memory limit on the whole process
+  tree. The OS makes commits above the limit fail; it does not kill the job.
+  `exit_reason` is therefore inferred from `peak_memory_bytes` reaching the
+  limit together with an abnormal exit. One oversized allocation refused
+  outright is reported with the limit and the peak but without `exit_reason`.
+- **Linux `cgroup`:** the daemon creates a sibling cgroup v2 with `memory.max`
+  (swap off) and moves the job into it, so the ceiling covers the whole tree,
+  and the kernel's OOM kill is what stops it. This needs the daemon inside a
+  writable delegated cgroup, which the systemd user unit installed by
+  autostart provides. Peak comes from `memory.peak` (kernel 5.19 or later).
+- **Linux `rlimit`:** when no writable cgroup is available (a shell-profile
+  autostart, WSL without systemd), the job gets `RLIMIT_DATA`. It is per
+  process, not summed across the tree, and there is no peak.
+- **CPU limits** are not in this version; `priority` only sets scheduling
+  priority (Windows priority class, Linux nice).
+
 ## 5. Default-deny override mechanism
 
 None. Default-denied paths (see `SECURITY.md` section 5) cannot be

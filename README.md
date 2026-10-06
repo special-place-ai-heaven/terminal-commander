@@ -52,6 +52,17 @@ result is ever silent or misleading.
 
 ## Recent improvements
 
+<!-- release-status -->Landed 2026-10-06, not yet in a tagged release.
+
+- **A job cannot take the host down:** every command, shell, recipe and PTY
+  start runs under a kernel-enforced memory ceiling (default 60% of the commit
+  limit or total memory) and lower CPU priority. Pass `limits` (for example
+  `{"memory": "50%"}`) to size a build; the start reports `limits_applied`, and
+  a job stopped by its ceiling reports `exit_reason: "memory_ceiling"` with
+  `peak_memory_bytes`. Windows uses a Job Object, Linux a cgroup when the
+  daemon runs under systemd, otherwise `RLIMIT_DATA`; the status names the
+  mode and never silently drops a limit. See `POLICY.md` section 4.3.
+
 <!-- release-status -->Landed 2026-10-06, released in v0.3.12.
 
 - **Linux/WSL shells survive the daemon autostart hook:** the hook sourced its

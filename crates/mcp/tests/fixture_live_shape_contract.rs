@@ -52,6 +52,11 @@ const DISCOVER_HOST_DEPENDENT: &[&str] = &[
     "daemon.environment.wsl.stale_confirmed_age_ms",
 ];
 
+/// Governor keys whose presence depends on the host: `peak_memory_bytes`
+/// exists only where the enforcement mechanism can measure it (Job Object,
+/// cgroup `memory.peak`, not rlimit).
+const GOVERNOR_HOST_DEPENDENT: &[&str] = &["peak_memory_bytes"];
+
 /// Tools deliberately not driven by this test. Each entry carries its reason.
 fn skipped() -> Vec<(&'static str, &'static str)> {
     #[allow(unused_mut)] // only the Windows build pushes more entries
@@ -423,21 +428,23 @@ async fn scenario(h: &mut Harness, data: &Path) {
 
 async fn command_chain(h: &mut Harness) -> String {
     // Quiet run (no rules): the response carries the bounded exit receipt.
-    h.check(
+    h.check_host(
         "run_and_watch",
         json!({"argv": echo_argv("quiet"), "wait_ms": 3000, "wait_until": "exit"}),
         "/response_example",
         &[],
+        GOVERNOR_HOST_DEPENDENT,
     )
     .await;
     // --- command / bucket / probe / event chain ---------------------------
     let run = h
-        .check(
+        .check_host(
             "run_and_watch",
             json!({"argv": echo_argv("hello"), "wait_ms": 3000, "wait_until": "exit",
                    "rules": [{"pattern": "hello", "severity": "high"}]}),
             "/response_example",
             &[],
+            GOVERNOR_HOST_DEPENDENT,
         )
         .await;
     let job = s(&run, "job_id");
@@ -445,11 +452,12 @@ async fn command_chain(h: &mut Harness) -> String {
 
     // command_status: a finished job whose rule matched (no receipt) ...
     h.wait_finished(&job).await;
-    h.check(
+    h.check_host(
         "command_status",
         json!({"job_id": job}),
         "/response_example",
         &[],
+        GOVERNOR_HOST_DEPENDENT,
     )
     .await;
     // ... and a quiet finished job whose output is longer than the receipt
@@ -462,11 +470,12 @@ async fn command_chain(h: &mut Harness) -> String {
         .await;
     let quiet_job = s(&quiet, "job_id");
     h.wait_finished(&quiet_job).await;
-    h.check(
+    h.check_host(
         "command_status",
         json!({"job_id": quiet_job}),
         "/response_example_no_rule_receipt",
         &[],
+        GOVERNOR_HOST_DEPENDENT,
     )
     .await;
 
@@ -743,8 +752,15 @@ async fn status_tools(h: &mut Harness) {
     )
     .await;
     h.check("health", json!({}), "/response_example", &[]).await;
-    h.check("policy_status", json!({}), "/response_example", &[])
-        .await;
+    // The default memory resolves from host memory, so it can be absent.
+    h.check_host(
+        "policy_status",
+        json!({}),
+        "/response_example",
+        &[],
+        &["governor.default_job_memory_bytes", "governor.note"],
+    )
+    .await;
     h.check("self_check", json!({}), "/response_example", &[])
         .await;
     h.check(
@@ -951,11 +967,12 @@ async fn recipe_tools(h: &mut Harness) {
     .await;
     h.check("recipe_list_active", json!({}), "/response_example", &[])
         .await;
-    h.check(
+    h.check_host(
         "recipe_run",
         json!({"recipe_id": "fixture.echo", "scope": {"kind": "global"}}),
         "/response_example",
         &[],
+        GOVERNOR_HOST_DEPENDENT,
     )
     .await;
     h.check(

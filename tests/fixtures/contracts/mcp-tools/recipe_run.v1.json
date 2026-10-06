@@ -59,7 +59,12 @@
     "wait_cap_ms": 60000,
     "wait_exhausted": false,
     "wait_ms": 5000,
-    "watched": true
+    "watched": true,
+    "limits_applied": {
+      "memory_bytes": 8589934592,
+      "priority": "below_normal"
+    },
+    "governor": "job_object"
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",

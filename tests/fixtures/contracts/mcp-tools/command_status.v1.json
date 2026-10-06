@@ -39,7 +39,8 @@
     "receipt": null,
     "restarted": false,
     "signal": null,
-    "state": "exited"
+    "state": "exited",
+    "governor": "job_object"
   },
   "response_example_no_rule_receipt": {
     "bucket_id": "bkt_018f0000000000000000000000000002",
@@ -75,7 +76,8 @@
     },
     "restarted": false,
     "signal": null,
-    "state": "exited"
+    "state": "exited",
+    "governor": "job_object"
   },
   "response_example_running": {
     "bucket_id": "bkt_018f0000000000000000000000000003",

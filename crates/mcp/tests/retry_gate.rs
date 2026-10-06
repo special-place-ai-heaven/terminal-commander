@@ -106,6 +106,7 @@ fn command_start() -> IpcRequest {
         dedup_nonce: None,
         receipt_shape: None,
         strip_ansi: true,
+        limits: None,
     })
 }
 
@@ -151,6 +152,7 @@ async fn pty_start_is_not_resent_on_transport_failure() {
         rows: None,
         cols: None,
         tag: None,
+        limits: None,
     });
     let result = client.call(req).await;
     assert!(result.is_err(), "transport error expected");
@@ -181,6 +183,7 @@ async fn shell_exec_is_not_resent_on_transport_failure() {
         bucket_config: None,
         tag: None,
         receipt_shape: None,
+        limits: None,
     });
     let result = client.call(req).await;
     assert!(result.is_err(), "transport error expected");

@@ -722,3 +722,74 @@ async fn run_and_watch_fast_command_is_complete_and_not_degraded() {
     handle.shutdown().await;
     cleanup(&data);
 }
+
+/// Resource governor: a `limits` request on `run_and_watch` is honoured and
+/// reported back as `limits_applied` (`priority` is the axis every host can
+/// set, so it is asserted regardless of which memory mode the host offers).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_and_watch_with_limits_reports_limits_applied() {
+    let data = tmp_data_dir("rw-limits");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        let payload = first_text(
+            &call_tool(
+                &client,
+                "run_and_watch",
+                serde_json::json!({
+                    "argv": ["true"],
+                    "wait_ms": 5000,
+                    "wait_until": "exit",
+                    "limits": {"memory": "512MiB", "priority": "idle"},
+                }),
+            )
+            .await,
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&payload).expect("run_and_watch payload is JSON");
+        assert_eq!(v["complete"].as_bool(), Some(true), "got: {payload}");
+        let applied = &v["limits_applied"];
+        assert_eq!(
+            applied["memory_bytes"].as_u64(),
+            Some(512 * 1024 * 1024),
+            "got: {payload}"
+        );
+        assert_eq!(applied["priority"].as_str(), Some("idle"), "got: {payload}");
+        assert!(
+            v["governor"].is_string() || v["governor"].is_object(),
+            "a governed job reports the mechanism that enforced it; got: {payload}"
+        );
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}
+
+/// Resource governor: `policy_status` carries the governor block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_status_reports_governor_block() {
+    let data = tmp_data_dir("policy-gov");
+    let handle = spawn_live_daemon(&data);
+    {
+        let (_server, client) = paired_against_live_daemon(&handle).await;
+
+        let payload = first_text(&call_tool(&client, "policy_status", serde_json::json!({})).await);
+        let v: serde_json::Value =
+            serde_json::from_str(&payload).expect("policy_status payload is JSON");
+        let g = &v["governor"];
+        assert_eq!(g["enabled"].as_bool(), Some(true), "got: {payload}");
+        assert!(g.get("mode_available").is_some(), "got: {payload}");
+        assert_eq!(
+            g["default_priority"].as_str(),
+            Some("below_normal"),
+            "got: {payload}"
+        );
+        assert!(g["llm_can_raise_limits"].is_boolean(), "got: {payload}");
+
+        let _ = client.cancel().await;
+    }
+    handle.shutdown().await;
+    cleanup(&data);
+}

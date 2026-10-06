@@ -276,6 +276,32 @@ universals are NOT merged alongside it. So enabling the flag does not
 sprinkle baseline LOW signal onto pack-covered commands; it only covers
 the otherwise-uncovered ones. This conservative behavior is by design.
 
+## 5b. Size a build with `limits`
+
+Every start is governed: a memory ceiling for the whole job tree and a lower
+CPU priority, from the daemon's `[governor]` defaults (`policy_status` shows
+them). To size one job, pass `limits` on `run_and_watch`, `command_start_combed`,
+`shell_exec`, `recipe_run` or `pty_command_start`:
+
+```json
+{"argv": ["cargo", "test", "--workspace"],
+ "limits": {"memory": "50%", "priority": "below_normal"},
+ "rules": [{"pattern": "^error|FAILED|test result"}],
+ "wait_until": "exit"}
+```
+
+- `memory` is `"24GiB"`, `"512MiB"`, bytes, `"40%"` of host memory, or
+  `"none"`. Read `limits_applied` in the reply: it is what the job really runs
+  with. If `limits_clamped` is non-empty the daemon does not let you raise that
+  axis above its default; do not retry with a bigger number.
+- `exit_reason: "memory_ceiling"` (with `peak_memory_bytes`) means the ceiling
+  stopped the job, so the failure is the limit, not your code. Retry with less
+  parallelism (`cargo test -j 2`, `make -j2`) rather than a bigger limit.
+- `governor` names the mechanism (`job_object`, `cgroup`, `rlimit`) or says
+  `unavailable` with a reason; in the last case the job ran with no ceiling.
+  On Windows a refused oversized allocation shows the limit and peak but no
+  `exit_reason`; compare `peak_memory_bytes` with `limits_applied.memory_bytes`.
+
 ## 6. Remote hosts: target_id
 
 To run a daemon-backed tool against a remote host, add `target_id`:

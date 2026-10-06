@@ -35,7 +35,11 @@
     "job_id": "job_018f0000000000000000000000000003",
     "bucket_id": "bkt_018f0000000000000000000000000003",
     "probe_id": "prb_018f0000000000000000000000000003",
-    "cursor": 0
+    "cursor": 0,
+    "limits_applied": {
+      "memory_bytes": 8589934592,
+      "priority": "below_normal"
+    }
   },
   "unavailable_error_example": {
     "message": "daemon_unavailable",
