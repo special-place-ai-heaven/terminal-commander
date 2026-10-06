@@ -2462,9 +2462,9 @@ mod runtime_win {
                     // SPAWN + WAIT in the SAME owned scope (F-010). The child
                     // never crosses a scope/thread boundary between spawn and
                     // wait, so DLL-init cannot be tripped by handle migration.
-                    // Host job peak at spawn, for the host-ceiling inference
-                    // at exit (set only when governed and joined).
-                    let mut host_peak_at_spawn: Option<u64> = None;
+                    // Completion-port state for the limit-hit reading at
+                    // exit (set only when governed).
+                    let mut limit_watch = crate::governor::LimitWatch::default();
                     let mut child = match slave.spawn_command(cmd) {
                         Ok(c) => {
                             // Resource governor: assign the ConPTY child to a
@@ -2474,9 +2474,9 @@ mod runtime_win {
                             // Mode is final before `spawn` returns (the killer
                             // is sent below).
                             if governed {
-                                let (job, report, host_peak) =
+                                let (job, report, watch) =
                                     crate::governor::govern_child(c.as_raw_handle(), &limits);
-                                host_peak_at_spawn = host_peak;
+                                limit_watch = watch;
                                 *waiter_gov_job.lock() = job;
                                 let report = report.lock().clone();
                                 *waiter_governor.lock() = report;
@@ -2586,7 +2586,7 @@ mod runtime_win {
                     crate::governor::finish_job(
                         &waiter_governor,
                         waiter_gov_job.lock().as_ref(),
-                        host_peak_at_spawn,
+                        limit_watch,
                         cancelled || exit_u32 != Some(0),
                     );
                     // The child exited: release the governor job now (like

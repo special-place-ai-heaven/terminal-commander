@@ -7,7 +7,9 @@
 //! `--exact alloc_helper --nocapture` and `TC_TEST_ALLOC_MIB=<n>`: the helper
 //! is a `#[test]` that returns at once unless the env var is set, then commits
 //! and touches `n` MiB in 1 MiB chunks. No python, powershell or extra binary.
-//! Optional helper env: `TC_TEST_READY_FILE` (written after the allocation),
+//! Optional helper env: `TC_TEST_ALLOC_ONESHOT` (one `n` MiB allocation
+//! instead of chunks; a refused one exits 3), `TC_TEST_READY_FILE` (written
+//! after the allocation),
 //! `TC_TEST_HOLD_FILE` (hold the memory until it exists), `TC_TEST_HOLD_MS`
 //! (hold it for a plain sleep: no syscall that could charge memory),
 //! `TC_TEST_OOM_VICTIM` (Linux: raise `oom_score_adj` so the memcg OOM killer
@@ -40,6 +42,7 @@ const OOM_VICTIM_ENV: &str = "TC_TEST_OOM_VICTIM";
 #[cfg(windows)]
 const EXPECT_PRIORITY_ENV: &str = "TC_TEST_EXPECT_PRIORITY";
 const NESTED_ENV: &str = "TC_TEST_NESTED";
+const ONESHOT_ENV: &str = "TC_TEST_ALLOC_ONESHOT";
 const MIB: u64 = 1024 * 1024;
 const LIMIT: u64 = 100 * MIB;
 const HOST_LIMIT: u64 = 150 * MIB;
@@ -65,7 +68,16 @@ fn alloc_helper() {
     }
     let mib: usize = mib.parse().expect("TC_TEST_ALLOC_MIB is a number");
     let mut chunks = Vec::with_capacity(mib);
-    for _ in 0..mib {
+    if std::env::var_os(ONESHOT_ENV).is_some() {
+        let mut buf: Vec<u8> = Vec::new();
+        if buf.try_reserve_exact(mib << 20).is_err() {
+            eprintln!("ALLOC_REFUSED {mib}");
+            std::process::exit(3);
+        }
+        buf.resize(mib << 20, 1);
+        chunks.push(buf);
+    }
+    while chunks.len() < mib && std::env::var_os(ONESHOT_ENV).is_none() {
         let mut chunk = vec![0u8; 1 << 20];
         for i in (0..chunk.len()).step_by(4096) {
             chunk[i] = 1;
@@ -225,6 +237,30 @@ fn over_limit_allocation_is_stopped() {
     assert_governed_failure(ok, &report);
 }
 
+/// ONE large allocation the kernel refuses outright: the hit must come from
+/// the kernel's own limit signal (Windows: the job's memory-limit message on
+/// the completion port).
+#[test]
+fn single_refused_allocation_is_a_limit_hit() {
+    let cfg = config(
+        governed(),
+        env(&[(ALLOC_ENV, OVER_MIB), (ONESHOT_ENV, "1")]),
+    );
+    let (ok, report) = run_cfg(&helper_argv(), &cfg);
+    println!("one-shot report: {report:?} exit_ok={ok}");
+    assert!(!ok, "one 300 MiB alloc under a 100 MiB limit must fail");
+    match report.mode.as_ref().expect("governed job has a mode") {
+        // Observed live: `PeakJobMemoryUsed` records the refused charge too,
+        // so the peak is reported but not asserted here.
+        GovernorMode::JobObject => {
+            assert!(report.memory_limit_hit, "kernel limit message counted");
+        }
+        GovernorMode::Cgroup => assert!(report.memory_limit_hit, "cgroup oom counted"),
+        GovernorMode::Rlimit => assert!(!report.memory_limit_hit, "rlimit cannot know"),
+        GovernorMode::Unavailable(reason) => panic!("governor unavailable: {reason}"),
+    }
+}
+
 /// Tree containment: the allocating process is a grandchild. Job Object and
 /// cgroup sum the tree; rlimit is inherited and still enforced per process.
 #[cfg(any(windows, unix))]
@@ -291,8 +327,10 @@ fn mode_is_final_before_exit() {
 
 /// Two jobs, each under its 100 MiB per-job limit, both join a 150 MiB host
 /// ceiling. The first holds 90 MiB; the second's 90 MiB pushes the host past
-/// its ceiling and fails. Rlimit mode has no aggregate primitive: install
-/// returns `Err` and the scenario stops there.
+/// its ceiling and fails. Run twice in the same process: the second round
+/// must be detected too, after the host ceiling was already reached once (a
+/// never-resetting peak cannot see it). Rlimit mode has no aggregate
+/// primitive: install returns `Err` and the scenario stops there.
 fn host_ceiling_scenario() {
     let installed = install_host_ceiling(HOST_LIMIT);
     println!(
@@ -321,6 +359,18 @@ fn host_ceiling_scenario() {
         join_host_ceiling: true,
         ..governed()
     };
+    for round in 1..=2 {
+        println!("host ceiling round {round}");
+        host_ceiling_round(joined);
+    }
+    // The host dir lives for the daemon's life; this process is the daemon.
+    #[cfg(target_os = "linux")]
+    if let Some(parent) = test_parent_cgroup() {
+        let _ = std::fs::remove_dir(parent.join(format!("tc-jobs-{}", std::process::id())));
+    }
+}
+
+fn host_ceiling_round(joined: JobLimits) {
     let dir = scratch_dir("host");
     let ready = dir.join("ready").to_string_lossy().into_owned();
     rt().block_on(async {
@@ -384,11 +434,6 @@ fn host_ceiling_scenario() {
         );
     });
     let _ = std::fs::remove_dir_all(dir);
-    // The host dir lives for the daemon's life; this process is the daemon.
-    #[cfg(target_os = "linux")]
-    if let Some(parent) = test_parent_cgroup() {
-        let _ = std::fs::remove_dir(parent.join(format!("tc-jobs-{}", std::process::id())));
-    }
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -614,12 +659,13 @@ fn outliving_grandchild_is_killed_and_dir_removed() {
     println!("orphan job: ok={ok} {report:?}");
     assert!(ok);
     assert_eq!(report.mode, Some(GovernorMode::Cgroup));
-    assert!(
-        !parent
-            .join(format!("tc-job-{}-{id}", std::process::id()))
-            .exists(),
-        "job cgroup dir must be removed"
-    );
+    // The EBUSY retry runs on the blocking pool, off the async worker.
+    let job_dir = parent.join(format!("tc-job-{}-{id}", std::process::id()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while job_dir.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!job_dir.exists(), "job cgroup dir must be removed");
     let pid = std::fs::read_to_string(&pidfile).expect("pid file");
     let proc_dir = PathBuf::from(format!("/proc/{}", pid.trim()));
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -628,6 +674,45 @@ fn outliving_grandchild_is_killed_and_dir_removed() {
     }
     assert!(!proc_dir.exists(), "the outliving grandchild was killed");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// After boot found cgroups usable, a per-job create failure (here: the
+/// host dir removed under the daemon) is `Unavailable`, never a run-time
+/// switch to the rlimit lane; the job still runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn removed_host_dir_is_unavailable_not_rlimit() {
+    if available_mode() != GovernorMode::Cgroup {
+        println!("linux governor mode: rlimit (no cgroup lane); skipped");
+        return;
+    }
+    install_host_ceiling(HOST_LIMIT).expect("host ceiling installs");
+    let joined = JobLimits {
+        join_host_ceiling: true,
+        ..governed()
+    };
+    let (ok, first) = run(&helper_argv(), joined, "1");
+    println!("before removal: ok={ok} {first:?}");
+    assert!(ok);
+    assert_eq!(first.mode, Some(GovernorMode::Cgroup));
+    let host = test_parent_cgroup()
+        .expect("cgroup parent")
+        .join(format!("tc-jobs-{}", std::process::id()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::fs::remove_dir(&host).is_err() {
+        assert!(Instant::now() < deadline, "host dir never emptied");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (ok, second) = run(&helper_argv(), joined, "1");
+    println!("after removal: ok={ok} {second:?}");
+    assert!(ok, "an ungoverned job still runs");
+    match second.mode {
+        Some(GovernorMode::Unavailable(reason)) => {
+            assert!(!reason.contains('/'), "reason carries no path: {reason}");
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+    assert!(!second.host_ceiling_joined);
 }
 
 /// Boot sweep removes empty dirs of DEAD daemons only; a live daemon's dirs

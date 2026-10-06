@@ -10,7 +10,10 @@
 //!
 //! * Windows: limits are added to the Job Object the probe already owns
 //!   (`JOB_OBJECT_LIMIT_JOB_MEMORY` caps the job's summed commit charge;
-//!   `JOB_OBJECT_LIMIT_PRIORITY_CLASS`). Peak = `PeakJobMemoryUsed`. The host
+//!   `JOB_OBJECT_LIMIT_PRIORITY_CLASS`). Peak = `PeakJobMemoryUsed` (reported
+//!   only); hit = the kernel's `JOB_OBJECT_MSG_JOB_MEMORY_LIMIT` messages,
+//!   read from one per-daemon I/O completion port every governed job and the
+//!   host job are associated with. The host
 //!   ceiling is a parent Job Object: a joining child is assigned to it FIRST,
 //!   then to its per-job job, which the kernel nests under the host job.
 //! * Linux: a SIBLING cgroup v2 `<daemon parent cgroup>/tc-job-<pid>-<probe_id>`
@@ -20,10 +23,12 @@
 //!   the cgroup in `pre_exec` (writes `0` to `cgroup.procs`), so nothing it
 //!   forks can escape; the parent re-writes the pid after spawn as a checked
 //!   fallback. Peak = `memory.peak`, hit = `memory.events.local` `oom > 0`
-//!   with a non-success exit. When the parent
-//!   cgroup is not writable (WSL `/non-systemd`, no systemd) the fallback is
+//!   with a non-success exit. When the boot-time probe finds the parent
+//!   cgroup not writable (WSL `/non-systemd`, no systemd) the lane is
 //!   `RLIMIT_DATA` set in `pre_exec` (inherited, per-process, not tree-summed;
-//!   peak and hit are unknowable). Never `RLIMIT_AS`, never `systemd-run`.
+//!   peak and hit are unknowable). That choice is made once: a per-job cgroup
+//!   failure after a usable probe is `Unavailable`, never a run-time switch
+//!   to rlimit. Never `RLIMIT_AS`, never `systemd-run`.
 //! * Other unix: no memory primitive (`RLIMIT_DATA` does not cover
 //!   mmap-backed malloc there): memory is reported `Unavailable`.
 //! * Priority on unix: `setpriority` (nice 10 BelowNormal, 19 Idle) in
@@ -92,19 +97,21 @@ pub struct GovernorReport {
     /// Windows: `PeakJobMemoryUsed`; Linux cgroup: `memory.peak` (None on
     /// kernels < 5.19); rlimit: None.
     pub peak_memory_bytes: Option<u64>,
-    /// Requires a non-success exit everywhere. Windows: peak >= limit;
-    /// cgroup: the job dir's local `oom` count > 0; rlimit: false
-    /// (unknowable).
+    /// The kernel refused this job's OWN limit and the job exited
+    /// non-success. Windows: the job posted at least one
+    /// `JOB_OBJECT_MSG_JOB_MEMORY_LIMIT` (or `..._PROCESS_MEMORY_LIMIT`) to
+    /// the daemon's completion port, so a single refused allocation that
+    /// never raised the peak still counts. Linux cgroup: the job dir's
+    /// `memory.events.local` `oom` count > 0. Rlimit: false (unknowable).
     pub memory_limit_hit: bool,
     /// The child joined the installed host ceiling.
     pub host_ceiling_joined: bool,
     /// The host ceiling was reached while this job ran and the job exited
     /// non-success (filled at exit). An inference, never a guess: unknown is
     /// reported as `false`.
-    /// * Windows: the host job's `PeakJobMemoryUsed` was below the host limit
-    ///   at this job's spawn and is at or above it at exit. If the host peak
-    ///   was already at the limit when the job started (the peak never
-    ///   resets), the answer is unknowable and reported `false`.
+    /// * Windows: the host job's kernel limit-message count on the daemon's
+    ///   completion port rose between this job's spawn and exit. A count, not
+    ///   a peak, so every later crossing is seen too.
     /// * Linux cgroup: the host dir's `memory.events.local` `oom` count rose
     ///   between spawn and exit.
     /// * Rlimit / no host ceiling joined: `false`.
@@ -245,8 +252,14 @@ pub fn install_host_ceiling(limit_bytes: u64) -> Result<GovernorMode, String> {
         memory_bytes: Some(limit_bytes),
         ..JobLimits::default()
     })?;
+    if windows_host::HOST.get().is_some() {
+        return Err("host ceiling already installed".to_owned());
+    }
+    // Enforcement stands without the port; only `host_ceiling_hit` would be
+    // unknowable (reported `false`).
+    let watched = limit_messages::associate(&job, limit_messages::HOST_KEY);
     windows_host::HOST
-        .set((job, limit_bytes))
+        .set((job, limit_bytes, watched))
         .map_err(|_| "host ceiling already installed".to_owned())?;
     Ok(GovernorMode::JobObject)
 }
@@ -274,7 +287,7 @@ pub fn install_host_ceiling(limit_bytes: u64) -> Result<GovernorMode, String> {
 #[cfg(windows)]
 #[must_use]
 pub fn host_ceiling() -> Option<u64> {
-    windows_host::HOST.get().map(|(_, limit)| *limit)
+    windows_host::HOST.get().map(|(_, limit, _)| *limit)
 }
 
 /// The installed host ceiling in bytes, if any.
@@ -314,9 +327,148 @@ pub const fn sweep_stale_job_dirs() -> usize {
 mod windows_host {
     use std::sync::OnceLock;
 
-    /// The host-ceiling Job Object and its limit. Never dropped: the job (and
-    /// its `KILL_ON_JOB_CLOSE`) lives as long as the daemon.
-    pub(super) static HOST: OnceLock<(crate::process::JobHandle, u64)> = OnceLock::new();
+    /// The host-ceiling Job Object, its limit, and whether it reports to the
+    /// completion port. Never dropped: the job (and its `KILL_ON_JOB_CLOSE`)
+    /// lives as long as the daemon.
+    pub(super) static HOST: OnceLock<(crate::process::JobHandle, u64, bool)> = OnceLock::new();
+}
+
+/// Kernel memory-limit messages, the Windows limit-hit signal.
+///
+/// One I/O completion port per daemon process (created lazily, never
+/// closed). Every governed Job Object, and the host job, is associated with it
+/// under its own completion key; the kernel posts `JOB_OBJECT_MSG_*` packets
+/// there. Packets are drained non-blocking (timeout 0) into a process-wide
+/// per-key count whenever a governed job spawns or finishes, so draining for
+/// one job never loses another job's messages.
+#[cfg(windows)]
+mod limit_messages {
+    use std::collections::BTreeMap;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use parking_lot::Mutex;
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::IO::{
+        CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JobObjectAssociateCompletionPortInformation,
+        SetInformationJobObject,
+    };
+
+    use crate::process::JobHandle;
+
+    // winnt.h values; windows-sys only exposes them behind the large
+    // `Win32_System_SystemServices` feature.
+    const JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT: u32 = 9;
+    const JOB_OBJECT_MSG_JOB_MEMORY_LIMIT: u32 = 10;
+
+    /// The host-ceiling job's key; per-job keys start at 1.
+    pub(super) const HOST_KEY: usize = 0;
+    static NEXT_KEY: AtomicUsize = AtomicUsize::new(1);
+    /// Limit messages seen per key. Holding this lock across the drain means
+    /// a reader sees every message the kernel posted before its read.
+    static COUNTS: Mutex<BTreeMap<usize, u64>> = parking_lot::const_mutex(BTreeMap::new());
+
+    fn port() -> Option<HANDLE> {
+        // Stored as `isize` so the static is `Sync`.
+        static PORT: OnceLock<Option<isize>> = OnceLock::new();
+        let raw = *PORT.get_or_init(|| {
+            // SAFETY: INVALID_HANDLE_VALUE plus a null existing port creates
+            // a new port tied to no file; the result is checked for null.
+            let h =
+                unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, std::ptr::null_mut(), 0, 1) };
+            (!h.is_null()).then_some(h as isize)
+        });
+        raw.map(|h| h as HANDLE)
+    }
+
+    /// A fresh per-job key, never reused within the process.
+    pub(super) fn next_key() -> usize {
+        NEXT_KEY.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Route `job`'s notifications to the port under `key`. `false` when the
+    /// port or the association is unavailable (hit detection then reports
+    /// `false`; the limit itself is unaffected).
+    pub(super) fn associate(job: &JobHandle, key: usize) -> bool {
+        let Some(port) = port() else {
+            return false;
+        };
+        let info = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+            CompletionKey: std::ptr::without_provenance_mut(key),
+            CompletionPort: port,
+        };
+        let Ok(size) = u32::try_from(std::mem::size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>())
+        else {
+            return false;
+        };
+        // SAFETY: `job.0` is a live Job Object handle owned by `JobHandle`
+        // for this borrow; `info` is a `#[repr(C)]` POD of exactly `size`
+        // bytes the kernel only reads. The BOOL result is checked.
+        let ok = unsafe {
+            SetInformationJobObject(
+                job.0 as HANDLE,
+                JobObjectAssociateCompletionPortInformation,
+                std::ptr::from_ref(&info).cast(),
+                size,
+            )
+        };
+        ok != 0
+    }
+
+    /// Pull every queued packet without blocking; count the limit messages.
+    // ponytail: drained only when a governed job spawns or finishes, so a
+    // long job spawning many processes queues NEW/EXIT packets in kernel
+    // memory until then. Upgrade: a drain thread blocking on the port.
+    fn drain(counts: &mut BTreeMap<usize, u64>) {
+        let Some(port) = port() else { return };
+        loop {
+            let mut msg = 0u32;
+            let mut key = 0usize;
+            let mut overlapped: *mut OVERLAPPED = std::ptr::null_mut();
+            // SAFETY: every out-pointer is a live local; timeout 0 never
+            // blocks. For job notifications `overlapped` carries a process
+            // id, not a pointer, and is never dereferenced.
+            let ok = unsafe {
+                GetQueuedCompletionStatus(port, &raw mut msg, &raw mut key, &raw mut overlapped, 0)
+            };
+            if ok == 0 {
+                return;
+            }
+            if matches!(
+                msg,
+                JOB_OBJECT_MSG_JOB_MEMORY_LIMIT | JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT
+            ) {
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+
+    /// Limit messages seen for `key` so far.
+    pub(super) fn count(key: usize) -> u64 {
+        let mut counts = COUNTS.lock();
+        drain(&mut counts);
+        counts.get(&key).copied().unwrap_or(0)
+    }
+
+    /// Limit messages seen for a finished job's `key`; forgets the key.
+    pub(super) fn take(key: usize) -> u64 {
+        let mut counts = COUNTS.lock();
+        drain(&mut counts);
+        counts.remove(&key).unwrap_or(0)
+    }
+}
+
+/// Completion-port state carried from [`govern_child`] to [`finish_job`].
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LimitWatch {
+    /// The limited per-job job's completion key, when associated.
+    key: Option<usize>,
+    /// The host job's limit-message count at spawn (joined and watched).
+    host_at_spawn: Option<u64>,
 }
 
 /// Add the memory and priority limits to the extended limit info the probe
@@ -355,13 +507,13 @@ pub(crate) fn apply_job_limits(
 /// limits: only the pre-existing kill-only job, report mode `None`.
 ///
 /// Returns the per-job job (for tree-kill and the peak query), the report
-/// (mode and `host_ceiling_joined` final here), and the host job's peak at
-/// spawn for [`finish_job`]'s host-ceiling inference.
+/// (mode and `host_ceiling_joined` final here), and the completion-port
+/// state [`finish_job`] reads the limit messages with.
 #[cfg(windows)]
 pub(crate) fn govern_child(
     child: Option<std::os::windows::io::RawHandle>,
     limits: &JobLimits,
-) -> (Option<crate::process::JobHandle>, SharedReport, Option<u64>) {
+) -> (Option<crate::process::JobHandle>, SharedReport, LimitWatch) {
     use crate::process::{JobHandle, assign_to_job, create_job};
     let governed = *limits != JobLimits::default();
     let report = if governed {
@@ -375,23 +527,34 @@ pub(crate) fn govern_child(
                 "child handle unavailable".to_owned(),
             ));
         }
-        return (None, report, None);
+        return (None, report, LimitWatch::default());
     };
+    // A failed host assignment leaves `host_ceiling_joined` false; the
+    // per-job job below is still created and its mode reported on its own.
     let host = windows_host::HOST
         .get()
         .filter(|_| limits.join_host_ceiling)
-        .filter(|(host, _)| assign_to_job(host, child).is_ok());
+        .filter(|(host, _, _)| assign_to_job(host, child).is_ok());
     let host_joined = host.is_some();
-    let host_peak_at_spawn = host.and_then(|(host, _)| job_peak(host));
-    let job_with = |l: &JobLimits| -> Result<JobHandle, String> {
+    let host_at_spawn = host
+        .filter(|(_, _, watched)| *watched)
+        .map(|_| limit_messages::count(limit_messages::HOST_KEY));
+    // Associate before assigning, so no limit message predates the port.
+    let job_with = |l: &JobLimits, watch: bool| -> Result<(JobHandle, Option<usize>), String> {
         let job = create_job(l)?;
+        let key = watch
+            .then(limit_messages::next_key)
+            .filter(|key| limit_messages::associate(&job, *key));
         assign_to_job(&job, child)?;
-        Ok(job)
+        Ok((job, key))
     };
-    let (job, mode) = match job_with(limits) {
-        Ok(job) => (Some(job), GovernorMode::JobObject),
+    let (job, key, mode) = match job_with(limits, governed) {
+        Ok((job, key)) => (Some(job), key, GovernorMode::JobObject),
         Err(reason) => (
-            job_with(&JobLimits::default()).ok(),
+            job_with(&JobLimits::default(), false)
+                .ok()
+                .map(|(job, _)| job),
+            None,
             GovernorMode::Unavailable(reason),
         ),
     };
@@ -400,15 +563,17 @@ pub(crate) fn govern_child(
         r.mode = Some(mode);
         r.host_ceiling_joined = host_joined;
     }
-    (job, report, host_peak_at_spawn)
+    (job, report, LimitWatch { key, host_at_spawn })
 }
 
-/// Fill peak, limit-hit and host-ceiling-hit after the child exited.
+/// Fill peak, limit-hit and host-ceiling-hit after the child exited. The
+/// hits come from the kernel's limit messages ([`limit_messages`]); the peak
+/// is reported only.
 #[cfg(windows)]
 pub(crate) fn finish_job(
     report: &SharedReport,
     job: Option<&crate::process::JobHandle>,
-    host_peak_at_spawn: Option<u64>,
+    watch: LimitWatch,
     abnormal_exit: bool,
 ) {
     let (governed, joined) = {
@@ -420,20 +585,20 @@ pub(crate) fn finish_job(
     };
     // Ungoverned (default limits) or Unavailable (a kill-only job carries no
     // limit to report against): no per-job query.
-    if let Some(peak) = job.filter(|_| governed).and_then(job_peak) {
-        let mut r = report.lock();
-        r.peak_memory_bytes = Some(peak);
-        r.memory_limit_hit = abnormal_exit && r.memory_limit_bytes.is_some_and(|l| peak >= l);
+    let peak = job.filter(|_| governed).and_then(job_peak);
+    // Always take the key, so a finished job's count never lingers.
+    let own_hits = watch.key.map_or(0, limit_messages::take);
+    let host_hit = joined
+        && abnormal_exit
+        && watch
+            .host_at_spawn
+            .is_some_and(|before| limit_messages::count(limit_messages::HOST_KEY) > before);
+    let mut r = report.lock();
+    if peak.is_some() {
+        r.peak_memory_bytes = peak;
     }
-    if joined && abnormal_exit {
-        // Only a crossing seen during this job's life counts; a host peak
-        // already at the limit at spawn makes the answer unknowable.
-        let hit = windows_host::HOST.get().is_some_and(|(host, limit)| {
-            host_peak_at_spawn.is_some_and(|before| before < *limit)
-                && job_peak(host).is_some_and(|peak| peak >= *limit)
-        });
-        report.lock().host_ceiling_hit = hit;
-    }
+    r.memory_limit_hit = governed && abnormal_exit && own_hits > 0;
+    r.host_ceiling_hit = host_hit;
 }
 
 /// `PeakJobMemoryUsed` of `job`, `None` if the query fails.
@@ -484,7 +649,8 @@ pub(crate) struct UnixGovernor {
 impl UnixGovernor {
     /// Decide the mode for `limits`. `None` for default limits (no syscall).
     /// In cgroup mode the cgroup dir is created and `memory.max` written here,
-    /// before spawn, so a non-writable hierarchy can still fall back to rlimit.
+    /// before spawn. The rlimit lane is chosen only from the cached
+    /// [`cgroup::usable`] probe; a later per-job failure is `Unavailable`.
     /// Memory `None` without a host ceiling to join = nice only, no cgroup dir.
     pub(crate) fn prepare(limits: &JobLimits, probe_id: impl std::fmt::Display) -> Option<Self> {
         if *limits == JobLimits::default() {
@@ -706,12 +872,6 @@ mod cgroup {
     /// The installed host ceiling: (`tc-jobs-<pid>` dir, limit).
     pub(super) static HOST: OnceLock<(PathBuf, u64)> = OnceLock::new();
 
-    enum Error {
-        /// Hierarchy not usable by us: use the rlimit lane.
-        Fallback,
-        Unavailable(String),
-    }
-
     /// The daemon's PARENT cgroup dir, resolved once from `/proc/self/cgroup`.
     /// `None` when not on cgroup v2, the daemon sits in the root cgroup, or
     /// the path has any non-Normal component (`..`, `.`).
@@ -758,6 +918,12 @@ mod cgroup {
     }
 
     /// Mode for a job: (mode, per-job dir, joined the host ceiling).
+    ///
+    /// The rlimit lane comes ONLY from the cached boot-time [`usable`]
+    /// probe. Once cgroups were found usable, any per-job failure (a removed
+    /// host dir, `EACCES`, `EROFS`, ...) is `Unavailable`: falling back to
+    /// `RLIMIT_DATA` at run time would apply a limit the daemon decided not
+    /// to apply under rlimit.
     pub(super) fn decide(limits: &JobLimits, id: &str) -> (GovernorMode, Option<PathBuf>, bool) {
         let host = limits
             .join_host_ceiling
@@ -767,45 +933,41 @@ mod cgroup {
         if limits.memory_bytes.is_none() && host.is_none() {
             return (GovernorMode::Rlimit, None, false);
         }
+        if host.is_none() && !usable() {
+            return (GovernorMode::Rlimit, None, false);
+        }
         let target = host.map_or_else(
             || parent_dir().map(|p| p.join(format!("{JOB_PREFIX}{}-{id}", std::process::id()))),
             |host| Some(host.join(id)),
         );
         let Some(dir) = target else {
-            return (GovernorMode::Rlimit, None, false);
+            // `usable()` implies a parent dir; unreachable in practice.
+            return (
+                GovernorMode::Unavailable("cgroup parent unresolved".to_owned()),
+                None,
+                false,
+            );
         };
         match create(&dir, limits.memory_bytes) {
             Ok(()) => (GovernorMode::Cgroup, Some(dir), host.is_some()),
-            Err(Error::Fallback) => (GovernorMode::Rlimit, None, false),
-            Err(Error::Unavailable(reason)) => (GovernorMode::Unavailable(reason), None, false),
+            Err(reason) => (GovernorMode::Unavailable(reason), None, false),
         }
     }
 
-    /// mkdir `dir`, require `cgroup.procs`, write the memory limits.
-    /// Writability is detected by attempting the mkdir itself.
-    fn create(dir: &Path, memory: Option<u64>) -> Result<(), Error> {
+    /// mkdir `dir`, require `cgroup.procs`, write the memory limits. Every
+    /// failure is a path-free reason; the dir is removed on failure.
+    fn create(dir: &Path, memory: Option<u64>) -> Result<(), String> {
         if let Err(e) = std::fs::create_dir(dir) {
-            return Err(if is_fallback(e.kind()) {
-                Error::Fallback
-            } else {
-                Error::Unavailable(errno_reason("cgroup mkdir", &e))
-            });
+            return Err(errno_reason("cgroup mkdir", &e));
         }
         if !dir.join("cgroup.procs").exists() {
             let _ = std::fs::remove_dir(dir);
-            return Err(Error::Unavailable(
-                "cgroup.procs missing after mkdir".to_owned(),
-            ));
+            return Err("cgroup.procs missing after mkdir".to_owned());
         }
         if let Some(bytes) = memory {
             if let Err(e) = std::fs::write(dir.join("memory.max"), bytes.to_string()) {
                 let _ = std::fs::remove_dir(dir);
-                // No delegated memory controller: memory.max is missing.
-                return Err(if is_fallback(e.kind()) {
-                    Error::Fallback
-                } else {
-                    Error::Unavailable(errno_reason("cgroup memory.max", &e))
-                });
+                return Err(errno_reason("cgroup memory.max", &e));
             }
             // Swap accounting may be compiled out (file absent); the
             // memory.max cap above is the enforced limit either way.
@@ -840,8 +1002,13 @@ mod cgroup {
                 }
             })
         };
-        write("memory.max", &limit.to_string())?;
-        write("cgroup.subtree_control", "+memory")?;
+        if let Err(reason) = write("memory.max", &limit.to_string())
+            .and_then(|()| write("cgroup.subtree_control", "+memory"))
+        {
+            // Never leave a half-configured host dir behind.
+            let _ = std::fs::remove_dir(&dir);
+            return Err(reason);
+        }
         let _ = std::fs::write(dir.join("memory.swap.max"), "0");
         HOST.set((dir, limit))
             .map_err(|_| "host ceiling already installed".to_owned())
@@ -874,21 +1041,29 @@ mod cgroup {
     }
 
     /// rmdir `dir`; on `EBUSY` (a descendant outlived the job) write
-    /// `cgroup.kill` (kernel >= 5.14) and retry until the kernel lets go.
-    // ponytail: blocking 10ms poll for up to 1s on the caller's thread, only
-    // on the EBUSY path; move to spawn_blocking if it ever shows up hot.
+    /// `cgroup.kill` (kernel >= 5.14) and retry for up to 1 s until the
+    /// kernel lets go. The retry never sleeps on an async worker: inside a
+    /// tokio runtime it runs on the blocking pool; outside one (a plain
+    /// thread) it runs inline. Anything left over is the boot sweep's.
     pub(super) fn remove(dir: &Path) {
-        match std::fs::remove_dir(dir) {
-            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {}
-            _ => return,
+        let busy =
+            |r: std::io::Result<()>| matches!(r, Err(e) if e.raw_os_error() == Some(libc::EBUSY));
+        if !busy(std::fs::remove_dir(dir)) {
+            return;
         }
         let _ = std::fs::write(dir.join("cgroup.kill"), "1");
-        for _ in 0..100 {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            match std::fs::remove_dir(dir) {
-                Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {}
-                _ => return,
+        let dir = dir.to_owned();
+        let retry = move || {
+            for _ in 0..100 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                if !busy(std::fs::remove_dir(&dir)) {
+                    return;
+                }
             }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => drop(rt.spawn_blocking(retry)),
+            Err(_) => retry(),
         }
     }
 
