@@ -81,9 +81,28 @@ if [ "${#pending_shas[@]}" -eq 0 ]; then
 fi
 fingerprint=$(printf '%s\n' "${crate_shas[@]}" | sort | sha256sum | cut -c1-16)
 
+# release-please already attributes a commit that changes a file under the
+# root package's own path (its .github/release-please-config.json key) and
+# lists it in that CHANGELOG; repeating it in the synthetic body lists it
+# twice. Synthesize only the commits release-please cannot see.
+ROOT_PKG_DIR="${PKG_JSON%/package.json}"
+attribute_shas=()
+for sha in "${pending_shas[@]}"; do
+  if [ -n "$(git diff-tree --no-commit-id --name-only -r "$sha" -- "${ROOT_PKG_DIR}/")" ]; then
+    echo "[synth] ${sha:0:7} also changes ${ROOT_PKG_DIR}/: release-please attributes it already."
+    continue
+  fi
+  attribute_shas+=("$sha")
+done
+if [ "${#attribute_shas[@]}" -eq 0 ]; then
+  echo "[synth] every unattributed crate commit also changes ${ROOT_PKG_DIR}/. Skipping."
+  emit trigger_pushed false
+  exit 0
+fi
+
 strongest=""   # "" < fix < feat < breaking
 breaking_sha=""
-for sha in "${pending_shas[@]}"; do
+for sha in "${attribute_shas[@]}"; do
   subject=$(git show -s --format='%s' "$sha")
   type_tok="${subject%%:*}"            # e.g. "feat(daemon)!" or "fix"
   case "$type_tok" in
@@ -102,7 +121,7 @@ for sha in "${pending_shas[@]}"; do
 done
 # Body-level breaking-footer detection. Consume each body completely so
 # pipefail cannot turn an early grep match into a false negative via SIGPIPE.
-for sha in "${pending_shas[@]}"; do
+for sha in "${attribute_shas[@]}"; do
   if git show -s --format='%b' "$sha" | grep -E '^BREAKING[ -]CHANGE:' >/dev/null; then
     strongest="breaking"
     breaking_sha="$sha"
@@ -125,7 +144,7 @@ is_release_message() {
 strip_cc_type() { printf '%s' "$1" | sed -E 's/^[a-z]+(\([^)]*\))?!?:[[:space:]]*//'; }
 
 release_messages=()
-for sha in "${pending_shas[@]}"; do
+for sha in "${attribute_shas[@]}"; do
   while IFS= read -r line; do
     if is_release_message "$line"; then release_messages+=("$line"); fi
   done < <(git show -s --format='%B' "$sha")
@@ -154,7 +173,7 @@ commit_subject="${release_messages[0]}"
 # bottom where its parser treats each as a distinct changelog entry.
 commit_body="Synthesized by synthesize-crates-release-trigger.sh so release-please
 attributes crates/** and scripts/release/** changes to the canonical version source. Attributed commits
-newly attributed since ${base_tag}: ${#pending_shas[@]} of ${#crate_shas[@]} total
+newly attributed since ${base_tag}: ${#attribute_shas[@]} of ${#crate_shas[@]} total
 (fingerprint ${fingerprint})."
 for message in "${release_messages[@]:1}"; do
   commit_body+=$'\n\n'"$message"
