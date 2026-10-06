@@ -90,7 +90,7 @@ jobs:
       RUST_TOOLCHAIN: "1.97.1"
       NODE_VERSION: "20"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -99,7 +99,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: npm-binary-build-pre-gates
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
       - name: root wrapper unit tests (clean checkout)
@@ -121,7 +121,7 @@ jobs:
       RUST_TOOLCHAIN: "1.97.1"
       NODE_VERSION: "20"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -129,7 +129,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: npm-binary-build-pre-gates-windows
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: root wrapper unit tests (clean checkout)
@@ -155,7 +155,7 @@ jobs:
     env:
       RUST_TOOLCHAIN: "1.97.1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -222,12 +222,12 @@ jobs:
       - build-mac-arm64
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
       - name: Download all 5 platform bin artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: tc-bin-*
           path: artifacts/
@@ -237,7 +237,7 @@ jobs:
           set -euo pipefail
           for plat in linux-x64 linux-arm64 windows-x64 mac-x64 mac-arm64; do
             pkg_dir="packages/terminal-commander-${plat}"
-            # actions/download-artifact@v4 stays at the per-artifact dir; bin.tar lives inside.
+            # actions/download-artifact@v8 stays at the per-artifact dir; bin.tar lives inside.
             tar_path="artifacts/tc-bin-${plat}/bin.tar"
             if [ ! -f "$tar_path" ]; then
               echo "::error::expected $tar_path missing — reusable workflow may have changed format"
@@ -258,7 +258,7 @@ jobs:
           done
           (cd packages/terminal-commander && npm pack --pack-destination "$GITHUB_WORKSPACE/tarballs")
           ls -la tarballs/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-tarballs
           path: tarballs/*.tgz
