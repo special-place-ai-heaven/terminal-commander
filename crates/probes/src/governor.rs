@@ -143,24 +143,40 @@ pub const fn host_memory() -> Option<HostMemory> {
 }
 
 /// The mode a governed job would get on this host, for status reporting.
+///
 /// Windows: `JobObject`. Linux: `Cgroup` when a sibling cgroup with a
 /// delegated memory controller can actually be created (probed once with a
 /// real mkdir + rmdir, then cached), else `Rlimit`. Other unix: `Rlimit`.
 /// A per-job attempt can still downgrade; the job's report is authoritative.
+#[cfg(windows)]
+#[must_use]
+pub const fn available_mode() -> GovernorMode {
+    GovernorMode::JobObject
+}
+
+/// See the Windows variant.
+#[cfg(target_os = "linux")]
 #[must_use]
 pub fn available_mode() -> GovernorMode {
-    #[cfg(windows)]
-    return GovernorMode::JobObject;
-    #[cfg(target_os = "linux")]
-    return if cgroup::usable() {
+    if cgroup::usable() {
         GovernorMode::Cgroup
     } else {
         GovernorMode::Rlimit
-    };
-    #[cfg(all(unix, not(target_os = "linux")))]
-    return GovernorMode::Rlimit;
-    #[cfg(not(any(unix, windows)))]
-    return GovernorMode::Unavailable("no kernel primitive".to_owned());
+    }
+}
+
+/// See the Windows variant.
+#[cfg(all(unix, not(target_os = "linux")))]
+#[must_use]
+pub const fn available_mode() -> GovernorMode {
+    GovernorMode::Rlimit
+}
+
+/// See the Windows variant.
+#[cfg(not(any(unix, windows)))]
+#[must_use]
+pub fn available_mode() -> GovernorMode {
+    GovernorMode::Unavailable("no kernel primitive".to_owned())
 }
 
 // ---------------------------------------------------------------- Windows --
