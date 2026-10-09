@@ -108,3 +108,30 @@ The [broader future design](../contracts/communication-buckets-v1.md) records me
 and council options. None of these communication features is implemented by this
 embed repair. Mount/permission/privacy guarantees, codec/signature dependencies,
 tokenizer support and two-peer crash/flood tests must pass before advertising them.
+
+## Integration CI follow-up
+
+PR #266's initial Linux run on `176797733198e2566850a7b650633bea1b683960`
+failed `fixtures_match_live_tool_responses`: the live command had valid cleanup
+state `uncertain` with a `detail` object, while the success fixture illustrates
+`complete` without `detail`. The recursive key-set comparison incorrectly
+required the same tagged-enum variant. Windows's remote pre-build gate passed;
+the dependent build/pack jobs were skipped after the Linux failure.
+
+The follow-up checks `process_cleanup` against the actual `ProcessCleanup`
+wire type and its canonical serialized shape. Every defined variant is
+accepted; a missing required variant detail or an unmodeled field is rejected.
+The reported cleanup uncertainty is preserved. No production behavior or
+fixture payload was changed to manufacture a complete observation.
+
+Three deterministic regression cases failed before the correction
+(`job_01a122962c56746ea4063fba0acfb47b`). Afterward, all four native fixture
+tests, including the original live check, passed
+(`job_01a1229836e17067890325d31e3f7c59`); targeted strict clippy also passed
+(`job_01a12299a8137511a22d6249db1378b0`). The complete Linux gate then passed
+1,656 tests / 8 skipped, strict clippy/fmt, load and MCP guards
+(`job_01a1229a557073788b4556dd14dd04cb`). The Windows gate also passed its
+25 selected tests and daemon/MCP checks
+(`job_01a1229dd299764082d3210388e4b246`); its local ConPTY opt-in check was
+skipped. Fresh remote checks are required before treating the follow-up as
+ready to release.

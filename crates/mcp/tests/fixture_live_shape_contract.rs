@@ -209,6 +209,22 @@ fn diff_keys(path: &str, expected: &Value, actual: &Value, out: &mut Vec<(char, 
             .expect("fixture CPU state must match its typed wire contract");
         return;
     }
+    // Cleanup detail belongs to a tagged variant, not every observation.
+    // Require both variants to be valid and reject fields Serde would ignore.
+    if path == "$.process_cleanup" {
+        for payload in [expected, actual] {
+            let typed = serde_json::from_value::<
+                terminal_commander_core::process_observation::ProcessCleanup,
+            >(payload.clone())
+            .expect("cleanup payload must match its typed wire contract");
+            let canonical = serde_json::to_value(typed).expect("serialize typed cleanup");
+            assert_eq!(
+                payload, &canonical,
+                "cleanup payload must have the canonical typed wire shape"
+            );
+        }
+        return;
+    }
     match (expected, actual) {
         (Value::Object(e), Value::Object(a)) => {
             for k in e.keys().filter(|k| !a.contains_key(*k)) {
@@ -233,6 +249,47 @@ fn diff_keys(path: &str, expected: &Value, actual: &Value, out: &mut Vec<(char, 
         }
         _ => {}
     }
+}
+
+#[test]
+fn cleanup_shape_accepts_defined_variants() {
+    let expected = json!({"state": "complete"});
+    for actual in [
+        json!({"state": "running"}),
+        json!({"state": "complete"}),
+        json!({"state": "reaping"}),
+        json!({"state": "uncertain", "detail": {"raw_os_error": null}}),
+        json!({"state": "uncertain", "detail": {"raw_os_error": 13}}),
+    ] {
+        let mut differences = Vec::new();
+        diff_keys("$.process_cleanup", &expected, &actual, &mut differences);
+        assert!(
+            differences.is_empty(),
+            "cleanup variant drift: {differences:?}"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "cleanup payload must match its typed wire contract")]
+fn cleanup_shape_rejects_missing_variant_detail() {
+    diff_keys(
+        "$.process_cleanup",
+        &json!({"state": "complete"}),
+        &json!({"state": "uncertain"}),
+        &mut Vec::new(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "cleanup payload must have the canonical typed wire shape")]
+fn cleanup_shape_rejects_unmodeled_fields() {
+    diff_keys(
+        "$.process_cleanup",
+        &json!({"state": "complete"}),
+        &json!({"state": "complete", "unmodeled": true}),
+        &mut Vec::new(),
+    );
 }
 
 struct Harness {
