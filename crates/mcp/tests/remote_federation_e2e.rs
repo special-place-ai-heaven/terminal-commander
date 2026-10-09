@@ -112,6 +112,7 @@ fn spawn_health_only_daemon(socket: &Path) -> tokio::task::JoinHandle<()> {
                         uptime_secs: 1,
                         idle_secs: Some(0),
                         version: "health-only-test-daemon".to_owned(),
+                        identity: None,
                     },
                 },
                 _ => IpcResult::Err {

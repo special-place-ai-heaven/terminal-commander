@@ -422,7 +422,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     // `state.shutdown_notified()` and drains cleanly. ttl=0 disables.
     spawn_idle_reaper(&state);
     // P1 / TC50: reclaim sessions idle past their per-session TTL.
-    spawn_session_reaper(&state);
+    let _session_reaper = spawn_session_reaper(&state);
     spawn_discovery_prewarm(&state_dir);
     // Re-assert the pidfile if it goes missing (the daemon writes it once at
     // bind above and never used to recover a lost one). Closes the
@@ -505,7 +505,7 @@ pub async fn run_ipc_server(config: DaemonConfig) -> Result<(), RuntimeError> {
     // F1 idle self-reap: see the Unix branch for rationale. ttl=0 disables.
     spawn_idle_reaper(&state);
     // Session idle-reap (no-op on non-unix; sessions are PTY-backed).
-    spawn_session_reaper(&state);
+    let _session_reaper = spawn_session_reaper(&state);
     spawn_discovery_prewarm(&state_dir);
     // Re-assert the pidfile if it goes missing (cross-platform; see the Unix
     // arm). Closes the pidfile-less window mis-read as stale by the replace path.
@@ -642,33 +642,42 @@ fn spawn_idle_reaper(state: &Arc<crate::state::DaemonState>) {
 /// reaped on the next session start. The task lives for the daemon's life
 /// (it shares the process exit; the IPC server's shutdown drops everything).
 #[cfg(unix)]
-fn spawn_session_reaper(state: &Arc<crate::state::DaemonState>) {
+pub(crate) fn spawn_session_reaper(
+    state: &Arc<crate::state::DaemonState>,
+) -> Option<tokio::task::JoinHandle<()>> {
     let ttl = state.config.shell_session.idle_ttl_secs;
     if ttl == 0 {
         tracing::info!("session idle-reap disabled (shell_session.idle_ttl_secs=0)");
-        return;
+        return None;
     }
     let tick = (ttl / 2).clamp(1, 60);
     tracing::info!("session idle-reap enabled: idle_ttl_secs={ttl} tick={tick}s");
     let st = Arc::clone(state);
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         let mut iv = tokio::time::interval(std::time::Duration::from_secs(tick));
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            iv.tick().await;
+            tokio::select! {
+                _ = iv.tick() => {},
+                () = st.shutdown_notified() => break,
+            }
             let reaped = st.sessions.reap_idle();
             if reaped > 0 {
                 tracing::info!("session idle-reap: reclaimed {reaped} session(s)");
             }
         }
-    });
+    }))
 }
 
 /// No-op session reaper on non-unix (the shell-session runtime is unix-only;
 /// Windows session support is a separate slice). The Windows PTY command lane
 /// has no idle-session concept to reap.
 #[cfg(not(unix))]
-const fn spawn_session_reaper(_state: &Arc<crate::state::DaemonState>) {}
+pub(crate) const fn spawn_session_reaper(
+    _state: &Arc<crate::state::DaemonState>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    None
+}
 
 /// Write the daemon pidfile (pid + version + endpoint) so a newer
 /// install can find and replace this daemon. Non-fatal on failure.

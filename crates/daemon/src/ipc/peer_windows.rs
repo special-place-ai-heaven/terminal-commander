@@ -49,7 +49,7 @@ pub fn peer_identity_for(server: &NamedPipeServer) -> PeerIdentity {
     }
 }
 
-fn resolve_sid_and_image(pid: u32) -> Option<(String, Option<PathBuf>)> {
+pub(crate) fn resolve_sid_and_image(pid: u32) -> Option<(String, Option<PathBuf>)> {
     unsafe {
         let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut token = HANDLE::default();

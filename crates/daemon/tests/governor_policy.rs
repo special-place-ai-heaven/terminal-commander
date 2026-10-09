@@ -480,7 +480,8 @@ fn hardened_profile_clamps_a_raise_and_full_access_does_not() {
 /// the start response or the terminal status, even when the request carries
 /// `limits`. Compared as wire BYTES: the disabled run equals an enabled run
 /// of the same job with its governor fields cleared (what an ungoverned
-/// daemon emits), field order included, ids and numbers blanked.
+/// daemon emits), field order included, ids and numbers blanked. Cgroup CPU
+/// evidence is asserted separately because governance changes its source.
 #[test]
 fn disabled_governor_is_byte_identical_to_ungoverned() {
     rt().block_on(async {
@@ -506,6 +507,33 @@ fn disabled_governor_is_byte_identical_to_ungoverned() {
         start_on.limits_applied = None;
         start_on.limits_clamped.clear();
         start_on.governor = None;
+        // Bind each typed CPU sample to the job before aligning the distinct
+        // accounting source for the byte comparison below.
+        for status in [&status_off, &status_on] {
+            let identity = status.process_identity.as_ref().expect("process identity");
+            let cpu = status.cpu.as_ref().expect("CPU sample");
+            assert_eq!(identity.probe_id, status.probe_id);
+            assert_eq!(cpu.probe_id, status.probe_id);
+            assert_eq!(cpu.leader_pid, identity.child_pid);
+        }
+        #[cfg(target_os = "linux")]
+        if matches!(
+            status_on.governor.as_ref(),
+            Some(terminal_commander_ipc::GovernorModeWire::Cgroup)
+        ) {
+            use terminal_commander_core::job_cpu::JobCpuAccounting;
+
+            // The cgroup and process group have different accounting scopes.
+            assert_eq!(
+                status_off.cpu.as_ref().unwrap().accounting,
+                JobCpuAccounting::LinuxProcessGroup
+            );
+            assert_eq!(
+                status_on.cpu.as_ref().unwrap().accounting,
+                JobCpuAccounting::LinuxCgroup
+            );
+            status_on.cpu.clone_from(&status_off.cpu);
+        }
         status_on.governor = None;
         status_on.limits_applied = None;
         status_on.peak_memory_bytes = None;

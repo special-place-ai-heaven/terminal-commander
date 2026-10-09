@@ -1,0 +1,28 @@
+{
+  "_comment": "MCP server configuration for this project. See https://registry.modelcontextprotocol.io",
+  "mcpServers": {
+    "_instructions": "Uncomment and configure the servers you want to use.",
+
+    "_github": {
+      "_comment": "GitHub MCP server — issues, PRs, code search. Requires GITHUB_TOKEN.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+
+    "_filesystem": {
+      "_comment": "Filesystem MCP server — broader file access outside project root.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+
+    "_git": {
+      "_comment": "Git MCP server — version >=2025.12.18 required (security fix).",
+      "_security_note": "Pin to >=2025.12.18. Earlier versions have RCE vulnerabilities.",
+      "command": "uvx",
+      "args": ["mcp-server-git@>=2025.12.18", "--repository", "."]
+    }
+  }
+}

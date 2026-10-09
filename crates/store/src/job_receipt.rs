@@ -143,8 +143,9 @@ impl EventStore {
     /// and reintroducing the precise harm this feature exists to remove.
     ///
     /// So:
-    /// - a REAL terminal transition always wins, and heals a stray
-    ///   abandonment written moments earlier (`INSERT OR REPLACE`);
+    /// - the first REAL terminal outcome wins, and heals a stray abandonment;
+    ///   a later observation may refresh evidence for that same outcome, but
+    ///   cannot replace it with a conflicting state or exit code;
     /// - an ABANDONMENT inserts only when no row exists, and may overwrite
     ///   only another abandonment (keeping a double quiesce idempotent). It
     ///   can never clobber a real outcome.
@@ -194,13 +195,26 @@ impl EventStore {
                 end_cause = excluded.end_cause
              WHERE job_receipts.end_cause = 'abandoned'"
         } else {
-            // A real terminal transition is authoritative and heals a stray
-            // abandonment.
-            "INSERT OR REPLACE INTO job_receipts
+            // A real terminal transition heals a stray abandonment. Repeated
+            // observations of the same outcome may add final drain evidence;
+            // a conflicting late callback cannot rewrite an observed outcome.
+            "INSERT INTO job_receipts
                 (job_id, bucket_id, terminal_state, exit_code,
                  final_signal_counts, restarted_at, created_at,
                  metrics_json, end_cause)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8)"
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8)
+             ON CONFLICT(job_id) DO UPDATE SET
+                bucket_id = excluded.bucket_id,
+                terminal_state = excluded.terminal_state,
+                exit_code = excluded.exit_code,
+                final_signal_counts = excluded.final_signal_counts,
+                restarted_at = NULL,
+                created_at = excluded.created_at,
+                metrics_json = excluded.metrics_json,
+                end_cause = excluded.end_cause
+             WHERE job_receipts.end_cause = 'abandoned'
+                OR (job_receipts.terminal_state = excluded.terminal_state
+                    AND job_receipts.exit_code IS excluded.exit_code)"
         };
         self.conn.execute(
             sql,
@@ -364,6 +378,60 @@ mod tests {
             .expect("replace");
         let r = s.get_job_receipt("job_x").expect("get").expect("present");
         assert_eq!(r.exit_code, Some(1));
+    }
+
+    #[test]
+    fn conflicting_real_terminal_outcome_cannot_replace_the_first_receipt() {
+        for (state, exit_code, late_state, late_code) in [
+            ("failed", Some(7), "exited", Some(0)),
+            ("cancelled", None, "exited", Some(0)),
+            ("failed", Some(7), "failed", Some(8)),
+        ] {
+            let mut s = store();
+            s.record_job_receipt(
+                "job_once",
+                "bkt_1",
+                state,
+                exit_code,
+                "{}",
+                Some(EVIDENCE),
+                None,
+            )
+            .expect("first terminal observation");
+            let first = s.get_job_receipt("job_once").unwrap().unwrap();
+            s.record_job_receipt(
+                "job_once",
+                "bkt_other",
+                late_state,
+                late_code,
+                "{}",
+                None,
+                None,
+            )
+            .expect("conflicting late callback is harmless");
+            assert_eq!(s.get_job_receipt("job_once").unwrap().unwrap(), first);
+        }
+    }
+
+    #[test]
+    fn same_terminal_outcome_can_refresh_final_drain_evidence() {
+        let mut s = store();
+        s.record_job_receipt("job_drain", "bkt_1", "cancelled", None, "{}", None, None)
+            .expect("immediate cancellation receipt");
+        s.record_job_receipt(
+            "job_drain",
+            "bkt_1",
+            "cancelled",
+            None,
+            "{}",
+            Some(EVIDENCE),
+            None,
+        )
+        .expect("lifecycle waiter adds final evidence");
+        let row = s.get_job_receipt("job_drain").unwrap().unwrap();
+        assert_eq!(row.terminal_state, "cancelled");
+        assert_eq!(row.exit_code, None);
+        assert_eq!(row.metrics_json.as_deref(), Some(EVIDENCE));
     }
 
     #[test]

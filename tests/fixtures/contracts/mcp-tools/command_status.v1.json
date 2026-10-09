@@ -21,6 +21,10 @@
     "note": "Daemon-backed lifecycle lookup for jobs started by command_start_combed. Success returns counters and exit metadata, never raw process output. v1.1 adds TC11 frames_suppressed* counters (additive). TB-7: job_id carries an opaque-id format note (copy verbatim, e.g. job_<32hex>; from command_start_combed / run_and_watch) so the first call uses the right id."
   },
   "response_example": {
+    "cpu": {"accounting":"windows_job_object","interval":null,"leader_pid":1234,"leader_start_ticks":null,"probe_id":"prb_018f0000000000000000000000000001","state":{"unavailable":"missing_job_object"}},
+    "process_cleanup": {"state": "complete"},
+    "process_identity": {"child_pid":1234,"ownership":"windows_job_object","probe_id":"prb_018f0000000000000000000000000001","process_group_id":null},
+    "process_observation": {"stderr":{"bytes_total":0,"state":{"state":"complete"}},"stdout":{"bytes_total":8192,"state":{"state":"complete"}}},
     "bucket_id": "bkt_018f0000000000000000000000000001",
     "bytes_total": 8192,
     "duration_ms": 1372,
@@ -44,6 +48,10 @@
     "limits_applied": { "memory_bytes": 8589934592, "priority": "below_normal" }
   },
   "response_example_no_rule_receipt": {
+    "cpu": {"accounting":"windows_job_object","interval":null,"leader_pid":1234,"leader_start_ticks":null,"probe_id":"prb_018f0000000000000000000000000001","state":{"unavailable":"missing_job_object"}},
+    "process_cleanup": {"state": "complete"},
+    "process_identity": {"child_pid":1234,"ownership":"windows_job_object","probe_id":"prb_018f0000000000000000000000000001","process_group_id":null},
+    "process_observation": {"stderr":{"bytes_total":0,"state":{"state":"complete"}},"stdout":{"bytes_total":71,"state":{"state":"complete"}}},
     "bucket_id": "bkt_018f0000000000000000000000000002",
     "bytes_total": 71,
     "duration_ms": 17,
@@ -82,6 +90,10 @@
     "limits_applied": { "memory_bytes": 8589934592, "priority": "below_normal" }
   },
   "response_example_running": {
+    "cpu": {"accounting":"windows_job_object","interval":null,"leader_pid":1234,"leader_start_ticks":null,"probe_id":"prb_018f0000000000000000000000000001","state":{"unknown":"first_sample"}},
+    "process_cleanup": {"state": "running"},
+    "process_identity": {"child_pid":1234,"ownership":"windows_job_object","probe_id":"prb_018f0000000000000000000000000001","process_group_id":null},
+    "process_observation": {"stderr":{"bytes_total":0,"state":{"state":"reading"}},"stdout":{"bytes_total":2,"state":{"state":"reading"}}},
     "bucket_id": "bkt_018f0000000000000000000000000003",
     "bytes_total": 2,
     "duration_ms": null,

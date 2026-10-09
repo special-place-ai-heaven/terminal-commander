@@ -237,6 +237,7 @@ mod runtime {
         /// receipt on its terminal transition, mirroring the combed lane, so a
         /// PTY outcome is reconstructable after a restart instead of vanishing.
         store: crate::store_actor::StoreClient,
+        lifecycle_tasks: parking_lot::Mutex<tokio::task::JoinSet<()>>,
     }
 
     impl std::fmt::Debug for PtyRuntime {
@@ -288,6 +289,7 @@ mod runtime {
                 activation,
                 sources,
                 store,
+                lifecycle_tasks: parking_lot::Mutex::new(tokio::task::JoinSet::new()),
             }
         }
 
@@ -326,6 +328,25 @@ mod runtime {
                     probe_id: b.probe_id,
                 })
                 .collect()
+        }
+
+        /// Finish lifecycle receipts before the embedded engine closes its store.
+        pub async fn drain_lifecycle_tasks(&self) -> bool {
+            let mut tasks = std::mem::take(&mut *self.lifecycle_tasks.lock());
+            let drain = async { while tasks.join_next().await.is_some() {} };
+            if tokio::time::timeout(std::time::Duration::from_secs(10), drain)
+                .await
+                .is_err()
+            {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                return false;
+            }
+            true
+        }
+
+        pub fn abort_lifecycle_tasks(&self) {
+            self.lifecycle_tasks.lock().abort_all();
         }
 
         /// Authoritative wire [`Liveness`] for a PTY job, derived from the job
@@ -711,7 +732,7 @@ mod runtime {
                 let waiter_probe = Arc::clone(&probe_cell);
                 let waiter_metrics = Arc::clone(&metrics);
                 let waiter_governor = Arc::clone(&governor);
-                tokio::spawn(async move {
+                self.lifecycle_tasks.lock().spawn(async move {
                     // A dropped sender (probe dropped before it could send)
                     // is treated as a cancellation: the job did not exit
                     // cleanly on its own.
@@ -1282,6 +1303,10 @@ mod runtime {
                 governor.exit_reason = None;
             }
             Some(terminal_commander_ipc::protocol::CommandStatusResponse {
+                process_observation: None,
+                process_cleanup: None,
+                process_identity: None,
+                cpu: None,
                 job_id,
                 bucket_id,
                 probe_id,

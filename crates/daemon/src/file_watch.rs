@@ -513,6 +513,14 @@ impl WatchRuntime {
     /// Stop a live watch. Returns the final metrics so the caller can
     /// echo them to the LLM. Cancellation is idempotent.
     pub fn stop(&self, watch_id: JobId) -> Result<(BucketId, FileProbeMetrics), WatchError> {
+        self.stop_owned(watch_id)
+            .map(|(bucket, metrics, _probe)| (bucket, metrics))
+    }
+
+    fn stop_owned(
+        &self,
+        watch_id: JobId,
+    ) -> Result<(BucketId, FileProbeMetrics, Option<FileProbe>), WatchError> {
         let removed = self.live.write().remove(&watch_id);
         let Some(b) = removed else {
             return Err(WatchError::UnknownWatch(watch_id));
@@ -529,11 +537,11 @@ impl WatchRuntime {
         // zero in the snapshot. `combine_file_metrics` overlays the two
         // so the returned metrics and the audit line carry real
         // counters (same F9 footgun fixed for PTY in `combine_pty_metrics`).
-        let taken = b.cancel.lock().take();
+        let mut taken = b.cancel.lock().take();
         let probe_metrics = taken
             .as_ref()
             .map_or_else(FileProbeMetrics::default, FileProbe::metrics);
-        if let Some(mut p) = taken {
+        if let Some(p) = taken.as_mut() {
             p.cancel();
         }
         let sink_snap = b.metrics.lock().clone();
@@ -574,7 +582,28 @@ impl WatchRuntime {
                 metrics.frames_total, metrics.events_emitted, metrics.bytes_total
             )),
         );
-        Ok((b.bucket_id, metrics))
+        Ok((b.bucket_id, metrics, taken))
+    }
+
+    /// Cancel and join all file readers before the embedded store closes.
+    pub async fn drain_watches(&self) -> bool {
+        let mut probes: Vec<_> = self
+            .live_watches()
+            .into_iter()
+            .filter_map(|watch| {
+                self.stop_owned(watch.watch_id)
+                    .ok()
+                    .and_then(|(_, _, probe)| probe)
+            })
+            .collect();
+        let drain = async {
+            for probe in &mut probes {
+                let _ = probe.wait().await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), drain)
+            .await
+            .is_ok()
     }
 
     /// Snapshot bounded info about every live watch (for
@@ -649,6 +678,10 @@ impl WatchRuntime {
         let rec = self.jobs.get(watch_id)?;
         let elapsed_ms = crate::command::running_elapsed_ms(&rec);
         Some(terminal_commander_ipc::protocol::CommandStatusResponse {
+            process_observation: None,
+            process_cleanup: None,
+            process_identity: None,
+            cpu: None,
             job_id: watch_id,
             bucket_id,
             probe_id,

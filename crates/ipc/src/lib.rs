@@ -21,6 +21,8 @@
 //!
 //! Source-status: live (TC37).
 
+pub mod compound;
+pub mod engine;
 pub mod protocol;
 
 pub mod framing;

@@ -14,15 +14,16 @@
 //!
 //! It cannot happen, and the reason is OWNERSHIP rather than sequencing:
 //!
-//! 1. `ProcessProbe` holds `_job: Option<Arc<JobHandle>>`.
+//! 1. The lifecycle task owns `OwnedProcess`, which holds an `Arc<JobHandle>`
+//!    through cleanup, governor accounting, and the exit report.
 //! 2. `KILL_ON_JOB_CLOSE` fires only when the LAST `Arc` drops, via
 //!    `JobHandle::Drop -> CloseHandle`.
-//! 3. `drive_to_exit` takes the probe **by value** and holds it across
-//!    `probe.wait().await`.
+//! 3. Runtime-loss cleanup transfers an Arc to its native reaper until cleanup
+//!    verification. The normal daemon waiter owns its probe across `wait()`.
 //!
-//! So for the whole duration of the wait, the waiter itself owns a live `Arc`
-//! to the job handle. The handle cannot close underneath the very task that
-//! would observe and persist the result.
+//! The task producing the exit report retains the live job handle. Native
+//! cleanup retains it independently of the Tokio runtime. A metrics/CPU handle
+//! alone cannot keep a process alive after its lifecycle owner is gone.
 //!
 //! Forcing the failure would require production code to expose a seam that only
 //! a test uses, which constitution VI (NON-NEGOTIABLE) forbids: "Production code
@@ -44,39 +45,72 @@ fn read_repo_file(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Fact 1 + 2: the probe owns a shared handle whose `Drop` closes the job.
+/// Facts 1 + 2: lifecycle and native cleanup retain the shared job handle.
 #[test]
-fn process_probe_still_owns_the_job_handle_arc() {
+fn lifecycle_task_and_native_reaper_own_the_job_handle_arc() {
     let source = read_repo_file("../probes/src/process.rs");
-
+    let owned = source
+        .split_once("struct OwnedProcess {")
+        .unwrap()
+        .1
+        .split_once("impl OwnedProcess {")
+        .unwrap()
+        .0;
     assert!(
-        source.contains("_job: Option<Arc<JobHandle>>"),
-        "ProcessProbe must still hold `_job: Option<Arc<JobHandle>>`. If the \
-         probe stops owning an Arc to the job handle, the waiter no longer keeps \
-         the job alive across `wait()`, and KILL_ON_JOB_CLOSE could fire while a \
-         waiter is still able to observe and persist a plausible exit status."
+        owned.contains("job: Option<Arc<JobHandle>>"),
+        "the lifecycle owner must retain the Windows Job Object handle"
     );
+
+    let spawn = source
+        .split_once("pub fn spawn_with_environment(")
+        .unwrap()
+        .1;
+    let (before_task, task) = spawn
+        .split_once("runtime_handle.spawn(async move {")
+        .unwrap();
     assert!(
-        source.contains("impl Drop for JobHandle") && source.contains("CloseHandle"),
-        "JobHandle::Drop -> CloseHandle is the mechanism that makes \
-         KILL_ON_JOB_CLOSE last-Arc-scoped. Removing it changes when the child \
-         tree dies relative to the waiter."
+        before_task.contains("owned.job.clone_from(&job)"),
+        "the Job Object Arc must reach OwnedProcess before the task can run"
+    );
+    let task = task.split_once("Ok(Self {").unwrap().0;
+    let finished = task.find("owned.finish().await").unwrap();
+    let accounted = task.find("owned.job.as_deref()").unwrap();
+    let reported = task.find("Ok(ProcessProbeReport {").unwrap();
+    assert!(
+        finished < accounted && accounted < reported,
+        "the task must retain the job through cleanup, accounting and the exit report"
+    );
+
+    let reaper = source.split_once("impl Drop for OwnedProcess {").unwrap().1;
+    let reaper = reaper.split_once("fn signal_process_group(").unwrap().0;
+    let cloned = reaper.find("let job = self.job.clone()").unwrap();
+    let moved = reaper.find(".spawn(move || {").unwrap();
+    let verified = reaper.find("job_quiescent(job.as_deref())").unwrap();
+    assert!(
+        cloned < moved && moved < verified,
+        "runtime-loss cleanup must retain the Arc in its native reaper until verification"
+    );
+
+    let handle_drop = source.split_once("impl Drop for JobHandle {").unwrap().1;
+    let handle_drop = handle_drop
+        .split_once("pub struct ProcessProbe {")
+        .unwrap()
+        .0;
+    assert!(
+        handle_drop.contains("CloseHandle(self.0 as HANDLE)"),
+        "KILL_ON_JOB_CLOSE remains scoped to the final JobHandle Arc"
     );
 }
 
-/// Fact 3: the waiter takes the probe BY VALUE, so it owns an Arc for the whole
-/// wait. A `&mut ProcessProbe` signature would let the caller drop the probe --
-/// and the last Arc -- while the wait is still in flight.
+/// Fact 3: the daemon waiter owns the probe for the whole wait and receives
+/// the lifecycle task's report before constructing its receipt.
 #[test]
 fn drive_to_exit_still_takes_the_probe_by_value() {
     let source = read_repo_file("src/command.rs");
 
     assert!(
         source.contains("async fn drive_to_exit(mut probe: ProcessProbe)"),
-        "drive_to_exit MUST take `mut probe: ProcessProbe` BY VALUE. Taking it \
-         by reference would let the owner drop the probe (and the last \
-         Arc<JobHandle>) while `probe.wait()` is still in flight, which is the \
-         one ordering that could surface a killed child as a clean exit."
+        "drive_to_exit must retain the probe by value while awaiting its lifecycle report"
     );
     assert!(
         source.contains("probe.wait().await"),

@@ -71,7 +71,10 @@ fn every_probe_spawn_lane_filters_wslenv() {
     let mut lanes = 0;
     for path in files {
         let source = std::fs::read_to_string(&path).unwrap();
-        if source.contains("ProcessProbe::spawn(") || source.contains("PtyProbe::spawn(") {
+        if source.lines().any(|line| {
+            !line.trim_start().starts_with("//")
+                && (line.contains("ProcessProbe::spawn") || line.contains("PtyProbe::spawn"))
+        }) {
             lanes += 1;
             assert!(
                 source.contains("filter_wslenv_for_spawn("),

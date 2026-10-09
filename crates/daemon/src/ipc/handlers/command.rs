@@ -24,6 +24,20 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
     params: &CommandStartParams,
     peer: &PeerIdentity,
 ) -> Result<IpcResponse, IpcError> {
+    handle_command_start_with_environment(
+        state,
+        params,
+        peer,
+        terminal_commander_core::EnvironmentMode::Inherit,
+    )
+}
+
+pub(in crate::ipc::server) fn handle_command_start_with_environment(
+    state: &Arc<DaemonState>,
+    params: &CommandStartParams,
+    peer: &PeerIdentity,
+    environment: terminal_commander_core::EnvironmentMode,
+) -> Result<IpcResponse, IpcError> {
     if params.env.len() > MAX_COMMAND_ENV_ITEMS {
         return Err(IpcError::new(
             IpcErrorCode::ArgvInvalid,
@@ -58,10 +72,14 @@ pub(in crate::ipc::server) fn handle_command_start_combed(
         peer_discriminator: Some(peer_discriminator(peer)),
         limits: params.limits.clone(),
     };
-    let resp = state.command.start_combed(req).map_err(|e| {
-        let err = enrich_shell_teach(&state.policy, "command_start_combed", map_command_error(e));
-        attach_recipe_steer(state, RecipeTeachIntent::Argv(&params.argv), err)
-    })?;
+    let resp = state
+        .command
+        .start_combed_with_environment(req, environment)
+        .map_err(|e| {
+            let err =
+                enrich_shell_teach(&state.policy, "command_start_combed", map_command_error(e));
+            attach_recipe_steer(state, RecipeTeachIntent::Argv(&params.argv), err)
+        })?;
     Ok(IpcResponse::CommandStartCombed(resp))
 }
 
@@ -203,10 +221,17 @@ pub(in crate::ipc::server) fn handle_command_status(
     //    is one-way by construction.
     let wire = job_id.to_wire_string();
     if state.store.job_start_recorded(&wire).unwrap_or(false) {
-        return Err(IpcError::new(
+        let mut error = IpcError::new(
             IpcErrorCode::JobLost,
             format!("job {wire} started but never recorded a terminal transition"),
-        ));
+        );
+        error.details = Some(Box::new(terminal_commander_ipc::engine::JobLostDetails {
+            job_id,
+            current_instance_id: state.boot_id.to_string(),
+            api_version: terminal_commander_ipc::engine::ENGINE_API_VERSION,
+            build_fingerprint: env!("TC_SOURCE_FINGERPRINT").to_owned(),
+        }));
+        return Err(error);
     }
     Err(map_command_error(crate::command::CommandError::UnknownJob(
         job_id,
@@ -249,7 +274,7 @@ pub(in crate::ipc::server) fn handle_command_output_tail(
     // Safe: tail.lines.len() is bounded by MAX_TAIL_LINES (200), fits u32.
     #[allow(clippy::cast_possible_truncation)]
     let returned_lines = tail.lines.len() as u32;
-    let truncated_lines = frame_count > tail.lines.len();
+    let truncated_lines = tail.evicted_frames > 0 || frame_count > tail.lines.len();
     let truncated_bytes = tail.truncated;
     Ok(IpcResponse::CommandOutputTail(CommandOutputTailResponse {
         job_id: params.job_id,
@@ -337,5 +362,66 @@ mod tests {
         assert_eq!(err.code, IpcErrorCode::UnknownJob);
 
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn output_tail_reports_evicted_history_even_when_all_retained_lines_fit() {
+        use super::{CommandOutputTailParams, IpcResponse, handle_command_output_tail};
+        use terminal_commander_core::{
+            BucketId, ContextRingConfig, JobConfig, ProbeId, SourceFrame, SourceStream, SourceType,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = std::sync::Arc::new(
+            DaemonState::bootstrap(DaemonConfig::defaults_in(dir.path())).unwrap(),
+        );
+        let job_id = JobId::new();
+        let probe_id = ProbeId::new();
+        state.jobs.start(JobConfig {
+            job_id,
+            argv: vec!["tail-fixture".into()],
+            bucket_id: BucketId::new(),
+            probe_id,
+            source_type: SourceType::Process,
+            grace_secs: 0,
+        });
+        state
+            .rings
+            .create_ring(
+                probe_id,
+                ContextRingConfig {
+                    max_frames: 1,
+                    max_bytes: 1024,
+                },
+            )
+            .unwrap();
+        for text in ["old", "new"] {
+            state
+                .rings
+                .append_frame(
+                    probe_id,
+                    SourceFrame::new(probe_id, SourceStream::Stdout, text.into()),
+                )
+                .unwrap();
+        }
+        let IpcResponse::CommandOutputTail(tail) = handle_command_output_tail(
+            &state,
+            &CommandOutputTailParams {
+                job_id,
+                max_lines: 10,
+                max_bytes: 1024,
+                strip_ansi: true,
+            },
+        )
+        .unwrap() else {
+            panic!("unexpected response")
+        };
+        assert_eq!(tail.lines, ["new"]);
+        assert_eq!(tail.evicted_frames, 1);
+        assert!(
+            tail.truncated_lines,
+            "lost history is never complete output"
+        );
+        assert!(!tail.truncated_bytes);
     }
 }

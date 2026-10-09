@@ -1051,6 +1051,10 @@ fn response_types_have_no_raw_stream_lane() {
     };
     assert_small_response(&r);
     let s = CommandStatusResponse {
+        process_observation: None,
+        process_cleanup: None,
+        process_identity: None,
+        cpu: None,
         job_id: terminal_commander_core::JobId::new(),
         bucket_id: terminal_commander_core::BucketId::new(),
         probe_id: terminal_commander_core::ProbeId::new(),

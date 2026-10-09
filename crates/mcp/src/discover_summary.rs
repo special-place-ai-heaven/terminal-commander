@@ -58,6 +58,8 @@ pub struct DiscoverSummary<'a> {
 #[derive(Debug, Serialize)]
 pub struct DaemonSummary<'a> {
     pub version: &'a str,
+    pub identity: Option<&'a terminal_commander_ipc::engine::EngineIdentity>,
+    pub capabilities: &'a [terminal_commander_ipc::engine::EngineCapability],
     pub policy_profile: &'a str,
     /// The daemon's IPC method list is in `detail: "full"`.
     pub method_count: usize,
@@ -127,6 +129,8 @@ pub fn summarize(payload: &SystemDiscoverPayload) -> DiscoverSummary<'_> {
             let environment = &daemon.environment;
             DaemonSummary {
                 version: &daemon.version,
+                identity: daemon.identity.as_ref(),
+                capabilities: &daemon.capabilities,
                 policy_profile: &daemon.policy_profile,
                 method_count: daemon.methods.len(),
                 environment: EnvironmentSummary {

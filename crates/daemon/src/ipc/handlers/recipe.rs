@@ -372,6 +372,9 @@ const fn recipe_admin_grant(
 }
 
 fn caller_may_recipe_admin(state: &DaemonState, peer: &PeerIdentity, from_mcp: bool) -> bool {
+    if crate::embedded::host_admin_granted(state, peer) {
+        return true;
+    }
     let seam = state.config.recipe_admin_test_seam && !from_mcp;
     recipe_admin_grant(peer_program_role(peer), from_mcp, seam)
 }
@@ -397,6 +400,9 @@ pub(in crate::ipc::server) fn caller_is_harness_adapter(
     state: &DaemonState,
     peer: &PeerIdentity,
 ) -> bool {
+    if crate::embedded::host_admin_granted(state, peer) {
+        return true;
+    }
     let role_ok = match peer_program_role(peer) {
         ProgramRole::McpAdapter => true,
         ProgramRole::AdminCli => false,

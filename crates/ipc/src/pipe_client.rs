@@ -241,6 +241,7 @@ mod tests {
                         uptime_secs: 1,
                         idle_secs: Some(0),
                         version: "test".to_owned(),
+                        identity: None,
                     },
                 },
             };
