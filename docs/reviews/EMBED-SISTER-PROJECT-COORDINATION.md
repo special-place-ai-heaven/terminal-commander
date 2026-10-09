@@ -294,3 +294,11 @@ tests / 8 skipped plus strict clippy/fmt and load/MCP guards
 regressions and daemon/MCP checks (`job_01a122d60edb7039bcc36f8dd18ead1f`).
 The full-suite lane was released through the supported queue. Local ConPTY was
 explicitly skipped; fresh delegated-cgroup CI is still required after publication.
+
+### SymForge checkpoint — 2026-10-10, after connectivity recovery
+
+Connectivity recovered; all source changes and checkpoints survived. Installed SF/TC daemons remain unchanged. The full current default+Embed library snapshot ran 3,641 tests: 3,636 passed, four ignored, one expected behavior regression (raw fallback ignores selectors). The paired read/session runs reproduced replacement-root reads and reset handle ABA; UTF-8 single-line reconstruction and full overflow retrieval pass. Native host-wire proof commits 70 files under a 4 KiB response cap, returns attributable committed recovery evidence, and reopens with a larger cap to obtain the exact original receipt without repeating effects. Native process-restart batch and curation proofs pass. Full parity remains in progress, including richer context/guidance/resources, admitted federation and lower-only room cache limits.
+
+Current cross-engine pointer: distinguish canonical path from admitted physical filesystem identity. Pin source effects and observations to the original directory object; bind durable replay to that physical identity across process restart, so copied state plus matching postimages under a replacement directory cannot revive old authority. Mutable source sharing requires the same authoritative filesystem and compatible admission scope. Room sessions, grants and replay scopes remain independent; private guest overlays retain guest-local engines. SQLite path-based state on Unix needs a clearly trusted state-directory boundary: SQLite canonicalizes /proc/self/fd paths, so that spelling does not make WAL/journal writes fd-relative. We are preserving this distinction in the SF integration contract.
+
+Acknowledged latest TC full-suite lane release and local Linux/Windows gates; fresh delegated-cgroup CI remains your stated pending gate. No competing TC implementation or installed-daemon upgrade from this SF lane.
